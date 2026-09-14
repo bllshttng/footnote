@@ -6234,6 +6234,10 @@ impl Core {
         let journal = scan_spawn_journal();
         let (fresh_receipts, receipt_error) = (journal.receipts, journal.error);
         let mut row_name: Option<String> = None;
+        // (x-a6b9) The refusal computed inside the row block survives the
+        // block: a live pane names the pane, a no-pane disposition names its
+        // classification - never the bare "agent is not resumable".
+        let mut refusal: Option<String> = None;
         let facts = {
             let candidates: Vec<&RegistryAgent> = self
                 .agents
@@ -6261,8 +6265,24 @@ impl Core {
             let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
                 self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
             });
-            if live_pane || !self.row_resumable_in_session(a) {
-                None // refused; reason below
+            // (x-a6b9) The refusal is computed where its evidence lives: a
+            // live pane names the pane, a no-pane disposition names its
+            // classification - "agent is not resumable" told the operator
+            // nothing the server did not already know.
+            refusal = if live_pane {
+                Some(format!(
+                    "session already has a live pane {}",
+                    a.mux.as_ref().map(|(_, p)| *p).expect("live_pane checked")
+                ))
+            } else if let RowResumeDisposition::NoPane(reason) =
+                self.row_resume_disposition_in_session(a)
+            {
+                Some(Self::no_pane_reason_text(reason).to_string())
+            } else {
+                None
+            };
+            if refusal.is_some() {
+                None // refused; reason carried in `refusal`
             } else {
                 // (x-d285) The live registry name is the resolver's
                 // key; it outranks the display name the facts carry.
@@ -6283,7 +6303,7 @@ impl Core {
                 return ResumeOutcome::Refused { reason: error };
             }
             return ResumeOutcome::Refused {
-                reason: "agent is not resumable".into(),
+                reason: refusal.unwrap_or_else(|| "agent is not resumable".into()),
             };
         };
         if let Some(worker) = stored_member
@@ -6437,7 +6457,22 @@ impl Core {
             .filter(|(_, m)| m.harness.as_deref() == Some("claude"))
             .map(|(name, _)| name)
             .collect();
-        if claude_names.is_empty() {
+        // (x-a6b9) Held claude Drive portals join the same off-loop batch:
+        // a fill's argv is the attach-transition plan. Portal keys carry a
+        // `portal:` prefix so one row that is both a squad member and a held
+        // portal resolves each transition it actually needs.
+        let portal_names: Vec<String> = self
+            .portals
+            .keys()
+            .copied()
+            .filter_map(
+                |idx| match portal_reach::classify_portal_restore(self, idx) {
+                    Some(portal_reach::PortalRestoreClass::NeedsClaudePlan(name)) => Some(name),
+                    _ => None,
+                },
+            )
+            .collect();
+        if claude_names.is_empty() && portal_names.is_empty() {
             self.workspace_restore_apply(false, harness, HashMap::new(), reply);
             return;
         }
@@ -6448,6 +6483,12 @@ impl Core {
                 set.spawn(async move {
                     let verdict = run_reentry_plan(&name, "resume").await;
                     (name, verdict)
+                });
+            }
+            for name in portal_names {
+                set.spawn(async move {
+                    let verdict = run_reentry_plan(&name, "attach").await;
+                    (format!("portal:{name}"), verdict)
                 });
             }
             let mut plans = HashMap::new();
@@ -6505,6 +6546,7 @@ impl Core {
                     member: name,
                     harness: member.harness.clone(),
                     squad: 0,
+                    portal: None,
                     outcome: "refused".into(),
                     pane: None,
                     tab: None,
@@ -6518,6 +6560,7 @@ impl Core {
                     member: name,
                     harness: member.harness.clone(),
                     squad: 0,
+                    portal: None,
                     outcome: "refused".into(),
                     pane: None,
                     tab: None,
@@ -6542,6 +6585,7 @@ impl Core {
                             member: name,
                             harness: harness_name,
                             squad: 0,
+                            portal: None,
                             outcome: "refused".into(),
                             pane: None,
                             tab: None,
@@ -6555,6 +6599,7 @@ impl Core {
                             member: name,
                             harness: harness_name,
                             squad: 0,
+                            portal: None,
                             outcome: "refused".into(),
                             pane: None,
                             tab: None,
@@ -6593,6 +6638,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad,
+                    portal: None,
                     outcome: "resumed".into(),
                     pane: Some(pane),
                     tab: Some(tab),
@@ -6603,6 +6649,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad,
+                    portal: None,
                     outcome: "focused".into(),
                     pane: Some(pane),
                     tab: Some(tab),
@@ -6613,6 +6660,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad: 0,
+                    portal: None,
                     outcome: "refused".into(),
                     pane: None,
                     tab: None,
@@ -6627,6 +6675,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad: 0,
+                    portal: None,
                     outcome: "refused".into(),
                     pane: None,
                     tab: None,
@@ -6639,6 +6688,7 @@ impl Core {
                     member: name,
                     harness: harness_name,
                     squad: 0,
+                    portal: None,
                     outcome: "planned".into(),
                     pane: None,
                     tab: None,
@@ -6648,6 +6698,150 @@ impl Core {
             };
             rows.push(row);
         }
+        // (x-a6b9) Portals answer after the members: one row per stored
+        // portal, classified by the same door the focus fill uses. A held
+        // claude Drive seat fills from its staged attach verdict; a fill
+        // that did not land reports refused, never silent. The one-row /
+        // ambiguous / no-row texts are the reach's own refusal vocabulary.
+        let portal_indices: Vec<u8> = self.portals.keys().copied().collect();
+        let mut portal_rows = Vec::with_capacity(portal_indices.len());
+        for idx in portal_indices {
+            let (row_key, seat, tab_id) = match self.portals.get(&idx) {
+                Some(p) => (p.row_key.clone(), p.seat, p.tab),
+                None => continue,
+            };
+            let mk = |outcome: &str,
+                      pane: Option<u64>,
+                      tab: Option<u64>,
+                      reason: Option<String>,
+                      notice: Option<String>| RestoreRow {
+                member: row_key.clone(),
+                harness: None,
+                squad: 0,
+                portal: Some(idx),
+                outcome: outcome.into(),
+                pane,
+                tab,
+                reason,
+                notice,
+            };
+            match portal_reach::classify_portal_restore(self, idx) {
+                Some(portal_reach::PortalRestoreClass::SeatGone) => {
+                    portal_rows.push(mk(
+                        "refused",
+                        None,
+                        None,
+                        Some("portal seat is gone".into()),
+                        None,
+                    ));
+                }
+                Some(portal_reach::PortalRestoreClass::Focused) => {
+                    portal_rows.push(mk("focused", Some(seat), Some(tab_id), None, None));
+                }
+                Some(portal_reach::PortalRestoreClass::NoRow) => {
+                    portal_rows.push(mk(
+                        "refused",
+                        None,
+                        None,
+                        Some(format!("no live row answers {row_key}")),
+                        None,
+                    ));
+                }
+                Some(portal_reach::PortalRestoreClass::Ambiguous) => {
+                    portal_rows.push(mk(
+                        "refused",
+                        None,
+                        None,
+                        Some(format!("{row_key} is ambiguous - reach it by its pane")),
+                        None,
+                    ));
+                }
+                Some(
+                    cls @ (portal_reach::PortalRestoreClass::NeedsClaudePlan(_)
+                    | portal_reach::PortalRestoreClass::FillDirect(_)),
+                ) => {
+                    if dry_run {
+                        portal_rows.push(mk("planned", None, None, None, None));
+                        continue;
+                    }
+                    let locate_notice = match &cls {
+                        portal_reach::PortalRestoreClass::FillDirect(row) => {
+                            portal_reach::locate_tier_notice(row)
+                        }
+                        _ => None,
+                    };
+                    if let portal_reach::PortalRestoreClass::NeedsClaudePlan(name) = &cls {
+                        match plans.remove(&format!("portal:{name}")) {
+                            Some(Ok(verdict)) => {
+                                self.reentry_verdict = Some(verdict);
+                            }
+                            Some(Err(reason)) => {
+                                portal_rows.push(mk("refused", None, None, Some(reason), None));
+                                continue;
+                            }
+                            None => {
+                                portal_rows.push(mk(
+                                    "refused",
+                                    None,
+                                    None,
+                                    Some(
+                                        "claude re-entry plan unresolved; resume it from the agent panel"
+                                            .into(),
+                                    ),
+                                    None,
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                    // Fill through the focus door's one body; the seat
+                    // pane's own size keeps the replacement viewer at the
+                    // geometry it held. The reach repoints in place, so the
+                    // entry's own seat and tab are the report's values.
+                    let (srows, scols) = self
+                        .panes
+                        .get(&seat)
+                        .map(|e| e.vt.size())
+                        .unwrap_or((crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS));
+                    let vp = tree::Rect {
+                        x: 0,
+                        y: 0,
+                        rows: srows,
+                        cols: scols,
+                    };
+                    let _ = portal_reach::fill_held_portal_at(
+                        self,
+                        RESTORE_CLIENT,
+                        (0, tab_id),
+                        vp,
+                        idx,
+                    );
+                    self.reentry_verdict = None;
+                    let filled = self
+                        .portals
+                        .get(&idx)
+                        .is_some_and(|p| self.panes.get(&p.seat).is_some_and(|e| e.cmd.is_some()));
+                    if filled {
+                        let (pseat, ptab) = self
+                            .portals
+                            .get(&idx)
+                            .map(|p| (Some(p.seat), Some(p.tab)))
+                            .unwrap_or((None, None));
+                        portal_rows.push(mk("resumed", pseat, ptab, None, locate_notice));
+                    } else {
+                        portal_rows.push(mk(
+                            "refused",
+                            None,
+                            None,
+                            Some("portal fill did not land; the seat stays held".into()),
+                            None,
+                        ));
+                    }
+                }
+                None => continue,
+            }
+        }
+        rows.extend(portal_rows);
         let resumed = rows.iter().filter(|r| r.outcome == "resumed").count();
         if resumed > 0 {
             self.push_layout(true);

@@ -324,7 +324,9 @@ fn default_true() -> bool {
 /// `squads` holds only real workspaces; additive, floor stays 58.
 /// v80 : `PanePlacement.fit`, serde(default) - the server picks the tab; floor
 /// stays 58.
-pub const PROTO_VERSION: u32 = 80;
+/// v81 (x-a6b9): `RestoreRow.portal`, serde(default) - the restore verb
+/// reports and fills held portal seats; floor stays 58.
+pub const PROTO_VERSION: u32 = 81;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -549,6 +551,9 @@ pub use placement::{PanePlacement, PaneTarget, PlacementFallback, ResolvedPlacem
 /// on `refused` (a member that cannot resume is NAMED, never silently
 /// dropped), `pane` on `resumed`/`focused`, `tab` on both, and `notice`
 /// carries the vanished-cwd fallback note on a resumed member.
+///
+/// (v81, x-a6b9) A portal row: `portal` names the seat's index and `member`
+/// carries the portal's row key; `None` is a squad member row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RestoreRow {
     pub member: String,
@@ -556,6 +561,8 @@ pub struct RestoreRow {
     pub harness: Option<String>,
     pub squad: u64,
     pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portal: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

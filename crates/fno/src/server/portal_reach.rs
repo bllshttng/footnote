@@ -118,10 +118,25 @@ pub(super) fn fill_held_portal_seat(
     pid: u64,
 ) -> Option<Flow> {
     let idx = core.portal_of(Some(pid))?;
-    let stand_in = core
-        .panes
-        .get(&pid)
-        .is_some_and(|entry| entry.cmd.is_none());
+    fill_held_portal_at(core, client_id, view, vp, idx)
+}
+
+/// (x-a6b9) The fill by portal INDEX: the one body behind the focus door
+/// ([`fill_held_portal_seat`]) and the restore verb, so the two doors cannot
+/// disagree about what fills a held seat. The seat's own leaf wins
+/// (`portal_explicit = false`); the reach repoints the stand-in in place.
+pub(super) fn fill_held_portal_at(
+    core: &mut Core,
+    client_id: u64,
+    view: (u64, TabId),
+    vp: Rect,
+    idx: u8,
+) -> Option<Flow> {
+    let stand_in = core.portals.get(&idx).is_some_and(|portal| {
+        core.panes
+            .get(&portal.seat)
+            .is_some_and(|entry| entry.cmd.is_none())
+    });
     if !stand_in {
         return None;
     }
@@ -139,6 +154,79 @@ pub(super) fn fill_held_portal_seat(
         ));
     }
     None
+}
+
+/// (x-a6b9) What the restore verb would do with portal `idx` right now. One
+/// classifier behind both callers - `workspace_restore_start` collects the
+/// claude plans to resolve off-loop, `workspace_restore_apply` turns each
+/// verdict into the report row - so the two halves cannot disagree about
+/// who fills, who plans, and who refuses. `None`: no portal at `idx`.
+pub(super) enum PortalRestoreClass {
+    /// The seat pane left the session; the entry is stale.
+    SeatGone,
+    /// The seat already runs a viewer.
+    Focused,
+    /// No live paneless row answers the key.
+    NoRow,
+    /// Two or more rows answer the key.
+    Ambiguous,
+    /// One claude Drive row: its attach re-entry plan must be staged before
+    /// a fill. Carries the row NAME the resolver keys on.
+    NeedsClaudePlan(String),
+    /// One row whose argv builds inline (codex Drive, Follow, Locate).
+    FillDirect(RegistryAgent),
+}
+
+pub(super) fn classify_portal_restore(core: &Core, idx: u8) -> Option<PortalRestoreClass> {
+    let portal = core.portals.get(&idx)?;
+    let seat_in_tree = core.session.find_pane(portal.seat).is_some();
+    let seat_viewer = seat_in_tree
+        && core
+            .panes
+            .get(&portal.seat)
+            .is_some_and(|entry| entry.cmd.is_some());
+    if seat_viewer {
+        return Some(PortalRestoreClass::Focused);
+    }
+    if !seat_in_tree || !core.panes.contains_key(&portal.seat) {
+        return Some(PortalRestoreClass::SeatGone);
+    }
+    let mut hits = core
+        .agents
+        .iter()
+        .filter(|a| row_answers_key(a, &portal.row_key));
+    match (hits.next(), hits.next()) {
+        (None, _) => Some(PortalRestoreClass::NoRow),
+        (Some(_), Some(_)) => Some(PortalRestoreClass::Ambiguous),
+        (Some(row), None) => {
+            let claude_drive = row.harness.as_deref() == Some("claude")
+                && matches!(
+                    agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
+                    Reach::Drive
+                );
+            if claude_drive {
+                Some(PortalRestoreClass::NeedsClaudePlan(row.name.clone()))
+            } else {
+                Some(PortalRestoreClass::FillDirect(row.clone()))
+            }
+        }
+    }
+}
+
+/// (x-a6b9) The notice a filled Locate-tier portal carries: the seat shows
+/// where the thread lives, not the thread, and the row says so instead of
+/// reading as a Drive fill that shows nothing.
+pub(super) fn locate_tier_notice(row: &RegistryAgent) -> Option<String> {
+    let locate = matches!(
+        agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
+        Reach::Locate
+    );
+    locate.then(|| {
+        format!(
+            "{} reaches Locate only - the portal shows where the thread lives, not the thread",
+            row.harness.as_deref().unwrap_or("this harness")
+        )
+    })
 }
 
 /// One control-door reach parked while the row's re-entry plan resolves
