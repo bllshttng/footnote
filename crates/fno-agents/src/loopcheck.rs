@@ -10156,6 +10156,16 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // GitHub reword cannot misread a stored refusal.
                 let secondary =
                     refusal_is_secondary(&failed_stderr, quota.as_ref(), is_graphql_read);
+                if secondary {
+                    // The ledger is the fleet's refusal memory now (the
+                    // journal scan that read the row below is gone), so a
+                    // refusal the GATE itself observes must open the same
+                    // backoff a Python REST read opens - or every later fire
+                    // re-probes and re-attempts the refused read. A no-op
+                    // while a backoff is already live.
+                    let _ =
+                        crate::gh_budget::record_refusal(&budget_ledger, now.timestamp_millis());
+                }
                 emit(
                     "loop_check_gh_error",
                     serde_json::json!({
