@@ -2527,7 +2527,14 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         // `fno agents attach` and `recover --print-command` print. Paths and
         // ids only; nothing from inside the route file is printed (AC5).
         let mut printed_argv: Vec<String> = match &reentry_plan {
-            Some(plan) => crate::pane_relaunch::env_prefixed(&plan.env, &plan.argv),
+            Some(plan) => {
+                let pairs: Vec<(String, String)> = plan
+                    .env
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                crate::pane_relaunch::env_prefixed(&pairs, &plan.argv)
+            }
             None => argv.clone(),
         };
         if let Some(Ok(Some(route))) = &codex_route_outcome {
