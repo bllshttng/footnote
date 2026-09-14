@@ -30,7 +30,7 @@ The whole decision is now native, in `crates/fno-agents/src/source_pin.rs`, serv
 - Non-git packaged candidates keep their existing behavior.
 - `record` atomically maintains BOTH pins. One is the legacy `source-path` file, kept for rollback. The other is the versioned companion `~/.fno/source-pin.json` with schema, timestamp, origin, worktree kind, branch, both heads, and eligibility. The companion is provenance only. Eligibility is always re-proven live.
 - `sync` serves doctor's `source_checkout_sync` fields from the same probes, so no second ancestry classifier exists in Python.
-- `resolve` (x-401c) reuses that same `sync` probe to carry `behind` and a one-line `guidance` in its answer, and update --check plus the sideline menu surface them. When the source is a proven-ancestor checkout that is strictly behind origin, neither reader says current: the guidance names the distance and the sync command, the menu shows `source N behind origin`, and an install prints the distance warning. A current or divergent source carries no `behind`.
+- `resolve` reuses that same `sync` probe to carry `behind` and a one-line `guidance` in its answer. update --check and the sideline menu surface both. When the source is behind origin, neither reader says current. The guidance names the distance and the sync command. The menu shows `source N behind origin`. An install prints the distance warning. A current or divergent source carries no `behind`.
 
 `fno doctor` prints the deployed build commit beside the source checkout, so the lag this gate prevents is visible without probing binaries by hand.
 
