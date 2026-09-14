@@ -6346,6 +6346,29 @@ event_types:
           description: "Why the board could not be read. Present only on a blind fire; a blind king blocks rather than certifying itself finished, and the same dry-fire ceiling bounds it."
     consumers: [operator]
 
+  - name: king_drain_reserve
+    description: "One king fire whose drain read spent at least half the reserve held back for it. The reserve is silent by design, so this row is the series that shows how close each fire's kill came: elapsed_ms near bound_ms means an expensive read, remaining_budget_ms near zero means a starved fire, and the pair separates the two."
+    sources: [hook]
+    data:
+      required: [session_id, scope, bound_ms, elapsed_ms, remaining_budget_ms]
+      properties:
+        session_id:
+          type: string
+          description: "The king session's fno_id."
+        scope:
+          type: string
+          description: "The crowned scope whose drain read ran."
+        bound_ms:
+          type: integer
+          description: "The wall-clock bound the drain read was granted (the configured ceiling clamped to the fire's remaining budget, floored at 250ms)."
+        elapsed_ms:
+          type: integer
+          description: "What the drain read actually measured. Near bound_ms the read is expensive relative to its grant; near zero with a tiny bound_ms the fire was starved before the drain."
+        remaining_budget_ms:
+          type: integer
+          description: "What remained of the fire's aggregate budget when the drain started. Near zero means the pre-drain reads had already spent the fire."
+    consumers: [operator]
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

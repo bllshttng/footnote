@@ -135,6 +135,7 @@ mod probe {
 
         let cap = agents_config::max_live(&config_cwd) as usize;
         let floor_gb = agents_config::min_free_gb(&config_cwd);
+        let swap_cap = agents_config::max_swap_pct(&config_cwd);
 
         let mut warnings: Vec<String> = Vec::new();
         let mut out: Map<String, Value> = Map::new();
@@ -175,9 +176,10 @@ mod probe {
                     out,
                 );
             }
-            // RAM floor: refuse below the floor; unreadable RAM skips.
+            // Memory terms: the same two the gate refuses on (x-8c8c).
             let avail = spawn_gate::available_ram_gb();
-            ram_row = Some(ram_floor_row(avail, floor_gb));
+            let swap = spawn_gate::swap_used_pct();
+            ram_row = Some(ram_floor_row(avail, floor_gb, swap, swap_cap));
             if let Some(avail) = avail {
                 if avail < floor_gb {
                     return refuse_with(
@@ -186,6 +188,19 @@ mod probe {
                             "available RAM {avail:.1}GB below the min_free_gb floor {floor_gb:.1}GB"
                         ),
                         json!({"available_gb": avail, "min_free_gb": floor_gb}),
+                        &make_rows(None, slots, cap, ram_row, Vec::new()),
+                        out,
+                    );
+                }
+            }
+            if let Some(pct) = swap {
+                if swap_cap > 0.0 && pct >= swap_cap {
+                    return refuse_with(
+                        "swap_pressure",
+                        format!(
+                            "swap {pct:.1}% used is at or above the max_swap_pct cap {swap_cap:.0}%"
+                        ),
+                        json!({"swap_used_pct": pct, "max_swap_pct": swap_cap}),
                         &make_rows(None, slots, cap, ram_row, Vec::new()),
                         out,
                     );
@@ -324,6 +339,10 @@ mod probe {
             out.insert("min_free_gb".into(), json!(floor_gb));
             // available_ram_gb rides only when the RAM read ran.
         }
+        if swap_cap > 0.0 {
+            out.insert("max_swap_pct".into(), json!(swap_cap));
+            // swap_used_pct rides only when the swap read ran.
+        }
         out.insert(
             "rows".into(),
             json!(make_rows(Some(&lanes), slots, cap, ram_row, cpu_rows)),
@@ -429,25 +448,37 @@ fn make_rows(
     rows
 }
 
-fn ram_floor_row(avail: Option<f64>, floor_gb: f64) -> Value {
+fn ram_floor_row(avail: Option<f64>, floor_gb: f64, swap: Option<f64>, swap_cap: f64) -> Value {
     let mut row = Map::new();
     row.insert("name".into(), json!("ram-floor"));
-    match avail {
-        None => {
-            row.insert("measured".into(), Value::Null);
-            row.insert("threshold".into(), json!(format!("{floor_gb:.1}GB")));
-            row.insert("verdict".into(), json!("skipped: RAM unreadable"));
-        }
-        Some(avail) => {
-            row.insert("measured".into(), json!(format!("{avail:.1}GB")));
-            row.insert("threshold".into(), json!(format!("{floor_gb:.1}GB")));
-            row.insert(
-                "verdict".into(),
-                json!(if avail < floor_gb { "refuse" } else { "pass" }),
-            );
-        }
-    }
-    row.insert("key".into(), json!("agents.min_free_gb"));
+    row.insert(
+        "measured".into(),
+        json!(format!(
+            "{} / swap {}",
+            avail
+                .map(|v| format!("{v:.1}GB"))
+                .unwrap_or_else(|| "unreadable".into()),
+            swap.map(|v| format!("{v:.1}%"))
+                .unwrap_or_else(|| "unreadable".into()),
+        )),
+    );
+    row.insert(
+        "threshold".into(),
+        json!(format!("{floor_gb:.1}GB / cap {swap_cap:.0}%")),
+    );
+    row.insert(
+        "verdict".into(),
+        json!(match (avail, swap) {
+            (Some(a), _) if floor_gb > 0.0 && a < floor_gb => "refuse",
+            (_, Some(s)) if swap_cap > 0.0 && s >= swap_cap => "refuse",
+            (None, None) => "skipped: RAM and swap unreadable",
+            _ => "pass",
+        }),
+    );
+    row.insert(
+        "key".into(),
+        json!("agents.min_free_gb / agents.max_swap_pct"),
+    );
     Value::Object(row)
 }
 
@@ -601,4 +632,32 @@ fn lanes_answer(
         }
     }
     Ok(Value::Object(lanes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// x-8c8c: a disabled term (`<= 0`) never renders refuse, whatever the
+    /// machine reads.
+    #[test]
+    fn ram_floor_row_disabled_cap_never_refuses() {
+        for verdict in [
+            ram_floor_row(Some(35.0), 4.0, Some(40.0), 0.0)["verdict"]
+                .as_str()
+                .unwrap(),
+            ram_floor_row(None, 0.0, Some(5.0), 90.0)["verdict"]
+                .as_str()
+                .unwrap(),
+        ] {
+            assert_eq!(verdict, "pass");
+        }
+    }
+
+    /// x-8c8c: an enabled cap still refuses at the ceiling.
+    #[test]
+    fn ram_floor_row_refuses_at_the_ceiling() {
+        let row = ram_floor_row(Some(35.0), 4.0, Some(94.0), 90.0);
+        assert_eq!(row["verdict"].as_str().unwrap(), "refuse");
+    }
 }

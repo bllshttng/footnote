@@ -68,7 +68,8 @@ EXIT_GATE_UNAVAILABLE = 87
 #: deadline - not this gate's 600s queue - bounds the wait.
 WAITABLE_REFUSAL_REASONS = frozenset(
     {
-        "load_backstop", "ram_floor", "cpu_instrument_unreadable",
+        "load_backstop", "ram_floor", "swap_pressure",
+        "cpu_instrument_unreadable",
         "cpu_share_undecidable", "fleet_cpu_share", "provider_cap",
         "max_live", "no_wait", "no_wait_mutex_held",
     }

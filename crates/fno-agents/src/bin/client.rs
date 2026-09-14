@@ -38,7 +38,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "board",
     "claim",
     "codex-assign-project",
-    "codex-loaded-threads",
     "compaction",
     "component-verdict",
     "provider-cap",
@@ -243,10 +242,6 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::review_summary::run_review_summary(&args[1..]);
     }
 
-    if matches!(verb, "codex-loaded-threads") {
-        return fno_agents::codex_inject::run_loaded_thread_discovery().await;
-    }
-
     // `component-verdict` is the HIDDEN decision verb for deployed-component
     // convergence: reads one JSON request on stdin (expected rev +
     // per-component probes) and prints the per-component verdict. Binary-direct
@@ -328,7 +323,7 @@ async fn run(args: Vec<String>) -> i32 {
     // codex's turn/start lane still cannot parse arbitrary slash payloads).
     // Structured targets + an outcome receipt (a Turn + a reviewThreadId),
     // strictly better than keystroke faking. Same `matches!`
-    // treatment as `mail-inject`/`codex-loaded-threads` so it stays out of
+    // treatment as `mail-inject` so it stays out of
     // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard - no advertised
     // fno verb is added. The socket round-trip needs the user's daemon.
     if matches!(verb, "review-start") {
@@ -1355,6 +1350,22 @@ async fn run(args: Vec<String>) -> i32 {
                 exit_code_for(err.code)
             }
             ResponsePayload::Ok(result) => {
+                // The loaded-thread answer rides `list --harness codex` as a
+                // field instead of a hidden verb root. Gated on the codex
+                // filter so no other list pays the app-server round trip; an
+                // unreachable daemon becomes `available: false`, never a list
+                // failure. The await must happen here - format_success is sync.
+                let result = if verb_owned == "list"
+                    && result["filters_applied"]["provider"].as_str() == Some("codex")
+                {
+                    let mut with_loaded = result;
+                    with_loaded["codex_loaded"] = fno_agents::codex_inject::loaded_threads_block(
+                        fno_agents::codex_inject::discover_loaded_threads().await,
+                    );
+                    with_loaded
+                } else {
+                    result
+                };
                 if let Some(line) = format_success(
                     &verb_owned,
                     &agent_name,
@@ -4312,6 +4323,7 @@ fn format_success(
                     &discovered,
                     result["truth_probe_asked"].as_u64(),
                     result["truth_probe_answered"].as_u64(),
+                    result.get("codex_loaded"),
                 ))
             } else {
                 Some(render_list_table(
@@ -4389,9 +4401,12 @@ fn render_list_json(
     discovered: &[Value],
     truth_probe_asked: Option<u64>,
     truth_probe_answered: Option<u64>,
+    codex_loaded: Option<&Value>,
 ) -> String {
     let count = agents.as_array().map(|a| a.len()).unwrap_or(0);
-    let payload = json!({
+    // `codex_loaded` is additive and present only when the caller probed the
+    // codex daemon (`--harness codex`); the key is omitted otherwise.
+    let mut payload = json!({
         "agents": agents,
         "count": count,
         "discovered_sessions": discovered,
@@ -4402,6 +4417,9 @@ fn render_list_json(
         "truth_probe_answered": truth_probe_answered,
         "schema_version": LIST_JSON_SCHEMA_VERSION,
     });
+    if let Some(block) = codex_loaded {
+        payload["codex_loaded"] = block.clone();
+    }
     serde_json::to_string_pretty(&payload).unwrap_or_default()
 }
 

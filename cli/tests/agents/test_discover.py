@@ -1700,9 +1700,11 @@ def test_daemon_row_is_enriched_by_recent_rollout(tmp_path, monkeypatch):
         subprocess.CompletedProcess([], 1, stdout="", stderr="unsupported"),
         subprocess.CompletedProcess([], 0, stdout="not-json", stderr=""),
         subprocess.CompletedProcess(
-            [], 0, stdout='{"available":false,"reason":"no-daemon"}', stderr=""
+            [], 0, stdout='{"codex_loaded":{"available":false,"reason":"no-daemon"}}', stderr=""
         ),
-        subprocess.CompletedProcess([], 0, stdout='{"available":true,"threads":[]}', stderr=""),
+        subprocess.CompletedProcess(
+            [], 0, stdout='{"codex_loaded":{"available":true,"threads":[]}}', stderr=""
+        ),
     ],
 )
 def test_daemon_probe_failure_or_empty_is_lenient(monkeypatch, completed):
@@ -1718,13 +1720,15 @@ def test_daemon_probe_shapes_valid_rows_and_skips_bad_entries(monkeypatch):
     from fno import rust_binary
 
     output = {
-        "available": True,
-        "threads": [
-            {"session_id": "short", "cwd": None},
-            {"session_id": "short", "cwd": "/duplicate"},
-            {"session_id": "019f4d0c-full", "cwd": "/repo"},
-            {"session_id": 7, "cwd": "/bad"},
-        ],
+        "codex_loaded": {
+            "available": True,
+            "threads": [
+                {"session_id": "short", "cwd": None},
+                {"session_id": "short", "cwd": "/duplicate"},
+                {"session_id": "019f4d0c-full", "cwd": "/repo"},
+                {"session_id": 7, "cwd": "/bad"},
+            ],
+        }
     }
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents"))
     monkeypatch.setattr(
@@ -1739,6 +1743,44 @@ def test_daemon_probe_shapes_valid_rows_and_skips_bad_entries(monkeypatch):
         ("short", "short", ""),
         ("019f4d0c-full", "019f4d0c", "/repo"),
     ]
+
+
+def test_daemon_probe_argv_rides_list_not_a_hidden_verb(monkeypatch):
+    from fno import rust_binary
+
+    seen: dict = {}
+
+    def fake_run(argv, **kw):
+        seen["argv"] = argv
+        return subprocess.CompletedProcess([], 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents"))
+    monkeypatch.setattr(discover.subprocess, "run", fake_run)
+
+    assert discover._codex_daemon_threads_raw() is None
+    assert seen["argv"] == [
+        "/fake/fno-agents",
+        "list",
+        "--json",
+        "--no-discovered",
+        "--harness",
+        "codex",
+    ]
+
+
+def test_daemon_probe_list_without_codex_loaded_block_returns_none(monkeypatch):
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents"))
+    monkeypatch.setattr(
+        discover.subprocess,
+        "run",
+        lambda *a, **kw: subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps({"agents": [], "count": 0}), stderr=""
+        ),
+    )
+
+    assert discover._codex_daemon_threads_raw() is None
 
 
 def test_us2_codex_malformed_meta_skipped_not_fatal(tmp_path):
