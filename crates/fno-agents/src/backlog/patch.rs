@@ -814,6 +814,17 @@ fn status_mismatch(
 /// contention up to 3 times), and read the receipt back from the committed
 /// rows.
 pub fn apply(graph: &Path, req: &PatchRequest) -> Result<PatchReceipt, PatchRefusal> {
+    apply_with_timeout(graph, req, DEFAULT_LOCK_TIMEOUT)
+}
+
+/// `apply` with the lock deadline made explicit. Every contention kind
+/// (version conflict, lock timeout) retries, then refuses; the timeout
+/// parameter exists so the exhaustion path is testable in milliseconds.
+pub fn apply_with_timeout(
+    graph: &Path,
+    req: &PatchRequest,
+    lock_timeout: Duration,
+) -> Result<PatchReceipt, PatchRefusal> {
     const ATTEMPTS: usize = 3;
     for attempt in 0..ATTEMPTS {
         let version =
@@ -841,7 +852,7 @@ pub fn apply(graph: &Path, req: &PatchRequest) -> Result<PatchReceipt, PatchRefu
                 base_version: Some(version),
                 plan_rungs: Some(planned.rungs),
             },
-            DEFAULT_LOCK_TIMEOUT,
+            lock_timeout,
         ) {
             Ok(outcome) => {
                 // The receipt comes from the READBACK, never the intent: the
@@ -871,9 +882,15 @@ pub fn apply(graph: &Path, req: &PatchRequest) -> Result<PatchReceipt, PatchRefu
             Err(StoreError::Conflict | StoreError::LockTimeout(..)) if attempt + 1 < ATTEMPTS => {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            Err(StoreError::Conflict | StoreError::LockTimeout(..)) => {
+            Err(StoreError::Conflict) => {
                 return Err(PatchRefusal::refused(format!(
                     "refused: {} graph changed under the write after {ATTEMPTS} attempts",
+                    planned.node_id
+                )));
+            }
+            Err(StoreError::LockTimeout(..)) => {
+                return Err(PatchRefusal::refused(format!(
+                    "refused: {} the graph lock stayed busy across {ATTEMPTS} attempts",
                     planned.node_id
                 )));
             }
@@ -938,6 +955,21 @@ pub(crate) fn plan_status_on_rows(
     token: &str,
     word: &str,
 ) -> Result<(), PatchRefusal> {
+    // Single-row scope: the typed API writes ONLY the named row, so leaving
+    // superseded (which drops the replacer's backref, a second-row edit)
+    // refuses here and names its own door. The backlog-update door clears
+    // the chain in the same write; the typed API must not do that silently.
+    let old_status = rows
+        .iter()
+        .find(|e| field_eq(e, "id", token))
+        .and_then(|e| e.get("status"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if old_status == "superseded" {
+        return Err(PatchRefusal::refused(format!(
+            "refused: {token} is superseded; leaving is owned by another door: fno backlog unsupersede {token}"
+        )));
+    }
     let req = PatchRequest {
         node: token.to_string(),
         status: Some(word.to_string()),
@@ -1473,69 +1505,47 @@ mod tests {
         }
     }
 
-    // AC12-EDGE: a version that changes under every commit exhausts the
-    // retries and refuses without a partial write.
+    // AC12-EDGE: contention across every attempt exhausts the retries and
+    // refuses without a partial write. Deterministic via the lock: a holder
+    // keeps `<graph>.lock` past every retry deadline, so all three attempts
+    // time out and the exhaustion arm fires.
     #[test]
     fn a_graph_that_keeps_changing_refuses_after_three_attempts() {
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
-        // The target node: deferred with a ready plan, so --status ready has
-        // real facts to clear (a write MUST land) and PLANNING succeeds - the
-        // refusal can only come from contention at the commit.
         let plan = plan_file(&dir, "ready-plan.md", Some("ready"));
         let target = node(
             "x-1",
             json!({
-                "plan_path": plan.clone(),
+                "plan_path": plan,
                 "deferred_at": "2026-01-01T00:00:00+00:00",
                 "deferred_reason": "waiting",
                 "status": "deferred",
             }),
         );
-        // Enough filler rows that one read-plan window is many writer
-        // cycles: a squeeze would need the version check to see no write
-        // across the whole window, three attempts running.
-        let filler: Vec<Value> = (0..4000)
-            .map(|i| node(&format!("x-f{i}"), json!({})))
-            .collect();
-        let writer_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let handle = {
-            let graph = graph.clone();
-            let stop = writer_stop.clone();
-            let target = target.clone();
-            std::thread::spawn(move || {
-                let mut n = 0u64;
-                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    n += 1;
-                    let body = serde_json::json!({
-                        // The writer PRESERVES the target row (only its own
-                        // noise changes), so a retry's re-read still resolves
-                        // x-1 and the refusal comes from the version check.
-                        "entries": [node("x-w", json!({ "title": format!("w{n}") })), target]
-                    });
-                    // Atomic replace, like a real writer: a torn read would
-                    // surface as an unreadable store, not contention.
-                    let tmp = graph.with_extension("json.tmp");
-                    if std::fs::write(&tmp, body.to_string()).is_ok() {
-                        let _ = std::fs::rename(&tmp, &graph);
-                    }
-                }
-            })
-        };
-        let mut entries = filler;
-        entries.push(target.clone());
         std::fs::write(
             &graph,
-            serde_json::json!({ "entries": entries }).to_string(),
+            serde_json::json!({ "entries": [target] }).to_string(),
         )
         .unwrap();
-        let result = apply(&graph, &req("x-1", Some("ready"), &[]));
-        writer_stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        handle.join().unwrap();
+        // Hold the store's own lock well past three 100ms deadlines.
+        let holder = {
+            let graph = graph.clone();
+            std::thread::spawn(move || {
+                let lock = graph_store::BoundedLock::acquire(&graph, Duration::from_secs(10))
+                    .expect("test lock");
+                std::thread::sleep(Duration::from_millis(1500));
+                drop(lock);
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let result =
+            apply_with_timeout(&graph, &req("x-1", Some("ready"), &[]), Duration::from_millis(100));
+        holder.join().expect("holder finished");
         match result {
             Err(e) => {
                 assert_eq!(e.exit, 2);
-                assert!(e.message.contains("graph changed under the write"), "{e:?}");
+                assert!(e.message.contains("stayed busy"), "{e:?}");
             }
             Ok(receipt) => panic!("expected contention refusal, got {receipt:?}"),
         }
