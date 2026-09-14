@@ -16,7 +16,8 @@
 #      inside the command flow with env side effects)
 #   4. rm-naming refusals in dispatch.py and the Rust ask twins
 #      (claude_ask/codex_ask/gemini_ask) + their teardown warnings
-#   5. the stop/rm livelock exits in daemon.rs (no_op dead ends named)
+#   5. the rm-gate texts that name the claude stop rm runs itself, and the
+#      stop_claude dead end in daemon.rs
 #
 # Every REMEDY claim is pinned by a positive marker: a string that must be
 # present. The two absence checks (--force, branch -D) are backstops paired
@@ -127,14 +128,16 @@ done
 require "$REPO_ROOT/crates/fno-agents/src/codex_ask.rs" "the exchange finished" "teardown(codex): states the exchange finished first"
 require "$REPO_ROOT/crates/fno-agents/src/gemini_ask.rs" "the exchange finished" "teardown(gemini): states the exchange finished first"
 
-# --- 5. stop/rm livelock exits -------------------------------------------------
+# --- 5. the claude stop rm runs itself, and stop_claude's dead end ------------
 DM="$REPO_ROOT/crates/fno-agents/src/daemon.rs"
 # The two rm refusal texts live in the builder module the file-budget gate
-# moved them into; the stop_claude claim still lives in the handler.
+# moved them into; the stop_claude claim still lives in the handler. rm
+# stopped telling the caller to stop (law: remove needs no prior stop) - it
+# runs the claude stop itself and reports the roster evidence.
 RR="$REPO_ROOT/crates/fno-agents/src/daemon/rm_refusal_detail.rs"
-require "$RR" "If stop answers no_op" "rm(live): names the stop no_op dead end"
-require "$RR" "If stop refuses or no-ops" "rm(idless): names the stop dead end"
-require "$DM" "stop-then-rm has no exit here" "stop_claude(idless): no false rm-clears claim"
+require "$RR" "rm ran \`claude stop\`" "rm(live): names the stop rm ran itself"
+require "$RR" "rm could not run its claude stop" "rm(idless): says rm could not run its claude stop"
+require "$DM" "stopping has no exit here" "stop_claude(idless): no false rm-clears claim"
 
 if [[ "$FAILURES" -gt 0 ]]; then
     echo "$FAILURES check(s) failed"
