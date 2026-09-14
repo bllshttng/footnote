@@ -1453,11 +1453,15 @@ pub fn run_gate(
 
                         if flags.no_wait {
                             let row_refs: Vec<&RegistryEntry> = live.iter().collect();
+                            let drained = warnings.len();
                             let waiting = spawn_gate_lanes::read_awaiting_operator(
                                 registry_path,
                                 &row_refs,
                                 &mut warnings,
                             );
+                            for w in &warnings[drained..] {
+                                eprintln!("{w}");
+                            }
                             let line = slot_refusal_line(
                                 slots,
                                 cap,
@@ -1488,11 +1492,15 @@ pub fn run_gate(
                         }
                         if !announced {
                             let row_refs: Vec<&RegistryEntry> = live.iter().collect();
+                            let drained = warnings.len();
                             let waiting = spawn_gate_lanes::read_awaiting_operator(
                                 registry_path,
                                 &row_refs,
                                 &mut warnings,
                             );
+                            for w in &warnings[drained..] {
+                                eprintln!("{w}");
+                            }
                             let line = slot_refusal_line(
                                 slots,
                                 cap,

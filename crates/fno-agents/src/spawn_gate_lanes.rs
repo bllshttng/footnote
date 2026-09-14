@@ -301,16 +301,18 @@ fn awaiting_operator(
             continue;
         }
         let short = sid.get(..8).unwrap_or(sid).to_lowercase();
-        // File order is journal order, so the first open ask is the oldest.
+        // File order is journal order, so the first OPEN ask is the oldest:
+        // closed asks are filtered before the find, or a closed first question
+        // would hide a newer open one.
         if let Some((qid, _, _)) = asks
             .iter()
+            .filter(|(qid, _, _)| !closed.contains(qid))
             .find(|(_, q_session, q_asker)| match q_session {
                 Some(s) => s.eq_ignore_ascii_case(sid),
                 None => q_asker
                     .as_deref()
                     .is_some_and(|a| a.to_lowercase() == short),
             })
-            .filter(|(qid, _, _)| !closed.contains(qid))
         {
             waiting.insert(row.name.clone(), qid.clone());
         }
@@ -355,7 +357,7 @@ pub(crate) fn read_awaiting_operator(
 
 /// Count rows of ONE provider only when status and positive liveness agree
 /// (the port of `spawn_gate.provider_live_count`). Returns the count, the
-/// names of the rows it included, and the parked pairs it left out — a claude
+/// names of the rows it included, and the parked pairs it left out: a claude
 /// row with an open operator question and a quiet transcript holds its process
 /// and its slot but spends nothing on the lane, so it stops counting against
 /// the provider cap. Every unreadable source is an `Err`, never a zero.
@@ -862,8 +864,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// AC7-ERR: a recycled pid — alive, but a different process incarnation
-    /// than the recorded start token — is not counted; the correct incarnation
+    /// AC7-ERR: a recycled pid, alive but a different process incarnation
+    /// than the recorded start token, is not counted; the correct incarnation
     /// still is.
     #[test]
     fn provider_count_skips_a_recycled_pid() {
