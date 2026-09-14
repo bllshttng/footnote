@@ -54,7 +54,8 @@ from fno.graph.api import cmd_version as _cmd_version
 # the provenance change touches it. The alias keeps the historical name
 # importable.
 from fno.graph.provenance_view import lifecycle_roster as _lifecycle_roster
-from fno.graph.provenance_view import pr_block, registry_status_index, render_pr_line
+from fno.graph.provenance_view import pr_block, render_pr_line
+from fno.provenance.registry_liveness import registry_status_index
 
 cli = typer.Typer(
     name="graph",
