@@ -2967,3 +2967,46 @@ def test_running_components_adapter_carries_rows(monkeypatch) -> None:
     # No installed binary is the dark-census arm, independent of the runner.
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     assert update.running_components(runner=_run) is None
+
+
+def test_update_readiness_reports_gate_refusal(monkeypatch, tmp_path) -> None:
+    """A refused-but-resolved source pin blocks readiness: update_ready False,
+    guidance says update blocked with the native refusal, and the payload
+    carries the structured pin verdict (the advisory surface agrees with the
+    mutating path's gate)."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="bbb2222")
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
+    refusal = "refusing source /tmp/wt/cli: linked worktree branch feature/x HEAD a is not an ancestor of origin/main HEAD b."
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {
+            "decision": "refuse",
+            "path": str(tmp_path / "cli"),
+            "eligibility": "divergent",
+            "refusal": refusal,
+            "warning": None,
+        },
+    )
+
+    result = update.update_readiness(runner=_make_runner(mux_rc=1, agent_rc=1))
+
+    assert result["update_ready"] is False
+    assert "update blocked" in result["guidance"]
+    assert "feature/x" in result["guidance"]
+    assert result["source_pin"]["eligibility"] == "divergent"
+    # The positive control: an eligible pin leaves readiness to the revs.
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {
+            "decision": "allow",
+            "path": str(tmp_path / "cli"),
+            "eligibility": "eligible",
+            "refusal": None,
+            "warning": None,
+        },
+    )
+    ok = update.update_readiness(runner=_make_runner(mux_rc=1, agent_rc=1))
+    assert ok["update_ready"] is True
+    assert "update blocked" not in ok["guidance"]

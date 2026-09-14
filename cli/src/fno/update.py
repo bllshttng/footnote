@@ -698,6 +698,13 @@ def update_readiness(
     if resolved_source is None:
         degraded.append("source checkout not resolvable")
 
+    # The advisory surface reports the same gate the mutating path enforces:
+    # a refused-but-resolved source must never read as "update ready" here.
+    # A refusal WITHOUT a path (nothing located) is the ordinary unresolvable
+    # degrade above, not a gate verdict.
+    pin = _resolve_source_pin(source)
+    gate_refused = bool(pin and pin.get("path") and pin.get("decision") == "refuse")
+
     source_rev: Optional[str] = None
     if resolved_source is not None:
         source_rev = doctor._source_rev(resolved_source)
@@ -705,6 +712,8 @@ def update_readiness(
             degraded.append("source rev unreadable")
 
     update_ready = bool(installed_rev and source_rev and installed_rev != source_rev)
+    if gate_refused:
+        update_ready = False
 
     source_wire = _read_source_wire(resolved_source) if resolved_source else None
     if resolved_source is not None and source_wire is None:
@@ -777,22 +786,27 @@ def update_readiness(
 
     degraded_reason = "; ".join(degraded) if degraded else None
 
-    guidance = _build_update_guidance(
-        update_ready=update_ready,
-        revs_known=installed_rev is not None and source_rev is not None,
-        source_rev=source_rev,
-        wire_known=shells_known and source_wire is not None,
-        wire_bump=wire_bump,
-        running_wires=running_wires,
-        source_wire=source_wire,
-        shells=shells,
-        shells_ended=shells_ended,
-        shells_known=shells_known,
-        revivable=revivable,
-        revivable_known=revivable_known,
-        degraded_reason=degraded_reason,
-        stale_rows=running_rows,
-    )
+    if gate_refused:
+        guidance = "update blocked: " + (
+            pin.get("refusal") or "the resolved source failed the source-pin gate"
+        )
+    else:
+        guidance = _build_update_guidance(
+            update_ready=update_ready,
+            revs_known=installed_rev is not None and source_rev is not None,
+            source_rev=source_rev,
+            wire_known=shells_known and source_wire is not None,
+            wire_bump=wire_bump,
+            running_wires=running_wires,
+            source_wire=source_wire,
+            shells=shells,
+            shells_ended=shells_ended,
+            shells_known=shells_known,
+            revivable=revivable,
+            revivable_known=revivable_known,
+            degraded_reason=degraded_reason,
+            stale_rows=running_rows,
+        )
 
     # None (not 0) when the underlying fetch never happened - a count fno never
     # fetched is not evidence of an empty fleet (AC4-EDGE). `guidance` already
@@ -822,6 +836,16 @@ def update_readiness(
     )
     return {
         "update_ready": update_ready,
+        "source_pin": (
+            {
+                "decision": pin.get("decision"),
+                "eligibility": pin.get("eligibility"),
+                "refusal": pin.get("refusal"),
+                "warning": pin.get("warning"),
+            }
+            if pin
+            else None
+        ),
         "installed_rev": installed_rev,
         "source_rev": source_rev,
         "python_tool": {"script": front_script, "running": running, "same": same},
