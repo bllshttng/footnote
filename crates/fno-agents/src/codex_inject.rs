@@ -370,17 +370,37 @@ pub fn initialized_notification_json() -> String {
 }
 
 /// The `turn/start` request injecting `text` into `thread_id` as a text input
-/// item. `id` is `1` (matched on the response). `text` is injected verbatim —
-/// the `<fno_mail>` envelope is rendered caller-side (Python), so this is a dumb
-/// transport, mirroring [`crate::mail_inject`].
-pub fn turn_start_request_json(thread_id: &str, text: &str) -> String {
+/// item, carrying an optional per-turn `sandboxPolicy`. `None` builds the bare
+/// frame. `text` is injected verbatim — the `<fno_mail>` envelope is rendered
+/// caller-side (Python), so this is a dumb transport, mirroring
+/// [`crate::mail_inject`]. The policy, when present, is always the thread's own
+/// resolved posture with only the roots widened - never a hand-built object,
+/// which would replace every sibling field with the server's defaults.
+pub fn turn_start_request_json_with_policy(
+    id: u64,
+    thread_id: &str,
+    text: &str,
+    sandbox_policy: Option<&serde_json::Value>,
+) -> String {
+    let mut params = serde_json::json!({
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": text}],
+    });
+    if let Some(policy) = sandbox_policy {
+        params["sandboxPolicy"] = policy.clone();
+    }
+    serde_json::json!({"id": id, "method": "turn/start", "params": params}).to_string()
+}
+
+/// The minimal `thread/resume` probe: reads the posture the server resolved
+/// for a LOADED thread (`result.sandbox`) without spawning anything. Measured
+/// 2026-09-14 on codex 0.154.0: the reply carries `sandbox` and the thread's
+/// rollout does not grow.
+pub fn thread_resume_probe_json(id: u64, thread_id: &str) -> String {
     serde_json::json!({
-        "id": 1,
-        "method": "turn/start",
-        "params": {
-            "threadId": thread_id,
-            "input": [{"type": "text", "text": text}]
-        }
+        "id": id,
+        "method": "thread/resume",
+        "params": {"threadId": thread_id}
     })
     .to_string()
 }
@@ -1664,19 +1684,80 @@ pub async fn run_codex_assign_project(rest: &[String]) -> i32 {
     }
 }
 
-/// The connect + initialize handshake + `turn/start` round-trip. Split out so
-/// [`deliver_via_codex_daemon`] can wrap it in a total timeout.
+/// Wire ids for the three request frames, in send order. `read_until_id`
+/// matches ids, so each read waits for its own frame; a skipped stage leaves a
+/// gap, which bare JSON-RPC allows.
+const THREAD_READ_ID: u64 = 1;
+const THREAD_RESUME_ID: u64 = 2;
+const TURN_START_ID: u64 = 3;
+
+/// One send + wait-for-its-own-id round-trip.
+async fn round_trip(
+    sink: &mut AppServerSink,
+    stream: &mut AppServerStream,
+    id: u64,
+    frame: String,
+) -> Result<String, &'static str> {
+    sink.send(Message::Text(frame.into()))
+        .await
+        .map_err(|_| "io-error")?;
+    read_until_id(stream, &serde_json::json!(id)).await
+}
+
+/// The connect + initialize handshake + the posture read + `turn/start`.
+/// Split out so [`deliver_via_codex_daemon`] can wrap it in a total timeout.
+///
+/// The writable-roots grant rides the TURN, never a client `-c` flag (x-4a68):
+/// `thread/read` names the thread's cwd, `thread/resume` reads the posture the
+/// server resolved, and only a `workspaceWrite` posture widens the roots -
+/// this lane never narrows a thread. A failed read is NOT a delivery failure:
+/// the turn still goes out, policy-less. Measured 2026-09-14 on codex 0.154.0:
+/// resume on a loaded thread answers Ok carrying `sandbox`, and the rollout
+/// does not grow.
 async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
     let (mut sink, mut stream) = connect_app_server(sock)
         .await
         .map_err(ReviewStartError::Reason)?;
 
+    let cwd = match round_trip(
+        &mut sink,
+        &mut stream,
+        THREAD_READ_ID,
+        thread_read_request_json(THREAD_READ_ID, thread_id),
+    )
+    .await
+    {
+        Ok(raw) => parse_thread_read_cwd(&raw).unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    let mut policy = None;
+    if !cwd.is_empty() {
+        let roots = crate::provider::codex_writable_roots(Path::new(&cwd));
+        if !roots.is_empty() {
+            if let Ok(raw) = round_trip(
+                &mut sink,
+                &mut stream,
+                THREAD_RESUME_ID,
+                thread_resume_probe_json(THREAD_RESUME_ID, thread_id),
+            )
+            .await
+            {
+                if let Some(sandbox) = crate::codex_thread::parse_resolved_sandbox(&raw) {
+                    policy = Some(crate::codex_thread::sandbox_policy_with_roots(
+                        Some(&sandbox),
+                        &roots,
+                    ));
+                }
+            }
+        }
+    }
+
     sink.send(Message::Text(
-        turn_start_request_json(thread_id, text).into(),
+        turn_start_request_json_with_policy(TURN_START_ID, thread_id, text, policy.as_ref()).into(),
     ))
     .await
     .map_err(|_| ReviewStartError::Reason("io-error"))?;
-    let resp = read_until_id(&mut stream, &serde_json::json!(1)).await?;
+    let resp = read_until_id(&mut stream, &serde_json::json!(TURN_START_ID)).await?;
     classify_turn_start_response(&resp)
 }
 
@@ -1802,13 +1883,34 @@ mod tests {
 
     #[test]
     fn turn_start_carries_thread_id_and_text_item() {
-        let v: serde_json::Value =
-            serde_json::from_str(&turn_start_request_json("THREAD-9", "hello MARKER")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&turn_start_request_json_with_policy(
+            1,
+            "THREAD-9",
+            "hello MARKER",
+            None,
+        ))
+        .unwrap();
         assert_eq!(v["id"], 1);
         assert_eq!(v["method"], "turn/start");
         assert_eq!(v["params"]["threadId"], "THREAD-9");
         assert_eq!(v["params"]["input"][0]["type"], "text");
         assert_eq!(v["params"]["input"][0]["text"], "hello MARKER");
+    }
+
+    #[test]
+    fn turn_start_policy_is_all_or_nothing() {
+        // A Some policy rides whole; None builds the bare frame. There is no
+        // hand-built fallback: a policy guessed without the thread's resolved
+        // posture could replace sibling fields with server defaults.
+        let bare: serde_json::Value =
+            serde_json::from_str(&turn_start_request_json_with_policy(3, "T", "x", None)).unwrap();
+        assert!(bare["params"].get("sandboxPolicy").is_none());
+        let policy = serde_json::json!({"type": "workspaceWrite", "writableRoots": ["/r"]});
+        let carried: serde_json::Value = serde_json::from_str(
+            &turn_start_request_json_with_policy(3, "T", "x", Some(&policy)),
+        )
+        .unwrap();
+        assert_eq!(carried["params"]["sandboxPolicy"]["writableRoots"][0], "/r");
     }
 
     #[test]
@@ -2705,8 +2807,89 @@ mod tests {
         let _guard = crate::path_test_guard();
         let temp = tempfile::tempdir().unwrap();
         // No daemon: reaching the socket would hang past the guard, so a hit
-        // here would only come from the git step refusing first.
+        // here would only come from the git step resolve_allow_missing arm.
         let id = ensure_project_for_cwd(temp.path()).await;
         assert_eq!(id, None);
+    }
+
+    /// The full turn path: a workspaceWrite posture yields a `turn/start`
+    /// whose `sandboxPolicy.writableRoots` carries the granted roots on top of
+    /// the posture's own.
+    #[tokio::test]
+    async fn deliver_carries_the_writable_roots_grant_on_the_turn() {
+        let _guard = crate::path_test_guard();
+        std::env::set_var("FNO_WORKER_ADD_DIRS", "/tmp/fno-t13-a:/tmp/fno-t13-b");
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_thread_sandbox(json!({
+                "type": "workspaceWrite", "writableRoots": ["/tmp/fno-t13-own"]
+            })),
+        );
+        let result = deliver_via_codex_daemon("thread-t", "hello GRANT").await;
+        assert!(result.is_ok(), "delivery must succeed: {result:?}");
+        std::env::remove_var("FNO_WORKER_ADD_DIRS");
+        let turn = daemon
+            .first_params("turn/start")
+            .expect("turn/start must have run");
+        let roots: Vec<String> = turn["sandboxPolicy"]["writableRoots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            roots.contains(&"/tmp/fno-t13-own".to_string()),
+            "the posture's own roots ride: {roots:?}"
+        );
+        assert!(
+            roots.contains(&"/tmp/fno-t13-a".to_string()),
+            "the state dirs ride: {roots:?}"
+        );
+    }
+
+    /// A `dangerFullAccess` posture sends NO policy: this lane never narrows
+    /// a thread.
+    #[tokio::test]
+    async fn deliver_sends_no_policy_for_a_danger_full_access_posture() {
+        let _guard = crate::path_test_guard();
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick()
+                .with_thread_sandbox(json!({"type": "dangerFullAccess"})),
+        );
+        let result = deliver_via_codex_daemon("thread-t", "hello").await;
+        assert!(result.is_ok());
+        let turn = daemon.first_params("turn/start").expect("turn ran");
+        assert!(turn.get("sandboxPolicy").is_none());
+    }
+
+    /// A reply with no posture key sends no policy either.
+    #[tokio::test]
+    async fn deliver_sends_no_policy_when_the_posture_is_missing() {
+        let _guard = crate::path_test_guard();
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick(),
+        );
+        let result = deliver_via_codex_daemon("thread-t", "hello").await;
+        assert!(result.is_ok());
+        let turn = daemon.first_params("turn/start").expect("turn ran");
+        assert!(turn.get("sandboxPolicy").is_none());
+    }
+
+    /// A refused `thread/resume` is not a delivery failure: the turn still
+    /// goes out, policy-less.
+    #[tokio::test]
+    async fn deliver_still_sends_the_turn_when_the_resume_probe_refuses() {
+        let _guard = crate::path_test_guard();
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick()
+                .with_thread_sandbox(json!({"type": "workspaceWrite", "writableRoots": []}))
+                .with_failing_thread_resume(),
+        );
+        let result = deliver_via_codex_daemon("thread-t", "hello RESILIENT").await;
+        assert!(result.is_ok(), "delivery must succeed: {result:?}");
+        let turn = daemon
+            .first_params("turn/start")
+            .expect("the turn must still have run");
+        assert_eq!(turn["input"][0]["text"], "hello RESILIENT");
+        assert!(turn.get("sandboxPolicy").is_none());
     }
 }

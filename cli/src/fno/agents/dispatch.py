@@ -64,6 +64,7 @@ from fno.agents.sender_provenance import (
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, render_seed
+from fno.agents.lane_heal import lane_heal as _lane_heal
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
 from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
@@ -5651,21 +5652,10 @@ def _mux_pane_send(
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
     When ``guarded``, the paste rides the server-side turn-taken interlock: a
-    pane whose recipient is mid-turn refuses with EXIT_TARGET_NOT_IDLE and this
-    returns False -- a ``stalled`` demotion to the caller's durable floor --
-    rather than swallowing the bytes and letting the sender report ``hosted``
-    (Locked Decision 4: hosted-on-bytes-written is banned). A guarded send does
-    NOT hold the pane's writer claim: the server guard refuses any pane whose
-    claim a live pid holds ("busy: relay"), so holding our own claim would
-    self-block every guarded send; the atomic server-side idle check is itself
-    the interleave protection for the paste. No caller opts into this branch any
-    more (node x-1904): the guard was `rerun_allowed`, borrowed from the rerun
-    verb, and a busy recipient enqueues an injected paste rather than corrupting
-    a composer (measured, not inferred -- see the doc comment on
-    `rerun_allowed` in `crates/fno/src/server.rs`), so refusing before any byte
-    was written vetoed exactly the delivery this transport can make. Left in
-    place (not deleted) as a real capability of the underlying `fno mux pane
-    send --guarded` verb, which the rerun caller still legitimately wants.
+    mid-turn pane refuses with EXIT_TARGET_NOT_IDLE and this returns False, a
+    ``stalled`` demotion to the caller's durable floor. No fno caller opts in
+    any more; the rerun verb still uses the underlying `fno mux pane send
+    --guarded` verb directly.
 
     ``guarded=False`` is the raw channel the writer-claim holder owns; it holds
     the claim across the text-then-CR burst so no other writer interleaves. The
@@ -7087,17 +7077,8 @@ def _review_start_codex(
 
 def keystroke_lane(entry: "AgentEntry") -> tuple[str, bool]:
     """The live delivery lane for a registry row and whether it is a KEYSTROKE
-    lane (a prompt-line path where the REPL's slash parser runs before the
-    model), mirroring ``_deliver_live``'s routing order EXACTLY: mux first, then
-    harness. A predicate that disagrees with the real router is worse than none.
-
-    A raw slash payload fires a verb only on a keystroke lane. The codex/gemini/
-    opencode daemon lanes answer False (``agent.deliver`` / ``turn/start`` submit
-    a turn to the model with no TUI prompt line, so the slash never reaches a
-    parser); the mux pane paste and claude's ``control.sock`` (the --raw inject
-    lane) are keystrokes. The claude answer models the control.sock door ``--raw``
-    uses, not every claude sub-lane (a stream-json switchboard peer is a different
-    lane this predicate does not classify).
+    lane (the REPL's slash parser runs before the model), mirroring
+    ``_deliver_live``'s routing order exactly: mux first, then harness.
     """
     if entry.mux:
         return ("mux-pane", True)
@@ -7223,6 +7204,23 @@ def _deliver_live(
                 or not entry.mux
             ):
                 break
+        # Heal after the pane miss (x-4a68): a codex row whose pane is gone
+        # but whose thread is loaded in the app-server rebinds to the thread
+        # lane, and the wrapped body rides turn/start instead of the durable
+        # queue. Every other verdict keeps the durable fallback.
+        sid = getattr(entry, "harness_session_id", None)
+        if getattr(entry, "harness", None) == "codex" and sid:
+            heal_verdict, _heal_reason, _pane = _lane_heal(sid)
+            if heal_verdict == "rebound-thread":
+                from fno.agents.registry import resolve_agent
+
+                entry = resolve_agent(entry.name).entry
+                return _mail_inject_codex(
+                    entry.harness_session_id or sid,
+                    wrapped,
+                    reason_out=reason_out,
+                    origin=(mail.origin if mail else None),
+                )
         return False
 
     # Codex hosted thread (x-de10): the daemon's thread actor drives the turn.

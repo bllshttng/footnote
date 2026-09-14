@@ -301,7 +301,7 @@ def test_every_session_builder_and_submit_path_names_the_shared_contract():
     assert "CR_SETTLE_MS" not in rust_inject
     assert 'capabilities(recipient_harness)["send_keys_enter_delay_ms"]' in python_inject
     assert 'capabilities("claude")["send_keys_enter_delay_ms"]' not in python_inject
-    assert "default_enter_delay_ms(provider)" in rust_inject
+    assert "default_enter_delay_ms(harness)" in rust_inject
 
 
 def _resolve(**kw):

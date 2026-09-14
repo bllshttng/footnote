@@ -525,10 +525,10 @@ pub(crate) fn codex_sandbox_config_args_resume(cwd: &std::path::Path) -> Vec<Str
     args
 }
 
-/// The single whole-value `writable_roots` override used by interactive resume
-/// lanes that must grant roots without also changing the operator's sandbox
-/// mode.
-pub(crate) fn codex_writable_config_args(cwd: &std::path::Path) -> Vec<String> {
+/// The root list the interactive resume and turn/start lanes grant: the repo's
+/// git common dir, the plan content dir, and the seam-published state dirs.
+/// Empty when none resolve.
+pub(crate) fn codex_writable_roots(cwd: &std::path::Path) -> Vec<String> {
     let mut roots: Vec<String> = [git_common_dir(cwd), plan_content_dir(cwd)]
         .into_iter()
         .flatten()
@@ -543,6 +543,14 @@ pub(crate) fn codex_writable_config_args(cwd: &std::path::Path) -> Vec<String> {
             roots.push(extra);
         }
     }
+    roots
+}
+
+/// The single whole-value `writable_roots` override used by interactive resume
+/// lanes that must grant roots without also changing the operator's sandbox
+/// mode.
+pub(crate) fn codex_writable_config_args(cwd: &std::path::Path) -> Vec<String> {
+    let roots = codex_writable_roots(cwd);
     if roots.is_empty() {
         return vec![];
     }
@@ -2832,11 +2840,20 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os("HOME");
+        let prev_codex = std::env::var_os("CODEX_HOME");
         std::env::set_var("HOME", home);
+        // CODEX_HOME reaches past the swapped HOME into whatever fake-daemon
+        // home a parallel test has set. The fresh install these tests model
+        // has neither, so the codex home is neutralized for the closure.
+        std::env::remove_var("CODEX_HOME");
         f();
         match prev {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
+        }
+        match prev_codex {
+            Some(v) => std::env::set_var("CODEX_HOME", v),
+            None => std::env::remove_var("CODEX_HOME"),
         }
     }
 }

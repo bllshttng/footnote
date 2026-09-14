@@ -126,6 +126,7 @@ pub mod king_checkin;
 pub mod king_history;
 pub mod king_ledger;
 pub mod king_termination;
+pub mod lane_heal;
 pub mod law_match;
 pub mod liveness_sweep;
 pub mod logs;

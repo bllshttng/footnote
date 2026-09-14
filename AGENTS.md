@@ -43,7 +43,7 @@ AC9 delivery sentinel (echoed verbatim by a fresh worker, asserted by unit test)
 
 ### Codex RPC
 
-`fno agents mail send <full-session-id> --raw '/review'` fires daemon RPC: NATIVE verbs only. --raw types verbatim. fno verbs want $fno:target. A /fno: reads as prose.
+`fno agents mail send <full-session-id> --raw <payload>` types any single-line payload verbatim. /fno:verb and $fno:verb both name an fno verb. The lane rewrites the verb to the form of the receiving harness. The codex app-server lane sends a non-review payload over turn/start.
 
 - specimens: mail_inject.rs, mux_cli.rs
 - graduates-to: Codex RPC dispatch returns a submit receipt naming the accepted verb.

@@ -5,14 +5,14 @@
 # stays the only Python file that execs fno-agents by literal name.
 crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/authorized_merge.rs	567	let out = Command::new("fno")
-crossing	crates/fno-agents/src/bin/client.rs	1647	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	1702	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	3135	match std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	4392	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
+crossing	crates/fno-agents/src/bin/client.rs	1659	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	1714	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	3147	match std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/bin/client.rs	4404	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/blueprint_judge.rs	69	return match Command::new("fno").args(["help", "--all"]).output() {
 crossing	crates/fno-agents/src/blueprint_judge.rs	165	let out = Command::new("fno")
 crossing	crates/fno-agents/src/client_verbs.rs	1279	let mut command = Command::new("fno");
-crossing	crates/fno-agents/src/client_verbs.rs	2841	let mut command = std::process::Command::new("fno");
+crossing	crates/fno-agents/src/client_verbs.rs	2775	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/daemon.rs	1117	let out = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/daemon.rs	1231	let mut cmd = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/daemon.rs	2322	let mut cmd = std::process::Command::new("fno");
@@ -23,13 +23,13 @@ crossing	crates/fno-agents/src/distress.rs	148	.or_else(|| newest_assistant_text
 crossing	crates/fno-agents/src/distress.rs	271	std::ffi::OsStr::new(&loopcheck_fno_bin()),
 crossing	crates/fno-agents/src/distress.rs	350	let text = newest_assistant_text_via_reader(&loopcheck_fno_bin(), &transcript, &cwd);
 crossing	crates/fno-agents/src/finalize.rs	485	let mut cmd = Command::new("fno");
-crossing	crates/fno-agents/src/finalize.rs	1904	let mut command = Command::new("fno");
-crossing	crates/fno-agents/src/finalize.rs	1960	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2332	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2414	let ok = Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2784	let out = match Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2804	let mut cmd = Command::new("fno");
-crossing	crates/fno-agents/src/gc.rs	889	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
+crossing	crates/fno-agents/src/finalize.rs	1923	let mut command = Command::new("fno");
+crossing	crates/fno-agents/src/finalize.rs	1979	let ok = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2351	let ok = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2433	let ok = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2803	let out = match Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2823	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/gc.rs	924	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/king_checkin.rs	143	let mut argv = vec![fno_bin()];
 crossing	crates/fno-agents/src/loop_dispatch.rs	364	let out = Command::new("fno")
 crossing	crates/fno-agents/src/loopcheck.rs	3495	pub(crate) fn loopcheck_fno_bin() -> String {
@@ -40,9 +40,11 @@ crossing	crates/fno-agents/src/pane_relaunch.rs	338	let mut command = std::proce
 crossing	crates/fno-agents/src/pane_relaunch.rs	560	std::process::Command::new("fno")
 crossing	crates/fno-agents/src/pane_stop.rs	464	let Ok(output) = std::process::Command::new("fno")
 crossing	crates/fno-agents/src/pane_stop.rs	535	let mut child = std::process::Command::new("fno")
-crossing	crates/fno-agents/src/prove_it_verdicts.rs	456	let mut cmd = Command::new("fno");
-crossing	crates/fno-agents/src/provider.rs	559	let out = match std::process::Command::new("fno")
+crossing	crates/fno-agents/src/prove_it_verdicts.rs	507	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/provider.rs	567	let out = match std::process::Command::new("fno")
 crossing	crates/fno-agents/src/reentry.rs	135	let out = std::process::Command::new("fno")
+crossing	crates/fno-agents/src/resume_wake.rs	153	let out = std::process::Command::new("fno").args(argv).output()?;
+crossing	crates/fno-agents/src/resume_wake.rs	164	std::process::Command::new("fno")
 crossing	crates/fno-agents/src/route_slot.rs	2402	let mut cmd = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsString {
 crossing	crates/fno-agents/src/scrape.rs	334	let bin = fno_bin();
@@ -92,8 +94,8 @@ resolver	crates/fno-agents/src/loopcheck.rs	8237	fn decide_inner(args: &[String]
 resolver	crates/fno-agents/src/loopcheck.rs	11059	fn build_block_reason(
 resolver	crates/fno-agents/src/operator_notice.rs	33	pub fn notify_operator(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/plugin_install.rs	57	fn build_stage(cwd: &Path) -> Result<PathBuf, String> {
-resolver	crates/fno-agents/src/provider_cap_verbs.rs	284	fn run_fno(args: &[&str], cwd: Option<&std::path::Path>, timeout: std::time::Duration) -> bool {
-resolver	crates/fno-agents/src/provider_cap_verbs.rs	319	fn real_deps() -> crate::provider_cap::LeaveDeps {
+resolver	crates/fno-agents/src/provider_cap_verbs.rs	287	fn run_fno(args: &[&str], cwd: Option<&std::path::Path>, timeout: std::time::Duration) -> bool {
+resolver	crates/fno-agents/src/provider_cap_verbs.rs	322	fn real_deps() -> crate::provider_cap::LeaveDeps {
 resolver	crates/fno-agents/src/reclaim.rs	114	fn plugin_cache_copies() -> Vec<PathBuf> {
 resolver	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsString {
 resolver	crates/fno-agents/src/scrape.rs	212	fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {

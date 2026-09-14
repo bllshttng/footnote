@@ -2852,8 +2852,13 @@ def _raw_send(
     twice before it gave up. A caller gates on this rather than guessing from the
     session's shape, and gets the same resolution the real send would run.
     """
+    from fno.agents.lane_heal import (
+        lane_heal as _lane_heal,
+        raw_send_heal_action as _raw_send_heal_action,
+    )
     from fno.agents.dispatch import (
         _mail_inject_claude,
+        _mail_inject_codex,
         _mux_pane_send,
         _review_start_codex,
         keystroke_lane,
@@ -2893,18 +2898,14 @@ def _raw_send(
         print(f"refused: {reason}", file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # 1. Leading slash after stripping; refuse bare "/" and whitespace-only. The
-    #    leading slash is the marker a human skimming a transcript reads as
-    #    "invocation, not a typed ruling".
+    # 1. Refuse an empty or whitespace-only payload. Any single line is a
+    #    legal raw payload (law d-5976045c): a slash verb, a codex skill verb,
+    #    or a plain word. A bare marker is nothing to invoke.
     stripped = payload.strip()
-    if not stripped.startswith("/"):
-        _refused(
-            "payload must start with / (a verb invocation); free prose belongs in an ordinary "
-            "wrapped send. Answering a prompt (a [Y/n]) is `fno agents ask <name> \"<answer>\"`",
-            usage=True,
-        )
-    if stripped == "/":
-        _refused("payload is just '/'; nothing to invoke", usage=True)
+    if not stripped:
+        _refused("payload is empty", usage=True)
+    if stripped in ("/", "$"):
+        _refused("payload is just a bare marker; nothing to invoke", usage=True)
 
     # 2. Single line: the transport is one bracketed paste plus one CR, so a
     #    second line would ride in as trailing content on the same turn.
@@ -2923,11 +2924,11 @@ def _raw_send(
     _enforce_body_cap(stripped, usage=check)
     _enforce_style(stripped, allow_reason=style_exception)
 
-    # 2b. Forged envelope: a raw payload starts with "/", so it cannot itself
-    #     be a `<fno_mail>` tag, but it can still smuggle one mid-line. The mux
-    #     lane (`_mux_pane_send` below) pastes this string directly and never
-    #     reaches the Rust mail-inject binary's own check, so this is the only
-    #     door for that lane.
+    # 2b. Forged envelope: a raw payload is one line, but it can still smuggle
+    #     a `<fno_mail>` tag mid-line, and `contains_fno_mail_tag` searches the
+    #     whole payload. The mux lane (`_mux_pane_send` below) pastes this
+    #     string directly and never reaches the Rust mail-inject binary's own
+    #     check, so this is the only door for that lane.
     from fno.mail.envelope import contains_fno_mail_tag
 
     if contains_fno_mail_tag(stripped):
@@ -3110,47 +3111,56 @@ def _raw_send(
                 file=sys.stderr,
             )
 
-    # 4. Route by the actual lane. Mux-hosted Codex is a keystroke lane like any
-    #    other mux pane; only a Codex app-server thread uses structured review/start.
+    # 4. Heal a dead pane binding before routing on the row: a codex row whose
+    #    pane is gone but whose thread is loaded rebinds to the thread lane.
+    if entry.mux and session_id and entry.harness == "codex":
+        action, detail = _raw_send_heal_action(*_lane_heal(session_id), name)
+        if action == "rebound":
+            entry = resolve_agent(lookup_name).entry
+        elif action == "refused":
+            _refused(detail)
+        elif action == "check" and check:
+            _unmeasurable(detail)
+
+    # 5. Route by the actual lane. Mux-hosted Codex is a keystroke lane like any
+    #    other mux pane; only a Codex app-server thread uses structured lanes
+    #    (review/start for review verbs, turn/start for any other payload).
     lane, is_keystroke = keystroke_lane(entry)
     if not is_keystroke:
         verb = stripped.split(maxsplit=1)[0]
         if lane == "codex-daemon":
-            # --check answers before the RPC fires: a review verb HAS a path on
-            # this lane (the structured RPC), everything else has none. The
-            # probe claims path-existence only, same as the keystroke branches -
-            # but only for preconditions it cannot cheaply decide; a missing
-            # binary or an unresolvable target WOULD refuse the send, so the
-            # check answers them rather than promising a path the send lacks.
-            if check and verb not in _CODEX_REVIEW_VERBS:
+            from fno import rust_binary
+
+            is_review = verb in _CODEX_REVIEW_VERBS
+            if check and rust_binary.resolve_installed_binary() is None:
                 print(
-                    "not-injectable: codex-daemon has no prompt line; only "
-                    "/review and /code-review map to its review/start RPC"
+                    "not-injectable: the fno-agents binary is absent or too "
+                    f"old (run `fno doctor`), so "
+                    f"{'review/start' if is_review else 'turn/start'} has no "
+                    "transport"
                 )
                 raise typer.Exit(code=1)
-            if verb not in _CODEX_REVIEW_VERBS:
-                _refused(
-                    f"{name!r} is a codex app-server thread, which has no prompt "
-                    "line - a slash payload cannot parse there. The app-server "
-                    "exposes turn/start (text to the model, no slash parsing) and "
-                    f"review/start (the reviewer); {verb!r} maps to neither.\n"
-                    "  - to have the codex model READ this, drop --raw (a wrapped "
-                    "send delivers it as text, which is all any codex lane can do "
-                    "with it)\n"
-                    f"  - if {verb!r} is a codex TUI built-in (/compact and "
-                    "friends), no fno lane can fire it on a daemon thread; host "
-                    "the session in a mux pane, where --raw pastes at the real "
-                    "prompt line and the TUI parser runs it"
+            if check and not is_review:
+                print("injectable: codex-daemon turn/start")
+                raise typer.Exit(code=0)
+            if not is_review:
+                raw_msg_id, reservation, authored_words = _reserve_raw()
+                turn_reasons: list[str] = []
+                turn_delivered = _mail_inject_codex(
+                    session_id,
+                    stripped,
+                    reason_out=turn_reasons,
+                    origin=origin,
                 )
-            if check:
-                from fno import rust_binary
-
-                if rust_binary.resolve_installed_binary() is None:
-                    print(
-                        "not-injectable: the fno-agents binary is absent or too "
-                        "old (run `fno doctor`), so review/start has no transport"
-                    )
-                    raise typer.Exit(code=1)
+                if turn_delivered:
+                    _record_raw(raw_msg_id, authored_words)
+                    print("injected")
+                    raise typer.Exit(code=0)
+                _release_budget(reservation)
+                turn_failure = turn_reasons[-1] if turn_reasons else "no-daemon"
+                _refused(
+                    f"{name!r} codex turn/start not delivered: {turn_failure}"
+                )
             default_base = (
                 _codex_default_review_base(getattr(entry, "cwd", None))
                 if stripped in _CODEX_REVIEW_VERBS
@@ -3261,25 +3271,9 @@ def _raw_send(
     # "A path exists" is the whole claim.
     if check:
         if entry.mux:
-            # SELF used to have no path on this lane, structurally: `_raw_send`
-            # pasted with `guarded=True`, which rides the server-side turn-taken
-            # interlock and refuses EXIT_TARGET_NOT_IDLE while the recipient is
-            # mid-turn, and a session asking about ITSELF is mid-turn by
-            # construction (running this command inside its own turn). Node
-            # x-1904 removed that veto: the guard was `rerun_allowed`, borrowed
-            # from the rerun verb, refusing a delivery the transport can
-            # actually make -- a busy claude session enqueues an injected paste
-            # rather than corrupting its composer (measured, not inferred; see
-            # `crates/fno/src/server.rs`). `_raw_send` now pastes unguarded and
-            # confirms by content against the recipient's own transcript
-            # (`_mux_pane_send(..., confirm=True)`), landing even mid-turn --
-            # the same property the control.sock lane already had, which is why
-            # that lane never carried a self/peer split. Self and peer are no
-            # longer a structurally different question on this lane either: the
-            # row recording a mux pane IS the path, for both. Not verified
-            # against the mux server here: a pane that has since exited still
-            # reads injectable, and the send answers that in about a second
-            # rather than a second subprocess answering it now.
+            # A codex row here was probed live by the heal; a claude row keeps
+            # its own pane answers. Either way the paste landing is the send's
+            # question, decided by the confirm.
             print("injectable: mux-pane (a paste still needs the confirm to land)")
             raise typer.Exit(code=0)
         if not session_id:
@@ -3568,10 +3562,13 @@ def cmd_send(
     raw: bool = typer.Option(
         False, "--raw",
         help=(
-            "Inject the payload UNWRAPPED at the recipient's prompt line so the "
-            "REPL slash parser fires it. Payload must start with / and be a "
-            "single line. Never queues durable. An actor OTHER than the model "
-            "must supply the trigger; self-injection is barred unless --to-self. "
+            "Inject the payload UNWRAPPED at the recipient's prompt line: one "
+            "line, typed verbatim - a slash verb, a codex skill verb, or a "
+            "plain word. A payload starting /fno: or $fno: is an fno verb, and "
+            "the lane rewrites the marker to the form of the receiving "
+            "harness. A showing prompt is answered with `fno agents ask`. "
+            "Never queues durable. An actor OTHER than the model must supply "
+            "the trigger; self-injection is barred unless --to-self. "
             "Mechanics and the reviewer-off-the-author rationale: "
             "docs/architecture/review-lanes.md."
         ),
@@ -3784,7 +3781,7 @@ def cmd_send(
             )
             raise typer.Exit(code=2)
         if message is None:
-            print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
+            print("error: --raw needs a payload (the text to type)", file=sys.stderr)
             raise typer.Exit(code=2)
         _raw_send(
             name,

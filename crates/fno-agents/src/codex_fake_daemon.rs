@@ -71,10 +71,18 @@ pub struct Behavior {
     /// on). A client that treats the id match as success reads HEALTHY here.
     pub refuse_initialize: bool,
     /// The canned `project/list` page. One page, no cursor: the resolver's
-    /// three branches (root match, name match, create) all fit in it, and the
+    /// three branches (root list, name match, create) all fit in it, and the
     /// fake models no project store on purpose - whether the REAL app-server
     /// persists a create is a question for the live daemon, not the double.
     pub projects: Vec<Value>,
+    /// The cwd the fake's `thread/read` answers with, and the posture its
+    /// `thread/resume` reply carries. `None` models a reply with no sandbox
+    /// key at all, so the driver must send the turn policy-less. The default
+    /// models today's daemon: a loaded thread with a cwd and no posture key.
+    pub thread_cwd: String,
+    pub thread_sandbox: Option<Value>,
+    /// Answer `thread/resume` with an error frame: the refused probe.
+    pub fail_thread_resume: bool,
     /// Every request frame this fake received, in arrival order.
     ///
     /// The fake models no sandbox and deliberately never will: whether the
@@ -97,6 +105,9 @@ impl Default for Behavior {
             stray_completion_after: None,
             refuse_initialize: false,
             projects: Vec::new(),
+            thread_cwd: "/tmp/fake-daemon-cwd".to_string(),
+            thread_sandbox: None,
+            fail_thread_resume: false,
             received: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -157,6 +168,21 @@ impl Behavior {
 
     pub fn with_projects(mut self, projects: Vec<Value>) -> Self {
         self.projects = projects;
+        self
+    }
+
+    pub fn with_thread_cwd(mut self, cwd: &str) -> Self {
+        self.thread_cwd = cwd.to_string();
+        self
+    }
+
+    pub fn with_thread_sandbox(mut self, sandbox: Value) -> Self {
+        self.thread_sandbox = Some(sandbox);
+        self
+    }
+
+    pub fn with_failing_thread_resume(mut self) -> Self {
+        self.fail_thread_resume = true;
         self
     }
 }
@@ -336,9 +362,24 @@ async fn serve(conn: UnixStream, behavior: Behavior) {
             }}),
             Some("initialize") => json!({"id": id, "result": {}}),
             Some("initialized") => continue,
-            Some("thread/start") | Some("thread/resume") => json!({"id": id, "result": {
-                "thread": {"id": behavior.thread_id, "path": "/tmp/fake-daemon-rollout.jsonl"}
-            }}),
+            Some("thread/read") => json!({"id": id, "result": {"thread": {
+                "id": behavior.thread_id, "cwd": behavior.thread_cwd
+            }}}),
+            Some("thread/start") | Some("thread/resume") => {
+                if behavior.fail_thread_resume
+                    && msg.get("method").and_then(Value::as_str) == Some("thread/resume")
+                {
+                    json!({"id": id, "error": {"message": "thread/resume refused"}})
+                } else {
+                    let mut result = json!({
+                        "thread": {"id": behavior.thread_id, "path": "/tmp/fake-daemon-rollout.jsonl"}
+                    });
+                    if let Some(sandbox) = &behavior.thread_sandbox {
+                        result["sandbox"] = sandbox.clone();
+                    }
+                    json!({"id": id, "result": result})
+                }
+            }
             Some("turn/start") => {
                 turn_n += 1;
                 steered = false;
