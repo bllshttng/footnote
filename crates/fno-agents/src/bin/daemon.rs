@@ -79,7 +79,7 @@ fn main() {
             );
             std::process::exit(3);
         }
-        fno_agents::test_run::spawn_owner_watchdog(
+        let armed = fno_agents::test_run::spawn_owner_watchdog(
             owner_pid,
             owner_birth,
             "fno-daemon-test-owner",
@@ -91,6 +91,10 @@ fn main() {
                 unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
             },
         );
+        if !armed {
+            eprintln!("fno-agents-daemon: refusing to start without an owner watchdog");
+            std::process::exit(3);
+        }
     }
 
     let home = AgentsHome::from_env();

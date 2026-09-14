@@ -176,14 +176,15 @@ pub fn owner_alive(pid: u32, birth: u64) -> bool {
 /// shape both keeper families (`pane_keeper.rs`, `graph_keeper.rs`) use to
 /// bind their lifetime to that owner instead of each hand-rolling its own
 /// poll. The daemon is the third consumer alongside the pane and graph
-/// keepers.
+/// keepers. Returns `false` when the thread could not spawn; a caller that
+/// cannot serve unwatched must refuse to start.
 pub fn spawn_owner_watchdog(
     owner_pid: u32,
     owner_birth: u64,
     thread_name: &str,
     on_death: impl FnOnce() + Send + 'static,
-) {
-    let _ = std::thread::Builder::new()
+) -> bool {
+    let spawn = std::thread::Builder::new()
         .name(thread_name.to_string())
         .spawn(move || loop {
             if !owner_alive(owner_pid, owner_birth) {
@@ -192,6 +193,15 @@ pub fn spawn_owner_watchdog(
             }
             std::thread::sleep(Duration::from_millis(250));
         });
+    match spawn {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!(
+                "fno-agents: owner watchdog thread spawn failed owner_pid={owner_pid}: {e}; the caller runs unwatched"
+            );
+            false
+        }
+    }
 }
 
 /// Block until the claim is ours or `deadline` passes. A contender spawns
