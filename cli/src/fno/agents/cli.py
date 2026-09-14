@@ -1721,19 +1721,14 @@ def cmd_spawn(
     if pane is not None:
         from fno.agents.existing_pane import pane_placement_conflict
 
-        conflict = pane_placement_conflict(
+        if conflict := pane_placement_conflict(
             pane, workspace=squad, split=split, at=at, tab=tab,
             bounded=bounded_placement,
-        )
-        if conflict:
+        ):
             print(conflict, file=sys.stderr)
             raise typer.Exit(code=2)
         if substrate != "pane" or once:
-            print(
-                "--pane applies only to --substrate pane (thread/headless "
-                "have no existing mux pane target)",
-                file=sys.stderr,
-            )
+            print("--pane applies only to --substrate pane (thread/headless have no existing mux pane target)", file=sys.stderr)
             raise typer.Exit(code=2)
 
     refusal = placement_refusal(

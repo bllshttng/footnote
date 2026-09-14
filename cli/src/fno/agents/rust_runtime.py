@@ -1626,17 +1626,14 @@ def make_agents_group_cls() -> type:
             return None
 
         def make_context(self, info_name, args, parent=None, **extra):  # type: ignore[no-untyped-def]
-            verb = None
-            existing_pane = None
             if args and args[0] not in ("-h", "--help"):
                 verb = args[0]
                 if verb == "spawn" or verb in _WORKER_DIR_VERBS:
                     if verb == "spawn":
                         from fno.agents.spawn_defaults import extract_existing_pane, inject_spawn_defaults
 
-                        args = inject_spawn_defaults(args)
                         try:
-                            args, existing_pane = extract_existing_pane(args)
+                            args, existing_pane = extract_existing_pane(inject_spawn_defaults(args))
                         except ValueError as exc:
                             print(f"fno agents spawn: {exc}", file=sys.stderr)
                             raise SystemExit(2) from exc
@@ -1684,7 +1681,7 @@ def make_agents_group_cls() -> type:
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
             context = super().make_context(info_name, args, parent=parent, **extra)
-            if verb == "spawn":
+            if args and args[0] == "spawn":
                 context.meta["fno_spawn_existing_pane"] = existing_pane
             return context
 
