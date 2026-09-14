@@ -118,17 +118,15 @@ def _write_graph(
         child["dispatch_verb"] = verb
     if brief is not None:
         child["dispatch_brief"] = brief
-    graph.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {"id": "x-EPIC", "title": "verb mission", "project": "fno"},
-                    child,
-                ]
-            }
-        )
-        + "\n"
-    )
+    epic = {"id": "x-EPIC", "title": "verb mission", "project": "fno"}
+    # Rows the way the store writes them: the typed api drops a row the
+    # model cannot parse, so seeds carry the stamped fields.
+    for row in (epic, child):
+        row.setdefault("type", "feature")
+        row.setdefault("priority", "p2")
+        row.setdefault("status", "idea")
+        row.setdefault("slug", row["id"].lower())
+    graph.write_text(json.dumps({"entries": [epic, child]}, indent=2) + "\n")
 
 
 def _events(p: Path) -> list[dict]:

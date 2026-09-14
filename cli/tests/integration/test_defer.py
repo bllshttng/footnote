@@ -528,23 +528,26 @@ def test_batch_defer_dedups_repeated_ids(tmp_graph, tmp_path):
     assert node.get("status") == "deferred"
 
 
-def test_batch_defer_enters_lock_once(tmp_graph, tmp_path, monkeypatch):
-    """AC3-CON: a batch of N>1 ids enters locked_mutate_graph exactly once."""
+def test_batch_defer_enters_store_once(tmp_graph, tmp_path, monkeypatch):
+    """AC3-CON: a batch of N>1 ids performs exactly one store mutation.
+
+    The lock itself lives keeper-side now; the batch contract is one
+    commit_rows_via_store round for the whole batch, never one per node."""
     import fno.graph.store as gs
 
     ids = [_seed_with_plan(tmp_path, f"Lock {n}") for n in range(3)]
     calls: list[int] = []
-    orig = gs.locked_mutate_graph
+    orig = gs.commit_rows_via_store
 
     def spy(*args, **kwargs):
         calls.append(1)
         return orig(*args, **kwargs)
 
-    monkeypatch.setattr(gs, "locked_mutate_graph", spy)
+    monkeypatch.setattr(gs, "commit_rows_via_store", spy)
 
     r = _invoke("backlog", "defer", *ids, "--reason", "stale")
     assert r.exit_code == 0, r.output
-    assert len(calls) == 1, f"batch must enter locked_mutate_graph once, got {len(calls)}"
+    assert len(calls) == 1, f"batch must enter commit_rows_via_store once, got {len(calls)}"
     # Delegation still mutated every node.
     by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
     assert all(by_id[nid].get("status") == "deferred" for nid in ids)

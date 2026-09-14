@@ -17,9 +17,17 @@ import pytest
 # ---------------------------------------------------------------------------
 
 def _make_graph(tmp_path: Path, entries: list[dict]) -> Path:
-    """Write a graph.json with the given entries and return its path."""
+    """Write a graph.json with the given entries and return its path. Rows
+    are stamped the way the store writes them: the typed api drops a row
+    the model cannot parse, so seeds carry the required fields."""
+    complete = []
+    for e in entries:
+        row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        complete.append(row)
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    g.write_text(json.dumps({"entries": complete}, indent=2) + "\n")
     return g
 
 

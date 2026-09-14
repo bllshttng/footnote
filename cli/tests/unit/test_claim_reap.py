@@ -332,6 +332,9 @@ class TestReapDeadClaims:
                         {
                             "id": node_id,
                             "title": "Release mirror",
+                            "slug": "release-mirror",
+                            "type": "feature",
+                            "priority": "p2",
                             "plan_path": "plans/release-mirror.md",
                             "locked_by": holder,
                             "session_id": holder,
@@ -379,6 +382,9 @@ class TestReapDeadClaims:
                         {
                             "id": node_id,
                             "title": "Reacquired mirror",
+                            "slug": "reacquired-mirror",
+                            "type": "feature",
+                            "priority": "p2",
                             "plan_path": "plans/reacquired-mirror.md",
                             "locked_by": holder,
                             "session_id": holder,
@@ -418,6 +424,9 @@ class TestReapDeadClaims:
                         {
                             "id": node_id,
                             "title": "Named clear",
+                            "slug": "named-clear",
+                            "type": "feature",
+                            "priority": "p2",
                             "plan_path": "plans/named-clear.md",
                             "locked_by": holder,
                             "session_id": holder,

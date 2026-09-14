@@ -7,9 +7,9 @@
 //! derives from it, and as the budget runs out the board stops starting reads,
 //! marks each unstarted source, and still emits the payload it has.
 //!
-//! The speed win is in-process reads. One graph read (the same
-//! `read_defaulted_opts(path, false, false)` the keeper's `read_strict` runs)
-//! feeds claimed-node lookups, PR binding, crown scope, AND the unplanned
+//! The speed win is in-process reads. One graph read (the store's
+//! `backlog::api::rows`, the same defaulted view the keeper serves) feeds
+//! claimed-node lookups, PR binding, crown scope, AND the unplanned
 //! queue's ready selection (the same `backlog_ready::select` the verb
 //! serves). The claims merge is a directory scan. `needs` folds in-process
 //! over the same sources `fno
@@ -46,7 +46,6 @@ pub(crate) mod scope;
 
 pub(crate) use queues::not_read_status;
 
-use crate::graph_store;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -303,18 +302,19 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         };
 
     // The graph: ONE read, shared by undispatched, claimed-node lookups, PR
-    // binding, and crown scope. `read_defaulted_opts(path, false, false)` is
-    // exactly the keeper's `read_strict` (defaults applied, diagnosis without
-    // a .bak), which is what the Python board's read_graph_strict runs.
+    // binding, and crown scope. It asks the store (`backlog::api::rows`),
+    // never the file: the store applies the same defaults the Python board's
+    // `read_graph_strict` runs, and a read failure surfaces as a warning the
+    // same way an unreadable file did.
     let graph_path = graph_json_path(&cwd);
-    let entries: Option<Vec<Value>> =
-        match graph_store::read_defaulted_opts(&graph_path, false, false) {
-            Ok(e) => Some(e),
-            Err(e) => {
-                warnings.push(format!("graph unreadable: {e}"));
-                None
-            }
-        };
+    let store = crate::backlog::api::Store::new(&graph_path);
+    let entries: Option<Vec<Value>> = match crate::backlog::api::rows(&store) {
+        Ok(e) => Some(e),
+        Err(e) => {
+            warnings.push(format!("graph unreadable: {}", e.0));
+            None
+        }
+    };
 
     let spent = |sources: &mut Map<String, Value>, name: &str, budget: &Budget| {
         let err = budget.spent_error();

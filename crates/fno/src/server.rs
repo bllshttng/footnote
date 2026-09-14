@@ -430,7 +430,7 @@ fn button_code(b: MouseButton) -> u32 {
 /// (v8, x-38c4). Jump/select carry a walk direction; rerun re-sends the
 /// selected block's command line under the idle guard.
 #[derive(Debug, Clone, Copy)]
-enum BlockNavOp {
+pub(crate) enum BlockNavOp {
     Jump(BlockDir),
     Select(BlockDir),
     Rerun,
@@ -441,7 +441,7 @@ enum BlockNavOp {
 /// direction (reusing [`BlockDir`]); clear drops the search. Each mutates the
 /// shared pane and, on open/step, replies a `SearchResult` to the initiator.
 #[derive(Debug, Clone)]
-enum SearchOp {
+pub(crate) enum SearchOp {
     Open(String),
     Step(BlockDir),
     Clear,
@@ -545,7 +545,7 @@ fn bottom_non_empty_lines(text: &str, n: usize) -> String {
 }
 
 /// What connected clients register with the core loop.
-enum CoreMsg {
+pub(crate) enum CoreMsg {
     /// (v78) A stats request; the Core owns the counter.
     ServerStats {
         reply: oneshot::Sender<ServerMsg>,
@@ -2788,10 +2788,9 @@ fn first_line_or(s: &str, fallback: &str) -> String {
 /// the same bounded-lock, version-checked, atomically-published pipeline
 /// every other writer uses. The blocking socket work runs off the async core;
 /// failure names what went wrong so the footer carries the cause, not just
-/// that it did. The derived views (graph.md, board targets) are Python-owned,
-/// so a landed write detaches one `fno backlog render-views` replay - the
-/// same pass a CLI write runs post-publish - rather than leaving the mux
-/// write's render to the next CLI mutation.
+/// that it did. The derived views (graph.md, board targets) are the keeper
+/// render trigger's job: a landed native write bumps the store counter and
+/// the trigger replays the views once, like every other write.
 async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String {
     let label = verb.label();
     let graph = backlog_view::graph_path();
@@ -2805,30 +2804,10 @@ async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String
     })
     .await;
     match outcome {
-        Ok(Ok(notice)) => {
-            spawn_render_views_replay();
-            notice
-        }
+        Ok(Ok(notice)) => notice,
         Ok(Err(e)) => format!("{label} {node}: {e}"),
         Err(_) => format!("{label} {node}: unavailable"),
     }
-}
-
-/// Fire-and-forget the canonical view replay after a native write. The
-/// subprocess is best-effort: a failed or dropped replay only means the
-/// derived views refresh on the next write, never that the write is lost.
-/// Tokio reaps the child when it exits.
-fn spawn_render_views_replay() {
-    let mut command = crate::process_admission::tokio_command(fno_bin());
-    command
-        .args(["backlog", "render-views"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
-    tokio::spawn(async move {
-        let _ = command.output().await;
-    });
 }
 
 /// (x-9c5f) Shell `fno agents spawn --name <n> --resume <uuid> --substrate bg`
@@ -14070,167 +14049,7 @@ async fn serve(
         });
     }
 
-    // The off-loop work-queue reader (x-6f77): the same 1s mtime-gated shape as
-    // the registry reader above, over ~/.fno/graph.json. graph.json's mtime
-    // bumps on every backlog mutation (claim/close), so a card flips to
-    // in-flight on the next tick with no separate subscribe stream. The 4M read
-    // is skipped whenever the stamp is unchanged.
-    //
-    // External tracker backend: the graph FILE is not the store anymore, so
-    // there is no mtime to gate on. The reader instead executes the
-    // backend-neutral snapshot verb (`fno backlog status --snapshot`) on a
-    // bounded refresh clock and caches its payload; both modes feed the SAME
-    // ReaderState, so the last-good retention, the stale-after-3-failures
-    // marker, and the pure derivations (cards, lanes, prs, missions) are
-    // unchanged. A snapshot exec failure is a read failure like any other -
-    // never a fallback to graph.json (which would resurrect stale graph-only
-    // rows the external backend no longer owns).
-    {
-        let core_tx = core_tx.clone();
-        let path = backlog_view::graph_path();
-        let external = backlog_view::external_backend_selected();
-        let mut count_rx = client_count_rx.clone();
-        tokio::spawn(async move {
-            // The board's project scope, latched ONCE (x-20f1). The server
-            // resolves nothing: the CLIENT read the config at spawn, from the
-            // checkout the operator launched in, and passed the answer in the
-            // env. Latched rather than re-read per tick, because a scope that
-            // changed under a live board makes the card set unexplainable.
-            // Changing it means `fno mux kill-server`, and `fno mux doctor`
-            // reports what a fresh spawn latches.
-            let (scope, why) = backlog_view::board_scope_from_spawn_env();
-            eprintln!("fno mux: backlog board scope: {why}");
-            let mut state = backlog_view::ReaderState::with_scope(scope);
-            // The last-good claim sweep (x-54fa): `None` until the first
-            // success (render un-overlaid), then only ever replaced by a
-            // fresher success — a sweep failure keeps this tick's overlay.
-            let mut last_live: Option<HashMap<String, String>> = None;
-            let mut sweep_gate = backlog_view::SweepLogGate::default();
-            // Due immediately: the first gated tick lands a fresh overlay.
-            let mut sweep_next = tokio::time::Instant::now();
-            // Snapshot-mode pacing: the current minted stamp and when the next
-            // refresh is due. A fresh stamp is minted only when the window
-            // opens, and the exec is attempted at most once per window (a
-            // failed read never commits its stamp to ReaderState, so without
-            // the attempted flag every 1s tick would re-exec during an
-            // outage - the hot loop SNAPSHOT_REFRESH_SECS exists to bound).
-            let mut snapshot_stamp: Option<(std::time::SystemTime, u64)> = None;
-            let mut next_refresh = tokio::time::Instant::now();
-            let mut snapshot_attempted = false;
-            let mut tick = tokio::time::interval(Duration::from_secs(1));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                // Gate the per-tick claim-sweep SUBPROCESS + graph.json read on
-                // an attached client (x-4e30). This is the idle-CPU root fix:
-                // an orphaned server with no viewer stops fork/exec'ing a whole
-                // `fno-agents claim sweep` process every second. The
-                // `changed()` arm is the 0->1 kick so the first attach's
-                // overlay is not up to 1s stale (AC3-FR).
-                tokio::select! {
-                    _ = tick.tick() => {}
-                    res = count_rx.changed() => {
-                        if res.is_err() {
-                            return; // Core dropped; server shutting down
-                        }
-                    }
-                }
-                if *count_rx.borrow() == 0 {
-                    continue; // no viewer -> no sweep subprocess, no read
-                }
-                // The sweep is not mtime-gated (claims move without a graph
-                // write) but it is paced: one fno-agents process per
-                // SWEEP_EVERY, due at once on the first attach. Log lines
-                // are flap-gated in SweepLogGate.
-                if sweep_next <= tokio::time::Instant::now() {
-                    sweep_next = tokio::time::Instant::now() + backlog_view::SWEEP_EVERY;
-                    match backlog_view::run_claim_sweep().await {
-                        Some(live) => {
-                            if sweep_gate.success() {
-                                eprintln!("fno mux: claim sweep recovered");
-                            }
-                            last_live = Some(live);
-                        }
-                        None => {
-                            if sweep_gate.failure() {
-                                eprintln!("fno mux: claim sweep failed; keeping last-good overlay");
-                            }
-                        }
-                    }
-                }
-                // Mode split. Graph mode: stat + conditional file read (the
-                // historical mtime+len gate). Snapshot mode: mint a fresh
-                // stamp on the refresh clock, exec the snapshot verb when the
-                // stamp differs from the cached one. `stamp != cached` is the
-                // single changed-signal both modes share.
-                let (stamp, raw) = if external {
-                    let now = tokio::time::Instant::now();
-                    if now >= next_refresh {
-                        next_refresh =
-                            now + Duration::from_secs(backlog_view::SNAPSHOT_REFRESH_SECS);
-                        // A clock-derived stamp: SystemTime::now() advances
-                        // past every previously minted (and cached) stamp, so
-                        // each refresh window reads as changed exactly once.
-                        snapshot_stamp = Some((std::time::SystemTime::now(), 0));
-                        snapshot_attempted = false;
-                    }
-                    let stamp = snapshot_stamp;
-                    let changed = stamp != state.cached_stamp();
-                    let raw = if changed && !snapshot_attempted {
-                        snapshot_attempted = true;
-                        tokio::task::spawn_blocking(backlog_view::read_snapshot)
-                            .await
-                            .ok()
-                            .flatten()
-                    } else {
-                        None
-                    };
-                    (stamp, raw)
-                } else {
-                    let stat_path = path.clone();
-                    let stamp = tokio::task::spawn_blocking(move || {
-                        std::fs::metadata(&stat_path)
-                            .ok()
-                            .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()))
-                    })
-                    .await
-                    .ok()
-                    .flatten();
-                    let read_path = path.clone();
-                    let changed = stamp != state.cached_stamp();
-                    let raw = if changed {
-                        tokio::task::spawn_blocking(move || {
-                            std::fs::read_to_string(&read_path).ok()
-                        })
-                        .await
-                        .ok()
-                        .flatten()
-                    } else {
-                        None
-                    };
-                    (stamp, raw)
-                };
-                if let Some((queue, prs, missions)) =
-                    state.tick(stamp, move || raw, last_live.as_ref())
-                {
-                    let holders = last_live.clone().unwrap_or_default();
-                    if core_tx
-                        .send(CoreMsg::BacklogCards {
-                            cards: queue.cards,
-                            lanes: queue.lanes,
-                            stale: queue.stale,
-                            holders,
-                            prs,
-                            missions,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return; // core loop gone; the server is shutting down
-                    }
-                }
-            }
-        });
-    }
+    crate::board_reader::spawn(core_tx.clone(), client_count_rx.clone());
 
     // The per-pane counter cadence: a fixed 30s tick telling the core to
     // snapshot and emit. Delay (not Burst) on a missed tick - counters are

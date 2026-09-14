@@ -72,15 +72,15 @@ crossing	crates/fno/src/needs_overlay.rs	257	let mut command = crate::process_ad
 crossing	crates/fno/src/server.rs	2612	pub(crate) fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/server.rs	2653	let mut command = crate::process_admission::std_command(fno_bin());
 crossing	crates/fno/src/server.rs	2716	let mut command = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server.rs	2821	let mut command = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server.rs	2875	let mut command = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server.rs	2907	let mut command = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server.rs	10476	let mut cmd = crate::process_admission::tokio_command(fno_bin());
-crossing	crates/fno/src/server.rs	10570	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/server.rs	2854	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/server.rs	2886	let mut command = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/server.rs	10455	let mut cmd = crate::process_admission::tokio_command(fno_bin());
+crossing	crates/fno/src/server.rs	10549	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/server/agent_actions.rs	413	let mut command = crate::process_admission::tokio_command(fno_bin());
 crossing	crates/fno/src/yard_overlay.rs	49	fn fno_bin() -> PathBuf {
 crossing	crates/fno/src/yard_overlay.rs	50	crate::server::fno_bin()
 crossing	crates/fno/src/yard_overlay.rs	57	let mut command = crate::process_admission::tokio_command(fno_bin());
+resolver	crates/fno-agents/src/graph_keeper.rs	575	fn run_render_pass() -> Result<(), (i32, String)> {
 resolver	crates/fno-agents/src/census.rs	399	fn resolve_fno() -> Option<PathBuf> {
 resolver	crates/fno-agents/src/claims.rs	2714	fn durable_session_pid() -> Option<i32> {
 resolver	crates/fno-agents/src/daemon.rs	1967	pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {

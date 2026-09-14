@@ -567,35 +567,30 @@ pub(crate) struct CommitReport {
     pub(crate) retired_names: std::collections::BTreeSet<String>,
 }
 
-/// The state root's graph file: the one `read_graph_entries` reads (plus the
-/// advisory archive) and the one the settle writes under the lock.
+/// The state root's store path: the one `read_graph_rows` reads through the
+/// store API (plus the advisory archive file beside it).
 pub(crate) fn graph_path(home: &AgentsHome) -> PathBuf {
     let state_root = home.root().parent().unwrap_or(home.root());
     state_root.join("graph.json")
 }
 
-/// Read the working graph plus the archive. The archive is advisory (a read
-/// failure contributes nothing); the WORKING graph failing to parse is `None`
-/// and every consumer keeps its rows. A missing graph file is an empty graph,
-/// matching the Python read seam.
-pub(crate) fn read_graph_entries_raw(home: &AgentsHome) -> Option<Vec<Value>> {
-    let graph_path = graph_path(home);
+/// Read the working graph plus the archive. The working graph asks the store
+/// (`backlog::api::rows`), never the file; the archive is a DIFFERENT file
+/// than the store (reading it is not opening graph.json) and stays advisory:
+/// a read failure contributes nothing. The working store failing to read is
+/// `None` and every consumer keeps its rows. A missing store is an empty
+/// graph, matching the Python read seam.
+pub(crate) fn read_graph_rows(home: &AgentsHome) -> Option<Vec<Value>> {
+    let store = crate::backlog::api::Store::new(&graph_path(home));
     let state_root = home.root().parent().unwrap_or(home.root());
-    let read = |path: &std::path::Path| -> Result<Vec<Value>, ()> {
-        match std::fs::read(path) {
-            Ok(raw) => serde_json::from_slice::<Value>(&raw)
-                .ok()
-                .and_then(|v| v.get("entries").cloned())
-                .and_then(|e| e.as_array().cloned())
-                .ok_or(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(_) => Err(()),
-        }
-    };
-    let mut entries = read(&graph_path).ok()?;
+    let mut entries = crate::backlog::api::rows(&store).ok()?;
     // The archive: same shape, advisory. An unparseable archive must not
     // blind the sweep to the working graph.
-    let archive = read(&state_root.join("graph-archive.json")).unwrap_or_default();
+    let archive = std::fs::read(state_root.join("graph-archive.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .and_then(|v| v.get("entries").and_then(|e| e.as_array().cloned()))
+        .unwrap_or_default();
     entries.extend(archive);
     Some(entries)
 }
@@ -603,7 +598,7 @@ pub(crate) fn read_graph_entries_raw(home: &AgentsHome) -> Option<Vec<Value>> {
 /// Read the working graph plus the archive and build the reverse-join index
 /// and the open-do map.
 pub fn read_graph_entries(home: &AgentsHome) -> Option<GraphRead> {
-    let entries = read_graph_entries_raw(home)?;
+    let entries = read_graph_rows(home)?;
     let index = graph_store::sessions_index(&entries);
     let work_index = graph_store::work_index(&entries);
     let mut open_do: HashMap<String, Vec<String>> = HashMap::new();
@@ -865,9 +860,10 @@ pub(crate) fn stale_open_do_rows(entries: &[Value]) -> Vec<StaleDoRow> {
 }
 
 /// The dry-run settle plan: every stale open do row a real pass would fill.
-/// Reads the graph; writes nothing.
+/// Reads the store; writes nothing.
 pub(crate) fn plan_stale_do_rows(home: &AgentsHome) -> Vec<StaleDoRow> {
-    match graph_store::read_defaulted(&graph_path(home), false) {
+    let store = crate::backlog::api::Store::new(&graph_path(home));
+    match crate::backlog::api::rows(&store) {
         Ok(entries) => stale_open_do_rows(&entries),
         Err(_) => Vec::new(),
     }
@@ -928,63 +924,38 @@ fn settle_backoff_ms(attempt: usize) -> u64 {
     u64::from_le_bytes(buf) % (bound + 1)
 }
 
-/// One read-apply-publish attempt. `Err(Retry(_))` is a lost race a fresh
-/// read may win; `Err(Fatal(_))` is not.
+/// One read-apply-publish pass. The fill runs through `api::session_end`,
+/// one call per stale row, so the daemon never writes the store outside the
+/// store's own mutation path: every write holds the same lock and the same
+/// optimistic stamp the keeper's writes hold, and a concurrent keeper write
+/// surfaces as a retried conflict instead of a lost fill. `Err(Retry(_))`
+/// is a lost race a fresh pass may win; `Err(Fatal(_))` is not. `Ok(_)`
+/// from `session_end` with `success: false` is a row that closed under
+/// another writer first - nothing this pass can fill, and not a refusal.
 fn settle_attempt(path: &std::path::Path) -> Result<Vec<StaleDoRow>, SettleRefusal> {
-    let base = graph_store::file_content_version(path);
-    let mut entries = graph_store::read_defaulted(path, false)
-        .map_err(|err| SettleRefusal::Fatal(format!("graph unreadable: {err}")))?;
+    let store = crate::backlog::api::Store::new(path);
+    let entries = crate::backlog::api::rows(&store)
+        .map_err(|err| SettleRefusal::Fatal(format!("graph unreadable: {}", err.0)))?;
     let stale = stale_open_do_rows(&entries);
     if stale.is_empty() {
-        return Ok(Vec::new()); // nothing stale: never touch the file
+        return Ok(Vec::new()); // nothing stale: never touch the store
     }
-    let now = crate::daemon::now_rfc3339_like();
+    let mut settled = Vec::new();
     for row in &stale {
-        let Some(entry) = entries
-            .iter_mut()
-            .find(|e| graph_store::entry_id(e) == Some(row.node.as_str()))
-        else {
-            continue;
-        };
-        let Some(sessions) = entry.get_mut("sessions").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for session in sessions.iter_mut() {
-            let matches = graph_store::is_open_do_row(session)
-                && session.get("harness").and_then(Value::as_str) == Some(row.harness.as_str())
-                && session.get("session_id").and_then(Value::as_str)
-                    == Some(row.session_id.as_str());
-            if matches {
-                if let Some(obj) = session.as_object_mut() {
-                    obj.entry("ended_at".to_string())
-                        .or_insert_with(|| Value::String(now.clone()));
-                    obj.entry("ended_by".to_string())
-                        .or_insert_with(|| Value::String("reap-sweep".into()));
-                }
-            }
+        match crate::backlog::api::session_end(
+            &store,
+            &row.node,
+            &row.session_id,
+            "reap-sweep",
+            Some("do"),
+            Some(&row.harness),
+        ) {
+            Ok(payload) if payload.success => settled.push(row.clone()),
+            Ok(_) => {}
+            Err(err) => return Err(SettleRefusal::Retry(err.0)),
         }
     }
-    let outcome = graph_store::locked_mutate(
-        path,
-        graph_store::MutateInput {
-            entries,
-            // No node crosses into a terminal rung here: the closure-release
-            // and board-render gates have nothing to do.
-            canonical_path: None,
-            base_version: Some(base),
-            plan_rungs: None,
-        },
-        graph_store::DEFAULT_LOCK_TIMEOUT,
-    );
-    match outcome {
-        Ok(_) => Ok(stale),
-        // A lost race (the file moved under the snapshot) or a contended
-        // lock: a fresh read may win. Anything else is final.
-        Err(
-            err @ (graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..)),
-        ) => Err(SettleRefusal::Retry(err.to_string())),
-        Err(err) => Err(SettleRefusal::Fatal(format!("settle write refused: {err}"))),
-    }
+    Ok(settled)
 }
 
 /// Why one settle attempt did not land. A retry is a lost race; a fatal is
@@ -995,82 +966,49 @@ enum SettleRefusal {
 }
 
 /// Fill ONE open do row with `ended_by: "reap-release"` (x-e3cc): the
-/// release verb's narrowed settle. Fill-if-absent over a fresh read, the
+/// release verb's narrowed settle. The fill runs through `api::session_end`
+/// (fill-if-absent over a fresh read inside the store's own mutation), the
 /// same blocker gate the batch settle applies (a node whose additional PRs
 /// are not recorded merged is not fillable), and the same bounded retry
 /// before the write refuses. `Ok(false)` = the pair is not fillable: the
 /// row was already closed, or the node still carries a blocker - the
 /// caller keeps the row either way.
 fn settle_one_do_row(home: &AgentsHome, node: &str, session_id: &str) -> Result<bool, String> {
-    let path = graph_path(home);
+    let store = crate::backlog::api::Store::new(&graph_path(home));
     const ATTEMPTS: usize = 5;
     for attempt in 0..ATTEMPTS {
-        let base = graph_store::file_content_version(&path);
-        let mut entries = match graph_store::read_defaulted(&path, false) {
-            Ok(e) => e,
-            Err(err) => return Err(format!("graph unreadable: {err}")),
-        };
         // The same eligibility the batch settle applies: the pair must sit
-        // in the batch's own stale set.
-        let eligible = stale_open_do_rows(&entries)
+        // in the current stale set, re-read fresh each attempt. The matching
+        // row also hands the settle its harness, so the fill names the exact
+        // window it closes instead of any open row for this session id.
+        let stale_rows = plan_stale_do_rows(home);
+        let matched = stale_rows
             .iter()
-            .any(|r| r.node == node && r.session_id.eq_ignore_ascii_case(session_id));
-        if !eligible {
+            .find(|r| r.node == node && r.session_id.eq_ignore_ascii_case(session_id));
+        let Some(eligible) = matched else {
             return Ok(false);
-        }
-        let now = crate::daemon::now_rfc3339_like();
-        let mut filled = false;
-        if let Some(entry) = entries
-            .iter_mut()
-            .find(|e| graph_store::entry_id(e) == Some(node))
-        {
-            if let Some(sessions) = entry.get_mut("sessions").and_then(Value::as_array_mut) {
-                for session in sessions.iter_mut() {
-                    let matches = graph_store::is_open_do_row(session)
-                        && session.get("session_id").and_then(Value::as_str) == Some(session_id);
-                    if matches {
-                        if let Some(obj) = session.as_object_mut() {
-                            obj.entry("ended_at".to_string())
-                                .or_insert_with(|| Value::String(now.clone()));
-                            obj.entry("ended_by".to_string())
-                                .or_insert_with(|| Value::String("reap-release".into()));
-                            filled = true;
-                        }
-                    }
-                }
-            }
-        }
-        if !filled {
-            return Ok(false);
-        }
-        let outcome = graph_store::locked_mutate(
-            &path,
-            graph_store::MutateInput {
-                entries,
-                canonical_path: None,
-                base_version: Some(base),
-                plan_rungs: None,
-            },
-            graph_store::DEFAULT_LOCK_TIMEOUT,
-        );
-        match outcome {
-            Ok(_) => return Ok(true),
-            Err(
-                err
-                @ (graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..)),
-            ) if attempt + 1 < ATTEMPTS => {
+        };
+        let harness = eligible.harness.clone();
+        match crate::backlog::api::session_end(
+            &store,
+            node,
+            session_id,
+            "reap-release",
+            Some("do"),
+            Some(&harness),
+        ) {
+            Ok(payload) if payload.success => return Ok(true),
+            Ok(_) => return Ok(false),
+            Err(err) if attempt + 1 < ATTEMPTS => {
                 std::thread::sleep(std::time::Duration::from_millis(250));
                 let _ = err;
             }
-            Err(
-                err
-                @ (graph_store::StoreError::Conflict | graph_store::StoreError::LockTimeout(..)),
-            ) => {
+            Err(err) => {
                 return Err(format!(
-                    "settle write refused: {err} (after {ATTEMPTS} attempts)"
+                    "settle write refused: {} (after {ATTEMPTS} attempts)",
+                    err.0
                 ))
             }
-            Err(err) => return Err(format!("settle write refused: {err}")),
         }
     }
     unreachable!("every loop arm returns")
@@ -1113,7 +1051,7 @@ pub(crate) fn without_settled(mut graph: GraphRead, planned: &[StaleDoRow]) -> G
 pub(crate) fn read_graph_node_states(
     home: &AgentsHome,
 ) -> Option<HashMap<String, (String, Option<String>, usize)>> {
-    let entries = read_graph_entries_raw(home)?;
+    let entries = read_graph_rows(home)?;
     let mut states = HashMap::new();
     for entry in entries {
         let Some(id) = graph_store::entry_id(&entry) else {
@@ -4639,5 +4577,98 @@ mod tests {
             assert_eq!(verdict.hold, None);
         }
         assert_eq!(calls, 0, "no network read without a do row");
+    }
+
+    fn one_stale_do_entry(id: &str) -> Value {
+        serde_json::json!({
+            "id": id, "title": "Settle me", "slug": id, "type": "feature",
+            "status": "done", "priority": "p2", "merge_status": "merged",
+            "created_at": "2026-09-11T00:00:00+00:00",
+            "completed_at": "2026-09-11T02:00:00+00:00",
+            "sessions": [{"phase": "do", "harness": "claude", "session_id": "s-open",
+                          "started_at": "2026-09-11T01:00:00+00:00"}]
+        })
+    }
+
+    fn seed_store(home: &AgentsHome, entries: Vec<Value>) {
+        graph_store::locked_mutate(
+            &graph_path(home),
+            graph_store::MutateInput {
+                entries,
+                canonical_path: None,
+                base_version: None,
+                plan_rungs: None,
+            },
+            graph_store::DEFAULT_LOCK_TIMEOUT,
+        )
+        .unwrap();
+    }
+
+    /// The settle fills through `api::session_end` (the store's own mutation
+    /// path), the dry-run plan reads the store, and a pass with nothing
+    /// stale never touches the file (AC6).
+    #[test]
+    fn readers_follow_store_settle_fills_through_session_end() {
+        let (base, home) = stale_state_home("settle-store");
+        let path = graph_path(&home);
+        seed_store(&home, vec![one_stale_do_entry("x-settle")]);
+        assert_eq!(plan_stale_do_rows(&home).len(), 1);
+
+        let (settled, refusals) = settle_stale_do_rows(&home);
+        assert!(refusals.is_empty(), "refusals: {refusals:?}");
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].session_id, "s-open");
+
+        let rows = read_graph_rows(&home).unwrap();
+        let session = &rows[0]["sessions"][0];
+        assert!(session.get("ended_at").and_then(Value::as_str).is_some());
+        assert_eq!(session["ended_by"], "reap-sweep");
+        assert!(plan_stale_do_rows(&home).is_empty());
+
+        let sha_before = graph_store::file_content_version(&path);
+        let (settled, _) = settle_stale_do_rows(&home);
+        assert!(settled.is_empty());
+        assert_eq!(graph_store::file_content_version(&path), sha_before);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// `read_graph_rows` joins the store read with the advisory archive: a
+    /// live row and an archived row both answer, an unparseable archive
+    /// blinds nothing, and an unreadable store is `None` (consumers keep
+    /// their rows).
+    #[test]
+    fn readers_follow_store_rows_read_the_store_and_advisory_archive() {
+        let (base, home) = stale_state_home("rows-archive");
+        seed_store(&home, vec![one_stale_do_entry("x-live")]);
+        std::fs::write(
+            base.join("graph-archive.json"),
+            serde_json::to_string(&serde_json::json!({"entries": [
+                {"id": "x-gone", "title": "Archived", "slug": "x-gone", "type": "feature",
+                 "status": "done", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let ids: Vec<String> = read_graph_rows(&home)
+            .unwrap()
+            .iter()
+            .filter_map(|row| graph_store::entry_id(row).map(str::to_string))
+            .collect();
+        assert!(ids.contains(&"x-live".to_string()));
+        assert!(ids.contains(&"x-gone".to_string()));
+
+        // An unparseable archive never blinds the working store.
+        std::fs::write(base.join("graph-archive.json"), b"{broken").unwrap();
+        let ids: Vec<String> = read_graph_rows(&home)
+            .unwrap()
+            .iter()
+            .filter_map(|row| graph_store::entry_id(row).map(str::to_string))
+            .collect();
+        assert_eq!(ids, vec!["x-live".to_string()]);
+
+        // An unreadable store reads None: every consumer keeps its rows.
+        std::fs::write(graph_path(&home), b"{broken").unwrap();
+        assert!(read_graph_rows(&home).is_none());
+        std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -186,7 +186,7 @@ def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True
         status["metadata"] = {"worktree": str(tmp_path / "wt")}
         (tmp_path / "wt").mkdir(exist_ok=True)
 
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *_a, **_k: [entry])
+    monkeypatch.setattr("fno.graph.api.wire_rows", lambda *_a, **_k: [entry])
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
     monkeypatch.setattr("fno.claims.core.claim_status", lambda key, root=None: status)
     monkeypatch.setattr(advance, "_claims_root_for", lambda key: tmp_path / "claims")
@@ -333,7 +333,7 @@ def test_missing_holder_worktree_refuses_exit_2(tmp_path, monkeypatch):
     entry_plan = tmp_path / "plan.md"
     entry_plan.write_text(PARALLEL_PLAN)
     monkeypatch.setattr(
-        "fno.graph.store.read_graph",
+        "fno.graph.api.wire_rows",
         lambda *_a, **_k: [{"id": "x-8d1d", "plan_path": str(entry_plan)}],
     )
     monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
@@ -963,7 +963,7 @@ def _entry_priority(monkeypatch, tmp_path, priority):
         "plan_path": str(tmp_path / "plan.md"),
         "priority": priority,
     }
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda *_a, **_k: [entry])
+    monkeypatch.setattr("fno.graph.api.wire_rows", lambda *_a, **_k: [entry])
 
 
 def test_width_invariant_under_flipping_waves_to_parallel(tmp_path):

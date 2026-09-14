@@ -92,7 +92,17 @@ def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("fno.paths.retro_pending_dir", lambda: tmp_path / "retro")
 
     def write(entries: list[dict]) -> None:
-        graph_path.write_text(json.dumps({"entries": entries}) + "\n")
+        # Rows the way the store writes them: the typed api drops a row
+        # the model cannot parse, so seeds carry the stamped fields.
+        complete = []
+        for e in entries:
+            row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+            row.setdefault("title", e.get("id", "node"))
+            row.setdefault("slug", e.get("id", "node"))
+            if row["status"] == "done" and not row.get("completed_at"):
+                row["completed_at"] = "2026-09-01T00:00:00Z"
+            complete.append(row)
+        graph_path.write_text(json.dumps({"entries": complete}) + "\n")
 
     def read() -> dict:
         raw = json.loads(graph_path.read_text())["entries"]

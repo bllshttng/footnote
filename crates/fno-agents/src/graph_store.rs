@@ -2102,6 +2102,19 @@ pub fn file_content_version(path: &Path) -> String {
     format!("sha256:{:x}", h.finalize())
 }
 
+/// The stamp [`MutateInput::base_version`] carries: the same value
+/// `locked_mutate` re-derives under the lock, resolved by the same backend
+/// switch. A caller snapshots it before its read and holds it to the
+/// publish, so an interleaved writer surfaces as
+/// [`StoreError::Conflict`] instead of a lost write.
+pub fn base_version(path: &Path) -> Result<String, StoreError> {
+    if crate::backlog::backend(path) == crate::backlog::Backend::Sqlite {
+        crate::backlog::version(path).map_err(StoreError::Sqlite)
+    } else {
+        Ok(file_content_version(path))
+    }
+}
+
 /// The store-side half of the locked read-modify-write cycle. Holds the
 /// bounded lock; re-derives the pre-image; runs slugs, recompute, the
 /// touched_at stamp, the closure-detection hook, canonicalization, and the

@@ -250,7 +250,9 @@ def _prepare_court(monkeypatch, tmp_path: Path, rows) -> None:
     graph_path = paths.graph_json()
     graph_path.parent.mkdir(parents=True, exist_ok=True)
     graph_path.write_text(
-        json.dumps({"entries": [{"id": "x-epic", "type": "epic", "project": "fno", "status": "ready"}]}),
+        json.dumps({"entries": [{"id": "x-epic", "title": "x-epic", "slug": "x-epic",
+                                 "type": "epic", "priority": "p2", "project": "fno",
+                                 "status": "ready"}]}),
         encoding="utf-8",
     )
 

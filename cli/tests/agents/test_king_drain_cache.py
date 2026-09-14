@@ -97,6 +97,10 @@ def _invoke_drain() -> tuple[int, dict, float]:
     started = time.monotonic()
     result = CliRunner().invoke(agents_king_app, ["drain", SCOPE])
     elapsed = time.monotonic() - started
+    assert result.exit_code == 0, (
+        f"drain exited {result.exit_code}; output={result.output!r}; "
+        f"exception={result.exception!r}"
+    )
     payload = json.loads(result.output.strip().splitlines()[-1])
     return result.exit_code, payload, elapsed
 
@@ -203,13 +207,13 @@ def test_wake_entries_read_once_per_graph_identity(graph, monkeypatch):
     wake._WAKE_ENTRIES_MEMO.update(ident=None, entries=None)
     calls: list[int] = []
 
-    def _counting_read(path):
+    from fno.graph.api import wire_rows as _real_wire_rows
+
+    def _counting_read(*args, **kwargs):
         calls.append(1)
-        from fno.graph.store import read_graph_strict
+        return _real_wire_rows(*args, **kwargs)
 
-        return read_graph_strict(path)
-
-    monkeypatch.setattr("fno.graph.store.read_graph", _counting_read)
+    monkeypatch.setattr("fno.graph.api.wire_rows", _counting_read)
     first = wake._graph_entries_for_wake()
     second = wake._graph_entries_for_wake()
     assert len(first) == FILLER + CHILDREN + 1

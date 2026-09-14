@@ -10,6 +10,7 @@
 
 pub mod agents_view;
 pub mod backlog_view;
+pub mod board_reader;
 pub mod bootstrap;
 pub mod chrome;
 pub mod client;

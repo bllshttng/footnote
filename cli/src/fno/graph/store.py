@@ -55,6 +55,8 @@ from fno.graph._constants import (  # noqa: F401  GRAPH_MD re-exported: patched 
     GRAPH_MD,
 )
 
+
+
 # Transaction retry budget: a conflict means another writer committed between
 # our begin and commit, and the fleet is not human-rate - colliding writers
 # are correlated by construction, so the retry sleeps a FULL-JITTER
@@ -249,10 +251,11 @@ def _is_canonical(path: Path) -> bool:
     Reading the RESOLVER, not the facade, also keeps this immune to the
     monkeypatch baking trap: a test that patches the facade and restores it
     leaves a frozen attribute behind."""
+    path = Path(path)  # a concretized _constants value may be a str
     try:
         from fno import paths as _paths
 
-        configured = _paths.graph_json()
+        configured = Path(_paths.graph_json())
     except Exception:  # noqa: BLE001 - a broken config owns no graph
         return False
     try:
@@ -525,6 +528,14 @@ class _Keeper:
 
     def shutdown(self) -> None:
         self._control(_TAG_SHUTDOWN, _TAG_RESPONSE)
+
+
+def shutdown_keeper(path: Path) -> None:
+    """Ask `path`'s keeper to exit, best-effort; a bootstrap lookup must leave nothing the session reaper counts as a leak."""
+    try:
+        _client_for(path).shutdown()
+    except Exception:  # noqa: BLE001 - a refusing keeper is the caller's absence
+        pass
 
 
 def _recv_exact(stream: socket.socket, length: int) -> bytes:
@@ -1173,19 +1184,24 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
             file=sys.stderr,
         )
 
-    is_canonical = _is_canonical(path)
     # Claim releases run AFTER the publish: root resolution and recovery
     # mutexes never belong inside the store's critical section.
     for release in outcome["closure_releases"]:
         release_node_claim_at_closure(release["id"], rung=release["rung"])
 
-    # Renders. The canonical board moved from under-the-lock to after-the-
-    # publish with the port: the keeper serializes publishes, and these
-    # projections are operator-chosen paths that must never hold (or wait
-    # on) the graph lock. Bytes are never partial (atomic replaces). The
-    # returned entries carry the overlaid statuses: what a caller receives
-    # must match what the render drew.
-    entries = _render_published_views(outcome["entries"], is_canonical, path)
+    # The client renders in-call when the write landed on the configured
+    # store; the keeper's trigger replays the pass for native writers and
+    # retries failures. A scratch graph renders only its own siblings.
+    from fno import paths as _paths
+
+    try:
+        configured = Path(_paths.graph_json()) == path
+    except Exception:  # noqa: BLE001 - an unresolvable config still owes a render
+        configured = False
+    try:
+        render_view_projections(outcome["entries"], configured, path)
+    except Exception as exc:  # noqa: BLE001 - a render failure never fails the write
+        print(f"Warning: post-publish render failed: {exc}", file=sys.stderr)
     # Wake the active-backlog drain daemon (x-c070): best-effort, never
     # wedges the mutation.
     try:
@@ -1194,46 +1210,51 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
         touch_nudge()
     except Exception:
         pass
-    return entries
+    return outcome["entries"]
 
 
-def render_canonical_views() -> None:
-    """Replay the canonical post-publish views from a fresh read.
-
-    The store's NATIVE writers (the mux reorder verbs) land graph bytes
-    through the keeper without the Python post-publish pass; this is the
-    pass they replay, so a native write leaves the same derived views
-    (graph.md, the configured board targets) a CLI write would. Every step
-    is best-effort: a render failure never rewrites history.
-    """
+def render_canonical_views() -> int:
+    """Replay the canonical post-publish views from a fresh read. The store's
+    NATIVE writers (the mux reorder verbs) land graph bytes through the keeper
+    without the Python post-publish pass; this is the pass they replay, so a
+    native write leaves the same derived views (graph.md, the configured board
+    targets) a CLI write would. Every step is best-effort: a render failure
+    never rewrites history. Returns the count of failed views so the caller
+    can refuse a false success."""
     from fno import paths as _paths
 
-    graph = _paths.graph_json()
+    failures: list[str] = []
+    graph = Path(_paths.graph_json())
     entries = read_graph(graph)
     try:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
         pass
-    _render_published_views(entries, True, Path(graph))
+    # Canonical BY CONTRACT: the caller picks the store; the config-resolved graph's targets refresh.
+    render_view_projections(entries, True, graph, failures=failures)
+    return len(failures)
 
 
-def _render_published_views(entries: list[dict], is_canonical: bool, path: Path) -> list[dict]:
-    """The view projections a landed publish owes: the readiness overlay,
-    graph.md, and the canonical/configured board targets (or a sibling
-    graph.html for test graphs). Returns the overlay-applied entries, so the
-    caller's list matches what the render drew."""
+def render_view_projections(
+    entries: list[dict], is_canonical: bool, path: Path, *, failures: list[str] | None = None
+) -> list[dict]:
+    """The view projections a landed publish owes; returns the overlay-applied
+    entries. A ``failures`` list collects one entry per failed view; the default keeps the stderr warning."""
     from fno.graph.render import render_graph_md
     from fno.graph import _constants as _gc
     from fno.paths import vault_root
 
-    # recompute (server-side) does not derive `blocked` - it is a read-time
-    # overlay - so re-apply it before rendering, or a mutation that newly
-    # blocks/unblocks a sibling renders stale in graph.md until the next
-    # explicit read.
+    # recompute (server-side) does not derive `blocked` (a read-time overlay);
+    # re-apply it before rendering, or a newly blocked/unblocked sibling renders stale in graph.md.
     try:
         entries = apply_readiness_overlay_via_store(entries)
     except Exception:  # noqa: BLE001 - a render-freshness pass never fails a landed publish
         pass
+    def _fail(message: str) -> None:
+        # Collectors get the reason; fire-and-forget keeps stderr.
+        (failures.append(message) if failures is not None
+         else print(f"Warning: {message}", file=sys.stderr))
+
     md_target = _gc.GRAPH_MD if is_canonical else path.with_name("graph.md")
     try:
         _obsidian = vault_root() is not None
@@ -1242,7 +1263,7 @@ def _render_published_views(entries: list[dict], is_canonical: bool, path: Path)
     try:
         render_graph_md(entries, md_target, obsidian=_obsidian)
     except OSError as e:
-        print(f"Warning: graph.md render failed: {e}", file=sys.stderr)
+        _fail(f"graph.md render failed: {e}")
     _archived = entries_with_archive(entries)
     if is_canonical:
         try:
@@ -1252,13 +1273,13 @@ def _render_published_views(entries: list[dict], is_canonical: bool, path: Path)
             if _canonical_row is not None:
                 render_one_target(_canonical_row, _archived)
         except Exception as e:
-            print(f"Warning: canonical board render failed: {e}", file=sys.stderr)
+            _fail(f"canonical board render failed: {e}")
         try:
             from fno.graph.roadmap_public import render_configured_targets
 
             render_configured_targets(_archived, skip_canonical=True)
         except Exception as e:
-            print(f"Warning: configured render targets failed: {e}", file=sys.stderr)
+            _fail(f"configured render targets failed: {e}")
     else:
         # Test and temporary graphs retain a sibling HTML artifact without
         # ever touching the operator's configured targets.
@@ -1267,7 +1288,7 @@ def _render_published_views(entries: list[dict], is_canonical: bool, path: Path)
 
             render_graph_html(_archived, path.with_name("graph.html"))
         except OSError as e:
-            print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
+            _fail(f"graph.html render failed: {e}")
     return entries
 
 
@@ -1288,21 +1309,12 @@ def _emit_graph_tx_event(**data: Any) -> None:
         pass
 
 
-def locked_mutate_graph(path: Path, mutator) -> list[dict]:
-    """Locked read-modify-write via the store keeper. Recomputes statuses
-    after mutation; retries on an interleaved writer; surfaces a wedged
-    store as GraphLockTimeout inside the deadline instead of blocking.
-
-    The mutator runs client-side against the begin snapshot; the keeper
-    re-derives the write pipeline (slugs, statuses, touched_at, closure
-    detection, canonicalization) and publishes under the bounded lock with
-    a backup. Renders, claim releases, and the nudge run after the
-    publish lands -- the same post-lock position the file leg used.
-
-    The plan-rung map is computed over the MUTATED rows (the rows the
-    keeper's recompute will see), so a node a mutator just bound to a plan
-    derives from that plan on the same write, exactly as the pre-port store
-    did.
+def commit_rows_via_store(path: Path, mutator) -> list[dict]:
+    """The modern raw write: begin, mutate client-side, publish through the
+    keeper's row-commit with the bounded retry, return the committed rows.
+    The write seam for callers with no named op; `locked_mutate_graph` is
+    the legacy name the remaining (pre-wave-9) callers still use. The
+    keeper re-derives the write pipeline and publishes under its lock.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1341,6 +1353,12 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     else:  # pragma: no cover - the for/else only fires without break/raise
         raise RuntimeError("unreachable: tx loop exited without a commit")
     return _finish_mutation(path, outcome)
+
+
+def locked_mutate_graph(path: Path, mutator) -> list[dict]:
+    """The legacy name of `commit_rows_via_store`, kept for the callers
+    wave 9 has not moved yet."""
+    return commit_rows_via_store(path, mutator)
 
 
 # ---------------------------------------------------------------------------

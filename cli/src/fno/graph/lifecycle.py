@@ -59,7 +59,7 @@ def register_lifecycle_commands(
             DEFERRED_KINDS,
             classify_deferred_reason,
         )
-        from fno.graph.store import locked_mutate_graph
+        from fno.graph.store import commit_rows_via_store
         from fno.graph._intake import _find_node, _find_dependents
 
         if kind is not None and kind not in DEFERRED_KINDS:
@@ -116,7 +116,7 @@ def register_lifecycle_commands(
                     node.pop("deferred_kind", None)
             return entries
 
-        locked_mutate_graph(graph_path(), mutator)
+        commit_rows_via_store(graph_path(), mutator)
         for tid in ids:
             typer.echo(f'Deferred {tid}: "{cleaned_reason}"')
         project_plans_from_graph(ids)

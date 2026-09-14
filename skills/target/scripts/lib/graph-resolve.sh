@@ -3,11 +3,12 @@
 #
 # Source this file, then call resolve_arg with any user-supplied argument.
 # Behaviors:
-#   - Full ab-XXXXXXXX  -> exact match, echoes plan_path or soft-fails.
-#   - Partial ab-XXXX..XXXXXXX (4-7 hex chars) -> prefix match via
-#       fno.graph.fuzzy.resolve_id; echoes plan_path on a unique
-#       resolution, soft-fails (with stderr) on ambiguity / no match.
-#   - RESOLVE_FUZZY=1 + non-ab input -> title fuzzy match via resolve_id.
+#   - Full ab-XXXXXXXX  -> exact match via `fno backlog get`; echoes plan_path
+#       or soft-fails.
+#   - Partial ab-XXXX..XXXXXXX (4-7 hex chars) -> prefix match through the
+#       same verb; echoes plan_path on a unique resolution, soft-fails (with
+#       stderr) on ambiguity / no match.
+#   - RESOLVE_FUZZY=1 + non-ab input -> title fuzzy match through the verb.
 #       Off by default because /target etc. pass raw feature descriptions
 #       that must NOT be collapsed onto an existing graph node.
 #   - Anything else -> echoes arg unchanged.
@@ -17,30 +18,16 @@
 #   arg=$(resolve_arg "$1")
 #
 # Env:
-#   GRAPH_JSON        override graph.json path (default: ~/.fno/graph.json)
 #   RESOLVE_STRICT=1  exit nonzero on unknown / ambiguous queries
 #   RESOLVE_FUZZY=1   opt into title fuzzy match for non-ab queries
 #
 # Design notes:
-# - Env-passed inputs to the python heredoc avoid shell-quoting hell (plan
-#   paths with spaces, unicode titles). No `-c "$arg"` interpolation means no
-#   injection surface: the arg is bound to os.environ, never spliced into a
-#   shell or python string.
-# - The python module path requires the `fno` package to be importable.
-#   When the import fails (e.g. environments without uv / venv), the resolver
-#   soft-fails to echoing the arg unchanged, preserving the historical
-#   contract for non-Python environments.
+# - `fno backlog get` is the resolution seam: it owns the id/slug/bare-hex/
+#   fuzzy tiers and the tracker-backend switch, so this shim never opens the
+#   graph store itself. Store path overrides ride fno's own path config.
 # - Soft fail by default. Downstream skills then try the echoed value as a
 #   file path, which fails with a clearer error than a bash function dying
 #   silently. RESOLVE_STRICT=1 opts into hard fail.
-
-# Use GRAPH_JSON_PATH from paths.sh if available; fall back to hardcoded default.
-if [[ -z "${GRAPH_JSON_PATH:-}" ]] && command -v fno >/dev/null 2>&1; then
-    _PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
-    [[ -f "$_PATHS_SH" ]] && source "$_PATHS_SH" 2>/dev/null || true
-    unset _PATHS_SH
-fi
-GRAPH_JSON="${GRAPH_JSON:-${GRAPH_JSON_PATH:-$HOME/.fno/graph.json}}"
 
 # Single fno-vs-external-vs-none classifier, shared with parse-claims-arg.sh so
 # the id-shape test has one home. Sourced as a bundled sibling (BASH_SOURCE
@@ -64,142 +51,108 @@ resolve_arg() {
         echo "$arg"
         return 0
     fi
-    if [[ ! -f "$GRAPH_JSON" ]]; then
-        echo "[graph-resolve] $GRAPH_JSON missing; using '$arg' as-is" >&2
-        echo "$arg"
-        return 0
+    # A GRAPH_JSON override is a sandbox contract (the shim's own tests, and
+    # callers pinning a scratch graph): resolve against that file. Otherwise
+    # resolve against the ambient store through the configured path,
+    # backend-switched like every other reader. Both ride the plugin's own
+    # cli/src, so the full resolver tiers (exact id, unique prefix, opt-in
+    # title fuzzy) survive whether this copy runs from a repo checkout or a
+    # deployed plugin directory. Exit contract:
+    #   0 plan_path | 1 no match | 3 no plan_path | 4 ambiguous
+    #   5 package unimportable -> the `fno backlog get` fallback below
+    #   6 external tracker backend -> pass the arg through unchanged
+    local plugin_root="${FNO_RESOLVE_PLUGIN_ROOT:-}"
+    if [[ -z "$plugin_root" ]]; then
+        plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
     fi
-
-    local result rc
-    result=$(GRAPH_JSON="$GRAPH_JSON" QUERY="$arg" python3 - <<'PYEOF'
+    local sandbox_result rc
+    sandbox_result=$(PLUGIN_ROOT="$plugin_root" QUERY="$arg" python3 - <<'PYEOF' 2>/dev/null
 import os, sys
-from pathlib import Path
+sys.path.insert(0, os.path.join(os.environ["PLUGIN_ROOT"], "cli", "src"))
 try:
     from fno.graph.fuzzy import resolve_id
     from fno.graph.store import read_graph_strict
-except ImportError as e:
-    sys.stderr.write(f"[graph-resolve] fno.graph import failed: {e}\n")
+except ImportError:
     sys.exit(5)
-graph_path = os.environ["GRAPH_JSON"]
-query = os.environ["QUERY"]
+graph = os.environ.get("GRAPH_JSON") or ""
+if not graph:
+    try:
+        from fno.paths import graph_json as configured_graph
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() != "graph":
+            sys.exit(6)
+        graph = str(configured_graph())
+    except Exception:
+        sys.exit(6)
+from pathlib import Path
 try:
-    # The canonical read seam, not a local json.load: resolve_id prefers
-    # non-done entries, so it reads `status` and must see the migrated
-    # vocabulary. `_strict` keeps "graph unreadable" (exit 2) distinguishable
-    # from "node absent" (exit 1), which the plain reader folds together.
-    entries = read_graph_strict(Path(graph_path))
-except Exception as e:
-    sys.stderr.write(f"[graph-resolve] failed to read {graph_path}: {e}\n")
-    sys.exit(2)
-match = resolve_id(query, entries)
-if match.kind in ("exact", "fuzzy") and match.candidates:
-    # candidates[0] is the matched entry; resolve_id already did the
-    # iteration so we don't repeat it here.
+    entries = read_graph_strict(Path(graph))
+except Exception:
+    sys.exit(1)
+match = resolve_id(os.environ["QUERY"], entries)
+if match.kind in ("exact", "fuzzy", "branch_derived") and match.candidates:
     matched = match.candidates[0]
     if matched.get("plan_path"):
         sys.stdout.write(matched["plan_path"])
         sys.exit(0)
-    sys.exit(3)  # resolved id but no plan_path
+    sys.exit(3)
 if match.kind == "ambiguous":
-    candidate_ids = ", ".join(e.get("id", "?") for e in match.candidates)
-    sys.stderr.write(f"[graph-resolve] ambiguous '{query}' matches: {candidate_ids}\n")
     sys.exit(4)
-sys.stderr.write(f"[graph-resolve] no match for '{query}'\n")
 sys.exit(1)
 PYEOF
 )
     rc=$?
-    case $rc in
-        0) echo "$result" ;;
-        1)
-            [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
-            echo "$arg"
-            ;;
-        3)
-            echo "[graph-resolve] node '$arg' has no plan_path in $GRAPH_JSON" >&2
-            [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
-            echo "$arg"
-            ;;
-        4)
-            [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
-            echo "$arg"
-            ;;
-        5)
-            # Python module not importable; fall back to legacy exact-match
-            # path so non-Python environments keep the old behavior.
-            # Print one explicit notice so the user understands the partial-
-            # prefix path will be unavailable in this environment - the
-            # import-error stderr from the heredoc on its own can read like
-            # a fatal failure when the resolver actually succeeded with the
-            # legacy matcher.
-            echo "[graph-resolve] fno package unavailable; falling back to legacy exact-match resolver (partial-prefix queries will not resolve)" >&2
-            _resolve_arg_legacy "$arg"
-            return $?
-            ;;
-        *)
-            echo "[graph-resolve] lookup failed (rc=$rc) for '$arg'" >&2
-            [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
-            echo "$arg"
-            ;;
-    esac
-    return 0
-}
-
-# Legacy fallback: exact-match only, no prefix support. Used when the
-# fno package can't be imported (no uv, no venv, no PYTHONPATH).
-# Mirrors the pre-fuzzy behavior so older environments are not regressed.
-_resolve_arg_legacy() {
-    local arg="$1"
-    local kind
-    kind="$(node_id_kind "$arg")"
-    if [[ "$kind" != "fno" ]]; then
-        # A partial/short id (fewer hex than a real id) cannot be resolved
-        # without the python module. Surface this explicitly so a user typing a
-        # prefix in a non-Python environment doesn't see silent passthrough
-        # and assume the resolver worked. External ids pass through silently.
-        if [[ "$arg" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]+$ ]]; then
-            echo "[graph-resolve] partial/short node id '$arg' cannot resolve in legacy mode; pass a full <prefix>-<4..8 hex> id or install the fno python package" >&2
-        fi
+    [[ $rc -ne 0 ]] && sandbox_result=""
+    if [[ $rc -eq 0 && -n "$sandbox_result" ]]; then
+        echo "$sandbox_result"
+        return 0
+    fi
+    if [[ $rc -eq 6 ]]; then
         echo "$arg"
         return 0
     fi
-    local path rc
-    path=$(GRAPH_JSON="$GRAPH_JSON" TARGET="$arg" python3 - <<'PYEOF'
-import json, os, sys
-path = os.environ["GRAPH_JSON"]
-target = os.environ["TARGET"]
-try:
-    with open(path) as f:
-        data = json.load(f)
-except Exception as e:
-    sys.stderr.write(f"[graph-resolve] failed to read {path}: {e}\n")
-    sys.exit(2)
-for entry in data.get("entries", []):
-    if entry.get("id") == target:
-        plan_path = entry.get("plan_path") or ""
-        sys.stdout.write(plan_path)
-        sys.exit(0 if plan_path else 3)
-sys.exit(1)
-PYEOF
-)
+    if [[ $rc -eq 5 ]]; then
+        : # fall through to the `fno backlog get` fallback below
+    elif [[ $rc -eq 1 ]]; then
+        echo "[graph-resolve] no match for '$arg'" >&2
+    elif [[ $rc -eq 3 ]]; then
+        echo "[graph-resolve] node '$arg' has no plan_path" >&2
+    elif [[ $rc -eq 4 ]]; then
+        echo "[graph-resolve] ambiguous '$arg'" >&2
+    fi
+    if [[ $rc -ne 5 ]]; then
+        [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
+        echo "$arg"
+        return 0
+    fi
+
+    if ! command -v fno >/dev/null 2>&1; then
+        echo "[graph-resolve] fno CLI unavailable; using '$arg' as-is" >&2
+        [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
+        echo "$arg"
+        return 0
+    fi
+
+    local payload rc plan_path
+    payload=$(fno backlog get "$arg" 2>/dev/null)
     rc=$?
-    case $rc in
-        0) echo "$path" ;;
-        1)
-            echo "[graph-resolve] unknown id '$arg' in $GRAPH_JSON" >&2
-            [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
-            echo "$arg"
-            ;;
-        3)
-            echo "[graph-resolve] node '$arg' has no plan_path in $GRAPH_JSON" >&2
-            [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
-            echo "$arg"
-            ;;
-        *)
-            echo "[graph-resolve] legacy lookup failed (rc=$rc) for '$arg'" >&2
-            [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
-            echo "$arg"
-            ;;
-    esac
-    return 0
+    if [[ $rc -ne 0 ]]; then
+        if [[ $rc -eq 1 ]]; then
+            echo "[graph-resolve] no match for '$arg'" >&2
+        else
+            echo "[graph-resolve] lookup failed (rc=$rc) for '$arg'" >&2
+        fi
+        [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
+        echo "$arg"
+        return 0
+    fi
+    plan_path=$(printf '%s' "$payload" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin).get("plan_path") or "")' 2>/dev/null)
+    if [[ -z "$plan_path" ]]; then
+        echo "[graph-resolve] node '$arg' has no plan_path" >&2
+        [[ "${RESOLVE_STRICT:-}" == "1" ]] && return 1
+        echo "$arg"
+        return 0
+    fi
+    echo "$plan_path"
 }

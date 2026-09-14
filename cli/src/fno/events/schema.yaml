@@ -91,6 +91,18 @@ event_types:
         error: { type: string }
     consumers: [operator]
 
+  - name: graph_render_failed
+    retention: durable
+    description: "The canonical keeper's render trigger ran the view pass and it failed. The write already landed; the trigger retries on the next settled tick, so this names a rendering debt, never a lost write."
+    sources: [daemon]
+    data:
+      required: [version, exit, stderr_tail]
+      properties:
+        version: { type: string }
+        exit: { type: integer }
+        stderr_tail: { type: string }
+    consumers: [operator]
+
   - name: graph_parity_sample
     retention: durable
     description: "One 5-minute parity sample: the relational export compared against authoritative JSON while JSON is still the backend. The first sample starts the 7-day soak clock."

@@ -440,7 +440,7 @@ _WAKE_ENTRIES_MEMO: dict = {"ident": None, "entries": None}
 def _graph_entries_for_wake() -> list:
     """The wake's graph read, one real read per graph identity: an unchanged
     graph is byte-identical, so the memo is not staleness."""
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
     from fno.king import drain_cache
     from fno.paths import graph_json
     from fno.tracker import active_backend_name
@@ -451,7 +451,7 @@ def _graph_entries_for_wake() -> list:
         ident = drain_cache.graph_ident(graph_json())
         if ident is not None and _WAKE_ENTRIES_MEMO["ident"] == ident:
             return _WAKE_ENTRIES_MEMO["entries"]
-        entries = read_graph(graph_json())
+        entries = wire_rows(path=graph_json())
         if ident is not None:
             _WAKE_ENTRIES_MEMO.update(ident=ident, entries=entries)
         return entries

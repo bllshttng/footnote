@@ -67,6 +67,8 @@ def _node(nid: str, **over) -> dict:
     base = {
         "id": nid,
         "title": f"node {nid}",
+        "slug": nid,
+        "type": "feature",
         "status": "done",
         "completed_at": "2026-08-01T00:00:00+00:00",
         "domain": "code",

@@ -457,19 +457,20 @@ def folder_audit(
         None, "--plans-dir", help="Plans dir to scan (default: resolved plans-content dir)."
     ),
 ) -> None:
-    from fno.graph._constants import GRAPH_JSON
     from fno.graph.statuses import recompute_statuses
-    from fno.graph.store import GraphCorruptError, _apply_graph_defaults, _read_json
-    from fno.paths import plans_content_dir
+    from fno.graph.store import GraphCorruptError, GraphUnreadableError, read_graph_strict
+    from fno.paths import graph_json, plans_content_dir
     from fno.plan._folder_audit import scan
 
     plans_root = Path(plans_dir_opt) if plans_dir_opt else plans_content_dir()
 
     try:
-        entries = recompute_statuses(_apply_graph_defaults(_read_json(GRAPH_JSON)))
-    except (GraphCorruptError, OSError) as exc:
+        # Strict through the configured path: healed bytes must not read as
+        # "no folder owners" - an unreadable graph refuses toward defer.
+        entries = recompute_statuses(read_graph_strict(graph_json()))
+    except (GraphCorruptError, GraphUnreadableError, OSError) as exc:
         typer.echo(
-            f"fno do plan folder-audit: graph.json unreadable ({exc}) - failing toward defer",
+            f"fno do plan folder-audit: graph unreadable ({exc}) - failing toward defer",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -610,10 +611,11 @@ def migrate_keys(
 
 def _plan_sync_watermark() -> Path:
     """Watermark gating the sweep, a sibling of graph.json (the global graph the
-    sweep is driven by), so all sessions share one gate keyed to the one graph."""
+    sweep is driven by), so all sessions share one gate keyed to the one
+    graph. The v2 name keeps an old mtime float from reading as synced."""
     from fno.paths import graph_json
 
-    return graph_json().parent / ".plan-sync-watermark"
+    return graph_json().parent / ".plan-sync-watermark-v2"
 
 
 def _read_watermark(path: Path) -> Optional[float]:
@@ -628,8 +630,9 @@ def _read_watermark(path: Path) -> Optional[float]:
     help=(
         "Converge every plan doc's graph->doc mirror fields (priority/type/"
         "blocked_by/project/size/parent). Graph-driven: walks every node with a "
-        "plan_path. The bare form short-circuits on an unchanged graph (one stat "
-        "vs .plan-sync-watermark); --all forces a full walk to backfill new keys."
+        "plan_path. The bare form short-circuits on an unchanged graph (one "
+        "version probe vs .plan-sync-watermark); --all forces a full walk to "
+        "backfill new keys."
     ),
 )
 def sync(
@@ -637,27 +640,28 @@ def sync(
         False,
         "--all",
         "-A",
-        help="Force a full walk, bypassing the graph-mtime short-circuit.",
+        help="Force a full walk, bypassing the store-version short-circuit.",
     ),
 ) -> None:
     """Idempotent whole-vault mirror-field sweep (x-5d84)."""
-    from fno.paths import graph_json
+    from fno.graph import api as graph_api
     from fno.plan._project import project_graph_nodes
     from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
 
-    gpath = graph_json()
     watermark = _plan_sync_watermark()
     try:
-        graph_mtime: Optional[float] = gpath.stat().st_mtime
-    except OSError:
-        graph_mtime = None
+        store_version: Optional[float] = float(graph_api.version())
+    except Exception:  # noqa: BLE001 - an absent store must not block the sweep
+        store_version = None
 
-    # Locked Decision 3: gate on graph.json mtime, NEVER a doc mtime (a graph
-    # mutation never touches a doc's mtime, so a doc gate skips exactly the doc
-    # needing repaint). One stat + one small read, zero doc reads on a no-op.
-    if not all_ and graph_mtime is not None:
+    # Locked Decision 3: gate on the store's mutation counter, NEVER a doc
+    # mtime (a graph mutation never touches a doc's mtime, so a doc gate skips
+    # exactly the doc needing repaint). One version probe, zero doc reads on a
+    # no-op. The counter still moves after the SQLite flip, where a file mtime
+    # would freeze.
+    if not all_ and store_version is not None:
         prev = _read_watermark(watermark)
-        if prev is not None and graph_mtime <= prev:
+        if prev is not None and store_version <= prev:
             typer.echo("plan sync: graph unchanged since last sync; skipped")
             return
 
@@ -667,7 +671,7 @@ def sync(
         entries = read_entries("plan.sync")
     except ExternalMetadataUnavailable:
         # The vault mirror is default-backend machinery (its watermark is the
-        # local store's mtime); an external selection must not repaint docs
+        # local store's version); an external selection must not repaint docs
         # from stale local rows.
         typer.echo("plan sync: external tracker backend selected; 0 docs repainted", err=True)
         return
@@ -678,10 +682,10 @@ def sync(
     # Claim the sweep window before the per-doc walk (Concurrency): a burst of
     # parallel sessions advances the watermark before walking, so redundant
     # walks are at worst benign (identical graph-derived content, atomic write).
-    if graph_mtime is not None:
+    if store_version is not None:
         try:
             watermark.parent.mkdir(parents=True, exist_ok=True)
-            watermark.write_text(f"{graph_mtime}\n", encoding="utf-8")
+            watermark.write_text(f"{store_version}\n", encoding="utf-8")
         except OSError:
             pass
 

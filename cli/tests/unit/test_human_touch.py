@@ -25,6 +25,15 @@ def _events(path: Path) -> list[dict]:
 
 
 def _fake_graph(tmp_path: Path, entries: list[dict]) -> Path:
+    """Store-consistent rows: status matches pr_number the way the store
+    recomputes it, so the typed read emits no graph_status_drift event."""
+    for e in entries:
+        e.setdefault("slug", e.get("id", "node"))
+        e.setdefault("type", "feature")
+        e.setdefault("priority", "p2")
+        if e.get("pr_number") and "status" not in e:
+            e["status"] = "in_review"
+        e.setdefault("status", "idea")
     p = tmp_path / "graph.json"
     p.write_text(json.dumps({"entries": entries}))
     return p

@@ -420,6 +420,25 @@ pub fn nodes(
     Ok(paginate(rows, page))
 }
 
+/// Every working-graph row through the store, in ordinal order. The one
+/// read the wave-8 board readers share: a caller that folds over `Value`
+/// rows asks the store instead of opening graph.json. The typed
+/// normalization applies where the model can carry the row; a row it cannot
+/// represent rides through VERBATIM, so the reader seam stays total and a
+/// legacy-shaped row can never silently vanish from a board fold (the typed
+/// queries drop it, the import's rule; a reader must not). Archived rows
+/// come back; the caller filters.
+pub fn rows(store: &Store) -> Result<Vec<Value>, ApiError> {
+    Ok(read_rows(store)?
+        .iter()
+        .map(|row| {
+            Node::from_json(row)
+                .map(|node| node.to_json())
+                .unwrap_or_else(|_| row.clone())
+        })
+        .collect())
+}
+
 /// The progress notes of one node, newest last (store order), paged.
 pub fn comments(
     store: &Store,
@@ -466,27 +485,54 @@ pub fn version(store: &Store) -> Result<i64, ApiError> {
 /// `locked_mutate` (which owns the backend switch and the one transaction).
 /// `Ok(false)` from `apply` is a domain refusal: nothing is written and the
 /// counter stays put, which is AC15's failed-mutation arm.
+///
+/// The cycle is optimistic: the pre-read stamp is held as `base_version`, so
+/// an interleaved writer surfaces as a conflict instead of a lost write. A
+/// lost race (conflict or a contended lock) retries the whole
+/// snapshot-read-apply-publish cycle a bounded few times before the refusal
+/// names it, so callers keep the "lands or names a refusal" contract without
+/// learning the retry. `apply` reruns over a FRESH read each attempt, so a
+/// retry never overwrites what another writer just landed.
 fn mutate(
     store: &Store,
-    apply: impl FnOnce(&mut Vec<Value>) -> Result<bool, String>,
+    mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
 ) -> Result<bool, ApiError> {
-    let mut working: Vec<Value> = read_rows(store)?;
-    let changed = apply(&mut working)?;
-    if !changed {
-        return Ok(false);
+    const ATTEMPTS: usize = 5;
+    for attempt in 0..ATTEMPTS {
+        let base = crate::graph_store::base_version(&store.graph)?;
+        let mut working: Vec<Value> = read_rows(store)?;
+        let changed = apply(&mut working)?;
+        if !changed {
+            return Ok(false);
+        }
+        match crate::graph_store::locked_mutate(
+            &store.graph,
+            crate::graph_store::MutateInput {
+                entries: working,
+                canonical_path: None,
+                base_version: Some(base),
+                plan_rungs: None,
+            },
+            MUTATE_TIMEOUT,
+        ) {
+            Ok(_) => return Ok(true),
+            Err(
+                err @ (crate::graph_store::StoreError::Conflict
+                | crate::graph_store::StoreError::LockTimeout(..)),
+            ) if attempt + 1 < ATTEMPTS => {
+                let _ = err;
+                std::thread::sleep(MUTATE_RETRY_BACKOFF);
+            }
+            Err(err) => return Err(err.into()),
+        }
     }
-    crate::graph_store::locked_mutate(
-        &store.graph,
-        crate::graph_store::MutateInput {
-            entries: working,
-            canonical_path: None,
-            base_version: None,
-            plan_rungs: None,
-        },
-        MUTATE_TIMEOUT,
-    )?;
-    Ok(true)
+    unreachable!("every loop arm returns")
 }
+
+/// Flat delay between optimistic-mutation retries. The settle's full-jitter
+/// backoff exists because correlated sweepers re-lined up; a mutation's
+/// window is one read-apply pass, so a flat short wait rides it out.
+const MUTATE_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
 fn fresh_version(store: &Store) -> i64 {
     version(store).unwrap_or(0)
@@ -948,7 +994,17 @@ pub fn session_end(
     id: &str,
     session_id: &str,
     ended_by: &str,
+    phase: Option<&str>,
+    harness: Option<&str>,
 ) -> Result<Payload<Node>, ApiError> {
+    // A session may hold several open rows on one node (one per phase), so a
+    // settle that matches on session_id alone would fabricate ended_at on
+    // unrelated think/review/ship provenance. Callers name the phase and
+    // harness they are settling; a record only matches when they agree.
+    let matches_window = |rec_phase: Option<&str>, rec_harness: Option<&str>| -> bool {
+        phase.map_or(true, |want| rec_phase == Some(want))
+            && harness.map_or(true, |want| rec_harness == Some(want))
+    };
     let mut updated: Option<Node> = None;
     let ok = mutate(store, |rows| {
         for row in rows.iter_mut() {
@@ -956,14 +1012,30 @@ pub fn session_end(
                 continue;
             }
             let Ok(mut parsed) = Node::from_json(row) else {
-                return Ok(false);
+                // A row the typed model cannot represent still owes its
+                // close: fill ended_at on the raw session rows rather than
+                // skipping the settle forever (the sweep would re-list the
+                // same stale row every pass). The payload carries no typed
+                // node on this path. The sessions aggregate owns the raw
+                // row shape, so the fill composes through it.
+                return Ok(crate::backlog::sessions::fill_open_window_raw(
+                    row,
+                    session_id,
+                    phase,
+                    harness,
+                    &crate::graph_store::now_isoformat(),
+                    ended_by,
+                ));
             };
             let Some(list) = &mut parsed.sessions else {
                 return Ok(false);
             };
             let mut closed = false;
             for record in list.iter_mut() {
-                if record.session_id == session_id && record.ended_at.is_none() {
+                if record.session_id == session_id
+                    && record.ended_at.is_none()
+                    && matches_window(Some(&record.phase), Some(&record.harness))
+                {
                     record.ended_at = Some(crate::graph_store::now_isoformat());
                     record.ended_by = Some(ended_by.to_string());
                     closed = true;

@@ -470,16 +470,25 @@ def _capture_project_roots(root: Path) -> "list[Path]":
     The graph is the one machine-wide store (``~/.fno/graph.json``), and its
     entries carry the ``cwd``/``source_cwd`` each node was worked from, so it
     is the measured-fact enumeration of sibling projects - no second registry.
-    Dead or missing roots degrade to zero captures in the fold below, and a
-    corrupt or absent graph reads as this project alone.
+    The read goes through the store api, never the file. Dead or missing roots
+    degrade to zero captures in the fold below, and a corrupt or absent store
+    reads as this project alone.
     """
     roots = {Path(root).resolve()}
     try:
         backend = os.environ.get("FNO_TRACKER_BACKEND") or "graph"
         if backend == "graph":
             from fno import paths
+            from fno.graph.store import _client_for
 
-            payload = json.loads(paths.graph_json().read_text(encoding="utf-8"))
+            # The keeper's read op is the store's raw arm: unlike the typed
+            # `api.nodes` it never drops a row the node model cannot carry,
+            # which this enumeration must not do - a legacy row's cwd is as
+            # real a project root as a typed row's. The path resolves at call
+            # time so the seam the tests pin (`paths.graph_json`) picks the
+            # store up.
+            gpath = paths.graph_json()
+            payload = _client_for(gpath).read(gpath)
             entries = payload.get("entries", []) if isinstance(payload, dict) else payload
             locations = (
                 (entry.get("cwd"), entry.get("source_cwd"))

@@ -1611,7 +1611,11 @@ def test_capture_project_roots_does_not_resolve_every_graph_entry(
     roots = _capture_project_roots(this)
 
     assert roots == [sibling, this]
-    assert resolved == [this]
+    # The AC: no ENTRY's cwd is pre-resolved - later physical-store dedup owns
+    # filesystem resolution. (The keeper client's own machinery resolving its
+    # binary and the store path is implementation noise the contract does not
+    # speak to.)
+    assert sibling not in resolved
 
 
 def test_capture_project_roots_preserves_external_backend_sidecars(

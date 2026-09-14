@@ -990,7 +990,7 @@ def _stamp_forward(
 ) -> None:
     """Stamp the node with its spawned /think session + output pointers (Discretion 5).
 
-    Serialized under locked_mutate_graph so the forward pointer write cannot
+    Serialized under the store write lock so the forward pointer write cannot
     clobber a concurrent node update (Concurrency invariant). Best-effort: a
     stamp failure never unwinds an already-successful spawn. ``output_path`` (B,
     x-5d51) records where the headless worker writes its /think doc so the node
@@ -998,7 +998,7 @@ def _stamp_forward(
     """
     try:
         from fno.graph.cli import _graph_path
-        from fno.graph.store import locked_mutate_graph
+        from fno.graph.store import commit_rows_via_store
 
         def mutator(entries):
             for e in entries:
@@ -1015,7 +1015,7 @@ def _stamp_forward(
                     break
             return entries
 
-        locked_mutate_graph(_graph_path(), mutator)
+        commit_rows_via_store(_graph_path(), mutator)
     except Exception as exc:  # noqa: BLE001
         _LOG.debug("spawn_think: forward stamp failed for %s: %s", node_id, exc)
 
@@ -1053,7 +1053,7 @@ def on_node_born(
         install pays nothing (no graph re-read, no settings churn beyond the
         single gate read).
       * **Durable re-read.** ``store.ensure_slugs`` may re-slug a node inside
-        ``locked_mutate_graph``, so the seed + worker name must read the node
+        the store write lock, so the seed + worker name must read the node
         back by id post-persist (Domain Pitfall: slug re-read after persist).
         Falls back to the passed-in node when the re-read can't find it. A
         caller that ALREADY holds the persisted, slugged node (decompose's
@@ -1093,9 +1093,9 @@ def on_node_born(
             from fno.tracker.metadata import read_entries
 
             if graph_path is not None:
-                from fno.graph.store import read_graph
+                from fno.graph.api import wire_rows
 
-                gp_entries: list[dict] = read_graph(graph_path)
+                gp_entries: list[dict] = wire_rows(path=graph_path)
             else:
                 gp_entries = read_entries("provenance.spawn_think")
             # ponytail: linear scan per born node. Bounded by the

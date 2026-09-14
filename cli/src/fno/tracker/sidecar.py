@@ -153,9 +153,9 @@ def _graph_store_path() -> Path:
 def _load_from_graph(id: str) -> Sidecar:
     from pydantic import ValidationError
 
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
 
-    for entry in read_graph(_graph_store_path()):
+    for entry in wire_rows(path=_graph_store_path()):
         if entry.get("id") == id:
             try:
                 return Sidecar(
@@ -178,7 +178,7 @@ def _load_from_graph(id: str) -> Sidecar:
 
 
 def _save_to_graph(sidecar: Sidecar) -> Path:
-    from fno.graph.store import locked_mutate_graph
+    from fno.graph.store import commit_rows_via_store
 
     from .types import NodeNotFound
 
@@ -194,7 +194,7 @@ def _save_to_graph(sidecar: Sidecar) -> Path:
                 return entries
         raise NodeNotFound(sidecar.id)
 
-    locked_mutate_graph(path, _apply)
+    commit_rows_via_store(path, _apply)
     return path
 
 
@@ -239,9 +239,9 @@ def load_all() -> dict[str, Sidecar]:
         return out
     from pydantic import ValidationError
 
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
 
-    entries = read_graph(_graph_store_path())
+    entries = wire_rows(path=_graph_store_path())
     out = {}
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("id"), str):

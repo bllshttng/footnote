@@ -60,7 +60,8 @@ from fno.graph._reconcile import (
     resolve_promise_evidence,
 )
 from fno.graph.fuzzy import resolve_id
-from fno.graph.store import locked_mutate_graph, normalize_plan_path, read_graph
+from fno.graph.api import wire_rows
+from fno.graph.store import commit_rows_via_store, normalize_plan_path
 from fno.graph.strand import _reparent_live_children, _reparent_receipt
 
 
@@ -455,7 +456,7 @@ def done_command(
                 err=True,
             )
             raise typer.Exit(code=1)
-        entries = read_graph(graph_path)
+        entries = wire_rows(path=graph_path)
         if query:
             branch = _current_branch()
             match = resolve_id(query, entries, git_branch=branch)
@@ -508,7 +509,7 @@ def done_command(
                     touched.append((eid, tags))
             return entries_inner
 
-        locked_mutate_graph(graph_path, _backfill_mutator)
+        commit_rows_via_store(graph_path, _backfill_mutator)
 
         if not touched:
             typer.echo(
@@ -555,7 +556,7 @@ def done_command(
         _done_via_seam(query, skip_stamp=False, force=False, reason=None)
         return
 
-    entries = read_graph(graph_path)
+    entries = wire_rows(path=graph_path)
     branch = _current_branch()
     match = resolve_id(query, entries, git_branch=branch)
 
@@ -830,7 +831,7 @@ def done_command(
             break
         return entries_inner
 
-    locked_mutate_graph(graph_path, _mutator)
+    commit_rows_via_store(graph_path, _mutator)
 
     # Emit done_race_collision AFTER the lock releases (telemetry fires after
     # the op so the diagnostic line reflects the actual emit outcome - per

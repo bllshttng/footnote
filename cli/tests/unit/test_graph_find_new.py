@@ -34,7 +34,17 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 def _seed(g: Path, entries: list[dict]) -> None:
-    g.write_text(json.dumps({"entries": entries}, indent=2) + "\n")
+    """Rows the way the store writes them: the typed api drops a row the
+    model cannot parse, so seeds carry the stamped fields."""
+    complete = []
+    for e in entries:
+        row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        if row["status"] == "done" and not row.get("completed_at"):
+            row["completed_at"] = "2026-09-01T00:00:00Z"
+        complete.append(row)
+    g.write_text(json.dumps({"entries": complete}, indent=2) + "\n")
 
 
 def _read(g: Path) -> list[dict]:

@@ -88,9 +88,9 @@ def _invoke_discover(monkeypatch, tmp_path, control_matches):
     from fno.graph.cli import cli
 
     graph_file = tmp_path / "graph.json"
-    graph_file.write_text("[]")
+    graph_file.write_text('{"entries": []}')
     monkeypatch.setattr(constants, "GRAPH_JSON", graph_file)
-    monkeypatch.setattr("fno.graph.store.read_graph", lambda path: [_node()])
+    monkeypatch.setattr("fno.graph.api.wire_rows", lambda path=None, **k: [_node()])
     monkeypatch.setattr(discovery, "candidates", lambda *a, **k: CandidateResults())
     monkeypatch.setattr(
         discovery, "assess", lambda *a, **k: Assessment("undecided", [], "r")

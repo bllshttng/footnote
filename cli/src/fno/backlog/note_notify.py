@@ -210,10 +210,10 @@ def readers_before_append(task_id: str, graph_path: Path) -> NoteReaders | Refus
     """Resolve the readers BEFORE the append; surface any Refused verbatim."""
     from fno.agents.registry import load_registry
     from fno.graph._intake import _find_node
-    from fno.graph.store import read_graph
+    from fno.graph.api import wire_rows
 
     try:
-        rows = read_graph(graph_path)
+        rows = wire_rows(path=graph_path)
         entry = _find_node(rows, task_id) or next(  # the write path takes slugs too
             (e for e in rows if str(e.get("slug") or "").lower() == task_id.strip().lower()),
             None,

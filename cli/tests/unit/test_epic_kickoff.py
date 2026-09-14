@@ -41,8 +41,16 @@ def _events(p: Path) -> list[dict]:
 
 
 def _write_graph(tmp_path: Path, entries: list[dict], monkeypatch) -> Path:
+    """Seed the graph the way the store writes it: every row carries the
+    fields the typed api requires (the store stamps them on every write)."""
+    complete = []
+    for e in entries:
+        row = {"type": "feature", "priority": "p2", "status": "idea", **e}
+        row.setdefault("title", e.get("id", "node"))
+        row.setdefault("slug", e.get("id", "node"))
+        complete.append(row)
     g = tmp_path / "graph.json"
-    g.write_text(json.dumps({"entries": entries}) + "\n")
+    g.write_text(json.dumps({"entries": complete}) + "\n")
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
     return g
 

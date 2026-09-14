@@ -43,7 +43,7 @@ from fno.company.contracts import (
 )
 from fno.graph._constants import mint_node_id
 from fno.graph._intake import _would_create_cycle, _would_exceed_epic_depth
-from fno.graph.store import locked_mutate_graph
+from fno.graph.store import commit_rows_via_store
 
 
 class _CoordModel(BaseModel):
@@ -290,7 +290,7 @@ def commit(
         return working
 
     try:
-        locked_mutate_graph(graph_path, _mutate)
+        commit_rows_via_store(graph_path, _mutate)
     except _CommitAborted as aborted:
         return aborted.refusal
 

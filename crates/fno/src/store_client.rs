@@ -407,6 +407,18 @@ pub fn nodes(
     Ok(NodeConnection { nodes, page_info })
 }
 
+/// The total row fold: every stored row, typed or not, so a fold over the
+/// answer is total. A legacy row the model would reject still rides through
+/// (the `rows` wire op's contract); the typed `nodes` op would drop it.
+pub fn rows(graph: &Path) -> Result<Vec<Value>, String> {
+    let reply = call(graph, "api", json!({ "op": "rows" }))?;
+    Ok(reply
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
 /// The store's mutation counter: one bump per write, legacy writers
 /// included.
 pub fn version(graph: &Path) -> Result<i64, String> {
