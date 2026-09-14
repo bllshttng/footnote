@@ -9,7 +9,6 @@ Filter: ``fno doctor test cli/tests/unit/test_backlog_update_status.py``
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest

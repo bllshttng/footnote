@@ -126,7 +126,7 @@ def register_lifecycle_commands(
             DEFERRED_KINDS,
             classify_deferred_reason,
         )
-        from fno.graph._intake import _find_dependents, _find_node
+        from fno.graph._intake import _find_dependents
         from fno.graph.store import read_graph
 
         if kind is not None and kind not in DEFERRED_KINDS:
@@ -205,10 +205,15 @@ def register_lifecycle_commands(
         # AC5-HP: on a node carrying BOTH facts the park rides on the
         # supersession, so leaving deferred alone would no-op; refuse and
         # name the route that actually revives the node.
+        def _node_of(tid: str) -> dict:
+            node = _find_node(entries, tid)
+            assert node is not None  # require_nodes already guaranteed it
+            return node
+
         still_superseded = [
-            (tid, _find_node(entries, tid).get("superseded_by"))
+            (tid, _node_of(tid).get("superseded_by"))
             for tid in ids
-            if _find_node(entries, tid).get("superseded_by")
+            if _node_of(tid).get("superseded_by")
         ]
         if still_superseded:
             for tid, replacer in still_superseded:
@@ -224,7 +229,7 @@ def register_lifecycle_commands(
         from fno.plan.rulings import plan_rulings, ruling_lines
 
         for tid in ids:
-            node = _find_node(entries, tid)
+            node = _node_of(tid)
             was_deferred = bool(node.get("deferred_at"))
             kind = node.get("deferred_kind")
             reason = node.get("deferred_reason")
