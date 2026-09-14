@@ -86,6 +86,112 @@ impl PauseState {
     }
 }
 
+/// The effective dispatch pause (x-39f4): what a dispatch-oriented poller
+/// must obey. Combines the operator's manual sentinel with the fleet
+/// incident verdict. Both block; when both are present the manual one wins
+/// only for display, because it names the operator's own hand. `Clear` is
+/// the only not-paused answer - an unreadable incident fails closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchPause {
+    Clear,
+    Manual { state: String, detail: String },
+    FleetIncident { generation: u64, reason: String },
+    FleetIncidentUnavailable { detail: String },
+}
+
+impl DispatchPause {
+    pub fn is_paused(&self) -> bool {
+        !matches!(self, Self::Clear)
+    }
+
+    /// The tick-row skip token. One vocabulary shared by the active-backlog
+    /// supervisor, the mission loop, and the daemon's stale sweep.
+    pub fn skip_reason(&self) -> &'static str {
+        match self {
+            Self::Clear => "",
+            Self::Manual { .. } => "loops_paused",
+            Self::FleetIncident { .. } => "fleet_stop",
+            Self::FleetIncidentUnavailable { .. } => "fleet_stop_unavailable",
+        }
+    }
+
+    /// Short human detail for a tick row or event.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Clear => String::new(),
+            Self::Manual { detail, .. } => detail.clone(),
+            Self::FleetIncident { generation, reason } => {
+                format!("fleet incident stopped at generation {generation}: {reason}")
+            }
+            Self::FleetIncidentUnavailable { detail } => {
+                format!("fleet incident state unreadable: {detail}")
+            }
+        }
+    }
+}
+
+/// Combine a manual sentinel state with a fleet verdict. Manual wins for
+/// display when both are present; both block.
+fn combine(manual: &PauseState, incident: crate::fleet_incident::Verdict) -> DispatchPause {
+    if manual.is_paused() {
+        let state = match manual {
+            PauseState::Paused { .. } => "paused",
+            PauseState::Corrupt { .. } => "corrupt",
+            _ => unreachable!("is_paused true implies Paused or Corrupt"),
+        };
+        return DispatchPause::Manual {
+            state: state.to_string(),
+            detail: manual.message(),
+        };
+    }
+    match incident {
+        crate::fleet_incident::Verdict::Clear(_) => DispatchPause::Clear,
+        crate::fleet_incident::Verdict::Stopped(r) => DispatchPause::FleetIncident {
+            generation: r.generation,
+            reason: r.reason,
+        },
+        crate::fleet_incident::Verdict::Unavailable(d) => {
+            DispatchPause::FleetIncidentUnavailable { detail: d }
+        }
+    }
+}
+
+/// The effective dispatch pause for this machine.
+pub fn dispatch_pause() -> DispatchPause {
+    combine(&read_state(), crate::fleet_incident::verdict())
+}
+
+/// The combined `loops paused --json` answer: `paused`, `source`, `state`,
+/// and the incident generation/reason or unavailable detail when present.
+/// The Python adapter reads only `paused`, so the added fields stay additive.
+fn paused_json() -> Value {
+    match dispatch_pause() {
+        DispatchPause::Clear => json!({"paused": false, "source": "none", "state": "clear"}),
+        DispatchPause::Manual { .. } => {
+            // Re-read keeps the manual fields (who/paused_at/expires_at)
+            // verbatim from the sentinel's own shape.
+            let mut v = read_state().json();
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("source".into(), json!("manual"));
+            }
+            v
+        }
+        DispatchPause::FleetIncident { generation, reason } => json!({
+            "paused": true,
+            "source": "fleet_incident",
+            "state": "fleet_stop",
+            "generation": generation,
+            "reason": reason,
+        }),
+        DispatchPause::FleetIncidentUnavailable { detail } => json!({
+            "paused": true,
+            "source": "fleet_incident_unavailable",
+            "state": "fleet_stop_unavailable",
+            "detail": detail,
+        }),
+    }
+}
+
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -168,8 +274,10 @@ fn corrupt(path: &Path, error: impl Into<String>) -> PauseState {
     }
 }
 
+/// The effective dispatch verdict: manual sentinel OR fleet incident. The
+/// stop hook's `pause_message()` deliberately stays manual-only.
 pub fn is_paused() -> bool {
-    read_state().is_paused()
+    dispatch_pause().is_paused()
 }
 
 pub fn pause_message() -> Option<String> {
@@ -253,7 +361,10 @@ pub fn run_loops(args: &[String]) -> i32 {
     let rest = &args[1..];
     let json_out = rest.iter().any(|arg| arg == "--json");
     let output = match action {
-        "paused" | "status" => read_state().json(),
+        // x-39f4: `paused` answers the combined dispatch verdict (manual OR
+        // fleet); `status` stays about the manual sentinel only.
+        "paused" => paused_json(),
+        "status" => read_state().json(),
         "pause-all" => {
             let (who, ttl) = match parse_pause_options(rest) {
                 Ok(options) => options,
@@ -342,5 +453,126 @@ mod tests {
         assert!(read_state_at(&path, 1).is_paused());
         fs::write(&path, r#"{"who":"op"}"#).unwrap();
         assert!(read_state_at(&path, 1).is_paused());
+    }
+
+    fn stopped_record(gen: u64) -> crate::fleet_incident::IncidentRecord {
+        crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "stopped".into(),
+            generation: gen,
+            changed_at: "2026-09-13T01:07:00Z".into(),
+            changed_by: "op".into(),
+            reason: "load 385".into(),
+            source: Some("file".into()),
+        }
+    }
+
+    #[test]
+    fn combine_blocks_on_manual_when_the_fleet_is_clear() {
+        let paused = PauseState::Paused {
+            who: "op".into(),
+            paused_at: 1,
+            expires_at: None,
+        };
+        let clear_record = crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "clear".into(),
+            generation: 2,
+            changed_at: String::new(),
+            changed_by: String::new(),
+            reason: String::new(),
+            source: Some("file".into()),
+        };
+        let combined = combine(&paused, crate::fleet_incident::Verdict::Clear(clear_record));
+        assert_eq!(
+            combined,
+            DispatchPause::Manual {
+                state: "paused".into(),
+                detail: "loops paused by op".into(),
+            }
+        );
+        assert_eq!(combined.skip_reason(), "loops_paused");
+    }
+
+    #[test]
+    fn combine_prefers_the_manual_display_when_both_hold() {
+        let paused = PauseState::Paused {
+            who: "op".into(),
+            paused_at: 1,
+            expires_at: None,
+        };
+        let combined = combine(
+            &paused,
+            crate::fleet_incident::Verdict::Stopped(stopped_record(5)),
+        );
+        assert!(matches!(combined, DispatchPause::Manual { .. }));
+        assert_eq!(combined.skip_reason(), "loops_paused");
+    }
+
+    #[test]
+    fn combine_fails_closed_on_an_unavailable_fleet_record() {
+        let combined = combine(
+            &PauseState::Clear,
+            crate::fleet_incident::Verdict::Unavailable("unreadable: boom".into()),
+        );
+        assert!(combined.is_paused());
+        assert_eq!(combined.skip_reason(), "fleet_stop_unavailable");
+        assert!(combined.detail().contains("boom"));
+    }
+
+    #[test]
+    fn fleet_incident_verdict_names_the_fleet_stop() {
+        let combined = combine(
+            &PauseState::Clear,
+            crate::fleet_incident::Verdict::Stopped(stopped_record(7)),
+        );
+        assert_eq!(
+            combined,
+            DispatchPause::FleetIncident {
+                generation: 7,
+                reason: "load 385".into(),
+            }
+        );
+        assert_eq!(combined.skip_reason(), "fleet_stop");
+    }
+
+    /// The done probe: end-to-end through the env-resolved readers. Pins HOME
+    /// and FNO_AGENTS_HOME so neither the sentinel nor the fleet record
+    /// touches real state, and holds the shared env lock so a parallel
+    /// env-pinned test cannot observe the mutation.
+    #[test]
+    fn loops_paused_reports_fleet_incident() {
+        let guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let saved_home = std::env::var_os("HOME");
+        let saved_agents = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("HOME", tmp.path());
+        let agents = tmp.path().join("agents-home");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::env::set_var("FNO_AGENTS_HOME", &agents);
+        std::fs::write(
+            crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&agents)),
+            serde_json::to_string(&stopped_record(7)).unwrap(),
+        )
+        .unwrap();
+
+        let value = paused_json();
+
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match saved_agents {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        drop(guard);
+
+        assert_eq!(value["paused"], true);
+        assert_eq!(value["source"], "fleet_incident");
+        assert_eq!(value["generation"], 7);
+        assert_eq!(value["state"], "fleet_stop");
     }
 }
