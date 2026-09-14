@@ -3250,8 +3250,8 @@ def advance(
     #     defers. The node stays in ready (skip mutates nothing); the next tick
     #     after the reset dispatches it. Never fatal - a defer read failure just
     #     proceeds to dispatch.
-    #     The route decision itself is shared with `fno agents dispatch` so
-    #     both autonomous launchers stay / defer / cut over identically; the
+    #     The route decision itself is shared with the spawn door's node-seeded
+    #     branch so both autonomous launchers stay / defer / cut over identically; the
     #     tuple it returns is pinned for this attempt and the worker never
     #     re-switches. The dispatch_failover receipt is emitted after the spawn
     #     below so it only lands when a worker actually launched.
@@ -3271,7 +3271,7 @@ def advance(
         # (eff_provider = provider arg -> node pin -> active default), so the
         # quota decision evaluates the provider the worker will actually run on,
         # not a mismatched active record (x-5d3e review). `effective_active` (not
-        # the raw `.active` pointer) is what `fno agents dispatch` probes: with managed
+        # the raw `.active` pointer) is what an autonomous launcher probes: with managed
         # rotation past the pointer the two launchers would otherwise probe
         # different records and disagree about the route.
         provider_id = (

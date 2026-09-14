@@ -39,7 +39,7 @@ runner = CliRunner()
 @pytest.fixture
 def claims_tmp(tmp_path: Path, monkeypatch):
     """Root BOTH node:<id> (global root) and dispatch:<id> (cwd/env root) claims
-    under one tmp dir, and force the Python agents dispatch so the verb never
+    under one tmp dir and pin the Python runtime so the spawn never
     execs the Rust binary."""
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))

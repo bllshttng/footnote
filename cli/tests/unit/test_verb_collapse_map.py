@@ -206,8 +206,10 @@ def test_map_covers_current_surface_once():
     # the writer moved into crates: counted from the merged file, 628.
     # x-3873 allocates `agents capabilities` and `agents target-family`, the
     # two read leaves that replace the retired `fno agents dispatch
-    # capabilities`/`family`: 628 -> 630.
-    assert len(mapped) == 630, (
+    # capabilities`/`family`: 628 -> 630, then deletes the five `agents
+    # dispatch *` rows and the five bare `dispatch *` rows with the verb
+    # itself: 630 -> 620.
+    assert len(mapped) == 620, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -268,7 +270,8 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     groups_with_dispatch = {row["current-leaf"].split()[0] for row in rows if row["tier"] == "T1"}
     kept = Counter(row["current-leaf"].split()[0] for row in rows if row["tier"] == "KEEP")
     projected = len(groups_with_dispatch) + sum(kept.values())
-    assert projected == 79
+    # x-3873 deleted the `dispatch` group with the verb: 79 -> 78.
+    assert projected == 78
     assert projected <= 99
 
 

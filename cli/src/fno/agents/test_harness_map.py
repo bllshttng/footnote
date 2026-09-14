@@ -636,11 +636,13 @@ def test_opencode_arbitrary_verb_renders_fno_prefix():
     assert out2["command"] == "/fno:zzz args x-9"
 
 
-def test_normalize_fallback_table_mirrors_harness_map():
-    """Parity: normalize.sh's static command-surface fallback (used only when
-    `fno agents dispatch resolve` is unreachable) MUST mirror harness_map, the SoT - a
-    drift would dispatch the wrong spelling. Parses the shell case block and
-    compares each provider's surface to capabilities()."""
+def test_normalize_slash_prefix_table_mirrors_harness_map():
+    """Parity: normalize.sh's slash_prefix helper MUST mirror harness_map, the
+    SoT - a drift would dispatch the wrong spelling. (x-3873 deleted the
+    static command-surface fallback this test also watched; the surface now
+    reads `fno agents capabilities` straight from the packaged table.) Parses
+    the shell case block and compares each provider's prefix to capabilities().
+    """
     import re
     from pathlib import Path
 
@@ -656,30 +658,18 @@ def test_normalize_fallback_table_mirrors_harness_map():
         root = root.parent
     assert norm is not None, "normalize.sh not found from test location"
 
-    m = re.search(
-        r"resolve_command_surface\(\).*?case \"\$_prov\" in(.*?)esac",
-        norm.read_text(),
-        re.S,
+    text = norm.read_text()
+    # The surface read has NO fallback copy anymore: it shells the Rust leaf.
+    # retired-ok: a prohibition naming the string it forbids.
+    assert "agents dispatch resolve" not in text, (
+        "normalize.sh resurrects the retired dispatch resolve ask"
     )
-    assert m, "resolve_command_surface case block not found"
-    shell_map: dict[str, str] = {}
-    for arm in re.finditer(r"([a-z|*]+)\)\s*printf '([a-z-]+)'", m.group(1)):
-        for prov in arm.group(1).split("|"):
-            if prov != "*":
-                shell_map[prov] = arm.group(2)
-    assert shell_map, "no provider arms parsed from normalize.sh"
-    for prov, surface in shell_map.items():
-        assert capabilities(prov)["command_surface"] == surface, (
-            f"normalize.sh fallback maps {prov!r}->{surface!r} but harness_map "
-            f"says {capabilities(prov)['command_surface']!r}"
-        )
-    for prov in ("claude", "agy", "opencode", "codex", "gemini"):
-        assert prov in shell_map, f"normalize.sh fallback omits {prov!r}"
+    assert "agents capabilities" in text, "surface read must use the Rust leaf"
 
-    # slash_prefix must mirror too, or opencode would render `/target` not
+    # slash_prefix must mirror, or opencode would render `/target` not
     # `/fno:target`. The shell helper lists only non-empty prefixes explicitly
     # (opencode); claude/agy fall to `*` -> "", matching harness_map's default.
-    mp = re.search(r"slash_prefix\(\).*?case \"\$1\" in(.*?)esac", norm.read_text(), re.S)
+    mp = re.search(r"slash_prefix\(\).*?case \"\$1\" in(.*?)esac", text, re.S)
     assert mp, "slash_prefix case block not found in normalize.sh"
     shell_prefix: dict[str, str] = {}
     for arm in re.finditer(r"([a-z|*]+)\)\s*printf '([a-z:-]*)'", mp.group(1)):

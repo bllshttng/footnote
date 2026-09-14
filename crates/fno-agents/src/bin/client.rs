@@ -478,7 +478,7 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `capabilities` / `target-family` (x-3873 change 2): read-only leaves
     // over the packaged capability table and the merge-posture family table,
-    // successors to the retired `fno agents dispatch capabilities`/`family`.
+    // successors to the retired dispatch query leaves (d-496680aa).
     // Direct dispatch; no daemon RPC. Same `==` dispatch + ALL_CLIENT_ACTIONS
     // registration as the other direct leaves, so the parity tests stay in
     // sync.

@@ -84,7 +84,7 @@ Both triggers observing one merge dispatch the successor at most once: the `disp
 
 ## Dispatch mechanics
 
-The worker spawn routes through the shared resolver (`fno.agents.harness_map.resolve_dispatch`, the same one `fno agents dispatch resolve` and `dispatch-node.sh` use), not a hardcoded `/target` f-string. The resolver returns the substrate (`bg` for claude, `headless` for codex/others) and the per-harness-normalized command. `_spawn_worker` spawns exactly that. The workflow verb is DERIVED from the node's plan rung and difficulty (`resolve_effective_verb`): difficulty decides at intake (plan rung `none`), the plan's rung decides at re-dispatch. A node's `dispatch_brief` rides `TARGET_BRIEF` env, and a stored `dispatch_verb` outside the target/blueprint family (e.g. `/think`) keeps declared precedence. The full table and the refusal cases live in [backlog-graph-verb-contracts](backlog-graph-verb-contracts.md).
+The worker spawn routes through the shared resolver (`fno.agents.harness_map.resolve_dispatch`, the same one `resolve_node_spawn` and `dispatch-node.sh`'s spawn door read), not a hardcoded `/target` f-string. The resolver returns the substrate (`bg` for claude, `headless` for codex/others) and the per-harness-normalized command. `_spawn_worker` spawns exactly that. The workflow verb is DERIVED from the node's plan rung and difficulty (`resolve_effective_verb`): difficulty decides at intake (plan rung `none`), the plan's rung decides at re-dispatch. A node's `dispatch_brief` rides `TARGET_BRIEF` env, and a stored `dispatch_verb` outside the target/blueprint family (e.g. `/think`) keeps declared precedence. The full table and the refusal cases live in [backlog-graph-verb-contracts](backlog-graph-verb-contracts.md).
 
 `no-merge` stays a launcher decision, never baked into a node verb. A derived `/target` renders through the same rungs as the builtin, whose default bakes the flag. `config.auto_merge.grant="dispatch"` omits it, preserving the configured merge posture. The legacy `dispatch.auto_merge` bool reads as the grant for one release. The agent is named `target-<full-node-id>-<slug>` (a `-blueprint` qualifier states a derived non-target phase). Its cwd resolves to the node's recorded root (`--cwd`) or canonical main (`--fresh`). Subscription lane only (`fno agents spawn`), never `-p` / API credit.
 
@@ -106,10 +106,10 @@ Three autonomous entry points consume it, so identical node, config, and quota f
 
 - `backlog advance` (the active backlog and the merge trigger route through it) calls the selector directly.
 - `fno agents dispatch` calls it directly.
-- `skills/target/scripts/dispatch-node.sh` (which backs `/target bg`) is a shell rung and cannot import Python, so it reaches the same seam through `fno agents dispatch resolve --autonomous`.
+- `skills/target/scripts/dispatch-node.sh` (which backs `/target bg`) is a shell rung and cannot import Python, so it hands the node to `fno agents spawn --node` and the door's own resolver answers the seam (x-3873).
 
 That flag is the whole reason the shell rung is not a fourth, divergent policy.
-Bare `fno agents dispatch resolve` is pure - it answers "which harness is configured", never "does that harness have quota left" - so a dispatcher that called only the bare verb would sit on a walled account while an idle harness waited.
+A bare harness read is pure - it answers "which harness is configured", never "does that harness have quota left" - so a dispatcher that consulted only the harness would sit on a walled account while an idle harness waited.
 `--autonomous` folds the route decision into the same tuple: on a cutover the returned `harness`, `substrate`, and `command` are already the destination's, and `route_action` / `route_account` / `route_source` / `route_retry_at` carry the verdict.
 The destination's credentials never cross that boundary - only its record id does, which `fno agents spawn --dispatch-account <record>` resolves on the other side.
 That flag exists because `--account` is operator intent and claude-only by contract, while a cutover's whole point is landing on another harness.

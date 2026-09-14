@@ -36,8 +36,8 @@ Invocation:
         --channel-name <name>
 
 Both flags are required. ``--session-id`` is the Claude session this
-channel server is bound to (the fno agents dispatch layer sets this when
-constructing the ``--mcp-config`` argv for ``claude --bg``). ``--channel-name``
+channel server is bound to (the spawn layer sets this when constructing
+the ``--mcp-config`` argv for ``claude --bg``). ``--channel-name``
 is the routing handle external ``fno agents ask`` calls use.
 
 Logging: stderr is reserved for diagnostic output (warnings, info

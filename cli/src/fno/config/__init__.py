@@ -2032,7 +2032,7 @@ class DispatchBlock(BaseModel):
     """Autonomous-dispatch profile (nested under 'config.dispatch').
 
     Per-environment overlay of the in-tree harness-capability map
-    (`fno.agents.harness_map`): the shared `fno agents dispatch resolve` resolver reads
+    (`fno.agents.harness_map`): the shared `resolve_node_spawn` resolver reads
     these as the config rung between an explicit flag and the built-in default.
     All three are empty ("") = unset, so a fresh install resolves exactly as the
     built-ins (harness=claude, per-harness substrate, `/target --no-merge {id}`).

@@ -307,8 +307,8 @@ RUST_CLIENT_VERBS = frozenset(
         "compaction",
         # Read leaves over the packaged capability table and the merge-posture
         # family table (x-3873 change 2): the successors to the retired
-        # `fno agents dispatch capabilities`/`family`. Direct dispatch in
-        # client.rs (no daemon RPC); hidden `fno agents` surface. Parity-synced.
+        # dispatch capabilities/family query leaves (d-496680aa). Direct dispatch
+        # in client.rs (no daemon RPC); hidden `fno agents` surface. Parity-synced.
         "capabilities",
         "target-family",
     }

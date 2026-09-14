@@ -1611,7 +1611,7 @@ horizon makes both predicates true for one `LOW` reset. Defer wins that overlap:
 a near reset is waited out rather than churning harnesses, which is the policy
 the horizon exists to express.
 
-Shell dispatchers reach the same decision through `fno agents dispatch resolve
+Shell dispatchers reach the same decision through the spawn door (`fno agents spawn --node`
 --autonomous`, which folds the route into the resolved tuple and adds
 `route_action` / `route_account` / `route_source` / `route_retry_at`. Only the
 destination's record id crosses that boundary; `fno agents spawn

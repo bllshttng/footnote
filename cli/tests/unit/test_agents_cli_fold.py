@@ -20,13 +20,13 @@ def _commands(app) -> set[str]:
     return set(command.list_commands(click.Context(command)))
 
 
-def test_agents_registers_the_nine_folded_roots() -> None:
+def test_agents_registers_the_eight_folded_roots() -> None:
+    # x-3873 removed `dispatch`: one launch verb, and it is spawn (d-496680aa).
     from fno.agents.cli import agents_app
 
     assert {
         "autonomy",
         "claim",
-        "dispatch",
         "king",
         "mail",
         "mcp",
@@ -50,7 +50,6 @@ def test_old_agents_fold_spellings_forward_and_teach() -> None:
     for old, destination in (
         ("autonomy", "agents autonomy"),
         ("claim", "agents claim"),
-        ("dispatch", "agents dispatch"),
         ("king", "agents king"),
         ("mcp", "agents mcp"),
         ("restart", "agents restart"),

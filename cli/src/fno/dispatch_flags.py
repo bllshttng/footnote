@@ -120,7 +120,7 @@ def configured_dispatch_harness(
       ``dispatch.harness``                 deprecated one release; fallback rung
 
     Both dispatch doors read the stage table for this axis: ``resolve_dispatch``
-    (the seam behind dispatch-node.sh and ``fno agents dispatch resolve``) takes
+    (the seam behind the shell dispatchers and the node spawn resolver) takes
     the returned value as its config rung, and ``fno agents spawn`` reads the
     same ``provider`` field through its own profile merge, so a caller cannot
     get two answers for one node.

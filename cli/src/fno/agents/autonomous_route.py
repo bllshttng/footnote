@@ -1,10 +1,10 @@
 """One quota-aware route decision, shared by every autonomous launcher.
 
 Before this module the two autonomous target launchers disagreed: ``backlog
-advance`` could walk the active combo and land on another harness, while
-``fno agents dispatch`` could only defer or decline-to-defer on the Claude account
-pool. So the all-accounts-walled case terminated in a wait of up to a week
-while an idle Codex subscription sat there.
+advance`` could walk the active combo and land on another harness, while the
+retired ``agents dispatch`` verb (d-496680aa) could only defer or
+decline-to-defer on the Claude account pool. So the all-accounts-walled case
+terminated in a wait of up to a week while an idle Codex subscription sat there.
 
 :func:`select_autonomous_route` is the single seam. It returns one of four
 actions and, for ``cutover``, the complete destination tuple (record, harness,
@@ -354,7 +354,7 @@ def select_autonomous_route(
         # not in a caller because the picking incident (2026-08, recorded in the
         # dual-implementation inventory) happened when only ONE caller had the
         # check: identical fixtures deferred under `backlog advance` and
-        # launched under `fno agents dispatch`. The second launcher is gone
+        # launched under the retired dispatch verb. That launcher is gone
         # (x-e53e - everything dispatches through `fno agents spawn` now), and
         # this function stays the single seam every remaining caller reads.
         if not pinned and _healthy_alternate_exists(node_cwd):
