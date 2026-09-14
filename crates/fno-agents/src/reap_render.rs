@@ -180,6 +180,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 json!({"node": node, "harness": harness, "session_id": session_id})
             })
             .collect();
+        let nudge_json: Vec<Value> = summary
+            .open_pr_nudge
+            .iter()
+            .map(|(id, action)| json!({"id": id, "action": action}))
+            .collect();
         let holds: Vec<Value> = summary
             .holds
             .iter()
@@ -210,6 +215,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_pr_contradicts": triples(&summary.kept_pr_contradicts),
                 "kept_open_work": open_work,
                 "kept_open_do_row": open_do,
+                "kept_open_pr": pair(&summary.kept_open_pr),
                 "kept_planning_unclosed": planning_unclosed,
                 "kept_active": active,
                 "kept_transcript_unresolved": summary.kept_transcript_unresolved,
@@ -228,6 +234,8 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "holds": holds,
                 "hold_escalate_after_s": summary.hold_escalate_after_s,
                 "release_refused": summary.release_refused,
+                "open_pr_rows": summary.open_pr_rows,
+                "open_pr_nudge": nudge_json,
                 "dry_run": dry_run,
             })
         );
@@ -309,6 +317,18 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             .unwrap_or("");
         out.push_str(&format!(
             "  kept {id} (open do row on done node: {node}: {detail}){}\n",
+            hold_line(summary, id)
+        ));
+    }
+    for (id, node) in &summary.kept_open_pr {
+        let detail = summary
+            .holds
+            .iter()
+            .find(|h| h.id == *id)
+            .map(|h| h.detail.as_str())
+            .unwrap_or("");
+        out.push_str(&format!(
+            "  kept {id} (open pr: {node} {detail}){}\n",
             hold_line(summary, id)
         ));
     }
@@ -394,6 +414,9 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     }
     for (name, reason) in &summary.kept_receipts {
         out.push_str(&format!("  kept receipt {name} ({reason})\n"));
+    }
+    for (id, action) in &summary.open_pr_nudge {
+        out.push_str(&format!("  would nudge {id} ({action})\n"));
     }
     if dry_run {
         out.push_str("(dry-run: no changes made)\n");

@@ -2955,7 +2955,7 @@ fn run_node_route(rest: &[String]) -> i32 {
         let answer = match &graph {
             None => serde_json::json!({"state": "graph-unreadable"}),
             Some(g) => {
-                let verdict = fno_agents::gc_sweep::provenance_verdict(&entry, "", g, None);
+                let verdict = fno_agents::gc_sweep::provenance_verdict(&entry, "", g, None, None);
                 let node = verdict.route.node.clone();
                 let basis = format!(
                     "via {}",

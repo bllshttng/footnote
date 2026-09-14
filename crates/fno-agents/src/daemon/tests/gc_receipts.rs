@@ -94,8 +94,8 @@ pub(super) fn graph_read(
         pr_state.insert(node.to_string(), (None, 0, 0));
     }
     let mut open: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for (sid, node) in open_do {
-        open.entry(sid.to_ascii_lowercase())
+    for (slurp, node) in open_do {
+        open.entry(slurp.to_ascii_lowercase())
             .or_default()
             .push(node.to_string());
     }
@@ -108,6 +108,9 @@ pub(super) fn graph_read(
         plan_written: std::collections::HashMap::new(),
         statuses,
         pr_state,
+        pr_number: std::collections::HashMap::default(),
+        do_nodes: std::collections::HashMap::default(),
+        pr_reads: std::collections::HashMap::default(),
     })
 }
 

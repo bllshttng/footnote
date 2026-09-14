@@ -2726,6 +2726,52 @@ event_types:
           type: string
           description: "The sweep that confirmed this removal, such as roster-reap."
 
+  - name: pr_nudge_sent
+    description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports the runner's exit status."
+    sources: [daemon]
+    data:
+      required: [session_id, node, pr, action, attempt, delivered]
+      properties:
+        session_id:
+          type: string
+        node:
+          type: string
+        pr:
+          type: integer
+        action:
+          type: string
+          enum: [mail, resume]
+        attempt:
+          type: integer
+        delivered:
+          type: boolean
+
+  - name: pr_nudge_escalated
+    description: "The nudge ladder's attempt budget is spent with no session activity: one operator question was filed (deduplicated on the marker) and the ladder now waits for activity."
+    sources: [daemon]
+    data:
+      required: [session_id, node, pr]
+      properties:
+        session_id:
+          type: string
+        node:
+          type: string
+        pr:
+          type: integer
+
+  - name: pr_nudge_paused
+    description: "A recorded merge order pauses the nudge ladder for this session: no nudge is sent while the lead node named in the decision is not done. Emitted at most once per hour per session."
+    sources: [daemon]
+    data:
+      required: [session_id, node, pr]
+      properties:
+        session_id:
+          type: string
+        node:
+          type: string
+        pr:
+          type: integer
+
   - name: state_reap
     description: "The daemon applied configured retention to expendable state files. Emitted once on every periodic pass, including zero-candidate and disabled runs."
     sources: [daemon, test]

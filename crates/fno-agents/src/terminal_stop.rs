@@ -26,6 +26,7 @@
 //! unit-tested here (mirrors `gc.rs`: one decision, two triggers).
 
 use crate::paths::AgentsHome;
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// One parsed terminal-stop marker: the claude session uuid to stop and the
@@ -50,20 +51,21 @@ pub enum StopAction {
 /// Decide whether `finalize` should drop a terminal-stop marker. Pure.
 ///
 /// Returns the uuid to mark when ALL hold: the session is a footnote-spawned
-/// worker (`agent_self`), it is NOT loop-run-driven (`!driver_lib`), and the
-/// manifest carries a syntactically-valid claude session uuid. A `None`/empty/
-/// separator-bearing uuid is rejected so a malformed manifest can never steer
-/// the marker write outside the marker dir.
-pub fn should_mark(agent_self: bool, driver_lib: bool, uuid: Option<&str>) -> Option<&str> {
-    if !agent_self || driver_lib {
+/// worker (`agent_self`), it is NOT loop-run-driven (`!driver_lib`), the
+/// session's node carries no open PR (`!pr_open`), and the manifest carries
+/// a syntactically-valid claude session uuid. A `None`/empty/separator-
+/// bearing uuid is rejected so a malformed manifest can never steer the
+/// marker write outside the marker dir.
+pub fn should_mark(
+    agent_self: bool,
+    driver_lib: bool,
+    uuid: Option<&str>,
+    pr_open: bool,
+) -> Option<&str> {
+    if !agent_self || driver_lib || pr_open {
         return None;
     }
-    let uuid = uuid?;
-    if is_valid_uuid(uuid) {
-        Some(uuid)
-    } else {
-        None
-    }
+    uuid.filter(|u| is_valid_uuid(u))
 }
 
 /// Decide the sweep action for a marker given the roster lookup result: the
@@ -81,6 +83,47 @@ pub fn stop_decision(short: Option<String>) -> StopAction {
 /// else keeps the marker filename inside the marker dir (no `/`, `..`, NUL).
 fn is_valid_uuid(uuid: &str) -> bool {
     !uuid.is_empty() && uuid.len() <= 64 && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
+/// The open-PR fact at finalize time: `Some(reason)` when the session's PR
+/// (the manifest node's recorded `pr_number`, else the branch's PR for
+/// HEAD) is open, `None` when no open PR holds the session. An unreadable
+/// read reads as open - a kept session costs a slot; a stopped session
+/// strands a PR.
+pub fn open_pr_label(home: &AgentsHome, node: Option<&str>, cwd: &Path) -> Option<String> {
+    if let Some(id) = node.map(str::trim).filter(|s| !s.is_empty()) {
+        let entries = crate::gc_sweep::read_graph_entries_raw(home);
+        if let Some(entries) = entries {
+            if let Some(entry) = entries
+                .iter()
+                .find(|e| crate::graph_store::entry_id(e).is_some_and(|nid| nid == id))
+            {
+                let pr = entry.get("pr_number").and_then(Value::as_u64);
+                let merge_status = entry.get("merge_status").and_then(Value::as_str);
+                if let Some(pr) = pr {
+                    let open = merge_status.map(|m| m != "merged").unwrap_or(true);
+                    return open.then(|| format!("PR {pr} open"));
+                }
+            }
+        }
+    }
+    // No recorded pr_number (or the node/graph was unreadable): read the PR
+    // state for HEAD the way `gh_pr_url` does. OPEN holds; an UNREADABLE
+    // read holds too - a kept session costs a slot, a stopped one strands
+    // a PR.
+    let Some(payload) = crate::finalize::pr_info(cwd, None) else {
+        return Some("pr state unread; treating as open".to_string());
+    };
+    let Some(state) = payload.get("state").and_then(Value::as_str) else {
+        return Some("pr state unread; treating as open".to_string());
+    };
+    if state != "OPEN" {
+        return None;
+    }
+    match payload.get("number").and_then(Value::as_u64) {
+        Some(n) => Some(format!("PR {n} open")),
+        None => Some("pr state unread; treating as open".to_string()),
+    }
 }
 
 /// Write a marker file named by `uuid`, content = `reason`. Best-effort: the
@@ -153,32 +196,41 @@ mod tests {
 
     #[test]
     fn marks_spawned_non_driven_session() {
-        assert_eq!(should_mark(true, false, Some(UUID)), Some(UUID));
+        assert_eq!(should_mark(true, false, Some(UUID), false), Some(UUID));
     }
 
     #[test]
     fn operator_terminal_not_marked() {
         // No FNO_AGENT_SELF: an operator's own /target must stay parked (AC3-UI).
-        assert_eq!(should_mark(false, false, Some(UUID)), None);
+        assert_eq!(should_mark(false, false, Some(UUID), false), None);
     }
 
     #[test]
     fn loop_run_driven_not_marked() {
         // FNO_DRIVER_LIB set: the loop-run driver owns lifecycle (AC6-FR).
-        assert_eq!(should_mark(true, true, Some(UUID)), None);
+        assert_eq!(should_mark(true, true, Some(UUID), false), None);
+    }
+
+    #[test]
+    fn open_pr_session_not_marked() {
+        // The node's PR is open: a stopped session strands the PR.
+        assert_eq!(should_mark(true, false, Some(UUID), true), None);
     }
 
     #[test]
     fn missing_uuid_not_marked() {
-        assert_eq!(should_mark(true, false, None), None);
-        assert_eq!(should_mark(true, false, Some("")), None);
+        assert_eq!(should_mark(true, false, None, false), None);
+        assert_eq!(should_mark(true, false, Some(""), false), None);
     }
 
     #[test]
     fn separator_bearing_uuid_rejected() {
         // A malformed manifest must never write outside the marker dir.
-        assert_eq!(should_mark(true, false, Some("../../etc/passwd")), None);
-        assert_eq!(should_mark(true, false, Some("a/b")), None);
+        assert_eq!(
+            should_mark(true, false, Some("../../etc/passwd"), false),
+            None
+        );
+        assert_eq!(should_mark(true, false, Some("a/b"), false), None);
     }
 
     #[test]

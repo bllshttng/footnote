@@ -848,9 +848,28 @@ pub fn run_finalize(args: &[String]) -> i32 {
     let agent_self = std::env::var_os("FNO_AGENT_SELF").is_some();
     let driver_lib = std::env::var_os("FNO_DRIVER_LIB").is_some();
     let mut terminal_stop_marked = false;
-    if let Some(uuid) =
-        crate::terminal_stop::should_mark(agent_self, driver_lib, m.claude_transcript_id.as_deref())
-    {
+    // The open-PR gate: a session whose node's PR is open keeps its slot,
+    // so the marker waits for the merge. An unreadable read keeps the
+    // session (kept beats stranded). Read only for the sessions that could
+    // ever be marked: a spawn worker not driven by the loop library.
+    let open_pr = if agent_self && !driver_lib {
+        crate::terminal_stop::open_pr_label(
+            &crate::paths::AgentsHome::from_env(),
+            m.graph_node_id.as_deref(),
+            Path::new(&cwd),
+        )
+    } else {
+        None
+    };
+    if let Some(reason) = &open_pr {
+        eprintln!("finalize: terminal-stop marker skipped: {reason}");
+    }
+    if let Some(uuid) = crate::terminal_stop::should_mark(
+        agent_self,
+        driver_lib,
+        m.claude_transcript_id.as_deref(),
+        open_pr.is_some(),
+    ) {
         let agents_home = crate::paths::AgentsHome::from_env();
         match crate::terminal_stop::write_marker(&agents_home, uuid, &reason) {
             Ok(p) => {
@@ -1900,7 +1919,7 @@ fn valid_project_id(s: &str) -> bool {
 }
 
 /// Best-effort PR metadata for the current HEAD/branch through the REST reader.
-fn pr_info(cwd: &Path, number: Option<u64>) -> Option<Value> {
+pub(crate) fn pr_info(cwd: &Path, number: Option<u64>) -> Option<Value> {
     let mut command = Command::new("fno");
     command.args(["do", "pr", "info"]);
     if let Some(number) = number {

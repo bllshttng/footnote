@@ -162,6 +162,7 @@ pub mod pane_stop;
 pub mod paths;
 pub mod pi;
 pub mod plugin_install;
+pub mod pr_nudge;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provider;
@@ -988,6 +989,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `claude --bg` worker that finalize marked terminal was `claude stop`ped so
     // its slot frees instead of parking at an idle prompt forever.
     "bg_worker_terminal_stopped",
+    // Nudge ladder (daemon-emitted): a session the retirement sweep keeps on
+    // an open PR is mailed or resumed to drive the PR to merge; a stuck one
+    // escalates to the operator; a recorded merge order pauses the ladder.
+    "pr_nudge_sent",
+    "pr_nudge_escalated",
+    "pr_nudge_paused",
     "agent_spawn_failed",
     // A codex thread was auto-resumed with no reconstructible state-root grant
     // (x-f22f). The roots reach a spawn as an RPC param from the Python seam,

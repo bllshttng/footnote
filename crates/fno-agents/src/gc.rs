@@ -110,6 +110,16 @@ pub struct GcRow {
     /// instead of holding. Set only when the verb's ruling matched the row;
     /// a missing age is never quiet on any other path.
     pub release_quiet: bool,
+    /// The `(node, pr)` THIS session drives and the PR is still open:
+    /// the session has a `do` row on the open node, the node carries
+    /// `pr_number`, and its recorded `merge_status` is not `merged`.
+    /// The graph record is the whole open-PR fact - the sweep makes no
+    /// network call for an open node.
+    pub open_pr: Option<(String, u64)>,
+    /// The live newer peer on the same node has its own `do` row on the
+    /// node: the peer drives the PR, so this row's open-PR keep does not
+    /// apply and the ordinary release path answers.
+    pub peer_drives_pr: bool,
 }
 
 impl GcRow {
@@ -195,6 +205,10 @@ pub enum KeepReason {
     /// this session: settled work would be re-opened by the retirement's
     /// absence, so the row stays and the node is named.
     OpenDoRow { node: String },
+    /// The session's node carries an open PR (`pr_number` set, recorded
+    /// `merge_status` not `merged`): a retirement here strands the PR with
+    /// nothing left to drive it. The remedy is merge, not reap.
+    OpenPr { node: String, pr: u64 },
 }
 
 impl KeepReason {
@@ -217,6 +231,7 @@ impl KeepReason {
             KeepReason::TranscriptUnresolved => "transcript unresolved",
             KeepReason::GraphUnreadable => "graph unreadable",
             KeepReason::OpenDoRow { .. } => "open do row on done node",
+            KeepReason::OpenPr { .. } => "open pr",
         }
     }
 }
@@ -307,6 +322,22 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                             }),
                         ),
                     };
+                }
+            }
+            // The open-PR keep outranks every session-shaped release below:
+            // a terminal roster state, a parked node, or a live peer that
+            // does not drive the PR would strand a real PR with nothing
+            // left to drive it. The recorded-merge release cannot meet
+            // this arm, because merge_status merged means no open PR.
+            if let Some((node, pr)) = &row.open_pr {
+                if !row.peer_drives_pr {
+                    return (
+                        GcAction::Keep,
+                        Some(KeepReason::OpenPr {
+                            node: node.clone(),
+                            pr: *pr,
+                        }),
+                    );
                 }
             }
             // x-2774 changes 1, 3, 6, 8: open NODE state alone is not
@@ -547,6 +578,8 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
     // so an unused placeholder path satisfies the shared signature.
     let emitter = EventEmitter::new(std::path::PathBuf::new(), "daemon");
     let store = std::cell::RefCell::new(gc_sweep::HarnessStoreIndex::default());
+    // The rehearsal reads the same PR states the real arm would read, so its
+    // prediction holds when applied. Read-only; cached per PR per pass.
     let mut summary = gc_sweep::run(
         home,
         &emitter,
@@ -566,6 +599,8 @@ pub fn gc_sweep_dry_run(home: &AgentsHome, grace_secs: i64) -> gc_sweep::GcSumma
         .into_iter()
         .map(|row| (row.node, row.harness, row.session_id))
         .collect();
+    // The ladder's DRY-RUN plan: decisions only, no effect, no state write.
+    summary.open_pr_nudge = crate::pr_nudge::plan(home, &summary.open_pr_rows, grace_secs);
     summary
 }
 
@@ -934,6 +969,10 @@ pub fn maybe_retirement_sweep(
         let retain_days = crate::agents_config::reap_receipt_retain_days(&grace_cwd);
         let _ = state_file_sweep(&home, &emitter, &grace_cwd);
         let summary = gc_sweep(&home, &emitter, grace_secs, retain_days);
+        // Locked Decision 5: the nudge ladder rides the daemon's retire arm
+        // only, after the sweep that classified the open-PR rows. A manual
+        // verb run never nudges; its dry run only prints the plan.
+        crate::pr_nudge::run_ladder(&home, &emitter, &summary.open_pr_rows, grace_secs);
         unowned_sweeps(&home, &emitter, &grace_cwd);
         // The mux surface is one of the stores a reap must clear: the
         // default-flag prune closes an orphaned worker's tab on the retire
@@ -1728,6 +1767,8 @@ mod tests {
             node_merged: false,
             pid_gone: false,
             release_quiet: false,
+            open_pr: None,
+            peer_drives_pr: false,
         }
     }
 
@@ -2044,6 +2085,9 @@ mod tests {
             plan_written: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
             pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
+            pr_number: HashMap::new(),
+            do_nodes: HashMap::new(),
+            pr_reads: HashMap::new(),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -2156,6 +2200,9 @@ mod tests {
             plan_written: HashMap::new(),
             statuses: HashMap::from([("N1".to_string(), "done".to_string())]),
             pr_state: HashMap::from([("N1".to_string(), (None, 0, 0))]),
+            pr_number: HashMap::new(),
+            do_nodes: HashMap::new(),
+            pr_reads: HashMap::new(),
         }));
         let emitter = crate::events::EventEmitter::new(std::path::PathBuf::new(), "daemon");
         let stopped = Arc::new(AtomicBool::new(false));
@@ -2628,7 +2675,113 @@ mod tests {
             node_merged: false,
             pid_gone: false,
             release_quiet: false,
+            open_pr: None,
+            peer_drives_pr: false,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
+    }
+
+    /// The base open-PR row: a do-phase spawn row on an in_review node
+    /// whose PR is unmerged. `pr` and `node` parameterize the arms below.
+    fn open_pr_row(node: &str, status: &str, pr: u64) -> GcRow {
+        GcRow {
+            origin: Some("spawn".into()),
+            crowned: false,
+            work: WorkState::Open {
+                node: node.into(),
+                status: status.into(),
+            },
+            transcript_age_s: Some(10_000),
+            owns_worktree: true,
+            worktree_clean: None,
+            branch_merged: None,
+            planning: None,
+            planning_closed: Vec::new(),
+            planning_plan_written: Vec::new(),
+            planning_released: false,
+            confirm_hold: None,
+            session_terminal: None,
+            superseded_by_live_peer: None,
+            node_merged: false,
+            pid_gone: false,
+            release_quiet: false,
+            open_pr: Some((node.into(), pr)),
+            peer_drives_pr: false,
+        }
+    }
+
+    /// The keep outranks a terminal harness state: a stopped roster state
+    /// on an in_review node with an open PR must not release the row, or
+    /// the PR strands with nothing left to drive it.
+    #[test]
+    fn open_pr_keep_holds_a_terminal_session_without_a_pr_driver() {
+        let mut row = open_pr_row("x-node", "in_review", 1943);
+        row.session_terminal = Some("stopped".into());
+        row.transcript_age_s = Some(40);
+        let (action, reason) = gc_decide(&row, 900);
+        assert_eq!(action, GcAction::Keep);
+        assert_eq!(
+            reason,
+            Some(KeepReason::OpenPr {
+                node: "x-node".into(),
+                pr: 1943,
+            })
+        );
+    }
+
+    /// Every other release still answers to the keep: a live newer peer
+    /// that does NOT drive the PR, and a parked node.
+    #[test]
+    fn open_pr_keep_survives_a_non_driving_peer_and_a_parked_node() {
+        let mut row = open_pr_row("x-node", "in_review", 1943);
+        row.session_terminal = Some("stopped".into());
+        row.superseded_by_live_peer = Some("peer-b (created later)".into());
+        let (action, reason) = gc_decide(&row, 900);
+        assert_eq!(action, GcAction::Keep);
+        assert_eq!(
+            reason,
+            Some(KeepReason::OpenPr {
+                node: "x-node".into(),
+                pr: 1943,
+            })
+        );
+        let parked = open_pr_row("x-node", "deferred", 1943);
+        assert_eq!(
+            gc_decide(&parked, 900),
+            (
+                GcAction::Keep,
+                Some(KeepReason::OpenPr {
+                    node: "x-node".into(),
+                    pr: 1943,
+                })
+            )
+        );
+    }
+
+    /// The peer releases only when the PEER drives the PR: with a driving
+    /// peer the row falls through to the ordinary release path and retires
+    /// past the grace. A recorded merge empties open_pr, so the merged node
+    /// retires as today too.
+    #[test]
+    fn a_driving_peer_and_a_recorded_merge_release_the_row() {
+        let mut driven = open_pr_row("x-node", "in_review", 1943);
+        driven.peer_drives_pr = true;
+        driven.superseded_by_live_peer = Some("peer-b (created later)".into());
+        assert_eq!(gc_decide(&driven, 900), (GcAction::Retire, None));
+        let mut merged = open_pr_row("x-node", "in_review", 1943);
+        merged.node_merged = true;
+        merged.open_pr = None;
+        assert_eq!(gc_decide(&merged, 900), (GcAction::Retire, None));
+    }
+
+    /// The planning lane keeps precedence: a blueprint row that closed its
+    /// own planning assignment on an open-PR node retires past the grace -
+    /// the planner never drives the feature PR.
+    #[test]
+    fn a_closed_planner_row_on_an_open_pr_node_retires_as_today() {
+        let mut planner = open_pr_row("x-node", "in_review", 1943);
+        planner.planning = Some(vec![("x-node".into(), "in_review".into())]);
+        planner.planning_closed = vec!["x-node".into()];
+        assert_eq!(gc_decide(&planner, 900), (GcAction::Retire, None));
     }
 }

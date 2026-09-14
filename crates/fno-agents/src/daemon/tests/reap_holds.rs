@@ -4,7 +4,8 @@
 
 use super::gc_receipts::*;
 use super::*;
-use crate::gc_sweep::{self, GcSummary};
+use crate::gc_sweep::{self, GcSummary, GraphRead};
+use std::collections::HashMap;
 
 // ── x-e3cc: every hold carries an age, a basis and an escalation ─────────
 
@@ -852,5 +853,78 @@ fn the_release_refusal_names_the_unverified_gate() {
         crate::reap_release::row_bucket_in(&home, &dry, "ghost"),
         "no registry row names this handle"
     );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── the open-PR keep through the sweep ──────────────────────────────────────
+
+/// A stopped claude spawn row whose session has a do row on an in_review
+/// node carrying pr_number 1943 (merge_status unrecorded): the sweep keeps
+/// the row under `open pr`, projects a hold with a clock, and exposes the
+/// nudge-ladder row. A peer without a do row on the node changes nothing.
+#[test]
+fn ac1_hp_open_pr_keep_survives_a_terminal_state_through_the_sweep() {
+    let home = tmp_home("gc-open-pr");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 2 * 3600);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = claude_worker_row("pr-row", "cccc9999");
+        row.origin = Some("spawn".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+    let sid = "cccc9999-1111-2222-3333-444444444444";
+    let graph = Some(GraphRead {
+        index: HashMap::from([(
+            sid.to_string(),
+            vec![("x-node".to_string(), "in_review".to_string())],
+        )]),
+        work_index: HashMap::from([(
+            sid.to_string(),
+            vec![("x-node".to_string(), "in_review".to_string())],
+        )]),
+        statuses: HashMap::from([("x-node".to_string(), "in_review".to_string())]),
+        pr_state: HashMap::from([("x-node".to_string(), (None, 0, 0))]),
+        pr_number: HashMap::from([("x-node".to_string(), Some(1943))]),
+        do_nodes: HashMap::from([(
+            sid.to_string(),
+            std::collections::HashSet::from(["x-node".to_string()]),
+        )]),
+        ..Default::default()
+    });
+    // The roster reads stopped: the exact state that reaped seven rows on
+    // 2026-09-13 before the keep existed.
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("cccc9999", Some("stopped")),
+    ]);
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        graph,
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| true,
+    );
+    // The row handle is the short id when one is recorded.
+    assert_eq!(
+        summary.kept_open_pr,
+        vec![("cccc9999".to_string(), "x-node".to_string())],
+        "kept buckets: {:?}",
+        summary.kept_open_work
+    );
+    let hold = find_hold(&summary, "cccc9999");
+    assert_eq!(hold.reason, "open pr");
+    assert_eq!(hold.detail, "x-node #1943");
+    assert_eq!(summary.open_pr_rows.len(), 1, "{:?}", summary.open_pr_rows);
+    let ladder_row = &summary.open_pr_rows[0];
+    assert_eq!(ladder_row.node, "x-node");
+    assert_eq!(ladder_row.pr, 1943);
+    assert_eq!(ladder_row.session_id, sid);
+    // A stopped roster state reads as not live: the ladder's resume arm.
+    assert!(!ladder_row.live);
+    assert_eq!(summary.retired, vec![], "nothing retires");
     std::fs::remove_dir_all(home.root()).ok();
 }

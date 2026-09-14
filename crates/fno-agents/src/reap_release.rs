@@ -112,7 +112,7 @@ pub(crate) fn witness_refusal(home: &AgentsHome, hold: &gc_sweep::Hold) -> Optio
         let status = statuses
             .as_ref()
             .and_then(|s| s.get(node))
-            .map(|(status, _)| status.as_str())
+            .map(|(status, _, _)| status.as_str())
             .unwrap_or("unknown");
         let parked = crate::gc::INACTIVE_NODE_STATUSES.contains(&status);
         if status != "done" && !parked {

@@ -230,6 +230,13 @@ impl AgentsHome {
         self.root.join("terminal-stop")
     }
 
+    /// Directory of per-session nudge-ladder state (one JSON file per open-PR
+    /// session: attempts, last_nudge_at, escalated). Beside the terminal-stop
+    /// markers; the daemon's retire arm owns it.
+    pub fn pr_nudge_dir(&self) -> PathBuf {
+        self.root.join("pr-nudge")
+    }
+
     /// Operator override dir for detection manifests: a readable
     /// `<provider>.toml` here beats the bundled copy
     /// (`crate::manifest::load_manifest` resolution chain).
