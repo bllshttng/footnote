@@ -444,6 +444,7 @@ async fn granted_thread_puts_the_roots_on_every_turn_start() {
     for turn in turns {
         let policy = &turn["params"]["sandboxPolicy"];
         assert_eq!(policy["type"], "workspaceWrite");
+        assert_eq!(policy["networkAccess"], true);
         assert_eq!(policy["writableRoots"][0], "/Users/x/.fno");
         assert!(
             policy["writableRoots"]
