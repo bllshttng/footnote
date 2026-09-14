@@ -316,7 +316,9 @@ def _refusal(args: Sequence[str], *, reset: Optional[int], unavailable: bool = F
 
 
 def _gh_budget(payload: dict) -> dict:
-    return verb_call("gh-budget", payload, timeout=5)
+    # The budget ops ride the existing fleet-incident action as an argument
+    # (law d-fe66560a allows no new client action); the door is unchanged.
+    return verb_call("fleet-incident", payload, timeout=5)
 
 
 def admit(argv: Sequence[str]) -> Optional[str]:

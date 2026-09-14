@@ -101,39 +101,11 @@ shim forward-compat. stdout is one JSON decision; exit 0 = a decision
 (verdict allow or block), 2 = bad arguments.
 ";
 
-/// Full per-verb help for `gh-budget`: the budget's tuning knobs and its one
-/// writer rule are contract, not implementation detail.
-pub const GH_BUDGET_USAGE: &str = "\
-usage: fno-agents gh-budget   (one JSON payload on stdin, one JSON object on stdout)
-
-The machine-wide GitHub request budget. Ops:
-  {\"op\":\"admit\",\"argv\":[...]}    ask before one gh call goes out
-  {\"op\":\"refused\"}               record a real GitHub refusal (opens/keeps a fleet-wide backoff)
-  {\"op\":\"status\"}                read the ledger: points_60s, cap, backoff_remaining_s
-
-Cap: 450 points per 60s by default (half of GitHub's advertised 900-point
-REST secondary limit). Override per environment with
-FNO_GH_BUDGET_POINTS_PER_MIN. A GET or a GraphQL query costs 1 point; a
-content-creating request costs 5; version/help/config/alias and
-`api rate_limit` cost 0.
-
-Backoff schedule: a recorded refusal opens a fleet-wide backoff of 60s,
-doubling while refusals stay within 900s of each other, capped at 900s.
-During a backoff one request per 30s passes as a half-open probe.
-
-Writer rule: an op \"refused\" is only ever SENT when the failed call's
-stderr carries HTTP 403 or HTTP 429 (Python's _quota.record_refusal owns
-that gate). The local refusal line says \"rate limit\" so both existing
-classifiers back off, and never says HTTP 403, so a local refusal is never
-recorded as GitHub's.
-";
-
 /// The fuller help body for `verb`, when one exists above. `None` falls
 /// through to the one-line `verb_usage` entry.
 pub fn verb_help(verb: &str) -> Option<&'static str> {
     match verb {
         "loop-check" => Some(LOOP_CHECK_USAGE),
-        "gh-budget" => Some(GH_BUDGET_USAGE),
         _ => None,
     }
 }

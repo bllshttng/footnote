@@ -53,7 +53,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "law-match",
     "finalize",
     "fleet-incident",
-    "gh-budget",
     "graph-get",
     "grid",
     "help",
@@ -472,17 +471,22 @@ async fn run(args: Vec<String>) -> i32 {
     // writable even when the daemon is the thing wedged. Python's `fno agents
     // incident` adapter relays it; the admission gates call the library in
     // process. Same `==` dispatch + ALL_CLIENT_ACTIONS registration as
-    // `test-run`, so the parity tests stay in sync.
+    // `test-run`, so the parity tests stay in sync. The fleet GitHub request
+    // budget rides THIS action as its `gh-budget` argument (law d-fe66560a
+    // allows no new client action): an admit must answer before every gh
+    // call, including when the daemon is the thing wedged, so it dispatches
+    // here with no daemon RPC either.
     if verb == "fleet-incident" {
+        if args.get(1).map(String::as_str) == Some("gh-budget") {
+            return fno_agents::gh_budget::run_gh_budget(&args[2..]);
+        }
+        if args.len() < 2 {
+            match fno_agents::gh_budget::run_gh_budget_stdin_door() {
+                -1 => {}
+                code => return code,
+            }
+        }
         return fno_agents::fleet_incident::run_fleet_incident(&args[1..]);
-    }
-
-    // `gh-budget`: the machine-wide GitHub request budget (see gh_budget.rs
-    // doc). Direct dispatch, no daemon RPC: an admit must answer before every
-    // gh call, including when the daemon is the thing wedged, and the proxy
-    // shim crosses it on nearly every fleet gh call.
-    if verb == "gh-budget" {
-        return fno_agents::gh_budget::run_gh_budget(&args[1..]);
     }
 
     if verb == "compaction" {

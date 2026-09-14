@@ -3759,7 +3759,7 @@ event_types:
     consumers: [operator]
 
   - name: loop_check_graphql_standdown
-    description: "Emitted when a fire stands down instead of blocking via loop_check: the fleet GitHub request budget holds a live refusal backoff or an exhausted 60s point window (budget_cause names which; `fno-agents gh-budget status` reads the ledger), the primary GraphQL floor is breached, or both. It verified no PR state, so it has no fingerprint and must not be counted as a loop_check fire (an empty fingerprint would break the reverse-scan streak in read_prior_fires)."
+    description: "Emitted when a fire stands down instead of blocking via loop_check: the fleet GitHub request budget holds a live refusal backoff or an exhausted 60s point window (budget_cause names which; `fno-agents fleet-incident gh-budget status` reads the ledger), the primary GraphQL floor is breached, or both. It verified no PR state, so it has no fingerprint and must not be counted as a loop_check fire (an empty fingerprint would break the reverse-scan streak in read_prior_fires)."
     sources: [hook]
     data:
       required: [session_id, decision, standing_down, graphql_remaining, graphql_floor]

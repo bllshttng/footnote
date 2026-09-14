@@ -19,7 +19,7 @@ _REAL_BACKOFF_LIVE = _quota.backoff_live
 def quiet_budget(monkeypatch):
     """Keep every execute_graphql test off the real fleet ledger.
 
-    execute_graphql now admits against `fno-agents gh-budget`; a test that
+    execute_graphql now admits against `fno-agents fleet-incident gh-budget`; a test that
     skipped the stub would charge the operator's machine-wide budget (or trip
     over a live fleet backoff). Tests that exercise the budget re-stub admit
     themselves.
@@ -598,7 +598,7 @@ def test_a_real_gh_is_not_mistaken_for_a_console_script_shim(tmp_path):
 BUDGET_LINE = (
     "gh budget: fleet GitHub rate limit held locally (budget: 450/450 points "
     "in 60s | backoff 0s left); this command did not reach GitHub. Retry "
-    "after 1s. Ledger: fno-agents gh-budget status"
+    "after 1s. Ledger: fno-agents fleet-incident gh-budget status"
 )
 
 

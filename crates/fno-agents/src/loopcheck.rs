@@ -8625,7 +8625,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // cap, skips the probe entirely. The measured 2026-09-13 refusal window
     // kept 160 stand-downs alive by probing through them; a stand-down under
     // the ledger now spends ZERO GitHub requests. The ledger
-    // (`fno-agents gh-budget status`) is also the fleet-wide refusal memory:
+    // (`fno-agents fleet-incident gh-budget status`) is also the fleet-wide
+    // refusal memory:
     // every gh call this machine admits is stamped there, and a GitHub 403
     // any caller records opens the same fleet-wide backoff - the secondary
     // limit is per-USER, so one session's refusal must stand every member
@@ -8665,7 +8666,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             let cause: String = if secondary_refusal {
                 format!(
                     "the fleet GitHub request budget is holding calls ({}: {}/{} points in 60s, \
-                     backoff {}s left) - `fno-agents gh-budget status` reads the ledger",
+                     backoff {}s left) - `fno-agents fleet-incident gh-budget status` reads the \
+                     ledger",
                     budget_cause.unwrap_or("budget"),
                     budget.points_60s,
                     budget.cap,

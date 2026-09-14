@@ -295,13 +295,10 @@ RUST_CLIENT_VERBS = frozenset(
         # Running-process census (x-f188); the walker lives in census.rs.
         "census",
         # Durable fleet incident breaker (x-77db): direct dispatch in client.rs
-        # (no daemon RPC); public surface `fno agents incident`. Parity-synced.
+        # (no daemon RPC); public surface `fno agents incident`. The fleet
+        # GitHub request budget rides this action as its gh-budget argument
+        # (law d-fe66560a allows no new client action). Parity-synced.
         "fleet-incident",
-        # Machine-wide GitHub request budget: direct dispatch in client.rs (no
-        # daemon RPC - an admit must answer before every gh call, including
-        # when the daemon is the thing wedged); Python calls it via
-        # fno.rust_binary.verb_call. Parity-synced.
-        "gh-budget",
         # Fleet announcements (one bus line, per-session cursor): direct
         # dispatch in client.rs (no daemon RPC); the mail shim and the hook
         # scripts invoke the binary directly. Parity-synced.
@@ -550,8 +547,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",
-    "fleet-incident": "Durable fleet incident breaker (x-77db): stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it (exit 0 clear, 1 stopped or unavailable); check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches.",
-    "gh-budget": "Machine-wide GitHub request budget: one JSON payload on stdin ({op: admit|refused|status}), one JSON answer on stdout; admits every real gh call against one 60s point window and one fleet-wide refusal backoff (ledger at ~/.fno/locks/github-request-budget.json). Python calls it via fno.rust_binary.verb_call from pr/_quota.py, not `fno agents` routing.",
+    "fleet-incident": "Durable fleet incident breaker (x-77db): stop --reason T / clear --reason T write the machine-wide record; status [--json] reads it (exit 0 clear, 1 stopped or unavailable); check [--json] is the admission verdict (exit 0 clear, 90 stopped, 91 unavailable). The public surface is `fno agents incident`; the spawn/test/daemon gates read the file before their bypass branches. The fleet GitHub request budget rides this action as its gh-budget argument (one JSON payload on stdin, {op: admit|refused|status}; ledger at ~/.fno/locks/github-request-budget.json; called via fno.rust_binary.verb_call from pr/_quota.py).",
     "announce": "Fleet announcements: send --scope S [--subject T] [--expires 24h] [--urgent] reads the body on stdin and appends ONE kind=announce bus line (operator or crowned agent, 6/hour); read --session-id ID --boundary B renders unseen standing announcements once per session; status ID [--json] reads the sender's receipts (audience/landed/pending/woken/unreachable/late). The public surface is `fno agents mail team`; hooks call the binary directly.",
     "compaction": "Compaction stamps: mark --session <id> writes the PreCompact stamp the provider-cap actor reads (best-effort, always exits 0); status --session <id> reads the stamp against the transcript's own boundary. The hook calls the binary directly.",
     "capabilities": "One harness's config-independent capability contract (x-3873): <harness> [--json] prints map_version, harness, then that harness's table; an unknown harness exits 2 naming the declared list.",

@@ -21,12 +21,15 @@
 //! the operator's breaker (`fno agents incident`), and a disk fault must not
 //! refuse every gh call on the machine.
 //!
-//! Verb surface: `fno-agents gh-budget` takes one JSON payload on stdin (the
-//! `rust_binary.verb_call` door convention) and prints one JSON object. All
-//! three ops exit 0; the refusal is carried in the payload, never in the
-//! exit code, because `verb_call` raises on a nonzero exit.
+//! Verb surface: the ops ride the EXISTING `fleet-incident` action as its
+//! `gh-budget` argument (law d-fe66560a allows no new client action):
+//! `fno-agents fleet-incident gh-budget <<< '{"op":"admit","argv":[...]}'`.
+//! One JSON payload on stdin (the `rust_binary.verb_call` door convention),
+//! one JSON object on stdout. All three ops exit 0; the refusal is carried
+//! in the payload, never in the exit code, because `verb_call` raises on a
+//! nonzero exit.
 use serde_json::{json, Value};
-use std::io::Read;
+use std::io::{IsTerminal, Read};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -348,7 +351,7 @@ fn refusal_line(verdict: &Verdict) -> String {
     format!(
         "gh budget: fleet GitHub rate limit held locally ({cause}: {}/{} points in 60s | \
          backoff {}s left); this command did not reach GitHub. Retry after {}s. \
-         Ledger: fno-agents gh-budget status",
+         Ledger: fno-agents fleet-incident gh-budget status",
         verdict.points_60s, verdict.cap, verdict.retry_after_s, verdict.retry_after_s
     )
 }
@@ -472,10 +475,19 @@ pub fn snapshot(path: &Path, now: i64) -> Snapshot {
     }
 }
 
-/// Binary entry: one JSON payload on stdin, one JSON object on stdout,
-/// exit 0 for every op the payload names (the refusal rides in the payload,
-/// never in the exit code - verb_call raises on a nonzero exit).
-pub fn run_gh_budget(_args: &[String]) -> i32 {
+/// Binary entry under the `fleet-incident` action (law d-fe66560a allows no
+/// new client action): `fno-agents fleet-incident gh-budget [status]`, or the
+/// stdin door `verb_call("fleet-incident", {"op": ...})` takes. One JSON
+/// payload on stdin (the `rust_binary.verb_call` door convention), one JSON
+/// object on stdout. All three ops exit 0; the refusal is carried in the
+/// payload, never in the exit code, because `verb_call` raises on a nonzero
+/// exit. The bare `status` word answers without stdin, so the refusal prose
+/// can name a copy-pasteable command.
+pub fn run_gh_budget(args: &[String]) -> i32 {
+    if args == ["status"] {
+        print_status();
+        return 0;
+    }
     let mut buf = String::new();
     if std::io::stdin().read_to_string(&mut buf).is_err() {
         eprintln!("gh-budget: stdin read failed");
@@ -488,6 +500,45 @@ pub fn run_gh_budget(_args: &[String]) -> i32 {
             return 2;
         }
     };
+    dispatch_op(&payload)
+}
+
+/// The stdin door verb_call takes: `fno-agents fleet-incident` with the ops
+/// payload on stdin and NO argv. A payload naming a budget op dispatches
+/// here; anything else (a bare interactive `fno-agents fleet-incident`, a
+/// tty stdin, non-JSON stdin) falls through to the incident breaker's own
+/// behavior, which owns its usage error.
+pub fn run_gh_budget_stdin_door() -> i32 {
+    if std::io::stdin().is_terminal() {
+        return -1; // not ours: the caller falls through to the breaker
+    }
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
+        return -1;
+    }
+    let Ok(payload) = serde_json::from_str::<Value>(&buf) else {
+        return -1;
+    };
+    if payload.get("op").and_then(Value::as_str).is_none() {
+        return -1;
+    }
+    dispatch_op(&payload)
+}
+
+fn print_status() {
+    let s = snapshot(&ledger_path(), now_ms());
+    println!(
+        "{}",
+        json!({
+            "points_60s": s.points_60s,
+            "cap": s.cap,
+            "backoff_remaining_s": s.backoff_remaining_s,
+            "ledger": ledger_word(s.ledger),
+        })
+    );
+}
+
+fn dispatch_op(payload: &Value) -> i32 {
     let now = now_ms();
     match payload.get("op").and_then(Value::as_str) {
         Some("admit") => {
@@ -526,20 +577,14 @@ pub fn run_gh_budget(_args: &[String]) -> i32 {
             }
         },
         Some("status") => {
-            let s = snapshot(&ledger_path(), now);
-            println!(
-                "{}",
-                json!({
-                    "points_60s": s.points_60s,
-                    "cap": s.cap,
-                    "backoff_remaining_s": s.backoff_remaining_s,
-                    "ledger": ledger_word(s.ledger),
-                })
-            );
+            print_status();
             0
         }
         other => {
-            eprintln!("gh-budget: unknown op {other:?}; expected admit, refused, or status");
+            eprintln!(
+                "gh-budget: unknown op {other:?}; expected admit, refused, or status \
+                 (fno-agents fleet-incident gh-budget)"
+            );
             2
         }
     }

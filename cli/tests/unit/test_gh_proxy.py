@@ -289,7 +289,7 @@ def test_delegate_stamps_the_reentry_marker_into_the_exec_environment(monkeypatc
 BUDGET_LINE = (
     "gh budget: fleet GitHub rate limit held locally (budget: 2/2 points "
     "in 60s | backoff 0s left); this command did not reach GitHub. Retry "
-    "after 1s. Ledger: fno-agents gh-budget status"
+    "after 1s. Ledger: fno-agents fleet-incident gh-budget status"
 )
 
 
