@@ -245,13 +245,13 @@ def test_join_spawns_width_minus_one_workers_with_lead_hub(tmp_path, monkeypatch
         "band": "medium",
         "workers": 3,
         "workers_source": "explicit",
-        "spawned": ["jn-t-x-8d1d-1", "jn-t-x-8d1d-2"],
-        "lead": "jn-t-x-8d1d-1",
+        "spawned": ["jn-t-8d1d-1", "jn-t-8d1d-2"],
+        "lead": "jn-t-8d1d-1",
         # An unbanded plan degrades to joiner 2's shapeless spawn: no grid
         # call, the caller's default lane.
         "lanes": {
-            "jn-t-x-8d1d-1": shapeless,
-            "jn-t-x-8d1d-2": shapeless,
+            "jn-t-8d1d-1": shapeless,
+            "jn-t-8d1d-2": shapeless,
         },
     }
     assert len(calls) == 2
@@ -324,7 +324,7 @@ def test_join_writes_the_brief_file_into_the_holder_worktree(tmp_path, monkeypat
     _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
     join_node("x-8d1d", 3)
     brief = (tmp_path / "wt" / ".fno" / "join-briefs" / "x-8d1d.md").read_text()
-    assert "mail hub: jn-t-x-8d1d-1" in brief
+    assert "mail hub: jn-t-8d1d-1" in brief
     assert "task update x-8d1d" in brief
 
 
@@ -359,7 +359,7 @@ def test_zero_workers_still_spawns_one(tmp_path, monkeypatch):
     lead that was never spawned."""
     calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
     receipt = join_node("x-8d1d", 0)
-    assert receipt["spawned"] == ["jn-t-x-8d1d-1"]
+    assert receipt["spawned"] == ["jn-t-8d1d-1"]
     assert len(calls) == 1
 
 
@@ -400,8 +400,8 @@ def test_second_join_refuses_while_joiners_live(tmp_path, monkeypatch):
     calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
     reg = tmp_path / "registry.json"
     reg.write_text(json.dumps({"schema_version": 2, "agents": [
-        {"name": "jn-t-x-8d1d-1", "harness_session_id": "s-1", "status": "live"},
-        {"name": "jn-t-x-8d1d-2", "harness_session_id": "s-2", "status": "stopped"},
+        {"name": "jn-t-8d1d-1", "harness_session_id": "s-1", "status": "live"},
+        {"name": "jn-t-8d1d-2", "harness_session_id": "s-2", "status": "stopped"},
     ]}))
     monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
     monkeypatch.setattr(
@@ -411,7 +411,7 @@ def test_second_join_refuses_while_joiners_live(tmp_path, monkeypatch):
     with pytest.raises(JoinRefuse) as excinfo:
         join_node("x-8d1d", 5)
     assert excinfo.value.code == 5
-    assert "already joined by jn-t-x-8d1d-1" in excinfo.value.message
+    assert "already joined by jn-t-8d1d-1" in excinfo.value.message
     assert not calls  # refused before any spawn, brief untouched
 
 
@@ -422,7 +422,7 @@ def test_crashed_joiner_does_not_lock_the_node(tmp_path, monkeypatch):
     calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
     reg = tmp_path / "registry.json"
     reg.write_text(json.dumps({"schema_version": 2, "agents": [
-        {"name": "jn-t-x-8d1d-1", "harness_session_id": "s-dead", "status": "live"},
+        {"name": "jn-t-8d1d-1", "harness_session_id": "s-dead", "status": "live"},
     ]}))
     monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
     monkeypatch.setattr(
@@ -448,7 +448,7 @@ def test_join_allowed_when_no_live_joiner_rows(tmp_path, monkeypatch):
     calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
     reg = tmp_path / "registry.json"
     reg.write_text(json.dumps({"schema_version": 2, "agents": [
-        {"name": "jn-t-x-8d1d-1", "harness_session_id": "s-1", "status": "stopped"},
+        {"name": "jn-t-8d1d-1", "harness_session_id": "s-1", "status": "stopped"},
     ]}))
     monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
     receipt = join_node("x-8d1d", 5)
@@ -504,22 +504,22 @@ def test_join_spawns_one_worker_per_distinct_band(tmp_path, monkeypatch):
 
     monkeypatch.setattr(advance, "_grid_lane_for", _grid)
     receipt = join_node("x-8d1d", 5)
-    assert receipt["spawned"] == ["jn-t-x-8d1d-1", "jn-t-x-8d1d-2", "jn-t-x-8d1d-3"]
+    assert receipt["spawned"] == ["jn-t-8d1d-1", "jn-t-8d1d-2", "jn-t-8d1d-3"]
     # Highest band first; the lead carries it.
-    assert receipt["lead"] == "jn-t-x-8d1d-1"
+    assert receipt["lead"] == "jn-t-8d1d-1"
     assert picked == ["high", "medium", "low"]
     assert receipt["lanes"] == {
-        "jn-t-x-8d1d-1": {"band": "high", "harness": "claude", "model": "glm-x",
+        "jn-t-8d1d-1": {"band": "high", "harness": "claude", "model": "glm-x",
                        "sandbox": "off"},
         # The grid PICKED codex here, and the thread substrate is claude-only,
         # so the pick is unusable and reads as declined. That decline now
         # carries its reason too: it is the one most likely to puzzle a reader,
         # because the grid had no complaint of its own.
-        "jn-t-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
+        "jn-t-8d1d-2": {"band": "medium", "harness": None, "model": None,
                        "sandbox": "off",
                        "grid": "declined",
                        "grid_reason": "grid=harness-not-claude (codex)"},
-        "jn-t-x-8d1d-3": {"band": "low", "harness": "claude", "model": "glm-sm",
+        "jn-t-8d1d-3": {"band": "low", "harness": "claude", "model": "glm-sm",
                        "sandbox": "off"},
     }
     for call, name in zip(calls, receipt["spawned"]):
@@ -546,7 +546,7 @@ def test_band_count_capped_by_width_rule(tmp_path, monkeypatch):
     )
     receipt = join_node("x-8d1d", 3)
     assert receipt["width"] == 3
-    assert receipt["spawned"] == ["jn-t-x-8d1d-1", "jn-t-x-8d1d-2"]
+    assert receipt["spawned"] == ["jn-t-8d1d-1", "jn-t-8d1d-2"]
     assert [lane["band"] for lane in receipt["lanes"].values()] == ["high", "medium"]
     assert len(calls) == 2
 
@@ -572,11 +572,11 @@ def test_grid_declined_spawns_default_lane_and_records_it(tmp_path, monkeypatch)
         assert "--model" not in call["cmd"]
     declined = {"grid": "declined", "grid_reason": "grid=no-inventory-declared"}
     assert receipt["lanes"] == {
-        "jn-t-x-8d1d-1": {"band": "high", "harness": None, "model": None,
+        "jn-t-8d1d-1": {"band": "high", "harness": None, "model": None,
                        "sandbox": "off", **declined},
-        "jn-t-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
+        "jn-t-8d1d-2": {"band": "medium", "harness": None, "model": None,
                        "sandbox": "off", **declined},
-        "jn-t-x-8d1d-3": {"band": "low", "harness": None, "model": None,
+        "jn-t-8d1d-3": {"band": "low", "harness": None, "model": None,
                        "sandbox": "off", **declined},
     }
 
@@ -614,7 +614,7 @@ def test_lane_count_is_not_capped_by_the_number_of_distinct_bands(
 
     assert len(calls) == 4, "one distinct band must not cap the lane count at 1"
     assert receipt["spawned"] == [
-        "jn-t-x-8d1d-1", "jn-t-x-8d1d-2", "jn-t-x-8d1d-3", "jn-t-x-8d1d-4",
+        "jn-t-8d1d-1", "jn-t-8d1d-2", "jn-t-8d1d-3", "jn-t-8d1d-4",
     ]
     assert [lane["band"] for lane in receipt["lanes"].values()] == [
         "medium", "medium", "medium", "medium",
@@ -627,9 +627,9 @@ def test_banded_brief_carries_the_band_table(tmp_path, monkeypatch):
     _wire(monkeypatch, tmp_path, BANDED_PLAN)
     join_node("x-8d1d", 5)
     brief = (tmp_path / "wt" / ".fno" / "join-briefs" / "x-8d1d.md").read_text()
-    assert "| jn-t-x-8d1d-1 | high |" in brief
-    assert "| jn-t-x-8d1d-2 | medium |" in brief
-    assert "| jn-t-x-8d1d-3 | low |" in brief
+    assert "| jn-t-8d1d-1 | high |" in brief
+    assert "| jn-t-8d1d-2 | medium |" in brief
+    assert "| jn-t-8d1d-3 | low |" in brief
 
 
 def test_explicit_model_skips_the_band_grid(tmp_path, monkeypatch):
@@ -816,7 +816,7 @@ def test_flag_off_argv_matches_the_historical_shape(tmp_path, monkeypatch):
     assert calls[0]["cmd"][1:] == [
         "agents", "spawn", "--substrate", "thread",
         "--harness", "claude",
-        "--cwd", str(tmp_path / "wt"), "--name", "jn-t-x-8d1d-1",
+        "--cwd", str(tmp_path / "wt"), "--name", "jn-t-8d1d-1",
         f"/fno:execute waves {plan}",
     ]
 
@@ -1161,7 +1161,7 @@ def test_sandbox_on_caps_lanes_at_the_band_count(tmp_path, monkeypatch):
         "one distinct band under enforcement must yield one lane; more lanes "
         "would share a write policy and an empty deny_edit"
     )
-    assert receipt["spawned"] == ["jn-t-x-8d1d-1"]
+    assert receipt["spawned"] == ["jn-t-8d1d-1"]
 
 
 def test_sandbox_off_leaves_the_lane_count_uncapped(tmp_path, monkeypatch):
@@ -1176,7 +1176,7 @@ def test_sandbox_off_leaves_the_lane_count_uncapped(tmp_path, monkeypatch):
 
     assert len(calls) == 4
     assert receipt["spawned"] == [
-        "jn-t-x-8d1d-1", "jn-t-x-8d1d-2", "jn-t-x-8d1d-3", "jn-t-x-8d1d-4",
+        "jn-t-8d1d-1", "jn-t-8d1d-2", "jn-t-8d1d-3", "jn-t-8d1d-4",
     ]
 
 

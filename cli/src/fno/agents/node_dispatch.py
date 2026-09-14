@@ -124,15 +124,8 @@ def resolve_node_spawn(
     effective_verb: Optional[str] = None
     if isinstance(node, dict) and not is_reconcile:
         effective_verb = _node_effective_verb(node)
-    # x-84b2: the verb code resolves (and refuses) BEFORE the resolver, and
-    # the name mints ONCE here, before spawn, riding the receipt.
+    # x-84b2: the verb code resolves (and refuses) BEFORE the resolver.
     verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
-    agent_name = _worker_agent_name(
-        node_id,
-        node_slug,
-        source=source,
-        verb_code=verb_code,
-    )
     # --provider selects the account/record (or a bare kind like "claude"),
     # layer-separate from `harness` (the record's cli). NOT the launch harness:
     # defaulting it here once launched claude carrying codex syntax.
@@ -156,6 +149,15 @@ def resolve_node_spawn(
             harness = grid_harness
             grid_lane_route = grid_route_resolved
             grid_lane_account = grid_account_resolved
+    # x-84b2/x-57fe: the name mints ONCE here - after the lane/model consult,
+    # before spawn - so it carries the model tag, riding the receipt.
+    agent_name = _worker_agent_name(
+        node_id,
+        node_slug,
+        source=source,
+        verb_code=verb_code,
+        model=model,
+    )
 
     # x-4391/x-4be1: node_cwd precedence, so a cross-project dispatch reads
     # the DEPENDENT node's config; the same settings object feeds the resolver

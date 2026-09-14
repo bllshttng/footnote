@@ -1265,7 +1265,7 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
     assert cmd[:5] == ["fno-py", "agents", "spawn", "--harness", "claude"]
     assert "--cwd" in cmd and "/work/dir" in cmd
     assert "--fresh" not in cmd
-    assert cmd[-2] == "t-ab-2222aaaa"
+    assert cmd[-2] == "t-2222aaaa"
     assert cmd[-1] == "/target --no-merge ab-2222aaaa"  # no-merge rides as a token
     # subscription lane only - never the API-credit/-p lane.
     assert "-p" not in cmd and "--print" not in cmd and "--bare" not in cmd
@@ -1610,25 +1610,26 @@ def test_advance_resolver_error_is_non_fatal(iso, monkeypatch):
 
 
 def test_worker_agent_name_carries_verb_id_and_slug():
-    # Provenance-carrying name (x-84b2): [<source>-]<verb>-<node>-<slug>,
-    # degrading to ...-<node> when the node has no slug. An attended manual
-    # launch (source=None) carries no source segment.
+    # Provenance-carrying name (x-84b2): [<source>-]<verb>-<hex>-<slug>, with
+    # the node prefix stripped and the slug capped at 12 (x-57fe), degrading
+    # to ...-<hex> when the node has no slug. An attended manual launch
+    # (source=None) carries no source segment.
     assert adv._worker_agent_name("ab-2222aaaa", "cargo-bootstrapper") == \
-        "t-ab-2222aaaa-cargo-bootstrapper"
-    assert adv._worker_agent_name("ab-2222aaaa", None) == "t-ab-2222aaaa"
-    assert adv._worker_agent_name("ab-2222aaaa", "") == "t-ab-2222aaaa"
+        "t-2222aaaa-cargo"
+    assert adv._worker_agent_name("ab-2222aaaa", None) == "t-2222aaaa"
+    assert adv._worker_agent_name("ab-2222aaaa", "") == "t-2222aaaa"
     # Parity with the shell dispatchers (codex P2 / gemini HIGH, PR #525): an
     # unsanitized title fallback (caps/spaces/punct) must normalize identically,
-    # and a slug longer than the 30-char cut must truncate (graph slugs reach 48)
-    # so the Python name never diverges from dispatch-node.sh's.
+    # and a slug longer than the dispatch cut must truncate (graph slugs reach
+    # 48) so the Python name never diverges from dispatch-node.sh's.
     assert adv._worker_agent_name("ab-2222aaaa", "Cargo Bootstrapper!!") == \
-        "t-ab-2222aaaa-cargo-bootstrapper"
+        "t-2222aaaa-cargo"
     assert adv._worker_agent_name("ab-2222aaaa", "x" * 35) == \
-        "t-ab-2222aaaa-" + "x" * 30
+        "t-2222aaaa-" + "x" * 12
     # A sourced daemon dispatch stamps its origin first.
     assert adv._worker_agent_name(
         "ab-2222aaaa", "cargo-bootstrapper", source="ab", verb_code="bp"
-    ) == "ab-bp-ab-2222aaaa-cargo-bootstrapper"
+    ) == "ab-bp-2222aaaa-cargo"
 
 
 def test_worker_agent_name_qualifier_keeps_prefix_contract():
@@ -1636,10 +1637,10 @@ def test_worker_agent_name_qualifier_keeps_prefix_contract():
     # lands as bp; the bare default is t.
     assert adv._worker_agent_name(
         "x-7aa8abc1", "daily-pass", verb_code="bp"
-    ) == "bp-x-7aa8abc1-daily-pass"
+    ) == "bp-7aa8abc1-daily-pass"
     # A node declaring no verb keeps the manual t- name.
     assert adv._worker_agent_name("ab-2222aaaa", "cargo-bootstrapper") == \
-        "t-ab-2222aaaa-cargo-bootstrapper"
+        "t-2222aaaa-cargo"
 
 
 def test_spawn_worker_declared_verb_lands_in_name(monkeypatch):
@@ -1657,7 +1658,7 @@ def test_spawn_worker_declared_verb_lands_in_name(monkeypatch):
     # vocabulary refuses for unlisted ones.
     adv._spawn_worker("x-7aa8abc1", None, "daily-pass", verb="/think")
     name = captured["cmd"][-2]
-    assert name.startswith("th-x-7aa8abc1-")
+    assert name.startswith("th-7aa8abc1-")
 
 
 def test_spawn_worker_name_includes_slug(monkeypatch):
@@ -1672,7 +1673,7 @@ def test_spawn_worker_name_includes_slug(monkeypatch):
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker("ab-2222aaaa", None, "cargo-bootstrapper")
-    assert captured["cmd"][-2] == "t-ab-2222aaaa-cargo-bootstrapper"
+    assert captured["cmd"][-2] == "t-2222aaaa-cargo"
 
 
 def test_spawn_worker_name_collision_raises_already_running(monkeypatch):
@@ -1723,7 +1724,7 @@ def test_spawn_worker_receipt_carries_the_registered_name(monkeypatch):
         receipt=receipt,
     )
     minted = captured["cmd"][captured["cmd"].index("--name") + 1]
-    assert minted == "ab-bp-x-7aa8abc1-daily-pass"
+    assert minted == "ab-bp-7aa8abc1-daily-pass"
     assert receipt["agent_name"] == minted
 
 
@@ -3337,7 +3338,7 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
     assert len(calls) == 1  # exactly one worker launch requested
     name = calls[0][calls[0].index("--name") + 1]
     assert re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name), name
-    assert name == f"ab-bp-{node_id}-path-consolidation-wave-0-del"
+    assert name == f"ab-bp-{node_id}-path"
 
 
 def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypatch):
@@ -3354,6 +3355,13 @@ def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypat
     }
     monkeypatch.setattr(adv, "_next_node", lambda project: node)
     monkeypatch.setattr("fno.claims.core.machine_id", lambda: "")
+    # The grid consult (fno-agents route-slot) precedes the mint (x-57fe moved
+    # the mint after it); the refusal-under-test is naming, so the consult is
+    # stubbed out and the fail-closed lambda below keeps naming verbs only.
+    monkeypatch.setattr(
+        adv, "_grid_lane_for",
+        lambda *a, **k: (None, None, None, None, "stubbed"),
+    )
     monkeypatch.setattr(
         adv.subprocess, "run", lambda cmd, *a, **k: (_naming_passthrough(cmd, **k) or pytest.fail("must not spawn"))
     )
@@ -3376,20 +3384,20 @@ def test_duplicate_dispatch_converges_on_one_dedup_name():
     # An exact expectation, not f(x) == f(x): a tautology holds for any
     # deterministic implementation, including one that returns "".
     assert adv._worker_agent_name(*args) == (
-        "t-regready-pipeline-2c4f9a1b3d-path-consolidation-wave-0-dele"
+        "t-regready-pipeline-2c4f9a1b3d-path"
     )
     # A different source stays distinct (G4 de-stub never collides).
     assert adv._worker_agent_name(*args) != adv._worker_agent_name(*args, source="rd")
 
 
 def test_filed_specimen_names_remain_byte_for_byte():
-    """The 43/45-char specimens from the node fit; x-84b2 moves the shape."""
+    """The 43/45-char specimens from the node fit; x-57fe moves the shape."""
     assert adv._worker_agent_name("x-8096", "path-consolidation-wave-0-delegate") == (
-        "t-x-8096-path-consolidation-wave-0-dele"
+        "t-8096-path"
     )
     assert adv._worker_agent_name(
         "x-8096", "path-consolidation-wave-0-delegate", source="rd"
-    ) == ("rd-t-x-8096-path-consolidation-wave-0-dele")
+    ) == ("rd-t-8096-path")
 
 
 # ---------------------------------------------------------------------------

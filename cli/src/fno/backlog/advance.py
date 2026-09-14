@@ -1186,10 +1186,11 @@ def _worker_agent_name(
     *,
     source: Optional[str] = None,
     verb_code: str = "t",
+    model: Optional[str] = None,
 ) -> str:
-    """Provenance-carrying bg worker name ``[<source>-]<verb>-<node>-<slug>``;
+    """Provenance-carrying bg worker name ``[<source>-]<verb>-<hex>-<slug>-<model>``;
     raises AgentNameError when the identity cannot be represented."""
-    return dispatch_agent_name(source, verb_code, node_id, slug=node_slug)
+    return dispatch_agent_name(source, verb_code, node_id, slug=node_slug, model=model)
 
 
 def _refuse_repeated_dead_dispatch(
@@ -2406,10 +2407,16 @@ def _live_joiner_names(node_id: str) -> list[str]:
         return []
     legacy_prefix = f"j-{node_id}-"
     canonical_prefix = f"jn-t-{node_id}-"
+    # x-57fe: the mint emits the node hex without its prefix, so the live
+    # probe answers to both spellings of the joiner lead.
+    prefixes = [legacy_prefix, canonical_prefix]
+    node_hex = node_id.rpartition("-")[2] if "-" in node_id else ""
+    if node_hex and node_hex != node_id:
+        prefixes += [f"j-{node_hex}-", f"jn-t-{node_hex}-"]
     candidates = [
         (str(row.get("name")), str(row.get("harness_session_id") or ""))
         for row in reg.get("agents", [])
-        if str(row.get("name", "")).startswith((legacy_prefix, canonical_prefix))
+        if str(row.get("name", "")).startswith(tuple(prefixes))
         and row.get("status") == "live"
     ]
     if not candidates:
@@ -2435,6 +2442,7 @@ def _sandbox_brief_section(
     worker_bands: list[str],
     policies: dict,
     sandbox_on: bool,
+    names: dict,
 ) -> str:
     """The brief paragraph naming each worker's file set, so a refused write
     reads as a reason and not as a broken machine."""
@@ -2445,16 +2453,17 @@ def _sandbox_brief_section(
     for k, band in enumerate(worker_bands, start=1):
         pol = policies.get(band)
         verdict = pol.verdict if pol else "unevaluated"
+        worker = names.get(k) or f"jn-t-{node_id}-{k}"
         if pol is not None and pol.verdict == "enforced":
             any_policy = True
             lines.append(
-                f"- jn-t-{node_id}-{k} (band {band}) may write: "
+                f"- {worker} (band {band}) may write: "
                 f"{', '.join(pol.allow_write or ())}. A write outside it is "
                 f"refused at the Edit/Write layer and by the OS sandbox."
             )
         else:
             lines.append(
-                f"- jn-t-{node_id}-{k} (band {band or 'unbanded'}) is NOT "
+                f"- {worker} (band {band or 'unbanded'}) is NOT "
                 f"narrowed ({verdict}); the sandbox layer is off for it."
             )
     return "\n".join(lines) if any_policy else ""
@@ -2632,7 +2641,18 @@ def _join_node(
         worker_bands = [""] * count
     policies = render_join_write_policy(graph, worker_bands) if sandbox_on else {}
 
-    lead = f"jn-t-{node_id}-1"
+    # x-84b2: joiner names are minted once through the canonical bridge -
+    # jn-t-<hex>-<ordinal> (x-57fe), the operator-verb source stamped so a
+    # joiner is distinguishable from an autonomous dispatch. The lead IS the
+    # first minted name, never a hand-built sibling of it.
+    try:
+        joiner_names = {
+            k: dispatch_agent_name("jn", "t", node_id, slug=str(k))
+            for k in range(1, len(worker_bands) + 1)
+        }
+    except AgentNameError as exc:
+        raise JoinRefuse(6, f"joiner name unmintable: {exc}") from exc
+    lead = joiner_names[1]
     # The joiner brief rides a FILE, not only TARGET_BRIEF: a daemon-forked
     # worker inherits the claude daemon's env (x-6de8), so the env export in
     # the spawn below reaches panes but not this lane's serving sessions.
@@ -2640,16 +2660,6 @@ def _join_node(
     # table is the band's durable channel for the same reason.
     brief_dir = Path(worktree) / ".fno" / "join-briefs"
     try:
-        # x-84b2: joiner names are minted once through the canonical bridge -
-        # jn-t-<node>-<ordinal>, the operator-verb source stamped so a joiner
-        # is distinguishable from an autonomous dispatch.
-        try:
-            joiner_names = {
-                k: dispatch_agent_name("jn", "t", node_id, slug=str(k))
-                for k in range(1, len(worker_bands) + 1)
-            }
-        except AgentNameError as exc:
-            raise JoinRefuse(6, f"joiner name unmintable: {exc}") from exc
         brief_dir.mkdir(parents=True, exist_ok=True)
         band_table = ""
         if bands:
@@ -2695,7 +2705,7 @@ def _join_node(
             f"{band_table}\n"
         )
         sandbox_section = _sandbox_brief_section(
-            node_id, worker_bands, policies, sandbox_on
+            node_id, worker_bands, policies, sandbox_on, joiner_names
         )
         if sandbox_section:
             # Appended only when present: with the flag off (or no enforced
@@ -2739,7 +2749,7 @@ def _join_node(
         name = joiner_names[k]
         brief = (
             f"lead joiner of {node_id}: you are the mail hub for the {node_id} "
-            f"joiners (jn-t-{node_id}-*)"
+            f"joiners ({lead} and siblings)"
             if k == 1
             else f"joiner of {node_id}: mail hub is {lead}"
         ) + (

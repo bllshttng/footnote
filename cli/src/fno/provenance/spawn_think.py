@@ -708,7 +708,7 @@ def _think_output_path(
 # ---------------------------------------------------------------------------
 
 
-def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None) -> str:
+def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REASON_BIRTH, invocation_suffix: Optional[str] = None, model: Optional[str] = None) -> str:
     """Provenance-carrying bg worker name, scoped by trigger reason.
 
     x-84b2 shape: ``th-th-<node-id>[-<reason>]-<slug>`` - the spawn_think
@@ -735,6 +735,7 @@ def _worker_agent_name(node_id: str, node_slug: Optional[str], reason: str = REA
         qualifier=None if reason == REASON_BIRTH else reason,
         slug=node_slug,
         discriminator=invocation_suffix,
+        model=model,
     )
 
 
@@ -758,7 +759,7 @@ def _spawn_think_worker(
     (``--fresh``). Returns the spawn receipt's short_id. Raises
     SpawnAlreadyRunning on a name-collision and SpawnError otherwise.
     """
-    agent_name = _worker_agent_name(node_id, node_slug, reason, invocation_suffix)
+    agent_name = _worker_agent_name(node_id, node_slug, reason, invocation_suffix, model=model)
     root = Path(node_cwd) if node_cwd else None
     try:
         settings_obj = _settings_for(root)
