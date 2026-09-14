@@ -17,10 +17,24 @@ from pathlib import Path
 import pytest
 
 from fno.agents.stale_escalate import dedupe_key
-from fno.king.escalate import escalate, question_text
+from fno.king.escalate import escalate
 from fno.outstanding.core import read_open_questions, read_question_events
 
 STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
+
+
+def _fake_render(ids, key, reason, *, live=None, unknown_reason=None) -> dict:
+    """The renderer runs in the fno-agents crate; the fake keeps its
+    contract where the fold tests depend on it: the marker+key leads."""
+    return {
+        "ok": True,
+        "question": (
+            f"[king-escalation:{key}] The king stopped on {len(ids)} board "
+            f"row(s) nothing is clearing: {', '.join(ids)}. "
+            f"Reason given: {reason}. body"
+        ),
+        "mail": f"A crown under yours stopped on {len(ids)} rows. Reason given: {reason}.",
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +44,13 @@ def isolate_question_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         lambda: tmp_path / "questions.jsonl",
         raising=False,
     )
+
+
+@pytest.fixture(autouse=True)
+def crate_render_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the crate round-trip for every fold test, as
+    test_outstanding.py stubs _law_match (x-ff27)."""
+    monkeypatch.setattr("fno.king.escalate._render", _fake_render)
 
 
 def _run(root: Path, ids: list[str], reason: str = "NoProgress") -> tuple[str, str]:
@@ -128,30 +149,60 @@ def test_the_key_ignores_order_and_repeats(tmp_path: Path) -> None:
     assert dedupe_key(["a"]) != dedupe_key(["a", "b"])
 
 
-def test_an_empty_stalled_set_never_reads_as_a_clean_board(tmp_path: Path) -> None:
-    """An unreadable board escalates with no ids. The text must say so.
-
-    Absence has two explanations. A question that named zero rows and stopped
-    there would be indistinguishable from a board with nothing on it, which is
-    the one state that must never produce a question at all.
+def test_a_refused_render_raises_and_touches_no_question(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refusal is the gate speaking (x-ff27): the renderer refuses an
+    empty set, and the fold must never run for it. The channel's empty
+    branch closes open asks, so reaching it with a refused set would read a
+    refused board as a clean one.
     """
-    _, qid = _run(tmp_path, [], reason="NoProgress")
-    (question,) = read_open_questions(tmp_path)
+    from fno.events import operator_question
+    from fno.outstanding.core import append_question_event
 
-    assert question.id == qid
-    assert "could not read" in question.question
-    assert "clean" not in question.question
+    seeded = "q-seeded01"
+    append_question_event(
+        operator_question(
+            question_id=seeded,
+            question="[king-escalation:seeded] seeded open row",
+            session_id="k-seed",
+            cwd=str(tmp_path),
+            ask="decide",
+            source="daemon",
+        ),
+        tmp_path,
+    )
+    monkeypatch.setattr(
+        "fno.king.escalate._render",
+        lambda *a, **k: {
+            "ok": False,
+            "message": "king escalation refused: the stalled set is empty",
+        },
+    )
+    with pytest.raises(ValueError, match="king escalation refused"):
+        _run(tmp_path, [])
+
+    remaining = [q.id for q in read_open_questions(tmp_path)]
+    assert remaining == [seeded], "the refused escalation closed nothing, asked nothing"
 
 
-def test_the_question_names_the_rows_and_carries_the_key() -> None:
-    key = dedupe_key(STALLED)
-    text = question_text(STALLED, key, "NoProgress")
+def test_the_fold_renders_with_the_dedupe_key_of_its_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The crate renders; this file pins the seam: escalate hands the
+    renderer the deduped ids and the key the marker carries."""
+    seen: dict = {}
 
-    assert "undispatched:x-1234" in text
-    assert "undispatched:x-5678" in text
-    assert f"[king-escalation:{key}]" in text
-    # The operator's actual decision hinges on this: the king is GONE.
-    assert "exited" in text
+    def rec(ids, key, reason, **k):
+        seen.update(ids=ids, key=key, reason=reason)
+        return _fake_render(ids, key, reason, **k)
+
+    monkeypatch.setattr("fno.king.escalate._render", rec)
+    _run(tmp_path, list(reversed(STALLED)))
+
+    assert seen["ids"] == sorted(STALLED)
+    assert seen["key"] == dedupe_key(STALLED)
+    assert seen["reason"] == "NoProgress"
 
 
 def test_an_unreadable_store_is_not_an_empty_one(tmp_path: Path) -> None:
