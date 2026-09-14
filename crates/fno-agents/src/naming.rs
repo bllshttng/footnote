@@ -16,6 +16,9 @@ use std::sync::OnceLock;
 pub const MAX_LEN: usize = 64;
 /// Per-component cap for human-readable text.
 pub const SLUG_CAP: usize = 30;
+/// Dispatch-form slug cap (x-57fe): a worker name must stay readable in a
+/// narrow terminal, so the human slug gives up more room to the model tag.
+pub const DISPATCH_SLUG_CAP: usize = 12;
 
 const CODES_YAML: &str = include_str!("naming-codes.yaml");
 
@@ -24,6 +27,7 @@ struct RawCodes {
     sources: Vec<String>,
     verbs: Vec<String>,
     word_codes: std::collections::HashMap<String, String>,
+    model_codes: std::collections::HashMap<String, String>,
     provenance: Vec<ProvenanceRow>,
 }
 
@@ -38,6 +42,7 @@ pub struct Codes {
     pub sources: HashSet<String>,
     pub verbs: HashSet<String>,
     pub word_codes: std::collections::HashMap<String, String>,
+    pub model_codes: std::collections::HashMap<String, String>,
     pub provenance: Vec<(String, String, String)>,
 }
 
@@ -49,6 +54,7 @@ fn codes() -> &'static Codes {
             sources: raw.sources.into_iter().collect(),
             verbs: raw.verbs.into_iter().collect(),
             word_codes: raw.word_codes,
+            model_codes: raw.model_codes,
             provenance: raw
                 .provenance
                 .into_iter()
@@ -141,7 +147,59 @@ pub fn slug_component(raw: Option<&str>, cap: usize) -> String {
     s
 }
 
-/// Build `<prefix>-<node_id>[-<qualifier>][-<slug>][-<discriminator>]`.
+/// The short per-model name tag (x-57fe): a known key in `model_codes`
+/// matched longest-first as a substring of the lowered model, else the first
+/// 8 alphanumeric characters. `None` for a blank model.
+pub fn model_code_for(model: Option<&str>) -> Option<String> {
+    let m = model?.trim();
+    if m.is_empty() {
+        return None;
+    }
+    let lowered = m.to_lowercase();
+    let mut keys: Vec<(&String, &String)> = codes().model_codes.iter().collect();
+    keys.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(b.0)));
+    for (k, v) in keys {
+        if lowered.contains(k.as_str()) {
+            return Some(v.clone());
+        }
+    }
+    let squeezed: String = lowered
+        .chars()
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        .collect();
+    let mut tag: String = squeezed.chars().take(8).collect();
+    if tag.is_empty() {
+        tag.push('m');
+    }
+    Some(tag)
+}
+
+/// A node-shaped identity (`x-4129`) emits its bare hex: every row in a
+/// dispatch shares the prefix, so the name spends those bytes on the model
+/// tag instead (x-57fe).
+fn node_hex(identity: &str) -> Option<&str> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^[a-z][a-z0-9]*-([0-9a-f]+)$").unwrap());
+    re.captures(identity)
+        .and_then(|c| c.get(1))
+        .map(|m| m.as_str())
+}
+
+/// Truncate a sanitized slug at the last hyphen at or under `cap`; a
+/// hyphenless slug truncates hard.
+fn cut_slug(raw: Option<&str>, cap: usize) -> String {
+    let full = slug_component(raw, usize::MAX);
+    if full.chars().count() <= cap {
+        return full;
+    }
+    let taken: String = full.chars().take(cap).collect();
+    match taken.rfind('-') {
+        Some(i) if i > 0 => taken[..i].trim_end_matches('-').to_string(),
+        _ => taken.trim_end_matches('-').to_string(),
+    }
+}
+
+/// Build `<prefix>-<node_hex>[-<qualifier>][-<slug>][-<model>][-<discriminator>]`.
 /// Required identity never shaves; only the human slug gives way.
 pub fn agent_name(
     prefix: &str,
@@ -149,17 +207,26 @@ pub fn agent_name(
     slug: Option<&str>,
     qualifier: Option<&str>,
     discriminator: Option<&str>,
+    model: Option<&str>,
 ) -> Result<String, NameError> {
     let prefix = prefix.trim();
     let node_id = node_id.trim();
     let qualifier = qualifier.unwrap_or("").trim();
+    let model_code = model_code_for(model).unwrap_or_default();
     let disc = slug_component(discriminator, SLUG_CAP);
 
-    let required_parts: Vec<&str> = [prefix, node_id, qualifier, disc.as_str()]
-        .iter()
-        .filter(|p| !p.is_empty())
-        .copied()
-        .collect();
+    let node_disp = node_hex(node_id).unwrap_or(node_id);
+    let required_parts: Vec<&str> = [
+        prefix,
+        node_disp,
+        qualifier,
+        model_code.as_str(),
+        disc.as_str(),
+    ]
+    .iter()
+    .filter(|p| !p.is_empty())
+    .copied()
+    .collect();
     if required_parts.is_empty() {
         return Err(NameError::refused(
             "agent name needs at least a prefix or a node id",
@@ -177,13 +244,16 @@ pub fn agent_name(
         if !qualifier.is_empty() {
             detail.push_str(&format!(" qualifier='{}'", qualifier));
         }
+        if !model_code.is_empty() {
+            detail.push_str(&format!(" model='{}'", model_code));
+        }
         if !disc.is_empty() {
             detail.push_str(&format!(" discriminator='{}'", disc));
         }
         return Err(NameError::refused(detail));
     }
 
-    let mut human = slug_component(slug, SLUG_CAP);
+    let mut human = cut_slug(slug, SLUG_CAP);
     if !human.is_empty() {
         let avail = MAX_LEN.saturating_sub(required.len() + 1);
         human = human.chars().take(avail).collect();
@@ -192,12 +262,19 @@ pub fn agent_name(
         }
     }
 
-    let name = [prefix, node_id, qualifier, human.as_str(), disc.as_str()]
-        .iter()
-        .filter(|p| !p.is_empty())
-        .copied()
-        .collect::<Vec<&str>>()
-        .join("-");
+    let name = [
+        prefix,
+        node_disp,
+        qualifier,
+        human.as_str(),
+        model_code.as_str(),
+        disc.as_str(),
+    ]
+    .iter()
+    .filter(|p| !p.is_empty())
+    .copied()
+    .collect::<Vec<&str>>()
+    .join("-");
     let ok = name.len() <= MAX_LEN
         && name
             .chars()
@@ -227,8 +304,10 @@ pub fn verb_code_for(word: Option<&str>) -> Result<String, NameError> {
     })
 }
 
-/// Build `[<source>-]<verb>-<identity>[-...]`. `source` None is the attended
-/// manual form; unknown codes raise rather than fabricating provenance.
+/// Build `[<source>-]<verb>-<hex>[-<qualifier>][-<slug>][-<model>][-<disc>]`.
+/// `source` None is the attended manual form; unknown codes raise rather than
+/// fabricating provenance. The dispatch form caps the human slug at
+/// [`DISPATCH_SLUG_CAP`] and carries the model tag (x-57fe).
 pub fn dispatch_agent_name(
     source: Option<&str>,
     verb: &str,
@@ -236,6 +315,7 @@ pub fn dispatch_agent_name(
     slug: Option<&str>,
     qualifier: Option<&str>,
     discriminator: Option<&str>,
+    model: Option<&str>,
 ) -> Result<String, NameError> {
     let v = verb.trim();
     if !dispatch_verbs().contains(v) {
@@ -244,20 +324,28 @@ pub fn dispatch_agent_name(
             verb
         )));
     }
+    if let Some(s) = source {
+        let s = s.trim();
+        if !dispatch_sources().contains(s) {
+            return Err(NameError::refused(format!(
+                "unknown dispatch source '{}'",
+                source.unwrap_or("")
+            )));
+        }
+    }
     let prefix = match source {
         None => v.to_string(),
-        Some(s) => {
-            let s = s.trim();
-            if !dispatch_sources().contains(s) {
-                return Err(NameError::refused(format!(
-                    "unknown dispatch source '{}'",
-                    source.unwrap_or("")
-                )));
-            }
-            format!("{}-{}", s, v)
-        }
+        Some(s) => format!("{}-{}", s.trim(), v),
     };
-    agent_name(&prefix, identity, slug, qualifier, discriminator)
+    let slug = cut_slug(slug, DISPATCH_SLUG_CAP);
+    agent_name(
+        &prefix,
+        identity,
+        Some(&slug),
+        qualifier,
+        discriminator,
+        model,
+    )
 }
 
 /// The `fno agents name` assembly: `--verb`/`--source` select the dispatch
@@ -271,6 +359,7 @@ pub fn bridge_name(
     discriminator: Option<&str>,
     source: Option<&str>,
     verb: Option<&str>,
+    model: Option<&str>,
 ) -> Result<String, NameError> {
     if verb.is_some() || source.is_some() {
         let p = prefix.unwrap_or("");
@@ -282,22 +371,24 @@ pub fn bridge_name(
         let Some(v) = verb.filter(|v| !v.trim().is_empty()) else {
             return Err(NameError::usage("--source requires --verb"));
         };
+        let source = source.filter(|s| !s.trim().is_empty());
         let code = if dispatch_verbs().contains(v.trim()) {
             v.trim().to_string()
         } else {
             verb_code_for(Some(v))?
         };
         return dispatch_agent_name(
-            source.filter(|s| !s.trim().is_empty()),
+            source,
             &code,
             node_id,
             slug,
             qualifier,
             discriminator,
+            model,
         );
     }
     match prefix.filter(|p| !p.trim().is_empty()) {
-        Some(p) => agent_name(p, node_id, slug, qualifier, discriminator),
+        Some(p) => agent_name(p, node_id, slug, qualifier, discriminator, model),
         None => Err(NameError::usage("a prefix or --verb is required")),
     }
 }
@@ -315,7 +406,7 @@ pub struct Parsed {
 
 fn node_shape() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"^([a-z][a-z0-9]*-[0-9a-f]+)(?:-(.*))?$").unwrap())
+    RE.get_or_init(|| Regex::new(r"^(?:([a-z][a-z0-9]*-)?([0-9a-f]+))(?:-(.*))?$").unwrap())
 }
 
 /// Parse `[<source>-]<verb>-<identity>`, else None. Positional grammar: the
@@ -360,8 +451,14 @@ pub fn parse_dispatch_agent_name(name: Option<&str>) -> Option<Parsed> {
             name: name.to_string(),
             source: source.map(str::to_string),
             verb: verb.to_string(),
-            node: Some(c.get(1).unwrap().as_str().to_string()),
-            tail: c.get(2).map(|m| m.as_str().to_string()).unwrap_or_default(),
+            node: Some(match (c.get(1), c.get(2)) {
+                // Full form keeps the prefix; bare hex stays bare - the
+                // Python bridge re-attaches the id via the graph (x-57fe).
+                (Some(p), Some(hex)) => format!("{}{}", p.as_str(), hex.as_str()),
+                (_, Some(hex)) => hex.as_str().to_string(),
+                _ => joined.clone(),
+            }),
+            tail: c.get(3).map(|m| m.as_str().to_string()).unwrap_or_default(),
         }),
         None => Some(Parsed {
             name: name.to_string(),
@@ -448,6 +545,7 @@ pub fn run_name_mint(args: &[String]) -> i32 {
         value_of(args, "--discriminator").as_deref(),
         value_of(args, "--source").as_deref(),
         value_of(args, "--verb").as_deref(),
+        value_of(args, "--model").as_deref(),
     ) {
         Ok(name) => {
             println!("{name}");
@@ -501,6 +599,7 @@ pub fn run_name_codes() -> i32 {
         "sources": c.sources.iter().collect::<Vec<_>>(),
         "verbs": c.verbs.iter().collect::<Vec<_>>(),
         "word_codes": c.word_codes,
+        "model_codes": c.model_codes,
         "provenance": c
             .provenance
             .iter()
@@ -517,24 +616,87 @@ mod tests {
 
     #[test]
     fn mint_dispatch_form_and_shaving() {
-        let n =
-            dispatch_agent_name(Some("ab"), "bp", "x-84b2", Some("Ab Names"), None, None).unwrap();
-        assert_eq!(n, "ab-bp-x-84b2-ab-names");
-        let manual = dispatch_agent_name(None, "t", "x-84b2", None, None, None).unwrap();
-        assert_eq!(manual, "t-x-84b2");
+        let n = dispatch_agent_name(
+            Some("ab"),
+            "bp",
+            "x-84b2",
+            Some("Ab Names"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(n, "ab-bp-84b2-ab-names");
+        let manual = dispatch_agent_name(None, "t", "x-84b2", None, None, None, None).unwrap();
+        assert_eq!(manual, "t-84b2");
+    }
+
+    #[test]
+    fn model_segment_appends_and_refuses_unknown_only_when_blank_squeezes() {
+        // Known model: longest-key-first substring match on the lowered model.
+        let n = dispatch_agent_name(
+            Some("sob"),
+            "bp",
+            "x-57fe",
+            Some("250ms Read Floor"),
+            None,
+            None,
+            Some("glm-5.3-flash[1m]"),
+        )
+        .unwrap();
+        assert_eq!(n, "sob-bp-57fe-250ms-read-glm");
+        // Unknown model squeezes to 8 alphanumeric characters.
+        let n = dispatch_agent_name(
+            Some("ab"),
+            "t",
+            "x-1",
+            None,
+            None,
+            None,
+            Some("Kimi K2 Thinking"),
+        )
+        .unwrap();
+        assert_eq!(n, "ab-t-1-kimik2th");
+        // Blank model is absent, never a segment of empty text.
+        let n = dispatch_agent_name(Some("ab"), "t", "x-1", None, None, None, Some("  ")).unwrap();
+        assert_eq!(n, "ab-t-1");
+    }
+
+    #[test]
+    fn dispatch_slug_cap_cuts_at_hyphen() {
+        // 16-char slug under cap 12 cuts at the last hyphen, never mid-word.
+        assert_eq!(
+            cut_slug(Some("250ms Read Floor"), DISPATCH_SLUG_CAP),
+            "250ms-read"
+        );
+        // A hyphenless slug truncates hard at the cap.
+        assert_eq!(cut_slug(Some("abcdefghij"), 4), "abcd");
+        // Under the cap the slug passes through whole.
+        assert_eq!(cut_slug(Some("Ab Names"), DISPATCH_SLUG_CAP), "ab-names");
+        let n = dispatch_agent_name(
+            Some("ab"),
+            "t",
+            "x-1",
+            Some("250ms Read Floor"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(n, "ab-t-1-250ms-read");
     }
 
     #[test]
     fn mint_refusals() {
-        let err = dispatch_agent_name(Some("ab"), "zz", "x-1", None, None, None).unwrap_err();
+        let err = dispatch_agent_name(Some("ab"), "zz", "x-1", None, None, None, None).unwrap_err();
         assert_eq!(err.exit, 3);
         assert!(err.message.contains("unknown dispatch verb"));
     }
 
     #[test]
     fn unknown_source_and_verb_refuse() {
-        assert!(dispatch_agent_name(Some("zz"), "t", "x-1", None, None, None).is_err());
-        assert!(dispatch_agent_name(None, "zz", "x-1", None, None, None).is_err());
+        assert!(dispatch_agent_name(Some("zz"), "t", "x-1", None, None, None, None).is_err());
+        assert!(dispatch_agent_name(None, "zz", "x-1", None, None, None, None).is_err());
         assert!(verb_code_for(Some("impeccable")).is_err());
         assert_eq!(verb_code_for(Some("/fno:target")).unwrap(), "t");
         assert_eq!(verb_code_for(Some("$fno:blueprint")).unwrap(), "bp");
@@ -544,7 +706,7 @@ mod tests {
     #[test]
     fn required_identity_never_shaves() {
         let long = "n-".to_string() + &"z".repeat(70);
-        let err = dispatch_agent_name(Some("ab"), "t", &long, None, None, None).unwrap_err();
+        let err = dispatch_agent_name(Some("ab"), "t", &long, None, None, None, None).unwrap_err();
         assert!(err.message.contains("64-char"), "{err}");
         assert_eq!(err.exit, 3);
     }
@@ -555,6 +717,7 @@ mod tests {
             "t",
             "regready-pipeline-2c4f9a1b3d",
             Some("path consolidation wave 0 delegate handoff"),
+            None,
             None,
             None,
         )
@@ -570,10 +733,15 @@ mod tests {
         assert_eq!(p.verb, "bp");
         assert_eq!(p.node.as_deref(), Some("x-84b2"));
         assert_eq!(p.tail, "slug");
+        // Bare-hex node: parsed as the node, hex kept bare.
+        let p = parse_dispatch_agent_name(Some("ab-bp-84b2-slug")).unwrap();
+        assert_eq!(p.node.as_deref(), Some("84b2"));
+        assert_eq!(p.tail, "slug");
         // A node prefix colliding with a code never misreads as a source.
         let p = parse_dispatch_agent_name(Some("t-x-84b2")).unwrap();
         assert!(p.source.is_none());
         assert_eq!(p.verb, "t");
+        assert_eq!(p.node.as_deref(), Some("x-84b2"));
         // Typed identities stay opaque.
         let p = parse_dispatch_agent_name(Some("ro-t-session-abcd1234")).unwrap();
         assert!(p.node.is_none());
@@ -593,9 +761,10 @@ mod tests {
             None,
             Some("ab"),
             Some("bp"),
+            None,
         )
         .unwrap();
-        assert_eq!(n, "ab-bp-x-84b2-ab-names");
+        assert_eq!(n, "ab-bp-84b2-ab-names");
         assert_eq!(
             bridge_name(
                 Some("legacy"),
@@ -604,29 +773,40 @@ mod tests {
                 None,
                 None,
                 Some("ab"),
-                Some("t")
+                Some("t"),
+                None,
             )
             .unwrap_err()
             .exit,
             2
         );
         assert_eq!(
-            bridge_name(None, "x-1", None, None, None, Some("ab"), None)
+            bridge_name(None, "x-1", None, None, None, Some("ab"), None, None)
                 .unwrap_err()
                 .exit,
             2
         );
         assert_eq!(
-            bridge_name(None, "x-1", None, None, None, None, None)
+            bridge_name(None, "x-1", None, None, None, None, None, None)
                 .unwrap_err()
                 .exit,
             2
         );
-        let n = bridge_name(Some("target"), "x-3218", None, None, None, None, None).unwrap();
-        assert_eq!(n, "target-x-3218");
+        let n = bridge_name(Some("target"), "x-3218", None, None, None, None, None, None).unwrap();
+        assert_eq!(n, "target-3218");
         // One positional (empty prefix) with a verb is the node.
-        let n = bridge_name(None, "x-84b2", None, None, None, Some("kl"), Some("th")).unwrap();
-        assert_eq!(n, "kl-th-x-84b2");
+        let n = bridge_name(
+            None,
+            "x-84b2",
+            None,
+            None,
+            None,
+            Some("kl"),
+            Some("th"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(n, "kl-th-84b2");
     }
 
     #[test]

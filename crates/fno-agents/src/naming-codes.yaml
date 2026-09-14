@@ -39,6 +39,18 @@ word_codes:
   think: th
   fix: f
   builtin: t
+# x-57fe: the short per-model name tag, matched longest-key-first as a
+# substring of the lowered model string. An unknown model falls back to the
+# first 8 alphanumeric characters.
+model_codes:
+  opus: opus
+  sonnet: sonnet
+  haiku: haiku
+  fable: fable
+  glm: glm
+  luna: luna
+  astra: astra
+  sol: sol
 # Every dispatch path with its codes. verb "resolved" = decided at dispatch
 # time from the harness-map receipt. The CI audit refuses when a path loses
 # its row or the sob/ac split and the two ab rows stop holding.
