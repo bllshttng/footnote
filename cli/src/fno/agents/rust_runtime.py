@@ -1626,6 +1626,7 @@ def make_agents_group_cls() -> type:
             return None
 
         def make_context(self, info_name, args, parent=None, **extra):  # type: ignore[no-untyped-def]
+            existing_pane = None
             if args and args[0] not in ("-h", "--help"):
                 verb = args[0]
                 if verb == "spawn" or verb in _WORKER_DIR_VERBS:
