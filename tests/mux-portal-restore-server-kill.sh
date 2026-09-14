@@ -71,7 +71,14 @@ STUB
 #!/bin/sh
 while IFS= read -r l; do echo "codex-portal:$l"; done
 STUB
-    chmod +x "$STUB_DIR/claude" "$STUB_DIR/codex"
+    # A Follow-tier fill runs the peek argv, which names the deployed `fno`
+    # CLI; the stub stands in for it and still answers stdin lines.
+    cat >"$STUB_DIR/fno" <<'STUB'
+#!/bin/sh
+echo "fno-stub:$*"
+while IFS= read -r l; do echo "stub-responder:$l"; done
+STUB
+    chmod +x "$STUB_DIR/claude" "$STUB_DIR/codex" "$STUB_DIR/fno"
     export PATH="$STUB_DIR:$PATH"
     # The re-entry resolver stub: the attach transition resolves to a
     # responder argv, exactly the shape the real resolver's JSON carries.
