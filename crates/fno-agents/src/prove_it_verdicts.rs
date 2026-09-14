@@ -120,14 +120,9 @@ pub fn run_prove_it_verdicts(args: &[String]) -> i32 {
                     };
                     let body = rec
                         .get("original")
-                        .map(|o| {
-                            o.get("body")
-                                .or_else(|| o.get("text"))
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string()
-                        })
-                        .unwrap_or_default();
+                        .map(crate::backlog::note_history::record_body)
+                        .unwrap_or("")
+                        .to_string();
                     map.entry(node.to_string()).or_default().push(body);
                 }
                 map

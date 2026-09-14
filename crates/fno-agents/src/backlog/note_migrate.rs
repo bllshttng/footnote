@@ -141,11 +141,9 @@ fn run_history(
         }
     }
     for r in &records {
-        let original = r.get("original").unwrap_or(&Value::Null);
-        let body = original
-            .get("body")
-            .or_else(|| original.get("text"))
-            .and_then(Value::as_str)
+        let body = r
+            .get("original")
+            .map(note_history::record_body)
             .unwrap_or("");
         let rev = r
             .get("prior_revision")
@@ -160,11 +158,14 @@ fn run_history(
         println!("rev {rev} {reason} session {session}");
         println!("{body}");
     }
+    // The trailer names ONE node; a whole-journal read prints blocks only.
+    let Some(tok) = node else {
+        return 0;
+    };
     let display_id = row
         .and_then(graph_store::entry_id)
         .map(str::to_string)
-        .or_else(|| node.map(str::to_string))
-        .unwrap_or_default();
+        .unwrap_or_else(|| tok.to_string());
     let first = if total == 0 { 0 } else { offset + 1 };
     let last = offset + records.len();
     let mut trailer = format!("{display_id}: records {first}-{last} of {total}");
