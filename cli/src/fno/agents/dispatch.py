@@ -4917,30 +4917,7 @@ def register_mcp_channel(
 _SEND_MAX_BODY_BYTES = 1024 * 1024  # 1 MiB
 
 
-@dataclass
-class DispatchSendResult:
-    """Return shape for :func:`dispatch_send`.
-
-    ``msg_id``   The envelope id written to the store (``msg-<8hex>``).
-    ``delivery`` ``"hosted"`` if live socket/MCP delivery succeeded;
-                 ``"durable"`` if the peer was offline, non-claude, or
-                 injection failed and the message was queued durable.
-    """
-
-    msg_id: str
-    delivery: str  # "hosted" | "durable"
-    # The live lane's own cause when delivery demoted to durable (node x-1904):
-    # the claude control.sock vocabulary (not-confirmed / attach-failed / ...),
-    # a codex RPC reason, or a mux token. None when no live attempt ran (the
-    # recipient was asleep, so durable was written upfront with no live miss).
-    reason: Optional[str] = None
-    # Set by the --to-project anycast path (resolve_to_project): the registry
-    # name the project resolved to (when one live peer), and the destination
-    # project (for the durable-queue and resolved-recipient stdout lines).
-    recipient: Optional[str] = None
-    to_project: Optional[str] = None
-    # Owner class the durable write was stamped with (x-1602); None if none was.
-    durable_owner: Optional[str] = None
+from fno.agents.send_result import DispatchSendResult
 
 
 def rpc_roundtrip(
