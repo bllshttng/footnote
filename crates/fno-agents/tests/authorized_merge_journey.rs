@@ -65,6 +65,9 @@ impl Probes for FakeGitHub {
             armed: *self.armed.borrow(),
         })
     }
+    fn node_binding(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
+        ProbeOutcome::Clear
+    }
     fn dispatch_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
         ProbeOutcome::Clear
     }
