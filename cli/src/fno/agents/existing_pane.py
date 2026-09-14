@@ -7,6 +7,8 @@ from typing import Callable
 
 from fno.agents.dispatch import DispatchAskError
 
+Runner = Callable[..., subprocess.CompletedProcess[str]]
+
 
 def pane_placement_conflict(pane: int | None, **placements) -> str | None:
     if pane is None:
@@ -29,14 +31,7 @@ def resolve_existing_pane(session: str, pane_id: int, rows: list[dict]) -> dict:
     return row
 
 
-def start_existing_pane(
-    session: str,
-    pane_id: int,
-    cwd: str,
-    wrapped: list[str],
-    run_mux: Callable[..., subprocess.CompletedProcess[str]],
-    runner: Callable[..., subprocess.CompletedProcess[str]],
-) -> subprocess.CompletedProcess[str]:
+def start_existing_pane(session: str, pane_id: int, cwd: str, wrapped: list[str], run_mux: Runner, runner: Runner) -> subprocess.CompletedProcess[str]:
     proc = run_mux(
         [
             "mux", "pane", "send", "--server", session, str(pane_id), "--text", "cd -- " + shlex.quote(cwd) + " && exec " + shlex.join(wrapped), "--submit", "--raw", "--guarded",
