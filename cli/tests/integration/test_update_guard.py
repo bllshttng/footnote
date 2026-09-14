@@ -33,6 +33,12 @@ _REFUSED_MSG = (
 
 runner = CliRunner()
 
+# The REAL subprocess.run, captured before any fixture stubs the module
+# attribute (the autouse fixture patches the shared subprocess module).
+import subprocess as _subprocess_module
+
+_REAL_SUBPROCESS_RUN = _subprocess_module.run
+
 
 # ---------------------------------------------------------------------------
 # Autouse fixture: isolate FNO_REPO_ROOT, stub out actual install
@@ -628,3 +634,141 @@ def test_component_verdict_transport_builds_the_native_call(
     assert "--python-expected" in cmd and "beef" in cmd
     assert "--python-evidence" in cmd and "2 .py differ" in cmd
     assert report == {"converged": True, "components": []}
+
+# ---------------------------------------------------------------------------
+# AC6: public journey - the native source-pin gate at the CLI surface
+# ---------------------------------------------------------------------------
+
+
+def _git(*args: str) -> None:
+    import subprocess as sp
+
+    # The autouse fixture replaces subprocess.run on the SHARED module to stub
+    # update's install leg; bind the real runner at import time so fixtures
+    # still execute git for real.
+    proc = _REAL_SUBPROCESS_RUN(["git", *args], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def _divergent_worktree_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """A canonical checkout plus a linked worktree diverged from origin/main.
+
+    Real git fixtures: the native classifier's ancestry evidence is proven in
+    Rust; here the same paths drive the public Python journey.
+    """
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git("-C", str(origin), "init", "-q", "-b", "main")
+    (origin / "f.txt").write_text("1\n")
+    _git("-C", str(origin), "add", "-A")
+    _git("-C", str(origin), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "c1")
+    canonical = tmp_path / "canonical"
+    _git("clone", "-q", str(origin), str(canonical))
+    (canonical / "cli").mkdir()
+    (canonical / "cli" / "pyproject.toml").write_text('[project]\nname = "fno"\n')
+    wt = tmp_path / "wt-feature"
+    _git("-C", str(canonical), "worktree", "add", "-q", "-b", "feature/x", str(wt))
+    (wt / "cli").mkdir()
+    (wt / "cli" / "pyproject.toml").write_text('[project]\nname = "fno"\n')
+    (wt / "diverge.txt").write_text("x\n")
+    _git("-C", str(wt), "add", "-A")
+    _git("-C", str(wt), "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "diverge")
+    return canonical, wt
+
+
+def _native_style_pin(path: Path, decision: str, **overrides):
+    """A native resolve answer shape for the given fixture path."""
+    pin = {
+        "decision": decision,
+        "path": str(path),
+        "origin": "cache",
+        "worktree_kind": "linked_worktree",
+        "branch": "feature/x",
+        "detached": False,
+        "source_head": "d" * 40,
+        "remote_ref": "origin/main",
+        "remote_head": "e" * 40,
+        "ancestor": decision == "allow",
+        "eligibility": "eligible" if decision == "allow" else "divergent",
+        "warning": None,
+        "refusal": None,
+        "detail": None,
+    }
+    pin.update(overrides)
+    return pin
+
+
+def test_ac6_err_divergent_cached_worktree_refuses_before_any_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reproduced incident: a cache pin at a divergent linked worktree must
+    exit nonzero with the refusal named - before the install runner or EITHER
+    pin writer executes."""
+    import fno.update as update_mod
+
+    canonical, wt = _divergent_worktree_fixture(tmp_path)
+    pin = _native_style_pin(
+        wt / "cli",
+        "refuse",
+        refusal=(
+            f"refusing source {wt / 'cli'}: linked worktree branch feature/x HEAD d40 is "
+            "not an ancestor of origin/main HEAD e40. Re-run with --source to override."
+        ),
+    )
+    calls: dict = {"resolve": 0, "record": 0, "exec": 0}
+
+    def fake_call(subcommand, extra=None, runner=None, input_text=None):
+        calls[f"{subcommand}"] = calls.get(subcommand, 0) + 1
+        if subcommand == "resolve":
+            return pin
+        return {}
+
+    monkeypatch.setattr(update_mod, "_resolve_source_pin", lambda o=None: fake_call("resolve"))
+    monkeypatch.setattr(update_mod, "_cache_source_path", lambda p: calls.__setitem__("record", calls["record"] + 1))
+    monkeypatch.setattr(update_mod.os, "execvp", lambda *a, **kw: calls.__setitem__("exec", calls["exec"] + 1))
+    monkeypatch.setattr(update_mod, "_refresh_rust_bins", lambda *a, **kw: None)
+
+    result = runner.invoke(app, ["doctor", "update"])
+
+    assert result.exit_code == 1
+    assert "refusing source" in (result.output or "")
+    assert "feature/x" in (result.output or "")
+    assert calls["record"] == 0, "no pin write may follow a refusal"
+    assert calls["exec"] == 0, "no install may follow a refusal"
+    # The positive control: the same cache pinned at the canonical checkout
+    # would be allowed - the refusal is about THIS pin, not the cache file.
+    assert canonical.exists()
+
+
+def test_ac6_hp_explicit_source_warns_and_records_the_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit --source at the same divergent worktree reaches the rendered
+    install command, warns, and records complete pin evidence."""
+    import json as json_mod
+
+    import fno.update as update_mod
+
+    _canonical, wt = _divergent_worktree_fixture(tmp_path)
+    warning = "warning: --source is a divergent linked worktree; installing by explicit request"
+    pin = _native_style_pin(wt / "cli", "allow", origin="explicit", warning=warning)
+    calls: dict = {"record": [], "exec": 0}
+
+    def fake_call(subcommand, extra=None, runner=None, input_text=None):
+        if subcommand == "record":
+            calls["record"].append({"extra": list(extra or []), "stdin": input_text})
+            return {}
+        return pin
+
+    monkeypatch.setattr(update_mod, "_resolve_source_pin", lambda o=None: fake_call("resolve"))
+    monkeypatch.setattr(update_mod, "_cache_source_path", lambda p: fake_call("record", input_text=json_mod.dumps(p)))
+    monkeypatch.setattr(update_mod.os, "execvp", lambda *a, **kw: calls.__setitem__("exec", calls["exec"] + 1))
+    monkeypatch.setattr(update_mod, "_refresh_rust_bins", lambda *a, **kw: None)
+
+    result = runner.invoke(app, ["doctor", "update", "--source", str(wt / "cli"), "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Would run:" in (result.output or "")
+    assert warning in (result.output or "")
+    assert calls["exec"] == 0, "dry run executes nothing"
+    assert len(calls["record"]) == 1, "dry run records complete pin evidence"

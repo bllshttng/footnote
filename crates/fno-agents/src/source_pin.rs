@@ -170,7 +170,10 @@ fn is_fno_source(dir: &str) -> bool {
 /// `NonGit` (today's packaged-candidate behavior); only a PROVEN linked
 /// worktree enters the ancestry gate.
 fn worktree_kind(dir: &str) -> WorktreeKind {
-    let common = match git_ok(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]) {
+    let common = match git_ok(
+        dir,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ) {
         Some(c) => c,
         None => return WorktreeKind::NonGit,
     };
@@ -225,7 +228,8 @@ fn head_evidence(dir: &str) -> HeadEvidence {
 }
 
 fn short(sha: &Option<String>) -> String {
-    sha.as_ref().map_or("?".to_string(), |s| s[..s.len().min(12)].to_string())
+    sha.as_ref()
+        .map_or("?".to_string(), |s| s[..s.len().min(12)].to_string())
 }
 
 /// The safety classification for one validated candidate. Live probes only:
@@ -234,9 +238,13 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
     let kind = worktree_kind(path);
     let heads = head_evidence(path);
     let rref = remote_ref(path);
-    let remote_head = git_ok(path, &["rev-parse", "--verify", &format!("{rref}^{{commit}}")]);
+    let remote_head = git_ok(
+        path,
+        &["rev-parse", "--verify", &format!("{rref}^{{commit}}")],
+    );
 
-    let (ancestor, detail): (Option<bool>, Option<String>) = if kind != WorktreeKind::LinkedWorktree {
+    let (ancestor, detail): (Option<bool>, Option<String>) = if kind != WorktreeKind::LinkedWorktree
+    {
         (None, None)
     } else if remote_head.is_none() {
         (
@@ -451,8 +459,10 @@ fn sync(source: &str) -> SyncAnswer {
     };
     ans.source_head = Some(source_head.clone());
     let rref = remote_ref(source);
-    let remote_head = match git_ok(source, &["rev-parse", "--verify", &format!("{rref}^{{commit}}")])
-    {
+    let remote_head = match git_ok(
+        source,
+        &["rev-parse", "--verify", &format!("{rref}^{{commit}}")],
+    ) {
         Some(h) => h,
         None => {
             ans.detail = format!("{rref} ref is unreadable");
@@ -539,7 +549,9 @@ fn record_from_str(raw: &str, cache: &str, companion: &str) -> Result<(), String
         .filter(|p| !p.is_empty())
         .ok_or_else(|| "stdin JSON carries no usable path".to_string())?
         .to_string();
-    let obj = answer.as_object_mut().ok_or("stdin JSON is not an object")?;
+    let obj = answer
+        .as_object_mut()
+        .ok_or("stdin JSON is not an object")?;
     obj.insert("schema".into(), serde_json::json!(PIN_SCHEMA));
     obj.insert(
         "recorded_at".into(),
@@ -731,10 +743,28 @@ mod tests {
         new_repo(&origin);
         add_cli(&origin);
         let clone = base.join("clone");
-        git_in(base, &["clone", "-q", origin.to_str().unwrap(), clone.to_str().unwrap()]);
+        git_in(
+            base,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        );
         add_cli(&clone);
         let wt = base.join("wt");
-        git_in(&clone, &["worktree", "add", "-q", "-b", "feature/x", wt.to_str().unwrap()]);
+        git_in(
+            &clone,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/x",
+                wt.to_str().unwrap(),
+            ],
+        );
         let wt_cli = add_cli(&wt);
         (clone.to_string_lossy().into_owned(), wt_cli)
     }
@@ -761,7 +791,10 @@ mod tests {
         let (_clone, wt) = clone_with_worktree(&base.path().join("e1"));
         fs::write(std::path::Path::new(&wt).join("d.txt"), "x\n").unwrap();
         git_in(std::path::Path::new(&wt), &["add", "-A"]);
-        git_in(std::path::Path::new(&wt), &["commit", "-q", "-m", "diverge"]);
+        git_in(
+            std::path::Path::new(&wt),
+            &["commit", "-q", "-m", "diverge"],
+        );
         let a = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
@@ -772,8 +805,14 @@ mod tests {
         let refusal = a.refusal.unwrap();
         assert!(refusal.contains(&wt), "refusal names the path: {refusal}");
         assert!(refusal.contains("feature/x"), "names the branch: {refusal}");
-        assert!(refusal.contains("--source"), "names the override: {refusal}");
-        assert!(refusal.contains("not an ancestor"), "names the divergence: {refusal}");
+        assert!(
+            refusal.contains("--source"),
+            "names the override: {refusal}"
+        );
+        assert!(
+            refusal.contains("not an ancestor"),
+            "names the divergence: {refusal}"
+        );
     }
 
     #[test]
@@ -782,7 +821,10 @@ mod tests {
         let (_clone, wt) = clone_with_worktree(&base.path().join("a2"));
         fs::write(std::path::Path::new(&wt).join("d.txt"), "x\n").unwrap();
         git_in(std::path::Path::new(&wt), &["add", "-A"]);
-        git_in(std::path::Path::new(&wt), &["commit", "-q", "-m", "diverge"]);
+        git_in(
+            std::path::Path::new(&wt),
+            &["commit", "-q", "-m", "diverge"],
+        );
         let a = resolve(&ResolveArgs {
             override_path: Some(wt.clone()),
             env_source: None,
@@ -791,7 +833,10 @@ mod tests {
         });
         assert_eq!(a.decision, Decision::Allow);
         let warning = a.warning.unwrap();
-        assert!(warning.contains("divergent"), "warning names divergence: {warning}");
+        assert!(
+            warning.contains("divergent"),
+            "warning names divergence: {warning}"
+        );
         assert_eq!(a.ancestor, Some(false));
     }
 
@@ -799,8 +844,14 @@ mod tests {
     fn ac3_err_unproven_ancestry_refuses_and_names_instrument() {
         let base = tempfile::tempdir().unwrap();
         let (clone, wt) = clone_with_worktree(&base.path().join("e3"));
-        git_in(std::path::Path::new(&clone), &["update-ref", "-d", "refs/remotes/origin/main"]);
-        git_in(std::path::Path::new(&clone), &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+        git_in(
+            std::path::Path::new(&clone),
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+        git_in(
+            std::path::Path::new(&clone),
+            &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+        );
         let a = resolve(&ResolveArgs {
             override_path: None,
             env_source: None,
@@ -811,7 +862,10 @@ mod tests {
         assert_eq!(a.ancestor, None);
         assert_eq!(a.eligibility, "ancestry_unknown");
         let refusal = a.refusal.unwrap();
-        assert!(refusal.contains("could not be proven"), "names the gap: {refusal}");
+        assert!(
+            refusal.contains("could not be proven"),
+            "names the gap: {refusal}"
+        );
     }
 
     #[test]
@@ -904,11 +958,17 @@ mod tests {
         let (clone, _wt) = clone_with_worktree(&base.path().join("s2"));
         // Commit B locally, reset to A, move origin/main ref to B.
         fs::write(std::path::Path::new(&clone).join("2.txt"), "x\n").unwrap();
-        git_in(std::path::Path::new(&clone), &["add", "-A"]); 
+        git_in(std::path::Path::new(&clone), &["add", "-A"]);
         git_in(std::path::Path::new(&clone), &["commit", "-q", "-m", "b"]);
         let b = git_ok(&clone, &["rev-parse", "HEAD"]).unwrap();
-        git_in(std::path::Path::new(&clone), &["reset", "-q", "--hard", "HEAD~1"]);
-        git_in(std::path::Path::new(&clone), &["update-ref", "refs/remotes/origin/main", b.trim()]);
+        git_in(
+            std::path::Path::new(&clone),
+            &["reset", "-q", "--hard", "HEAD~1"],
+        );
+        git_in(
+            std::path::Path::new(&clone),
+            &["update-ref", "refs/remotes/origin/main", b.trim()],
+        );
         let s = sync(&clone);
         assert_eq!(s.status, "behind", "detail: {}", s.detail);
         assert_eq!(s.detail, "");
@@ -917,11 +977,11 @@ mod tests {
     #[test]
     fn sync_not_ancestor_reads_unknown() {
         let base = tempfile::tempdir().unwrap();
-        let (clone, _wt) = clone_with_worktree(&base.path().join("s3")); 
+        let (clone, _wt) = clone_with_worktree(&base.path().join("s3"));
         fs::write(std::path::Path::new(&clone).join("3.txt"), "x\n").unwrap();
-        git_in(std::path::Path::new(&clone), &["add", "-A"]); 
+        git_in(std::path::Path::new(&clone), &["add", "-A"]);
         git_in(std::path::Path::new(&clone), &["commit", "-q", "-m", "c"]);
-        let s = sync(&clone); 
+        let s = sync(&clone);
         assert_eq!(s.status, "unknown");
         assert_eq!(s.behind, None);
         assert_eq!(s.detail, "source HEAD is not an ancestor of origin/main");
