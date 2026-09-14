@@ -304,6 +304,18 @@ if (( reviewed_file_count == 0 )); then
   fi
   echo "emit-attestation: the diff under review is empty (no changed files, base ${reviewed_base_sha} .. HEAD ${reviewed_head_sha} on branch ${branch})." >&2
   echo "A review with nothing to read is not a pass; ${refusal_row_note}." >&2
+  if [[ "$branch" == "$base" ]]; then
+    # The rewrite cannot produce the base name, so branch == base with an empty
+    # diff is the canonical checkout sitting on the repo default: exactly the
+    # x-a8a1 shape, where the attestation would be lost for the real PR and in
+    # scope for any PR whose headRefName is literally the base. Name it rather
+    # than refusing here - work committed directly ON the default branch attests
+    # honestly (the actor producer runs on main-based sessions), so only the
+    # nothing-to-read case carries the default-branch warning.
+    echo "You are on the repo default branch '${base}': an attestation recorded here" >&2
+    echo "is lost for the real PR and in scope for any PR whose head is '${base}'. Run" >&2
+    echo "from the PR's worktree." >&2
+  fi
   echo "If you are reviewing a worktree from the canonical checkout, hand the review its" >&2
   echo "target explicitly: run from the worktree path, or pass the PR number to the review verb." >&2
   exit 1
@@ -434,14 +446,23 @@ if [[ -n "$findings_file" ]]; then
   # path, so a row can never read milder than the classified findings. The
   # verb's stderr line is the emit receipt. The typed-verdict emit below
   # stays for `declare` and for hand runs with no findings file.
-  # The declared scope rides BOTH emit paths, or the stamp is half a stamp.
+  # The declared scope rides BOTH emit paths, and so does the branch: classify
+  # re-resolves the branch from cwd, which in a reviewer worktree names the
+  # LOCAL checkout, not the PR (x-a8a1). The rewrite's result crosses through
+  # FNO_ATTEST_BRANCH - a new typer.Option is refused by the flag-surface
+  # ratchet (scripts/ci/check_flag_registry.py), so the producer passes the
+  # branch through the environment. The hold join/release inside classify
+  # still key on its own cwd-resolved local name, which is what the hook set
+  # the hold under.
   if [[ -n "$review_round" ]]; then
-    "${FNO:-fno}" do review classify --findings-file "$findings_file" \
+    FNO_ATTEST_BRANCH="$branch" "${FNO:-fno}" do review classify \
+      --findings-file "$findings_file" \
       --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
       --execution-context "$execution_context" --output-contract "$output_contract" \
       --review-round "$review_round" >/dev/null
   else
-    "${FNO:-fno}" do review classify --findings-file "$findings_file" \
+    FNO_ATTEST_BRANCH="$branch" "${FNO:-fno}" do review classify \
+      --findings-file "$findings_file" \
       --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
       --execution-context "$execution_context" --output-contract "$output_contract" >/dev/null
   fi

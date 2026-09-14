@@ -176,6 +176,7 @@ def _attest_from_record(
     findings_file: Path,
     execution_context: str = "inline",
     output_contract: str = "json_block",
+    branch_override: str = "",
 ) -> str:
     """Write the ``review_attestation`` row for the record classify just built.
 
@@ -183,6 +184,14 @@ def _attest_from_record(
     counted zero blocking findings, so the row cannot be milder than what the
     review produced. Returns the verdict for the receipt. Every refusal exit
     names the missing input, and nothing is emitted on any of them.
+
+    ``branch_override`` replaces the row's ``branch`` field only: the caller
+    (the shell producer) resolved the PR branch with its upstream rewrite,
+    which this verb must not re-derive from cwd. Hold join and release keep
+    the cwd-resolved local name the hook keyed the hold under (x-a8a1).
+    classify sources it from ``FNO_ATTEST_BRANCH`` - the flag-surface ratchet
+    (scripts/ci/check_flag_registry.py) refuses a new typer.Option here, so
+    the producer passes the branch through the environment instead.
 
     The emitted row carries the same fields the shell producer writes, the
     reviewed ranges included: a row without ``reviewed_base_sha`` contributes
@@ -325,6 +334,8 @@ def _attest_from_record(
     }
     if harness:
         data["harness"] = harness
+    if branch_override:
+        data["branch"] = branch_override
     for key in _ATTEST_RECORD_KEYS:
         if record.get(key) is not None:
             data[key] = record[key]
@@ -385,7 +396,7 @@ def _attest_from_record(
 
     typer.secho(
         f"review_attestation emitted: reviewer={data['reviewer']} "
-        f"head_sha={head_sha[:8]} branch={branch} verdict={verdict} "
+        f"head_sha={head_sha[:8]} branch={data['branch']} verdict={verdict} "
         f"session={session_id or 'none'} attester={resolved_id or 'unattributed'} "
         f"lines={line_count} files={file_count}",
         err=True,
@@ -408,7 +419,9 @@ def classify(
         "--attest",
         help="Reviewer name: also write the head-pinned review_attestation row, "
         "with the verdict the classifier measured (pass only on zero blocking "
-        "findings). Empty: classify only, no event.",
+        "findings). Empty: classify only, no event. Set FNO_ATTEST_BRANCH to "
+        "override the row's branch field with a caller-resolved PR branch "
+        "(hold join/release keep the cwd-resolved local name).",
     ),
     reviewer_context: str = typer.Option(
         "unknown",
@@ -485,6 +498,7 @@ def classify(
                 err=True,
             )
             raise typer.Exit(code=2)
+        branch_override = os.environ.get("FNO_ATTEST_BRANCH", "").strip()
         _attest_from_record(
             record,
             attest.strip(),
@@ -492,6 +506,7 @@ def classify(
             findings_file,
             execution_context=execution_context,
             output_contract=output_contract,
+            branch_override=branch_override,
         )
     if emit_record:
         sys.stdout.write(json.dumps(record, ensure_ascii=False) + "\n")
