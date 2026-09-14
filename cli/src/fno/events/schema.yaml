@@ -2761,7 +2761,7 @@ event_types:
 
   - name: pr_nudge_paused
     description: "A recorded merge order pauses the nudge ladder for this session: no nudge is sent while the lead node named in the decision is not done. Emitted at most once per hour per session."
-    sources: [ daemon ]
+    sources: [daemon]
     data:
       required: [session_id, node, pr]
       properties:

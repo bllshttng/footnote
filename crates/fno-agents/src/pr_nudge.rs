@@ -76,8 +76,9 @@ impl NudgeAction {
 }
 
 /// The pure ladder decision. Order is the law: reset, wait, pause,
-/// escalate, mail, resume.
-pub fn decide(input: &NudgeInput) -> NudgeAction {
+/// escalate, mail, resume. Returns the (possibly reset) state beside the
+/// action, so the caller persists what the decision saw.
+pub fn decide(input: &NudgeInput) -> (NudgeAction, LadderState) {
     let mut input = input.clone();
     // 1. Reset: activity the ladder did not cause - a transcript write
     // newer than the last nudge - clears the budget. The session answered;
@@ -88,6 +89,7 @@ pub fn decide(input: &NudgeInput) -> NudgeAction {
             input.state.escalated = false;
         }
     }
+    let state = input.state.clone();
     // 2. Wait: the transcript is inside the grace, or the last nudge is
     // younger than the grace. Either way the session has had no fair chance
     // to answer yet.
@@ -99,27 +101,27 @@ pub fn decide(input: &NudgeInput) -> NudgeAction {
         .last_nudge_at
         .is_none_or(|t| input.now.saturating_sub(t) >= input.grace_secs);
     if !quiet_long_enough || !nudged_long_ago {
-        return NudgeAction::Wait;
+        return (NudgeAction::Wait, state);
     }
     // 3. Pause: a live merge order is the only allowed hold. The row stays
     // and the pause names itself, at most once per hour.
     if input.merge_order_hold {
-        return NudgeAction::Pause;
+        return (NudgeAction::Pause, state);
     }
     // 4. Escalate: the budget is spent and the operator has not heard yet.
     // After this fires once, the ladder waits for activity - no more
     // nudges, no repeat asks.
     if input.state.attempts >= MAX_ATTEMPTS {
         if !input.state.escalated {
-            return NudgeAction::Escalate;
+            return (NudgeAction::Escalate, state);
         }
-        return NudgeAction::Wait;
+        return (NudgeAction::Wait, state);
     }
     // 5/6. A live session reads its mail; a dead process needs a resume.
     if input.live {
-        NudgeAction::Mail
+        (NudgeAction::Mail, state)
     } else {
-        NudgeAction::Resume
+        (NudgeAction::Resume, state)
     }
 }
 
@@ -158,13 +160,15 @@ pub fn run_ladder(home: &AgentsHome, emitter: &EventEmitter, rows: &[OpenPrRow],
             let bin = argv[0].clone();
             let rest: Vec<String> = argv[1..].to_vec();
             let refs: Vec<&str> = rest.iter().map(String::as_str).collect();
-            match crate::loopcheck::bounded_read(
-                bin.as_ref(),
-                &refs,
-                std::path::Path::new(cwd),
-                "pr-nudge",
-                RUN_TIMEOUT,
-            ) {
+            // A global verb (mail, resume, ask) needs no row cwd; the empty
+            // string means "stay here", because chdir("") fails the spawn.
+            let dir: std::path::PathBuf = if cwd.is_empty() {
+                std::path::PathBuf::from(".")
+            } else {
+                std::path::PathBuf::from(cwd)
+            };
+            match crate::loopcheck::bounded_read(bin.as_ref(), &refs, &dir, "pr-nudge", RUN_TIMEOUT)
+            {
                 Ok(out) => (
                     if out.status.success() {
                         0
@@ -197,16 +201,15 @@ pub fn apply(
     home: &AgentsHome,
     emitter: &EventEmitter,
     row: &OpenPrRow,
-    state: &LadderState,
+    state_param: &LadderState,
     merge_order_hold: bool,
     grace_secs: i64,
     now: i64,
     runner: Runner,
 ) {
-    let mut state = state.clone();
     let last_activity_at = row.transcript_age_s.map(|age| now.saturating_sub(age));
     let input = NudgeInput {
-        state: state.clone(),
+        state: state_param.clone(),
         transcript_age_s: row.transcript_age_s,
         last_activity_at,
         merge_order_hold,
@@ -214,10 +217,10 @@ pub fn apply(
         now,
         live: row.live,
     };
-    let action = decide(&input);
+    let (action, mut state) = decide(&input);
     match action {
         NudgeAction::Wait => {
-            if input.state.attempts != state.attempts || input.state.escalated != state.escalated {
+            if &state != state_param {
                 save_state(home, &row.session_id, &state);
             }
         }
@@ -509,7 +512,7 @@ pub fn plan(home: &AgentsHome, rows: &[OpenPrRow], grace_secs: i64) -> Vec<(Stri
                 now,
                 live: row.live,
             };
-            let action = decide(&input);
+            let (action, _) = decide(&input);
             (row.id.clone(), action.as_str().to_string())
         })
         .collect()
@@ -612,7 +615,7 @@ mod tests {
         let mut inp = input(LadderState::default(), true);
         inp.transcript_age_s = Some(10);
         inp.last_activity_at = Some(1890);
-        assert_eq!(decide(&inp), NudgeAction::Wait);
+        assert_eq!(decide(&inp).0, NudgeAction::Wait);
     }
 
     #[test]
@@ -622,14 +625,14 @@ mod tests {
             last_nudge_at: Some(1880),
             ..Default::default()
         };
-        assert_eq!(decide(&input(st, true)), NudgeAction::Wait);
+        assert_eq!(decide(&input(st, true)).0, NudgeAction::Wait);
     }
 
     #[test]
     fn merge_order_pauses() {
         let mut inp = input(LadderState::default(), true);
         inp.merge_order_hold = true;
-        assert_eq!(decide(&inp), NudgeAction::Pause);
+        assert_eq!(decide(&inp).0, NudgeAction::Pause);
     }
 
     #[test]
@@ -640,14 +643,14 @@ mod tests {
             escalated: false,
             ..Default::default()
         };
-        assert_eq!(decide(&input(st.clone(), true)), NudgeAction::Escalate);
+        assert_eq!(decide(&input(st.clone(), true)).0, NudgeAction::Escalate);
         let st = LadderState {
             attempts: 3,
             last_nudge_at: Some(900),
             escalated: true,
             ..Default::default()
         };
-        assert_eq!(decide(&input(st, true)), NudgeAction::Wait);
+        assert_eq!(decide(&input(st, true)).0, NudgeAction::Wait);
     }
 
     #[test]
@@ -661,7 +664,50 @@ mod tests {
         let mut inp = input(st, true);
         // The transcript was rewritten AFTER the last nudge.
         inp.last_activity_at = Some(1500);
-        assert_eq!(decide(&inp), NudgeAction::Mail);
+        assert_eq!(decide(&inp).0, NudgeAction::Mail);
+    }
+
+    #[test]
+    fn a_reset_persists_even_when_the_pass_waits() {
+        // Activity newer than the last nudge resets the budget, and the
+        // reset lands in the state file even though the pass waits on the
+        // fresh transcript - the file must never read as a budget the
+        // ladder no longer enforces.
+        let home = AgentsHome::at(std::env::temp_dir().join("fno-pn-reset"));
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
+        let r = row(false);
+        let spent = LadderState {
+            attempts: 3,
+            last_nudge_at: Some(100),
+            escalated: true,
+            ..Default::default()
+        };
+        save_state(&home, &r.session_id, &spent);
+        let mut quiet_row = r.clone();
+        // The write is inside the grace: the pass waits, the reset stays.
+        quiet_row.transcript_age_s = Some(10);
+        let mut runner = |argv: &[String], _cwd: &str| -> (i32, String) {
+            if argv.contains(&"do".to_string()) {
+                (0, "line".into())
+            } else {
+                (0, String::new())
+            }
+        };
+        let emitter = EventEmitter::new(home.events_jsonl(), "test");
+        apply(
+            &home,
+            &emitter,
+            &quiet_row,
+            &spent,
+            false,
+            900,
+            1900,
+            &mut runner,
+        );
+        let saved = load_state(&home, &r.session_id);
+        assert_eq!(saved.attempts, 0);
+        assert!(!saved.escalated);
+        let _ = std::fs::remove_dir_all(home.root().to_path_buf());
     }
 
     #[test]

@@ -850,13 +850,18 @@ pub fn run_finalize(args: &[String]) -> i32 {
     let mut terminal_stop_marked = false;
     // The open-PR gate: a session whose node's PR is open keeps its slot,
     // so the marker waits for the merge. An unreadable read keeps the
-    // session (kept beats stranded).
-    let open_pr = crate::terminal_stop::open_pr_label(
-        &crate::paths::AgentsHome::from_env(),
-        m.graph_node_id.as_deref(),
-        Path::new(&cwd),
-    );
-    if let (Some(reason), true, false) = (&open_pr, agent_self, driver_lib) {
+    // session (kept beats stranded). Read only for the sessions that could
+    // ever be marked: a spawn worker not driven by the loop library.
+    let open_pr = if agent_self && !driver_lib {
+        crate::terminal_stop::open_pr_label(
+            &crate::paths::AgentsHome::from_env(),
+            m.graph_node_id.as_deref(),
+            Path::new(&cwd),
+        )
+    } else {
+        None
+    };
+    if let Some(reason) = &open_pr {
         eprintln!("finalize: terminal-stop marker skipped: {reason}");
     }
     if let Some(uuid) = crate::terminal_stop::should_mark(
