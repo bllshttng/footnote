@@ -289,13 +289,13 @@ Reactivation is a separate verb from ``undefer`` on purpose: reviving a plan tha
 
 Does NOT re-contain or re-parent children released when the node was superseded: re-adoption is decompose's job, the same policy ``cmd_undefer`` applies to un-containment.
 
-Since x-665f the verb is a transport over the patch door (`backlog-update --leave superseded`), and the door's readback refusal holds here too: a node that is not superseded answers ``unchanged`` with exit 0 and no ``Unsuperseded`` line, and a write whose readback still reads terminal refuses naming the fact that holds. The verb prints ``Unsuperseded`` only on an applied receipt.
+The verb is now a transport over the patch door (`backlog-update --leave superseded`), and the door's readback refusal holds here too: a node that is not superseded answers ``unchanged`` with exit 0 and no ``Unsuperseded`` line, and a write whose readback still reads terminal refuses naming the fact that holds. The verb prints ``Unsuperseded`` only on an applied receipt.
 
 ## cmd_undefer
 
-Clear the deferral facts on ``node_id``. A transport over the patch door (``backlog-update --leave deferred``) since x-665f.
+Clear the deferral facts on ``node_id``. A transport over the patch door (``backlog-update --leave deferred``).
 
-The readback refusal is the verb's honesty contract: the door clears the facts, recomputes, and refuses unless the derived status actually left ``deferred``. A node carrying BOTH ``superseded_by`` and ``deferred_at`` (74 rows at the 2026-09-13 read) is refused outright by the transport - the park rides on the supersession, so leaving deferred alone would either lie (the old ``Undeferred`` receipt while the node stayed superseded, x-e3c4) or no-op. The refusal names the route that revives the node: ``fno backlog update <id> --status idea``, or ``fno backlog unsupersede <id>``.
+The readback refusal is the verb's honesty contract: the door clears the facts, recomputes, and refuses unless the derived status actually left ``deferred``. A node carrying BOTH ``superseded_by`` and ``deferred_at`` (74 rows at the 2026-09-13 read) is refused outright by the transport - the park rides on the supersession, so leaving deferred alone would either lie (the old ``Undeferred`` receipt printed while the node stayed superseded) or no-op. The refusal names the route that revives the node: ``fno backlog update <id> --status idea``, or ``fno backlog unsupersede <id>``.
 
 A node that is not deferred answers ``unchanged`` with exit 0, a warning on stderr, no ``Undeferred`` line, and no boundary event.
 
