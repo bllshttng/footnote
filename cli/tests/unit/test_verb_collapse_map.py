@@ -204,7 +204,10 @@ def test_map_covers_current_surface_once():
     # the Python gate transport calls, landed in parallel: 627 -> 628. This
     # branch allocated `do pr hold` / `pr hold` rows then removed them when
     # the writer moved into crates: counted from the merged file, 628.
-    assert len(mapped) == 628, (
+    # x-3873 allocates `agents capabilities` and `agents target-family`, the
+    # two read leaves that replace the retired `fno agents dispatch
+    # capabilities`/`family`: 628 -> 630.
+    assert len(mapped) == 630, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

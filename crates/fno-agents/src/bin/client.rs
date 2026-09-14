@@ -33,6 +33,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "backlog-note",
     "backlog-notes",
     "bash-census",
+    "capabilities",
     "blueprint-feed",
     "board",
     "claim",
@@ -124,6 +125,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "task-context-revalidate",
     "task-context-show",
     "task-context-stage",
+    "target-family",
     "territory-rows",
     "territory-verdict",
     "trace",
@@ -472,6 +474,19 @@ async fn run(args: Vec<String>) -> i32 {
     // scan + cursor write, and both must work when the daemon is wedged.
     if verb == "announce" {
         return fno_agents::announce::run_announce(&args[1..]);
+    }
+
+    // `capabilities` / `target-family` (x-3873 change 2): read-only leaves
+    // over the packaged capability table and the merge-posture family table,
+    // successors to the retired `fno agents dispatch capabilities`/`family`.
+    // Direct dispatch; no daemon RPC. Same `==` dispatch + ALL_CLIENT_ACTIONS
+    // registration as the other direct leaves, so the parity tests stay in
+    // sync.
+    if verb == "capabilities" {
+        return fno_agents::client_verbs::run_capabilities(&args[1..]);
+    }
+    if verb == "target-family" {
+        return fno_agents::client_verbs::run_target_family(&args[1..]);
     }
 
     // `review-coverage`: standalone review_coverage producer (see its own doc
