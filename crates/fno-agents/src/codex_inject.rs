@@ -1283,13 +1283,16 @@ pub async fn discover_loaded_threads() -> Result<Vec<LoadedThread>, &'static str
     }
 }
 
-pub async fn run_loaded_thread_discovery() -> i32 {
-    let output = match discover_loaded_threads().await {
-        Ok(threads) => serde_json::json!({"available": true, "threads": threads}),
-        Err(reason) => serde_json::json!({"available": false, "reason": reason}),
-    };
-    println!("{output}");
-    0
+/// The `codex_loaded` payload block (x-f654): what the retired hidden
+/// `codex-loaded-threads` verb printed, as a value. `Ok` -> `{"available":
+/// true, "threads": [...]}`; every `Err` -> `{"available": false, "reason":
+/// <reason>}`, so "the daemon could not answer" stays distinct from "zero
+/// threads". Rides `list --json --harness codex` instead of a verb root.
+pub fn loaded_threads_block(result: Result<Vec<LoadedThread>, &'static str>) -> serde_json::Value {
+    match result {
+        Ok(threads) => serde_json::json!({ "available": true, "threads": threads }),
+        Err(reason) => serde_json::json!({ "available": false, "reason": reason }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2891,5 +2894,34 @@ mod tests {
             .expect("the turn must still have run");
         assert_eq!(turn["input"][0]["text"], "hello RESILIENT");
         assert!(turn.get("sandboxPolicy").is_none());
+    }
+
+    /// x-f654: the block keeps the retired verb's exact payload shape.
+    #[test]
+    fn loaded_threads_block_ok_carries_the_thread_rows() {
+        let block = loaded_threads_block(Ok(vec![
+            LoadedThread {
+                session_id: "019f4d0c-full".into(),
+                cwd: "/repo".into(),
+            },
+            LoadedThread {
+                session_id: "019f4d0d-full".into(),
+                cwd: "/other".into(),
+            },
+        ]));
+        assert_eq!(block["available"], true);
+        assert_eq!(block["threads"][0]["session_id"], "019f4d0c-full");
+        assert_eq!(block["threads"][0]["cwd"], "/repo");
+        assert_eq!(block["threads"][1]["session_id"], "019f4d0d-full");
+    }
+
+    /// An unreachable daemon reads as `available: false` with a reason, never
+    /// as zero threads.
+    #[test]
+    fn loaded_threads_block_err_names_the_reason() {
+        let block = loaded_threads_block(Err("no-daemon"));
+        assert_eq!(block["available"], false);
+        assert_eq!(block["reason"], "no-daemon");
+        assert!(block.get("threads").is_none());
     }
 }
