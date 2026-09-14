@@ -3218,10 +3218,8 @@ def cmd_update(
     from fno._flag_aliases import refuse_retired_model_tier
     from fno.text_or_file import read_text_arg
     from fno.graph._constants import (
-        PRIORITY_ORDER,
         normalize_difficulty,
         normalize_tag,
-        validate_priority_write,
     )
     from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import (
@@ -3238,18 +3236,8 @@ def cmd_update(
 
     _require_node_id(task_id)
 
-    if priority is not None and priority not in PRIORITY_ORDER:
-        typer.echo(
-            f"Error: invalid priority '{priority}'. Must be: {', '.join(PRIORITY_ORDER.keys())}",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-    if priority == "p0":
-        try:
-            validate_priority_write(priority, blocks_everything=blocks_everything)
-        except ValueError as exc:
-            typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=2)
+    if priority is not None:
+        _validate_priority_or_exit(priority, blocks_everything=blocks_everything)
 
     if project is not None and (not isinstance(project, str) or not project.strip()):
         typer.echo("Error: --project must be a non-empty string", err=True)
