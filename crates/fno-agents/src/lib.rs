@@ -128,6 +128,7 @@ pub mod king_ledger;
 pub mod king_termination;
 pub mod lane_heal;
 pub mod law_match;
+mod lifecycle_child;
 pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;

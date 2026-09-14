@@ -20,6 +20,7 @@
 //!   preserve source key order without a crate-wide serde_json `preserve_order`.
 
 use crate::claude_ask::{liveness_probe, locate_session, ClaudeHome};
+use crate::lifecycle_child::heal_token;
 #[cfg(test)]
 use crate::manifest_lookup::parse_manifest_identity;
 use crate::manifest_lookup::{find_manifest_for_session, git_worktree_paths, ManifestIdentity};
@@ -358,7 +359,7 @@ fn read_jsonl(path: &Path) -> (Vec<(String, Value)>, usize) {
 /// `KNOWN_PROVIDERS` enumeration so one alien harness never bricks the shared
 /// read (it degrades to durable routing, x-ec59 posture); dispatch capability
 /// is gated separately at the spawn/ask seam (`bin/client.rs`).
-fn is_identity_token(v: Option<&str>) -> bool {
+pub(crate) fn is_identity_token(v: Option<&str>) -> bool {
     matches!(
         v,
         Some(s) if !s.is_empty()
@@ -582,7 +583,10 @@ fn validate_registry_row(
 /// Caller obligation: at least one of `provider` / `harness` is a valid identity
 /// token. `load_registry_entries` checks that before calling; `heal_token` gets
 /// it from the healer, which only ever writes a known harness.
-fn backfill_row_aliases(obj: &mut serde_json::Map<String, Value>, legacy_provider_semantics: bool) {
+pub(crate) fn backfill_row_aliases(
+    obj: &mut serde_json::Map<String, Value>,
+    legacy_provider_semantics: bool,
+) {
     // Lockstep alias heal (x-8dfc), mirroring Python `load_registry`:
     // the two identity fields are the same token in the skew window, so
     // heal whichever is missing OR corrupt (shape-checked, not truthy)
@@ -1233,183 +1237,6 @@ fn is_session_shaped(token: &str) -> bool {
     }
     (token.len() == 8 && token.bytes().all(|b| b.is_ascii_alphanumeric()))
         || is_uuid_shaped(&token.to_ascii_lowercase())
-}
-
-fn helper_registry_path(registry_path: &Path) -> std::io::Result<PathBuf> {
-    let absolute = if registry_path.is_absolute() {
-        registry_path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(registry_path)
-    };
-    if let Ok(canonical) = fs::canonicalize(&absolute) {
-        return Ok(canonical);
-    }
-    if let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) {
-        if let Ok(canonical_parent) = fs::canonicalize(parent) {
-            return Ok(canonical_parent.join(name));
-        }
-    }
-    Ok(absolute)
-}
-
-fn token_helper_args(token: &str, registry_path: &Path, cross_project: bool) -> Vec<String> {
-    let mut args = vec![
-        "agents".to_string(),
-        "heal-token".to_string(),
-        token.to_string(),
-        "--registry".to_string(),
-        registry_path.to_string_lossy().into_owned(),
-        "--all-sources".to_string(),
-    ];
-    if cross_project {
-        args.push("--cross-project".to_string());
-    }
-    args
-}
-
-fn token_helper_output(
-    token: &str,
-    registry_path: &Path,
-    cross_project: bool,
-    scope_cwd: Option<&Path>,
-) -> std::io::Result<std::process::Output> {
-    use std::process::Command;
-
-    let registry_path = helper_registry_path(registry_path)?;
-    let mut command = Command::new("fno");
-    command
-        .args(token_helper_args(token, &registry_path, cross_project))
-        .env("FNO_AGENTS_RUNTIME", "python");
-    match scope_cwd {
-        Some(cwd) => command.current_dir(cwd),
-        // No scope dir named: pin an existing cwd anyway, because a daemon
-        // lazy-started from a worktree the reaper later deleted would hand the
-        // child its own dead cwd, and the Python helper dies at getcwd with a
-        // traceback (x-8f73). The registry's parent (~/.fno/agents) is the
-        // nearest always-there directory.
-        None => command.current_dir(crate::daemon::lifecycle_child_cwd(
-            registry_path
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new(".")),
-        )),
-    };
-    command.output()
-}
-
-/// Ask the Python resolver to union registry and harness-store candidates.
-///
-/// `Ok(Some(row))` on resolution, `Ok(None)` only on the helper's documented
-/// clean miss, and `Err(msg)` on ambiguity or unavailable/incomplete coverage.
-/// `FNO_AGENTS_RUNTIME=python` pins the child to the Python dispatch so the
-/// shellout cannot recurse back into this binary.
-fn heal_token(
-    token: &str,
-    registry_path: &Path,
-    cross_project: bool,
-    scope_cwd: Option<&Path>,
-) -> Result<Option<Value>, String> {
-    let out = match token_helper_output(token, registry_path, cross_project, scope_cwd) {
-        Ok(o) => o,
-        Err(exc) => {
-            return Err(format!(
-                "cannot safely resolve token {} because the all-source identity helper could not run: {exc}. Use the full session id.",
-                py_repr_str(token)
-            ));
-        }
-    };
-    // The healer adopts best-effort: a failed registry write still returns the
-    // row, with the reason on stderr. Swallowing that would make the degradation
-    // invisible -- the verb works, the roster silently does not.
-    let parsed = parse_heal_token_output(token, &out);
-    if matches!(&parsed, Ok(Some(_))) {
-        let warn = String::from_utf8_lossy(&out.stderr);
-        if !warn.trim().is_empty() {
-            eprint!("{warn}");
-        }
-    }
-    parsed
-}
-
-/// Enforce the Python helper's output contract without collapsing unavailable
-/// coverage into a clean miss. Kept pure so malformed/off-contract subprocess
-/// results are mechanically testable without mutating PATH.
-fn parse_heal_token_output(
-    token: &str,
-    out: &std::process::Output,
-) -> Result<Option<Value>, String> {
-    const AMBIGUOUS: i32 = 3;
-    const MISS: i32 = 13;
-
-    if out.status.code() == Some(AMBIGUOUS) {
-        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        return Err(if detail.is_empty() {
-            format!(
-                "token {} is ambiguous across harness stores",
-                py_repr_str(token)
-            )
-        } else {
-            detail
-        });
-    }
-    if out.status.code() == Some(MISS) {
-        return Ok(None);
-    }
-    if !out.status.success() {
-        // The FULL stderr, not its first line: the helper's real failure is the
-        // tail of a Python traceback ("OSError: ...deleted"), and quoting only
-        // the first line shipped "(exit 1): Traceback" - a refusal that names
-        // nothing (x-8f73).
-        let detail = String::from_utf8_lossy(&out.stderr);
-        let detail = detail.trim();
-        return Err(format!(
-            "cannot safely resolve token {} because the all-source identity helper failed (exit {}){}. Use the full session id.",
-            py_repr_str(token),
-            out.status.code().unwrap_or(-1),
-            if detail.is_empty() { String::new() } else { format!(":\n{detail}") },
-        ));
-    }
-    // The LAST non-empty line, not the whole buffer: a first-run `fno` may print
-    // a setup-migration banner ahead of the payload.
-    let text = String::from_utf8_lossy(&out.stdout);
-    let line = match text.lines().rev().find(|l| !l.trim().is_empty()) {
-        Some(l) => l,
-        None => {
-            return Err(format!(
-                "cannot safely resolve token {} because the all-source identity helper returned no row. Use the full session id.",
-                py_repr_str(token)
-            ))
-        }
-    };
-    match serde_json::from_str::<Value>(line) {
-        Ok(mut row) if row.is_object() => {
-            // The healed row skipped `load_registry_entries`, so it gets neither
-            // that loader's alias reconciliation nor its validation. Apply both:
-            // without the backfill the row has no `claude_session_uuid` (resume's
-            // dead arm would refuse); without the field bar, an exit-0 helper returning `{}` or a
-            // partial object would resolve as a SUCCESS and surface as a confusing
-            // missing-cwd error three frames later instead of a clean not-found.
-            let obj = match row.as_object_mut() {
-                Some(o) => o,
-                None => unreachable!("object guard above"),
-            };
-            backfill_row_aliases(obj, false);
-            let has_identity = is_identity_token(obj.get("harness").and_then(Value::as_str));
-            let has_fields = ["name", "cwd", "log_path"]
-                .iter()
-                .all(|k| obj.contains_key(*k));
-            if !has_identity || !has_fields {
-                return Err(format!(
-                    "cannot safely resolve token {} because the all-source identity helper returned an incomplete row. Use the full session id.",
-                    py_repr_str(token)
-                ));
-            }
-            Ok(Some(row))
-        }
-        _ => Err(format!(
-            "cannot safely resolve token {} because the all-source identity helper returned malformed JSON. Use the full session id.",
-            py_repr_str(token)
-        )),
-    }
 }
 
 /// [`find_agent_entry`], plus all-source resolution for session-shaped tokens.
@@ -2771,7 +2598,8 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         // cargo-only install where only the mux (`fno`) is on PATH. Where
         // even `fno` is off PATH, scrape::fno_py resolves directly (the
         // twin of _subprocess_util.py's fno_py_cmd()). `FNO_AGENTS_RUNTIME=python` pins the child to Python
-        // dispatch, mirroring `token_helper_output` above -- without it,
+        // dispatch, mirroring `crate::lifecycle_child::token_helper_output` --
+        // without it,
         // `resume` (in RUST_CLIENT_VERBS) would auto-route straight back into
         // this same binary and loop.
         //
@@ -4127,54 +3955,6 @@ mod tests {
     }
 
     #[test]
-    fn heal_output_distinguishes_clean_miss_from_broken_coverage() {
-        use std::process::Command;
-
-        let miss = Command::new("sh").args(["-c", "exit 13"]).output().unwrap();
-        assert!(parse_heal_token_output("deadbeef", &miss)
-            .unwrap()
-            .is_none());
-
-        let off_contract = Command::new("sh")
-            .args(["-c", "echo probe-broke >&2; exit 7"])
-            .output()
-            .unwrap();
-        let message = parse_heal_token_output("deadbeef", &off_contract).unwrap_err();
-        assert!(message.contains("cannot safely resolve"));
-        assert!(message.contains("probe-broke"));
-
-        let malformed = Command::new("sh")
-            .args(["-c", "printf 'not-json\\n'"])
-            .output()
-            .unwrap();
-        assert!(parse_heal_token_output("deadbeef", &malformed)
-            .unwrap_err()
-            .contains("malformed JSON"));
-    }
-
-    #[test]
-    fn heal_failure_quotes_the_full_stderr_not_just_its_first_line() {
-        use std::process::Command;
-
-        // The x-8f73 failure shape: a Python traceback whose first line is the
-        // useless header and whose tail names the real cause. The refusal must
-        // carry the tail, because the tail is the diagnosis.
-        let out = Command::new("sh")
-            .args([
-                "-c",
-                "echo Traceback >&2; echo '  more' >&2; echo 'OSError: The current working directory was deleted' >&2; exit 1",
-            ])
-            .output()
-            .unwrap();
-        let message = parse_heal_token_output("deadbeef", &out).unwrap_err();
-        assert!(message.contains("Traceback"), "{message}");
-        assert!(
-            message.contains("OSError: The current working directory was deleted"),
-            "{message}"
-        );
-    }
-
-    #[test]
     fn backfill_gives_a_healed_v10_row_the_fields_the_verbs_read() {
         // The shape `fno agents heal-token` emits: harness-only, no `provider`
         // and no `claude_session_uuid` (v10 removed both from disk). Without the
@@ -4775,145 +4555,6 @@ mod tests {
             run_recover(&["--print-command".to_string()], &home),
             2,
             "a flag is not an agent name"
-        );
-    }
-
-    #[test]
-    fn heal_token_helper_forwards_cross_project_exactly_once() {
-        let registry = Path::new("/tmp/registry.json");
-        assert_eq!(
-            token_helper_args("deadbeef", registry, false),
-            vec![
-                "agents",
-                "heal-token",
-                "deadbeef",
-                "--registry",
-                "/tmp/registry.json",
-                "--all-sources",
-            ]
-        );
-        assert_eq!(
-            token_helper_args("deadbeef", registry, true),
-            vec![
-                "agents",
-                "heal-token",
-                "deadbeef",
-                "--registry",
-                "/tmp/registry.json",
-                "--all-sources",
-                "--cross-project",
-            ]
-        );
-    }
-
-    #[test]
-    fn token_helper_runs_in_explicit_scope_cwd() {
-        // PATH mutation is process-global: take the lib-wide test mutex so a
-        // concurrent PATH-dependent test does not inherit this stub.
-        let _path_guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        use std::os::unix::fs::PermissionsExt;
-
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = cv_tmpdir();
-        let scope = dir.path().join("replacement");
-        fs::create_dir(&scope).unwrap();
-        let marker = dir.path().join("helper-cwd");
-        let registry_marker = dir.path().join("helper-registry");
-        let fake_fno = dir.path().join("fno");
-        fs::write(
-            &fake_fno,
-            "#!/bin/sh\npwd > \"$FNO_TEST_HELPER_CWD\"\nprintf '%s\\n' \"$5\" > \"$FNO_TEST_HELPER_REGISTRY\"\nexit 0\n",
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&fake_fno).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_fno, permissions).unwrap();
-
-        let old_path = std::env::var_os("PATH");
-        let caller_cwd = std::env::current_dir().unwrap();
-        let relative_registry = Path::new("relative/registry.json");
-        let expected_registry = caller_cwd.join(relative_registry);
-        std::env::set_var("PATH", crate::path_with(dir.path()));
-        std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
-        std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
-        let output =
-            token_helper_output("deadbeef", relative_registry, false, Some(&scope)).unwrap();
-        match old_path {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
-        std::env::remove_var("FNO_TEST_HELPER_CWD");
-        std::env::remove_var("FNO_TEST_HELPER_REGISTRY");
-
-        assert!(output.status.success());
-        let observed = Path::new(fs::read_to_string(marker).unwrap().trim())
-            .canonicalize()
-            .unwrap();
-        assert_eq!(observed, scope.canonicalize().unwrap());
-        assert_eq!(
-            Path::new(fs::read_to_string(registry_marker).unwrap().trim()),
-            expected_registry
-        );
-    }
-
-    #[test]
-    fn token_helper_without_scope_cwd_pins_an_existing_directory() {
-        // x-8f73: with no scope dir named, the child inherits the caller's cwd
-        // - fatal when a daemon lazy-started from a worktree the reaper later
-        // deleted keeps that dead cwd forever. The helper child must land in an
-        // existing directory (the registry's parent) instead.
-        let _path_guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _guard = crate::claims::test_env_lock()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = cv_tmpdir();
-        let marker = dir.path().join("helper-cwd");
-        let registry_marker = dir.path().join("helper-registry");
-        let fake_fno = dir.path().join("fno");
-        fs::write(
-            &fake_fno,
-            "#!/bin/sh\npwd > \"$FNO_TEST_HELPER_CWD\"\nprintf '%s\\n' \"$5\" > \"$FNO_TEST_HELPER_REGISTRY\"\nexit 0\n",
-        )
-        .unwrap();
-        let mut permissions = fs::metadata(&fake_fno).unwrap().permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&fake_fno, permissions).unwrap();
-
-        let old_path = std::env::var_os("PATH");
-        let registry = dir.path().canonicalize().unwrap().join("registry.json");
-        std::env::set_var("PATH", crate::path_with(dir.path()));
-        std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
-        std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
-        let output = token_helper_output("deadbeef", &registry, false, None).unwrap();
-        match old_path {
-            Some(path) => std::env::set_var("PATH", path),
-            None => std::env::remove_var("PATH"),
-        }
-        std::env::remove_var("FNO_TEST_HELPER_CWD");
-        std::env::remove_var("FNO_TEST_HELPER_REGISTRY");
-
-        assert!(output.status.success());
-        let observed = PathBuf::from(fs::read_to_string(&marker).unwrap().trim())
-            .canonicalize()
-            .unwrap();
-        // The child's cwd is the chooser's answer: the live cwd when getcwd
-        // works, else the registry's parent (nearest always-there directory).
-        // The fallback arm itself is pinned by the pure
-        // daemon::lifecycle_child_cwd_from tests, since chdir is process-global.
-        let expected =
-            crate::daemon::lifecycle_child_cwd(registry.parent().unwrap_or(Path::new(".")));
-        assert_eq!(observed, expected.canonicalize().unwrap());
-        assert_eq!(
-            Path::new(fs::read_to_string(registry_marker).unwrap().trim()),
-            registry
         );
     }
 

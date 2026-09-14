@@ -1562,51 +1562,6 @@ pub(crate) fn live_liveness_prober(
 /// Cheap in steady state: no markers -> one dir stat, no roster load. A stop
 /// failure leaves the marker for the next tick (retry); a marker whose session is
 /// already gone is dropped as stale.
-/// The cwd a lifecycle child inherits: this process's cwd while getcwd still
-/// resolves, else `fallback`, else the temp dir. A daemon lazy-started from a
-/// worktree the reaper later deleted runs forever with a dead cwd, and every
-/// child that inherits it fails the same way - the Python identity helper
-/// exits 1 with a bare traceback, `claude stop` with "The current working
-/// directory was deleted" - so finished workers could never be stopped and
-/// held fleet slots until a daemon restart (x-8f73). These children need no
-/// particular directory, only an existing one.
-pub(crate) fn lifecycle_child_cwd_from(
-    cwd: std::io::Result<std::path::PathBuf>,
-    fallback: &std::path::Path,
-) -> std::path::PathBuf {
-    cwd.unwrap_or_else(|_| {
-        if fallback.is_dir() {
-            fallback.to_path_buf()
-        } else {
-            std::env::temp_dir()
-        }
-    })
-}
-
-pub(crate) fn lifecycle_child_cwd(fallback: &std::path::Path) -> std::path::PathBuf {
-    lifecycle_child_cwd_from(std::env::current_dir(), fallback)
-}
-
-/// Run `claude stop <short>`, refusing to wait past `timeout`. `kill_on_drop`:
-/// on timeout the `output()` future is dropped, so the hung child does not
-/// keep running past the deadline this call gave up at (self-review finding:
-/// this was hand-duplicated at the RPC call site below; one shared helper
-/// now backs both).
-pub(crate) async fn bounded_claude_stop(
-    short: &str,
-    timeout: Duration,
-) -> Result<std::io::Result<std::process::Output>, tokio::time::error::Elapsed> {
-    let stop = tokio::process::Command::new("claude")
-        .arg("stop")
-        .arg(short)
-        .current_dir(lifecycle_child_cwd(
-            crate::paths::AgentsHome::from_env().root(),
-        ))
-        .kill_on_drop(true)
-        .output();
-    tokio::time::timeout(timeout, stop).await
-}
-
 async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
     // read_markers (dir list + N file reads) and the roster load/parse are
     // blocking fs; run them off the async runtime so a slow disk or a large
@@ -1654,7 +1609,9 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                 // sweep. A timeout leaves the marker for the next tick, since
                 // it is retried every tick, which is the failure this feature
                 // exists to prevent.
-                let stopped = bounded_claude_stop(&short, Duration::from_secs(15)).await;
+                let stopped =
+                    crate::lifecycle_child::bounded_claude_stop(&short, Duration::from_secs(15))
+                        .await;
                 match stopped {
                     // retired-ok: a daemon log line naming its own teardown call.
                     Err(_) => eprintln!("daemon: claude stop {short} timed out (retry next tick)"),
@@ -6244,7 +6201,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
     };
     // Bound the subprocess so a hung `claude` can never wedge this RPC
     // handler, the same way the background-sweep twin above is bounded.
-    match bounded_claude_stop(&short, Duration::from_secs(15)).await {
+    match crate::lifecycle_child::bounded_claude_stop(&short, Duration::from_secs(15)).await {
         Err(_) => Response::err(
             req.id,
             ErrorCode::Internal,
@@ -8791,40 +8748,6 @@ mod tests {
     use super::*;
     use crate::client_verbs::RowLiveness;
     use crate::codex_thread_entry::build_codex_thread_entry;
-
-    /// x-8f73: a live cwd passes through untouched (the dominant case).
-    #[test]
-    fn lifecycle_child_cwd_passes_a_live_cwd_through() {
-        let live = std::env::temp_dir().join("x8f73-live-cwd");
-        std::fs::create_dir_all(&live).unwrap();
-        let chosen = lifecycle_child_cwd_from(Ok(live.clone()), Path::new("/nonexistent"));
-        assert_eq!(chosen, live);
-        std::fs::remove_dir_all(&live).ok();
-    }
-
-    /// x-8f73: a dead cwd (getcwd errored) falls back to an existing fallback;
-    /// a missing fallback degrades to the temp dir instead of handing the child
-    /// another missing directory.
-    #[test]
-    fn lifecycle_child_cwd_falls_back_when_getcwd_fails() {
-        let fallback = std::env::temp_dir().join("x8f73-fallback");
-        std::fs::create_dir_all(&fallback).unwrap();
-        let dead = std::io::Error::from_raw_os_error(libc::ENOENT);
-        assert_eq!(
-            lifecycle_child_cwd_from(
-                Err(std::io::Error::from_raw_os_error(libc::ENOENT)),
-                &fallback
-            ),
-            fallback
-        );
-        std::fs::remove_dir_all(&fallback).ok();
-        // The fallback itself is gone: temp dir, never a missing path.
-        let missing = Path::new("/nonexistent/x8f73");
-        assert_eq!(
-            lifecycle_child_cwd_from(Err(dead), missing),
-            std::env::temp_dir()
-        );
-    }
 
     /// The e2e restart-storm test only exercises `state_error_code` when the
     /// scheduler happens to race a task into shutdown-cancellation, so its

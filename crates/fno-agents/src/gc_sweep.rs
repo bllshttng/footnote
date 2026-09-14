@@ -1241,7 +1241,7 @@ fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
                 .map(|rt| {
                     rt.block_on(async {
                         matches!(
-                            crate::daemon::bounded_claude_stop(&short, std::time::Duration::from_secs(15))
+                            crate::lifecycle_child::bounded_claude_stop(&short, std::time::Duration::from_secs(15))
                                 .await,
                             Ok(Ok(output)) if output.status.success()
                         )

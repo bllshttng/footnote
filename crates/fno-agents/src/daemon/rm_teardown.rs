@@ -64,7 +64,7 @@ pub(crate) fn claude_stop_confirmed(short: &str) -> bool {
         .map(|rt| {
             rt.block_on(async {
                 matches!(
-                    super::bounded_claude_stop(&short, std::time::Duration::from_secs(15)).await,
+                    crate::lifecycle_child::bounded_claude_stop(&short, std::time::Duration::from_secs(15)).await,
                     Ok(Ok(output)) if output.status.success()
                 )
             })
