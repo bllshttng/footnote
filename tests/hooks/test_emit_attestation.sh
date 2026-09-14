@@ -487,7 +487,7 @@ if [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then
   exit 0
 fi
 if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
-  f=""; attest=""; ctx="unknown"; xctx="inline"; contract="json_block"; shift 3
+  f=""; attest=""; ctx="unknown"; xctx="inline"; contract="json_block"; obranch=""; shift 3
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --findings-file) f="$2"; shift 2 ;;
@@ -495,6 +495,7 @@ if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
       --reviewer-context) ctx="$2"; shift 2 ;;
       --execution-context) xctx="$2"; shift 2 ;;
       --output-contract) contract="$2"; shift 2 ;;
+      --branch) obranch="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -503,6 +504,8 @@ if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
     # The verb's contract, stubbed against the fixture repo (cwd): measure
     # the verdict from the classified record (prose_unparseable always fails),
     # measure the diff, merge, and write the ONE emit the shell delegates to.
+    # --branch, when the producer passed one, overrides the row's branch field
+    # ONLY - the verb's own contract under test, mirrored here.
     if [[ "$contract" == "prose_unparseable" ]]; then
       verdict="fail"
     else
@@ -510,7 +513,7 @@ if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
     fi
     merged="$(jq -cn --argjson rec "$record" --arg reviewer "$attest" --arg verdict "$verdict" \
       --arg head "$(git rev-parse HEAD)" \
-      --arg branch "$(git rev-parse --abbrev-ref HEAD)" \
+      --arg branch "${obranch:-$(git rev-parse --abbrev-ref HEAD)}" \
       --arg base "$(git merge-base HEAD origin/main)" \
       --arg ctx "$ctx" --arg xctx "$xctx" --arg contract "$contract" \
       '$rec + {reviewer:$reviewer,head_sha:$head,verdict:$verdict,session_id:"",branch:$branch,reviewed_base_sha:$base,reviewed_head_sha:$head,reviewer_context:$ctx,execution_context:$xctx,output_contract:$contract,invocation_id:"UNJOINED"}')"
@@ -593,6 +596,47 @@ for key in findings_blocking findings_nonblocking findings review_round disposit
   [[ "$got" == "<missing>" ]] && pass "no-file payload omits $key" \
     || fail "no-file payload carries $key='$got'"
 done
+
+echo "== default-branch refusal + delegated-path branch parity (x-a8a1) =="
+git -C "$REPO" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+git -C "$REPO" update-ref refs/remotes/origin/main "$BASE_SHA"
+git -C "$REPO" update-ref refs/remotes/origin/feature/x-e601 "$HEAD_SHA"
+
+# 15. A checkout ON the default branch refuses before anything is journaled:
+#     the upstream rewrite cannot produce the base name, so branch == base
+#     can only mean the emit ran on the repo default - lost for the real PR,
+#     in scope for any PR whose headRefName is main. Pre-attempt shape: no
+#     refused terminal row either (no review attempt exists to terminate).
+git -C "$REPO" checkout -q -B main "$BASE_SHA"
+rm -f "$TMP/last-emit.txt"
+RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-stub" bash "$EMITTER" code-review pass 2>&1 >/dev/null)"
+RECEIPT_RC=$?
+[[ $RECEIPT_RC -ne 0 ]] && pass "default-branch emit refuses" \
+  || fail "default-branch emitted anyway (exit $RECEIPT_RC)"
+[[ ! -f "$TMP/last-emit.txt" ]] \
+  && pass "default-branch refusal journals nothing (pre-attempt shape)" \
+  || fail "default-branch refusal journaled a row: $(cat "$TMP/last-emit.txt" 2>/dev/null)"
+case "$RECEIPT" in
+  *"is the repo default"*) pass "refusal names the default-branch shape" ;;
+  *) fail "refusal lacks the reason: $RECEIPT" ;;
+esac
+
+# 16. The delegated path (--findings-file) records the SAME branch the typed
+#     path resolves: the script passes its post-rewrite branch through
+#     --branch, so a reviewer worktree's LOCAL checkout name never reaches
+#     the row. Same worktree, same head, one flag apart used to produce two
+#     different branches (x-a8a1, node note 2).
+git -C "$REPO" checkout -q -B wt/r-4 origin/feature/x-e601
+git -C "$REPO" branch --set-upstream-to=origin/feature/x-e601 wt/r-4 >/dev/null 2>&1
+rm -f "$TMP/last-emit.txt"
+emit_ff "--findings-file $F14"
+[[ -f "$TMP/last-emit.txt" ]] && pass "delegated emit from a reviewer-worktree branch lands" \
+  || fail "delegated emit wrote nothing"
+got="$(stored '.branch')"
+[[ "$got" == "feature/x-e601" ]] \
+  && pass "delegated path records the rewritten PR branch, not the local name" \
+  || fail "delegated branch: want feature/x-e601, got '$got'"
 
 echo ""
 echo "emit-attestation: $PASS passed, $FAIL failed"

@@ -190,6 +190,17 @@ if [[ "$upstream" == */* && "${upstream#*/}" != "$base" && "$ahead" == "0" ]]; t
   branch="${upstream#*/}"
 fi
 
+# The rewrite above provably cannot produce the base name (its second conjunct
+# requires the upstream to differ from it), so branch == base here means the
+# checkout sits on the repo default branch. That emit is mis-scoped by
+# construction: lost for the real PR, in scope for any PR whose headRefName is
+# literally the base (x-a8a1). Same fail-closed shape as the detached-HEAD
+# refusal: a pre-attempt refusal, so it journals nothing.
+if [[ "$branch" == "$base" ]]; then
+  echo "emit-attestation: branch '${branch}' is the repo default; an attestation recorded here is lost for the real PR and in scope for any PR whose head is '${branch}'. Run from the PR's worktree; no event emitted" >&2
+  exit 1
+fi
+
 # Shared resolution for BOTH exits below (the refusal and the emit): the actor
 # reads and the invocation id. Hoisted above the diff measurement so the
 # empty-diff refusal can journal its own terminal row - a refusal that writes
@@ -434,16 +445,22 @@ if [[ -n "$findings_file" ]]; then
   # path, so a row can never read milder than the classified findings. The
   # verb's stderr line is the emit receipt. The typed-verdict emit below
   # stays for `declare` and for hand runs with no findings file.
-  # The declared scope rides BOTH emit paths, or the stamp is half a stamp.
+  # The declared scope rides BOTH emit paths, and so does the branch: classify
+  # re-resolves the branch from cwd, which in a reviewer worktree names the
+  # LOCAL checkout, not the PR (x-a8a1) - the --branch passthrough keeps the
+  # delegated row byte-identical to the typed path's. The hold join/release
+  # inside classify still key on its own cwd-resolved local name, which is
+  # what the hook set the hold under.
   if [[ -n "$review_round" ]]; then
     "${FNO:-fno}" do review classify --findings-file "$findings_file" \
       --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
       --execution-context "$execution_context" --output-contract "$output_contract" \
-      --review-round "$review_round" >/dev/null
+      --review-round "$review_round" --branch "$branch" >/dev/null
   else
     "${FNO:-fno}" do review classify --findings-file "$findings_file" \
       --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
-      --execution-context "$execution_context" --output-contract "$output_contract" >/dev/null
+      --execution-context "$execution_context" --output-contract "$output_contract" \
+      --branch "$branch" >/dev/null
   fi
 else
   data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
