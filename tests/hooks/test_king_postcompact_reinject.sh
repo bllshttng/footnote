@@ -13,13 +13,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 KING="$REPO_ROOT/hooks/king-postcompact-reinject.sh"
-BRIEF="$REPO_ROOT/skills/king-for-a-day/references/postcompact-brief.md"
-# 1600 held 1580 with 20 B of slack. The demand-signal rule added 194 B: agents
-# were not voting because nothing armed taught the verb, and this brief is one
-# of only two armed surfaces that reach an install. Trading was barred by this
-# file's own style-exception header, which says the five rules are the
-# operator's verbatim corrections and must not be shortened. So the cap moves,
-# keeping the same slack 1600 gave 1580.
+BRIEF="$REPO_ROOT/skills/reign/references/postcompact-brief.md"
+# Keep the cap fixed: the brief must fit without changing the budget.
 BRIEF_MAX_BYTES=1800
 
 [[ -f "$KING" ]] || { echo "FAIL: king hook not found at $KING" >&2; exit 1; }
@@ -82,7 +77,9 @@ FNO_PLATFORM=claude
 OUT="$(run_king "{\"source\":\"compact\",\"session_id\":\"$SID\"}")"
 RC=$?
 [[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext
-    | contains("level 1 over fno") and contains("Encode, then abdicate")' >/dev/null 2>&1 \
+    | contains("level 1 over fno") and contains("Encode, then abdicate")
+      and contains("--substrate thread") and contains("glm-5.3-flash[1m]")
+      and (contains("king-for-a-day") | not)' >/dev/null 2>&1 \
   && pass "crowned claude: additionalContext carries crown + first rule" \
   || fail "crowned claude rc=$RC payload=$OUT"
 
@@ -92,8 +89,8 @@ RC=$?
 #    systemMessage carrier, never the claude-only hookSpecificOutput key.
 registry_fixture "$CROWNED_HARNESS_ROW"
 FNO_PLATFORM=codex
-OUT="$(printf '%s' '{}' | env CODEX_THREAD_ID="$SID" FNO_PLATFORM=codex \
-  PLUGIN_ROOT="$REPO_ROOT" CLAUDE_PLUGIN_ROOT="$TMP/foreign-claude-plugin" \
+OUT="$(printf '%s' '{}' | env -u CODEX_SESSION_ID CODEX_THREAD_ID="$SID" FNO_PLATFORM=codex \
+  CODEX_PLUGIN_ROOT="$REPO_ROOT" PLUGIN_ROOT="$REPO_ROOT" CLAUDE_PLUGIN_ROOT="$TMP/foreign-claude-plugin" \
   bash "$KING" 2>/dev/null)"
 RC=$?
 [[ $RC -eq 0 ]] && echo "$OUT" | jq -e 'has("systemMessage") and (has("hookSpecificOutput") | not)' >/dev/null 2>&1 \

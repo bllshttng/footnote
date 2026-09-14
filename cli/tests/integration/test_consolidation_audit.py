@@ -17,6 +17,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AUDIT_SCRIPT = REPO_ROOT / "scripts" / "ci" / "check-no-stale-skill-refs.sh"
+RETIRED_SKILLS = REPO_ROOT / "scripts" / "ci" / "retired-skills.txt"
 
 
 def _make_tiny_repo(tmp_path: Path) -> Path:
@@ -30,6 +31,8 @@ def _make_tiny_repo(tmp_path: Path) -> Path:
     audit_dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy(AUDIT_SCRIPT, audit_dest)
     audit_dest.chmod(0o755)
+    registry_dest = tmp_path / "scripts" / "ci" / "retired-skills.txt"
+    shutil.copy(RETIRED_SKILLS, registry_dest)
     subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "init"],
@@ -134,19 +137,22 @@ def test_audit_catches_slash_command_form(tmp_path: Path) -> None:
 
 
 def test_audit_rejects_malformed_skill_name(tmp_path: Path) -> None:
-    """Sanity check: if someone wrote a regex meta in CUT_SKILLS the script bails."""
+    """Sanity check: a malformed registry name fails closed."""
     repo = _make_tiny_repo(tmp_path)
-    script = repo / "scripts" / "ci" / "check-no-stale-skill-refs.sh"
-    text = script.read_text()
-    # Inject a malformed name into the CUT_SKILLS array.
-    text = text.replace(
-        'CUT_SKILLS=(distill megaspec tower-play tower-watch copy-this)',
-        'CUT_SKILLS=("bad.name" megaspec tower-play tower-watch copy-this)',
-    )
-    script.write_text(text)
+    registry = repo / "scripts" / "ci" / "retired-skills.txt"
+    registry.write_text("bad.name|cut|test ruling\n")
     result = _run_audit(repo)
     assert result.returncode == 2, result.stdout + result.stderr
     assert "malformed skill name" in result.stderr
+
+
+def test_audit_rejects_missing_retired_skill_registry(tmp_path: Path) -> None:
+    """A missing registry must not turn the stale-reference audit green."""
+    repo = _make_tiny_repo(tmp_path)
+    (repo / "scripts" / "ci" / "retired-skills.txt").unlink()
+    result = _run_audit(repo)
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "AUDIT ERROR" in result.stderr
 
 
 @pytest.mark.skipif(

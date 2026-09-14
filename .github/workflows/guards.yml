@@ -390,6 +390,12 @@ jobs:
         timeout-minutes: 5
         run: bash scripts/ci/check-retired-command-strings.sh
 
+      # A command form named by a live law must reach the skill that teaches it.
+      - name: Law command-form check
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-law-command-forms.sh
+
       # Every page the AGENTS.md deep-dive index links must open with a scope
       # section (## Is this page for you? + a Not for: line), so a reader
       # with a symptom can tell whether the mechanism on the page governs it
