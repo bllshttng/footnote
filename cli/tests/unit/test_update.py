@@ -3025,3 +3025,110 @@ def test_update_readiness_reports_gate_refusal(monkeypatch, tmp_path) -> None:
     ok = update.update_readiness(runner=_make_runner(mux_rc=1, agent_rc=1))
     assert ok["update_ready"] is True
     assert "update blocked" not in ok["guidance"]
+
+
+def test_update_readiness_behind_pin_guidance_replaces_current(monkeypatch, tmp_path) -> None:
+    """AC4-HP: installed == source while the checkout is behind origin
+    -> the native behind guidance replaces the `is current` line, and the
+    payload carries the distance."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="aaa1111")
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
+    guidance = (
+        "source checkout aaa1111 is 14 commit(s) behind origin/main bbb2222; "
+        "merged changes there are not installed. Sync it "
+        "(git -C /repo pull --ff-only), then run fno doctor update"
+    )
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {
+            "decision": "allow",
+            "path": str(tmp_path / "cli"),
+            "eligibility": "eligible",
+            "behind": 14,
+            "guidance": guidance,
+            "refusal": None,
+            "warning": None,
+        },
+    )
+
+    result = update.update_readiness(runner=_make_runner(mux_rc=1, agent_rc=1))
+
+    assert result["update_ready"] is False
+    assert result["guidance"] == guidance
+    assert "is current" not in result["guidance"]
+    assert "up to date" not in result["guidance"]
+    assert result["source_pin"]["behind"] == 14
+    assert result["source_pin"]["guidance"] == guidance
+
+
+def test_update_readiness_old_helper_pin_keeps_python_guidance(monkeypatch, tmp_path) -> None:
+    """AC5-EDGE: a pin without `guidance` (an older fno-agents binary)
+    falls through to the Python-built guidance, wording unchanged."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="aaa1111")
+    monkeypatch.setattr(
+        update,
+        "running_components",
+        lambda runner: [
+            {
+                "component": "daemon",
+                "name": "agents home",
+                "verdict": "stale",
+                "on_restart": "restarts",
+                "survives": "workers and panes",
+            },
+            {
+                "component": "pane-keeper",
+                "name": "main-1991",
+                "verdict": "stale",
+                "on_restart": "kept",
+                "survives": "its pane; current only when that pane ends",
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {
+            "decision": "allow",
+            "path": str(tmp_path / "cli"),
+            "eligibility": "eligible",
+            "refusal": None,
+            "warning": None,
+        },
+    )
+
+    result = update.update_readiness(runner=_make_runner(mux_rc=1, agent_rc=1))
+
+    assert result["update_ready"] is False
+    assert "installed aaa1111 is current" in result["guidance"]
+    assert "behind" not in result["guidance"]
+
+
+def test_update_readiness_pending_update_keeps_ready_line(monkeypatch, tmp_path) -> None:
+    """AC6-HP: a behind pin does not override the `update ready`
+    guidance when the revs already differ."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="bbb2222")
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {
+            "decision": "allow",
+            "path": str(tmp_path / "cli"),
+            "eligibility": "eligible",
+            "behind": 14,
+            "guidance": "source checkout bbb2222 is 14 commit(s) behind origin/main ccc3333; "
+            "merged changes there are not installed. Sync it "
+            "(git -C /repo pull --ff-only), then run fno doctor update",
+            "refusal": None,
+            "warning": None,
+        },
+    )
+
+    result = update.update_readiness(
+        runner=_make_runner(mux_rows=[{"session": "main", "state": "live", "panes": 1, "wire_version": 47}])
+    )
+
+    assert result["update_ready"] is True
+    assert result["guidance"].startswith("update ready")

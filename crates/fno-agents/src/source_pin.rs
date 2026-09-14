@@ -60,10 +60,17 @@ pub struct ResolveAnswer {
     pub ancestor: Option<bool>,
     /// eligible | divergent | ancestry_unknown | invalid_override | no_source
     pub eligibility: String,
+    /// Commits HEAD..remote-default, when the source is a proven-ancestor
+    /// checkout that is strictly behind. None = current, divergent, or
+    /// unreadable (the `sync` detail names which).
+    pub behind: Option<u64>,
     /// Operator-facing text for the allow-with-warning outcome.
     pub warning: Option<String>,
     /// Operator-facing text for the refuse outcome.
     pub refusal: Option<String>,
+    /// One-line verdict for update --check and the TUI: the refuse reason, or
+    /// the behind distance. None when there is nothing to act on.
+    pub guidance: Option<String>,
     /// The instrument that failed, for ancestry_unknown.
     pub detail: Option<String>,
 }
@@ -290,7 +297,7 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
 
     let explicit = origin == "explicit";
     let state = branch_label(heads.branch.as_deref(), heads.detached);
-    let (decision, warning, refusal) = match eligibility {
+    let (decision, mut warning, refusal) = match eligibility {
         "eligible" => (Decision::Allow, None, None),
         "divergent" if explicit => (
             Decision::Allow,
@@ -329,6 +336,40 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
         _ => (Decision::Allow, None, None),
     };
 
+    // Distance and guidance come from `sync`, the one staleness reader - no
+    // second rev-list probe here. A non-ancestor HEAD reads unknown from
+    // `sync`, so `behind` only ever pairs with an eligible allow.
+    let (mut behind, mut guidance) = (None, None);
+    if decision == Decision::Refuse {
+        guidance = Some(format!(
+            "update blocked: {}",
+            refusal
+                .as_deref()
+                .unwrap_or("the resolved source failed the source-pin gate")
+        ));
+    } else if kind != WorktreeKind::NonGit {
+        let s = sync(path);
+        if s.status == "behind" {
+            if let Some(n) = s.behind {
+                behind = Some(n);
+                let repo = Path::new(path)
+                    .parent()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string());
+                let sh = short(&s.source_head);
+                let rh = short(&s.remote_head);
+                guidance = Some(format!(
+                    "source checkout {sh} is {n} commit(s) behind {rref} {rh}; merged changes there are not installed. Sync it (git -C {repo} pull --ff-only), then run fno doctor update"
+                ));
+                if warning.is_none() {
+                    warning = Some(format!(
+                        "warning: source {path} is {n} commit(s) behind {rref}; this installs the older snapshot. Sync first: git -C {repo} pull --ff-only"
+                    ));
+                }
+            }
+        }
+    }
+
     ResolveAnswer {
         decision,
         path: Some(path.to_string()),
@@ -341,8 +382,10 @@ fn classify(path: &str, origin: &str) -> ResolveAnswer {
         remote_head,
         ancestor,
         eligibility: eligibility.to_string(),
+        behind,
         warning,
         refusal,
+        guidance,
         detail,
     }
 }
@@ -437,8 +480,10 @@ fn no_source_answer(invalid_override: Option<&str>) -> ResolveAnswer {
         remote_head: None,
         ancestor: None,
         eligibility: eligibility.to_string(),
+        behind: None,
         warning: None,
         refusal: Some(refusal),
+        guidance: None,
         detail: None,
     }
 }
@@ -988,6 +1033,95 @@ mod tests {
         assert_eq!(s.status, "unknown");
         assert_eq!(s.behind, None);
         assert_eq!(s.detail, "source HEAD is not an ancestor of origin/main");
+    }
+
+    #[test]
+    fn ac1_hp_behind_main_checkout_names_distance() {
+        let base = tempfile::tempdir().unwrap();
+        let (clone, _wt) = clone_with_worktree(&base.path().join("a4"));
+        // Move origin/main one commit ahead of the clone's HEAD. Stage only
+        // 2.txt: `add -A` would track the untracked cli/pyproject.toml and the
+        // reset below would delete it, breaking the fno-source check.
+        fs::write(std::path::Path::new(&clone).join("2.txt"), "x\n").unwrap();
+        git_in(std::path::Path::new(&clone), &["add", "2.txt"]);
+        git_in(std::path::Path::new(&clone), &["commit", "-q", "-m", "b"]);
+        let b = git_ok(&clone, &["rev-parse", "HEAD"]).unwrap();
+        git_in(
+            std::path::Path::new(&clone),
+            &["reset", "-q", "--hard", "HEAD~1"],
+        );
+        git_in(
+            std::path::Path::new(&clone),
+            &["update-ref", "refs/remotes/origin/main", b.trim()],
+        );
+        let cli = std::path::Path::new(&clone)
+            .join("cli")
+            .to_string_lossy()
+            .into_owned();
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            cache: None,
+            candidate_paths: vec![cli],
+        });
+        assert_eq!(a.decision, Decision::Allow);
+        assert_eq!(a.behind, Some(1));
+        let guidance = a.guidance.unwrap();
+        assert!(
+            guidance.contains("1 commit(s) behind origin/main"),
+            "guidance names the distance: {guidance}"
+        );
+        assert!(!guidance.contains("current"), "no word current: {guidance}");
+        let warning = a.warning.unwrap();
+        assert!(
+            warning.contains("1 commit(s) behind origin/main"),
+            "warning names the distance: {warning}"
+        );
+        assert!(!warning.contains("current"), "no word current: {warning}");
+    }
+
+    #[test]
+    fn ac2_edge_current_main_checkout_is_silent() {
+        let base = tempfile::tempdir().unwrap();
+        let (clone, _wt) = clone_with_worktree(&base.path().join("a5"));
+        let cli = std::path::Path::new(&clone)
+            .join("cli")
+            .to_string_lossy()
+            .into_owned();
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            cache: None,
+            candidate_paths: vec![cli],
+        });
+        assert_eq!(a.decision, Decision::Allow);
+        assert_eq!(a.behind, None);
+        assert_eq!(a.guidance, None);
+        assert_eq!(a.warning, None);
+    }
+
+    #[test]
+    fn ac3_edge_divergent_guidance_wraps_refusal() {
+        let base = tempfile::tempdir().unwrap();
+        let (_clone, wt) = clone_with_worktree(&base.path().join("e4"));
+        fs::write(std::path::Path::new(&wt).join("d.txt"), "x\n").unwrap();
+        git_in(std::path::Path::new(&wt), &["add", "-A"]);
+        git_in(
+            std::path::Path::new(&wt),
+            &["commit", "-q", "-m", "diverge"],
+        );
+        let a = resolve(&ResolveArgs {
+            override_path: None,
+            env_source: None,
+            cache: None,
+            candidate_paths: vec![wt],
+        });
+        assert_eq!(a.decision, Decision::Refuse);
+        assert_eq!(a.behind, None);
+        assert_eq!(
+            a.guidance.unwrap(),
+            format!("update blocked: {}", a.refusal.unwrap())
+        );
     }
 
     #[test]
