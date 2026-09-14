@@ -32,6 +32,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "authorized-merge",
     "backlog-note",
     "backlog-notes",
+    "backlog-update",
     "bash-census",
     "blueprint-feed",
     "board",
@@ -632,6 +633,13 @@ async fn run(args: Vec<String>) -> i32 {
     // routing, and the nobody-bound pre-write refusal (exit 3).
     if verb == "backlog-note" {
         return fno_agents::backlog::note_cli::run_note(&args[1..]);
+    }
+    // `backlog-update` (x-665f): the native patch door. Daemon-free write;
+    // the Python `fno backlog update` bridge and the lifecycle verbs forward
+    // here, this action owns the field policy, the status validators, and the
+    // readback receipt.
+    if verb == "backlog-update" {
+        return fno_agents::backlog::patch::run_update(&args[1..]);
     }
     // `court-orphans` (x-f0d2): the orphan-crown sweep for `fno agents court`,
     // daemon-free read; `==` dispatch like graph-get, and registered in
