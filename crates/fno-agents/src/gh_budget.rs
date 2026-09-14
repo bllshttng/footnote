@@ -33,7 +33,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Half of GitHub's advertised 900 points/minute REST secondary limit.
 pub const DEFAULT_POINTS_PER_MIN: u32 = 450;
-const ENV_POINTS_PER_MIN: &str = "FNO_GH_BUDGET_POINTS_PER_MIN";
 const WINDOW_MS: i64 = 60_000;
 const HALF_OPEN_MS: i64 = 30_000;
 const ESCALATION_WINDOW_MS: i64 = 900_000;
@@ -96,7 +95,7 @@ pub fn ledger_path() -> PathBuf {
 }
 
 pub fn cap_from_env() -> u32 {
-    std::env::var(ENV_POINTS_PER_MIN)
+    std::env::var("FNO_GH_BUDGET_POINTS_PER_MIN")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|v| *v > 0)
