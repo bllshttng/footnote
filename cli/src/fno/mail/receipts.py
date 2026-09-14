@@ -61,11 +61,10 @@ def _is_live_lane_failure(reason: Optional[str]) -> bool:
 def durable_window_clause(owner: Optional[str]) -> str:
     """The drain-window clause every ``queued (durable)`` receipt carries (x-1602).
 
-    ``queued (durable)`` says nothing about time, so a reader cannot tell
-    "not yet" from "never" -- the absence misread that held a working lane
-    suspect an extra cycle. The clause quotes the owner-class horizon the
-    stranded sweep enforces (one bound, one table); an unknown class prints
-    no window, since a guessed constant is this defect in friendlier dress.
+    ``queued (durable)`` says nothing about time, so "not yet" and "never"
+    read identically. The clause quotes the owner-class horizon the stranded
+    sweep enforces (one bound, one table); an unknown class prints no window,
+    since a guessed constant is this defect in friendlier dress.
     """
     from fno.inbox.store import owner_ttl_hours
 
@@ -91,8 +90,8 @@ def durable_leg_story(reason: Optional[str]) -> Optional[str]:
     A live-inject miss plus a durable success is a normal outcome; rendering
     the raw token (``io-error``, ``attach-failed``, ...) put an error string
     inside a success receipt, which is what read as a broken lane. Returns
-    None when the reason is not a live-lane failure, so callers keep their
-    own wording; the token stays diagnostic (stderr advisory, bus record).
+    None when the reason is not a live-lane failure; the token stays
+    diagnostic (stderr advisory, bus record).
     """
     if not _is_live_lane_failure(reason):
         return None
@@ -112,8 +111,8 @@ def demotion_receipt(
 
     A live-lane failure renders as legs, never as an error token; a plain
     live-miss keeps its transcript-age suffix (``age_target`` names the
-    recipient the miss concerns); the line ends in the drain window.
-    """
+    recipient the miss concerns); the line ends in the drain window."""
+
     token = durable_leg_story(reason)
     if token is None:
         token = reason or "live-miss"
@@ -132,7 +131,7 @@ def print_project_demotion(result, to_project: str) -> None:
     anycast lane reaches the same dispatch_send as the by-name lane, so it
     carries the same cause); a bus-only peer gets the designed-queue receipt;
     no peer queues to the project inbox itself. Split from mail.cli
-    (file-budget) beside the rest of the receipt logic.
+    (file-budget).
     """
     if result.recipient is not None:
         from fno.agents.dispatch import BUS_ONLY_POLICY

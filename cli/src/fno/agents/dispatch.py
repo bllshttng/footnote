@@ -4939,8 +4939,7 @@ class DispatchSendResult:
     # project (for the durable-queue and resolved-recipient stdout lines).
     recipient: Optional[str] = None
     to_project: Optional[str] = None
-    # Owner class the durable write was stamped with (x-1602), so the receipt
-    # quotes the same horizon the sweep enforces; None when none was stamped.
+    # Owner class the durable write was stamped with (x-1602); None if none was.
     durable_owner: Optional[str] = None
 
 
