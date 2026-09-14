@@ -1280,9 +1280,19 @@ fn token_helper_output(
     command
         .args(token_helper_args(token, &registry_path, cross_project))
         .env("FNO_AGENTS_RUNTIME", "python");
-    if let Some(cwd) = scope_cwd {
-        command.current_dir(cwd);
-    }
+    match scope_cwd {
+        Some(cwd) => command.current_dir(cwd),
+        // No scope dir named: pin an existing cwd anyway, because a daemon
+        // lazy-started from a worktree the reaper later deleted would hand the
+        // child its own dead cwd, and the Python helper dies at getcwd with a
+        // traceback (x-8f73). The registry's parent (~/.fno/agents) is the
+        // nearest always-there directory.
+        None => command.current_dir(crate::daemon::lifecycle_child_cwd(
+            registry_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+        )),
+    };
     command.output()
 }
 
@@ -1345,16 +1355,17 @@ fn parse_heal_token_output(
         return Ok(None);
     }
     if !out.status.success() {
-        let why = String::from_utf8_lossy(&out.stderr);
-        let first = why
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("");
+        // The FULL stderr, not its first line: the helper's real failure is the
+        // tail of a Python traceback ("OSError: ...deleted"), and quoting only
+        // the first line shipped "(exit 1): Traceback" - a refusal that names
+        // nothing (x-8f73).
+        let detail = String::from_utf8_lossy(&out.stderr);
+        let detail = detail.trim();
         return Err(format!(
             "cannot safely resolve token {} because the all-source identity helper failed (exit {}){}. Use the full session id.",
             py_repr_str(token),
             out.status.code().unwrap_or(-1),
-            if first.is_empty() { String::new() } else { format!(": {}", first.trim()) },
+            if detail.is_empty() { String::new() } else { format!(":\n{detail}") },
         ));
     }
     // The LAST non-empty line, not the whole buffer: a first-run `fno` may print
@@ -4142,6 +4153,28 @@ mod tests {
     }
 
     #[test]
+    fn heal_failure_quotes_the_full_stderr_not_just_its_first_line() {
+        use std::process::Command;
+
+        // The x-8f73 failure shape: a Python traceback whose first line is the
+        // useless header and whose tail names the real cause. The refusal must
+        // carry the tail, because the tail is the diagnosis.
+        let out = Command::new("sh")
+            .args([
+                "-c",
+                "echo Traceback >&2; echo '  more' >&2; echo 'OSError: The current working directory was deleted' >&2; exit 1",
+            ])
+            .output()
+            .unwrap();
+        let message = parse_heal_token_output("deadbeef", &out).unwrap_err();
+        assert!(message.contains("Traceback"), "{message}");
+        assert!(
+            message.contains("OSError: The current working directory was deleted"),
+            "{message}"
+        );
+    }
+
+    #[test]
     fn backfill_gives_a_healed_v10_row_the_fields_the_verbs_read() {
         // The shape `fno agents heal-token` emits: harness-only, no `provider`
         // and no `claude_session_uuid` (v10 removed both from disk). Without the
@@ -4824,6 +4857,63 @@ mod tests {
         assert_eq!(
             Path::new(fs::read_to_string(registry_marker).unwrap().trim()),
             expected_registry
+        );
+    }
+
+    #[test]
+    fn token_helper_without_scope_cwd_pins_an_existing_directory() {
+        // x-8f73: with no scope dir named, the child inherits the caller's cwd
+        // - fatal when a daemon lazy-started from a worktree the reaper later
+        // deleted keeps that dead cwd forever. The helper child must land in an
+        // existing directory (the registry's parent) instead.
+        let _path_guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = cv_tmpdir();
+        let marker = dir.path().join("helper-cwd");
+        let registry_marker = dir.path().join("helper-registry");
+        let fake_fno = dir.path().join("fno");
+        fs::write(
+            &fake_fno,
+            "#!/bin/sh\npwd > \"$FNO_TEST_HELPER_CWD\"\nprintf '%s\\n' \"$5\" > \"$FNO_TEST_HELPER_REGISTRY\"\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_fno).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_fno, permissions).unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let registry = dir.path().canonicalize().unwrap().join("registry.json");
+        std::env::set_var("PATH", crate::path_with(dir.path()));
+        std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
+        std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
+        let output = token_helper_output("deadbeef", &registry, false, None).unwrap();
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        std::env::remove_var("FNO_TEST_HELPER_CWD");
+        std::env::remove_var("FNO_TEST_HELPER_REGISTRY");
+
+        assert!(output.status.success());
+        let observed = PathBuf::from(fs::read_to_string(&marker).unwrap().trim())
+            .canonicalize()
+            .unwrap();
+        // The child's cwd is the chooser's answer: the live cwd when getcwd
+        // works, else the registry's parent (nearest always-there directory).
+        // The fallback arm itself is pinned by the pure
+        // daemon::lifecycle_child_cwd_from tests, since chdir is process-global.
+        let expected =
+            crate::daemon::lifecycle_child_cwd(registry.parent().unwrap_or(Path::new(".")));
+        assert_eq!(observed, expected.canonicalize().unwrap());
+        assert_eq!(
+            Path::new(fs::read_to_string(registry_marker).unwrap().trim()),
+            registry
         );
     }
 
