@@ -1057,7 +1057,7 @@ fn single_line_decision(text: &str) -> Option<i32> {
 fn normalize_verb_marker(text: &str, harness: MailInjectHarness) -> String {
     let native = match harness {
         MailInjectHarness::Codex => '$',
-        MailInjectHarness::Claude | MailInjectHarness::Keeper => '/',
+        MailInjectHarness::Claude | MailInjectHarness::Opencode | MailInjectHarness::Keeper => '/',
     };
     let Some(rest) = text
         .strip_prefix(['/', '$'])
@@ -1449,13 +1449,13 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
                 .await
                 .map_err(|reason| reason.to_string())
         }
-        MailInjectHarness::Keeper => deliver_via_keeper_socket(
         MailInjectHarness::Opencode => crate::opencode_serve::steer_registered_session(
             &args.session,
             &text,
             Duration::from_secs(600),
         )
         .map(|_| ()),
+        MailInjectHarness::Keeper => deliver_via_keeper_socket(
             &args.session,
             &text,
             args.attempts,
