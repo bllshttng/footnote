@@ -1,8 +1,8 @@
 //! `fno-agents review-summary`: the one human display line for a reviewed head.
 //!
-//! The merge gate reads the ledger (`.fno/events.jsonl`) and never the PR
+//! The merge gate reads the attestation journals and never the PR
 //! body, so the body may carry a claim only THIS verb authors: it reads the
-//! same ledger and prints the reviewed-at line for a branch whose latest
+//! same journal and prints the reviewed-at line for a branch whose latest
 //! attestation is a `pass` pinned to `--head`. Any other state - a fail, a
 //! stale head, a missing or unreadable events file - prints nothing and
 //! exits 0, so a PR that arrives unreviewed carries no claim. A display line
@@ -32,11 +32,22 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// The journal `--events` defaults to when a caller omits it: the global
+/// state root's `events.jsonl`, the mirror every attestation emission writes.
+/// An external worktree cannot name its journal as `.fno/events.jsonl` -
+/// there that path is the worktree's own legacy journal, not the mirror
+/// (x-56b0).
+fn default_events_path() -> PathBuf {
+    crate::scratch::fno_state_root().join("events.jsonl")
+}
+
 fn parse_args(args: &[String]) -> Option<(PathBuf, String, String)> {
-    // A caller that cannot name all three gets silence, not a guess: the
-    // verb's only output is a claim about a specific (branch, head) pair.
+    // A caller that cannot name branch and head gets silence, not a guess:
+    // the verb's only output is a claim about a specific (branch, head) pair.
     Some((
-        PathBuf::from(flag_value(args, "--events")?),
+        flag_value(args, "--events")
+            .map(PathBuf::from)
+            .unwrap_or_else(default_events_path),
         flag_value(args, "--branch")?,
         flag_value(args, "--head")?,
     ))
@@ -238,6 +249,22 @@ mod tests {
                 "e.jsonl".to_string(),
             ]),
             0
+        );
+    }
+
+    #[test]
+    fn omitted_events_defaults_to_the_global_state_root_journal() {
+        let args = vec![
+            "review-summary".to_string(),
+            "--branch".to_string(),
+            "feature/x".to_string(),
+            "--head".to_string(),
+            "abc1234".to_string(),
+        ];
+        let (events, _, _) = parse_args(&args).expect("branch and head alone parse");
+        assert_eq!(
+            events,
+            crate::scratch::fno_state_root().join("events.jsonl")
         );
     }
 }
