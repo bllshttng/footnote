@@ -524,8 +524,11 @@ fn plugin_root() -> Option<PathBuf> {
             }
         }
     }
-    let mut pointer = home_dir()?;
-    pointer.push(".fno/plugin-root");
+    let mut pointer = match std::env::var("FNO_HOME") {
+        Ok(home) => PathBuf::from(home),
+        Err(_) => home_dir()?,
+    };
+    pointer.push("plugin-root");
     let text = std::fs::read_to_string(pointer).ok()?;
     let root = PathBuf::from(text.trim());
     // Only a root carrying the plugin manifest answers: a stale pointer
