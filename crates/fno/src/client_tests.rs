@@ -11910,6 +11910,7 @@ async fn attach_placement_selects_target_and_direction() {
                 fallback: PlacementFallback::NewTab,
                 max_panes: None,
                 thread_pane: false,
+                fit: false,
             },
         })
     );
@@ -12270,6 +12271,7 @@ async fn attach_placement_new_tab_and_cancel_are_distinct() {
                 fallback: PlacementFallback::NewTab,
                 max_panes: None,
                 thread_pane: false,
+                fit: false,
             },
         })
     );
@@ -12323,6 +12325,7 @@ async fn attach_placement_enter_commits_the_cursor_and_space_attaches_here() {
                 fallback: PlacementFallback::NewTab,
                 max_panes: None,
                 thread_pane: false,
+                fit: false,
             },
         }),
         "Enter must attach to the marked workspace, not here"

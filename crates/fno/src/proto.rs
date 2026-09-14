@@ -322,7 +322,9 @@ fn default_true() -> bool {
 /// scoreboard's read-only emission-failure counter read; floor stays 58.
 /// v79 : `ServerMsg::Layout.missions` carries the active-mission headers, so
 /// `squads` holds only real workspaces; additive, floor stays 58.
-pub const PROTO_VERSION: u32 = 79;
+/// v80 : `PanePlacement.fit`, serde(default) - the server picks the tab; floor
+/// stays 58.
+pub const PROTO_VERSION: u32 = 80;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -4126,7 +4128,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 79);
+        assert_eq!(PROTO_VERSION, 80);
         // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4578,6 +4580,7 @@ mod tests {
             fallback: PlacementFallback::NewTab,
             max_panes: None,
             thread_pane: false,
+            fit: false,
         };
         for msg in [
             ClientMsg::Control {

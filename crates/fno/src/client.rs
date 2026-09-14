@@ -13387,6 +13387,7 @@ async fn execute_row_menu_action(
                         max_panes: None,
                         thread_pane: false,
                         portal: None,
+                        fit: false,
                     },
                 }),
             )

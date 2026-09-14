@@ -99,6 +99,8 @@ pub struct PanePlacement {
     pub fallback: PlacementFallback,
     /// Maximum leaves accepted in the resolved target tab before an exact
     /// split refuses. Absent on legacy and non-agent placement requests.
+    /// Also the room a `fit` placement looks for: the first tab below this
+    /// count takes the pane.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_panes: Option<usize>,
     /// (x-07c2) DEPRECATED by `portal` below, kept as the compatibility
@@ -136,6 +138,13 @@ pub struct PanePlacement {
     /// "any". Additive and `#[serde(default)]`, so the floor does not move.
     #[serde(default)]
     pub portal_new: bool,
+    /// (v80, x-ae47) Server-chosen tab: the server picks the first tab in
+    /// display order with fewer leaves than `max_panes`, else a new tab; a
+    /// squad-less route births the squad. Refused with `tab`, `at`, `split`,
+    /// `here` or a portal, so the request names no geometry of its own.
+    /// Additive and `#[serde(default)]`, so the floor does not move.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fit: bool,
 }
 
 impl PanePlacement {

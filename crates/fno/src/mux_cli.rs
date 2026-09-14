@@ -2637,6 +2637,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut at = None;
         let mut at_current = false;
         let mut max_panes = None;
+        let mut fit = false;
         let mut i = 1;
         while i < args.len() {
             let tok = args[i]
@@ -2711,6 +2712,9 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     }
                     max_panes = Some(parsed);
                 }
+                // (x-ae47) The server picks the tab: first with room below
+                // --max-panes, else a new one.
+                "--fit" => fit = true,
                 t if t.starts_with("--") => return Err(format!("unknown flag: {t}")),
                 _ => break, // first bare token begins the command argv
             }
@@ -2749,6 +2753,12 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             at = Some(fno_pane);
             fallback = PlacementFallback::Refuse;
         }
+        if fit && (tab.is_some() || at.is_some() || split.is_some()) {
+            return Err(
+                "--fit selects its own tab and cannot be combined with --tab, --at, or --split"
+                    .to_string(),
+            );
+        }
         return Ok(ParsedPane {
             session,
             json,
@@ -2770,6 +2780,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     max_panes,
                     thread_pane: false,
                     portal: None,
+                    fit,
                 },
             },
         });
@@ -7413,6 +7424,59 @@ mod tests {
                 ..
             } if argv == &["codex"]
         ));
+    }
+
+    #[test]
+    fn mux_pane_parse_run_fit_selects_server_tab() {
+        // AC4-ERR + AC6-HP (client half): bare --fit parses into the
+        // placement; any explicit geometry refuses before a command exists.
+        let p = parse_pane_args(&os(&["run", "--fit", "--", "sleep", "300"])).unwrap();
+        assert!(matches!(
+            p.cmd,
+            PaneCmd::Run {
+                placement: PanePlacement { fit: true, .. },
+                ref argv,
+                ..
+            } if argv == &["sleep", "300"]
+        ));
+        for combo in [
+            vec!["run", "--fit", "--tab", "id:1", "--", "true"],
+            vec!["run", "--fit", "--at", "3", "--", "true"],
+            vec!["run", "--fit", "--split", "down", "--", "true"],
+            vec!["run", "--fit", "at", "3", "--", "true"],
+        ] {
+            let err = parse_pane_args(&os(&combo)).unwrap_err();
+            assert_eq!(
+                err,
+                "--fit selects its own tab and cannot be combined with --tab, --at, or --split"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_placement_fit_is_serde_default_and_skipped_when_false() {
+        // AC5-EDGE: a v79 payload with no fit key decodes fit == false, and a
+        // false fit stays off the wire, so the floor does not move.
+        let older: PanePlacement = serde_json::from_str(
+            r#"{"target":"CurrentRoute","split":null,"here":false,"tab":null,"at":null,"fallback":"new_tab","max_panes":null,"thread_pane":false,"portal":null,"portal_new":false}"#,
+        )
+        .unwrap();
+        assert!(!older.fit);
+        let wire = serde_json::to_string(&PanePlacement {
+            fit: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            !wire.contains("fit"),
+            "false fit stays off the wire: {wire}"
+        );
+        let with_fit = serde_json::to_string(&PanePlacement {
+            fit: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(with_fit.contains("\"fit\":true"));
     }
 
     #[test]
