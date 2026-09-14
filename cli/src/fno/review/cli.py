@@ -176,6 +176,7 @@ def _attest_from_record(
     findings_file: Path,
     execution_context: str = "inline",
     output_contract: str = "json_block",
+    branch_override: str = "",
 ) -> str:
     """Write the ``review_attestation`` row for the record classify just built.
 
@@ -183,6 +184,11 @@ def _attest_from_record(
     counted zero blocking findings, so the row cannot be milder than what the
     review produced. Returns the verdict for the receipt. Every refusal exit
     names the missing input, and nothing is emitted on any of them.
+
+    ``branch_override`` replaces the row's ``branch`` field only: the caller
+    (the shell producer) resolved the PR branch with its upstream rewrite,
+    which this verb must not re-derive from cwd. Hold join and release keep
+    the cwd-resolved local name the hook keyed the hold under (x-a8a1).
 
     The emitted row carries the same fields the shell producer writes, the
     reviewed ranges included: a row without ``reviewed_base_sha`` contributes
@@ -325,6 +331,8 @@ def _attest_from_record(
     }
     if harness:
         data["harness"] = harness
+    if branch_override:
+        data["branch"] = branch_override
     for key in _ATTEST_RECORD_KEYS:
         if record.get(key) is not None:
             data[key] = record[key]
@@ -385,7 +393,7 @@ def _attest_from_record(
 
     typer.secho(
         f"review_attestation emitted: reviewer={data['reviewer']} "
-        f"head_sha={head_sha[:8]} branch={branch} verdict={verdict} "
+        f"head_sha={head_sha[:8]} branch={data['branch']} verdict={verdict} "
         f"session={session_id or 'none'} attester={resolved_id or 'unattributed'} "
         f"lines={line_count} files={file_count}",
         err=True,
@@ -436,6 +444,14 @@ def classify(
         "--verify-fixes, so the counter reads the round it verified. Absent: "
         "the pass counts as a fresh round.",
     ),
+    branch: Optional[str] = typer.Option(
+        None,
+        "--branch",
+        help="Override the attested row's branch field ONLY: the PR branch the "
+        "caller already resolved (the shell producer's upstream rewrite), which "
+        "this verb must not re-derive from cwd. Hold join and release keep the "
+        "cwd-resolved local name.",
+    ),
 ) -> None:
     """Classify a findings payload; the one shell entry point producers share."""
     try:
@@ -485,6 +501,12 @@ def classify(
                 err=True,
             )
             raise typer.Exit(code=2)
+        branch_override = branch.strip() if branch else ""
+        if branch is not None and not branch_override:
+            typer.secho(
+                "classify: --branch needs a branch name; no event emitted", err=True
+            )
+            raise typer.Exit(code=2)
         _attest_from_record(
             record,
             attest.strip(),
@@ -492,6 +514,7 @@ def classify(
             findings_file,
             execution_context=execution_context,
             output_contract=output_contract,
+            branch_override=branch_override,
         )
     if emit_record:
         sys.stdout.write(json.dumps(record, ensure_ascii=False) + "\n")
