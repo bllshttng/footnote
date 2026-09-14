@@ -88,6 +88,7 @@ async fn rm_blocking_subprocess_work_does_not_stall_the_runtime() {
             &request,
             &snapshots,
             &|_| Ok(()),
+            &|_| true,
             // Stands in for the real chain (`fno ... reapable`, four git
             // calls, `git worktree remove`), compressed to a bound a test
             // can wait on.
