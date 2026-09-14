@@ -3000,9 +3000,15 @@ def _observe_node_claim(
         # stale claim while the row was the occupant, and an operator followed
         # it to a claim that read UNCLAIMED.
         lead = f"worker row {worker} is on the node; " if worker else ""
+        from fno.claims.verdict import reclaimable_stamp
+
+        basis = info.get("basis")
+        basis_note = f", basis={basis}" if basis else ""
+        stamp = reclaimable_stamp(info)
+        grace_note = f", reclaimable_at={stamp}" if stamp else ""
         message = (
-            f"dispatch {action} for {node_id}: {lead}node claim is {claim_state}, "
-            f"prior holder={holder}, truth_status={truth}"
+            f"dispatch {action} for {node_id}: {lead}node claim is {claim_state}{basis_note}, "
+            f"prior holder={holder}, truth_status={truth}{grace_note}"
         )
         print(f"advance: WARNING: {message}", file=sys.stderr)
         from fno.notify._impl import send_notification

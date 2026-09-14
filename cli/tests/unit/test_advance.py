@@ -4005,3 +4005,61 @@ def test_epic_notes_attribute_to_the_dispatched_child(monkeypatch):
     children = canned.receipt()["children"]
     assert children[0]["notes"] == [_SPAWN_NOTE]
     assert children[1]["notes"] == []
+
+
+# -- x-b68d: the contested-dispatch warning names the basis and the grace end --
+
+
+def test_observe_warning_names_basis_and_grace_end(monkeypatch, capsys):
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr("fno.agents.events.emit", lambda kind, **data: None)
+    monkeypatch.setattr(
+        "fno.notify._impl.send_notification", lambda *_args, **_kwargs: None
+    )
+    adv._observe_node_claim(
+        "x-grace",
+        native_info={
+            "state": "suspect",
+            "basis": "ttl-expired-unresolved",
+            "holder": "spawn-handover:ghost",
+            "reclaimable_at": 1789424400000,
+        },
+        worked_nodes={},
+        enforce_failure_limit=False,
+    )
+    err = capsys.readouterr().err
+    assert "basis=ttl-expired-unresolved" in err
+    assert "reclaimable_at=" in err
+
+
+def test_observe_warning_without_a_clock_names_basis_only(monkeypatch, capsys):
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda *_args, **_kwargs: {"state": "unknown"},
+    )
+    monkeypatch.setattr("fno.agents.events.emit", lambda kind, **data: None)
+    monkeypatch.setattr(
+        "fno.notify._impl.send_notification", lambda *_args, **_kwargs: None
+    )
+    adv._observe_node_claim(
+        "x-grace",
+        native_info={
+            "state": "suspect",
+            "basis": "pid-absent",
+            "holder": "target-session:held",
+        },
+        worked_nodes={},
+        enforce_failure_limit=False,
+    )
+    err = capsys.readouterr().err
+    assert "basis=pid-absent" in err
+    assert "reclaimable_at=" not in err
