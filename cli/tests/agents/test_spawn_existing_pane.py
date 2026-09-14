@@ -50,7 +50,8 @@ def test_existing_pane_spawn_keeps_the_requested_pane_id(
     assert len(send_calls) == 1
     send_call = send_calls[0]
     assert send_call[send_call.index("--server") + 1] == "main"
-    assert send_call[send_call.index("--text") + 1].startswith("exec ")
+    text = send_call[send_call.index("--text") + 1]
+    assert text.startswith("cd -- ") and " && exec " in text
     assert "--guarded" in send_call
     assert not any(call[1:4] == ["mux", "pane", "run"] for call in runner.calls)
 

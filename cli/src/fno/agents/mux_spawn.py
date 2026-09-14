@@ -3861,7 +3861,10 @@ def dispatch_spawn_pane(
         pane_env["FNO_MUX_SHELL_INTEGRATION"] = _shell_integration()
         pane_env["FNO_PROCESS_ADMISSION_MAX"] = str(_process_admission_max())
         pane_env["FNO_MUX_PANE_GROUP_MAX"] = str(_pane_group_max())
-        if provider == "pi" and session_uuid:
+        if existing_pane is not None:
+            assert pane is not None
+            proc = start_existing_pane(session, pane, str(cwd), wrapped, _run_mux, runner)
+        elif provider == "pi" and session_uuid:
             # (x-c198) Launching pi on an id is a CREATE when that id has no
             # session yet, and concurrent creates on one id are unserialised
             # and SILENT: four at once produced four sessions, every process
@@ -3916,9 +3919,6 @@ def dispatch_spawn_pane(
                         "create that could not be confirmed, never a create "
                         "that is known to have failed",
                     )
-        elif existing_pane is not None:
-            assert pane is not None
-            proc = start_existing_pane(session, pane, str(cwd), wrapped, _run_mux, runner)
         else:
             proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None

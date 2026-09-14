@@ -32,13 +32,14 @@ def resolve_existing_pane(session: str, pane_id: int, rows: list[dict]) -> dict:
 def start_existing_pane(
     session: str,
     pane_id: int,
+    cwd: str,
     wrapped: list[str],
     run_mux: Callable[..., subprocess.CompletedProcess[str]],
     runner: Callable[..., subprocess.CompletedProcess[str]],
 ) -> subprocess.CompletedProcess[str]:
     proc = run_mux(
         [
-            "mux", "pane", "send", "--server", session, str(pane_id), "--text", "exec " + shlex.join(wrapped), "--submit", "--raw", "--guarded",
+            "mux", "pane", "send", "--server", session, str(pane_id), "--text", "cd -- " + shlex.quote(cwd) + " && exec " + shlex.join(wrapped), "--submit", "--raw", "--guarded",
         ],
         runner,
     )
