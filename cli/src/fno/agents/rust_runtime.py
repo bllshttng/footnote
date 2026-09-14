@@ -245,10 +245,6 @@ RUST_CLIENT_VERBS = frozenset(
         # client.rs<->router parity test in sync.
         "backlog-note",
         "backlog-notes",
-        # The patch door (x-665f): direct client.rs dispatch, never `fno
-        # agents` routing; `fno backlog update --status/--set` and the
-        # lifecycle verbs forward here.
-        "backlog-update",
         # Orphan-crown sweep for `fno agents court`: daemon-free read, never `fno agents`.
         "court-orphans",
         # Crown scope fold for `fno agents court --nodes`: daemon-free read,
@@ -534,7 +530,6 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "graph-get": "Batch graph.json read by id (x-997a); invoked directly by `fno backlog get`'s forwarder, not `fno agents` routing.",
     "backlog-note": "The native note action (x-920a): bounded-state write, revision check, history routing, nobody-bound refusal; invoked directly by `fno backlog note`'s bridge, not `fno agents` routing.",
     "backlog-notes": "Note-corpus inventory, digest migration (preview default, explicit apply), and paged history readback (x-920a); the migration runbook drives it, not `fno agents` routing.",
-    "backlog-update": "The patch door (x-665f): one write path for stored node fields, status included, with the lifecycle rules as validators and a readback receipt; `fno backlog update --status/--set` and the lifecycle verbs forward to it, not `fno agents` routing.",
     "bash-census": "Bash-call compound/cd/heredoc shares and top command/verb tables over recent transcripts (x-997a); invoked directly by `fno doctor bash-census`.",
     "session-start-bytes": "Session-start preamble byte total (x-997a); invoked directly by `fno doctor`'s session-start byte report.",
     "judge": "Blueprint judge: grade a plan against the five product questions, or --labels/--split to calibrate against evals/blueprint-judge/labels.yaml; invoked by fno.observer.cli's judge_cmd/sweep through its own subprocess round-trip (_judge_via_rust), not `fno agents` routing.",

@@ -32,7 +32,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "authorized-merge",
     "backlog-note",
     "backlog-notes",
-    "backlog-update",
     "bash-census",
     "blueprint-feed",
     "board",
@@ -637,7 +636,11 @@ async fn run(args: Vec<String>) -> i32 {
     // `backlog-update` (x-665f): the native patch door. Daemon-free write;
     // the Python `fno backlog update` bridge and the lifecycle verbs forward
     // here, this action owns the field policy, the status validators, and the
-    // readback receipt.
+    // readback receipt. Deliberately NOT in ALL_CLIENT_ACTIONS: the shrink
+    // law (d-fe66560a) refuses any new action, so this arm is invoked only
+    // through resolve_binary by the Python bridge, never `fno agents` routing
+    // - the same unregistered-direct-dispatch shape as `board` or
+    // `notify-watch`.
     if verb == "backlog-update" {
         return fno_agents::backlog::patch::run_update(&args[1..]);
     }
