@@ -386,3 +386,14 @@ def test_defer_stamps_the_exact_match_kind_without_a_flag(tmp_graph):
     assert r.exit_code == 0, r.output
     node = _entry(tmp_graph, "x-0001")
     assert "deferred_kind" not in node or node["deferred_kind"] is None
+
+
+def test_the_door_flags_cannot_mix_with_a_legacy_flag(tmp_graph):
+    """One call, one door: a mixed call refuses naming both calls to run."""
+    _seed(tmp_graph, _node("x-0001"))
+
+    r = _invoke("update", "x-0001", "--status", "idea", "--priority", "p1")
+
+    assert r.exit_code == 2, r.output
+    assert "--priority" in r.output
+    assert _entry(tmp_graph, "x-0001")["priority"] == "p2"

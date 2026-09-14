@@ -1539,8 +1539,11 @@ mod tests {
             })
         };
         std::thread::sleep(Duration::from_millis(50));
-        let result =
-            apply_with_timeout(&graph, &req("x-1", Some("ready"), &[]), Duration::from_millis(100));
+        let result = apply_with_timeout(
+            &graph,
+            &req("x-1", Some("ready"), &[]),
+            Duration::from_millis(100),
+        );
         holder.join().expect("holder finished");
         match result {
             Err(e) => {
