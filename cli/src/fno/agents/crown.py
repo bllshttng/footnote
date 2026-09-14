@@ -1171,8 +1171,8 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
         # Advisory receipt data must never crash a crown that committed.
         receipt["stranded_subordinates"] = None
     # The crown TYPES the verb: the holder learns it reigns through raw mail
-    # typed as the operator would. Plugin-qualified per harness (`$fno:` on
-    # codex, `/fno:` elsewhere).
+    # typed as the operator would. Rendered per harness through the one
+    # normalizer; an unknown harness keeps the `/fno:` spelling.
     target_row = next((r for r in rows_after if r.name == target_name), None)
     target_harness = getattr(target_row, "harness", None) if target_row else None
     address = target_name
@@ -1183,8 +1183,13 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
             or getattr(target_row, "short_id", None)
             or target_name
         )
-    prefix = "$fno:" if target_harness == "codex" else "/fno:"
-    receipt["reign_delivery"] = _send_reign_verb(address, f"{prefix}reign {scope}")
+    from fno.agents.harness_map import DispatchResolveError, normalize_command
+
+    try:
+        verb = normalize_command(f"/fno:reign {scope}", target_harness or "")
+    except DispatchResolveError:
+        verb = f"/fno:reign {scope}"
+    receipt["reign_delivery"] = _send_reign_verb(address, verb)
     return receipt
 
 

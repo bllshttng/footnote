@@ -1953,6 +1953,30 @@ def test_in_place_crown_mails_the_reign_verb_and_names_the_delivery(
     assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "/fno:reign alpha")]
 
 
+def test_in_place_crown_renders_the_reign_verb_for_codex(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """x-c976: the reign verb renders through the one normalizer, so a codex
+    holder receives the `$fno:` spelling."""
+    import fno.agents.crown as crown_mod
+    from fno.agents.crown import promote_existing_session
+
+    _prepare_crown_cli(
+        monkeypatch,
+        tmp_path,
+        [_entry("worker", harness="codex", harness_session_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", status="idle")],
+    )
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        crown_mod, "_send_reign_verb", lambda address, verb: sent.append((address, verb)) or "msg-1 delivered (hosted)"
+    )
+
+    receipt = promote_existing_session("worker", ["alpha"])
+
+    assert receipt["reign_delivery"] == "msg-1 delivered (hosted)"
+    assert sent == [("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "$fno:reign alpha")]
+
+
 def test_reign_verb_send_failure_is_named_not_silent(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -13,6 +13,8 @@ import os
 import sys
 from typing import Optional
 
+from fno.config._dispatch_verbs import canonical_verb_key, parse_verb_token
+
 
 @dataclasses.dataclass
 class NodeSpawnArgs:
@@ -188,8 +190,8 @@ def resolve_node_spawn(
     # The receipt names the RESOLVED verb (x-ebd2); verb_source keeps the
     # RAW state, canonicalized so receipt and command agree on the spelling.
     receipt_verb = effective_verb or node_verb or "builtin"
-    if receipt_verb.startswith("/fno:"):
-        receipt_verb = "/" + receipt_verb[len("/fno:"):]
+    if parse_verb_token(receipt_verb):
+        receipt_verb = canonical_verb_key(receipt_verb)
     resolve_kwargs: dict = {
         "harness": ((harness or "").strip() or launch_axis or None),
         "node_id": node_id,
@@ -225,7 +227,7 @@ def resolve_node_spawn(
     # which is that refusal with its remedy - never a guessed label.
     descriptor_phase: Optional[str] = None
     try:
-        from fno.config._dispatch_verbs import canonical_verb_key, resolvable_verbs
+        from fno.config._dispatch_verbs import resolvable_verbs
 
         dispatch_cfg = getattr(settings_obj, "dispatch", None)
         registry = getattr(dispatch_cfg, "verb_registry", None) or {}

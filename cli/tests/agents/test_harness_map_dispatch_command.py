@@ -540,6 +540,14 @@ def test_out_of_family_declared_verb_keeps_declared_precedence():
     assert out["verb"] is None
 
 
+def test_dollar_namespaced_stored_verb_resolves_like_the_slash_spelling():
+    """x-c976: a `$fno:` dispatch_verb canonicalizes before the family read,
+    so it answers exactly what `/fno:` answers."""
+    for spelling in ("/fno:blueprint", "$fno:blueprint"):
+        answer, _note = resolve_effective_verb(verb=spelling, plan_rung="none", difficulty="high")
+        assert answer == "/blueprint"
+
+
 def test_explicit_command_bypasses_the_lifecycle_refusal():
     # A done rung would refuse the lifecycle; reconcile (and any other
     # explicit-command door) never consults it.

@@ -47,6 +47,14 @@ def test_a_prose_seed_is_never_judged(_plugin_state):
     assert cannot_fire_refusal("fix the login bug", "codex") is None
 
 
+def test_an_absolute_path_seed_is_never_judged(_plugin_state):
+    """x-c976: a leading-slash path is prose, never a verb the plugin must
+    expand - the fire test, not a prefix scan, decides."""
+    _plugin_state["status"] = "missing"
+    assert cannot_fire_refusal("/Users/bb16/plan.md go", "codex") is None
+    _refuse_unfireable_seed(["spawn", "/Users/bb16/plan.md go", "-H", "codex"])
+
+
 def test_only_the_measured_surface_is_gated(_plugin_state):
     _plugin_state["status"] = "missing"
     assert cannot_fire_refusal("/fno:target x-1", "claude") is None

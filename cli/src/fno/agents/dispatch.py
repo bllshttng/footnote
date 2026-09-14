@@ -64,6 +64,7 @@ from fno.agents.sender_provenance import (
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, render_seed
+from fno.config._dispatch_verbs import is_verb_seed
 from fno.agents.lane_heal import lane_heal as _lane_heal
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
@@ -2558,7 +2559,7 @@ def dispatch_spawn(
     _check_spawn_harness(harness, headless=headless)
 
     effective_message: Optional[str] = None
-    if message.strip().startswith(("/", "$fno:")):
+    if is_verb_seed(message):
         try:
             message = render_seed(message, harness)
         except DispatchResolveError as exc:

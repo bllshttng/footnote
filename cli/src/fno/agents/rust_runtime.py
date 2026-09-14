@@ -761,10 +761,11 @@ def _refuse_unfireable_seed(args: "Sequence[str]") -> None:
     """
     from fno.agents.harness_map import cannot_fire_refusal
     from fno.agents.spawn_defaults import _seed_of
+    from fno.config._dispatch_verbs import is_verb_seed
 
     toks = list(args[1:])
     seed = _seed_of(toks)
-    if not seed or not seed.strip().startswith(("/", "$fno:")):
+    if not seed or not is_verb_seed(seed):
         return
     from fno.dispatch_flags import DispatchFlagError, resolve_dispatch_harness
 
