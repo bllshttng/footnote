@@ -271,7 +271,12 @@ def test_identity_accepts_cross_process_recall_without_local_store() -> None:
     assert verdict.marker == "cross-process recall nonce"
 
 
+_DEFAULT_NEGATIVE_COUNTS = {"codex": 12}
+
+
 def _sweep_json(named_pairs=None, negative_counts=None) -> str:
+    if negative_counts is None:
+        negative_counts = _DEFAULT_NEGATIVE_COUNTS
     return json.dumps(
         {
             "status": "measured",
@@ -283,7 +288,7 @@ def _sweep_json(named_pairs=None, negative_counts=None) -> str:
                     "fields": 73,
                     "uniform": [],
                     "uniform_among_declarers": [],
-                    "negative_counts": negative_counts or {"codex": 12},
+                    "negative_counts": negative_counts,
                     "named_pairs": named_pairs or [],
                     "name_lists": [],
                 }

@@ -40,6 +40,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::evals_macro::canonical_json as canon;
+
 /// A value asserting that a capability is ABSENT. Each one is a claim that can
 /// be contradicted by an implementation somewhere else in the tree.
 const NEGATIVE: [&str; 8] = [
@@ -123,28 +125,6 @@ const USAGE: &str = "usage: fno-agents honesty-sweep [--json] \
 [--rows-json <path|->] [--rows-key <key>] [--name <label>]
 populations repeat; each named population is swept in turn. \
 Exit 0 measured (a finding is a candidate, never a verdict), 2 unmeasured.";
-
-/// Compact JSON with object keys sorted; the crate enables serde_json
-/// `preserve_order`, so without the explicit sort the same value renders two
-/// ways depending on insertion order.
-fn canon(value: &Value) -> String {
-    match value {
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let inner: Vec<String> = keys
-                .iter()
-                .map(|k| format!("{}:{}", Value::String((*k).clone()), canon(&map[*k])))
-                .collect();
-            format!("{{{}}}", inner.join(","))
-        }
-        Value::Array(items) => {
-            let inner: Vec<String> = items.iter().map(canon).collect();
-            format!("[{}]", inner.join(","))
-        }
-        other => other.to_string(),
-    }
-}
 
 fn flatten(prefix: &str, value: &Value, out: &mut BTreeMap<String, String>) {
     match value {
