@@ -185,6 +185,11 @@ def default_codex_sessions_dir() -> Path:
 def _codex_daemon_threads_raw(*, env: Optional[dict[str, str]] = None) -> Optional[list[dict]]:
     """Raw ``threads`` rows the app-server daemon reports, or None.
 
+    The transport is ``fno-agents list --json --no-discovered --harness codex``:
+    the answer rides the ``codex_loaded`` block of an existing verb instead of
+    its own (law d-fe66560a). ``--no-discovered`` is load-bearing - without it
+    the Rust list shells back into this Python discovery and recurses.
+
     None covers every failure mode (missing/stale binary, unavailable daemon,
     incompatible response, timeout) so a caller can tell "cannot answer" apart
     from "answered with zero threads" - the pane-binding daemon oracle needs
@@ -199,7 +204,7 @@ def _codex_daemon_threads_raw(*, env: Optional[dict[str, str]] = None) -> Option
         return None
     try:
         proc = subprocess.run(
-            [str(binary), "codex-loaded-threads"],
+            [str(binary), "list", "--json", "--no-discovered", "--harness", "codex"],
             capture_output=True,
             text=True,
             timeout=_CODEX_DAEMON_DISCOVERY_TIMEOUT_SECONDS,
@@ -213,9 +218,12 @@ def _codex_daemon_threads_raw(*, env: Optional[dict[str, str]] = None) -> Option
         result = json.loads(proc.stdout.strip())
     except (ValueError, AttributeError):
         return None
-    if not isinstance(result, dict) or result.get("available") is not True:
+    if not isinstance(result, dict):
         return None
-    threads = result.get("threads")
+    loaded = result.get("codex_loaded")
+    if not isinstance(loaded, dict) or loaded.get("available") is not True:
+        return None
+    threads = loaded.get("threads")
     if not isinstance(threads, list):
         return None
     return threads
