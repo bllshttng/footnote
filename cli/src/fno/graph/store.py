@@ -1440,7 +1440,45 @@ def append_wave_note(path: Path, node_id: str, note: dict) -> tuple[bool, str | 
     if resolved is None:
         return False, f"no node resolves to '{node_id}'"
     result = _run_op(Path(path), "append_wave_note", {"node_id": resolved, "note": note})
-    return bool(result.get("found")), result.get("error")
+    if not result.get("found"):
+        return False, result.get("error")
+    # The op's word is not the world's: a layer that reports found=true and
+    # loses the publish would print "folded as wave" over a no-op (x-6a2c),
+    # so read the target back and refuse when the note is not in the row.
+    row = _readback_row(Path(path), resolved)
+    notes = (row or {}).get("progress_notes") or []
+    if not any(
+        isinstance(n, dict)
+        and n.get("ts") == note.get("ts")
+        and n.get("title") == note.get("title")
+        and n.get("details") == note.get("details")
+        for n in notes
+    ):
+        return False, (
+            f"wave append reported success but the note is not in the published "
+            f"target ('{resolved}' read back without it); the write did not land"
+        )
+    return True, None
+
+
+def _readback_row(path: Path, node_id: str) -> "dict | None":
+    """One row by id for the wave append's read-back, full read as fallback.
+
+    ``read_nodes_by_ids`` is an optimization and can answer None without
+    answering the question; the gate must refuse only on a real absence, so
+    fall back to the full read before concluding the row is gone.
+    """
+    fast = read_nodes_by_ids(path, [node_id])
+    for row in (fast or {}).get("entries") or []:
+        if row.get("id") == node_id:
+            return row
+    try:
+        for row in read_graph(path):
+            if row.get("id") == node_id:
+                return row
+    except Exception:  # noqa: BLE001 - unreadable graph reads as absence
+        return None
+    return None
 
 
 def _run_op(path: Path, name: str, params: dict) -> dict:
