@@ -1636,17 +1636,17 @@ def test_ac3_hp_explicit_wins_every_injectable_field():
 
 
 @requires_rust
-def test_model_vendor_mismatch_warns_naming_both_sides():
-    # --model glm-5.3 with no zai route resolved: the spawn proceeds AND warns,
-    # naming the implied vendor (zai) and the resolved lane (anthropic, the
-    # builtin default harness). Warn-only: nothing is refused or rewritten.
+def test_model_vendor_mismatch_refuses_without_a_typed_harness():
+    # --model glm-5.3 with no -H and no declared row: the spawn refuses
+    # before launch (x-8fb6) instead of launching claude on a zai model.
     err = io.StringIO()
-    out = _inject(
-        ["spawn", "--name", "w", "-m", "glm-5.3", "hi"], err=err, model="opus"
-    )
-    assert "glm-5.3" in out  # the model still rides the argv; nothing is refused
+    with pytest.raises(SystemExit) as exc:
+        _inject(
+            ["spawn", "--name", "w", "-m", "glm-5.3", "hi"], err=err, model="opus"
+        )
+    assert exc.value.code == 2
     msg = err.getvalue()
-    assert "glm-5.3" in msg and "zai" in msg and "anthropic" in msg
+    assert "refusing to spawn" in msg and "glm-5.3" in msg and "-P zai" in msg
 
 
 def test_model_vendor_match_prints_no_warning():
@@ -1667,14 +1667,17 @@ def test_route_matching_model_is_silent():
 
 
 @requires_rust
-def test_mismatch_warns_with_no_config_at_all():
-    # The warning must not depend on config being present: a bare argv with a
-    # cross-vendor model is the exact operator typo it exists to catch.
+def test_mismatch_refuses_with_no_config_at_all():
+    # A bare argv with a cross-vendor model is the exact operator typo the
+    # gate exists to catch: nothing typed the harness, so it refuses.
     err = io.StringIO()
-    inject_spawn_defaults(
-        ["spawn", "--name", "w", "-m", "gpt-5.6", "hi"], stderr=err, env={}
-    )
-    assert "openai" in err.getvalue() and "anthropic" in err.getvalue()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "-m", "gpt-5.6", "hi"], stderr=err, env={}
+        )
+    assert exc.value.code == 2
+    msg = err.getvalue()
+    assert "openai" in msg and "refusing to spawn" in msg and "-H codex" in msg
 
 
 def test_explicit_route_with_cross_vendor_model_is_silent():
@@ -1709,12 +1712,16 @@ def test_injected_cross_vendor_model_refuses_and_names_the_config_key():
 
 @requires_rust
 def test_typed_cross_vendor_model_still_warns_and_proceeds():
-    # The other half of the same predicate, and the one that must NOT change.
-    # A caller who types a cross-vendor model means it; passthrough is
-    # deliberate and documented. Config also names a model here, so this pins
-    # that the refusal keys on what was INJECTED, not on config being present.
+    # A caller who types BOTH the harness and a cross-vendor model means it;
+    # passthrough is deliberate and documented. Config also names a model
+    # here, so this pins that the refusal keys on what was INJECTED, not on
+    # config being present.
     err = io.StringIO()
-    out = _inject(["spawn", "--name", "w", "-m", "gpt-5.6", "hi"], err=err, model="opus")
+    out = _inject(
+        ["spawn", "--name", "w", "-H", "claude", "-m", "gpt-5.6", "hi"],
+        err=err,
+        model="opus",
+    )
     assert "gpt-5.6" in out
     msg = err.getvalue()
     assert "implies vendor" in msg
@@ -1932,6 +1939,84 @@ def _slot_settings(rows, profiles):
     s = _Settings(profiles=profiles)
     s.routing = _Routing(rows)
     return s
+
+
+@requires_rust
+def test_pin_model_resolves_row_harness_and_receipt(monkeypatch):
+    """AC1-HP: --model gpt-6-astra with row codex-astra declared launches
+    codex, names the row in the receipt, and prints no vendor warning."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--model", "gpt-6-astra", "/fno:blueprint x-1"],
+        settings=_slot_settings(
+            [{"name": "codex-astra", "harness": "codex", "model": "gpt-6-astra"}],
+            {"blueprint": {"lanes": ["codex-astra"]}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    msg = err.getvalue()
+    assert "routing.models.codex-astra" in msg
+    assert "implies vendor" not in msg
+
+
+@requires_rust
+def test_pin_model_carries_row_route_and_account(monkeypatch):
+    """AC2-HP: a routed row's pin carries harness, route and account."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--model", "glm-5.3-flash[1m]", "/fno:target x-1"],
+        settings=_slot_settings(
+            [{"name": "zai-flash", "harness": "claude",
+              "model": "glm-5.3-flash[1m]", "route": "zai/glm-5.3-flash[1m]",
+              "account": "zai"}],
+            {"target": {"lanes": ["zai-flash"]}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "claude"
+    assert out[out.index("--route") + 1] == "zai/glm-5.3-flash[1m]"
+    assert out[out.index("--account") + 1] == "zai"
+    assert "implies vendor" not in err.getvalue()
+
+
+@requires_rust
+def test_pin_row_outranks_the_profile_provider(monkeypatch):
+    """AC4-EDGE: the typed model's declared row beats the profile's config
+    harness - gpt-5.6-luna rides codex even with target.provider = claude."""
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
+    err = io.StringIO()
+    out = inject_spawn_defaults(
+        ["spawn", "--name", "w", "--model", "gpt-5.6-luna", "/fno:target x-1"],
+        settings=_slot_settings(
+            [{"name": "codex-luna", "harness": "codex", "model": "gpt-5.6-luna"}],
+            {"target": {"provider": "claude", "lanes": ["flash-x"]}},
+        ),
+        stderr=err,
+        env={},
+    )
+    assert out[out.index("--harness") + 1] == "codex"
+    assert out[out.index("--harness") + 1] != "claude"
+
+
+@requires_rust
+def test_unrowed_model_without_a_harness_refuses():
+    """AC5-ERR: no row declares gpt-9-preview and nothing typed the harness,
+    so the spawn exits 2 naming -H codex; no argv comes back."""
+    err = io.StringIO()
+    with pytest.raises(SystemExit) as exc:
+        inject_spawn_defaults(
+            ["spawn", "--name", "w", "--model", "gpt-9-preview", "hi"],
+            stderr=err,
+            env={},
+        )
+    assert exc.value.code == 2
+    msg = err.getvalue()
+    assert "refusing to spawn" in msg and "-H codex" in msg
 
 
 _SLOT_ROWS = [
@@ -2666,7 +2751,7 @@ def test_explicit_model_pin_overrides_the_lanes(monkeypatch):
     monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: {})
     err = io.StringIO()
     out = inject_spawn_defaults(
-        ["spawn", "--name", "w", "--model", "gpt-5.6-luna", "/fno:target x-1"],
+        ["spawn", "--name", "w", "-H", "claude", "--model", "gpt-5.6-luna", "/fno:target x-1"],
         settings=_slot_settings(
             _SLOT_ROWS, {"target": {"lanes": ["flash-x", "sonnet-x"]}}
         ),

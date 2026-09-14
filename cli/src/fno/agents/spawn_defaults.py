@@ -1056,6 +1056,7 @@ def _check_model_vendor_mismatch(
     env: Optional[Mapping[str, str]] = None,
     *,
     model_source: Optional[str] = None,
+    harness_typed: bool = True,
 ) -> None:
     """Judge a model whose implied vendor the resolved lane does not match.
 
@@ -1099,6 +1100,7 @@ def _check_model_vendor_mismatch(
                 "harness": harness,
                 "env_harness": env_harness,
                 "model_source": model_source,
+                "harness_typed": harness_typed,
             }
         )
     except SpawnOverlayUnavailable as exc:
@@ -1352,7 +1354,9 @@ def inject_spawn_defaults(
                 slot_receipt.append(
                     ("slot", f"{slot_candidate['lane_rung']} {slot_candidate['lane']}", "routing")
                 )
-            elif slot_candidate is None and _terminal.startswith("slot="):
+            elif _terminal.startswith("slot="):
+                # A pin pick (no lane_rung) lands here too: the terminal
+                # carries `row=` so the receipt names the declared row.
                 slot_receipt.append(("slot", _terminal[len("slot="):], "routing"))
             else:
                 # The no-lanes grid path: the terminal is the grid's own
@@ -1422,7 +1426,9 @@ def inject_spawn_defaults(
         defaults, profile, lane
     ):
         # No config field resolved at all, so any --model here was typed.
-        _check_model_vendor_mismatch(out, err, env)
+        _check_model_vendor_mismatch(
+            out, err, env, harness_typed=bool(explicit_harness and explicit_harness.strip())
+        )
         _emit_defaults_applied(
             out, profile_verb, seed, locals(), from_config, suppressed,
         )
@@ -1439,13 +1445,23 @@ def inject_spawn_defaults(
     # the decision; effort joins the pair only when its axis was free and the
     # row's harness has an effort surface (the resolver omitted it otherwise).
     if grid_candidate is not None:
-        inject += ["--harness", grid_candidate["harness"], "--model", grid_candidate["model"]]
-        from_config.append(("grid", f"{grid_candidate['harness']}/{grid_candidate['model']}", "difficulty-grid"))
+        # A pin candidate (pin_row set) is the typed model's declared row; a
+        # grid one is the difficulty grid's pick. The pin's model is already
+        # on the argv, so only the harness injects.
+        _pin_row = grid_candidate.get("pin_row") or ""
+        _src = f"routing.models.{_pin_row}" if _pin_row else "difficulty-grid"
+        inject += ["--harness", grid_candidate["harness"]]
+        if not has_model:
+            inject += ["--model", grid_candidate["model"]]
+        if _pin_row:
+            from_config.append(("harness", grid_candidate["harness"], _src))
+        else:
+            from_config.append(("grid", f"{grid_candidate['harness']}/{grid_candidate['model']}", _src))
         has_harness = True
         has_model = True
         if grid_candidate.get("effort") and not effort_occupied:
             inject += ["--effort", grid_candidate["effort"]]
-            from_config.append(("effort", grid_candidate["effort"], "difficulty-grid"))
+            from_config.append(("effort", grid_candidate["effort"], _src))
             has_effort = True
         # The row's route rides beside the model it belongs to; a route or
         # vendor pinned on argv is never overwritten.
@@ -1455,13 +1471,13 @@ def inject_spawn_defaults(
             and not explicit_vendor_present
         ):
             inject += ["--route", grid_candidate["route"]]
-            from_config.append(("route", grid_candidate["route"], "difficulty-grid"))
+            from_config.append(("route", grid_candidate["route"], _src))
         # The capacity pick read the row account's quota; claude-only at the CLI.
         if grid_candidate.get("account") and not _flag_present(out[1:], "--account"):
             if grid_candidate["harness"] == "claude":
                 inject += ["--account", grid_candidate["account"]]
                 from_config.append(
-                    ("account", grid_candidate["account"], "difficulty-grid")
+                    ("account", grid_candidate["account"], _src)
                 )
                 grid_account_injected = True
             else:
@@ -1832,7 +1848,10 @@ def inject_spawn_defaults(
     model_source = next(
         (source for axis, _value, source in from_config if axis == "model"), None
     )
-    _check_model_vendor_mismatch(out, err, env, model_source=model_source)
+    _check_model_vendor_mismatch(
+        out, err, env, model_source=model_source,
+        harness_typed=bool(explicit_harness and explicit_harness.strip()),
+    )
     _emit_defaults_applied(
         out, profile_verb, seed, locals(),
         from_config, suppressed,
