@@ -246,9 +246,15 @@ supported = true
 rule_ids = ["approval_prompt"]
 keys = ["3"]
 
+# `codex` bare is the interactive create. Measured 2026-09-13 (0.154.0): a
+# bare `codex -C` thread (01a09bcd) stayed absent from the daemon's loaded
+# set; a `--remote unix://` thread (01a09c05) appeared there 4.3s after
+# launch. `--remote` ignores a config trust override: the readiness probe
+# refuses, it never answers.
 [harness.codex.resume_strategy.forms.interactive_create]
 kind = "subcommand"
-tokens = ["codex"]
+pre_exec = ["codex", "app-server", "daemon", "start"]
+tokens = ["codex", "--remote", "unix://"]
 
 [harness.codex.resume_strategy.forms.interactive_resume]
 kind = "subcommand"

@@ -193,11 +193,12 @@ def test_map_covers_current_surface_once():
     # Counted from the merged file at the x-f33e fold: main carried 619
     # (provider-cap and compaction among them) and that branch allocates
     # `doctor evals macro`, its forwarded `evals macro` spelling, and the
-    # binary-first `agents evals-macro` action the dispatchers expose. This
-    # branch allocated `agents spawn-gate`, the verb the Python gate
-    # transport calls, in parallel from the same 616 base: counted from the
-    # merged file, 618 -> 623.
-    assert len(mapped) == 623, (
+    # binary-first `agents evals-macro` action the dispatchers expose. That
+    # fold also allocated `agents backlog-note` and `agents backlog-notes`,
+    # the two native note verbs. This branch allocated `agents spawn-gate`,
+    # the verb the Python gate transport calls, in parallel from the same
+    # 616 base: counted from the merged file, 618 -> 625.
+    assert len(mapped) == 625, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

@@ -4173,8 +4173,9 @@ def cmd_watchdog(
     ),
 ) -> None:
     """Report unfinished work: started nodes nobody holds, done branches
-    ahead of origin/main, dirty ownerless worktrees, and ownerless PRs older
-    than a day. Every finding names the one command that clears it.
+    ahead of origin/main, dirty ownerless worktrees, and ownerless open PRs
+    (a PR whose owner reads unknown waits 24h). Every finding names the one
+    command that clears it.
 
     The transcript is the truth source (keyed by session id); the registry
     and claude's agent view are hints. The default output is the

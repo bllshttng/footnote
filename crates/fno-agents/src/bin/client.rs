@@ -30,6 +30,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "ask",
     "attach",
     "authorized-merge",
+    "backlog-note",
+    "backlog-notes",
     "bash-census",
     "blueprint-feed",
     "board",
@@ -561,6 +563,21 @@ async fn run(args: Vec<String>) -> i32 {
     // `graph-get`/`bash-census`/`session-start-bytes` (x-997a): daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).
     if verb == "graph-get" {
         return fno_agents::graph_get::run_graph_get(&args[1..]);
+    }
+
+    // `backlog-notes` (x-920a wave 3): inventory, digest migration, and
+    // history readback over the note corpus. Direct dispatch, daemon-free.
+    if verb == "backlog-notes" {
+        return fno_agents::backlog::note_migrate::run_notes(&args[1..]);
+    }
+
+    // `backlog-note` (x-920a): the native note action. Daemon-free write; the
+    // Python `fno backlog note` bridge owns evidence checks, identity,
+    // archived refusal, crown candidates and the mail transport, this action
+    // owns the bounded-state policy, revision-checked replacement, history
+    // routing, and the nobody-bound pre-write refusal (exit 3).
+    if verb == "backlog-note" {
+        return fno_agents::backlog::note_cli::run_note(&args[1..]);
     }
     // `court-orphans` (x-f0d2): the orphan-crown sweep for `fno agents court`,
     // daemon-free read; `==` dispatch like graph-get, and registered in

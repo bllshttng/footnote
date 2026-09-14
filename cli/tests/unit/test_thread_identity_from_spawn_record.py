@@ -101,14 +101,36 @@ def test_exited_rows_own_no_identity(tmp_path, monkeypatch):
     assert live_thread_row_for_cwd(str(cwd_a)) is None
 
 
-def test_non_thread_rows_and_unidentified_rows_never_answer(tmp_path, monkeypatch):
+def test_remote_codex_pane_row_answers_for_its_own_cwd(tmp_path, monkeypatch):
+    """A remote codex pane runs its tool shell under the shared daemon exactly
+    like a thread worker, so the fill reads the pane row too (x-a095)."""
     cwd_a = tmp_path / "worker-a"
     cwd_a.mkdir()
-    pane_row = _thread_row(
-        "pane", str(cwd_a), "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", substrate="pane"
-    )
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    pane_row = _thread_row("pane", str(cwd_a), sid, substrate="pane")
+    _write_registry(tmp_path, monkeypatch, [pane_row])
+    assert live_thread_row_for_cwd(str(cwd_a)) == ("codex", sid)
+
+
+def test_unidentified_rows_never_answer(tmp_path, monkeypatch):
+    cwd_a = tmp_path / "worker-a"
+    cwd_a.mkdir()
     bald_row = _thread_row("bald", str(cwd_a), "")  # no session id on the row
-    _write_registry(tmp_path, monkeypatch, [pane_row, bald_row])
+    _write_registry(tmp_path, monkeypatch, [bald_row])
+    assert live_thread_row_for_cwd(str(cwd_a)) is None
+
+
+def test_pane_and_thread_rows_on_one_cwd_refuse_to_pick(tmp_path, monkeypatch):
+    cwd_a = tmp_path / "worker-a"
+    cwd_a.mkdir()
+    rows = [
+        _thread_row(
+            "pane", str(cwd_a), "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
+            substrate="pane",
+        ),
+        _thread_row("thread", str(cwd_a), "019f48e1-5b09-72a0-9bc8-6b364bcf4ae5"),
+    ]
+    _write_registry(tmp_path, monkeypatch, rows)
     assert live_thread_row_for_cwd(str(cwd_a)) is None
 
 

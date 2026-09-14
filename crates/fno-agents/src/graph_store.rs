@@ -2105,13 +2105,81 @@ pub fn file_content_version(path: &Path) -> String {
 /// The store-side half of the locked read-modify-write cycle. Holds the
 /// bounded lock; re-derives the pre-image; runs slugs, recompute, the
 /// touched_at stamp, the closure-detection hook, canonicalization, and the
-/// atomic publish with backup. The MUTATOR is the caller's: it ran
-/// client-side against the begin snapshot, and contention is resolved by the
-/// caller retrying on [`StoreError::LockTimeout`] or a version conflict.
+/// atomic publish with backup. Contention is resolved by the caller
+/// retrying on [`StoreError::LockTimeout`] or a version conflict.
+/// x-920a wave 1: the publication-seam prose policy. Every locked mutation
+/// passes through it, so every writer obeys the combined
+/// `details`+`current_state.body` budget, and a migrated row's
+/// `progress_notes` can never grow again. An oversized legacy row may be
+/// edited DOWN; an unrelated status/claim/PR update on it still succeeds
+/// because unchanged prose fields are skipped.
+pub fn enforce_node_state_policy(pre: &[Value], entries: &[Value]) -> Result<(), StoreError> {
+    use crate::backlog::node_state;
+    for cand in entries {
+        let Some(id) = entry_id(cand) else {
+            continue;
+        };
+        let pre_row = pre.iter().find(|r| entry_id(r) == Some(id));
+        let cand_details = cand.get("details");
+        let pre_details = pre_row.and_then(|r| r.get("details"));
+        let cand_state = cand.get(node_state::STATE_KEY);
+        let pre_state = pre_row.and_then(|r| r.get(node_state::STATE_KEY));
+        // Unchanged prose: the row is untouched by this policy.
+        if cand_details == pre_details && cand_state == pre_state {
+            continue;
+        }
+        // Budget: the candidate total must fit, or be no larger than the
+        // pre-image total (editing an oversized legacy row DOWN is legal).
+        let cand_total = node_state::prose_total(cand);
+        let pre_total = pre_row.map(node_state::prose_total).unwrap_or(0);
+        if cand_total > node_state::PROSE_LIMIT && cand_total > pre_total {
+            return Err(StoreError::Invalid(node_state::budget_message(id, cand)));
+        }
+        // Migrated rows: history is authoritative; the hot append feed must
+        // not reappear through any writer, this one included.
+        let migrated = pre_row
+            .map(|r| r.get(node_state::HISTORY_MARKER_KEY).is_some())
+            .unwrap_or(false);
+        if migrated {
+            let count = |v: Option<&Value>| {
+                v.and_then(|r| r.get("progress_notes"))
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            };
+            if count(cand.get("progress_notes")) > count(pre_row) {
+                return Err(StoreError::Invalid(format!(
+                    "refusing to grow progress_notes on migrated node {id}: the row is migrated; use current_state"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The store-side half of the locked read-modify-write cycle. Holds the
+/// bounded lock; re-derives the pre-image; runs slugs, recompute, the
+/// touched_at stamp, the closure-detection hook, canonicalization, and the
+/// atomic publish with backup. Contention is resolved by the caller
+/// retrying on [`StoreError::LockTimeout`] or a version conflict.
 pub fn locked_mutate(
     path: &Path,
     input: MutateInput,
     timeout: Duration,
+) -> Result<MutateOutcome, StoreError> {
+    locked_mutate_with_hook(path, input, timeout, None)
+}
+
+/// Same cycle with one pre-publication hook. The hook runs INSIDE the
+/// mutation lock, after every guard, right before the bytes are written, and
+/// receives the raw begin snapshot. An error refuses the whole mutation;
+/// `node_state` uses this to journal the exact pre-image before any
+/// replacement publishes (x-920a wave 1).
+pub fn locked_mutate_with_hook(
+    path: &Path,
+    input: MutateInput,
+    timeout: Duration,
+    before_publish: Option<&mut dyn FnMut(&[Value]) -> Result<(), StoreError>>,
 ) -> Result<MutateOutcome, StoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2271,6 +2339,14 @@ pub fn locked_mutate(
     }
 
     canonicalize_entries(&mut entries);
+
+    // x-920a wave 1: the publication-seam prose policy. Every writer goes
+    // through here, so every writer obeys the combined details+current_state
+    // budget, and a migrated row's progress_notes can never grow again.
+    enforce_node_state_policy(&raw, &entries)?;
+    if let Some(hook) = before_publish {
+        hook(&raw)?;
+    }
 
     let (backup, shadow_warning, version) = if sqlite_backend {
         let version = crate::backlog::authoritative_sync(path, &shadow_before, &entries)

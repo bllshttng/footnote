@@ -3153,11 +3153,10 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
     import time
     import uuid as _uuid
 
+    from fno.agents.codex_pane import _codex_session_ids_loaded, _make_codex_bind_probe
     from fno.agents.mux_spawn import (
         _await_pane_binding,
-        _codex_session_ids_loaded,
         _lookup_child_pid,
-        _make_codex_bind_probe,
         _reap_spawned_pane,
         _run_mux,
         build_pane_argv,
@@ -3177,23 +3176,42 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
     source_auth = source_home / "auth.json"
     if source_auth.is_file():
         (codex_home / "auth.json").symlink_to(source_auth.resolve())
-    prompt = "fno codex bind canary: reply READY and take no other action."
-    argv = build_pane_argv("codex", prompt, cwd, True, None, name=name)
-    argv = ["env", f"CODEX_HOME={codex_home}", *argv]
-    # None (daemon unreachable at this instant) is passed through as-is; the
-    # ordinary production probe refuses to correlate against a fabricated
-    # empty baseline. This home is newly created and uniquely owned by the
-    # canary, so it positively contains no pre-existing daemon sessions: an
-    # absent pre-spawn socket is an empty baseline here, not ambiguity.
-    baseline_ids = _codex_session_ids_loaded(cwd, codex_home=codex_home)
-    if baseline_ids is None:
-        baseline_ids = set()
-    spawn_started_ms = int(time.time() * 1000)
-    proc = _run_mux(
-        ["mux", "pane", "run", "--server", session, "--cwd", str(cwd), "--", *argv],
-        subprocess.run,
-    )
+    # Start the daemon under the private CODEX_HOME; stop it on every exit.
+    from fno.agents.codex_pane import ensure_codex_daemon
+
+    daemon_env = {**os.environ, "CODEX_HOME": str(codex_home)}
+    ensure_codex_daemon(subprocess.run, env=daemon_env)
+
+    def _stop_daemon() -> None:
+        subprocess.run(
+            ["codex", "app-server", "daemon", "stop"],
+            capture_output=True,
+            text=True,
+            env=daemon_env,
+        )
+
+    try:
+        prompt = "fno codex bind canary: reply READY and take no other action."
+        argv = build_pane_argv("codex", prompt, cwd, True, None, name=name)
+        argv = ["env", f"CODEX_HOME={codex_home}", *argv]
+        # None (daemon unreachable at this instant) is passed through as-is; the
+        # ordinary production probe refuses to correlate against a fabricated
+        # empty baseline. This home is newly created and uniquely owned by the
+        # canary, so it positively contains no pre-existing daemon sessions: an
+        # absent pre-spawn socket is an empty baseline here, not ambiguity.
+        baseline_ids = _codex_session_ids_loaded(cwd, codex_home=codex_home)
+        if baseline_ids is None:
+            baseline_ids = set()
+        spawn_started_ms = int(time.time() * 1000)
+        proc = _run_mux(
+            ["mux", "pane", "run", "--server", session, "--cwd", str(cwd), "--", *argv],
+            subprocess.run,
+        )
+    except BaseException:
+        _stop_daemon()
+        raise
     if proc.returncode != 0:
+        _stop_daemon()
         return {
             "bound": False,
             "session_id": None,
@@ -3209,6 +3227,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
         # dispatch raises on): the canary pane may exist without a way to
         # name it, so point at the manual cleanup path instead of a silent
         # leak.
+        _stop_daemon()
         return {
             "bound": False,
             "session_id": None,
@@ -3281,6 +3300,7 @@ def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
         }
     finally:
         _reap_spawned_pane(session, pane_id, subprocess.run)
+        _stop_daemon()
 
 
 def _emit_codex_bind_report(result: dict[str, Any]) -> None:

@@ -757,9 +757,10 @@ def _append_plan_progress(plan_path: str, text: str, project_root: Path) -> None
 def _dispatch_backlog_progress(
     sink: StatusSinkConfig, event: dict[str, Any], project_root: Path
 ) -> "tuple[str, str]":
-    """On ``task_done`` / ``run_summary`` carrying a ``node``: append a timestamped
-    progress note to the graph node AND to its plan doc's ``## Progress`` section.
-    Other kinds / node-less events are a no-op (advance the cursor)."""
+    """On ``task_done`` / ``run_summary`` carrying a ``node``: record the row in
+    permanent history (x-920a: never the human current state) AND append to the
+    plan doc's ``## Progress`` section. Other kinds / node-less events are a
+    no-op (advance the cursor)."""
     if event.get("type") not in ("task_done", "run_summary"):
         return DELIVERED, ""
     node_id = event.get("node")
@@ -767,20 +768,45 @@ def _dispatch_backlog_progress(
         return DELIVERED, ""
 
     from fno import paths as _paths
-    from fno.graph.store import append_progress_note
 
     text = _progress_line(event)
-    note = {"ts": event.get("ts", ""), "text": text}
     try:
-        found, plan_path = append_progress_note(_paths.graph_json(), node_id, note)
+        receipt = _machine_note(_paths.graph_json(), node_id, event.get("type"), text)
     except Exception as exc:  # a graph write failure is a real (droppable) failure
         return DROPPED, f"graph note failed: {exc}"
-    if not found:
-        return DROPPED, f"node {node_id} not found in graph"
+    if receipt is None:
+        return DROPPED, f"node {node_id} not found in graph or write refused"
     # Plan-doc append is best-effort and never fails the delivery.
+    plan_path = None
+    try:
+        from fno.graph import api as graph_api
+
+        row = graph_api.node(node_id)
+        plan_path = getattr(row, "plan_path", None)
+    except Exception:  # noqa: BLE001 - the plan stamp never fails the delivery
+        plan_path = None
     if plan_path:
-        _append_plan_progress(plan_path, f"{note['ts']} {text}", project_root)
+        _append_plan_progress(plan_path, f"{event.get('ts', '')} {text}", project_root)
     return DELIVERED, ""
+
+
+def _machine_note(graph_path, node_id: str, kind, text: str) -> "dict | None":
+    """One machine record through the native note action (history-only).
+    ``None`` on a refused write or a missing node."""
+    import subprocess as _sp
+
+    from fno.graph.note_cli import _receipt
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        return None
+    argv = [str(binary), "backlog-note", "--graph", str(graph_path), "--stdin", "--json",
+            "--quiet", "--node", str(node_id), "--machine", str(kind)]
+    proc = _sp.run(argv, input=text, text=True, check=False, capture_output=True)
+    if proc.returncode != 0:
+        return None
+    return _receipt(proc.stdout)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
