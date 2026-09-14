@@ -368,6 +368,8 @@ def sweep(
 
     if skill not in ("blueprint", "review", "target"):
         raise typer.BadParameter("--skill must be blueprint, review, or target")
+    if judge_n > 0 and skill != "blueprint":
+        typer.echo("--judge applies to --skill blueprint only; ignored")
     if since < 1:
         raise typer.BadParameter("--since must be >= 1 (days).")
 
@@ -481,13 +483,20 @@ def _judge_via_rust(argv: list[str]) -> Optional[dict]:
     if binary is None:
         typer.echo("fno-agents binary not found; run `fno doctor update --rust`", err=True)
         return None
+    # A labels run is rows x dimensions x the Rust spawn's own 600s cap; the
+    # wrapper cap grows with it, and --split is the chunking remedy.
+    timeout = 14400 if "--labels" in argv else 3600
     try:
-        result = subprocess.run([str(binary), "judge", *argv], capture_output=True, text=True, timeout=3600)
-        return json.loads(result.stdout)
+        result = subprocess.run([str(binary), "judge", *argv], capture_output=True, text=True, timeout=timeout)
+        out = json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         detail = f"bad output (stdout={result.stdout[:200]!r} stderr={result.stderr[:200]!r})" if isinstance(exc, ValueError) else str(exc)
         typer.echo(f"judge fault: {detail}", err=True)
         return None
+    if isinstance(out, dict) and out.get("error"):
+        typer.echo(f"judge fault: {out['error']}", err=True)
+        return None
+    return out
 
 
 def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[str, int]:
@@ -527,6 +536,8 @@ def _judge_one_item(item: dict, run_id: str, events_paths: list[Path]) -> tuple[
 def judge_cmd(ctx: typer.Context) -> None:
     """Advisory five-question judge, never blocking. Every flag is fno-agents'; forwards raw argv, no typer.Option."""
     args = ctx.args
+    if "--split" in args and "--labels" not in args:
+        typer.echo("--split applies to --labels only; ignored")
     if "--labels" in args:
         out = _judge_via_rust(args)
         if out is None:
