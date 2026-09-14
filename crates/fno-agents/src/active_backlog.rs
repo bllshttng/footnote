@@ -1094,6 +1094,13 @@ fn dispatch_mission(
         if merged.reason.is_none() {
             merged.reason = facts.reason.clone();
         }
+        // The gate is per member but the tick reads it once: any member the
+        // incident stopped must survive the fold, or a stopped verdict folds
+        // back into `no_work` (x-39f4).
+        if merged.gate.is_none() {
+            merged.gate = facts.gate.clone();
+            merged.gate_detail = facts.gate_detail.clone();
+        }
         if member.epic {
             epic_members += 1;
             if outcome == MissionDispatch::Retire {
@@ -3310,18 +3317,12 @@ mod tests {
 
     /// x-39f4 regression: with a positive stopped record, one supervisor and
     /// one mission cycle record ZERO dispatch-only poll children
-    /// (`config active-backlog`, `backlog advance`, `backlog undispatched`)
-    /// while the tick rows name fleet_stop with the generation. Flipping the
-    /// same record to clear generation N+1 makes the SAME residents re-resolve
-    /// and advance - no daemon restart, no task respawn. The clear phase is
-    /// the positive control: it proves the stub would have recorded them.
-    /// x-39f4 regression: with a positive stopped record, one supervisor and
-    /// one mission cycle record ZERO dispatch-only poll children
-    /// (`config active-backlog`, `backlog advance`, `backlog undispatched`)
-    /// while the tick rows name fleet_stop with the generation. Flipping the
-    /// same record to clear generation N+1 makes the SAME residents re-resolve
-    /// and advance - no daemon restart, no task respawn. The clear phase is
-    /// the positive control: it proves the stub would have recorded them.
+    /// (`backlog advance`, `backlog undispatched`) while the tick rows name
+    /// fleet_stop with the generation. The pause check sits BEFORE the loop's
+    /// territory re-resolve, so the resident loop survives the whole incident
+    /// instead of exiting on the empty-registry dropout - and on clear it is
+    /// the base's own dropout semantics that decide, with the supervisor's
+    /// status-fanout still ticking as the live positive control.
     #[tokio::test]
     async fn incident_pause_suppresses_dispatch_only_poll_children() {
         let _env = env_guard();
@@ -3346,6 +3347,10 @@ mod tests {
             interval_seconds: 1,
             failure_limit: 3,
             mission: Some("x-epic".into()),
+            scope: String::new(),
+            rung: 0,
+            kingless: true,
+            members: vec!["x-epic".into()],
             max_concurrent: 1,
         };
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -3368,12 +3373,14 @@ mod tests {
         ));
 
         // One paused cycle: both residents tick at once, then idle. Zero
-        // dispatch-only children; a tick row names the stop.
+        // dispatch-only children, a tick row names the stop, and the drain
+        // loop is STILL RESIDENT - the pause check precedes the dropout
+        // re-resolve that an empty registry would otherwise trip.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let calls = std::fs::read_to_string(&record).unwrap_or_default();
         assert!(
             !calls.contains("active-backlog"),
-            "supervisor must not shell the resolver while stopped: {calls}"
+            "no active-backlog child while stopped: {calls}"
         );
         assert!(
             !calls.contains("advance"),
@@ -3382,6 +3389,10 @@ mod tests {
         assert!(
             !calls.contains("undispatched"),
             "no undispatched probe while stopped: {calls}"
+        );
+        assert!(
+            !drain.is_finished(),
+            "the resident loop must survive the incident, not exit on dropout"
         );
         let rows: Vec<serde_json::Value> =
             journal_lines(&tmp.path().join(".fno").join("events.jsonl"))
@@ -3397,15 +3408,21 @@ mod tests {
             "a tick row must name fleet_stop with the generation: {rows:?}"
         );
 
-        // Flip the SAME record to clear at generation N+1: the same residents
-        // re-resolve and advance - the positive control proving the stub
-        // records these verbs when unblocked.
+        // Flip the SAME record to clear at generation N+1: the loop wakes,
+        // re-resolves against the (empty) sandbox registry, and exits by the
+        // base's dropout semantics - with still-zero dispatch children. The
+        // supervisor's status-sinks ticks in the record are the positive
+        // control that the stub was live the whole time.
         write_incident(&agents, "clear", 6);
         tokio::time::sleep(Duration::from_millis(2500)).await;
         let calls = std::fs::read_to_string(&record).unwrap_or_default();
         assert!(
-            calls.contains("active-backlog") && calls.contains("advance"),
-            "clear must resume: resolver and advance run again: {calls}"
+            calls.contains("status-sinks"),
+            "supervisor fanout must keep ticking as the positive control: {calls}"
+        );
+        assert!(
+            !calls.contains("advance") && !calls.contains("undispatched"),
+            "an empty registry dispatches nothing: {calls}"
         );
 
         shutdown.store(true, Ordering::SeqCst);
