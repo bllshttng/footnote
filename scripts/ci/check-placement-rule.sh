@@ -336,8 +336,12 @@ EOF
 # fixture text, e.g. this lint's own test) and scripts/ci/ (this script and
 # its siblings) are excluded wholesale, mirroring check-no-hardcoded-paths.sh's
 # own convention - never scanned, not even via the allowlist above.
+# The leading boundary refuses an identifier char before .claude, so a dotted
+# config key ending in .claude (e.g. "spawn.harness.claude") is not mistaken
+# for path construction, while quote-, slash-, space- and line-start-preceded
+# .claude still is.
 CLAUDE_HITS=$(
-    grep -rnE '\.claude([/"'"'"']|$)' \
+    grep -rnE '(^|[^A-Za-z0-9_.])\.claude([/"'"'"']|$)' \
         cli/src crates hooks scripts \
         --include='*.py' --include='*.rs' --include='*.sh' \
         --exclude-dir=tests --exclude-dir=ci \

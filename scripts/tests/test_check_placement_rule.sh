@@ -64,6 +64,29 @@ RC=$?
 rm -f "$SCRATCH"
 if [[ $RC -eq 0 ]]; then pass "anchored write does not trip the check"; else fail "anchored write incorrectly flagged: $OUT"; fi
 
+# ---- T05: a dotted config key ending in .claude is NOT flagged ----
+echo "T05: dotted config key ending in .claude passes"
+SCRATCH="$REPO_ROOT/cli/src/fno/_scratch_placement_test.py"
+printf 'ROUTE_KEY = "spawn.harness.claude"\n' > "$SCRATCH"
+OUT=$(bash "$CHECK" 2>&1)
+RC=$?
+rm -f "$SCRATCH"
+if [[ $RC -eq 0 ]]; then pass "dotted config key is not path construction"; else fail "dotted config key flagged as path: $OUT"; fi
+
+# ---- T06: ~/.claude path construction is still caught (positive control) ----
+echo "T06: ~/.claude path construction is still caught"
+SCRATCH="$REPO_ROOT/cli/src/fno/_scratch_placement_test.py"
+printf 'STATE = Path("~/.claude/config.toml")\n' > "$SCRATCH"
+OUT=$(bash "$CHECK" 2>&1)
+RC=$?
+rm -f "$SCRATCH"
+if [[ $RC -ne 0 ]]; then pass "rc!=0 with ~/.claude path construction"; else fail "rc=0, expected a caught violation"; fi
+if echo "$OUT" | grep -q "_scratch_placement_test.py"; then
+    pass "report names the offending file"
+else
+    fail "report did not name the offending file: $OUT"
+fi
+
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
