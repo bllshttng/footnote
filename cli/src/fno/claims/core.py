@@ -1409,9 +1409,11 @@ def refresh_claim(
         if existing.expires_at is None:
             return None
         verdict = _claim_verdict(existing, root=root)
-        if verdict.get("expired") is True:
+        # STALE is the only refused verdict (x-b445), matching Rust renew: an
+        # expired claim whose holder still reads live extends.
+        if verdict.get("state") == "stale":
             raise ClaimValidationError(
-                f"claim {key!r} expired before refresh; refusing to resurrect it"
+                f"claim {key!r} expired and its holder reads dead; refusing to resurrect it"
             )
 
         window = ttl_ms if ttl_ms is not None else MIN_TTL_MS

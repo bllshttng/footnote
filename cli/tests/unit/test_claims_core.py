@@ -678,8 +678,9 @@ class TestRefresh:
     def test_refresh_refuses_claim_that_expires_while_waiting_for_recovery_mutex(
         self, tmp_path, monkeypatch
     ):
-        """The under-mutex reread is the authority: expiry in the wait window
-        cannot be rewritten into a new lease by the old holder."""
+        """The under-mutex reread is the authority: a claim whose holder reads
+        dead (x-b445: expired AND stale) cannot be rewritten into a new lease
+        by the old holder."""
         import fno.claims.core as claims_core
 
         path = claim_path("k", root=tmp_path)
@@ -691,16 +692,82 @@ class TestRefresh:
             token = real_acquire(lock_path, timeout_s, **kwargs)
             existing = read_claim_file(path)
             path.write_text(
-                serialize_claim(existing.model_copy(update={"expires_at": expired_deadline}))
+                serialize_claim(
+                    existing.model_copy(
+                        update={
+                            "expires_at": expired_deadline,
+                            "pid": self._dead_pid(),
+                            "pid_provenance": "session-prover",
+                            "session_id": None,
+                        }
+                    )
+                )
             )
             return token
 
         monkeypatch.setattr(claims_core, "acquire_dir_mutex", acquire_then_expire)
 
-        with pytest.raises(ClaimValidationError, match="expired"):
+        with pytest.raises(ClaimValidationError, match="holder reads dead"):
             refresh_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
 
         assert read_claim_file(path).expires_at == expired_deadline
+
+    def test_AC2_HP_refresh_extends_expired_claim_whose_holder_reads_live(
+        self, tmp_path
+    ):
+        """x-b445: TTL expiry alone no longer refuses. An expired claim whose
+        native verdict reads live extends, exactly as `claim status` reports."""
+        import os
+        import time
+
+        acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+        existing = read_claim_file(path := claim_path("k", root=tmp_path))
+        path.write_text(
+            serialize_claim(
+                existing.model_copy(
+                    update={
+                        "expires_at": now_ms() - 1,
+                        "pid": os.getpid(),  # the test process: verifiably alive
+                        "pid_provenance": "session-prover",
+                        "session_id": None,
+                    }
+                )
+            )
+        )
+        time.sleep(0.01)
+        refreshed = refresh_claim("k", HOLDER_A, ttl_ms=7_200_000, root=tmp_path)
+        assert refreshed is not None
+        assert abs(refreshed.expires_at - (now_ms() + 7_200_000)) < 2_000
+
+    def test_AC2_ERR_refresh_refuses_verdict_stale_and_leaves_the_file_alone(
+        self, tmp_path
+    ):
+        """x-b445: a stale verdict (dead holder, no live witness) still
+        refuses, and the refusal leaves the claim file unchanged."""
+        dead_pid = self._dead_pid()
+        acquire_claim("k", HOLDER_A, ttl_ms=60_000, root=tmp_path)
+        existing = read_claim_file(path := claim_path("k", root=tmp_path))
+        body = serialize_claim(
+            existing.model_copy(
+                update={
+                    "expires_at": now_ms() - 1,
+                    "pid": dead_pid,
+                    "pid_provenance": "session-prover",
+                    "session_id": None,
+                }
+            )
+        )
+        path.write_text(body)
+        with pytest.raises(ClaimValidationError, match="holder reads dead"):
+            refresh_claim("k", HOLDER_A, ttl_ms=7_200_000, root=tmp_path)
+        assert path.read_text() == body
+
+    @staticmethod
+    def _dead_pid() -> int:
+        dead_pid = 999_999
+        while psutil.pid_exists(dead_pid):
+            dead_pid += 1
+        return dead_pid
 
 
 # ---------------------------------------------------------------------------
