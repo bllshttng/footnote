@@ -37,7 +37,7 @@
 //! shared value vocabulary, the options, the collection orchestration,
 //! and the board-shape tests.
 
-mod budget;
+pub(crate) mod budget;
 mod claims;
 mod classify;
 mod prs;

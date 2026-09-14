@@ -2673,7 +2673,7 @@ fn arms_readout(
     // the arm_watch daemon arm fold the same files and cannot drift.
     let journals = fno_agents::tick_ledger::journals(home);
     let arms = fno_agents::tick_ledger::read_arms(&journals, now_unix);
-    let trace = fno_agents::tick_ledger::read_tick_trace(&journals, now_unix);
+    let trace = fno_agents::tick_ledger::read_tick_trace_live(&journals, &arms, now_unix);
     (arms, trace)
 }
 

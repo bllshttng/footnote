@@ -113,6 +113,7 @@ def test_ac3hp_install_prints_plist_before_writing(
         fno_binary="/usr/local/bin/fno",
         install_path="/usr/bin:/bin",
         dry_run=False,
+        activate=False,
     )
 
     captured = capsys.readouterr()
@@ -133,6 +134,7 @@ def test_ac3hp_install_writes_file_on_confirm(
         fno_binary="/usr/local/bin/fno",
         install_path="/usr/bin:/bin",
         dry_run=False,
+        activate=False,
     )
 
     plist_path = tmp_launch_agents / "sh.fno.pr-watcher.plist"
