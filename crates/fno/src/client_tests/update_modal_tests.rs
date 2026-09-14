@@ -40,6 +40,7 @@ fn update_modal_names_stale_processes_and_offers_restart() {
             },
         ],
         running_stale: 2,
+        source_pin: None,
     });
     let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
     let labels: Vec<&str> = menu
@@ -138,6 +139,7 @@ fn sideline_menu_omits_update_row_when_not_ready() {
         degraded: None,
         running: vec![],
         running_stale: 0,
+        source_pin: None,
     });
     let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
     assert!(!menu.actions.contains(&AuxAction::OpenUpdate));
@@ -182,6 +184,7 @@ fn sideline_menu_shows_row_for_ok_but_internally_degraded_probe() {
         degraded: Some("fno mux ls --json failed".into()),
         running: vec![],
         running_stale: 0,
+        source_pin: None,
     });
     let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
     let labels: Vec<&str> = menu
@@ -195,4 +198,61 @@ fn sideline_menu_shows_row_for_ok_but_internally_degraded_probe() {
         .collect();
     assert_eq!(labels[0], "update check degraded");
     assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
+}
+
+/// x-401c AC7-HP: a behind source with no update pending outranks the
+/// restart row - the menu names the distance and offers the modal first.
+#[test]
+fn sideline_menu_names_source_behind_origin() {
+    let payload = serde_json::json!({
+        "update_ready": false,
+        "installed_rev": "aaa1111",
+        "source_rev": "aaa1111",
+        "guidance": "source checkout aaa1111 is 14 commit(s) behind origin/main bbb2222; \
+                     merged changes there are not installed. Sync it, then run fno doctor update",
+        "degraded": null,
+        "running": [],
+        "running_stale": 2,
+        "source_pin": {"behind": 14}
+    });
+    let parsed: UpdateReadiness = serde_json::from_value(payload).expect("parses");
+    let outcome = UpdateOutcome::Ok(parsed);
+    let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+    let labels: Vec<&str> = menu
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels[0], "source 14 behind origin");
+    assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
+}
+
+/// x-401c AC8-EDGE: a payload with no `source_pin` key, or with a null
+/// `behind`, parses and builds today's rows (no behind row).
+#[test]
+fn sideline_menu_without_source_pin_keeps_rows() {
+    for pin in [serde_json::Value::Null, serde_json::json!({"behind": null})] {
+        let mut payload = serde_json::json!({
+            "update_ready": false,
+            "installed_rev": "same",
+            "source_rev": "same",
+            "guidance": "up to date at same - no update pending, 0 shell(s) unaffected",
+            "degraded": null,
+            "running": [],
+            "running_stale": 0
+        });
+        if !pin.is_null() {
+            payload["source_pin"] = pin.clone();
+        }
+        let parsed: UpdateReadiness = serde_json::from_value(payload).expect("parses");
+        let menu = build_sideline_menu(Anchor::Center, Some(&UpdateOutcome::Ok(parsed)));
+        assert!(
+            !menu.actions.contains(&AuxAction::OpenUpdate),
+            "no behind row for pin {pin:?}"
+        );
+    }
 }

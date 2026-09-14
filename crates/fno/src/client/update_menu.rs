@@ -27,6 +27,18 @@ pub(crate) struct UpdateReadiness {
     pub(crate) running: Vec<RunningRow>,
     #[serde(default)]
     pub(crate) running_stale: usize,
+    /// x-401c: the source-pin verdict. Tolerated absent (an older Python
+    /// payload); only `behind` is read here.
+    #[serde(default)]
+    pub(crate) source_pin: Option<SourcePinView>,
+}
+
+/// The slice of the source-pin answer the menu needs (x-401c). Serde ignores
+/// the pin's other keys; this struct does not set `deny_unknown_fields`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct SourcePinView {
+    #[serde(default)]
+    pub(crate) behind: Option<u64>,
 }
 
 /// One census row the modal renders: what a restart does to this process
@@ -114,6 +126,16 @@ pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>
     match update {
         Some(UpdateOutcome::Ok(r)) if r.update_ready => {
             rows.push(entry("⬆", "update ready"));
+            actions.push(AuxAction::OpenUpdate);
+        }
+        // x-401c: the source checkout is behind origin, so a sync (not an
+        // update) is what's owed. Ranks above restart: a restart onto a
+        // behind build still runs old code.
+        Some(UpdateOutcome::Ok(r))
+            if r.source_pin.as_ref().and_then(|p| p.behind).unwrap_or(0) > 0 =>
+        {
+            let n = r.source_pin.as_ref().and_then(|p| p.behind).unwrap_or(0);
+            rows.push(entry("⬆", &format!("source {n} behind origin")));
             actions.push(AuxAction::OpenUpdate);
         }
         // x-f188 change 7: stale long-lived processes are their own reason

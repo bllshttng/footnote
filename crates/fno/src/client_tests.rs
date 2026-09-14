@@ -8509,6 +8509,7 @@ fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
         degraded: None,
         running: vec![],
         running_stale: 0,
+        source_pin: None,
     });
     let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
     let labels: Vec<&str> = menu
@@ -8742,6 +8743,7 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         degraded: None,
         running: vec![],
         running_stale: 0,
+        source_pin: None,
     });
     let modal = build_update_modal(Some(&outcome));
     let headers: Vec<&str> = modal
