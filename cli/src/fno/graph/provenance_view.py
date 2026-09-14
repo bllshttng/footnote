@@ -187,8 +187,7 @@ def lifecycle_roster(
 
 
 def pr_block(entry_or_sidecar: Any) -> dict:
-    """The PR projection every provenance shape carries: keys present, nulls
-    honest. Accepts a graph entry dict or a sidecar node."""
+    """The PR projection every provenance shape carries; accepts dict or sidecar."""
     def _num(o: Any) -> Optional[int]:
         return getattr(o, "pr_number", None) if not isinstance(o, dict) else o.get("pr_number")
 
