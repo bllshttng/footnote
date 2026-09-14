@@ -4467,11 +4467,14 @@ def doctor_command(
                     install_path=os.environ.get("PATH", "/usr/bin:/bin"),
                     interval=int(pw.get("interval_seconds") or 600),
                     defer_when_ticking=True,
+                    caller="doctor-fix",
                 )
                 typer.echo(f"fno doctor: --fix pr-watch refresh: {rmsg}", err=True)
             else:
                 hmsg, _ = heal_watcher(
-                    launch_agents_dir=_LAUNCH_AGENTS_DIR, defer_when_ticking=True
+                    launch_agents_dir=_LAUNCH_AGENTS_DIR,
+                    defer_when_ticking=True,
+                    caller="doctor-fix",
                 )
                 typer.echo(f"fno doctor: --fix pr-watch heal: {hmsg}", err=True)
 

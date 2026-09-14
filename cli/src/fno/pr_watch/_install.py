@@ -309,6 +309,54 @@ def _tick_in_flight(run: Optional[Callable[[list[str]], str]] = None) -> Optiona
     return pid if age is not None and age < 600 else None
 
 
+def _record_bounce(*, caller: str, deferred: bool, state_root: Optional[Path] = None) -> None:
+    """Name this bounce so the next killed tick can name its sender.
+
+    Writes ``pr-watch-bounce.json`` in the state dir (a deferred bounce writes
+    no sidecar: there is no kill to join) and emits ``pr_watch_bounce`` so
+    deferrals are countable. Never raises; a receipt must not block a cure.
+    """
+    data: dict = {
+        "caller": caller,
+        "pid": os.getpid(),
+        "ppid": os.getppid(),
+        "parent": "",
+        "deferred": deferred,
+    }
+    try:
+        data["parent"] = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(os.getppid())],
+            capture_output=True, text=True, check=False,
+            timeout=_LAUNCHCTL_TIMEOUT_S,
+        ).stdout.strip()[:160]
+    except Exception:  # noqa: BLE001 - a receipt never blocks a cure
+        pass
+    if not deferred:
+        try:
+            root = state_root
+            if root is None:
+                from fno.paths import state_dir
+
+                root = state_dir()
+            sidecar = Path(root) / "pr-watch-bounce.json"
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            tmp = sidecar.with_name(sidecar.name + ".tmp")
+            tmp.write_text(json.dumps({"ts": time.time(), **data}), encoding="utf-8")
+            os.replace(tmp, sidecar)
+        except Exception:  # noqa: BLE001 - a receipt never blocks a cure
+            pass
+    try:
+        from fno.events import _build, append_event
+        from fno.paths import state_dir as _state_dir
+
+        append_event(
+            _build("pr_watch_bounce", "daemon", data),
+            (state_root or _state_dir()) / "events.jsonl",
+        )
+    except Exception:  # noqa: BLE001 - a receipt never blocks a cure
+        pass
+
+
 def bounce(
     *,
     plist_path: Path,
@@ -319,6 +367,7 @@ def bounce(
     timeout_s: float = _LAUNCHCTL_TIMEOUT_S,
     kickstart: bool = True,
     defer_when_ticking: bool = False,
+    caller: str = "unknown",
 ) -> tuple[str, int]:
     """bootout -> bootstrap -> kickstart to cure a wedged launchd job.
 
@@ -344,9 +393,16 @@ def bounce(
     if run is None:
         run = _run_launchctl_timed
     if defer_when_ticking and (pid := _tick_in_flight()) is not None:
+        if label == _LABEL:
+            _record_bounce(caller=caller, deferred=True)
         return (f"tick in flight (pid {pid}); bounce deferred", 0)
     domain = f"gui/{uid}"
     target = f"{domain}/{label}"
+
+    # Receipt before bootout: the SIGTERM this bounce may send lands seconds
+    # from now, and only this sidecar joins that kill back to its sender.
+    if label == _LABEL:
+        _record_bounce(caller=caller, deferred=False)
 
     # 1. bootout: a nonzero rc is EXPECTED when the job is not loaded, so only a
     #    hang is fatal here.
@@ -385,7 +441,7 @@ def bounce(
 
 
 def heal_watcher(
-    *, launch_agents_dir: Path, defer_when_ticking: bool = False
+    *, launch_agents_dir: Path, defer_when_ticking: bool = False, caller: str = "unknown"
 ) -> tuple[str, int]:
     """Resolve the plist path and bounce the watcher. Doctor's --fix entrypoint.
 
@@ -394,7 +450,9 @@ def heal_watcher(
     plist_path = launch_agents_dir / _PLIST_FILENAME
     if not plist_path.exists():
         return (f"no plist at {plist_path}; run `fno do pr watch install`", 1)
-    return bounce(plist_path=plist_path, defer_when_ticking=defer_when_ticking)
+    return bounce(
+        plist_path=plist_path, defer_when_ticking=defer_when_ticking, caller=caller
+    )
 
 
 def refresh_watcher(
@@ -404,6 +462,7 @@ def refresh_watcher(
     install_path: str,
     interval: int = 600,
     defer_when_ticking: bool = False,
+    caller: str = "unknown",
 ) -> tuple[str, int]:
     """Re-render the plist onto the current binary, then bounce. Post-update hook.
 
@@ -427,7 +486,9 @@ def refresh_watcher(
         plist_path.write_text(plist_text, encoding="utf-8")
     except OSError as exc:
         return (f"failed to write plist {plist_path}: {exc}", 1)
-    return bounce(plist_path=plist_path, defer_when_ticking=defer_when_ticking)
+    return bounce(
+        plist_path=plist_path, defer_when_ticking=defer_when_ticking, caller=caller
+    )
 
 
 def _launchctl_is_loaded() -> bool:
@@ -537,7 +598,7 @@ def install(
         # cure the observed wedge (job loaded, `spawn scheduled`, never spawns),
         # and this is the `dead`-verdict fix command. The bounce is idempotent,
         # so a RE-install of a healthy agent just restarts it.
-        msg, rc = bounce(plist_path=plist_path)
+        msg, rc = bounce(plist_path=plist_path, caller="install")
         if rc == 0:
             typer.echo(f"Activated: {msg}")
         else:

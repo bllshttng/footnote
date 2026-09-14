@@ -15,6 +15,13 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_bounce_receipts(tmp_path, monkeypatch):
+    """Bounce receipts and pr_watch_bounce events land in a tmp state dir,
+    never the developer's ~/.fno."""
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path / "state")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -736,6 +743,7 @@ def test_refresh_verb_refreshes_when_enabled(monkeypatch):
     assert len(calls) == 1
     assert calls[0]["fno_binary"] == "/x/fno-py"
     assert calls[0]["defer_when_ticking"] is True
+    assert calls[0]["caller"] == "refresh"
     assert "pr-watch refresh:" in result.stdout
 
 
@@ -836,9 +844,9 @@ def test_heal_verb_bounces_when_enabled(monkeypatch):
     assert "pr-watch heal:" in result.stdout
 
 
-def test_heal_verb_defers_while_tick_holds_the_claim(monkeypatch):
-    """AC4-HP at the verb: the SessionStart heal passes
-    defer_when_ticking so the bounce cannot kill a live tick."""
+def test_heal_verb_defers_while_tick_is_in_flight(monkeypatch):
+    """AC4-HP at the verb: the SessionStart heal passes defer_when_ticking so
+    the bounce cannot kill a live tick, and names itself to the receipt."""
     from typer.testing import CliRunner
     from fno.cli import app
     import fno.pr_watch.cli as cli_mod
@@ -852,6 +860,7 @@ def test_heal_verb_defers_while_tick_holds_the_claim(monkeypatch):
     result = CliRunner().invoke(app, ["pr-watch", "heal"])
     assert result.exit_code == 0
     assert calls[0]["defer_when_ticking"] is True
+    assert calls[0]["caller"] == "heal"
 
 
 def test_heal_verb_single_flight_skips_when_held(monkeypatch):
@@ -1161,6 +1170,83 @@ def test_bounce_bootout_hang_is_fatal(tmp_launch_agents):
     )
     assert rc == 1 and "bootout" in msg and "timed out" in msg
     assert [c[0] for c in calls] == ["bootout"]  # stops at the hang
+
+
+def test_bounce_records_caller_sidecar_and_event(tmp_launch_agents):
+    """A real-watcher bounce writes pr-watch-bounce.json naming its caller and
+    emits pr_watch_bounce, so a killed tick can name the cure that killed it."""
+    import time as _time
+
+    import fno.paths
+
+    m = _install()
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_record_runner(calls), caller="heal",
+    )
+    assert rc == 0
+    state_root = Path(fno.paths.state_dir())
+    sidecar = json.loads((state_root / "pr-watch-bounce.json").read_text())
+    assert sidecar["caller"] == "heal"
+    assert sidecar["pid"] == os.getpid()
+    assert sidecar["ppid"] == os.getppid()
+    assert isinstance(sidecar["parent"], str)
+    assert sidecar["deferred"] is False
+    assert _time.time() - sidecar["ts"] < 60
+    events = [
+        json.loads(line)
+        for line in (state_root / "events.jsonl").read_text().splitlines()
+    ]
+    bounces = [e for e in events if e["type"] == "pr_watch_bounce"]
+    assert len(bounces) == 1
+    assert bounces[0]["data"]["caller"] == "heal"
+    assert bounces[0]["data"]["deferred"] is False
+
+
+def test_bounce_defer_emits_event_but_no_sidecar(tmp_launch_agents, monkeypatch):
+    """A deferred bounce is countable (pr_watch_bounce, deferred true) but
+    writes no sidecar: there is no kill to join it to."""
+    import fno.paths
+
+    m = _install()
+    monkeypatch.setattr(m, "_tick_in_flight", lambda: 4242)
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "x.plist", uid=501,
+        run=_record_runner(calls), defer_when_ticking=True, caller="refresh",
+    )
+    assert (msg, rc) == ("tick in flight (pid 4242); bounce deferred", 0)
+    assert calls == []
+    state_root = Path(fno.paths.state_dir())
+    assert not (state_root / "pr-watch-bounce.json").exists()
+    events = [
+        json.loads(line)
+        for line in (state_root / "events.jsonl").read_text().splitlines()
+    ]
+    bounces = [e for e in events if e["type"] == "pr_watch_bounce"]
+    assert len(bounces) == 1
+    assert bounces[0]["data"]["deferred"] is True
+    assert bounces[0]["data"]["caller"] == "refresh"
+
+
+def test_bounce_foreign_label_writes_nothing(tmp_launch_agents):
+    """AC3-EDGE: groom installs its own agent through bounce with a foreign
+    label (kickstart=False); no sidecar and no pr_watch_bounce event land."""
+    import fno.paths
+
+    m = _install()
+    calls: list[tuple] = []
+    msg, rc = m.bounce(
+        plist_path=tmp_launch_agents / "groom.plist", uid=501,
+        label="sh.fno.groom", kickstart=False,
+        run=_record_runner(calls),
+    )
+    assert rc == 0
+    state_root = Path(fno.paths.state_dir())
+    assert not (state_root / "pr-watch-bounce.json").exists()
+    events_path = state_root / "events.jsonl"
+    assert not events_path.exists() or "pr_watch_bounce" not in events_path.read_text()
 
 
 def test_bounce_defers_while_tick_claim_is_young(tmp_launch_agents, monkeypatch):

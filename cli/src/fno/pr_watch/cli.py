@@ -93,6 +93,30 @@ def _emit_for_sweep(event_type: str, data: dict[str, Any]) -> None:
     _emit_event(event_type, data)
 
 
+_BOUNCE_SIDECAR = "pr-watch-bounce.json"
+
+
+def _bounce_sender(window_s: float = 15.0) -> str:
+    """The bounce that just sent this SIGTERM, from its receipt; else unrecorded.
+
+    A bounce writes ``pr-watch-bounce.json`` moments before ``bootout``; a
+    fresh sidecar names the caller, pid and parent that killed this tick. A
+    hand ``kill -TERM``, or a stale sidecar from an earlier bounce, reads
+    ``unrecorded`` rather than blaming the wrong cure. Never raises: a sender
+    name is evidence, not a gate.
+    """
+    try:
+        import time
+        from fno.paths import state_dir
+
+        raw = json.loads((state_dir() / _BOUNCE_SIDECAR).read_text(encoding="utf-8"))
+        if time.time() - float(raw["ts"]) <= window_s:
+            return f"{raw['caller']} pid {raw['pid']} via {raw.get('parent', '')}".rstrip()
+    except Exception:  # noqa: BLE001 - evidence, never a gate
+        pass
+    return "unrecorded"
+
+
 #: The launchd label every phase in this tick rides on; each tick row names it.
 _PR_WATCH_SCHEDULER = "launchd:sh.fno.pr-watcher"
 
@@ -488,16 +512,18 @@ def tick() -> None:
         def _on_sigterm(signum, frame) -> None:  # noqa: ARG001 - handler signature
             signal.signal(signum, signal.SIG_IGN)
             phase = current_tick_phase()
+            sender = _bounce_sender()
             _emit_event("pr_watch_tick_end", {
                 "outcome": "error", "why": "killed",
                 "duration_s": round(time.monotonic() - started, 3),
-                "phase": phase, "pid": os.getpid(),
+                "phase": phase, "pid": os.getpid(), "sender": sender,
             })
             _emit_tick_row(
                 "pr_watch_merge",
                 interval_s=int(getattr(cfg, "interval_seconds", 600)) if cfg is not None else 600,
                 skip_reason="error",
-                detail=f"killed by a signal mid-tick; started and did not complete, phase={phase}",
+                detail=(f"killed by a signal mid-tick; started and did not complete, "
+                        f"phase={phase}; sender={sender}"),
             )
             signal.signal(signum, signal.SIG_DFL)
             os.kill(os.getpid(), signum)
@@ -1393,6 +1419,7 @@ def refresh() -> None:
         install_path=os.environ.get("PATH", "/usr/bin:/bin"),
         interval=settings.pr_watch.interval_seconds,
         defer_when_ticking=True,
+        caller="refresh",
     )
     typer.echo(f"pr-watch refresh: {msg}")
 
@@ -1442,6 +1469,7 @@ def heal() -> None:
             install_path=os.environ.get("PATH", "/usr/bin:/bin"),
             interval=settings.pr_watch.interval_seconds,
             defer_when_ticking=True,
+            caller="heal",
         )
         typer.echo(f"pr-watch heal: {msg}")
         if rc != 0:

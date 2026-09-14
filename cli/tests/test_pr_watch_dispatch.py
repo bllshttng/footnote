@@ -20,6 +20,13 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _sandbox_bounce_receipts(tmp_path, monkeypatch):
+    """Bounce receipts and pr_watch_bounce reads land in a tmp state dir,
+    never the developer's ~/.fno."""
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path / "state")
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_post_merge(monkeypatch):
     """Keep tick tests hermetic after the verb-first cutover.
 
@@ -2500,13 +2507,61 @@ class TestTickRecordsAndDeadline:
         assert death["outcome"] == "error"
         assert death["why"] == "killed"
         assert death["phase"]
+        assert death["sender"] == "unrecorded"
         rows = [d for t, d in events if t == "control_plane_tick"
                 and d.get("arm") == "pr_watch_merge"]
         assert rows and "killed by a signal mid-tick" in rows[-1]["detail"]
         assert "started and did not complete" in rows[-1]["detail"]
         assert rows[-1]["detail"].count("phase=") == 1
+        assert rows[-1]["detail"].endswith("sender=unrecorded")
         assert killed == [signal_mod.SIGTERM]
         assert installed[signal_mod.SIGTERM] == signal_mod.SIG_DFL
+
+    def test_sigterm_within_the_bounce_window_names_the_sender(self, monkeypatch):
+        """AC3-HP: a bounce wrote its receipt seconds ago; the killed tick's
+        end record names caller, pid and parent instead of unrecorded."""
+        import signal as signal_mod
+
+        import fno.paths
+        from fno.pr_watch import cli as prcli
+
+        installed: dict[int, object] = {}
+
+        def _record_signal(sig, handler):
+            installed[sig] = handler
+            return None
+
+        monkeypatch.setattr(prcli.signal, "signal", _record_signal)
+        monkeypatch.setattr(prcli.os, "kill", lambda pid, sig: None)
+
+        res, events = self._invoke_tick(monkeypatch, lambda **_kw: None)
+        sidecar = Path(fno.paths.state_dir()) / prcli._BOUNCE_SIDECAR
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps({
+            "ts": time.time(), "caller": "heal", "pid": 123,
+            "ppid": 456, "parent": "zsh -c fno doctor update", "deferred": False,
+        }))
+        installed[signal_mod.SIGTERM](signal_mod.SIGTERM, None)
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends[-1]["sender"].startswith("heal pid 123 via")
+        assert "zsh -c fno doctor update" in ends[-1]["sender"]
+
+    def test_a_stale_bounce_sidecar_reads_unrecorded(self, monkeypatch):
+        """AC3-ERR: a sidecar older than the 15s window is an earlier cure,
+        not this kill's sender; the row must not blame the wrong bounce."""
+        import fno.paths
+        from fno.pr_watch import cli as prcli
+
+        sidecar = Path(fno.paths.state_dir()) / prcli._BOUNCE_SIDECAR
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps({
+            "ts": time.time() - 16, "caller": "refresh", "pid": 99,
+            "ppid": 1, "parent": "init", "deferred": False,
+        }))
+        assert prcli._bounce_sender() == "unrecorded"
+        # A malformed sidecar never raises either.
+        sidecar.write_text("not json")
+        assert prcli._bounce_sender() == "unrecorded"
 
     def test_a_cut_phase_does_not_stop_the_phases_after_it(self, monkeypatch, tmp_path):
         """AC3-HP (x-c79d): the sweep burning its slice cannot take the arms
