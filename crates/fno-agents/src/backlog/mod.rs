@@ -736,21 +736,7 @@ fn snapshot_db(graph: &Path, now: u128) -> Result<(), String> {
         .execute("VACUUM INTO ?1", params![target.display().to_string()])
         .map_err(|error| format!("snapshot {}: {error}", target.display()))?;
     stamp_meta(&connection, "last_snapshot_ms", &now.to_string())?;
-    let mut snaps: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .map_err(|error| error.to_string())?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().starts_with("graph.db."))
-                .unwrap_or(false)
-        })
-        .collect();
-    snaps.sort();
-    if snaps.len() > crate::graph_store::GRAPH_BACKUP_KEEP {
-        for old in &snaps[..snaps.len() - crate::graph_store::GRAPH_BACKUP_KEEP] {
-            let _ = std::fs::remove_file(old);
-        }
-    }
+    let _ = crate::graph_store::rotate_backups(&dir, "graph.db.");
     Ok(())
 }
 
