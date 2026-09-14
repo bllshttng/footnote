@@ -2990,6 +2990,36 @@ mod tests {
         }
     }
 
+    /// Scrub the ambient harness markers so `acquire` stamps no session id and
+    /// the renewal verdict never consults the session witness: no registry
+    /// read, no transcript probe, no latency under a parallel test load. The
+    /// cargo test binary runs inside a live claude session, so the vendor
+    /// markers are set. Callers hold test_env_lock.
+    fn scrub_session_markers() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        const VARS: [&str; 4] = [
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_SESSION_ID",
+            "FNO_HARNESS_SESSION_ID",
+            "FNO_HARNESS_NAME",
+        ];
+        VARS.iter()
+            .map(|v| {
+                let saved = std::env::var_os(v);
+                std::env::remove_var(v);
+                (*v, saved)
+            })
+            .collect()
+    }
+
+    fn restore_session_markers(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (v, val) in saved {
+            match val {
+                Some(x) => std::env::set_var(v, x),
+                None => std::env::remove_var(v),
+            }
+        }
+    }
+
     fn lockfile(root: &TempDir, key: &str) -> PathBuf {
         claim_path(key, Some(root.path())).unwrap()
     }
@@ -3123,6 +3153,7 @@ mod tests {
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
         let saved_home = pin_agents_home(&td);
+        let saved_markers = scrub_session_markers();
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         match acquire("node:x-renew", "target-session:me", o) {
@@ -3152,6 +3183,7 @@ mod tests {
             t0 + 120_000
         );
         assert_eq!(after.acquired_at, acquired_at, "acquired_at preserved");
+        restore_session_markers(saved_markers);
         restore_agents_home(saved_home);
     }
 
@@ -3185,6 +3217,7 @@ mod tests {
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
         let saved_home = pin_agents_home(&td);
+        let saved_markers = scrub_session_markers();
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         o.pid = Some(dead_pid());
@@ -3213,6 +3246,7 @@ mod tests {
             ClaimState::Live,
             "a re-anchored claim must read LIVE, not SUSPECT"
         );
+        restore_session_markers(saved_markers);
         restore_agents_home(saved_home);
     }
 
@@ -3231,6 +3265,7 @@ mod tests {
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
         let saved_home = pin_agents_home(&td);
+        let saved_markers = scrub_session_markers();
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         o.pid = Some(dead_pid());
@@ -3263,6 +3298,7 @@ mod tests {
             ClaimState::Live,
             "a held anchor must still read LIVE, or the repair did nothing"
         );
+        restore_session_markers(saved_markers);
         restore_agents_home(saved_home);
     }
 
@@ -3277,6 +3313,7 @@ mod tests {
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
         let saved_home = pin_agents_home(&td);
+        let saved_markers = scrub_session_markers();
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         o.pid_unavailable = true;
@@ -3306,6 +3343,7 @@ mod tests {
             ClaimState::Live,
             "a v2 claim must stay SUSPECT until expiry, never LIVE"
         );
+        restore_session_markers(saved_markers);
         restore_agents_home(saved_home);
     }
 
@@ -3316,6 +3354,7 @@ mod tests {
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
         let saved_home = pin_agents_home(&td);
+        let saved_markers = scrub_session_markers();
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         let corpse = dead_pid();
@@ -3343,6 +3382,7 @@ mod tests {
         assert_eq!(after.pid, Some(corpse as i32));
         assert_eq!(after.acquired_at, before.acquired_at);
         assert!(after.expires_at.unwrap() > before.expires_at.unwrap());
+        restore_session_markers(saved_markers);
         restore_agents_home(saved_home);
     }
 
@@ -3353,6 +3393,7 @@ mod tests {
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
         let saved_home = pin_agents_home(&td);
+        let saved_markers = scrub_session_markers();
         let mut o = opts_in(&td);
         o.ttl_ms = Some(120_000);
         let _ = acquire("node:x-grow", "target-session:me", o);
@@ -3370,6 +3411,7 @@ mod tests {
             "deadline grew across renewals: {}ms out",
             exp - now_ms()
         );
+        restore_session_markers(saved_markers);
         restore_agents_home(saved_home);
     }
 
