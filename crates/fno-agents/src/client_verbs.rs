@@ -2875,7 +2875,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // 11 where it used to exec).
     // x-4a68: a codex row wakes over the daemon before any pane machinery.
     if harness == "codex" {
-        if let Some(code) = crate::resume_wake::codex_resume_wake_route(
+        let route = crate::resume_wake::codex_resume_wake_route(
             &name,
             entry,
             session_id,
@@ -2884,7 +2884,8 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             &row_name,
             &identity,
             home,
-        ) {
+        );
+        if let Some(code) = route {
             return code;
         }
     }
@@ -2972,8 +2973,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         );
     }
 
-    // x-6ac3: a thread row delivers over the codex daemon (the arm lives in
-    // `resume_wake::codex_resume_route`, above the claim block).
+    // x-6ac3: a thread row's daemon arm lives in `resume_wake::codex_resume_route`.
 
     // chdir BEFORE the emit so a stale cwd surfaces as exit 13 rather than a
     // misleading "agent_resumed" event followed by a failed exec.
