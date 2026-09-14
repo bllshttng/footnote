@@ -7,7 +7,9 @@
 
 use crate::claude_ask::{read_state_json, ClaudeHome};
 use crate::client_verbs::{append_agents_event, trace_events_path};
+use crate::daemon::PaneProbe;
 use crate::paths::AgentsHome;
+use crate::state;
 use crate::truth_probe::family1_truth_state;
 use serde_json::Value;
 
@@ -62,6 +64,255 @@ pub(crate) fn run_codex_thread_delivery(
             16
         }
     }
+}
+
+/// How the wake route talks to the mux for its viewport attach. Shells out to
+/// `fno` in production; tests feed the pane id and the lock screen in memory.
+pub(crate) trait ViewportIo {
+    fn launch(&self, argv: &[String]) -> std::io::Result<String>;
+    fn screen(&self, server: &str, pane: &str) -> String;
+    fn nap(&self, ms: u64);
+}
+
+/// The production mux transport.
+pub(crate) struct ShellViewportIo;
+
+impl ViewportIo for ShellViewportIo {
+    fn launch(&self, argv: &[String]) -> std::io::Result<String> {
+        // `fno mux pane run` prints the new pane id alone on stdout.
+        let out = std::process::Command::new("fno").args(argv).output()?;
+        if !out.status.success() {
+            return Err(std::io::Error::other(format!(
+                "pane run exited {}",
+                out.status
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    }
+
+    fn screen(&self, server: &str, pane: &str) -> String {
+        std::process::Command::new("fno")
+            .args([
+                "mux", "pane", "read", "--server", server, "--lines", "40", pane,
+            ])
+            .output()
+            .map(|o| {
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stdout),
+                    String::from_utf8_lossy(&o.stderr)
+                )
+            })
+            .unwrap_or_default()
+            .to_lowercase()
+    }
+
+    fn nap(&self, ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// The codex resume arm for rows whose thread is reachable over the app-server
+/// (x-4a68): a thread row delivers directly, and a pane row whose pane is dead
+/// but whose thread is loaded in the app-server gets the message over
+/// `turn/start` and attaches a `--remote unix://` viewport. `None` means this
+/// route does not answer and the caller's claim / pane / exec paths run
+/// unchanged - a live pane, a dead pane whose thread is not loaded, and any
+/// unmeasurable verdict all fall through.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn codex_resume_route(
+    name: &str,
+    entry: &Value,
+    session_id: &str,
+    message: Option<&str>,
+    cwd: &str,
+    row_name: &str,
+    identity: &[String],
+    home: &AgentsHome,
+    probe: &dyn Fn(&str, u64) -> PaneProbe,
+    loaded: &dyn Fn() -> Result<Vec<String>, &'static str>,
+    io: &dyn ViewportIo,
+) -> Option<i32> {
+    if entry.get("harness").and_then(Value::as_str) != Some("codex") {
+        return None;
+    }
+    // A thread row delivers over the daemon, never a terminal exec (x-6ac3):
+    // `codex resume <id>` needs a tty and a headless caller has none.
+    if entry.get("substrate").and_then(Value::as_str) == Some("thread") {
+        return Some(run_codex_thread_delivery(
+            name, session_id, message, cwd, home,
+        ));
+    }
+    let mux = entry.get("mux").and_then(|m| {
+        Some(state::MuxRef {
+            session: m.get("session")?.as_str()?.to_string(),
+            pane_id: m.get("pane_id")?.as_u64()?,
+        })
+    });
+    let mut route = None;
+    if mux.is_some() {
+        let verdict =
+            crate::lane_heal::heal_dead_pane_binding(home, session_id, false, probe, loaded);
+        if verdict.verdict == "dead-pane-loaded" {
+            route = Some(wake_loaded_thread(
+                name,
+                session_id,
+                message,
+                cwd,
+                row_name,
+                identity,
+                home,
+                &mux.unwrap(),
+                io,
+                probe,
+                loaded,
+            ));
+        }
+    }
+    route
+}
+
+/// The message goes over the daemon (carrying the writable-roots grant from
+/// [`crate::codex_inject`]); then the viewport attaches through the declared
+/// `interactive_attach` form - `codex resume <id> --remote unix://` behind the
+/// daemon `pre_exec`, with NO `-c` token, because a client `-c` grant both
+/// fails under `--remote` (pane 2205) and is redundant once the turn carries
+/// the policy (pane 2206, measured 2026-09-14).
+#[allow(clippy::too_many_arguments)]
+fn wake_loaded_thread(
+    name: &str,
+    session_id: &str,
+    message: Option<&str>,
+    cwd: &str,
+    row_name: &str,
+    identity: &[String],
+    home: &AgentsHome,
+    mux: &state::MuxRef,
+    io: &dyn ViewportIo,
+    probe: &dyn Fn(&str, u64) -> PaneProbe,
+    loaded: &dyn Fn() -> Result<Vec<String>, &'static str>,
+) -> i32 {
+    let code = run_codex_thread_delivery(name, session_id, message, cwd, home);
+    if code != 0 {
+        return code;
+    }
+    let argv = match crate::harness_capabilities::render_session_argv_with_ids(
+        "codex",
+        "interactive_attach",
+        Some(session_id),
+        None,
+    ) {
+        Ok(argv) => argv,
+        Err(err) => {
+            eprintln!(
+                "fno agents resume: {name}: delivered over the codex daemon, \
+                     but the viewport attach form is unavailable ({err}); the row \
+                     stays bound to the thread lane"
+            );
+            return finish_on_the_thread_lane(home, session_id, probe, loaded);
+        }
+    };
+    let run_argv =
+        crate::pane_relaunch::mux_pane_run_argv(&mux.session, cwd, &argv, identity, Some(row_name));
+    let pane = match io.launch(&run_argv) {
+        Ok(out) => out,
+        Err(err) => {
+            eprintln!(
+                "fno agents resume: {name}: delivered over the codex daemon, but \
+                 the viewport pane launch failed ({err}); the row rebinds to the \
+                 thread lane so sends still land"
+            );
+            return finish_on_the_thread_lane(home, session_id, probe, loaded);
+        }
+    };
+    if pane.parse::<u64>().is_err() {
+        eprintln!(
+            "fno agents resume: {name}: delivered over the codex daemon, but the \
+             viewport launch printed {pane:?}, not a pane id; the row rebinds to \
+             the thread lane so sends still land"
+        );
+        return finish_on_the_thread_lane(home, session_id, probe, loaded);
+    }
+    // Poll the new pane for the app-server lock screen within a 5s budget.
+    for _ in 0..10 {
+        io.nap(500);
+        if io
+            .screen(&mux.session, &pane)
+            .contains("open in another app")
+        {
+            println!(
+                "fno agents resume: {name}: the message was delivered, but codex \
+                 says the viewport is locked by another app (pane {pane}); the \
+                 row rebinds to the thread lane so sends still land"
+            );
+            return finish_on_the_thread_lane(home, session_id, probe, loaded);
+        }
+    }
+    // Rebind the row to the pane it made, only while the dead ref still
+    // stands - a concurrent resume wins and this call stands down.
+    let mut rebound = false;
+    let _ =
+        state::update_registry(&home.registry_json(), |r| {
+            let Some(target) = r.entries.iter_mut().find(|e| {
+                e.name == row_name && e.harness_session_id.as_deref() == Some(session_id)
+            }) else {
+                return;
+            };
+            let Some(current) = target.mux.as_ref() else {
+                return;
+            };
+            if current.session != mux.session || current.pane_id != mux.pane_id {
+                return;
+            }
+            target.mux = Some(state::MuxRef {
+                session: mux.session.clone(),
+                pane_id: pane.parse::<u64>().unwrap_or(mux.pane_id),
+            });
+            target.pid = None;
+            target.pid_start_time = None;
+            rebound = true;
+        });
+    if !rebound {
+        eprintln!(
+            "fno agents resume: {name}: delivered over the codex daemon, but the \
+             row changed under this resume; it rebinds to the thread lane"
+        );
+        return finish_on_the_thread_lane(home, session_id, probe, loaded);
+    }
+    append_agents_event(
+        &trace_events_path(home),
+        "agent_resumed",
+        &[
+            ("name", Value::String(name.to_string())),
+            ("provider", Value::String("codex".to_string())),
+            ("session_id", Value::String(session_id.to_string())),
+            ("cwd", Value::String(cwd.to_string())),
+        ],
+    );
+    println!(
+        "fno agents resume: {name} delivered over the codex daemon; viewport \
+         pane {pane} attached with --remote unix://"
+    );
+    0
+}
+
+/// The delivered-but-not-rebound floor: rebind the row to the thread lane so
+/// later sends still land, and exit 0 - the message WAS delivered.
+fn finish_on_the_thread_lane(
+    home: &AgentsHome,
+    session_id: &str,
+    probe: &dyn Fn(&str, u64) -> PaneProbe,
+    loaded: &dyn Fn() -> Result<Vec<String>, &'static str>,
+) -> i32 {
+    let verdict = crate::lane_heal::heal_dead_pane_binding(home, session_id, true, probe, loaded);
+    if verdict.verdict != "rebound-thread" {
+        eprintln!(
+            "fno agents resume: thread-lane rebind read {} ({:?}); the row is \
+             left as it stands",
+            verdict.verdict, verdict.reason
+        );
+    }
+    0
 }
 
 /// Run a respawn plan as a child and confirm it actually revived the row.
@@ -357,5 +608,267 @@ mod tests {
         );
         assert_eq!(code, 16);
         std::fs::remove_dir_all(temp.path()).ok();
+    }
+
+    // ---- x-4a68 wake-route fixtures -------------------------------------
+
+    struct ScriptedViewport {
+        launched: std::sync::Mutex<Vec<Vec<String>>>,
+        screen: std::sync::Mutex<String>,
+        fail_launch: bool,
+    }
+
+    impl ScriptedViewport {
+        fn new(screen_text: &str) -> Self {
+            Self {
+                launched: std::sync::Mutex::new(Vec::new()),
+                screen: std::sync::Mutex::new(screen_text.to_string()),
+                fail_launch: false,
+            }
+        }
+    }
+
+    impl ViewportIo for ScriptedViewport {
+        fn launch(&self, argv: &[String]) -> std::io::Result<String> {
+            self.launched.lock().unwrap().push(argv.to_vec());
+            if self.fail_launch {
+                return Err(std::io::Error::other("pane run refused"));
+            }
+            Ok("2301".to_string())
+        }
+        fn screen(&self, _s: &str, _p: &str) -> String {
+            self.screen.lock().unwrap().clone()
+        }
+        fn nap(&self, _ms: u64) {}
+    }
+
+    fn codex_pane_entry_json() -> Value {
+        serde_json::json!({
+            "harness": "codex",
+            "substrate": "pane",
+            "mux": {"session": "main", "pane_id": 2179}
+        })
+    }
+
+    fn push_codex_pane_row(home: &AgentsHome, name: &str, session: &str) {
+        let mut row = state::RegistryEntry {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        row.harness = Some("codex".to_string());
+        row.harness_session_id = Some(session.to_string());
+        row.mux = Some(state::MuxRef {
+            session: "main".to_string(),
+            pane_id: 2179,
+        });
+        row.substrate = Some("pane".to_string());
+        state::update_registry(&home.registry_json(), |r| r.entries.push(row)).unwrap();
+    }
+
+    fn read_row(home: &AgentsHome, session: &str) -> Option<state::RegistryEntry> {
+        state::load_registry(&home.registry_json())
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.harness_session_id.as_deref() == Some(session))
+    }
+
+    fn tmp_home(tag: &str) -> AgentsHome {
+        let dir = std::env::temp_dir().join(format!("fno-wake-{tag}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        AgentsHome::at(dir)
+    }
+
+    #[test]
+    fn a_loaded_thread_wakes_over_the_daemon_and_attaches_a_remote_viewport() {
+        let _guard = crate::path_test_guard();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let daemon = rt.block_on(async {
+            crate::codex_fake_daemon::FakeDaemon::start(crate::codex_fake_daemon::Behavior::quick())
+        });
+        let home = tmp_home("wake-hp");
+        push_codex_pane_row(&home, "w1", "sess-1");
+        let entry = codex_pane_entry_json();
+        let io = ScriptedViewport::new("idle codex tui");
+        let absent = |_s: &str, _p: u64| PaneProbe::Absent;
+        let loaded_ok = || Ok(vec!["sess-1".to_string()]);
+        let code = codex_resume_route(
+            "w1",
+            &entry,
+            "sess-1",
+            Some("continue"),
+            "/tmp/x",
+            "w1",
+            &[],
+            &home,
+            &absent,
+            &loaded_ok,
+            &io,
+        )
+        .expect("the wake route must answer");
+        assert_eq!(code, 0);
+        let params = daemon
+            .first_params("turn/start")
+            .expect("turn/start must have run");
+        assert_eq!(params["threadId"], "sess-1");
+        assert_eq!(params["input"][0]["text"], "continue");
+        let launched = io.launched.lock().unwrap();
+        assert_eq!(launched.len(), 1, "one viewport launch");
+        let joined = launched[0].join(" ");
+        assert!(joined.contains("resume"), "attach form resumes: {joined}");
+        assert!(joined.contains("--remote"), "attach is --remote: {joined}");
+        assert!(
+            joined.contains("unix://"),
+            "attach targets the daemon: {joined}"
+        );
+        assert!(
+            !joined.contains("'-c'"),
+            "no client -c grant rides (the fence's sh -c is not one): {joined}"
+        );
+        let row = read_row(&home, "sess-1").unwrap();
+        let mux = row.mux.expect("the row rebinds to the new pane");
+        assert_eq!(mux.pane_id, 2301);
+        assert!(row.pid.is_none());
+        drop(daemon);
+        std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_live_pane_a_missing_thread_and_an_unreadable_list_never_wake() {
+        let _guard = crate::path_test_guard();
+        let home = tmp_home("wake-err");
+        push_codex_pane_row(&home, "w1", "sess-1");
+        let entry = codex_pane_entry_json();
+        let io = ScriptedViewport::new("idle");
+        let present = |_s: &str, _p: u64| PaneProbe::Present;
+        let absent = |_s: &str, _p: u64| PaneProbe::Absent;
+        let loaded_ok = || Ok(vec!["other".to_string()]);
+        let loaded_err = || Err("io-error");
+        assert!(codex_resume_route(
+            "w1",
+            &entry,
+            "sess-1",
+            None,
+            "/tmp/x",
+            "w1",
+            &[],
+            &home,
+            &present,
+            &loaded_ok,
+            &io,
+        )
+        .is_none());
+        assert!(codex_resume_route(
+            "w1",
+            &entry,
+            "sess-1",
+            None,
+            "/tmp/x",
+            "w1",
+            &[],
+            &home,
+            &absent,
+            &loaded_ok,
+            &io,
+        )
+        .is_none());
+        assert!(codex_resume_route(
+            "w1",
+            &entry,
+            "sess-1",
+            None,
+            "/p",
+            "w1",
+            &[],
+            &home,
+            &absent,
+            &loaded_err,
+            &io,
+        )
+        .is_none());
+        assert!(io.launched.lock().unwrap().is_empty());
+        assert!(read_row(&home, "sess-1").unwrap().mux.is_some());
+        std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_lock_screen_delivers_then_rebinds_to_the_thread_lane() {
+        let _guard = crate::path_test_guard();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let daemon = rt.block_on(async {
+            crate::codex_fake_daemon::FakeDaemon::start(crate::codex_fake_daemon::Behavior::quick())
+        });
+        let home = tmp_home("wake-lock");
+        push_codex_pane_row(&home, "w1", "sess-1");
+        let entry = codex_pane_entry_json();
+        let io = ScriptedViewport::new("This conversation is open in another app");
+        let absent = |_s: &str, _p: u64| PaneProbe::Absent;
+        let loaded_ok = || Ok(vec!["sess-1".to_string()]);
+        let code = codex_resume_route(
+            "w1",
+            &entry,
+            "sess-1",
+            Some("go"),
+            "/tmp/x",
+            "w1",
+            &[],
+            &home,
+            &absent,
+            &loaded_ok,
+            &io,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(daemon.first_params("turn/start").is_some());
+        let row = read_row(&home, "sess-1").unwrap();
+        assert!(row.mux.is_none());
+        assert_eq!(row.substrate.as_deref(), Some("thread"));
+        drop(daemon);
+        std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_failed_viewport_launch_still_delivers_and_rebinds() {
+        let _guard = crate::path_test_guard();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let daemon = rt.block_on(async {
+            crate::codex_fake_daemon::FakeDaemon::start(crate::codex_fake_daemon::Behavior::quick())
+        });
+        let home = tmp_home("wake-launchfail");
+        push_codex_pane_row(&home, "w1", "sess-1");
+        let entry = codex_pane_entry_json();
+        let mut io = ScriptedViewport::new("idle");
+        io.fail_launch = true;
+        let absent = |_s: &str, _p: u64| PaneProbe::Absent;
+        let loaded_ok = || Ok(vec!["sess-1".to_string()]);
+        let code = codex_resume_route(
+            "w1",
+            &entry,
+            "sess-1",
+            Some("go"),
+            "/tmp/x",
+            "w1",
+            &[],
+            &home,
+            &absent,
+            &loaded_ok,
+            &io,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(daemon.first_params("turn/start").is_some());
+        let row = read_row(&home, "sess-1").unwrap();
+        assert!(row.mux.is_none());
+        drop(daemon);
+        std::fs::remove_dir_all(&home.registry_json().parent().unwrap()).ok();
     }
 }

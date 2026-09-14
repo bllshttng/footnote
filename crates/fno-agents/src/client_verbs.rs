@@ -2456,7 +2456,7 @@ fn should_delegate_claude_live_attach(
 /// fixture; on error it prints the same diagnostic `run_resume` used to print
 /// inline and returns the exit code to propagate.
 use crate::resume_args::parse_resume_args;
-use crate::resume_wake::{run_and_confirm_respawn, run_codex_thread_delivery};
+use crate::resume_wake::run_and_confirm_respawn;
 
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     let (name, print_command, message, cross_project, cwd_override, account) =
@@ -2876,6 +2876,37 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // widening of every non-claude arm would put a pid-scoped claim on a path
     // that never took one, and a thread-lane codex resume would start exiting
     // 11 where it used to exec.
+    // x-4a68: a codex row wakes over the daemon before any pane machinery
+    // runs. A thread row delivers directly; a pane row whose dead pane has its
+    // thread loaded in the app-server gets the message over turn/start and a
+    // --remote viewport attach. Every other shape falls through to the claim
+    // and pane paths below unchanged.
+    if harness == "codex" {
+        let loaded = || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|_| "io-error")?;
+            let threads = rt.block_on(crate::codex_inject::discover_loaded_threads())?;
+            Ok(threads.into_iter().map(|t| t.session_id).collect())
+        };
+        if let Some(code) = crate::resume_wake::codex_resume_route(
+            &name,
+            entry,
+            session_id,
+            message.as_deref(),
+            cwd,
+            &row_name,
+            &identity,
+            home,
+            &crate::daemon::run_mux_pane_probe,
+            &loaded,
+            &crate::resume_wake::ShellViewportIo,
+        ) {
+            return code;
+        }
+    }
+
     let resume_id = claim_uuid
         .as_deref()
         .filter(|id| !id.is_empty())
@@ -2961,14 +2992,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     }
 
     // x-6ac3: a codex row whose substrate is a thread delivers over the
-    // codex daemon, never a terminal exec. `codex resume <id>` needs a tty,
-    // and a headless caller (the watchdog's captured subprocess) has none -
-    // five wakes in the 2026-09-13 sweep refused with `stdin is not a
-    // terminal`. Same rule the claude arm holds: resume wakes headlessly;
-    // attach owns the terminal. A non-thread codex row keeps the exec.
-    if harness == "codex" && entry.get("substrate").and_then(Value::as_str) == Some("thread") {
-        return run_codex_thread_delivery(&name, session_id, message.as_deref(), cwd, home);
-    }
+    // codex daemon, never a terminal exec. That arm now lives in
+    // `resume_wake::codex_resume_route`, which runs before the claim block
+    // above so a pane row with a loaded thread wakes without pane machinery.
+    // A non-thread codex row keeps the exec.
 
     // chdir BEFORE the emit so a stale cwd surfaces as exit 13 rather than a
     // misleading "agent_resumed" event followed by a failed exec.
