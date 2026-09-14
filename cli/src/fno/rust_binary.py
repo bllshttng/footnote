@@ -199,26 +199,6 @@ def find_dev_binary() -> Optional[Path]:
     return None
 
 
-def lane_b_worker_binary() -> Optional[Path]:
-    """The ``fno-agents-worker`` keeper binary.
-
-    Mirrors the Rust resolver's order: ``$FNO_AGENTS_WORKER_BIN`` override,
-    then the sibling of the resolved ``fno-agents`` binary, then ``PATH``.
-    """
-    override = (os.environ.get("FNO_AGENTS_WORKER_BIN") or "").strip()
-    if override:
-        candidate = Path(override).expanduser()
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    agent_bin = resolve_binary()
-    if agent_bin is not None:
-        sibling = agent_bin.with_name("fno-agents-worker")
-        if sibling.is_file() and os.access(sibling, os.X_OK):
-            return sibling
-    found = shutil.which("fno-agents-worker")
-    return Path(found) if found else None
-
-
 class VerbUnavailable(RuntimeError):
     """The fno-agents binary is missing, failed, or answered malformed JSON."""
 

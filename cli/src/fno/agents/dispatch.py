@@ -879,22 +879,26 @@ _NO_CHILD_POSSIBLE_EXIT = 127
 _UNKNOWN_ORPHAN_TTL_MS = 5 * 60 * 1000
 
 
-def refuse_codex_thread_without_runtime() -> None:
-    """Refuse the codex thread lane up front when the worker runtime is absent.
+def _lane_b_worker_binary() -> Optional[Path]:
+    """The ``fno-agents-worker`` keeper binary.
 
-    The precondition is capability, not capacity: it needs no gate answer, and
-    the lane's own exit-13 contract (the spawn routing table's `codex +
-    once=False -> exit 13`) outranks the gate transport's fail-closed 87 for a
-    runtime that was never installed.
+    Mirrors the Rust resolver's order: ``$FNO_AGENTS_WORKER_BIN`` override,
+    then the sibling of the resolved ``fno-agents`` binary, then ``PATH``.
     """
+    override = (os.environ.get("FNO_AGENTS_WORKER_BIN") or "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
     from fno import rust_binary
 
-    if rust_binary.lane_b_worker_binary() is None:
-        raise DispatchAskError(
-            "lane-B thread spawn needs the fno-agents runtime; install it "
-            "(cargo build --release -p fno-agents) or use --substrate pane",
-            exit_code=13,
-        )
+    agent_bin = rust_binary.resolve_binary()
+    if agent_bin is not None:
+        sibling = agent_bin.with_name("fno-agents-worker")
+        if sibling.is_file() and os.access(sibling, os.X_OK):
+            return sibling
+    found = shutil.which("fno-agents-worker")
+    return Path(found) if found else None
 
 
 def _lane_b_keeper_socket(name: str) -> Path:
@@ -1038,9 +1042,7 @@ def _lane_b_thread_spawn(
             exit_code=2,
         )
     validate_spawn_name(name)
-    from fno import rust_binary
-
-    worker_bin = rust_binary.lane_b_worker_binary()
+    worker_bin = _lane_b_worker_binary()
     if worker_bin is None:
         raise DispatchAskError(
             "lane-B thread spawn needs the fno-agents runtime; install it "

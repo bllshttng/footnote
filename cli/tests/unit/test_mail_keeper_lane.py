@@ -491,7 +491,6 @@ def _run_journey(short, pi_home, binary, monkeypatch):
     # A real lane-B row, registered through the production spawn entry with
     # the same doubles the lane-B spawn tests use (no keeper binary launch).
     import fno.agents.dispatch as dispatch_mod
-    from fno import rust_binary as rust_binary_mod
     from fno.agents.dispatch import _lane_b_thread_spawn
     from fno.agents.registry import load_registry
 
@@ -527,7 +526,7 @@ def _run_journey(short, pi_home, binary, monkeypatch):
     try:
         monkeypatch.setattr(dispatch_mod, "_keeper_identify", _fake_identify)
         monkeypatch.setattr(
-            rust_binary_mod, "lane_b_worker_binary", lambda: Path("/fake/fno-agents-worker")
+            dispatch_mod, "_lane_b_worker_binary", lambda: Path("/fake/fno-agents-worker")
         )
         receipt = _lane_b_thread_spawn(name="wk-journey", harness="pi", cwd=short)
     finally:

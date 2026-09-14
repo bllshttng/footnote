@@ -471,7 +471,14 @@ def test_spawn_claude_once_uses_headless(workdir_claude) -> None:
 
 
 def test_spawn_codex_plain_no_once_requires_runtime(workdir, monkeypatch) -> None:
-    """Codex thread spawn reports the missing Rust runtime distinctly."""
+    """Codex thread spawn refuses on a missing runtime before any dispatch.
+
+    The gate is a binary verb now: with no fno-agents on the machine the gate
+    transport cannot even be asked, and the spawn refuses fail-closed at the
+    gate (87, gate_unavailable) instead of reaching the lane's own exit-13
+    check. 13 remains the lane's own code for a readable gate whose worker
+    binary is missing.
+    """
     from fno import rust_binary
     from fno.agents.cli import agents_app
 
@@ -480,6 +487,7 @@ def test_spawn_codex_plain_no_once_requires_runtime(workdir, monkeypatch) -> Non
     # fallback by stubbing both resolvers.
     monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: None)
 
     runner = _make_runner()
     result = runner.invoke(
@@ -487,11 +495,12 @@ def test_spawn_codex_plain_no_once_requires_runtime(workdir, monkeypatch) -> Non
         ["spawn", "--name", "ptagent", "-H", "codex", "hello", "--substrate", "bg"],
     )
 
-    assert result.exit_code == 13, (
-        f"expected exit 13 for plain codex spawn in Python fallback, got {result.exit_code}\n"
+    assert result.exit_code == 87, (
+        f"expected exit 87 for a codex spawn with no runtime at all, got {result.exit_code}\n"
         f"output: {result.output}"
     )
-    assert "fno-agents runtime" in result.output
+    assert "gate_unavailable" in result.output
+    assert "fno-agents" in result.output
 
 
 def test_spawn_unknown_provider_exits_2(workdir, monkeypatch, tmp_path) -> None:
