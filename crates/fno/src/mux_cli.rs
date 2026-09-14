@@ -253,8 +253,7 @@ impl SessionRow {
 /// Enumerate `*.sock` stems in the mux dir, sorted. `Err` is an unreadable dir
 /// the caller must distinguish from "no sessions" (a permissions/IO error must
 /// never read as empty); `NotFound` returns an empty list (no session ever
-/// started here, AC6-FR). Shared by `ls`/picker (which then probe) and `doctor`
-/// (which version-probes) so both see the same session set.
+/// started here, AC6-FR). A graph keeper's `<graph>.store.sock` sibling is never a session: probing it with a mux frame reads as unreachable and poisons the fold (the e2e sandboxes put the graph inside the mux dir). Shared by `ls`/picker and `doctor` so both see the same session set.
 fn session_names() -> Result<Vec<String>, String> {
     let dir = proto::mux_dir();
     let entries = match std::fs::read_dir(&dir) {
@@ -266,7 +265,9 @@ fn session_names() -> Result<Vec<String>, String> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let p = e.path();
-            (p.extension().and_then(|x| x.to_str()) == Some("sock"))
+            let is_session = p.extension().and_then(|x| x.to_str()) == Some("sock")
+                && !p.to_string_lossy().ends_with(".store.sock");
+            is_session
                 .then(|| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
                 .flatten()
         })
@@ -1857,11 +1858,7 @@ fn member_evidence() -> crate::squad_store::MemberEvidence {
 /// and an unreachable session contributes ZERO tab rows, so its tabs cannot be
 /// touched by a fold over what was collected.
 ///
-/// The store pass is NOT per-session and stays globally fail-closed.
-/// `live_cwds` is cross-session PROTECTIVE evidence: a live pane's cwd makes
-/// `prune_decision_with_evidence` return Keep, and an unreachable session
-/// contributes no cwds, so running the store pass on partial evidence would
-/// turn a Keep into a Prune. Absent liveness must never read as dead.
+/// The store pass is NOT per-session and stays globally fail-closed. `live_cwds` is cross-session PROTECTIVE evidence: a live pane's cwd makes `prune_decision_with_evidence` return Keep, and an unreachable session contributes no cwds, so running the store pass on partial evidence would turn a Keep into a Prune. Absent liveness must never read as dead.
 struct SweepScope {
     fold_tabs: bool,
     sweep_store: bool,
