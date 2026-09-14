@@ -879,6 +879,19 @@ pub(crate) fn claim_sweep_payload_from_records(
             if let Some(answered) = session_basis {
                 fields.insert("session_basis".into(), Value::String(answered.into()));
             }
+            // Only the bounded unresolved grace has a clock exit: a live claim
+            // and a pid-suspect claim have no reclaimable time, so the field's
+            // absence is the honest value there.
+            if state == crate::claims::ClaimState::Suspect
+                && basis == crate::claims::basis::TTL_EXPIRED_UNRESOLVED
+            {
+                if let Some(expires_at) = rec.expires_at {
+                    fields.insert(
+                        "reclaimable_at".into(),
+                        Value::from(expires_at + crate::claims::UNRESOLVED_GRACE_MS),
+                    );
+                }
+            }
             if !rec.metadata.is_empty() {
                 fields.insert("metadata".into(), Value::Object(rec.metadata.clone()));
             }
@@ -983,6 +996,43 @@ mod tests {
             assert!(row.get("machine_id").is_some());
             assert!(row.get("pid_provenance").is_some());
             assert!(row.get("expires_at").is_some());
+        });
+    }
+
+    #[test]
+    fn claim_sweep_marks_expired_unresolved_suspect_rows_reclaimable_at_grace_end() {
+        with_registry(serde_json::json!([]), || {
+            let td = tempfile::TempDir::new().unwrap();
+            sweep_acquire(td.path(), "node:x-live");
+            let now = crate::claims::now_ms();
+            // No registry row for the handover's worker, so the session
+            // witness answers Unresolved: Suspect inside the grace.
+            let yaml = format!(
+                "schema_version: 1\nkey: \"node:x-grace\"\nholder: \"spawn-handover:ghost\"\nacquired_at: {}\npid: 999999\nhost: test-host\nsession_id: \"s-ghost\"\npid_provenance: \"ambient\"\nexpires_at: {}\nreason: \"spawn handover window for node:x-grace\"\n",
+                now - 120_000,
+                now - 60_000
+            );
+            let dir = sweep_dir(td.path());
+            fs::write(dir.join("node%3Ax-grace.lock"), yaml).unwrap();
+            let claims = claim_sweep_payload(&dir)["claims"]
+                .as_array()
+                .unwrap()
+                .to_vec();
+            let grace = claims
+                .iter()
+                .find(|claim| claim["key"] == "node:x-grace")
+                .expect("the grace row is present");
+            assert_eq!(grace["state"], "suspect");
+            assert_eq!(grace["basis"], "ttl-expired-unresolved");
+            assert_eq!(
+                grace["reclaimable_at"],
+                serde_json::json!(now - 60_000 + crate::claims::UNRESOLVED_GRACE_MS)
+            );
+            let live = claims
+                .iter()
+                .find(|claim| claim["key"] == "node:x-live")
+                .expect("the live row is present");
+            assert!(live.get("reclaimable_at").is_none());
         });
     }
 
