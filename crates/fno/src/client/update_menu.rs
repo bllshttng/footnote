@@ -27,13 +27,13 @@ pub(crate) struct UpdateReadiness {
     pub(crate) running: Vec<RunningRow>,
     #[serde(default)]
     pub(crate) running_stale: usize,
-    /// x-401c: the source-pin verdict. Tolerated absent (an older Python
+    /// The source-pin verdict. Tolerated absent (an older Python
     /// payload); only `behind` is read here.
     #[serde(default)]
     pub(crate) source_pin: Option<SourcePinView>,
 }
 
-/// The slice of the source-pin answer the menu needs (x-401c). Serde ignores
+/// The slice of the source-pin answer the menu needs. Serde ignores
 /// the pin's other keys; this struct does not set `deny_unknown_fields`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub(crate) struct SourcePinView {
@@ -121,6 +121,10 @@ pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>
     };
     let mut rows = vec![PopupRow::Header("menu".into()), PopupRow::Rule];
     let mut actions = Vec::new();
+    let behind = match update {
+        Some(UpdateOutcome::Ok(r)) => r.source_pin.as_ref().and_then(|p| p.behind),
+        _ => None,
+    };
     // A probe still in flight (or never fired yet) builds the menu
     // WITHOUT an update row rather than waiting - the menu opens instantly.
     match update {
@@ -128,14 +132,14 @@ pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>
             rows.push(entry("⬆", "update ready"));
             actions.push(AuxAction::OpenUpdate);
         }
-        // x-401c: the source checkout is behind origin, so a sync (not an
+        // The source checkout is behind origin, so a sync (not an
         // update) is what's owed. Ranks above restart: a restart onto a
         // behind build still runs old code.
-        Some(UpdateOutcome::Ok(r))
-            if r.source_pin.as_ref().and_then(|p| p.behind).unwrap_or(0) > 0 =>
-        {
-            let n = r.source_pin.as_ref().and_then(|p| p.behind).unwrap_or(0);
-            rows.push(entry("⬆", &format!("source {n} behind origin")));
+        Some(UpdateOutcome::Ok(_)) if behind.is_some_and(|n| n > 0) => {
+            rows.push(entry(
+                "⬆",
+                &format!("source {} behind origin", behind.unwrap_or_default()),
+            ));
             actions.push(AuxAction::OpenUpdate);
         }
         // x-f188 change 7: stale long-lived processes are their own reason

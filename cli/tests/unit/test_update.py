@@ -3028,7 +3028,7 @@ def test_update_readiness_reports_gate_refusal(monkeypatch, tmp_path) -> None:
 
 
 def test_update_readiness_behind_pin_guidance_replaces_current(monkeypatch, tmp_path) -> None:
-    """x-401c AC4-HP: installed == source while the checkout is behind origin
+    """AC4-HP: installed == source while the checkout is behind origin
     -> the native behind guidance replaces the `is current` line, and the
     payload carries the distance."""
     _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="aaa1111")
@@ -3063,7 +3063,7 @@ def test_update_readiness_behind_pin_guidance_replaces_current(monkeypatch, tmp_
 
 
 def test_update_readiness_old_helper_pin_keeps_python_guidance(monkeypatch, tmp_path) -> None:
-    """x-401c AC5-EDGE: a pin without `guidance` (an older fno-agents binary)
+    """AC5-EDGE: a pin without `guidance` (an older fno-agents binary)
     falls through to the Python-built guidance, wording unchanged."""
     _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="aaa1111")
     monkeypatch.setattr(
@@ -3106,7 +3106,7 @@ def test_update_readiness_old_helper_pin_keeps_python_guidance(monkeypatch, tmp_
 
 
 def test_update_readiness_pending_update_keeps_ready_line(monkeypatch, tmp_path) -> None:
-    """x-401c AC6-HP: a behind pin does not override the `update ready`
+    """AC6-HP: a behind pin does not override the `update ready`
     guidance when the revs already differ."""
     _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="bbb2222")
     monkeypatch.setattr(update, "running_components", lambda runner: [])

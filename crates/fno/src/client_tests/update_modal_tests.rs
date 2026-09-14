@@ -200,7 +200,7 @@ fn sideline_menu_shows_row_for_ok_but_internally_degraded_probe() {
     assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
 }
 
-/// x-401c AC7-HP: a behind source with no update pending outranks the
+/// AC7-HP: a behind source with no update pending outranks the
 /// restart row - the menu names the distance and offers the modal first.
 #[test]
 fn sideline_menu_names_source_behind_origin() {
@@ -231,7 +231,7 @@ fn sideline_menu_names_source_behind_origin() {
     assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
 }
 
-/// x-401c AC8-EDGE: a payload with no `source_pin` key, or with a null
+/// AC8-EDGE: a payload with no `source_pin` key, or with a null
 /// `behind`, parses and builds today's rows (no behind row).
 #[test]
 fn sideline_menu_without_source_pin_keeps_rows() {
