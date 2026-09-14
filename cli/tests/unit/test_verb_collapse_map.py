@@ -407,9 +407,14 @@ def test_map_refusal_carries_a_parseable_template_row(tmp_path, monkeypatch) -> 
         flags_text=FLAGS.read_text(encoding="utf-8"),
     )
 
-    rows = [line.strip() for line in message.splitlines() if len(line.split("\t")) == len(columns)]
+    rows = [
+        line.strip()
+        for line in message.splitlines()
+        if len(line.split("\t")) == len(columns)
+    ]
     assert len(rows) == 1, (
-        f"the refusal must carry exactly one {len(columns)}-column template row, found {len(rows)}"
+        f"the refusal must carry exactly one {len(columns)}-column template row, "
+        f"found {len(rows)}"
     )
     leaf, tier, typing, refs, *_rest = rows[0].split("\t")
     assert leaf.split()[0], "the template needs a group-qualified action"
@@ -436,7 +441,8 @@ def test_flags_refusal_says_what_to_do_about_each_side(tmp_path, monkeypatch) ->
         if re.fullmatch(r"\s*[a-z][a-z0-9 -]* !--[a-z0-9-]+", line)
     ]
     assert len(templates) == 1, (
-        f"the refusal must carry exactly one `<action> !--<option>` template, found {templates}"
+        "the refusal must carry exactly one `<action> !--<option>` template, "
+        f"found {templates}"
     )
     assert "add that line" in message and "delete that line" in message, (
         "code-only and file-only must each say which way to fix the file"

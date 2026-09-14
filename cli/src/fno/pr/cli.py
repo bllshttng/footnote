@@ -63,9 +63,7 @@ attestation_app = typer.Typer(
     ),
 )
 def attestation_retract(
-    reviewer: str = typer.Option(
-        ..., "--reviewer", help="Reviewer name of the pass being revoked."
-    ),
+    reviewer: str = typer.Option(..., "--reviewer", help="Reviewer name of the pass being revoked."),
     attester: str = typer.Option(..., "--attester", help="The session id that emitted the pass."),
     head: str = typer.Option(..., "--head", help="The head sha the pass pinned."),
     reason: str = typer.Option(..., "--reason", "-R", help="Why the pass is revoked (recorded)."),
@@ -187,8 +185,7 @@ def status(
 def wait(
     pr_number: int = typer.Argument(..., help="GitHub PR number"),
     until: str = typer.Option(
-        "settled",
-        "--until",
+        "settled", "--until",
         help="Exit when: settled (any terminal verdict), green, or a new review posts.",
     ),
     timeout: str = typer.Option("30m", "--timeout", help="Max wait, e.g. 30m / 90s / 1h."),
@@ -552,11 +549,7 @@ def _parse_flags(flags_json: Optional[str]) -> Optional[List[str]]:
         parsed = json.loads(flags_json)
     except json.JSONDecodeError:
         return None
-    return (
-        parsed
-        if isinstance(parsed, list) and all(isinstance(flag, str) for flag in parsed)
-        else None
-    )
+    return parsed if isinstance(parsed, list) and all(isinstance(flag, str) for flag in parsed) else None
 
 
 @pr_app.command(
@@ -750,52 +743,6 @@ def hold_check(
         typer.echo(reason, err=True)
         raise typer.Exit(code=3)
     typer.echo(f"PR {pr_number}: no plan dispatch hold")
-
-
-@pr_app.command("hold")
-def hold(
-    action: str = typer.Argument(..., help="set or release."),
-    node: str = typer.Argument(..., help="Backlog node id or slug."),
-    reason: str = typer.Option("", "--reason", help="set: the merge condition."),
-    release_when: str = typer.Option("", "--release-when", help="set: the proof that lifts it."),
-    set_by: str = typer.Option("", "--set-by", help="set: who ruled."),
-    review_on: str = typer.Option(
-        "", "--review-on", help="set: review date YYYY-MM-DD (default today+7)."
-    ),
-    evidence: str = typer.Option("", "--evidence", help="release: the proof the condition held."),
-) -> None:
-    """Set or release a node plan's dispatch_hold, the merge hold every merge path reads.
-
-    A note reaches the worker; only the hold reaches `fno do pr merge` and
-    pr-watch. A ruled merge condition is `hold set`; the worker proves the
-    condition and lifts it with `hold release --evidence`.
-    """
-    from fno.paths import graph_json
-    from fno.rust_binary import VerbUnavailable, verb_call
-
-    if action not in ("set", "release"):
-        typer.echo(f"unknown hold action: {action} (set|release)", err=True)
-        raise typer.Exit(code=2)
-    payload = {
-        "op": f"hold-{action}",
-        "node": node,
-        "reason": reason,
-        "release_when": release_when,
-        "set_by": set_by,
-        "review_on": review_on,
-        "evidence": evidence,
-        "graph": str(graph_json()),
-    }
-    try:
-        receipt = verb_call("authorized-merge", payload)
-    except VerbUnavailable as exc:
-        typer.echo(str(exc), err=True)
-        raise typer.Exit(code=127)
-    code = int(receipt.get("exit_code", 1))
-    if code:
-        typer.echo(receipt.get("detail", ""), err=True)
-        raise typer.Exit(code=code)
-    typer.echo(json.dumps(receipt))
 
 
 @pr_app.command(

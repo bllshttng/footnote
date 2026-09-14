@@ -1,9 +1,7 @@
 """One plan-level hold reader shared by every PR merge path."""
 from __future__ import annotations
 
-import os
 import sys
-from pathlib import Path
 from typing import Optional
 
 from fno.graph.ladder import DispatchHoldState, DispatchHoldVerdict, dispatch_hold_verdict
