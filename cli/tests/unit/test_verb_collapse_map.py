@@ -208,7 +208,7 @@ def test_map_covers_current_surface_once():
     # declared-vs-measured sweep verb (refs 0): 628 -> 629.
     # x-f743 allocates `backlog notes`, the verbatim forwarder to the native
     # `backlog-notes` reader: 629 -> 630.
-    assert len(mapped) == 630, (
+    assert len(mapped) == 631, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
