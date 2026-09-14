@@ -99,33 +99,96 @@ fn run_inventory(graph: &std::path::Path, json_out: bool) -> i32 {
     0
 }
 
-/// Paged history readback: `backlog-notes history [--node <id>] [--offset N] [--limit N]`.
+/// Paged history readback: `backlog-notes history [<node>|<slug>] [--node <id>] [--offset N] [--limit N]`.
 fn run_history(
     graph: &std::path::Path,
     node: Option<&str>,
+    row: Option<&Value>,
     offset: usize,
     limit: usize,
     json_out: bool,
 ) -> i32 {
-    match note_history::read(graph, node, offset, limit) {
-        Ok((records, total)) => {
-            if json_out {
-                println!(
-                    "{}",
-                    json!({"total": total, "offset": offset, "records": records})
-                );
-            } else {
-                for r in &records {
-                    println!("{r}");
-                }
+    let (records, total) = if note_history::history_path(graph).exists() {
+        match note_history::read(graph, node, offset, limit) {
+            Ok(page) => page,
+            Err(e) => {
+                eprintln!("fno-agents backlog-notes: {e}");
+                return 1;
             }
-            0
         }
-        Err(e) => {
-            eprintln!("fno-agents backlog-notes: {e}");
-            1
+    } else {
+        (Vec::new(), 0)
+    };
+    if json_out {
+        println!(
+            "{}",
+            json!({"total": total, "offset": offset, "records": records})
+        );
+        return 0;
+    }
+    // A token neither the graph row nor the journal knows is a usage error;
+    // an archived node's journal outlives its row, so only the pair-empty
+    // case refuses.
+    if total == 0 && row.is_none() {
+        match node {
+            Some(tok) => {
+                eprintln!(
+                    "fno-agents backlog-notes: no node or journal record resolves to '{tok}'"
+                );
+                return 1;
+            }
+            None => return 0,
         }
     }
+    for r in &records {
+        let original = r.get("original").unwrap_or(&Value::Null);
+        let body = original
+            .get("body")
+            .or_else(|| original.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let rev = r
+            .get("prior_revision")
+            .and_then(Value::as_u64)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let reason = r.get("reason").and_then(Value::as_str).unwrap_or("");
+        let session = r
+            .get("source_session_id")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        println!("rev {rev} {reason} session {session}");
+        println!("{body}");
+    }
+    let display_id = row
+        .and_then(graph_store::entry_id)
+        .map(str::to_string)
+        .or_else(|| node.map(str::to_string))
+        .unwrap_or_default();
+    let first = if total == 0 { 0 } else { offset + 1 };
+    let last = offset + records.len();
+    let mut trailer = format!("{display_id}: records {first}-{last} of {total}");
+    match row {
+        Some(r) => {
+            trailer.push_str(&format!(
+                "; current_state revision {}",
+                crate::backlog::node_state::row_revision(r)
+            ));
+            let legacy = r
+                .get("progress_notes")
+                .and_then(Value::as_array)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            if legacy > 0 {
+                trailer.push_str(&format!(
+                    "; {legacy} legacy progress_notes (fno backlog get {display_id})"
+                ));
+            }
+        }
+        None => trailer.push_str("; current_state revision 0"),
+    }
+    println!("{trailer}");
+    0
 }
 
 /// One manifest entry. `state` is the replacement current-state body;
@@ -543,6 +606,28 @@ fn build_candidate(
     out
 }
 
+/// The usage text `--help` prints; names all three commands (the gate reads it).
+fn print_usage() {
+    println!(
+        "usage: backlog-notes <command> [flags]
+
+commands:
+  inventory
+        census of legacy progress_notes per node (backend, counts, chars)
+  migrate --manifest <path> [--apply]
+        carry each row's notes into the journal; dry run without --apply
+  history [<node>|<slug>]
+        read a node's note journal, oldest first
+
+flags:
+  --node <id>              node for history (a positional token also works)
+  --offset N --limit N     page the history read (default limit 50)
+  --json                   machine output; history emits {{total, offset, records}}
+  --graph <path>           graph file to read (default ~/.fno/graph.json)
+  -h, --help               this text"
+    );
+}
+
 /// `backlog-notes inventory|migrate|history` (x-920a wave 3).
 pub fn run_notes(args: &[String]) -> i32 {
     let mut action = String::new();
@@ -551,6 +636,7 @@ pub fn run_notes(args: &[String]) -> i32 {
     let mut apply = false;
     let mut json_out = false;
     let mut node: Option<String> = None;
+    let mut positional: Option<String> = None;
     let mut offset = 0usize;
     let mut limit = 50usize;
     let mut i = 0;
@@ -558,6 +644,10 @@ pub fn run_notes(args: &[String]) -> i32 {
         match args[i].as_str() {
             "inventory" | "migrate" | "history" if action.is_empty() => {
                 action = args[i].clone();
+            }
+            "-h" | "--help" => {
+                print_usage();
+                return 0;
             }
             "--graph" => {
                 i += 1;
@@ -611,6 +701,9 @@ pub fn run_notes(args: &[String]) -> i32 {
             }
             "--apply" => apply = true,
             "--json" => json_out = true,
+            other if action == "history" && positional.is_none() && !other.starts_with('-') => {
+                positional = Some(other.to_string());
+            }
             other => {
                 eprintln!("fno-agents backlog-notes: unknown argument {other}");
                 return 2;
@@ -618,13 +711,45 @@ pub fn run_notes(args: &[String]) -> i32 {
         }
         i += 1;
     }
+    if positional.is_some() && node.is_some() {
+        eprintln!(
+            "fno-agents backlog-notes: pass the node either positionally or via --node, not both"
+        );
+        return 2;
+    }
+    if node.is_none() {
+        node = positional;
+    }
     let graph = graph.unwrap_or_else(default_graph_path);
+    // Resolve the token (positional or --node) against the graph for the
+    // trailer: canonical id, current_state revision, legacy-note count. The
+    // journal still answers when the graph does not know the token (an
+    // archived node's history outlives its row).
+    let mut row = None;
+    if let Some(tok) = node.as_deref() {
+        if let Ok(entries) = graph_store::read_defaulted(&graph, false) {
+            row = crate::graph_get::find_entry(&entries, tok).cloned();
+        }
+    }
+    if let Some(r) = &row {
+        if let Some(id) = graph_store::entry_id(r) {
+            // A slug token filters the journal under the row's canonical id.
+            node = Some(id.to_string());
+        }
+    }
     match action.as_str() {
         "inventory" => run_inventory(&graph, json_out),
-        "history" => run_history(&graph, node.as_deref(), offset, limit, json_out),
+        "history" => run_history(
+            &graph,
+            node.as_deref(),
+            row.as_ref(),
+            offset,
+            limit,
+            json_out,
+        ),
         "migrate" => run_migrate(&graph, manifest.as_deref(), apply, json_out),
         _ => {
-            eprintln!("usage: backlog-notes inventory|migrate|history [--graph <path>] [flags]");
+            print_usage();
             2
         }
     }

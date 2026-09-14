@@ -29,6 +29,11 @@ fn read_graph(path: &PathBuf) -> serde_json::Value {
 }
 
 fn run_notes(args: &[&str]) -> (i32, String) {
+    let (code, out, _) = run_notes_full(args);
+    (code, out)
+}
+
+fn run_notes_full(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(std::iter::once("backlog-notes").chain(args.iter().copied()))
         .output()
@@ -36,6 +41,7 @@ fn run_notes(args: &[&str]) -> (i32, String) {
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
     )
 }
 
@@ -228,4 +234,90 @@ fn inventory_reports_counts_and_hashes_without_writes() {
     assert!(out.contains("backend\\\":\\\"json") || out.contains("backend"));
     assert!(out.contains(&hash[..20.min(hash.len())]) || out.contains("notes_hash"));
     assert_eq!(std::fs::read_to_string(&graph).unwrap(), before);
+}
+
+#[test]
+fn ac2_history_positional_slug_prints_bodies_and_trailer() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(
+        &graph,
+        &[json!({
+            "id": "x-1", "slug": "slug-x-1", "title": "n", "type": "feature",
+            "status": "ready", "priority": "p1",
+            "current_state": {"revision": 4, "body": "latest"},
+            "progress_notes": [
+                {"ts": "T1", "text": "legacy a"},
+                {"ts": "T2", "text": "legacy b"},
+            ],
+        })],
+    );
+    for i in 0..3 {
+        fno_agents::backlog::note_history::append(
+            &graph,
+            "x-1",
+            "state_replaced",
+            Some(i),
+            Some(0),
+            &json!({"revision": i, "body": format!("body {i}")}),
+            Some(&format!("sess-{i}")),
+            None,
+        )
+        .unwrap();
+    }
+    let g = graph.display().to_string();
+    let (code, out) = run_notes(&["history", "slug-x-1", "--graph", &g]);
+    assert_eq!(code, 0);
+    assert!(out.contains("body 0"), "oldest first: {out}");
+    assert!(out.find("body 0").unwrap() < out.find("body 2").unwrap());
+    assert!(out.contains("rev 0 state_replaced session sess-0"));
+    assert!(
+        out.contains(
+            "x-1: records 1-3 of 3; current_state revision 4; 2 legacy progress_notes (fno backlog get x-1)"
+        ),
+        "trailer: {out}"
+    );
+}
+
+#[test]
+fn ac2_history_unknown_token_exits_one_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture("x-1", "ready")]);
+    let g = graph.display().to_string();
+    let (code, _, err) = run_notes_full(&["history", "no-such-token", "--graph", &g]);
+    assert_eq!(code, 1);
+    assert!(
+        err.contains("no-such-token"),
+        "stderr names the token: {err}"
+    );
+}
+
+#[test]
+fn ac2_history_archived_node_survives_via_journal_and_help_exits_zero() {
+    // A token no row knows but the journal does: history still reads.
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture("x-1", "ready")]);
+    fno_agents::backlog::note_history::append(
+        &graph,
+        "d-archived",
+        "state_replaced",
+        Some(2),
+        None,
+        &json!({"revision": 2, "body": "gone but journaled"}),
+        Some("sess-old"),
+        None,
+    )
+    .unwrap();
+    let g = graph.display().to_string();
+    let (code, out) = run_notes(&["history", "d-archived", "--graph", &g]);
+    assert_eq!(code, 0);
+    assert!(out.contains("gone but journaled"));
+    assert!(out.contains("d-archived: records 1-1 of 1; current_state revision 0"));
+    let (help_code, help_out, _) = run_notes_full(&["--help"]);
+    assert_eq!(help_code, 0);
+    assert!(help_out.contains("inventory"));
+    assert!(help_out.contains("migrate"));
+    assert!(help_out.contains("history"));
 }
