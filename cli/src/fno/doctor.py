@@ -144,6 +144,14 @@ def _is_claude_plugin_cache(path: Path) -> bool:
     )
 
 
+def _is_plugin_stage(path: Path) -> bool:
+    parts = path.parts
+    return any(
+        parts[index : index + 2] == ("plugin-stage", "fno")
+        for index in range(max(0, len(parts) - 1))
+    )
+
+
 def _plugin_file_report(active_path: Path) -> dict[str, Any]:
     """Compare one active skill file with the matching source bytes."""
     try:
@@ -202,7 +210,13 @@ def _plugin_file_report(active_path: Path) -> dict[str, Any]:
         "active_digest": active_digest,
         "source_digest": source_digest,
     }
-    if stale and _is_claude_plugin_cache(active_path):
+    if stale and _is_plugin_stage(active_path):
+        report["detail"] = (
+            "the active skill lives in the fno-managed Claude plugin stage; "
+            "run `fno doctor update` to restage it from the source checkout, "
+            "then restart the session for skill text"
+        )
+    elif stale and _is_claude_plugin_cache(active_path):
         report["detail"] = (
             "active Claude plugin bytes are stale; run `claude plugin update "
             "fno@footnote`, then restart the session; `fno doctor update` does "
@@ -695,6 +709,109 @@ def _plugin_registry_path() -> Path:
     return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
 
 
+def _known_marketplaces_path() -> Path:
+    """Claude's marketplace registry (module-level so tests can stub it)."""
+    return Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
+
+
+def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
+    """One ``plugin-install --check`` probe (module-level so tests stub it).
+
+    Transport failures (missing binary, timeout) come back as exit -1 with
+    the reason in stderr rather than raising.
+    """
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        return proc.returncode, proc.stdout, proc.stderr
+    except (OSError, subprocess.SubprocessError) as exc:
+        return -1, "", str(exc)
+
+
+def _stage_check_report() -> Optional[dict[str, Any]]:
+    """Stage-drift verdict when Claude runs the plugin from the fno stage.
+
+    A directory marketplace never mints a ``gitCommitSha``, so for that
+    install shape the freshness question is a byte comparison of the stage
+    against the source checkout's HEAD, answered by
+    ``fno-agents plugin-install --check --json``. Returns None when this
+    machine's install is not a directory marketplace (the caller keeps its
+    registry-based answer); any transport failure maps to ``unknown`` with
+    the reason in ``detail``, never ``fresh``.
+    """
+    try:
+        marketplaces = json.loads(_known_marketplaces_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    entry = (marketplaces or {}).get("footnote") if isinstance(marketplaces, dict) else None
+    source = (entry or {}).get("source") if isinstance(entry, dict) else None
+    if not isinstance(source, dict) or source.get("source") != "directory":
+        return None
+    stage_path = str(source.get("path") or "")
+    if not stage_path:
+        return None
+
+    detail: Optional[str] = None
+    verdict: Any = None
+    binary = _cargo_bin_path()
+    src = _resolve_source(None)
+    if not binary:
+        detail = "no cargo fno-agents binary to run the stage check"
+    elif src is None:
+        detail = "no source checkout to compare against"
+    else:
+        code, out, err = _run_stage_check(
+            [
+                binary,
+                "plugin-install",
+                "--check",
+                "--json",
+                "--stage",
+                stage_path,
+                "--source",
+                str(src),
+            ]
+        )
+        if code not in (0, 3):
+            detail = (
+                f"plugin-install --check exited {code}: {(err or out).strip()}"
+            )
+        else:
+            try:
+                verdict = json.loads(out)
+            except ValueError:
+                detail = "plugin-install --check printed no JSON"
+            if verdict is not None and not isinstance(verdict, dict):
+                detail = "plugin-install --check printed a non-object"
+                verdict = None
+    if verdict is None:
+        return {
+            "status": "unknown",
+            "sha": None,
+            "installed_at": None,
+            "detail": detail or "stage check produced no verdict",
+            "kind": "stage",
+            "stage": stage_path,
+        }
+
+    status = verdict.get("status")
+    if status not in ("fresh", "stale", "absent", "unknown"):
+        status = "unknown"
+    source_root = str(verdict.get("source") or src)
+    return {
+        "status": status,
+        "sha": verdict.get("source_head"),
+        "installed_at": None,
+        "detail": verdict.get("detail"),
+        "kind": "stage",
+        "stage": str(verdict.get("stage") or stage_path),
+        "source": source_root,
+        "differing_count": verdict.get("differing_count", 0),
+        "missing_count": verdict.get("missing_count", 0),
+        "sample": verdict.get("sample", []),
+        "remedy": f"cd {source_root} && fno config plugin install claude",
+    }
+
+
 def _plugin_cache_report() -> dict[str, Any]:
     """Freshness of the deployed CLAUDE plugin cache the hooks run from.
 
@@ -742,6 +859,12 @@ def _plugin_cache_report() -> dict[str, Any]:
         return report
     sha = entry.get("gitCommitSha")
     if not sha:
+        # A directory marketplace never writes the sha; Claude then executes
+        # the plugin straight from the stage, so freshness is a byte verdict
+        # against source HEAD, not a sha question.
+        stage = _stage_check_report()
+        if stage is not None:
+            return stage
         report["detail"] = "installed_plugins.json carries no gitCommitSha"
         return report
     report["sha"] = sha
@@ -1973,7 +2096,14 @@ def _blockers(result: dict[str, Any]) -> list[str]:
         blockers.append(f"{plugin_hooks['failed']} plugin hook(s) cannot launch.")
 
     plugin_cache = result.get("plugin_cache") or {}
-    if plugin_cache.get("status") == "stale":
+    if plugin_cache.get("kind") == "stage" and plugin_cache.get("status") == "stale":
+        sample = plugin_cache.get("sample") or []
+        blockers.append(
+            f"plugin stage {plugin_cache.get('stage')} differs from source HEAD in "
+            f"{plugin_cache.get('differing_count', 0) + plugin_cache.get('missing_count', 0)} file(s) "
+            f"(e.g. {sample[0] if sample else '?'}). Fix: {plugin_cache.get('remedy')}"
+        )
+    elif plugin_cache.get("status") == "stale":
         deleted = plugin_cache.get("deleted_hook_scripts") or []
         if deleted:
             blockers.append(
@@ -2658,7 +2788,16 @@ def _emit_human(
     # Deployed claude plugin cache (x-4be1): the hooks actually executed by
     # Claude sessions. Advisory, same vocabulary as the wheel/rust legs.
     pc = result.get("plugin_cache") or {}
-    if pc.get("status") == "stale":
+    if pc.get("kind") == "stage" and pc.get("status") == "stale":
+        sample = pc.get("sample") or []
+        out(
+            f"fno doctor: plugin stage STALE ({pc.get('differing_count', 0)} differing, "
+            f"{pc.get('missing_count', 0)} missing; e.g. {sample[0] if sample else '?'}). "
+            f"Fix: {pc.get('remedy')}, then restart sessions to pick up new hook text."
+        )
+    elif pc.get("kind") == "stage" and pc.get("status") == "fresh":
+        out("fno doctor: plugin stage: fresh (matches source HEAD).")
+    elif pc.get("status") == "stale":
         sha = str(pc.get("sha") or "")[:12]
         when = str(pc.get("installed_at") or "")[:10] or "?"
         # `fno update` cannot refresh this: installed_plugins.json is claude's
@@ -4579,11 +4718,17 @@ def doctor_command(
         (result.get("archive_id_collisions") or {}).get("count")
         or (result.get("archive_id_collisions") or {}).get("unreadable")
     )
+    # A stale stage is not advisory: Claude sessions execute its hooks byte
+    # for byte, so drift here is the git-cache-blocker's equal, not the
+    # after-every-merge advisory the git cache kind stays as.
+    pc = result.get("plugin_cache") or {}
+    stage_stale = pc.get("kind") == "stage" and pc.get("status") == "stale"
     raise typer.Exit(
         1
         if result["status"] == "stale"
         or source_checkout_blocked
         or dead_agents
         or id_collisions
+        or stage_stale
         else 0
     )

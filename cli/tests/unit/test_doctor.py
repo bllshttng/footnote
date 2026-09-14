@@ -2822,6 +2822,132 @@ def test_plugin_cache_no_source_is_unknown(tmp_path, monkeypatch):
     assert doctor._plugin_cache_report()["status"] == "unknown"
 
 
+def _write_shaless_registry(tmp_path: Path) -> Path:
+    """Registry for a directory-marketplace install: no gitCommitSha key."""
+    registry = tmp_path / "installed_plugins.json"
+    registry.write_text(
+        json.dumps({"version": 2, "plugins": {"fno@footnote": [{"scope": "user"}]}}),
+        encoding="utf-8",
+    )
+    return registry
+
+
+def _write_stage_marketplace(tmp_path: Path, stage_path: Path) -> Path:
+    marketplaces = tmp_path / "known_marketplaces.json"
+    marketplaces.write_text(
+        json.dumps(
+            {
+                "footnote": {
+                    "source": {"source": "directory", "path": str(stage_path)},
+                    "installLocation": str(stage_path),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return marketplaces
+
+
+_STAGE_STALE_JSON = json.dumps(
+    {
+        "status": "stale",
+        "stage": "/stage/fno",
+        "source": "/src",
+        "source_head": "a" * 40,
+        "differing_count": 17,
+        "missing_count": 0,
+        "sample": ["hooks/claim-heartbeat.sh"],
+        "detail": None,
+    }
+)
+
+
+def test_plugin_cache_directory_marketplace_stage_stale(tmp_path, monkeypatch):
+    """AC5-HP: no sha + directory marketplace -> the verdict is a byte check
+    of the stage against source HEAD, and the blocker names count + remedy."""
+    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_shaless_registry(tmp_path)
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_known_marketplaces_path",
+        lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    monkeypatch.setattr(doctor, "_run_stage_check", lambda argv: (3, _STAGE_STALE_JSON, ""))
+
+    report = doctor._plugin_cache_report()
+
+    assert report["kind"] == "stage"
+    assert report["status"] == "stale"
+    assert report["differing_count"] == 17
+    assert "fno config plugin install claude" in report["remedy"]
+    blockers = doctor._blockers({"plugin_cache": report})
+    assert any("plugin stage" in b and "17 file(s)" in b for b in blockers)
+    assert any("hooks/claim-heartbeat.sh" in b for b in blockers)
+
+
+def test_plugin_cache_stage_check_transport_failure_is_unknown(tmp_path, monkeypatch):
+    """AC5-ERR: a failed or timed-out stage probe is unknown with the reason
+    in detail, and adds no blocker."""
+    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_shaless_registry(tmp_path)
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_known_marketplaces_path",
+        lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    monkeypatch.setattr(doctor, "_run_stage_check", lambda argv: (-1, "", "timeout expired"))
+
+    report = doctor._plugin_cache_report()
+
+    assert report["kind"] == "stage"
+    assert report["status"] == "unknown"
+    assert "timeout expired" in (report.get("detail") or "")
+    assert doctor._blockers({"plugin_cache": report}) == []
+
+
+def test_plugin_cache_non_directory_marketplace_keeps_registry_answer(tmp_path, monkeypatch):
+    """A sha-less entry with a non-directory marketplace keeps today's answer."""
+    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_shaless_registry(tmp_path)
+    )
+    marketplaces = tmp_path / "known_marketplaces.json"
+    marketplaces.write_text(
+        json.dumps({"footnote": {"source": {"source": "github", "repo": "x/y"}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(doctor, "_known_marketplaces_path", lambda: marketplaces)
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+
+    report = doctor._plugin_cache_report()
+
+    assert report.get("kind") is None
+    assert report["detail"] == "installed_plugins.json carries no gitCommitSha"
+
+
+def test_plugin_file_report_names_restage_for_stage_paths(tmp_path, monkeypatch):
+    """A stale SKILL.md under the fno stage points at `fno doctor update`."""
+    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
+    stage_skill = tmp_path / "plugin-stage" / "fno" / "skills" / "review" / "SKILL.md"
+    stage_skill.parent.mkdir(parents=True)
+    stage_skill.write_text("staged bytes\n", encoding="utf-8")
+    source_skill = repo / "skills" / "review" / "SKILL.md"
+    source_skill.parent.mkdir(parents=True)
+    source_skill.write_text("source bytes\n", encoding="utf-8")
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+
+    report = doctor._plugin_file_report(stage_skill)
+
+    assert report["status"] == "stale"
+    assert "fno doctor update" in (report.get("detail") or "")
+
+
 def _plugin_repo_with_hook_deletion(tmp_path: Path) -> tuple[Path, str]:
     """Two commits: the first references hooks/demo-gate.sh, the second
     deletes the script and its config entry together (the incident shape).
