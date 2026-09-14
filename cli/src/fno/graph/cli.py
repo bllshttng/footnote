@@ -3023,13 +3023,7 @@ def cmd_demand(
 
 
 
-@cli.command(
-    "update",
-    # x-665f: --status/--leave/--set are the patch door's flags. The Python
-    # surface never declares them (the flag registry is shrink-only); they
-    # ride ctx.args straight to the native backlog-update action.
-    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-)
+@cli.command("update", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def cmd_update(
     ctx: typer.Context,
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
@@ -3215,10 +3209,7 @@ def cmd_update(
         ),
     ),
 ) -> None:
-    # The patch door first: --status/--leave/--set in ctx.args forward to the
-    # native backlog-update action (x-665f). The forwarding, the legacy-flag
-    # mix refusal, and the flag table live in lifecycle.forward_update_door;
-    # this file is over the budget ratchet and only shrinks here.
+    # x-665f: the patch door first; lifecycle.forward_update_door owns the rest.
     if {"--status", "--leave", "--set"} & {a for a in (ctx.args or [])}:
         from fno.graph.lifecycle import forward_update_door
 
@@ -3234,11 +3225,8 @@ def cmd_update(
     )
     from fno.graph.store import commit_rows_via_store
     from fno.graph._intake import (
-        _parse_blocker_list,
-        _validate_blocker_ids,
-        _find_node,
-        _would_create_cycle,
-        _would_exceed_epic_depth,
+        _parse_blocker_list, _validate_blocker_ids, _find_node,
+        _would_create_cycle, _would_exceed_epic_depth,
     )
     from fno.graph._constants import EPIC_NEST_MAX_DEPTH
 

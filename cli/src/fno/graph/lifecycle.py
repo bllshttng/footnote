@@ -31,78 +31,26 @@ def _door(task_id: str, args: List[str], graph_path: Callable[[], Path]):
 
 #: The legacy cmd_update field flags that cannot ride one call with the door
 #: flags: the two write paths validate differently, and a mixed call could not
-#: say which rules it asked for. (flag spelling, unset sentinel)
-_LEGACY_UPDATE_FLAGS: List[tuple[str, object]] = [
-    ("locked_by", None),
-    ("locked_by_harness", None),
-    ("locked_by_harness_session", None),
-    ("has_brief", None),
-    ("plan_path", None),
-    ("pr_number", None),
-    ("pr_url", None),
-    ("repo", None),
-    ("priority", None),
-    ("blocks_everything", False),
-    ("title", None),
-    ("details", None),
-    ("details_file", None),
-    ("domain", None),
-    ("size", None),
-    ("difficulty", None),
-    ("model", None),
-    ("_model_tier_tombstone", None),
-    ("batch", None),
-    ("orphan_ok", None),
-    ("dispatch_verb", None),
-    ("dispatch_brief", None),
-    ("type_", None),
-    ("public", None),
-    ("project", None),
-    ("cwd", None),
-    ("source_node", None),
-    ("related", None),
-    ("blocked_by", None),
-    ("add_blocker", None),
-    ("remove_blocker", None),
-    ("acknowledge_collisions", None),
-    ("parent", None),
-    ("completion_note", None),
-    ("add_pr", None),
-    ("add_pr_url", None),
-    ("add_pr_note", None),
-    ("remove_pr", None),
-    ("caused_by", None),
-    ("fixes_pr", None),
-    ("reverted", None),
-    ("tag", None),
-    ("untag", None),
-    ("force", False),
-]
+#: say which rules it asked for. Any param whose parsed value differs from its
+#: unset sentinel (None, or False for the two pure switches) counts as passed.
+_LEGACY_UPDATE_PARAMS = (
+    "locked_by", "locked_by_harness", "locked_by_harness_session", "has_brief",
+    "plan_path", "pr_number", "pr_url", "repo", "priority", "blocks_everything",
+    "title", "details", "details_file", "domain", "size", "difficulty", "model",
+    "_model_tier_tombstone", "batch", "orphan_ok", "dispatch_verb",
+    "dispatch_brief", "type_", "public", "project", "cwd", "source_node",
+    "related", "blocked_by", "add_blocker", "remove_blocker",
+    "acknowledge_collisions", "parent", "completion_note", "add_pr",
+    "add_pr_url", "add_pr_note", "remove_pr", "caused_by", "fixes_pr",
+    "reverted", "tag", "untag", "force",
+)
 
-_FLAG_SPELLING = {
-    "locked_by": "--locked-by",
-    "locked_by_harness": "--locked-by-harness",
-    "locked_by_harness_session": "--locked-by-harness-session",
-    "has_brief": "--has-brief",
-    "type_": "--type",
-    "_model_tier_tombstone": "--model-tier",
-    "add_blocker": "--add-blocker",
-    "remove_blocker": "--remove-blocker",
-    "acknowledge_collisions": "--acknowledge-collisions",
-    "completion_note": "--completion-note",
-    "add_pr": "--add-pr",
-    "add_pr_url": "--add-pr-url",
-    "add_pr_note": "--add-pr-note",
-    "remove_pr": "--remove-pr",
-    "caused_by": "--caused-by",
-    "fixes_pr": "--fixes-pr",
-    "blocks_everything": "--blocks-everything",
-    "details_file": "--details-file",
-    "dispatch_verb": "--dispatch-verb",
-    "dispatch_brief": "--dispatch-brief",
-    "orphan_ok": "--orphan-ok",
-    "source_node": "--source-node",
-}
+#: The spellings the mechanical `--kebab-of-the-param` rule cannot produce.
+_FLAG_SPELLING_EXCEPTIONS = {"_model_tier_tombstone": "--model-tier", "type_": "--type"}
+
+
+def _flag_spelling(param: str) -> str:
+    return _FLAG_SPELLING_EXCEPTIONS.get(param, "--" + param.replace("_", "-"))
 
 
 def forward_update_door(
@@ -111,12 +59,12 @@ def forward_update_door(
     """`cmd_update`'s forwarding half (x-665f): relay the door flags to the
     native backlog-update action, refusing a mixed call. `values` is the
     caller's `locals()` - the legacy flags' parsed values, screened here
-    against :data:`_LEGACY_UPDATE_FLAGS` so the over-budget cli.py only
+    against :data:`_LEGACY_UPDATE_PARAMS` so the over-budget cli.py only
     carries the four-line handoff."""
     legacy_flags = [
-        _FLAG_SPELLING.get(param, f"--{param.replace('_', '-')}")
-        for param, unset in _LEGACY_UPDATE_FLAGS
-        if values.get(param, unset) is not unset
+        _flag_spelling(param)
+        for param in _LEGACY_UPDATE_PARAMS
+        if values.get(param) not in (None, False)
     ]
     if legacy_flags:
         typer.echo(
