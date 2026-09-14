@@ -472,6 +472,22 @@ pub fn probe_json(injectable: bool, reason: &str) -> String {
     serde_json::json!({ "injectable": injectable, "reason": reason }).to_string()
 }
 
+/// The last non-empty stdout line of `fno agents mail send`: its receipt.
+pub fn mail_send_receipt(stdout: &str) -> &str {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .last()
+        .unwrap_or("")
+}
+
+/// Did the send land? Exit 0 covers both `delivered (hosted)` and
+/// `queued (durable)`, so only the receipt says which.
+pub fn mail_send_landed(code: i32, stdout: &str) -> bool {
+    code == 0 && mail_send_receipt(stdout).contains("delivered (hosted)")
+}
+
 /// Print the outcome JSON to stdout and return its exit code.
 fn emit(delivered: bool, reason: &str) -> i32 {
     println!("{}", outcome_json(delivered, reason));
@@ -1531,6 +1547,27 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn mail_send_landed_hosted_receipt_is_true() {
+        assert!(mail_send_landed(0, "msg-1 delivered (hosted)\n"));
+    }
+
+    #[test]
+    fn mail_send_landed_queued_receipt_is_false() {
+        assert!(!mail_send_landed(0, "msg-1 queued (durable) [live-miss]\n"));
+    }
+
+    #[test]
+    fn mail_send_landed_nonzero_exit_is_false() {
+        assert!(!mail_send_landed(1, "msg-1 delivered (hosted)\n"));
+    }
+
+    #[test]
+    fn mail_send_landed_empty_stdout_is_false() {
+        assert!(!mail_send_landed(0, "\n"));
+        assert_eq!(mail_send_receipt("  \n"), "");
     }
 
     #[test]
