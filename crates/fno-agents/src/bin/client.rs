@@ -53,6 +53,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "law-match",
     "finalize",
     "fleet-incident",
+    "gh-budget",
     "graph-get",
     "grid",
     "help",
@@ -474,6 +475,14 @@ async fn run(args: Vec<String>) -> i32 {
     // `test-run`, so the parity tests stay in sync.
     if verb == "fleet-incident" {
         return fno_agents::fleet_incident::run_fleet_incident(&args[1..]);
+    }
+
+    // `gh-budget`: the machine-wide GitHub request budget (see gh_budget.rs
+    // doc). Direct dispatch, no daemon RPC: an admit must answer before every
+    // gh call, including when the daemon is the thing wedged, and the proxy
+    // shim crosses it on nearly every fleet gh call.
+    if verb == "gh-budget" {
+        return fno_agents::gh_budget::run_gh_budget(&args[1..]);
     }
 
     if verb == "compaction" {
