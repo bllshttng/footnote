@@ -5,8 +5,10 @@
 //! one `control_plane_tick` row to the journal it already uses, saying what it
 //! did or why it did nothing. The reader folds every journal into one row per
 //! arm: last tick, last action, last skip reason, and a stale verdict when the
-//! last tick is older than twice the arm's interval. An arm that never ticked
-//! is stale too - absence is the loudest skip reason of all.
+//! last tick is older than twice the arm's interval. An arm whose journals
+//! hold no tick row at all reads UNOBSERVED, never STALE: the absence of a
+//! producer receipt cannot say whether a producer exists, and only an
+//! observed receipt is a measurement (x-6484).
 //!
 //! The row shape is owned here; the Python arms mirror it through
 //! `cli/src/fno/control_plane.py` and `cli/src/fno/events/schema.yaml`, and a
@@ -155,8 +157,20 @@ pub fn emit_tick(
     );
 }
 
+/// Whether the scanned journals hold any producer receipt for an arm.
+/// `Unobserved` is evidence of nothing: no tick row was found, which cannot
+/// say whether a producer exists, started, or stopped before its first tick.
+/// It never upgrades to a staleness or failure verdict, and it never feeds
+/// cross-arm scheduler inference (x-6484).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProducerEvidence {
+    Unobserved,
+    Observed,
+}
+
 /// One rendered arm row for the readout.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ArmStatus {
     pub arm: String,
     pub scheduler: Option<String>,
@@ -167,8 +181,14 @@ pub struct ArmStatus {
     pub skip_reason: Option<String>,
     pub detail: Option<String>,
     pub interval_s: u64,
-    /// True when the arm never ticked, or its newest tick is older than twice
-    /// its interval. Event-driven arms (interval 0) never read stale.
+    /// The producer receipt this row was built from: `unobserved` when no
+    /// tick row exists, `observed` when one does. The honest runtime claim -
+    /// source inspection can find call sites, but an empty journal cannot
+    /// prove an emitter's absence.
+    pub producer_evidence: ProducerEvidence,
+    /// True when the newest tick is older than twice the arm's interval.
+    /// Event-driven arms (interval 0) never read stale, and neither does an
+    /// unobserved row: absence of a receipt is not a staleness measurement.
     pub stale: bool,
     /// Its newest run failed: the skip reason is itself a failure token
     /// ([`FAILURE_SKIPS`]). Independent of `stale` - the arm broken longest
@@ -333,7 +353,8 @@ fn arm_status(
             skip_reason: Some("never".to_string()),
             detail: None,
             interval_s: default_interval_s,
-            stale: default_interval_s > 0,
+            producer_evidence: ProducerEvidence::Unobserved,
+            stale: false,
             failing: false,
             failing_for_s: None,
             cause: None,
@@ -365,6 +386,7 @@ fn arm_status(
         skip_reason,
         detail: str_field(&tick.data, "detail"),
         interval_s,
+        producer_evidence: ProducerEvidence::Observed,
         stale,
         failing,
         failing_for_s,
@@ -377,6 +399,15 @@ fn str_field(data: &Value, field: &str) -> Option<String> {
     data.get(field)
         .and_then(Value::as_str)
         .map(|s| s.to_string())
+}
+
+/// The one Rust-owned verdict on whether a row asks the operator for
+/// attention: no producer receipt was ever observed, or the newest observed
+/// receipt is stale or failed. The status payload publishes its selection as
+/// `arms_attention`; consumers print the rows and never re-derive the
+/// verdict from the legacy booleans (x-6484).
+pub fn needs_attention(row: &ArmStatus) -> bool {
+    row.producer_evidence == ProducerEvidence::Unobserved || row.stale || row.failing
 }
 
 /// Skip reasons that mean the arm ran and its run failed - not that it chose
@@ -538,10 +569,11 @@ fn tick_overdue_cause(pm_last_ts: Option<&str>, trace: Option<&TickTrace>) -> (S
 }
 
 /// Fill `cause` and `line` on every row. A stale row takes the first cause
-/// that holds; a never-ticked or overdue daemon arm on a young daemon reads
-/// `pending` instead of red. `unexplained` is written when no rule fires, so
-/// a red row names its reason instead of daring the operator to guess
-/// whether the arm or its scheduler broke.
+/// that holds; an observed-stale daemon arm on a young daemon reads
+/// `pending` instead of red. An unobserved row is left alone: no measured
+/// cause applies to a receipt that does not exist. `unexplained` is written
+/// when no rule fires, so a red row names its reason instead of daring the
+/// operator to guess whether the arm or its scheduler broke.
 pub fn explain(rows: &mut [ArmStatus], daemon: &DaemonFacts) {
     explain_inner(rows, daemon, None)
 }
@@ -582,6 +614,7 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
     let mut cross_arm = vec![false; rows.len()];
     for (i, row) in rows.iter_mut().enumerate() {
         if !row.stale
+            && row.producer_evidence == ProducerEvidence::Observed
             && row.interval_s > 0
             && row.scheduler.as_deref().is_some_and(|s| down.contains(s))
         {
@@ -632,6 +665,10 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
 /// arm silent is an arm problem. All of them silent is a job problem, and the
 /// row already names the job. A scheduler hosting one interval-bearing arm is
 /// skipped: the verdict there would be the per-arm rule under a second name.
+/// Unobserved rows keep their seat in the silence vote (their interval still
+/// sets the floor) but cannot by themselves establish the verdict: a tier
+/// with no observed receipt is evidence of nothing, never a dead scheduler
+/// (x-6484 AC6).
 fn down_schedulers(rows: &[ArmStatus]) -> HashSet<String> {
     let mut by_sched: HashMap<&str, Vec<&ArmStatus>> = HashMap::new();
     for row in rows.iter().filter(|r| r.interval_s > 0) {
@@ -642,6 +679,10 @@ fn down_schedulers(rows: &[ArmStatus]) -> HashSet<String> {
     by_sched
         .into_iter()
         .filter(|(_, arms)| arms.len() >= 2)
+        .filter(|(_, arms)| {
+            arms.iter()
+                .any(|a| a.producer_evidence == ProducerEvidence::Observed)
+        })
         .filter(|(_, arms)| {
             let floor = arms.iter().map(|a| a.interval_s).min().unwrap_or(0) * 2;
             arms.iter().all(|a| match a.age_s {
@@ -738,10 +779,14 @@ fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
 }
 
 /// The per-row readout format, owned here so every consumer prints the same
-/// line. Verdict: STALE when stale, FAIL when failing, pending when the cause
-/// is daemon_young, else ok. The `cause=...` suffix is appended by `explain`.
+/// line. Verdict: UNOBSERVED when no producer receipt exists (before every
+/// other verdict: absence is not staleness, failure, or ok), STALE when
+/// stale, FAIL when failing, pending when the cause is daemon_young, else
+/// ok. The `cause=...` suffix is appended by `explain`.
 pub fn render_row(row: &ArmStatus) -> String {
-    let verdict = if row.stale {
+    let verdict = if row.producer_evidence == ProducerEvidence::Unobserved {
+        "UNOBSERVED"
+    } else if row.stale {
         "STALE"
     } else if row.failing {
         "FAIL"
@@ -1005,6 +1050,7 @@ mod tests {
         let rows = read_arms(&[journal.clone()], now);
         let wd = rows.iter().find(|r| r.arm == "watchdog").unwrap();
         assert_eq!(wd.skip_reason.as_deref(), Some("watchdog_off"));
+        assert_eq!(wd.producer_evidence, ProducerEvidence::Observed);
         assert!(
             wd.stale,
             "700s against the row's own 300s interval is stale"
@@ -1019,7 +1065,10 @@ mod tests {
     }
 
     #[test]
-    fn never_ticked_arm_is_stale_and_every_arm_appears() {
+    fn never_ticked_arm_is_unobserved_and_every_arm_appears() {
+        // AC1-HP: an empty journal is not a staleness measurement. Every
+        // known arm - interval-bearing or not - reads UNOBSERVED with
+        // last_ts=null, stale=false, failing=false, and no measured cause.
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
         std::fs::create_dir_all(&dir).unwrap();
@@ -1028,18 +1077,94 @@ mod tests {
         assert!(rows.len() >= KNOWN_ARMS.len());
         for spec in KNOWN_ARMS {
             let row = rows.iter().find(|r| r.arm == spec.arm).unwrap();
-            if spec.default_interval_s == 0 {
-                assert!(
-                    !row.stale,
-                    "event-driven arm {} never reads red from quiet",
-                    spec.arm
-                );
-            } else {
-                assert!(row.stale, "never-ticked arm {} reads stale", spec.arm);
-                assert_eq!(row.skip_reason.as_deref(), Some("never"));
-            }
+            assert_eq!(
+                row.producer_evidence,
+                ProducerEvidence::Unobserved,
+                "arm {} holds no receipt",
+                spec.arm
+            );
+            assert!(!row.stale, "unobserved arm {} never reads stale", spec.arm);
+            assert!(
+                !row.failing,
+                "unobserved arm {} never reads failing",
+                spec.arm
+            );
+            assert_eq!(row.last_ts, None);
+        }
+        // `explain` owns every row's `line`; run it before the line asserts.
+        let mut rows = rows;
+        explain(&mut rows, &DaemonFacts::Unknown);
+        for spec in KNOWN_ARMS {
+            let row = rows.iter().find(|r| r.arm == spec.arm).unwrap();
+            assert!(row.line.contains("UNOBSERVED"), "line: {}", row.line);
+            assert!(!row.line.contains("STALE"), "line: {}", row.line);
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AC2-HP: an emitted `acted=0` row is a measurement. A fresh zero-work
+    /// tick keeps its skip reason, reads ok (not UNOBSERVED), and lands in
+    /// no attention set.
+    #[test]
+    fn a_real_zero_action_tick_is_observed_not_unobserved() {
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:59:00Z",
+                "watchdog",
+                SCHED_LAUNCHD,
+                0,
+                json!("no_work"),
+                600,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
+        let rows = read_arms(&[journal], now);
+        let wd = rows.iter().find(|r| r.arm == "watchdog").unwrap();
+        assert_eq!(wd.producer_evidence, ProducerEvidence::Observed);
+        assert_eq!(wd.skip_reason.as_deref(), Some("no_work"));
+        assert!(!wd.stale && !wd.failing);
+        assert!(!needs_attention(wd), "line: {}", wd.line);
+        let line = render_row(wd);
+        assert!(line.contains("acted=0"), "line: {line}");
+        assert!(line.contains("skip=no_work"), "line: {line}");
+        assert!(!line.contains("UNOBSERVED"), "line: {line}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AC5: the attention predicate is unobserved, stale, or failing - and
+    /// nothing else. A pending (daemon_young) row and an ok row ask for no
+    /// operator; a failing row does even while fresh.
+    #[test]
+    fn needs_attention_covers_exactly_unobserved_stale_and_failing() {
+        let observed_fresh_ok = ArmStatus {
+            arm: "a".into(),
+            scheduler: None,
+            last_ts: Some("2026-09-04T12:00:00Z".into()),
+            age_s: Some(10),
+            acted: Some(1),
+            skip_reason: None,
+            detail: None,
+            interval_s: 300,
+            producer_evidence: ProducerEvidence::Observed,
+            stale: false,
+            failing: false,
+            failing_for_s: None,
+            cause: None,
+            line: String::new(),
+        };
+        assert!(!needs_attention(&observed_fresh_ok));
+        let mut failing = observed_fresh_ok.clone();
+        failing.failing = true;
+        assert!(needs_attention(&failing));
+        let mut stale = observed_fresh_ok.clone();
+        stale.stale = true;
+        assert!(needs_attention(&stale));
+        let mut unobserved = observed_fresh_ok.clone();
+        unobserved.producer_evidence = ProducerEvidence::Unobserved;
+        assert!(needs_attention(&unobserved));
     }
 
     /// An empty journal dir: every known arm reads never-ticked.
@@ -1072,6 +1197,7 @@ mod tests {
             skip_reason: Some("drain_disabled".to_string()),
             detail: None,
             interval_s: 60,
+            producer_evidence: ProducerEvidence::Observed,
             stale: true,
             failing: false,
             failing_for_s: None,
@@ -1158,8 +1284,22 @@ mod tests {
         // The drifted case runs first: it proves the stale_daemon rule CAN
         // fire before the second call proves the clean-daemon absence. A test
         // that asserted only the absence would pass on a reader that never
-        // implemented the rule at all.
-        let (guard, journal) = empty_journal();
+        // implemented the rule at all. An observed 3000s-old receipt is what
+        // puts the row in the ladder; an unobserved row would read
+        // UNOBSERVED instead.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-04T11:10:00Z",
+                "active_backlog",
+                SCHED_DAEMON,
+                0,
+                json!(null),
+                300,
+            )],
+        );
         let now = parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap();
 
         let mut rows = read_arms(&[journal.clone()], now);
@@ -1187,7 +1327,7 @@ mod tests {
         let ab = rows.iter().find(|r| r.arm == "active_backlog").unwrap();
         assert_eq!(ab.cause.as_deref(), Some("unexplained"));
         assert!(ab.line.contains("STALE"), "line: {}", ab.line);
-        drop(guard);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1456,17 +1596,53 @@ mod tests {
 
     #[test]
     fn explain_names_a_down_daemon_for_daemon_arms() {
-        let (guard, journal) = empty_journal();
-        let mut rows = read_arms(&[journal], 1_800_000_000);
+        // Observed-stale receipts put the arms in the cause ladder at all;
+        // an unobserved row would never enter it.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-04T11:00:00Z",
+                    "reap",
+                    SCHED_DAEMON,
+                    0,
+                    json!(null),
+                    60,
+                ),
+                tick_envelope(
+                    "2026-09-04T11:00:00Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-04T11:00:00Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+            ],
+        );
+        let mut rows = read_arms(
+            &[journal],
+            parse_rfc3339_unix("2026-09-04T12:00:00Z").unwrap(),
+        );
         explain(&mut rows, &DaemonFacts::Down);
         let reap = rows.iter().find(|r| r.arm == "reap").unwrap();
+        assert_eq!(reap.producer_evidence, ProducerEvidence::Observed);
         assert_eq!(reap.cause.as_deref(), Some("daemon_down"));
         assert!(reap.line.contains("STALE"), "line: {}", reap.line);
         // A launchd arm names its overdue tick tier, not the daemon:
         // pr_watch_merge is itself stale, so the stamps are tier-wide overdue.
         let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
-        drop(guard);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1611,11 +1787,12 @@ mod tests {
     }
 
     #[test]
-    fn explain_names_tick_overdue_when_the_whole_launchd_tier_stalled() {
+    fn an_all_unobserved_tier_establishes_no_measured_cause() {
         let (guard, journal) = empty_journal();
-        // Everything never-ticked: pr_watch_merge is itself stale, no attempt
-        // record exists, so the readout states the absence as a fact instead
-        // of blaming launchd (x-e3cc, x-d211).
+        // AC6-EDGE: every launchd arm unobserved. No receipt exists, so no
+        // cross-arm scheduler verdict and no tick_overdue may be derived:
+        // absence is not a measurement. Each row keeps UNOBSERVED and no
+        // cause, stating the absence as the fact it is.
         let mut rows = read_arms(&[journal], 1_800_000_000);
         let trace = TickTrace::default();
         explain_with_trace(
@@ -1626,13 +1803,17 @@ mod tests {
             },
             &trace,
         );
-        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
-        assert_eq!(kw.cause.as_deref(), Some("tick_overdue"));
-        assert!(
-            kw.line.contains("no tick stamp inside 2x interval"),
-            "line: {}",
-            kw.line
-        );
+        for arm in ["king_wake", "watchdog", "pr_watch_merge", "notify_watch"] {
+            let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert_eq!(
+                row.producer_evidence,
+                ProducerEvidence::Unobserved,
+                "{arm} holds no receipt"
+            );
+            assert!(!row.stale, "{arm} must not read STALE, line: {}", row.line);
+            assert_eq!(row.cause, None, "no measured cause without a receipt");
+            assert!(row.line.contains("UNOBSERVED"), "line: {}", row.line);
+        }
         drop(guard);
     }
 
@@ -1821,13 +2002,16 @@ mod tests {
     #[test]
     fn single_arm_scheduler_is_not_a_second_name_for_the_per_arm_rule() {
         // auto_continue is the only interval-bearing arm on the `session`
-        // scheduler. Its silence is judged by its own rule alone.
+        // scheduler. Its silence is judged by its own rule alone - and an
+        // empty journal is no silence measurement at all: the row stays
+        // UNOBSERVED, which is attention without an invented cause.
         let (guard, journal) = empty_journal();
         let mut rows = read_arms(&[journal], 1_800_000_000);
         explain(&mut rows, &DaemonFacts::Unknown);
         let ac = rows.iter().find(|r| r.arm == "auto_continue").unwrap();
-        assert!(ac.stale, "never-ticked auto_continue reads stale");
-        assert_ne!(ac.cause.as_deref(), Some("scheduler_down"));
+        assert_eq!(ac.producer_evidence, ProducerEvidence::Unobserved);
+        assert!(!ac.stale, "unobserved auto_continue never reads stale");
+        assert_eq!(ac.cause, None);
         drop(guard);
     }
 
@@ -1837,6 +2021,7 @@ mod tests {
         let mut rows = read_arms(&[journal], 1_800_000_000);
         explain(&mut rows, &DaemonFacts::Unknown);
         let sh = rows.iter().find(|r| r.arm == "stop_hook").unwrap();
+        assert_eq!(sh.producer_evidence, ProducerEvidence::Unobserved);
         assert!(!sh.stale, "event-driven arm never reads red from quiet");
         assert_eq!(sh.cause, None, "stop_hook is never explained");
         drop(guard);
@@ -1979,11 +2164,46 @@ mod tests {
 
     #[test]
     fn a_young_daemon_un_flips_its_arms_not_scheduler_down() {
-        // All three daemon arms silent, but the daemon is up 100s - inside
-        // reap's first window (2x60). daemon_young un-flips them, and the
-        // cross-arm verdict must not survive it.
-        let (guard, journal) = empty_journal();
-        let mut rows = read_arms(&[journal], 1_800_000_000);
+        // Three observed-stale daemon arms (900s against intervals 60/300),
+        // but the daemon is up 100s - inside reap's first window (2x60).
+        // daemon_young un-flips them, and the cross-arm verdict must not
+        // survive it. Observed receipts are what make this a staleness
+        // question at all; an unobserved row would never enter the ladder.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-11T11:45:00Z",
+                    "reap",
+                    SCHED_DAEMON,
+                    0,
+                    json!(null),
+                    60,
+                ),
+                tick_envelope(
+                    "2026-09-11T11:45:00Z",
+                    "active_backlog",
+                    SCHED_DAEMON,
+                    0,
+                    json!(null),
+                    300,
+                ),
+                tick_envelope(
+                    "2026-09-11T11:45:00Z",
+                    "retire",
+                    SCHED_DAEMON,
+                    0,
+                    json!(null),
+                    300,
+                ),
+            ],
+        );
+        let mut rows = read_arms(
+            &[journal],
+            parse_rfc3339_unix("2026-09-11T12:00:00Z").unwrap(),
+        );
         explain(
             &mut rows,
             &DaemonFacts::Up {
@@ -1993,11 +2213,12 @@ mod tests {
         );
         for arm in ["active_backlog", "reap", "retire"] {
             let row = rows.iter().find(|r| r.arm == arm).unwrap();
+            assert_eq!(row.producer_evidence, ProducerEvidence::Observed);
             assert!(!row.stale, "{arm} pends inside the young window");
             assert_eq!(row.cause.as_deref(), Some("daemon_young"));
             assert_ne!(row.cause.as_deref(), Some("scheduler_down"));
         }
-        drop(guard);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -23,6 +23,7 @@ fn row(arm: &str) -> ArmStatus {
         skip_reason: None,
         detail: None,
         interval_s: 600,
+        producer_evidence: fno_agents::tick_ledger::ProducerEvidence::Observed,
         stale: false,
         failing: false,
         failing_for_s: None,
