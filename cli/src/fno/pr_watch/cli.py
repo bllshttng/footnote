@@ -1392,6 +1392,7 @@ def refresh() -> None:
         fno_binary=_resolve_fno_binary(),
         install_path=os.environ.get("PATH", "/usr/bin:/bin"),
         interval=settings.pr_watch.interval_seconds,
+        defer_when_ticking=True,
     )
     typer.echo(f"pr-watch refresh: {msg}")
 

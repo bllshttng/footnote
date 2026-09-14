@@ -735,7 +735,52 @@ def test_refresh_verb_refreshes_when_enabled(monkeypatch):
     assert result.exit_code == 0
     assert len(calls) == 1
     assert calls[0]["fno_binary"] == "/x/fno-py"
+    assert calls[0]["defer_when_ticking"] is True
     assert "pr-watch refresh:" in result.stdout
+
+
+def test_refresh_verb_defers_while_tick_is_in_flight(monkeypatch, tmp_path):
+    """AC2-HP: a tick mid-flight defers the refresh; the verb reports the
+    deferral and launchd is never touched."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    monkeypatch.setattr(cli_mod, "_LAUNCH_AGENTS_DIR", tmp_path / "LaunchAgents")
+    monkeypatch.setattr(m, "_tick_in_flight", lambda: 4242)
+    calls: list = []
+    monkeypatch.setattr(
+        m, "_run_launchctl_timed", lambda *a, **kw: calls.append(a) or (0, False)
+    )
+
+    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
+    assert result.exit_code == 0
+    assert "tick in flight (pid 4242)" in result.stdout
+    assert "bounce deferred" in result.stdout
+    assert calls == [], "a deferred refresh must run no launchctl step"
+
+
+def test_refresh_verb_bounces_when_no_tick_runs(monkeypatch, tmp_path):
+    """AC2-EDGE: no tick in flight, the refresh bounces as today."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    import fno.pr_watch._install as m
+
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    monkeypatch.setattr(cli_mod, "_LAUNCH_AGENTS_DIR", tmp_path / "LaunchAgents")
+    monkeypatch.setattr(m, "_tick_in_flight", lambda: None)
+    calls: list = []
+    monkeypatch.setattr(
+        m, "_run_launchctl_timed", lambda *a, **kw: calls.append(a) or (0, False)
+    )
+
+    result = CliRunner().invoke(app, ["pr-watch", "refresh"])
+    assert result.exit_code == 0
+    assert [c[0] for c in calls] == ["bootout", "bootstrap", "kickstart"]
+    assert "bounced" in result.stdout and "awaiting first tick" in result.stdout
 
 
 # ---------------------------------------------------------------------------

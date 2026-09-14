@@ -37,13 +37,6 @@ call may occupy the whole merge slice.
   owner call at the slice remainder (`_ritual_timeout()`); the interactive
   default stays 300s.
 
-## Why the heal defers to a live tick
+## Why every cure defers to a live tick
 
-A `dead` verdict fired the SessionStart self-heal, whose bounce runs
-`bootout` plus `kickstart -k`; the `-k` SIGTERMs a running tick. During one
-outage this killed eight ticks in one hour, one per session start, keeping
-the verdict dead. `bounce(defer_when_ticking=True)` reads the
-`pr-watch:tick` claim first and defers while it is live and younger than one
-StartInterval (600s, above the 480s tick ceiling); an older live claim is a
-hung tick and still bounces. The heal passes the flag; the post-update
-refresh does not, because a new binary must load.
+A bounce fired mid-tick runs `bootout` plus `kickstart -k`, and the `-k` SIGTERMs the running tick; during one outage that killed eight ticks in one hour, one per session start, keeping the verdict dead. Three points own the guard since x-09d8. The in-flight read is launchd's: `launchctl list sh.fno.pr-watcher` names the service's PID and `ps -o etime=` ages it (under one 600s StartInterval defers; older is a hung tick and still bounces), replacing the cwd-routed `pr-watch:tick` claim that covered only the sweep phase and read free while merge, king_wake or recovery ran. Heal, refresh and doctor all pass `defer_when_ticking=True`; the post-update refresh defers too because the plist runs the stable `~/.local/bin/fno-py` symlink and every tick is a fresh process, so a new binary loads without a forced bounce. A deferred refresh still leaves its rewritten plist, and the next bounce installs it.

@@ -335,9 +335,9 @@ def bounce(
     liveness confirmation; a job that mutates shared state on each fire would
     instead perform that work at install time, against the plist's own schedule.
 
-    ``defer_when_ticking``: a heal fired mid-tick would kill the very tick the
-    verdict wrongly called dead, so it defers; a new-binary refresh must not
-    pass it.
+    ``defer_when_ticking``: a bounce fired mid-tick SIGTERMs that very tick, so
+    heal, refresh and doctor all pass the flag; a deferred refresh leaves its
+    rewritten plist for the next bounce.
     """
     if uid is None:
         uid = os.getuid()
