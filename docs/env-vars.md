@@ -48,6 +48,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_AGENT_ROW_PENDING` | py | unclear: cli/src/fno/agents/register_session.py:200 |
 | `FNO_AGENT_SELF` | py+rs | unclear: cli/src/fno/agent/cli.py:363 |
 | `FNO_AGENT_SESSION` | py | unclear: cli/src/fno/agents/context.py:237 |
+| `FNO_ATTEST_BRANCH` | py | Overrides the attested row's branch field with the caller-resolved PR branch (the shell producer's upstream rewrite); hold join/release keep the cwd-resolved local name. Set by skills/review/scripts/emit-attestation.sh, read in cli/src/fno/review/cli.py `_attest_from_record`. |
 | `FNO_AUTO_MEMORY_DIR` | py | unclear: cli/src/fno/inbox/drain.py:407 |
 | `FNO_BG` | py | unclear: cli/src/fno/target/orient.py:254 |
 | `FNO_BIN` | py+rs | Overrides the Python fno porcelain path at the Rust/Python seam. |
