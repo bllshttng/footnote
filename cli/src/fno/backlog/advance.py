@@ -1588,7 +1588,8 @@ def _grid_lane_for(
     provider: Optional[str],
     verb: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
-    """``(harness, model, route, account, decline_reason)`` for an UNPINNED spawn.
+    """``(harness, model, route, account, decline_reason)`` for an unpinned
+    spawn, or a PINNED model whose routing.models row declares its harness.
 
     One seam: tests monkeypatch this name, and a caller reaching past it
     bypasses every patch. A decline surfaces the chain's terminal verbatim,
@@ -1596,7 +1597,7 @@ def _grid_lane_for(
     as one row fact. ``verb`` is the effective workflow verb: its profile row
     prices the slot; None keeps the target profile. Contract:
     docs/architecture/backlog-graph-verb-contracts.md"""
-    if model is not None or (provider or "").strip() or node is None:
+    if (provider or "").strip() or node is None:
         return None, None, None, None, None
     try:
         from fno import route_resolve
@@ -1611,6 +1612,7 @@ def _grid_lane_for(
             node,
             capacity,
             inventory=inventory,
+            explicit_model_value=model,
         )
     except Exception as exc:  # noqa: BLE001 - unknown capacity spawns on defaults
         return None, None, None, None, f"grid=unreadable ({str(exc)[:80]})"
@@ -1619,6 +1621,11 @@ def _grid_lane_for(
     # receipt vocabulary and rewording them here would fork it.
     terminal = str(chain[-1]) if chain else "grid=no-reason-recorded"
     if candidate is None:
+        return None, None, None, None, terminal
+    if not candidate.get("pin_row"):
+        # A pinned model the rows do not declare dispatches on today's
+        # default; the spawn's --node vendor refusal catches a mismatched
+        # pairing there, and a lane/grid pick was never this caller's answer.
         return None, None, None, None, terminal
     # Placement retains the resolver's complete decision: the candidate
     # carries the capacity verdict that selected it, and the resolver already
@@ -2753,12 +2760,13 @@ def _join_node(
         )
         # The grid picks this band's lane, not the node's: the joiner pulls
         # the waves its band can carry, so its lane must match the band.
-        # An unbanded joiner (or an explicit --model) skips the grid and
-        # rides the caller's default lane. The thread substrate is
-        # claude-only (hard error on any other harness), so a grid lane
-        # naming another harness reads as declined - taking only its model
-        # would put a foreign-vendor model on the claude lane, the exact
-        # mismatch the spawn refuses.
+        # An unbanded joiner rides the caller's default lane; an explicit
+        # --model resolves through _grid_lane_for too, taking the harness
+        # its routing.models row declares when one does. The thread
+        # substrate is claude-only (hard error on any other harness), so a
+        # lane naming another harness reads as declined - taking only its
+        # model would put a foreign-vendor model on the claude lane, the
+        # exact mismatch the spawn refuses.
         lane_h: Optional[str] = None
         lane_m: Optional[str] = None
         lane_r: Optional[str] = None
