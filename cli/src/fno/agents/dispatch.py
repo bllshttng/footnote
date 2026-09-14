@@ -879,14 +879,6 @@ _NO_CHILD_POSSIBLE_EXIT = 127
 _UNKNOWN_ORPHAN_TTL_MS = 5 * 60 * 1000
 
 
-def _lane_b_worker_binary() -> Optional[Path]:
-    """The ``fno-agents-worker`` keeper binary (see
-    :func:`fno.rust_binary.lane_b_worker_binary`)."""
-    from fno import rust_binary
-
-    return rust_binary.lane_b_worker_binary()
-
-
 def refuse_codex_thread_without_runtime() -> None:
     """Refuse the codex thread lane up front when the worker runtime is absent.
 
@@ -1046,7 +1038,9 @@ def _lane_b_thread_spawn(
             exit_code=2,
         )
     validate_spawn_name(name)
-    worker_bin = _lane_b_worker_binary()
+    from fno import rust_binary
+
+    worker_bin = rust_binary.lane_b_worker_binary()
     if worker_bin is None:
         raise DispatchAskError(
             "lane-B thread spawn needs the fno-agents runtime; install it "
