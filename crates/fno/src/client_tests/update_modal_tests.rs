@@ -256,3 +256,65 @@ fn sideline_menu_without_source_pin_keeps_rows() {
         );
     }
 }
+
+/// AC5-HP (moved from the over-budget client_tests.rs): a ready outcome puts
+/// the update row above keybinds.
+#[test]
+fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
+    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+        update_ready: true,
+        installed_rev: Some("aaa1111".into()),
+        source_rev: Some("bbb2222".into()),
+        changelog: vec!["fix(x): thing".into()],
+        guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
+        degraded: None,
+        running: vec![],
+        running_stale: 0,
+        source_pin: None,
+    });
+    let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+    let labels: Vec<&str> = menu
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Entry { label, .. } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels[0], "update ready");
+    assert_eq!(labels[1], "sweep threads");
+    assert_eq!(labels[2], "keybinds");
+    assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
+}
+
+/// AC5-HP (moved from the over-budget client_tests.rs): the overlay carries
+/// the version pair, changelog, and guidance.
+#[test]
+fn update_modal_renders_version_pair_changelog_and_guidance() {
+    let outcome = UpdateOutcome::Ok(UpdateReadiness {
+        update_ready: true,
+        installed_rev: Some("aaa1111".into()),
+        source_rev: Some("bbb2222".into()),
+        changelog: vec!["fix(x): thing".into(), "feat(y): other thing".into()],
+        guidance: "update ready bbb2222 - wire unchanged - 14 shells survive".into(),
+        degraded: None,
+        running: vec![],
+        running_stale: 0,
+        source_pin: None,
+    });
+    let modal = build_update_modal(Some(&outcome));
+    let headers: Vec<&str> = modal
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Header(h) => Some(h.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(headers.contains(&"aaa1111 -> bbb2222"));
+    assert!(headers.contains(&"fix(x): thing"));
+    assert!(headers.contains(&"feat(y): other thing"));
+    assert!(headers.iter().any(|h| h.contains("14 shells survive")));
+}
