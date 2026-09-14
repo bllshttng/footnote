@@ -64,6 +64,7 @@ from fno.agents.sender_provenance import (
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, render_seed
+from fno.agents.lane_heal import lane_heal as _lane_heal
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
 from fno.agents.keeper_thread import complete_launch_argv, mint_session_id
@@ -6992,45 +6993,6 @@ def _mail_inject_codex(
         return bool(json.loads(proc.stdout.strip()).get("delivered"))
     except (ValueError, AttributeError):
         return False
-
-
-def _lane_heal(session_id: str) -> tuple[str, str | None, dict | None]:
-    """Ask the hidden `fno-agents lane-heal` verb about a row's pane binding.
-
-    Returns ``(verdict, reason, pane)`` where verdict is the Rust vocabulary
-    (``no-mux-ref|live-pane|dead-pane|dead-pane-loaded|rebound-thread|
-    unmeasurable``), and on ``rebound-thread`` the registry row has already
-    been rewritten to the thread lane. Mirrors :func:`_mail_inject_codex`'s
-    shell-out pattern; an absent binary, a timeout, or unparseable output is
-    ``("unmeasurable", <cause>, None)`` so the caller fails open exactly like
-    the probe contract.
-    """
-    import json
-
-    from fno import rust_binary
-
-    binary = rust_binary.resolve_installed_binary()
-    if binary is None:
-        return ("unmeasurable", "binary-absent", None)
-    try:
-        proc = subprocess.run(
-            [str(binary), "lane-heal", "--session", session_id],
-            capture_output=True,
-            text=True,
-            timeout=_MAIL_INJECT_TIMEOUT_S,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ("unmeasurable", "spawn-failed", None)
-    try:
-        parsed = json.loads(proc.stdout.strip())
-        pane = parsed.get("pane")
-        return (
-            str(parsed.get("verdict") or "unmeasurable"),
-            parsed.get("reason"),
-            pane if isinstance(pane, dict) else None,
-        )
-    except (ValueError, AttributeError):
-        return ("unmeasurable", "unparseable-output", None)
 
 
 def _review_start_codex(

@@ -3107,12 +3107,10 @@ def _raw_send(
                 file=sys.stderr,
             )
 
-    # 4. Heal a dead pane binding before routing on the row. A codex row whose
-    #    pane is gone but whose thread is loaded in the app-server rebinds to
-    #    the thread lane, so the payload rides turn/start instead of dying on
-    #    the pane (x-4a68). A claude dead pane keeps its existing heal owners;
-    #    an unmeasurable probe fails open for a real send and answers exit 3
-    #    under --check.
+    # 4. Heal a dead pane binding before routing on the row (x-4a68): a codex
+    #    row whose pane is gone but whose thread is loaded rebinds to the
+    #    thread lane. An unmeasurable probe fails open for a real send and
+    #    answers exit 3 under --check.
     if entry.mux and session_id:
         heal_verdict, heal_reason, heal_pane = _lane_heal(session_id)
         if heal_verdict == "rebound-thread":
@@ -3276,8 +3274,7 @@ def _raw_send(
     if check:
         if entry.mux:
             # The heal already probed this pane, so a surviving mux ref was
-            # read Present: the row's pane is real. Not verified here is
-            # whether the paste LANDS - the confirm decides that on the send.
+            # read Present. Whether the paste LANDS is the send's question.
             print(
                 "injectable: mux-pane (pane probed live; a paste still needs "
                 "the confirm to land)"
