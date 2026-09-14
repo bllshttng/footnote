@@ -243,6 +243,7 @@ _CACHE_NAMES = (
     "PIP_CACHE_DIR",
     "XDG_CACHE_HOME",
     "npm_config_cache",
+    "SCCACHE_DIR",
 )
 
 # Cache defaults live under the real home, so an unset var still has to be
@@ -252,6 +253,10 @@ _CACHE_DEFAULTS = {
     "RUSTUP_HOME": ".rustup",
     "XDG_CACHE_HOME": ".cache",
 }
+if sys.platform == "darwin":
+    # sccache ignores XDG_CACHE_HOME on macOS; this is its own default there,
+    # so a server started by a test child shares the operator's cache.
+    _CACHE_DEFAULTS["SCCACHE_DIR"] = "Library/Caches/Mozilla.sccache"
 
 # XDG config/data/state are sandboxed (they are state); XDG_CACHE_HOME is not
 # (it is a cache) and is handled above.

@@ -9,6 +9,7 @@ here, before anything depends on it.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -126,8 +127,12 @@ def test_unrelated_env_is_untouched(tmp_path):
 
 def test_explicit_cache_vars_are_preserved(tmp_path):
     """AC1-ERR (explicit form)."""
-    out = neutralise({"CARGO_HOME": "/opt/cargo", "HOME": "/home/dev"}, tmp_path)
+    out = neutralise(
+        {"CARGO_HOME": "/opt/cargo", "SCCACHE_DIR": "/opt/sccache", "HOME": "/home/dev"},
+        tmp_path,
+    )
     assert out["CARGO_HOME"] == "/opt/cargo"
+    assert out["SCCACHE_DIR"] == "/opt/sccache"
 
 
 def test_unset_cache_vars_are_pinned_to_the_real_home(tmp_path):
@@ -144,6 +149,21 @@ def test_unset_cache_vars_are_pinned_to_the_real_home(tmp_path):
     assert out["XDG_CACHE_HOME"].endswith("/.cache")
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin", reason="sccache follows XDG_CACHE_HOME off darwin"
+)
+def test_sccache_dir_is_pinned_to_the_mac_default(tmp_path):
+    """AC3-HP: a test child must not start an sccache server on a sandbox cache.
+
+    sccache ignores XDG_CACHE_HOME on macOS and defaults to
+    ~/Library/Caches/Mozilla.sccache, so an unpinned SCCACHE_DIR resolves
+    under the sandboxed HOME and the cache is deleted at exit.
+    """
+    out = neutralise({"HOME": "/home/dev"}, tmp_path)
+    assert out["SCCACHE_DIR"].endswith("/Library/Caches/Mozilla.sccache")
+    assert not out["SCCACHE_DIR"].startswith(str(tmp_path))
+
+
 def test_cache_defaults_do_not_follow_a_poisoned_home(tmp_path, fixtures_dir):
     """The cache default is read from the passwd entry, not from $HOME.
 
@@ -153,6 +173,8 @@ def test_cache_defaults_do_not_follow_a_poisoned_home(tmp_path, fixtures_dir):
     clean = neutralise({"HOME": "/home/dev"}, tmp_path)
     dirty = neutralise(poison({"HOME": "/home/dev"}, fixtures_dir), tmp_path)
     assert clean["CARGO_HOME"] == dirty["CARGO_HOME"]
+    if "SCCACHE_DIR" in clean:
+        assert clean["SCCACHE_DIR"] == dirty["SCCACHE_DIR"]
 
 
 # ---------------------------------------------------------------------------
