@@ -492,7 +492,7 @@ pub(crate) fn relaunch_on_pane_with(
             );
             16
         }
-        PaneProof::Unproven { tail: _, why } => {
+        PaneProof::Unproven { tail, why } => {
             // Keep the claim: the pane may still be live and the TTL guards
             // against a second writer.
             append_launch_event(
@@ -511,6 +511,11 @@ pub(crate) fn relaunch_on_pane_with(
                  prove the worker live: {why}. Check `fno mux pane ls --server {session}` \
                  before retrying."
             );
+            // The tail is evidence the operator cannot get later if the
+            // pane dies right after this, so show it when it has content.
+            if !tail.trim().is_empty() {
+                eprintln!("Last pane output:\n{tail}");
+            }
             16
         }
     }
@@ -922,7 +927,7 @@ mod tests {
 
     // ---- relaunch_on_pane (AC5-AC8) ------------------------------------
 
-    use super::{mux_pane_run_failure_message, relaunch_on_pane, relaunch_on_pane_with};
+    use super::{mux_pane_run_failure_message, relaunch_on_pane_with};
     use crate::state::{self, MuxRef};
     use crate::{paths::AgentsHome, AgentStatus};
     use std::fs;
@@ -939,6 +944,7 @@ mod tests {
             harness_session_id: Some(SESSION.into()),
             codex_session_id: Some(SESSION.into()),
             cwd: "/tmp".into(),
+            origin: Some("spawn".into()),
             substrate: Some("pane".into()),
             status: AgentStatus::Live,
             mux: Some(MuxRef {
@@ -978,7 +984,7 @@ mod tests {
     /// Run `relaunch_on_pane` with a zero window against a temp home, the
     /// stub on PATH, and the row already in the registry. `expected` is the
     /// mux ref the caller claims the row still carries.
-    fn run_relaunch(dir: &std::path::Path, home: &AgentsHome, expected: Option<&MuxRef>) -> i32 {
+    fn run_relaunch(home: &AgentsHome, expected: Option<&MuxRef>) -> i32 {
         relaunch_on_pane_with(
             Duration::ZERO,
             Duration::ZERO,
@@ -1036,7 +1042,7 @@ mod tests {
             session: "main".into(),
             pane_id: 2179,
         };
-        let code = run_relaunch(dir.path(), &home, Some(&expected));
+        let code = run_relaunch(&home, Some(&expected));
         match old_path {
             Some(p) => std::env::set_var("PATH", p),
             None => std::env::remove_var("PATH"),
@@ -1104,11 +1110,15 @@ mod tests {
             session: "main".into(),
             pane_id: 2179,
         };
-        let code = run_relaunch(dir.path(), &home, Some(&expected));
+        let code = run_relaunch(&home, Some(&expected));
         match old_path {
             Some(p) => std::env::set_var("PATH", p),
             None => std::env::remove_var("PATH"),
         }
+        // Read the claim under the SAME root the release wrote to, before
+        // the env var is dropped (a global-root read would answer someone
+        // else's live claim).
+        let (st, rec) = crate::claims::status(&format!("session:{SESSION}"), None);
         std::env::remove_var("FNO_CLAIMS_ROOT");
 
         assert_eq!(code, 16, "death is exit 16");
@@ -1124,7 +1134,6 @@ mod tests {
         assert!(failed[0].contains("\"reason\":\"pane-exited\""), "{events}");
         assert!(failed[0].contains("\"pane_id\":4242"), "{events}");
         assert!(!events.contains("\"agent_resumed\""), "{events}");
-        let (st, rec) = crate::claims::status(&format!("session:{SESSION}"), None);
         assert!(
             matches!(st, crate::claims::ClaimState::Free),
             "claim must be released: {st:?} {rec:?}"
@@ -1168,7 +1177,7 @@ mod tests {
             session: "main".into(),
             pane_id: 2179,
         };
-        let code = run_relaunch(dir.path(), &home, Some(&expected));
+        let code = run_relaunch(&home, Some(&expected));
         match old_path {
             Some(p) => std::env::set_var("PATH", p),
             None => std::env::remove_var("PATH"),
