@@ -406,3 +406,17 @@ def test_the_mix_refusal_catches_a_zero_valued_legacy_flag(tmp_graph):
 
     assert r.exit_code == 2, r.output
     assert "--fixes-pr" in r.output
+
+
+def test_a_retired_flag_refuses_naming_the_door_flags(tmp_graph):
+    """ignore_unknown_options would revive a retired spelling (--completed) as
+    a silent no-op; the stray-flag refusal keeps it an error that teaches the
+    one door. The done writer gate counts on this call failing."""
+    _seed(tmp_graph, _node("x-0001"))
+
+    r = _invoke("update", "x-0001", "--completed")
+
+    assert r.exit_code == 2, r.output
+    assert "--completed" in r.output
+    assert "--status" in r.output
+    assert _entry(tmp_graph, "x-0001")["status"] == "idea"

@@ -1,5 +1,8 @@
 """Node-lifecycle verbs: defer, retract, undefer, and unsupersede.
 
+tracker-owned machinery: every entry path is a tracker-owned registered
+verb, so this module's graph reads are those verbs' own orchestration.
+
 Extracted from graph/cli.py under the file-budget ratchet: the verbs a
 session calls to make or reverse a park or a supersession live here,
 registered into the backlog app by :func:`register_lifecycle_commands`. The
@@ -51,6 +54,24 @@ _FLAG_SPELLING_EXCEPTIONS = {"_model_tier_tombstone": "--model-tier", "type_": "
 
 def _flag_spelling(param: str) -> str:
     return _FLAG_SPELLING_EXCEPTIONS.get(param, "--" + param.replace("_", "-"))
+
+
+def refuse_stray_update_flags(door_args: List[str]) -> None:
+    """`update`'s extra args may only be door flags: ``ignore_unknown_options``
+    would otherwise revive a retired spelling (``--completed``) as a silent
+    no-op, and the done writer gate counts on that call failing."""
+    strays = [
+        a for a in door_args
+        if a.startswith("-") and a.split("=", 1)[0] not in ("--status", "--leave", "--set")
+    ]
+    if strays:
+        typer.echo(
+            f"Error: no such option: {strays[0]}. `fno backlog update` carries "
+            "one door per call: --status, --leave, and repeatable --set field=value "
+            "(legacy one-flag-per-field spellings are retired).",
+            err=True,
+        )
+        raise typer.Exit(code=2)
 
 
 def forward_update_door(
