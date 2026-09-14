@@ -429,7 +429,7 @@ fn button_code(b: MouseButton) -> u32 {
 /// (v8, x-38c4). Jump/select carry a walk direction; rerun re-sends the
 /// selected block's command line under the idle guard.
 #[derive(Debug, Clone, Copy)]
-enum BlockNavOp {
+pub(crate) enum BlockNavOp {
     Jump(BlockDir),
     Select(BlockDir),
     Rerun,
@@ -440,7 +440,7 @@ enum BlockNavOp {
 /// direction (reusing [`BlockDir`]); clear drops the search. Each mutates the
 /// shared pane and, on open/step, replies a `SearchResult` to the initiator.
 #[derive(Debug, Clone)]
-enum SearchOp {
+pub(crate) enum SearchOp {
     Open(String),
     Step(BlockDir),
     Clear,
