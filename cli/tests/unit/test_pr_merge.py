@@ -273,7 +273,7 @@ class FakeRun:
 
 @pytest.fixture
 def enabled(monkeypatch, tmp_path):
-    monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
+    monkeypatch.setattr(_merge, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
     # The posture floor (merge step 1b) reads live settings; hermetic tests
     # resolve to the shipped default rung (self_review), never the operator's
@@ -388,7 +388,7 @@ def test_auto_merge_disabled_skips_exit_2(enabled, monkeypatch, capsys, tmp_path
 
 
 def test_gh_missing_exits_127(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
+    monkeypatch.setattr(_merge, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     # Same hermeticity as the `enabled` fixture: a populated per-worker
     # sandbox graph makes the hold lookup's closure fetch fail-closed (exit 2)
     # before the gh-missing check this test exists to pin ever runs.
@@ -1325,7 +1325,7 @@ def _checks_enabled(monkeypatch):
     monkeypatch.setattr(
         _merge,
         "_load_auto_merge",
-        lambda: AutoMergeBlock(enabled=True, require_checks_pass=True),
+        lambda _repo: AutoMergeBlock(enabled=True, require_checks_pass=True),
     )
 
 
@@ -1394,7 +1394,7 @@ def test_merge_never_passes_delete_branch_and_deletes_remote_after(
     monkeypatch.setattr(
         _merge,
         "_load_auto_merge",
-        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
+        lambda _repo: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
     )
     fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
@@ -1420,7 +1420,7 @@ def test_remote_delete_failure_reports_partial_with_recovery(
     monkeypatch.setattr(
         _merge,
         "_load_auto_merge",
-        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
+        lambda _repo: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
     )
 
     class _NoDelete(FakeRun):
@@ -1450,7 +1450,7 @@ def test_fork_pr_skips_remote_delete(
     monkeypatch.setattr(
         _merge,
         "_load_auto_merge",
-        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
+        lambda _repo: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
     )
     fake = FakeRun(
         gh_merge=Result(0, "Merged pull request", ""),
@@ -1476,7 +1476,7 @@ def test_deleted_fork_head_repo_skips_remote_delete(
     monkeypatch.setattr(
         _merge,
         "_load_auto_merge",
-        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
+        lambda _repo: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
     )
     fake = FakeRun(
         gh_merge=Result(0, "Merged pull request", ""),
@@ -1498,7 +1498,7 @@ def test_unreadable_base_repo_reports_partial(
     monkeypatch.setattr(
         _merge,
         "_load_auto_merge",
-        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
+        lambda _repo: AutoMergeBlock(enabled=True, delete_branch_on_merge=True),
     )
     fake = FakeRun(
         gh_merge=Result(0, "Merged pull request", ""),

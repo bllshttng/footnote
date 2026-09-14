@@ -240,7 +240,7 @@ def _phase_a(base: str, cwd: str) -> int:
         return 1
 
     # (6) conflict_resolution policy.
-    if _conflict_resolution() == "fail":
+    if _conflict_resolution(cwd) == "fail":
         _git(["rebase", "--abort"], cwd)
         sys.stderr.write("conflict_resolution=fail; aborting rebase\n")
         _emit(
@@ -267,12 +267,14 @@ def _phase_a(base: str, cwd: str) -> int:
     return 42
 
 
-def _conflict_resolution() -> str:
+def _conflict_resolution(repo: str) -> str:
     """Resolve config.auto_merge.conflict_resolution ("opus"|"fail")."""
     try:
-        from fno.config import load_settings
+        from pathlib import Path
 
-        return load_settings().auto_merge.conflict_resolution
+        from fno.config import load_settings_for_repo
+
+        return load_settings_for_repo(Path(repo)).auto_merge.conflict_resolution
     except Exception:
         # Settings unreadable -> bash default ("opus", auto-resolve attempted).
         return "opus"

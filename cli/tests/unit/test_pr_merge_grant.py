@@ -390,7 +390,7 @@ def _stub_merge_world(monkeypatch, tmp_path):
     """The `enabled` fixture's hermetic stubs from test_pr_merge, narrowed to
     what the durable-arm cases need: gh present, no lane holds, coverage
     covered. Merge-behaviour beyond the authority arm is owned there."""
-    monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
+    monkeypatch.setattr(_merge, "_load_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setattr(

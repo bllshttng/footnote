@@ -110,10 +110,13 @@ def _git(args: Sequence[str], cwd: str):
     return run(["git", *args], cwd=cwd)
 
 
-def _load_auto_merge():
-    from fno.config import load_settings
+def _load_auto_merge(repo: str):
+    # Seeded at the repo this verb merges (ad11eb340's explicit-repo semantics):
+    # the ambient lens can answer a pinned FNO_CONFIG or a foreign cwd, which
+    # is not what the durable-grant arm below reads.
+    from fno.config import load_settings_for_repo
 
-    return load_settings().auto_merge
+    return load_settings_for_repo(Path(repo)).auto_merge
 
 
 # A checkout's toplevel never moves within a process, so the rev-parse
@@ -1939,7 +1942,7 @@ def run_merge(
     # Every refusal names the sanctioned override in its own text (x-3855): a
     # refusal that closes a door without pointing at the key is the one that
     # had two workers improvising config mutations inside sixty seconds.
-    auto_merge = _load_auto_merge()
+    auto_merge = _load_auto_merge(repo)
     state_file = _manifest_file(repo)
     approved = _read_state_field(state_file, "auto_merge_approved")
     if authority == "durable_grant":

@@ -157,7 +157,7 @@ class FakeGH:
 @pytest.fixture
 def gh_on(monkeypatch):
     monkeypatch.setattr(_verify, "_gh_available", lambda: True)
-    monkeypatch.setattr(_verify, "_auto_merge", lambda: AutoMergeBlock(enabled=True))
+    monkeypatch.setattr(_verify, "_auto_merge", lambda _repo: AutoMergeBlock(enabled=True))
 
 
 # ---- verify --kind merged ----
@@ -326,7 +326,7 @@ def test_remediation_verify_only_blocks_exit_1(tmp_path, monkeypatch, capsys):
     sf = _state_file(tmp_path)
     monkeypatch.setattr(_verify, "_gh_available", lambda: True)
     monkeypatch.setattr(
-        _verify, "_auto_merge", lambda: AutoMergeBlock(enabled=True, remediation="verify_only")
+        _verify, "_auto_merge", lambda _repo: AutoMergeBlock(enabled=True, remediation="verify_only")
     )
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN"}])
     monkeypatch.setattr(_verify, "run", fake)
@@ -377,7 +377,7 @@ def test_bounded_remediation_cleanup_split_from_merge(tmp_path, monkeypatch, del
     monkeypatch.setattr(
         _verify,
         "_auto_merge",
-        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=delete_branch),
+        lambda _repo: AutoMergeBlock(enabled=True, delete_branch_on_merge=delete_branch),
     )
     fake = FakeGH(
         toplevel=str(tmp_path),

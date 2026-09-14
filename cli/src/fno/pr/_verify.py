@@ -266,10 +266,12 @@ def _record_merge(state_file: str, pr: str, merged_at: str) -> bool:
         lock.release()
 
 
-def _auto_merge():
-    from fno.config import load_settings
+def _auto_merge(repo: str):
+    # Seeded at the repo this verify run decides for - the ambient lens can
+    # answer a pinned FNO_CONFIG or a foreign cwd (see _merge._load_auto_merge).
+    from fno.config import load_settings_for_repo
 
-    return load_settings().auto_merge
+    return load_settings_for_repo(Path(repo)).auto_merge
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +318,7 @@ def run_verify_merged(
         return 0
 
     repo_root = _repo_root(repo)
-    remediation = _auto_merge().remediation
+    remediation = _auto_merge(repo).remediation
 
     pr_json = _fetch_pr_state(pr_number, repo)
     if pr_json is None:
@@ -386,7 +388,7 @@ def run_verify_merged(
     # still-running check flows into _bounded_remediation, which reports
     # not-green without the misleading "failing" label. Judging pending here
     # would make verify refuse what `fno do pr merge` merges.
-    if _auto_merge().require_checks_pass:
+    if _auto_merge(repo).require_checks_pass:
         from fno.pr._status import without_coverage_statuses
 
         failing = _failing_required(
@@ -491,7 +493,7 @@ def _bounded_remediation(
 ) -> int:
     """Single gh pr merge attempt + single 30s poll (anti-thrash; x-9d11: the
     verb executes - no --auto, no --delete-branch)."""
-    auto_merge = _auto_merge()
+    auto_merge = _auto_merge(repo_root)
     strategy = auto_merge.merge_strategy
     # One authorized merge operation (crates/fno-agents/src/authorized_merge.rs).
     # This arm used to carry its own stacked-base probe, arming stand-down,
