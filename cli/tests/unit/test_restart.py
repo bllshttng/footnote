@@ -50,7 +50,7 @@ def test_restart_restarts_daemon_and_reports_mux(monkeypatch) -> None:
 
     result = runner.invoke(app, ["agents", "restart"])
     assert result.exit_code == 0
-    assert ["/cargo/bin/fno-agents", "restart", "--json"] in calls
+    assert ["/cargo/bin/fno-agents", "restart"] in calls
     assert not any("kill-server" in c for c in calls), "must NOT kill mux without --mux"
     assert "live mux session" in result.output
 
@@ -64,7 +64,48 @@ def test_agents_restart_force_preserves_the_daemon_break_glass_flag(monkeypatch)
     result = runner.invoke(app, ["agents", "restart", "--force"])
 
     assert result.exit_code == 0, result.output
-    assert ["/cargo/bin/fno-agents", "restart", "--json", "--force"] in calls
+    assert ["/cargo/bin/fno-agents", "restart", "--force"] in calls
+
+
+def test_daemon_refusal_renders_once_in_the_command_voice(monkeypatch) -> None:
+    """A binary refusal prints ONCE, prefixed by this command."""
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda cmd, **kw: types.SimpleNamespace(
+            returncode=2,
+            stdout="",
+            stderr="fno-agents: restart takes no arguments besides --force (got: --json)\n",
+        ),
+    )
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart"])
+
+    assert result.exit_code == 1
+    assert "fno agents restart: fno-agents restart exited 2" in result.output
+    assert result.output.count("takes no arguments besides --force") == 1
+
+
+def test_daemon_stderr_note_is_relayed_once_on_success(monkeypatch) -> None:
+    _fake_daemon_binary(monkeypatch)
+    monkeypatch.setattr(
+        restart.subprocess,
+        "run",
+        lambda cmd, **kw: types.SimpleNamespace(
+            returncode=0,
+            stdout="restarted: pid 100 -> 200\n",
+            stderr="note: declining recycled pid\n",
+        ),
+    )
+    monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
+
+    result = runner.invoke(app, ["agents", "restart"])
+
+    assert result.exit_code == 0, result.output
+    assert "agents daemon restarted" in result.output
+    assert result.output.count("note: declining recycled pid") == 1
 
 
 def test_restart_mux_flag_kills_each_session(monkeypatch) -> None:
@@ -484,7 +525,7 @@ def test_restart_cycles_stale_store_keeper_and_ends_on_verdict(monkeypatch) -> N
     assert "store keeper /tmp/graph.json pid 11 shut down" in result.output, result.output
     assert "1 pane keeper(s) run an older build" in result.output
     assert "kept with their panes" in result.output
-    assert ["--json"] == calls[0][-1:], "the daemon leg asks for --json"
+    assert ["restart"] == calls[0][-1:], "the daemon leg passes no subcommand flags"
     assert not any("kill-server" in c for c in calls), "no mux kill"
     last = [ln for ln in result.output.splitlines() if ln.strip()][-1]
     assert last.startswith("fno agents restart: ok - "), last
@@ -506,7 +547,8 @@ def test_restart_verdict_is_failed_when_daemon_fails(monkeypatch) -> None:
     assert result.exit_code == 1
     lines = [ln for ln in result.output.splitlines() if ln.strip()]
     assert lines[-1].startswith("fno agents restart: FAILED - "), lines[-1]
-    assert "survived SIGKILL" in lines[-1], "the daemon error text rides the verdict"
+    assert result.output.count("survived SIGKILL") == 1, "the error text appears once"
+    assert "survived SIGKILL" not in lines[-1], "the verdict names the leg; the say line carries the text"
 
 
 def test_restart_spared_store_keeper_fails_the_verb(monkeypatch) -> None:

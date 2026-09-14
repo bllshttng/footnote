@@ -296,7 +296,7 @@ def restart_command(
         say("fno agents restart: no installed fno-agents binary; skipping daemon restart", err=True)
     else:
         try:
-            daemon_cmd = [str(binary), "restart", "--json"]
+            daemon_cmd = [str(binary), "restart"]
             if force:
                 daemon_cmd.append("--force")
             daemon_proc = subprocess.run(daemon_cmd, capture_output=True, text=True, timeout=120)
@@ -306,8 +306,6 @@ def restart_command(
             say(f"fno agents restart: could not run fno-agents restart ({exc})", err=True)
             failures.append(f"daemon: {exc}")
         else:
-            if daemon_proc.stderr:
-                typer.echo(daemon_proc.stderr, err=True)
             keepers = None
             for line in daemon_proc.stdout.splitlines():
                 if line.startswith("fno agents restart: keepers "):
@@ -323,14 +321,21 @@ def restart_command(
                     say(line)  # unprefixed daemon receipts ("restarted: pid A -> B")
             spared = keepers is not None and any(c.get("result") != "cycled" for c in keepers.get("store_keepers", []))
             if rc == 0 or spared:  # a nonzero exit that IS the spared keeper
+                if daemon_proc.stderr:
+                    typer.echo(daemon_proc.stderr, err=True)
                 result["daemon"] = "restarted"
                 say("fno agents restart: agents daemon restarted (PTY workers survive).")
             else:
+                # One line in this command's voice: the raw refusal names the
+                # argv WE built, so quoting its last line here is the only
+                # place it appears.
                 detail = (daemon_proc.stderr or daemon_proc.stdout or "").strip().splitlines()
                 suffix = f": {detail[-1]}" if detail else ""
                 result["daemon"] = f"failed:{rc}"
                 say(f"fno agents restart: fno-agents restart exited {rc}{suffix}", err=True)
-                failures.append(f"daemon: exit {rc}{suffix}")
+                # The verdict line must not repeat the quoted reason: the say
+                # above is its single appearance.
+                failures.append(f"daemon: exit {rc}")
             if keepers is not None:
                 _fold_keepers(keepers, result, failures)
 
