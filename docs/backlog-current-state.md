@@ -2,7 +2,7 @@
 
 Every node carries ONE `current_state` object next to its `details`: `{body, revision, updated_at, source_session_id, source_harness}`. A note REPLACES it. The exact pre-image of every replacement lands in a permanent journal before the replacement publishes. The hot row stays bounded and no history is lost.
 
-Owner: `crates/fno-agents/src/backlog/node_state.rs` (policy), `note_history.rs` (journal), `note_migrate.rs` (inventory, migration, readback). The public writer is `fno backlog note`; the public reader is `fno backlog notes history <id>`. Their bridges and the shipped recipient walk live in `cli/src/fno/graph/note_cli.py` and `cli/src/fno/backlog/note_notify.py`.
+Owner: `crates/fno-agents/src/backlog/node_state.rs` (policy), `note_history.rs` (journal), `note_migrate.rs` (inventory, migration, readback). The public writer is `fno backlog note`. The public reader is `fno backlog notes history <id>`. Their bridges and the shipped recipient walk live in `cli/src/fno/graph/note_cli.py` and `cli/src/fno/backlog/note_notify.py`.
 
 ## The rules
 
