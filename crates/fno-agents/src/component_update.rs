@@ -712,13 +712,19 @@ mod tests {
     // ---- probe mode (POSIX: the fixtures are sh scripts) ----
 
     fn write_script(dir: &std::path::Path, name: &str, body: &str) -> PathBuf {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
+        // Published atomically (temp sibling + rename, same fix as
+        // tests/common/mod.rs): a direct write onto the exec'd path leaves a
+        // write-open fd that a sibling thread's fork window turns into a
+        // CI-only ETXTBSY.
+        let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+        std::fs::write(&tmp, body).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let p = dir.join(name);
+        std::fs::rename(&tmp, &p).unwrap();
         p
     }
 

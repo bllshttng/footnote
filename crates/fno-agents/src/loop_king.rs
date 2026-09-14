@@ -853,13 +853,19 @@ mod tests {
     /// A shell script standing in for `fno`, executable, printing its
     /// argument on stdout.
     fn write_fno_stub(dir: &Path, stdout: &str) -> std::path::PathBuf {
-        let p = dir.join("fno");
-        std::fs::write(&p, format!("#!/bin/sh\nprintf '%s' '{stdout}'\n")).unwrap();
+        // Published atomically (temp sibling + rename, same fix as
+        // tests/common/mod.rs): a direct write onto the exec'd path leaves a
+        // write-open fd that a sibling thread's fork window turns into a
+        // CI-only ETXTBSY.
+        let tmp = dir.join(format!(".fno.tmp-{}", std::process::id()));
+        std::fs::write(&tmp, format!("#!/bin/sh\nprintf '%s' '{stdout}'\n")).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let p = dir.join("fno");
+        std::fs::rename(&tmp, &p).unwrap();
         p
     }
 
