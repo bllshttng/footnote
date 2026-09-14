@@ -128,6 +128,7 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
     "--split": FlagOwner(FNO, "mux pane placement"),
     "--at": FlagOwner(FNO, "mux exact-origin placement"),
     "--tab": FlagOwner(FNO, "mux tab placement"),
+    "--pane": FlagOwner(FNO, "existing mux pane target; fno validates and starts in place"),
     "--mux-session": FlagOwner(FNO, "dispatch-next porcelain pins its mux lane"),
     "--bounded-placement": FlagOwner(FNO, "serialized placement lane under the mux lease"),
     "--crown": FlagOwner(FNO, "crown ladder; no harness has the concept"),
@@ -144,4 +145,4 @@ FLAG_OWNERS: dict[str, FlagOwner] = {
 
 #: Growth ratchet, measured at merge: 45 flags (44 + --mux-session, the
 #: dispatch-next lane pin).
-SPAWN_FLAG_CAP = 45
+SPAWN_FLAG_CAP = 46
