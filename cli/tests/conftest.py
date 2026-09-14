@@ -414,17 +414,24 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     stub a seam with a Python callable replace this outright (monkeypatch
     order: test wins); out-of-process e2e/parity tests spawn a fresh
     interpreter and never reach this in-process patch.
+
+    launchd is a second seam of the same shape: on 2026-09-08 two unstubbed
+    pr-watch install tests re-registered the operator's real
+    ``sh.fno.pr-watcher`` from a pytest tempdir (x-63aa), so a mutating
+    launchctl verb resolved outside the tmp tree is blocked in EVERY test,
+    smoke included - only the provider half stands down for smoke.
     """
     # Real-provider smoke tests (@pytest.mark.smoke, run nightly by
     # provider-smoke.yml) intentionally exec the real binary; never guard
     # those (codex P2 review). Per-PR CI excludes `-m smoke`. Same for the
     # real-codex boundary job, whose FNO_REAL_CODEX_PLUGIN_TEST=1 env is the
-    # test file's own explicit real-provider opt-in.
-    if (
+    # test file's own explicit real-provider opt-in. The launchctl check
+    # below applies regardless: a smoke test may exec a real provider but
+    # still must not touch the operator's launchd domain.
+    guard_providers = not (
         request.node.get_closest_marker("smoke")
         or os.environ.get("FNO_REAL_CODEX_PLUGIN_TEST") == "1"
-    ):
-        return
+    )
 
     import shutil
     import subprocess
@@ -460,9 +467,37 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
             return True
         return not str(Path(resolved).resolve()).startswith(tmp_root)
 
+    mutating_launchctl_verbs = {
+        "bootstrap", "bootout", "load", "unload", "kickstart",
+        "enable", "disable", "remove", "submit", "start", "stop",
+    }
+
+    def _is_real_launchctl_mutation(cmd) -> bool:
+        if not isinstance(cmd, (list, tuple)) or len(cmd) < 2:
+            return False
+        argv0 = str(cmd[0])
+        if Path(argv0).name != "launchctl":
+            return False
+        if str(cmd[1]) not in mutating_launchctl_verbs:
+            return False
+        # Same discriminator as _is_real_provider_exec: a fake launchctl on a
+        # tmp-isolated PATH may run any verb; an unresolved bare name would
+        # reach the ambient real binary (or fail) -> block.
+        resolved = argv0 if Path(argv0).is_absolute() else (shutil.which(argv0) or "")
+        if not resolved:
+            return True
+        return not str(Path(resolved).resolve()).startswith(tmp_root)
+
     class _GuardedPopen(subprocess.Popen):
         def __init__(self, args, *popenargs, **kwargs):
-            if _is_real_provider_exec(args):
+            if _is_real_launchctl_mutation(args):
+                raise AssertionError(
+                    f"live launchctl mutation blocked under pytest in "
+                    f"{request.node.nodeid}: {args[:2]} would change the "
+                    "operator's launchd domain. Stub _run_launchctl, "
+                    "_run_launchctl_timed or bounce, or pass activate=False."
+                )
+            if guard_providers and _is_real_provider_exec(args):
                 name = args[0] if isinstance(args, (list, tuple)) and args else args
                 raise AssertionError(
                     f"live provider exec blocked under pytest in "

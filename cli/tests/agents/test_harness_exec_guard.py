@@ -9,6 +9,8 @@ prove the complementary half: an un-isolated provider exec is blocked.
 """
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from fno.agents.harnesses import claude as _claude
@@ -46,3 +48,25 @@ def test_guard_allows_fake_under_tmp(tmp_path, monkeypatch):
         ["claude", "--version"], capture_output=True, text=True
     )
     assert result.returncode == 0
+
+
+def test_guard_blocks_live_launchctl_mutation(tmp_path, monkeypatch):
+    """A mutating launchctl verb resolved outside the tmp tree would change the
+    operator's real launchd domain, so the guard must raise before any process
+    starts (x-63aa: two unstubbed pr-watch install tests re-registered
+    sh.fno.pr-watcher from a pytest tempdir and killed every launchd arm)."""
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(AssertionError, match="live launchctl mutation blocked"):
+        subprocess.run(["launchctl", "bootstrap", "gui/501", "/tmp/x.plist"])
+
+
+def test_guard_allows_fake_launchctl_and_read_verbs(tmp_path, monkeypatch):
+    """A fake launchctl on a tmp-isolated PATH may run any verb, including a
+    mutating one - the discriminator is binary location and verb, not the mere
+    presence of launchctl."""
+    fake = tmp_path / "launchctl"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert subprocess.run(["launchctl", "bootout", "gui/501/x"]).returncode == 0
+    assert subprocess.run(["launchctl", "list"]).returncode == 0
