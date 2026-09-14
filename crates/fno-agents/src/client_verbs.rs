@@ -2385,7 +2385,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // support before session_id so an unknown harness surfaces "not supported",
     // then check identity before rendering so a supported harness with no bound
     // session reports the missing binding instead of an invalid argv.
-    let (argv, mut claim_uuid) = if harness == "claude" {
+    let (mut argv, mut claim_uuid) = if harness == "claude" {
         match claude_resume_argv(&ClaudeHome::from_env(), entry, &name) {
             Ok(plan) => plan,
             Err(code) => return code,
@@ -2418,6 +2418,27 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         };
         (v, None)
     };
+
+    // x-3954: a routed codex row re-resolves its route from TODAY's config.
+    // Resolved once here; the loaded-thread wake below runs first and needs no
+    // route (a thread still loaded in the app-server keeps the endpoint its
+    // app-server already holds), so the refusal fires only on the relaunch
+    // path. `argv` is spliced eagerly so `--print-command` and the launch
+    // shapes below all carry the tokens.
+    let codex_route_outcome: Option<Result<Option<crate::codex_route::CodexRoute>, String>> =
+        if harness == "codex" {
+            let outcome = crate::codex_route::resolve_row_route(entry, Path::new(cwd));
+            if let Ok(Some(route)) = &outcome {
+                crate::codex_route::splice_route(&mut argv, route);
+            }
+            Some(outcome)
+        } else {
+            None
+        };
+    let route_provider = entry
+        .get("route_provider_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
 
     // A pane (mux) row carries the session it was launched on; resume puts the
     // worker back THERE via `fno mux pane run`, not in this terminal, so the
@@ -2508,13 +2529,23 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     };
 
     if print_command {
+        // x-3954: an unresolvable codex route refuses even the print form - a
+        // printed unrouted recipe is the same wrong launch, one paste away.
+        if let Some(Err(reason)) = &codex_route_outcome {
+            eprintln!(
+                "fno agents resume: refused: {row_name} was launched on codex route \
+                 {route_provider}, and it cannot be restored ({reason}); \
+                 not relaunching on codex's default provider"
+            );
+            return crate::reentry::REENTRY_REFUSED_EXIT;
+        }
         // x-d285: a claude row prints its CANONICAL plan argv - env prefix,
         // session id, and the recorded --settings together - so the inspection
         // form matches what `fno agents attach` and `recover --print-command`
         // print for the same row. The dead arm's local argv equals the plan's;
         // the live arm's bare attach line did not carry a recorded route.
         // Paths and ids only; nothing from inside the route file is printed.
-        let printed_argv: Vec<String> = match &reentry_plan {
+        let mut printed_argv: Vec<String> = match &reentry_plan {
             Some(plan) => {
                 // Same shape the mux server's verdict prefix builds: env(1)
                 // assignments, then the provider argv.
@@ -2525,6 +2556,17 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             }
             None => argv.clone(),
         };
+        // x-3954: a restored codex route prints its env pairs too, the key
+        // masked - ids and shapes only, never the value from config.
+        if let Some(Ok(Some(route))) = &codex_route_outcome {
+            let mut env_prefix: Vec<String> = route
+                .env_masked()
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            env_prefix.extend(printed_argv.iter().cloned());
+            printed_argv = env_prefix;
+        }
         if let Some(session) = mux_session.as_deref() {
             // Pane form: `fno mux pane run ... -- claude ...`. Path only; nothing
             // from inside the route file reaches the printed command (AC5).
@@ -2662,6 +2704,25 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
+    // x-3954: refuse AFTER the wake (it needs no route) and BEFORE any claim -
+    // nothing launches and no claim is taken when the route cannot be
+    // restored. Relaunching on codex's default provider while holding the
+    // route's identity is the silent wrong-bill shape.
+    if let Some(Err(reason)) = &codex_route_outcome {
+        eprintln!(
+            "fno agents resume: refused: {row_name} was launched on codex route \
+             {route_provider}, and it cannot be restored ({reason}); \
+             not relaunching on codex's default provider"
+        );
+        return crate::reentry::REENTRY_REFUSED_EXIT;
+    }
+    if let Some(Ok(Some(route))) = &codex_route_outcome {
+        eprintln!(
+            "route: restored {} model {} (recorded when {row_name} launched)",
+            route.provider, route.model
+        );
+    }
+
     let resume_id = claim_uuid
         .as_deref()
         .filter(|id| !id.is_empty())
@@ -2701,10 +2762,16 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         // x-d285: the account namespace rides the pane relaunch. The mux CLI
         // forwards its environment to the pane child; the server-side
         // canonical resolution lands with the mux gestures (wave 2.2).
-        let plan_env: Vec<(String, String)> = reentry_plan
+        let mut plan_env: Vec<(String, String)> = reentry_plan
             .as_ref()
             .map(|p| p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
+        // x-3954: the restored route's env (key + provider stamp) rides the
+        // pane relaunch the same way - the child env is the only channel that
+        // can carry the key off the argv.
+        if let Some(Ok(Some(route))) = &codex_route_outcome {
+            plan_env.extend(route.env.clone());
+        }
         let expected_mux = entry.get("mux").and_then(|m| {
             Some(crate::state::MuxRef {
                 session: m.get("session")?.as_str()?.to_string(),
@@ -2784,6 +2851,12 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     exec_command.args(&argv[1..]);
     if let Some(plan) = &reentry_plan {
         for (key, value) in &plan.env {
+            exec_command.env(key, value);
+        }
+    }
+    // x-3954: the restored route's env rides the in-terminal exec.
+    if let Some(Ok(Some(route))) = &codex_route_outcome {
+        for (key, value) in &route.env {
             exec_command.env(key, value);
         }
     }
