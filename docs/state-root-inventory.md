@@ -58,6 +58,7 @@ One file per install. These belong at the root.
 | `mux/threads/<agent>.sock` | `cli/src/fno/agents/dispatch.py::_lane_b_keeper_socket()`, written by each `fno-agents-worker --keeper` it launches (the pane-less lane-B thread keeper; a session-keyed subfolder, never a top-level write) | unlinked by the keeper when its child exits; no server-start sweep yet - the restart journey that owns re-adoption is a later group of the same epic, so until then a crashed keeper's leftover is named by the registry row's `messaging_socket_path` |
 | `mux-view.json`, `.lock` | `crates/fno/src/view_store.rs` (follows the mux state root; `FNO_AGENTS_HOME` overrides) | permanent |
 | `installed-rev`, `installed-rust-rev`, `source-path` | `update.py`, `doctor.py` | permanent |
+| `source-pin.json` | `crates/fno-agents/src/source_pin.rs::record_from_str` via the hidden `fno-agents source-pin record` verb, called from `update._cache_source_path` | permanent; the versioned companion to `source-path` (schema, timestamp, selection origin, worktree kind, branch, both heads, eligibility). Provenance only: eligibility is re-proven live at every resolve, and a companion that disagrees with `source-path` reads as unknown, never evidence |
 | `my-priorities.md` | the operator, by hand or with their own `~/.fno/board.py` scratch script (not a repo file, and not `cli/src/fno/king/board.py`); read via `paths.operator_lane()` | permanent |
 | `plugin-root` | `hooks/session-start.sh` | permanent |
 | `pr-watcher-state.json`, `pr-watcher-state.lock` | `pr_watch/_state.py` | permanent |

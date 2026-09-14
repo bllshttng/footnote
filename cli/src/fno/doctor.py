@@ -1244,13 +1244,17 @@ def _post_merge_sync_health() -> dict[str, Any]:
 
 
 def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
-    """Measure whether the resolved source checkout is behind local ``origin/main``.
+    """Measure whether the resolved source checkout is behind its remote default.
 
     This is deliberately network-free. A source checkout can match its
     installed binary while both predate a merged change; reporting the measured
-    local remote-ref distance prevents that pair from reading as current. A
-    missing or non-ancestor remote ref is unknown, never a fabricated distance.
+    local remote-ref distance prevents that pair from reading as current. The
+    classification lives in the native source-pin authority; a helper that
+    cannot answer degrades to unknown with the failure named, never a
+    fabricated distance.
     """
+    from fno import update
+
     report: dict[str, Any] = {
         "status": "unknown",
         "behind": None,
@@ -1262,63 +1266,16 @@ def _source_checkout_sync(source: Optional[Path]) -> dict[str, Any]:
         report["detail"] = "source checkout not resolved"
         return report
 
-    def git(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", "-C", str(source), *args],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-    try:
-        source_head_proc = git("rev-parse", "HEAD")
-        remote_head_proc = git("rev-parse", "--verify", "origin/main^{commit}")
-    except (OSError, subprocess.SubprocessError) as exc:
-        report["detail"] = f"git source-sync probe failed ({exc})"
+    data = update._source_pin_call("sync", ["--source", str(source)])
+    if data is None:
+        report["detail"] = "source-pin helper unavailable (missing or pre-source-pin fno-agents)"
         return report
 
-    source_head = source_head_proc.stdout.strip()
-    remote_head = remote_head_proc.stdout.strip()
-    if source_head_proc.returncode != 0 or not source_head:
-        report["detail"] = "source checkout HEAD is unreadable"
-        return report
-    report["source_head"] = source_head
-    if remote_head_proc.returncode != 0 or not remote_head:
-        report["detail"] = "origin/main ref is unreadable"
-        return report
-    report["remote_head"] = remote_head
-
-    if source_head == remote_head:
-        report["status"] = "current"
-        report["behind"] = 0
-        return report
-
-    try:
-        ancestor = git("merge-base", "--is-ancestor", "HEAD", "origin/main")
-    except (OSError, subprocess.SubprocessError) as exc:
-        report["detail"] = f"source-sync ancestry probe failed ({exc})"
-        return report
-    if ancestor.returncode != 0:
-        report["detail"] = "source HEAD is not an ancestor of origin/main"
-        return report
-
-    try:
-        distance = git("rev-list", "--count", "HEAD..origin/main")
-    except (OSError, subprocess.SubprocessError) as exc:
-        report["detail"] = f"source-sync distance probe failed ({exc})"
-        return report
-    raw_distance = distance.stdout.strip()
-    try:
-        behind = int(raw_distance)
-    except ValueError:
-        report["detail"] = "origin/main distance is not an integer"
-        return report
-    if distance.returncode != 0 or behind <= 0:
-        report["detail"] = "origin/main distance is unavailable"
-        return report
-
-    report["status"] = "behind"
-    report["behind"] = behind
+    report["status"] = data.get("status", "unknown")
+    report["behind"] = data.get("behind")
+    report["source_head"] = data.get("source_head")
+    report["remote_head"] = data.get("remote_head")
+    report["detail"] = data.get("detail", "")
     return report
 
 

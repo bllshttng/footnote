@@ -63,139 +63,136 @@ def _write_pyproject(directory: Path, name: str = "fno") -> None:
     )
 
 
-def test_looks_like_fno_source_true_for_fno_pyproject(tmp_path: Path) -> None:
-    _write_pyproject(tmp_path / "cli")
-    assert update._looks_like_fno_source(tmp_path / "cli") is True
+def _fake_pin(**overrides):
+    """A native source-pin resolve answer with overridable fields."""
+    pin = {
+        "decision": "allow",
+        "path": "/tmp/fake/cli",
+        "origin": "cache",
+        "worktree_kind": "linked_worktree",
+        "branch": "feature/x",
+        "detached": False,
+        "source_head": "a" * 40,
+        "remote_ref": "origin/main",
+        "remote_head": "b" * 40,
+        "ancestor": True,
+        "eligibility": "eligible",
+        "warning": None,
+        "refusal": None,
+        "detail": None,
+    }
+    pin.update(overrides)
+    return pin
 
 
-def test_looks_like_fno_source_false_for_other_pyproject(tmp_path: Path) -> None:
-    _write_pyproject(tmp_path / "cli", name="something-else")
-    assert update._looks_like_fno_source(tmp_path / "cli") is False
+def test_source_pin_call_parses_native_json(monkeypatch):
+    from fno import rust_binary
 
-
-def test_looks_like_fno_source_false_when_missing(tmp_path: Path) -> None:
-    assert update._looks_like_fno_source(tmp_path / "nonexistent") is False
-
-
-def test_looks_like_fno_source_false_when_name_outside_project_table(
-    tmp_path: Path,
-) -> None:
-    """Guard against false-match: `name = "fno"` outside [project] must not count."""
-    (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "something-else"\nversion = "0.1.0"\n\n'
-        '[tool.example]\nname = "fno"\n',
-        encoding="utf-8",
+    # Hermetic: pin the helper path so the test never depends on a locally
+    # installed binary (CI pytest shards ship none).
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: "/bin/fake-agents")
+    proc = subprocess.CompletedProcess([], 0, stdout=json.dumps(_fake_pin()), stderr="")
+    monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: proc)
+    answer = update._source_pin_call(
+        "resolve", ["--cache", "/tmp/c"], runner=update.subprocess.run
     )
-    assert update._looks_like_fno_source(tmp_path) is False
+    assert answer is not None
+    assert answer["decision"] == "allow"
 
 
-def test_looks_like_fno_source_false_on_malformed_toml(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        "this is not [valid toml = at all",
-        encoding="utf-8",
+def test_source_pin_call_none_when_helper_fails_or_lies(monkeypatch):
+    import subprocess as sp
+
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: "/bin/fake-agents")
+    fail = sp.CompletedProcess([], 2, stdout="", stderr="unknown flag")
+    monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: fail)
+    assert update._source_pin_call("resolve", runner=update.subprocess.run) is None
+    bad = sp.CompletedProcess([], 0, stdout="not json", stderr="")
+    monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: bad)
+    assert update._source_pin_call("resolve", runner=update.subprocess.run) is None
+    boom = sp.CompletedProcess([], 0, stdout="[]", stderr="")
+    monkeypatch.setattr(update.subprocess, "run", lambda *a, **kw: boom)
+    assert update._source_pin_call("resolve", runner=update.subprocess.run) is None
+
+
+def test_source_pin_call_none_without_any_helper(monkeypatch):
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    assert update._source_pin_call("resolve", runner=update.subprocess.run) is None
+
+
+def test_resolve_source_pin_argv_carries_precedence_inputs(tmp_path, monkeypatch):
+    captured: dict = {}
+
+    def fake_call(subcommand, extra=None, runner=None, input_text=None):
+        captured["sub"] = subcommand
+        captured["extra"] = list(extra or [])
+        return _fake_pin()
+
+    monkeypatch.setattr(update, "_source_pin_call", fake_call)
+    monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "source-path")
+    monkeypatch.setattr(update, "_CANDIDATE_PATHS", (tmp_path / "c1",))
+    monkeypatch.setenv("FNO_SOURCE", str(tmp_path / "env-cli"))
+    override = tmp_path / "override-cli"
+    update._resolve_source_pin(override)
+    assert captured["sub"] == "resolve"
+    extra = captured["extra"]
+    assert extra[extra.index("--override") + 1] == str(override.resolve())
+    assert extra[extra.index("--env-source") + 1] == str((tmp_path / "env-cli").resolve())
+    assert extra[extra.index("--cache") + 1] == str(tmp_path / "source-path")
+    assert extra[extra.index("--candidate") + 1] == str((tmp_path / "c1").resolve())
+
+
+def test_discover_source_maps_native_answers(tmp_path, monkeypatch):
+    monkeypatch.delenv("FNO_SOURCE", raising=False)
+    monkeypatch.setattr(
+        update, "_resolve_source_pin", lambda override=None: _fake_pin(path="/tmp/wt/cli")
     )
-    assert update._looks_like_fno_source(tmp_path) is False
-
-
-def test_discover_source_with_override_validates(tmp_path: Path) -> None:
-    src = tmp_path / "cli"
-    _write_pyproject(src)
-    resolved = update._discover_source(override=src)
-    assert resolved == src.resolve()
-
-
-def test_discover_source_with_invalid_override_raises(tmp_path: Path) -> None:
-    bad = tmp_path / "not-fno"
-    _write_pyproject(bad, name="another-package")
-    with pytest.raises(update.SourceNotFoundError, match="does not contain"):
-        update._discover_source(override=bad)
-
-
-def test_discover_source_falls_back_to_env_var(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    src = tmp_path / "cli"
-    _write_pyproject(src)
-    monkeypatch.setenv("FNO_SOURCE", str(src))
-    # Point cache and candidates at empty dirs so env var is the only hit.
-    monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "nonexistent-cache")
-    monkeypatch.setattr(update, "_CANDIDATE_PATHS", (tmp_path / "candidate",))
-    resolved = update._discover_source()
-    assert resolved == src.resolve()
-
-
-def test_discover_source_falls_back_to_cache_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    src = tmp_path / "cli"
-    _write_pyproject(src)
-    cache = tmp_path / "cache" / "source-path"
-    cache.parent.mkdir()
-    cache.write_text(f"{src}\n", encoding="utf-8")
-    monkeypatch.delenv("FNO_SOURCE", raising=False)
-    monkeypatch.setattr(update, "_CACHE_FILE", cache)
-    monkeypatch.setattr(update, "_CANDIDATE_PATHS", (tmp_path / "candidate",))
-    resolved = update._discover_source()
-    assert resolved == src.resolve()
-
-
-def test_discover_source_falls_back_to_candidates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    src = tmp_path / "candidate-cli"
-    _write_pyproject(src)
-    monkeypatch.delenv("FNO_SOURCE", raising=False)
-    monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "no-cache")
-    monkeypatch.setattr(update, "_CANDIDATE_PATHS", (src,))
-    resolved = update._discover_source()
-    assert resolved == src.resolve()
-
-
-def test_discover_source_raises_when_nothing_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("FNO_SOURCE", raising=False)
-    monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "no-cache")
-    monkeypatch.setattr(update, "_CANDIDATE_PATHS", (tmp_path / "candidate",))
+    assert update._discover_source() == Path("/tmp/wt/cli")
+    # A refused-but-resolved pin still yields its path: doctor probes the
+    # checkout for staleness evidence regardless of the update gate.
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda override=None: _fake_pin(decision="refuse", path="/tmp/wt/cli"),
+    )
+    assert update._discover_source() == Path("/tmp/wt/cli")
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda override=None: _fake_pin(path=None, refusal="Could not locate the fno CLI source."),
+    )
     with pytest.raises(update.SourceNotFoundError, match="Could not locate"):
+        update._discover_source()
+    # Helper missing/malformed fails closed with the repair named.
+    monkeypatch.setattr(update, "_resolve_source_pin", lambda override=None: None)
+    with pytest.raises(update.SourceNotFoundError, match="could not answer source-pin"):
         update._discover_source()
 
 
-def test_discover_source_priority_override_beats_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Explicit --source should always win over env var, cache, and candidates."""
-    override_src = tmp_path / "override-cli"
-    env_src = tmp_path / "env-cli"
-    _write_pyproject(override_src)
-    _write_pyproject(env_src)
-    monkeypatch.setenv("FNO_SOURCE", str(env_src))
-    resolved = update._discover_source(override=override_src)
-    assert resolved == override_src.resolve()
+def test_cache_source_path_records_both_pins(tmp_path, monkeypatch):
+    captured: dict = {}
 
+    def fake_call(subcommand, extra=None, runner=None, input_text=None):
+        captured["sub"] = subcommand
+        captured["extra"] = list(extra or [])
+        captured["stdin"] = input_text
+        return {}
 
-def test_cache_source_path_writes_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cache = tmp_path / "subdir" / "source-path"
-    monkeypatch.setattr(update, "_CACHE_FILE", cache)
-    update._cache_source_path(Path("/some/source/path"))
-    assert cache.is_file()
-    assert cache.read_text(encoding="utf-8").strip() == "/some/source/path"
-
-
-def test_cache_source_path_silent_on_oserror(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Cache failures must not propagate - missing cache just means re-discovery."""
-    # Point cache at a path whose parent cannot be created (a regular file).
-    blocker = tmp_path / "blocker"
-    blocker.write_text("not a directory")
-    monkeypatch.setattr(update, "_CACHE_FILE", blocker / "child" / "source-path")
-    # Should not raise.
-    update._cache_source_path(Path("/some/source"))
-
-
+    monkeypatch.setattr(update, "_source_pin_call", fake_call)
+    monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "source-path")
+    update._cache_source_path(_fake_pin(path=str(tmp_path / "wt" / "cli")))
+    assert captured["sub"] == "record"
+    assert captured["extra"][captured["extra"].index("--cache") + 1] == str(tmp_path / "source-path")
+    assert "--companion" in captured["extra"]
+    assert json.loads(captured["stdin"])["path"] == str(tmp_path / "wt" / "cli")
+    # Best-effort: a failed record never raises; a non-dict pin is ignored.
+    monkeypatch.setattr(update, "_source_pin_call", lambda *a, **kw: None)
+    update._cache_source_path(_fake_pin())
+    update._cache_source_path({})
 # ---------------------------------------------------------------------------
 # Fix 7: OSError reading target-state.md must fail SAFE (return True = IN_PROGRESS)
 # ---------------------------------------------------------------------------
@@ -1332,6 +1329,11 @@ def test_ac1_hp_cli_rust_fires_before_execvp(
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")
     monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "source-path")
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {"decision": "allow", "path": str(cli_src), "warning": None, "refusal": None},
+    )
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
     # Stub rev helpers directly so subprocess.run stub does not need stdout
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: crate_rev)
@@ -1465,6 +1467,11 @@ def test_ac1_err_cli_execvp_still_called_after_cargo_failure(
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")
     monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "source-path")
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {"decision": "allow", "path": str(cli_src), "warning": None, "refusal": None},
+    )
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
     # Stub rev helpers directly so subprocess.run stub does not need stdout
     monkeypatch.setattr(update, "_rust_subtree_rev", lambda s: crate_rev)
@@ -1609,6 +1616,11 @@ def test_ac1_edge_no_rust_flag_skips_refresh(
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", tmp_path / "installed-rust-rev")
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")
     monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "source-path")
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {"decision": "allow", "path": str(cli_src), "warning": None, "refusal": None},
+    )
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
 
     tripwire_called = []
@@ -1636,6 +1648,11 @@ def test_ac1_edge_dry_run_shows_both_would_run_lines(
     monkeypatch.setattr(update, "_RUST_MARKER_FILE", marker_file)
     monkeypatch.setattr(update, "_INSTALLED_REV_FILE", tmp_path / "installed-rev")
     monkeypatch.setattr(update, "_CACHE_FILE", tmp_path / "source-path")
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {"decision": "allow", "path": str(cli_src), "warning": None, "refusal": None},
+    )
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
 
     # Provide a cargo binary so the rust leg does not short-circuit to skip
@@ -2666,7 +2683,16 @@ def _guard_env(
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims-home"))
     src = tmp_path / "src"
     _write_pyproject(src)
-    monkeypatch.setattr(update, "_discover_source", lambda source=None: src)
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {
+            "decision": "allow",
+            "path": str(src),
+            "warning": None,
+            "refusal": None,
+        },
+    )
     monkeypatch.setattr(update, "_target_in_progress", lambda: False)
     rust_calls: list = []
     monkeypatch.setattr(
@@ -2956,3 +2982,46 @@ def test_running_components_adapter_carries_rows(monkeypatch) -> None:
     # No installed binary is the dark-census arm, independent of the runner.
     monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     assert update.running_components(runner=_run) is None
+
+
+def test_update_readiness_reports_gate_refusal(monkeypatch, tmp_path) -> None:
+    """A refused-but-resolved source pin blocks readiness: update_ready False,
+    guidance says update blocked with the native refusal, and the payload
+    carries the structured pin verdict (the advisory surface agrees with the
+    mutating path's gate)."""
+    _readiness_env(monkeypatch, tmp_path, installed_rev="aaa1111", source_rev="bbb2222")
+    monkeypatch.setattr(update, "running_components", lambda runner: [])
+    refusal = "refusing source /tmp/wt/cli: linked worktree branch feature/x HEAD a is not an ancestor of origin/main HEAD b."
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {
+            "decision": "refuse",
+            "path": str(tmp_path / "cli"),
+            "eligibility": "divergent",
+            "refusal": refusal,
+            "warning": None,
+        },
+    )
+
+    result = update.update_readiness(runner=_make_runner(mux_rc=1, agent_rc=1))
+
+    assert result["update_ready"] is False
+    assert "update blocked" in result["guidance"]
+    assert "feature/x" in result["guidance"]
+    assert result["source_pin"]["eligibility"] == "divergent"
+    # The positive control: an eligible pin leaves readiness to the revs.
+    monkeypatch.setattr(
+        update,
+        "_resolve_source_pin",
+        lambda source=None: {
+            "decision": "allow",
+            "path": str(tmp_path / "cli"),
+            "eligibility": "eligible",
+            "refusal": None,
+            "warning": None,
+        },
+    )
+    ok = update.update_readiness(runner=_make_runner(mux_rc=1, agent_rc=1))
+    assert ok["update_ready"] is True
+    assert "update blocked" not in ok["guidance"]

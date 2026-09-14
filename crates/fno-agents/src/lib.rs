@@ -196,6 +196,7 @@ pub(crate) mod served_liveness;
 pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod single_flight;
+pub mod source_pin;
 pub mod spawn_axes;
 pub mod spawn_gate;
 pub mod spawn_overlay;

@@ -19,6 +19,20 @@ The resolved local source checkout is the comparison boundary. Doctor does not f
 
 The source-checkout sync field is independent of installed-binary freshness. `source_checkout_sync.status` is `current`, `behind`, or `unknown`. A `behind` result carries the positive `behind` commit count plus both heads. Unknown source-sync evidence never invents a distance or changes the binary freshness fields.
 
+## Update source eligibility: the source-pin gate
+
+Source selection is itself a freshness hazard. The resolution cache stored a bare path. A linked worktree whose HEAD had diverged from the remote default branch was measured installing machine-wide twice (2026-09-09 and 2026-09-13). Every later `fno doctor update` re-installed that branch. The stale pin and the pin-relative freshness check were self-consistent and permanently wrong.
+
+The whole decision is now native, in `crates/fno-agents/src/source_pin.rs`, served by the hidden `fno-agents source-pin resolve|record|sync` verb. Python (`cli/src/fno/update.py`, `cli/src/fno/doctor.py`) is transport only: it assembles the precedence inputs (`--source`, `$FNO_SOURCE`, the `~/.fno/source-path` cache, the fixed candidates), parses the JSON answer, and renders. The precedence ORDER, package-identity validation, worktree classification (main checkout / linked worktree / non-git), live ancestry evidence, and the allow/refuse decision all live in Rust. A pre-`source-pin` helper fails update closed with the repair named. It never falls back to the unsafe cache path.
+
+- An implicit linked-worktree pick must prove its HEAD is an ancestor of the local remote-default ref (`refs/remotes/origin/HEAD`, else `origin/main`). Otherwise update refuses before any install or pin write. Unprovable ancestry refuses too, naming the failed instrument.
+- An explicit `--source` stays the one escape hatch. It is accepted with a warning naming path, branch or detached state, and both heads. `$FNO_SOURCE` alone never bypasses the refusal.
+- Non-git packaged candidates keep their existing behavior.
+- `record` atomically maintains BOTH pins. One is the legacy `source-path` file, kept for rollback. The other is the versioned companion `~/.fno/source-pin.json` with schema, timestamp, origin, worktree kind, branch, both heads, and eligibility. The companion is provenance only. Eligibility is always re-proven live.
+- `sync` serves doctor's `source_checkout_sync` fields from the same probes, so no second ancestry classifier exists in Python.
+
+`fno doctor` prints the deployed build commit beside the source checkout, so the lag this gate prevents is visible without probing binaries by hand.
+
 The hidden `fno doctor plugin-file <active-skill-path>` diagnostic compares the active `skills/<name>/SKILL.md` bytes with the matching source file. When both files are readable, it reports `PLUGIN_FILE_FRESH`, `PLUGIN_FILE_STALE`, or `PLUGIN_FILE_UNKNOWN` with SHA-256 values. It exits 0, 3, or 4 respectively. A proven stale Claude cache names `claude plugin update fno@footnote`, session restart, and the fact that `fno doctor update` does not refresh the Claude plugin registry.
 
 Review instructions run this diagnostic before argument routing. A stale active skill stops the review before any lane marker or attestation can be produced. When comparison is unknown, the diagnostic warns and continues. This keeps a green CLI and a green emitter from hiding stale instructions that route the review elsewhere.
