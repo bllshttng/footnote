@@ -194,7 +194,9 @@ def test_map_covers_current_surface_once():
     # (provider-cap and compaction among them) and this branch allocates
     # `doctor evals macro`, its forwarded `evals macro` spelling, and the
     # binary-first `agents evals-macro` action the dispatchers expose.
-    assert len(mapped) == 622, (
+    # This branch allocates `agents backlog-note` and `agents backlog-notes`,
+    # the two native note verbs: counted from the merged file, 622 -> 624.
+    assert len(mapped) == 624, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

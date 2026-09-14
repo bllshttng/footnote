@@ -7,10 +7,15 @@
 //! rows in one transaction.
 
 pub mod api;
+pub mod commands;
 pub mod comments;
 pub mod encounters;
 pub mod model;
+pub mod node_state;
 pub mod nodes;
+pub mod note_cli;
+pub mod note_history;
+pub mod note_migrate;
 pub mod pull_requests;
 pub mod relations;
 pub mod sessions;
