@@ -448,20 +448,23 @@ if [[ -n "$findings_file" ]]; then
   # stays for `declare` and for hand runs with no findings file.
   # The declared scope rides BOTH emit paths, and so does the branch: classify
   # re-resolves the branch from cwd, which in a reviewer worktree names the
-  # LOCAL checkout, not the PR (x-a8a1) - the --branch passthrough keeps the
-  # delegated row byte-identical to the typed path's. The hold join/release
-  # inside classify still key on its own cwd-resolved local name, which is
-  # what the hook set the hold under.
+  # LOCAL checkout, not the PR (x-a8a1). The rewrite's result crosses through
+  # FNO_ATTEST_BRANCH - a new typer.Option is refused by the flag-surface
+  # ratchet (scripts/ci/check_flag_registry.py), so the producer passes the
+  # branch through the environment. The hold join/release inside classify
+  # still key on its own cwd-resolved local name, which is what the hook set
+  # the hold under.
   if [[ -n "$review_round" ]]; then
-    "${FNO:-fno}" do review classify --findings-file "$findings_file" \
+    FNO_ATTEST_BRANCH="$branch" "${FNO:-fno}" do review classify \
+      --findings-file "$findings_file" \
       --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
       --execution-context "$execution_context" --output-contract "$output_contract" \
-      --review-round "$review_round" --branch "$branch" >/dev/null
+      --review-round "$review_round" >/dev/null
   else
-    "${FNO:-fno}" do review classify --findings-file "$findings_file" \
+    FNO_ATTEST_BRANCH="$branch" "${FNO:-fno}" do review classify \
+      --findings-file "$findings_file" \
       --emit-record --attest "$reviewer" --reviewer-context "$reviewer_context" \
-      --execution-context "$execution_context" --output-contract "$output_contract" \
-      --branch "$branch" >/dev/null
+      --execution-context "$execution_context" --output-contract "$output_contract" >/dev/null
   fi
 else
   data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \

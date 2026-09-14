@@ -194,75 +194,94 @@ class TestClassifyReviewRoundOption:
         assert r.exit_code == 2, r.output
 
 
+def _mock_attest_world(monkeypatch, tmp_path):
+    """Mock everything `_attest_from_record` reads outside the record itself.
+
+    The cwd resolves branch `review/pr-1` (the reviewer-worktree shape); the
+    row's branch field is what the caller resolved, the hold release is what
+    the hook keyed. Returns (captured row data, ordered call markers).
+    """
+    import fno.events as events_mod
+    from fno.review import cli as review_cli
+
+    captured: dict = {}
+    calls: list[str] = []
+    real_build = events_mod._build
+
+    def spy_build(kind, source, data):
+        captured.update(data)
+        return real_build(kind, source, data)
+
+    git = {
+        ("symbolic-ref", "--short", "refs/remotes/origin/HEAD"): "origin/main",
+        ("merge-base", "HEAD", "origin/main"): "base0000",
+        ("diff", "--name-only", "base0000..HEAD"): "a.py\n",
+        ("diff", "--numstat", "base0000..HEAD"): "3\t1\ta.py\n",
+    }
+    monkeypatch.setattr(review_cli, "_git_out", lambda *args: git.get(tuple(args), ""))
+    monkeypatch.setattr(
+        "fno.review.invocation._settle_head_pin", lambda cwd: ("head1234", "review/pr-1")
+    )
+    monkeypatch.setattr(
+        "fno.harness_identity.resolve_attester_identity", lambda: ("sess-a", "witness")
+    )
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda *a, **kw: tmp_path)
+    monkeypatch.setattr("fno.paths.project_log", lambda *a, **kw: tmp_path / "events.jsonl")
+    monkeypatch.setattr("fno.events._build", spy_build)
+    monkeypatch.setattr("fno.events.append_event", lambda *a, **kw: calls.append("append"))
+    monkeypatch.setattr("fno.events.cli.mirror_to_global_log", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "fno.pr._review_hold.release_review_hold",
+        lambda branch, **kw: calls.append(f"release:{branch}"),
+    )
+    return captured, calls
+
+
 class TestAttestBranchOverride:
-    """`--branch` overrides the attested ROW's branch field only (x-a8a1).
+    """`FNO_ATTEST_BRANCH` overrides the attested ROW's branch field only (x-a8a1).
 
     The shell producer resolves the PR branch with its upstream rewrite; the
     verb must record it without re-deriving a local name from cwd. The hold
     join and release stay keyed on the cwd-resolved name the hook used.
     """
 
-    def _attest(self, monkeypatch, tmp_path, **kwargs):
-        import fno.events as events_mod
+    def test_override_replaces_the_row_branch_hold_keeps_cwd(self, tmp_path, monkeypatch) -> None:
         from fno.review import cli as review_cli
 
-        captured: dict = {}
-        calls: list[str] = []
-        real_build = events_mod._build
-
-        def spy_build(kind, source, data):
-            captured.update(data)
-            return real_build(kind, source, data)
-
-        git = {
-            ("symbolic-ref", "--short", "refs/remotes/origin/HEAD"): "origin/main",
-            ("merge-base", "HEAD", "origin/main"): "base0000",
-            ("diff", "--name-only", "base0000..HEAD"): "a.py\n",
-            ("diff", "--numstat", "base0000..HEAD"): "3\t1\ta.py\n",
-        }
-        monkeypatch.setattr(review_cli, "_git_out", lambda *args: git.get(tuple(args), ""))
-        monkeypatch.setattr(
-            "fno.review.invocation._settle_head_pin", lambda cwd: ("head1234", "review/pr-1")
-        )
-        monkeypatch.setattr(
-            "fno.harness_identity.resolve_attester_identity", lambda: ("sess-a", "witness")
-        )
-        monkeypatch.setattr("fno.paths.resolve_repo_root", lambda *a, **kw: tmp_path)
-        monkeypatch.setattr("fno.paths.project_log", lambda *a, **kw: tmp_path / "events.jsonl")
-        monkeypatch.setattr("fno.events._build", spy_build)
-        monkeypatch.setattr("fno.events.append_event", lambda *a, **kw: calls.append("append"))
-        monkeypatch.setattr("fno.events.cli.mirror_to_global_log", lambda *a, **kw: None)
-        monkeypatch.setattr(
-            "fno.pr._review_hold.release_review_hold",
-            lambda branch, **kw: calls.append(f"release:{branch}"),
-        )
-
+        captured, calls = _mock_attest_world(monkeypatch, tmp_path)
         verdict = review_cli._attest_from_record(
             {"findings_blocking": 0, "findings_nonblocking": 0, "findings": []},
             "code-review",
             "unknown",
             tmp_path / "findings.json",
-            **kwargs,
-        )
-        return verdict, captured, calls
-
-    def test_override_replaces_the_row_branch_hold_keeps_cwd(self, tmp_path, monkeypatch) -> None:
-        verdict, row, calls = self._attest(
-            monkeypatch, tmp_path, branch_override="feature/x-pr"
+            branch_override="feature/x-pr",
         )
         assert verdict == "pass"
-        assert row["branch"] == "feature/x-pr"
+        assert captured["branch"] == "feature/x-pr"
         assert calls == ["append", "release:review/pr-1"]
 
     def test_no_override_keeps_the_cwd_branch(self, tmp_path, monkeypatch) -> None:
-        verdict, row, calls = self._attest(monkeypatch, tmp_path)
+        from fno.review import cli as review_cli
+
+        captured, calls = _mock_attest_world(monkeypatch, tmp_path)
+        verdict = review_cli._attest_from_record(
+            {"findings_blocking": 0, "findings_nonblocking": 0, "findings": []},
+            "code-review",
+            "unknown",
+            tmp_path / "findings.json",
+        )
         assert verdict == "pass"
-        assert row["branch"] == "review/pr-1"
+        assert captured["branch"] == "review/pr-1"
         assert calls == ["append", "release:review/pr-1"]
 
 
-class TestClassifyBranchOption:
-    """The `--branch` flag rides the attest leg only; the record never carries it."""
+class TestClassifyBranchEnv:
+    """`FNO_ATTEST_BRANCH` rides the attest leg only; the record never carries it.
+
+    The flag-surface ratchet (scripts/ci/check_flag_registry.py) refuses a new
+    typer.Option on the attest flow, so the producer-resolved PR branch crosses
+    through the environment instead of a flag.
+    """
 
     def _invoke(self, tmp_path, payload, *extra):
         from typer.testing import CliRunner
@@ -276,13 +295,33 @@ class TestClassifyBranchOption:
             ["classify", "--findings-file", str(findings), "--emit-record", *extra],
         )
 
-    def test_empty_branch_name_refuses(self, tmp_path) -> None:
-        r = self._invoke(tmp_path, [_finding(1)], "--attest", "code-review", "--branch", "")
-        assert r.exit_code == 2, r.output
-
-    def test_branch_alone_does_not_touch_the_record(self, tmp_path) -> None:
-        r = self._invoke(tmp_path, [_finding(1)], "--branch", "feature/x")
+    def test_env_alone_does_not_touch_the_record(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("FNO_ATTEST_BRANCH", "feature/x")
+        r = self._invoke(tmp_path, [_finding(1)])
         assert r.exit_code == 0, r.output
         record = json.loads(r.output)
         assert "branch" not in record
         assert record["findings_blocking"] == 1
+
+    def test_classify_attest_sources_the_override_from_the_env(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The wiring end to end: classify --attest reads the env, the row
+        records the producer-resolved branch, the hold release stays local."""
+        from typer.testing import CliRunner
+
+        from fno.review import cli as review_cli
+        from fno.review.cli import review_app
+
+        captured, calls = _mock_attest_world(monkeypatch, tmp_path)
+        monkeypatch.setenv("FNO_ATTEST_BRANCH", "feature/x-pr")
+        findings = tmp_path / "findings.json"
+        findings.write_text(json.dumps([_finding(1)]), encoding="utf-8")
+        r = CliRunner().invoke(
+            review_app,
+            ["classify", "--findings-file", str(findings), "--attest", "code-review"],
+            catch_exceptions=False,
+        )
+        assert r.exit_code == 0, r.output
+        assert captured["branch"] == "feature/x-pr"
+        assert calls == ["append", "release:review/pr-1"]

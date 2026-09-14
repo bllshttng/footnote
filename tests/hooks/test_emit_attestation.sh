@@ -487,7 +487,7 @@ if [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then
   exit 0
 fi
 if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
-  f=""; attest=""; ctx="unknown"; xctx="inline"; contract="json_block"; obranch=""; shift 3
+  f=""; attest=""; ctx="unknown"; xctx="inline"; contract="json_block"; shift 3
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --findings-file) f="$2"; shift 2 ;;
@@ -495,7 +495,6 @@ if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
       --reviewer-context) ctx="$2"; shift 2 ;;
       --execution-context) xctx="$2"; shift 2 ;;
       --output-contract) contract="$2"; shift 2 ;;
-      --branch) obranch="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -504,8 +503,8 @@ if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
     # The verb's contract, stubbed against the fixture repo (cwd): measure
     # the verdict from the classified record (prose_unparseable always fails),
     # measure the diff, merge, and write the ONE emit the shell delegates to.
-    # --branch, when the producer passed one, overrides the row's branch field
-    # ONLY - the verb's own contract under test, mirrored here.
+    # FNO_ATTEST_BRANCH, when the producer set it, overrides the row's branch
+    # field ONLY - the verb's own contract under test, mirrored here.
     if [[ "$contract" == "prose_unparseable" ]]; then
       verdict="fail"
     else
@@ -513,7 +512,7 @@ if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
     fi
     merged="$(jq -cn --argjson rec "$record" --arg reviewer "$attest" --arg verdict "$verdict" \
       --arg head "$(git rev-parse HEAD)" \
-      --arg branch "${obranch:-$(git rev-parse --abbrev-ref HEAD)}" \
+      --arg branch "${FNO_ATTEST_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}" \
       --arg base "$(git merge-base HEAD origin/main)" \
       --arg ctx "$ctx" --arg xctx "$xctx" --arg contract "$contract" \
       '$rec + {reviewer:$reviewer,head_sha:$head,verdict:$verdict,session_id:"",branch:$branch,reviewed_base_sha:$base,reviewed_head_sha:$head,reviewer_context:$ctx,execution_context:$xctx,output_contract:$contract,invocation_id:"UNJOINED"}')"

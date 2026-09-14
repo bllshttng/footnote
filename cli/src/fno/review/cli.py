@@ -189,6 +189,9 @@ def _attest_from_record(
     (the shell producer) resolved the PR branch with its upstream rewrite,
     which this verb must not re-derive from cwd. Hold join and release keep
     the cwd-resolved local name the hook keyed the hold under (x-a8a1).
+    classify sources it from ``FNO_ATTEST_BRANCH`` - the flag-surface ratchet
+    (scripts/ci/check_flag_registry.py) refuses a new typer.Option here, so
+    the producer passes the branch through the environment instead.
 
     The emitted row carries the same fields the shell producer writes, the
     reviewed ranges included: a row without ``reviewed_base_sha`` contributes
@@ -416,7 +419,9 @@ def classify(
         "--attest",
         help="Reviewer name: also write the head-pinned review_attestation row, "
         "with the verdict the classifier measured (pass only on zero blocking "
-        "findings). Empty: classify only, no event.",
+        "findings). Empty: classify only, no event. Set FNO_ATTEST_BRANCH to "
+        "override the row's branch field with a caller-resolved PR branch "
+        "(hold join/release keep the cwd-resolved local name).",
     ),
     reviewer_context: str = typer.Option(
         "unknown",
@@ -443,14 +448,6 @@ def classify(
         "onto the record and the attested row when the invocation carried "
         "--verify-fixes, so the counter reads the round it verified. Absent: "
         "the pass counts as a fresh round.",
-    ),
-    branch: Optional[str] = typer.Option(
-        None,
-        "--branch",
-        help="Override the attested row's branch field ONLY: the PR branch the "
-        "caller already resolved (the shell producer's upstream rewrite), which "
-        "this verb must not re-derive from cwd. Hold join and release keep the "
-        "cwd-resolved local name.",
     ),
 ) -> None:
     """Classify a findings payload; the one shell entry point producers share."""
@@ -501,12 +498,7 @@ def classify(
                 err=True,
             )
             raise typer.Exit(code=2)
-        branch_override = branch.strip() if branch else ""
-        if branch is not None and not branch_override:
-            typer.secho(
-                "classify: --branch needs a branch name; no event emitted", err=True
-            )
-            raise typer.Exit(code=2)
+        branch_override = os.environ.get("FNO_ATTEST_BRANCH", "").strip()
         _attest_from_record(
             record,
             attest.strip(),
