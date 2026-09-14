@@ -627,9 +627,17 @@ fn lanes_answer(
     providers.dedup();
 
     let mut lanes = Map::new();
+    // One journal read for the whole probe: every provider's lane count
+    // judges the same waiting-worker question at the same instant.
+    let questions_raw = spawn_gate_lanes::read_questions_journal(registry_path, warnings);
     for provider in providers {
         let cap = spawn_gate_lanes::provider_lanes_cap(config_cwd, &provider);
-        match spawn_gate_lanes::provider_live_count(registry_path, &provider, warnings) {
+        match spawn_gate_lanes::provider_live_count_with_questions(
+            registry_path,
+            &provider,
+            &questions_raw,
+            warnings,
+        ) {
             Ok((live, counted, parked)) => {
                 let mut lane = Map::new();
                 lane.insert("cap".into(), json!(cap));

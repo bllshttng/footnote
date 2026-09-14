@@ -320,18 +320,12 @@ fn awaiting_operator(
     waiting
 }
 
-/// IO wrapper over `awaiting_operator`: reads the questions journal beside the
-/// agents home (`<fno_dir>/questions.jsonl`, the path `needs.rs`
-/// `default_sources` reads) and measures transcript quiet through the claude
-/// transcript lookup. Never fails: a missing journal means no questions, and
-/// any other read error pushes one warning and means no questions, so waiting
-/// workers stay counted.
-pub(crate) fn read_awaiting_operator(
-    registry_path: &Path,
-    rows: &[&RegistryEntry],
-    warnings: &mut Vec<String>,
-) -> BTreeMap<String, String> {
-    let raw = match registry_path.parent().and_then(Path::parent) {
+/// The raw questions journal beside the agents home (`<fno_dir>/questions.jsonl`,
+/// the path `needs.rs` `default_sources` reads). Never fails: a missing journal
+/// means no questions, and any other read error pushes one warning and means no
+/// questions, so waiting workers stay counted.
+pub(crate) fn read_questions_journal(registry_path: &Path, warnings: &mut Vec<String>) -> String {
+    match registry_path.parent().and_then(Path::parent) {
         Some(fno_dir) => {
             let path = fno_dir.join("questions.jsonl");
             std::fs::read_to_string(path).unwrap_or_else(|e| {
@@ -344,15 +338,31 @@ pub(crate) fn read_awaiting_operator(
             })
         }
         None => String::new(),
-    };
-    awaiting_operator(rows, &raw, |sid| {
-        let path = crate::claude_drive::find_transcript(sid)?;
-        let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
-        std::time::SystemTime::now()
-            .duration_since(modified)
-            .ok()
-            .map(|d| d.as_secs())
-    })
+    }
+}
+
+/// Transcript quiet in seconds for a claude session id; `None` when the
+/// transcript cannot be found or its age cannot be read.
+fn transcript_age_s(sid: &str) -> Option<u64> {
+    let path = crate::claude_drive::find_transcript(sid)?;
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    std::time::SystemTime::now()
+        .duration_since(modified)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// IO wrapper over `awaiting_operator`: reads the questions journal and
+/// measures transcript quiet through the claude transcript lookup. Never
+/// fails: an unreadable journal reads as no questions, so waiting workers
+/// stay counted.
+pub(crate) fn read_awaiting_operator(
+    registry_path: &Path,
+    rows: &[&RegistryEntry],
+    warnings: &mut Vec<String>,
+) -> BTreeMap<String, String> {
+    let raw = read_questions_journal(registry_path, warnings);
+    awaiting_operator(rows, &raw, transcript_age_s)
 }
 
 /// Count rows of ONE provider only when status and positive liveness agree
@@ -364,6 +374,18 @@ pub(crate) fn read_awaiting_operator(
 pub(crate) fn provider_live_count(
     registry_path: &Path,
     provider: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(usize, Vec<String>, Vec<(String, String)>), String> {
+    let questions_raw = read_questions_journal(registry_path, warnings);
+    provider_live_count_with_questions(registry_path, provider, &questions_raw, warnings)
+}
+
+/// The same count over a pre-read journal, so a caller counting MANY providers
+/// (the lanes probe) reads the journal once instead of once per provider.
+pub(crate) fn provider_live_count_with_questions(
+    registry_path: &Path,
+    provider: &str,
+    questions_raw: &str,
     warnings: &mut Vec<String>,
 ) -> Result<(usize, Vec<String>, Vec<(String, String)>), String> {
     let registry =
@@ -405,7 +427,7 @@ pub(crate) fn provider_live_count(
         .filter(|row| row.provider.as_deref() == Some(provider))
         .collect();
 
-    let waiting = read_awaiting_operator(registry_path, &candidates, warnings);
+    let waiting = awaiting_operator(&candidates, questions_raw, transcript_age_s);
 
     let bg_short_ids: BTreeSet<String> = candidates
         .iter()
