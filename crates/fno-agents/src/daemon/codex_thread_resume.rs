@@ -25,7 +25,7 @@ pub(super) async fn ensure_codex_thread_handle(
     };
     // A resumed thread with no cwd reads alive yet can never run a turn: the
     // app-server accepts the resume, so without this guard the daemon makes
-    // its own liveness evidence for a dead row (the x-f313 leak).
+    // its own liveness evidence for a dead row.
     if !cwd.is_dir() {
         return Err(format!(
             "codex thread '{}' cwd {} no longer exists; resume refused",

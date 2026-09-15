@@ -415,7 +415,7 @@ async fn recovery_stamps_a_failed_codex_thread_resume_orphaned() {
 /// Recovery refuses a codex thread row whose cwd is gone before any
 /// `thread/resume` frame leaves, and settles it Orphaned through the same
 /// failed-resume arm: a resumed thread with no cwd reads alive and can
-/// never run a turn (the x-f313 leak). A row whose cwd still exists
+/// never run a turn. A row whose cwd still exists
 /// resumes and goes Live. Two fake-daemon scopes because the registry
 /// forbids two rows sharing one harness_session_id and the fake answers
 /// one configured id.

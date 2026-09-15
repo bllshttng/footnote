@@ -151,8 +151,8 @@ PY
 cleanup() {
     if [[ "${FNO_PORTAL_LIVE:-0}" == "1" ]]; then
         # The LIVE run plants its threads in the real agents home by design;
-        # without this removal every run leaks rows the daemon then re-hosts
-        # (the x-f313 leak). The assert reads cwds under TMP_DIR, so it runs
+        # without this removal every run leaks rows the daemon then re-hosts.
+        # The assert reads cwds under TMP_DIR, so it runs
         # before that directory is removed.
         "$MUX_BIN" agents rm "$CLAUDE_NAME" --force >/dev/null 2>&1 || true
         "$MUX_BIN" agents rm "$CODEX_NAME" --force >/dev/null 2>&1 || true
