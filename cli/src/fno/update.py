@@ -973,7 +973,14 @@ def _restart_drifted_daemon(*, dry_run: bool = False) -> None:
         typer.echo(f"fno doctor update: WARNING: daemon restart did not run ({exc}); "
                    "run `fno agents restart`", err=True)
         return
-    said = next((l for l in proc.stdout.splitlines() if l.startswith(("restarted", "forced", "daemon was not running"))), "")
+    said = next(
+        (
+            line
+            for line in proc.stdout.splitlines()
+            if line.startswith(("restarted", "forced", "daemon was not running"))
+        ),
+        "",
+    )
     if proc.returncode == 0:
         typer.echo(f"fno doctor update: restarted the drifted agents daemon ({said or 'ok'})", err=True)
     else:
