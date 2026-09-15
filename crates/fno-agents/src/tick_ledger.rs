@@ -109,6 +109,11 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         default_interval_s: crate::provider_cap::PROVIDER_CAP_INTERVAL_S,
         scheduler: SCHED_DAEMON,
     },
+    ArmSpec {
+        arm: "merge_close",
+        default_interval_s: crate::merge_close::MERGE_CLOSE_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+    },
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token
@@ -985,10 +990,10 @@ mod tests {
     }
 
     /// AC8-HP: the readout knows the arm even before its first tick - one
-    /// `KNOWN_ARMS` row, daemon scheduler, the 300s beat.
+    /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
-    fn arm_watch_is_the_eleventh_known_arm_and_provider_cap_the_twelfth() {
-        assert_eq!(KNOWN_ARMS.len(), 12);
+    fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
+        assert_eq!(KNOWN_ARMS.len(), 13);
         let spec = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "arm_watch")
@@ -1004,6 +1009,15 @@ mod tests {
             crate::provider_cap::PROVIDER_CAP_INTERVAL_S
         );
         assert_eq!(cap.scheduler, SCHED_DAEMON);
+        let mc = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "merge_close")
+            .expect("merge_close row");
+        assert_eq!(
+            mc.default_interval_s,
+            crate::merge_close::MERGE_CLOSE_INTERVAL_S
+        );
+        assert_eq!(mc.scheduler, SCHED_DAEMON);
     }
 
     fn write_rows(path: &Path, rows: &[Value]) {

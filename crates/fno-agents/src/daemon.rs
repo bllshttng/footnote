@@ -2207,6 +2207,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut last_liveness_sweep = Instant::now();
     // Machine watch (x-d6ad): the arm owns its cadence, gate and memory.
     let machine_watch = crate::machine_watch::Arm::default();
+    // Merge close: the arm owns its cadence and gate; the sweep runs the
+    // bare reconcile that closes a merged PR's node with no session alive.
+    let merge_close = crate::merge_close::Arm::default();
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
@@ -2379,6 +2382,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 );
                 // The machine gets an arm (x-d6ad): bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
+                // Merged nodes close even when no session is alive.
+                crate::merge_close::maybe_tick(&merge_close, ctx.home.clone());
                 crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
                 crate::provider_cap_verbs::maybe_tick(&provider_cap, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's measurement,
@@ -2413,14 +2418,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         terminal_stop_sweep(&home, &emitter).await;
                     });
                 }
-                // Stale-question reconcile: rows past the wake ceiling are the
-                // watchdog's needs-human bucket, and no lane acts on them, so
-                // the durable question channel is the only surface they reach.
-                // This arm is that channel's trigger. Its own 6h stamp bounds
-                // discovery lag; the verb inside dedupes on outcome identity,
-                // so an eager run costs one sweep and asks nothing. The verb
-                // never gets an apply form: this lane routes information and
-                // changes no removal path.
+                // Stale-question reconcile, the arm above `stale_sweep`: its
+                // doc comment there covers the shape.
                 if !stale_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     let flag = Arc::clone(&stale_sweep_in_flight);
                     let home = ctx.home.clone();
