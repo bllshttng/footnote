@@ -101,6 +101,7 @@ pub mod drift;
 pub mod envelope;
 pub mod evals_arm;
 pub mod evals_macro;
+pub mod evals_trend;
 pub mod events;
 pub mod events_limits;
 pub mod evidence;

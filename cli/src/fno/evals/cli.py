@@ -157,150 +157,58 @@ def run_command(
     raise typer.Exit(code=0)
 
 
-@evals_app.command("trend")
-def trend_command() -> None:
-    """Score the recent window against the prior one (docs/evals.md, Trend).
+@evals_app.command(
+    "trend",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def trend_command(ctx: typer.Context) -> None:
+    """Score the recent window against the prior one; the fold is native
+    (fno-agents evals-trend, d-b6cc1a2a). Exit 4 when regressed."""
+    _forward_evals_native(ctx.args, "trend")
 
-    Exit codes:
-      0  rendered (or no data)
-      4  regressed: a regression-tier task dropped against the prior window
 
-    Zero typer.Options by design (x-72fc): the Python flag surface never
-    grows, so the trend view is a leaf, not a --trend flag on report.
-    """
-    from datetime import datetime, timezone
+@evals_app.command(
+    "report",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def report_command(ctx: typer.Context) -> None:
+    """Fold evals history: tiers, pass@1, pass^k, flakes, alarm. A pure argv
+    forwarder (d-b6cc1a2a); the flags are the binary's. Exit 4 on alarm."""
+    _forward_evals_native(ctx.args, "report")
 
+
+def _forward_evals_native(extra: list[str], mode: str) -> None:
+    """Resolve the history default and stale window, run the native fold,
+    propagate its exit code (4 = alarm/regressed). Missing binary exits 2."""
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
     from fno.config import load_settings
-    from fno.evals.report import compare_windows, load_rows
     from fno.paths import evals_history
+    from fno.rust_binary import resolve_binary
 
-    history_file = evals_history()
-    if not history_file.exists():
-        typer.echo("evals trend: no_data (no history yet)")
-        raise typer.Exit(code=0)
-    view = compare_windows(
-        load_rows(history_file),
-        window_days=int(load_settings().evals.stale_days),
-        now=datetime.now(timezone.utc),
-    )
-    typer.echo(_render_trend(view))
-    raise typer.Exit(code=4 if view["regressed"] else 0)
-
-
-def _render_trend(view: dict) -> str:
-    lines = [f"Eval trend: prior since {view['prior_start']}, recent since {view['recent_start']}"]
-    for tid, t in view["tasks"].items():
-        p, r = t["prior"], t["recent"]
-        lines.append(
-            f"  {tid}  prior {p['pass_at_1']:.0%} ({p['runs']})  "
-            f"recent {r['pass_at_1']:.0%} ({r['runs']})  "
-            f"delta={t['delta']:+.2f}  {t['verdict']}"
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno doctor evals: the fno-agents binary was not found. It ships in the "
+            "`pip install fno` wheel and with the plugin; reinstall fno or run "
+            "`fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
+            err=True,
         )
-    for label, miss in (("prior", view["missing_in_prior"]),
-                        ("recent", view["missing_in_recent"])):
-        if miss:
-            lines.append(f"  missing in {label}: {', '.join(miss)}")
-    if view["regressed"]:
-        lines.append(f"  REGRESSED: {', '.join(view['regressed'])}")
-    return "\n".join(lines)
-
-
-@evals_app.command("report")
-def report_command(
-    since: Optional[int] = typer.Option(None, "--since", help="Fold only the most recent N runs."),
-    graduate: bool = typer.Option(False, "--graduate", help="List capability tasks eligible to graduate."),
-    n: int = typer.Option(3, "--consecutive", help="Consecutive passes required for graduation eligibility."),
-    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
-    compare: Optional[str] = typer.Option(None, "--compare", help="Score this variant round (v<N>) against baseline instead of the default fold."),
-    history_file: Optional[Path] = typer.Option(None, "--history", help="History file (default: paths.evals_history())."),
-) -> None:
-    """Fold evals history: per-tier pass rates, pass@1, pass^k, flakes, alarm.
-
-    Exit codes:
-      0  report rendered (or no data); a --compare view never fires the alarm
-      4  regression alarm: a regression-tier task is below 100% in the window
-    """
-    import json as _json
-
-    from datetime import datetime, timezone
-
-    from fno.config import load_settings
-    from fno.evals.report import (
-        build_report,
-        compare_variants,
-        graduation_candidates,
-        load_rows,
-    )
-
-    if history_file is None:
-        from fno.paths import evals_history
-        history_file = evals_history()
-
-    if compare is not None:
-        if not VARIANT_RE.match(compare):
-            typer.echo(f"Error: --compare must be 'baseline' or 'v<N>', got '{compare}'", err=True)
-            raise typer.Exit(code=1)
-        cmp = compare_variants(load_rows(history_file, since=since, variant=None), compare)
-        if json_output:
-            typer.echo(_json.dumps(cmp, indent=2))
-        else:
-            for tid, t in cmp["tasks"].items():
-                b, v = t["baseline"], t["variant"]
-                typer.echo(
-                    f"  {tid}  baseline {b['pass_at_1']:.0%} ({b['runs']})  "
-                    f"{cmp['variant']} {v['pass_at_1']:.0%} ({v['runs']})  "
-                    f"delta={t['delta']:+.2f}  {t['verdict']}"
-                )
-            for label, miss in (("baseline", cmp["missing_in_baseline"]),
-                                (cmp["variant"], cmp["missing_in_variant"])):
-                if miss:
-                    typer.echo(f"  missing in {label}: {', '.join(miss)}")
-            typer.echo(f"  diff: git diff {cmp['baseline_rev']} {cmp['variant_rev']}")
-        raise typer.Exit(code=0)
-
-    rows = load_rows(history_file, since=since)
-    # The default report's alarm reads the recent window (x-cf8f). An
-    # unreadable config degrades to the all-rows fold instead of crashing.
+        raise typer.Exit(code=2)
     try:
-        window_days: Optional[int] = int(load_settings().evals.stale_days)
-    except Exception:  # noqa: BLE001 - the report renders without config
-        window_days = None
-    report = build_report(
-        rows,
-        now=datetime.now(timezone.utc) if window_days is not None else None,
-        window_days=window_days,
-    )
-
-    if graduate:
-        candidates = graduation_candidates(rows, n=n)
-        report["graduation_eligible"] = candidates
-
-    if json_output:
-        typer.echo(_json.dumps(report, indent=2))
-    elif report["no_data"]:
-        typer.echo("evals report: no_data (no history yet)")
-    else:
-        typer.echo("Evals report:")
-        for tier, agg in report["tiers"].items():
-            typer.echo(f"  {tier}: {agg['passes']}/{agg['runs']} pass ({agg['pass_rate']:.0%})")
-        for t in report["tasks"]:
-            mark = "FLAKE" if t["flake"] else ("PASS" if t["pass_k"] else "FAIL")
-            typer.echo(
-                f"    {t['tier']:11} {t['task_id']}: pass@1={t['pass_at_1']:.0%} "
-                f"pass^{t['runs']}={t['pass_k']} [{mark}]"
-            )
-        if report["flakes"]:
-            typer.echo(f"  flakes: {', '.join(report['flakes'])}")
-        if report["regression_alarm"]:
-            typer.echo(f"  REGRESSION ALARM: {', '.join(report['regression_alarm'])} below 100%")
-        if graduate:
-            elig = report.get("graduation_eligible") or []
-            typer.echo(
-                f"  graduation-eligible: {', '.join(elig)}" if elig
-                else "  graduation-eligible: none"
-            )
-
-    raise typer.Exit(code=4 if report["regression_alarm"] else 0)
+        stale_days = int(load_settings().evals.stale_days)
+    except Exception:  # noqa: BLE001 - an unreadable config reads the default
+        stale_days = 7
+    argv = [
+        str(binary), "evals-trend",
+        "--mode", mode,
+        "--history", str(evals_history()),
+        "--stale-days", str(stale_days),
+        *extra,
+    ]
+    result = subprocess.run(argv, check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 @evals_app.command(

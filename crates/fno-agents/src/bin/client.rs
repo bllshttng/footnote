@@ -160,6 +160,13 @@ fn main() {
     if args.first().map(String::as_str) == Some("evals-arm") {
         std::process::exit(fno_agents::evals_arm::run_evals_arm(&args[1..]));
     }
+    // `evals-trend` (x-cf8f): the eval report fold and the windowed trend,
+    // native under d-b6cc1a2a. Transport-only, dispatched here like
+    // evals-arm: the Python report/trend leaves pass --history and
+    // --stale-days and forward the rest.
+    if args.first().map(String::as_str) == Some("evals-trend") {
+        std::process::exit(fno_agents::evals_trend::run_evals_trend(&args[1..]));
+    }
     let code = rt.block_on(run(args));
     std::process::exit(code);
 }

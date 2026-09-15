@@ -238,10 +238,8 @@ def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
 
 def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
     """The eval bank's demand leg (x-cf8f): guards and the receipt parse here;
-    the due read, the gate, the detached run and the journal live in the
-    native ``evals-arm``, which holds the ``evals:scheduled-run`` claim across
-    ticks. Every failure shape lands as ``arm_failed``, never out of the tick.
-    """
+    the due read, gate, detached run and journal live in native evals-arm.
+    Every failure lands as ``arm_failed``, never out of the tick."""
     evals_cfg = getattr(settings, "evals", None)
     days = int(getattr(evals_cfg, "schedule_days", 0) or 0)
     interval_s = days * 86400
@@ -1256,8 +1254,6 @@ def tick() -> None:
                 except Exception as exc:  # noqa: BLE001 - never let heal break the tick
                     log.warning("pr-watch: heal phase failed: %s", exc)
 
-        # The eval bank's demand leg (x-cf8f): the body is the native
-        # evals-arm; the tick never runs the bank inline.
         def _phase_evals(_slice_s: float) -> None:
             set_tick_phase("evals")
             _run_evals_arm_phase(settings, seconds_left_fn=phase_seconds_left)

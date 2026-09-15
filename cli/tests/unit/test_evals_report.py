@@ -1,6 +1,14 @@
-"""Report fold + graduation (US3): AC2-HP, AC6-HP."""
+"""Report fold, graduation, and the native forwarders (d-b6cc1a2a).
+
+The windowed alarm, the trend windows, variant compare, and graduation
+candidates are native in `crates/fno-agents/src/evals_trend/` and tested
+there. Python keeps the all-rows fold, load_rows, the graduation file
+rewrite, and the summary caller; these tests pin the Python surface and the
+forwarder argv contract.
+"""
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -12,13 +20,9 @@ from fno.evals.cli import evals_app
 from fno.evals.report import (
     GraduateError,
     build_report,
-    compare_variants,
-    compare_windows,
     evals_health_summary,
     graduate_task_file,
-    graduation_candidates,
     load_rows,
-    window_rows,
 )
 
 runner = CliRunner()
@@ -28,7 +32,8 @@ def _row(task_id: str, tier: str, passed: bool) -> dict:
     return {"task_id": task_id, "tier": tier, "pass": passed}
 
 
-# AC2-HP: a task run 3 times with 2 passes -> pass@1 = 2/3, pass^3 False, flake.
+# --- the all-rows fold that stayed in Python -------------------------------
+
 def test_pass_k_report() -> None:
     rows = [_row("t", "capability", True), _row("t", "capability", False),
             _row("t", "capability", True)]
@@ -43,8 +48,7 @@ def test_pass_k_report() -> None:
 
 def test_regression_alarm_fires_below_100() -> None:
     rows = [_row("r", "regression", True), _row("r", "regression", False)]
-    report = build_report(rows)
-    assert report["regression_alarm"] == ["r"]
+    assert build_report(rows)["regression_alarm"] == ["r"]
 
 
 def test_regression_alarm_silent_at_100() -> None:
@@ -62,10 +66,10 @@ def test_graduated_task_excludes_pre_graduation_failures() -> None:
         _row("t", "regression", True),   # first post-graduation run, green
     ]
     report = build_report(rows)
-    assert report["regression_alarm"] == []  # no false alarm
+    assert report["regression_alarm"] == []
     task = report["tasks"][0]
     assert task["tier"] == "regression"
-    assert task["runs"] == 1 and task["passes"] == 1  # only the post-graduation run
+    assert task["runs"] == 1 and task["passes"] == 1
     assert report["tiers"]["regression"]["pass_rate"] == 1.0
 
 
@@ -73,7 +77,7 @@ def test_regression_alarm_still_fires_on_real_post_graduation_failure() -> None:
     rows = [
         _row("t", "capability", True),
         _row("t", "regression", True),
-        _row("t", "regression", False),  # real regression after graduation
+        _row("t", "regression", False),
     ]
     assert build_report(rows)["regression_alarm"] == ["t"]
 
@@ -98,22 +102,8 @@ def test_since_folds_recent_only(tmp_path: Path) -> None:
     assert len(rows) == 2 and all(r["pass"] for r in rows)
 
 
-def test_graduation_candidates_last_n_pass() -> None:
-    rows = [_row("cap", "capability", False)] + [_row("cap", "capability", True)] * 3
-    assert graduation_candidates(rows, n=3) == ["cap"]
+# --- graduation (unchanged semantics) ---------------------------------------
 
-
-def test_graduation_needs_n_runs() -> None:
-    rows = [_row("cap", "capability", True), _row("cap", "capability", True)]
-    assert graduation_candidates(rows, n=3) == []
-
-
-def test_graduation_skips_regression_tier() -> None:
-    rows = [_row("r", "regression", True)] * 3
-    assert graduation_candidates(rows, n=3) == []
-
-
-# AC6-HP: graduate rewrites the YAML tier, preserving comments.
 def test_graduate_task_file_rewrites_tier(tmp_path: Path) -> None:
     p = tmp_path / "cap.yaml"
     p.write_text("# a comment\nid: cap\ntier: capability  # hill\ngrade:\n  - {kind: exit, command: pytest}\n",
@@ -135,9 +125,31 @@ def test_evals_health_summary_none_without_history(tmp_path: Path) -> None:
     assert evals_health_summary(tmp_path / "absent.jsonl") is None
 
 
-def test_evals_health_summary(tmp_path: Path) -> None:
+# --- the summary caller (x-ab72 age fields; native alarm/regressed) ---------
+
+_NOW = datetime(2026, 9, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _ts(dt: datetime) -> str:
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _days_ago(n: float) -> str:
+    return _ts(_NOW - timedelta(days=n))
+
+
+def _quiet_native(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the native summary read so the test never spawns a binary."""
+    monkeypatch.setattr(
+        "fno.evals.report._native_summary_reads", lambda _p, _d: ([], [])
+    )
+
+
+def test_evals_health_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "fno.evals.report._native_summary_reads", lambda _p, _d: (["r"], [])
+    )
     hp = tmp_path / "h.jsonl"
-    # ts pinned: the summary's alarm reads the recent window (x-cf8f).
     recent = _ts(_NOW - timedelta(hours=1))
     _history.append_row(hp, {**_row("r", "regression", True), "ts": recent})
     _history.append_row(hp, {**_row("r", "regression", False), "ts": recent})
@@ -149,18 +161,12 @@ def test_evals_health_summary(tmp_path: Path) -> None:
     assert summary["regressed"] == []
 
 
-# --- age fields (x-ab72): the demand side ---
-
-_NOW = datetime(2026, 9, 15, 12, 0, 0, tzinfo=timezone.utc)
-
-
-def _ts(dt: datetime) -> str:
-    return dt.isoformat().replace("+00:00", "Z")
-
-
-def test_health_summary_stale_when_newest_regression_old(tmp_path: Path) -> None:
+def test_health_summary_stale_when_newest_regression_old(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _quiet_native(monkeypatch)
     hp = tmp_path / "h.jsonl"
-    _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(_NOW - timedelta(days=9))})
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": _days_ago(9)})
     summary = evals_health_summary(hp, stale_days=7, now=_NOW)
     assert summary is not None
     assert summary["stale"] is True
@@ -168,18 +174,24 @@ def test_health_summary_stale_when_newest_regression_old(tmp_path: Path) -> None
     assert summary["never_ran"] is False
 
 
-def test_health_summary_fresh_inside_window(tmp_path: Path) -> None:
+def test_health_summary_fresh_inside_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _quiet_native(monkeypatch)
     hp = tmp_path / "h.jsonl"
-    _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(_NOW - timedelta(days=2))})
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": _days_ago(2)})
     summary = evals_health_summary(hp, stale_days=7, now=_NOW)
     assert summary is not None
     assert summary["stale"] is False
     assert summary["age_days"] == pytest.approx(2.0, abs=0.01)
 
 
-def test_health_summary_never_ran_when_no_regression_row(tmp_path: Path) -> None:
+def test_health_summary_never_ran_when_no_regression_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _quiet_native(monkeypatch)
     hp = tmp_path / "h.jsonl"
-    _history.append_row(hp, {**_row("cap", "capability", True), "ts": _ts(_NOW - timedelta(days=1))})
+    _history.append_row(hp, {**_row("cap", "capability", True), "ts": _days_ago(1)})
     summary = evals_health_summary(hp, stale_days=7, now=_NOW)
     assert summary is not None
     assert summary["never_ran"] is True
@@ -188,7 +200,10 @@ def test_health_summary_never_ran_when_no_regression_row(tmp_path: Path) -> None
     assert summary["regression_pass_rate"] is None
 
 
-def test_health_summary_unreadable_ts_never_asserts_stale(tmp_path: Path) -> None:
+def test_health_summary_unreadable_ts_never_asserts_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _quiet_native(monkeypatch)
     hp = tmp_path / "h.jsonl"
     _history.append_row(hp, {**_row("r", "regression", True), "ts": "not-a-timestamp"})
     summary = evals_health_summary(hp, stale_days=7, now=_NOW)
@@ -198,7 +213,10 @@ def test_health_summary_unreadable_ts_never_asserts_stale(tmp_path: Path) -> Non
     assert summary["never_ran"] is False
 
 
-def test_health_summary_rows_without_ts_never_assert_stale(tmp_path: Path) -> None:
+def test_health_summary_rows_without_ts_never_assert_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _quiet_native(monkeypatch)
     hp = tmp_path / "h.jsonl"
     _history.append_row(hp, _row("r", "regression", True))
     summary = evals_health_summary(hp, stale_days=7, now=_NOW)
@@ -216,14 +234,30 @@ def test_health_summary_stale_days_resolves_from_config(
         evals = _Evals()
 
     monkeypatch.setattr("fno.evals.report.load_settings", lambda: _Settings())
+    _quiet_native(monkeypatch)
     hp = tmp_path / "h.jsonl"
-    _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(_NOW - timedelta(days=3))})
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": _days_ago(3)})
     summary = evals_health_summary(hp, now=_NOW)
     assert summary is not None
     assert summary["stale"] is True
 
 
-# --- variant axis: a missing variant key reads as baseline ---
+def test_health_summary_reads_the_native_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "fno.evals.report._native_summary_reads", lambda _p, _d: (["r"], ["r"])
+    )
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": _days_ago(1)})
+    summary = evals_health_summary(hp, stale_days=7, now=_NOW)
+    assert summary is not None
+    assert summary["regression_alarm"] == ["r"]
+    assert summary["regressed"] == ["r"]
+    assert summary["window_days"] == 7
+
+
+# --- variant axis: a missing variant key reads as baseline ------------------
 
 def test_load_rows_missing_variant_reads_as_baseline(tmp_path: Path) -> None:
     hp = tmp_path / "h.jsonl"
@@ -249,77 +283,66 @@ def test_since_applies_after_variant_filter(tmp_path: Path) -> None:
     assert len(rows) == 1 and rows[0]["variant"] == "v1"
 
 
-def test_compare_variants_improved() -> None:
-    rows = [
-        {**_row("t", "regression", True), "variant": "baseline"},
-        {**_row("t", "regression", False), "variant": "baseline"},
-        {**_row("t", "regression", True), "variant": "v1"},
-        {**_row("t", "regression", True), "variant": "v1"},
-    ]
-    cmp = compare_variants(rows, "v1")
-    t = cmp["tasks"]["t"]
-    assert t["delta"] == 0.5 and t["verdict"] == "improved"
-    assert t["baseline"]["runs"] == 2 and t["variant"]["runs"] == 2
+# --- CLI forwarders: argv contract + exit propagation -----------------------
+
+def _forwarder_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, returncode: int = 0) -> dict:
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: tmp_path / "fno-agents")
+    captured: dict = {}
+
+    def fake_run(argv, check=False):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, returncode)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return captured
 
 
-def test_variant_fails_do_not_fire_baseline_alarm(tmp_path: Path) -> None:
+def test_forwarder_refuses_without_the_binary(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno import rust_binary
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: None)
+    for leaf in ("report", "trend"):
+        res = runner.invoke(evals_app, [leaf])
+        assert res.exit_code == 2
+        assert "binary was not found" in res.output
+
+
+def test_forwarder_argv_composition(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Evals:
+        stale_days = 9
+
+    class _Settings:
+        evals = _Evals()
+
+    monkeypatch.setattr("fno.config.load_settings", lambda: _Settings())
     hp = tmp_path / "h.jsonl"
-    _history.append_row(hp, {**_row("t", "regression", True), "variant": "baseline"})
-    _history.append_row(hp, {**_row("t", "regression", False), "variant": "v1"})
-    report = build_report(load_rows(hp))
-    assert report["regression_alarm"] == []
-    assert report["tasks"][0]["runs"] == 1
+    monkeypatch.setattr("fno.paths.evals_history", lambda: hp)
+    captured = _forwarder_fakes(monkeypatch, tmp_path)
+    for leaf, mode in (("report", "report"), ("trend", "trend")):
+        captured.clear()
+        res = runner.invoke(evals_app, [leaf, "--json", "--since", "5"])
+        assert res.exit_code == 0
+        argv = captured["argv"]
+        assert argv[0] == str(tmp_path / "fno-agents")
+        assert argv[1] == "evals-trend"
+        assert argv[argv.index("--mode") + 1] == mode
+        assert argv[argv.index("--history") + 1] == str(hp)
+        assert argv[argv.index("--stale-days") + 1] == "9"
+        assert "--json" in argv
+        assert argv[argv.index("--since") + 1] == "5"
 
 
-def test_compare_missing_sides() -> None:
-    rows = [
-        {**_row("u", "regression", True), "variant": "baseline"},
-        {**_row("w", "regression", True), "variant": "v1"},
-    ]
-    cmp = compare_variants(rows, "v1")
-    assert cmp["missing_in_variant"] == ["u"]
-    assert cmp["missing_in_baseline"] == ["w"]
-    assert "u" not in cmp["tasks"] and "w" not in cmp["tasks"]
-
-
-def test_compare_scores_one_revision_pair() -> None:
-    rows = [
-        {**_row("t", "regression", True), "variant": "baseline", "bank_rev": "new"},
-        {**_row("t", "regression", True), "variant": "baseline", "bank_rev": "new"},
-        {**_row("t", "regression", False), "variant": "baseline", "bank_rev": "old"},
-        {**_row("t", "regression", True), "variant": "v1", "bank_rev": "v1rev"},
-    ]
-    cmp = compare_variants(rows, "v1")
-    t = cmp["tasks"]["t"]
-    # only the modal-rev baseline rows score: the "old" failure is excluded
-    assert t["baseline"]["runs"] == 2
-    assert t["baseline"]["pass_at_1"] == 1.0
-    assert cmp["baseline_rev"] == "new" and cmp["variant_rev"] == "v1rev"
-
-
-def test_common_rev_tie_breaks_deterministically() -> None:
-    from fno.evals.report import _common_rev
-
-    assert _common_rev([{"bank_rev": "bbb"}, {"bank_rev": "aaa"}]) == "aaa"
-
-
-# --- CLI ---
-
-def test_report_cli_regression_alarm_exit_4(tmp_path: Path) -> None:
-    hp = tmp_path / "h.jsonl"
-    # ts inside the recent window: the default report's alarm reads the
-    # window since x-cf8f.
-    _history.append_row(hp, {**_row("r", "regression", False), "ts": _ts(datetime.now(timezone.utc))})
-    res = runner.invoke(evals_app, ["report", "--history", str(hp)])
+def test_forwarder_exit_code_propagation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fno.paths.evals_history", lambda: tmp_path / "h.jsonl")
+    captured = _forwarder_fakes(monkeypatch, tmp_path, returncode=4)
+    res = runner.invoke(evals_app, ["report"])
     assert res.exit_code == 4
-    assert "REGRESSION ALARM" in res.stdout
+    assert captured["argv"][1] == "evals-trend"
 
 
-def test_report_cli_no_data_exit_0(tmp_path: Path) -> None:
-    res = runner.invoke(evals_app, ["report", "--history", str(tmp_path / "none.jsonl")])
-    assert res.exit_code == 0
-    assert "no_data" in res.stdout
-
+# --- graduate CLI (unchanged) -----------------------------------------------
 
 def test_graduate_cli(tmp_path: Path) -> None:
     d = tmp_path / "bank"
@@ -340,152 +363,13 @@ def test_graduate_cli_unknown_id_exit_1(tmp_path: Path) -> None:
     assert res.exit_code == 1
 
 
-# --- AC4: the trend readback CLI ---
+# --- regression guards from the port (d-b6cc1a2a) ---------------------------
 
-def _cli_rows(hp: Path) -> None:
-    now = datetime.now(timezone.utc)
-    prior = _ts(now - timedelta(days=10))
-    recent = _ts(now - timedelta(days=1))
-    for _ in range(3):
-        _history.append_row(hp, {**_row("r", "regression", True), "ts": prior})
-    _history.append_row(hp, {**_row("r", "regression", True), "ts": recent})
-    _history.append_row(hp, {**_row("r", "regression", False), "ts": recent})
-    _history.append_row(hp, {**_row("r", "regression", False), "ts": recent})
+def test_fold_symbols_are_gone_from_python() -> None:
+    """The windowed/compare/graduation-candidate folds live in Rust now; the
+    Python module must not carry a second implementation (law d-b6cc1a2a)."""
+    import fno.evals.report as report_module
 
-
-# AC4-HP: 3-of-3 prior then 1-of-3 recent -> regressed, exit 4.
-def test_trend_cli_regressed_exit_4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    hp = tmp_path / "h.jsonl"
-    _cli_rows(hp)
-    monkeypatch.setattr("fno.paths.evals_history", lambda: hp)
-    res = runner.invoke(evals_app, ["trend"])
-    assert res.exit_code == 4
-    assert "REGRESSED: r" in res.stdout
-    assert "prior" in res.stdout and "recent" in res.stdout
-
-
-def test_trend_cli_healthy_exit_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    hp = tmp_path / "h.jsonl"
-    now = datetime.now(timezone.utc)
-    for days in (10.0, 1.0):
-        for _ in range(2):
-            _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(now - timedelta(days=days))})
-    monkeypatch.setattr("fno.paths.evals_history", lambda: hp)
-    res = runner.invoke(evals_app, ["trend"])
-    assert res.exit_code == 0
-    assert "REGRESSED" not in res.stdout
-
-
-# AC4-ERR: no history prints no_data at exit 0.
-def test_trend_cli_no_data_exit_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("fno.paths.evals_history", lambda: tmp_path / "none.jsonl")
-    res = runner.invoke(evals_app, ["trend"])
-    assert res.exit_code == 0
-    assert "no_data" in res.stdout
-
-
-# --- time axis: the windowed alarm and the trend (x-cf8f) ---
-
-def _ts_row(task_id: str, tier: str, passed: bool, ts: str) -> dict:
-    return {**_row(task_id, tier, passed), "ts": ts}
-
-
-def _days_ago(n: float) -> str:
-    return _ts(_NOW - timedelta(days=n))
-
-
-# AC1-HP: the 50-day-old 3-min flake no longer fires the windowed alarm,
-# while the all-rows long view still folds every run.
-def test_windowed_alarm_silent_when_all_rows_old() -> None:
-    day0 = _days_ago(49)
-    rows = ([_ts_row("r", "regression", False, day0)] * 3
-            + [_ts_row("r", "regression", True, day0)] * 20)
-    report = build_report(rows, now=_NOW, window_days=7)
-    assert report["regression_alarm"] == []
-    task = report["tasks"][0]
-    assert task["runs"] == 23 and task["passes"] == 20
-    assert task["pass_at_1"] == pytest.approx(20 / 23, abs=1e-4)
-
-
-# AC1-ERR: a real within-window drop fires the alarm, the trend and regressed.
-def test_compare_windows_regressed_and_windowed_alarm_names_it() -> None:
-    rows = ([_ts_row("r", "regression", True, _days_ago(10))] * 3
-            + [_ts_row("r", "regression", True, _days_ago(1))]
-            + [_ts_row("r", "regression", False, _days_ago(1))] * 2)
-    cmp = compare_windows(rows, window_days=7, now=_NOW)
-    assert cmp["tasks"]["r"]["verdict"] == "regressed"
-    assert cmp["regressed"] == ["r"]
-    report = build_report(rows, now=_NOW, window_days=7)
-    assert report["regression_alarm"] == ["r"]
-
-
-def test_window_rows_half_open_and_unparseable_ts_excluded() -> None:
-    inside = _days_ago(3)
-    end_edge = _ts(_NOW)                      # end inclusive
-    start_edge = _days_ago(7)                 # start exclusive
-    old = _days_ago(30)
-    rows = [_ts_row("t", "regression", True, s) for s in (inside, end_edge, start_edge, old)]
-    rows.append({**_row("t", "regression", True), "ts": "not-a-timestamp"})
-    got = window_rows(rows, _NOW - timedelta(days=7), _NOW)
-    assert [r["ts"] for r in got] == [inside, end_edge]
-
-
-# AC1-EDGE: recent-only task has no verdict; the bad-ts row counts nowhere.
-def test_compare_windows_missing_in_prior_and_bad_ts_counts_nowhere() -> None:
-    rows = [
-        _ts_row("u", "regression", True, _days_ago(1)),
-        {**_row("u", "regression", True), "ts": "not-a-timestamp"},
-    ]
-    cmp = compare_windows(rows, window_days=7, now=_NOW)
-    assert cmp["missing_in_prior"] == ["u"]
-    assert cmp["missing_in_recent"] == []
-    assert cmp["tasks"] == {}
-    assert cmp["regressed"] == []
-
-
-def test_compare_windows_unchanged_and_window_fields() -> None:
-    rows = ([_ts_row("r", "regression", True, _days_ago(10))] * 2
-            + [_ts_row("r", "regression", True, _days_ago(1))] * 2)
-    cmp = compare_windows(rows, window_days=7, now=_NOW)
-    t = cmp["tasks"]["r"]
-    assert t["verdict"] == "unchanged" and t["delta"] == 0.0
-    assert t["prior"] == {"runs": 2, "pass_at_1": 1.0}
-    assert t["recent"] == {"runs": 2, "pass_at_1": 1.0}
-    assert cmp["regressed"] == []
-    assert cmp["window_days"] == 7
-    assert cmp["prior_start"] == (_NOW - timedelta(days=14)).isoformat()
-    assert cmp["recent_start"] == (_NOW - timedelta(days=7)).isoformat()
-
-
-def test_compare_windows_missing_in_recent_no_verdict() -> None:
-    rows = [_ts_row("a", "regression", True, _days_ago(10)),
-            _ts_row("b", "regression", True, _days_ago(1))]
-    cmp = compare_windows(rows, window_days=7, now=_NOW)
-    assert cmp["missing_in_recent"] == ["a"]
-    assert cmp["missing_in_prior"] == ["b"]
-    assert cmp["tasks"] == {}
-
-
-def test_compare_windows_regressed_needs_regression_tier() -> None:
-    # A capability-tier drop trends but never names the alarm.
-    rows = ([_ts_row("cap", "capability", True, _days_ago(10))] * 3
-            + [_ts_row("cap", "capability", False, _days_ago(1))])
-    cmp = compare_windows(rows, window_days=7, now=_NOW)
-    assert cmp["tasks"]["cap"]["verdict"] == "regressed"
-    assert cmp["regressed"] == []
-
-
-def test_build_report_default_alarm_unchanged_without_window() -> None:
-    rows = [_ts_row("r", "regression", False, _days_ago(49))]
-    assert build_report(rows)["regression_alarm"] == ["r"]
-
-
-def test_health_summary_regressed_from_windows(tmp_path: Path) -> None:
-    hp = tmp_path / "h.jsonl"
-    for _ in range(3):
-        _history.append_row(hp, {**_row("r", "regression", True), "ts": _days_ago(10)})
-    _history.append_row(hp, {**_row("r", "regression", False), "ts": _days_ago(1)})
-    summary = evals_health_summary(hp, stale_days=7, now=_NOW)
-    assert summary is not None
-    assert summary["regressed"] == ["r"]
-    assert summary["regression_alarm"] == ["r"]
+    for gone in ("compare_windows", "window_rows", "graduation_candidates",
+                 "compare_variants", "_pair_verdict", "_common_rev"):
+        assert not hasattr(report_module, gone)
