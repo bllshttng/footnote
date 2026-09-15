@@ -607,7 +607,7 @@ pub fn state_reap_config(cwd: &Path) -> StateReapConfig {
 /// Default global cap on concurrent live worker processes (union of the fno
 /// registry and claude's daemon roster). Matches the Pydantic default.
 pub const DEFAULT_MAX_LIVE: u32 = 3;
-/// The per-territory team cap default : max live node-working workers
+/// The per-territory team cap default: max live node-working workers
 /// under ONE crown scope. The machine ceiling stays [`DEFAULT_MAX_LIVE`].
 pub const DEFAULT_MAX_LIVE_PER_TERRITORY: u32 = 4;
 /// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
@@ -635,7 +635,7 @@ pub const DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S: u64 = 30;
 /// running. Matches the Pydantic default.
 pub const DEFAULT_ORPHAN_REAP_AFTER_S: u64 = 5400;
 /// Default age at which a reaper hold escalates into a question a king or
-/// the operator can rule on : the same derivation as the orphan
+/// the operator can rule on: the same derivation as the orphan
 /// clock, three times the longest detached wait.
 pub const DEFAULT_HOLD_ESCALATE_AFTER_S: u64 = 5400;
 

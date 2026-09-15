@@ -24,7 +24,7 @@ name = "fno"
 path = "src/main.rs"
 
 [dependencies]
-# `fno mux serve --web` : the read-only web bridge's HTTP + WebSocket
+# `fno mux serve --web`: the read-only web bridge's HTTP + WebSocket
 # surface. axum handles the untrusted-input HTTP parsing and WS handshake so
 # the web-facing bridge does not hand-roll that security-sensitive code.
 axum = { version = "0.8", features = ["ws"] }
@@ -52,10 +52,10 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # Read the flat `config.toml` (stage 3): the interactive server reads
 # `config.mux.*` directly (digest_overlay Pattern B) instead of shelling `fno`.
 toml = "0.8"
-# Native mux argv parsing : one typed declaration per flag, so the
+# Native mux argv parsing: one typed declaration per flag, so the
 # flag registry is structural rather than a hand-copied convention.
 clap = { version = "4", features = ["derive"] }
-# Popup chrome measures and paints in terminal columns : a fullwidth
+# Popup chrome measures and paints in terminal columns: a fullwidth
 # glyph is one char and two cells. Already resolved transitively via
 # alacritty_terminal, so this adds no new build artifact.
 unicode-width = "0.2"

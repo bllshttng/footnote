@@ -728,7 +728,7 @@ fn run_picker(rows: Vec<SessionRow>) -> Option<String> {
     result
 }
 
-/// Which rung ended a `kill-server` run : printed on both surfaces,
+/// Which rung ended a `kill-server` run: printed on both surfaces,
 /// because a silent recovery cannot be told apart from one that did nothing.
 #[derive(Debug, PartialEq, Eq)]
 enum KillPath {
@@ -790,7 +790,7 @@ const SIGKILL_GRACE: Duration = Duration::from_secs(1);
 /// the socket); a stale socket is unlinked here with a message (exit 0); no
 /// socket at all is "no server" (exit 1). A wedged holder - one that never
 /// accepted, or accepted and never answered - is escalated through SIGTERM
-/// and SIGKILL to unlink : a recovery verb must not depend on the
+/// and SIGKILL to unlink: a recovery verb must not depend on the
 /// subsystem it recovers. Every run prints which rung ended it, and an
 /// unrecoverable state names the next action instead of leaving a dead `&&`
 /// chain with no hint.
@@ -1586,7 +1586,7 @@ pub fn workspace(args: &[OsString], env_session: Option<&str>) -> i32 {
     }
 }
 
-/// `fno mux workspace restore` : one verb brings the stored
+/// `fno mux workspace restore`: one verb brings the stored
 /// workspaces' worker members back. Every live, non-tombstoned member
 /// resumes through its own harness's declared `interactive_resume` argv in a
 /// pane at its stored cwd; a member that cannot resume is named with its
@@ -2185,7 +2185,7 @@ pub enum SendSource {
     Stdin,
 }
 
-/// What `pane focus` (and `mux view`) was pointed at : a pane id, a
+/// What `pane focus` (and `mux view`) was pointed at: a pane id, a
 /// registry selector, or the interactive picker.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FocusTarget {
@@ -2605,7 +2605,7 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
 
 /// Resolve `--session`/env, connect to the EXISTING server, run one control
 /// verb, render the reply. The shared spine of the `tab`/`layout` porcelains
-/// ; `where` has its own registry-first path.
+///; `where` has its own registry-first path.
 fn run_on_existing_server(
     session_flag: Option<&str>,
     env_session: Option<&str>,
@@ -2865,7 +2865,7 @@ fn parse_slot(s: &str) -> crate::proto::SlotBinding {
     }
 }
 
-/// The on-disk `.toml` spec : `template = "main-left"`,
+/// The on-disk `.toml` spec: `template = "main-left"`,
 /// `slots = ["fno:af4dac55", "-", ...]`. Strings (not the wire enum shape) so a
 /// hand-authored file matches the `.fno` config idiom; converted to a
 /// [`LayoutSpec`] here, the same struct the `--template`/`--slot` flags build.
@@ -2884,7 +2884,7 @@ fn load_spec_file(path: &str) -> Result<crate::proto::LayoutSpec, String> {
     })
 }
 
-/// `fno mux layout get|apply ...` (get: ; apply:).
+/// `fno mux layout get|apply ...` (get:; apply:).
 pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
     let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
@@ -3200,7 +3200,7 @@ fn layout_graft_cli(
     )
 }
 
-/// One ambiguity-refusal line's worth of a candidate : exactly what
+/// One ambiguity-refusal line's worth of a candidate: exactly what
 /// the operator needs to disambiguate - the name to retype, the pane it
 /// hosts, and how stale the row is.
 #[derive(Debug, PartialEq, Eq)]
@@ -3456,7 +3456,7 @@ fn focus_pane(verb: &str, session: &str, pane: u64, render: bool, json: bool) ->
     }
 }
 
-/// Focus by selector : resolve, degrade a paneless row to a `peek`
+/// Focus by selector: resolve, degrade a paneless row to a `peek`
 /// hint rather than an attach (Locked Decision 1: attaching creates a pane,
 /// and the server's fd ceiling makes that a wave-blocking side effect), then
 /// move the viewer. An explicit --session overrides the host like `where`.
@@ -3510,7 +3510,7 @@ enum FocusAction {
     Bell,
 }
 
-/// The filter-list state : every pane-hosted row, the typed filter,
+/// The filter-list state: every pane-hosted row, the typed filter,
 /// and a cursor over the FILTERED view. Pure [`FilterPicker::step`], so the
 /// state machine is unit-testable without a terminal, matching `Picker`.
 /// Letters are filter text here, so movement is arrows only - no j/k.
@@ -3597,7 +3597,7 @@ fn render_filter_picker(p: &FilterPicker) -> String {
     out
 }
 
-/// The interactive focus picker : raw mode, no alt screen, one clear
+/// The interactive focus picker: raw mode, no alt screen, one clear
 /// on every exit path - the `run_picker` skeleton with a filter state machine
 /// and a pane-ref payload. Returns the chosen pane ref, or `None` on quit.
 fn run_focus_picker(rows: Vec<PaneRow>) -> Option<(String, u64)> {
@@ -3668,7 +3668,7 @@ fn run_focus_picker(rows: Vec<PaneRow>) -> Option<(String, u64)> {
     result
 }
 
-/// The `--fzf` door shared by `view` and `pane focus` : refuse a
+/// The `--fzf` door shared by `view` and `pane focus`: refuse a
 /// non-TTY stdin (a picker on a pipe would hang), refuse an empty roster,
 /// then run the picker. Esc is a clean exit 0 that focused nothing.
 fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
@@ -3740,7 +3740,7 @@ fn take_workspace_flag(
     Ok((workspace, out))
 }
 
-/// The tab-location branch shared by `view` and `where` : the agent
+/// The tab-location branch shared by `view` and `where`: the agent
 /// resolver found nothing, so treat the selector as a LOCATION - a tab
 /// ordinal, stable id, or name - and answer with what lives there. `focus`
 /// then moves the operator to the tab's focused pane (`view`); `where` only
@@ -3825,7 +3825,7 @@ fn location_lookup(
 }
 
 /// Resolve a selector to an agent row, falling through to the tab-location
-/// branch when the agent resolver returns NotFound : the shared head
+/// branch when the agent resolver returns NotFound: the shared head
 /// of `view` and `where`. Ambiguity keeps its own refusal; registry failures
 /// keep their own exit class.
 #[allow(clippy::too_many_arguments)]
@@ -3859,7 +3859,7 @@ fn resolve_row_or_location(
     }
 }
 
-/// `fno mux view <selector> [--url] [--fzf] [--json]` : point the
+/// `fno mux view <selector> [--url] [--fzf] [--json]`: point the
 /// operator's view at the pane hosting an agent, selected by what a person
 /// remembers - the node id or slug inside the minted name - rather than a
 /// pane index. Resolution is shared with `where` and `pane focus`; a row
@@ -3966,7 +3966,7 @@ mod doctor;
 mod doctor_boundary;
 #[cfg(not(test))]
 mod doctor_squads;
-/// `fno mux where <fno_id>` : resolve an fno session id to its live
+/// `fno mux where <fno_id>`: resolve an fno session id to its live
 /// location. Reads the registry to find the hosting mux session, connects to
 /// THAT session's socket, and rounds-trips one `PaneWhere`. The three failure
 /// modes get distinct exit codes (AC1-ERR); a registry read failure never reads
@@ -4482,7 +4482,7 @@ pub(crate) fn send_control(
 /// Turn one server reply into stdout + an exit code. `command_done_requested`
 /// lets a `wait` note the markerless degradation (asked --command-done, got a
 /// quiet/timeout settle because the pane emitted no OSC 133 `D`).
-/// The human tab label : the name when present, else the visible
+/// The human tab label: the name when present, else the visible
 /// `·N` ordinal - the identifier the operator's eye already has. Renderers
 /// print it FIRST and the stable `tab_id` second; the stable id alone names
 /// something the operator cannot find on their own screen.
@@ -4494,12 +4494,12 @@ fn tab_label(name: Option<&str>, ordinal: Option<usize>) -> String {
     }
 }
 
-/// The one-line legend naming the layout geometry's units : printed
+/// The one-line legend naming the layout geometry's units: printed
 /// exactly once per human layout rendering, verbatim.
 const LAYOUT_UNITS_LEGEND: &str =
     "x/y are the top-left corner in character cells; rows/cols are the size in character cells.";
 
-/// The human layout rows : one per pane, worker-joined, carrying
+/// The human layout rows: one per pane, worker-joined, carrying
 /// both tab identifier forms and the pane's geometry. Pure so the row shape
 /// is unit-testable without a socket; the caller prints the rows and then
 /// [`LAYOUT_UNITS_LEGEND`] exactly once.
@@ -4526,7 +4526,7 @@ fn layout_rows(squads: &[SquadLayout]) -> Vec<String> {
     out
 }
 
-/// The human [`ServerMsg::TabLocation`] receipt lines : the summary
+/// The human [`ServerMsg::TabLocation`] receipt lines: the summary
 /// line (workspace, both tab identifier forms, the focused pane) plus one
 /// line per pane naming its worker or the explicit `empty` marker. Pure so
 /// the receipt shape is unit-testable.
@@ -4814,7 +4814,7 @@ fn render_reply(
                     serde_json::to_string(&squads).unwrap_or_else(|_| "[]".into())
                 );
             } else {
-                // The operator-readable rendering : one row per pane.
+                // The operator-readable rendering: one row per pane.
                 let rows = layout_rows(&squads);
                 for row in &rows {
                     println!("{row}");
@@ -4876,7 +4876,7 @@ fn render_reply(
             focus,
             panes,
         } => {
-            // The reverse-location receipt : both identifier forms,
+            // The reverse-location receipt: both identifier forms,
             // every pane, and every occupant. `worker=empty` is the POSITIVE
             // marker for an unoccupied pane - absence of output proves
             // nothing.
@@ -6995,7 +6995,7 @@ mod tests {
                 provenance: None,
             }
         );
-        // The bare-submit keystroke the attribution refusal promises :
+        // The bare-submit keystroke the attribution refusal promises:
         // `--raw --submit` with no payload parses as an EMPTY raw text, never
         // the arity error that used to make the refusal's advice false.
         assert_eq!(
@@ -7063,7 +7063,7 @@ mod tests {
         use std::sync::Mutex;
 
         // The style/budget gates live in the renderer child, so this is their
-        // ownership boundary : a DEFAULT send dies on the renderer's
+        // ownership boundary: a DEFAULT send dies on the renderer's
         // nonzero exit with no PaneSend reaching the socket, while the
         // byte-identical --raw payload never launches a renderer and arrives
         // verbatim. The received BYTES are asserted, not `raw: true`.

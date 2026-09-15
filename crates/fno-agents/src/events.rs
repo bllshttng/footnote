@@ -147,7 +147,7 @@ impl EventEmitter {
     }
 
     fn write_line(&self, event_type: &str, payload: Map<String, Value>) -> Result<(), EmitError> {
-        // Unified envelope : the payload nests under `data`, the kind is
+        // Unified envelope: the payload nests under `data`, the kind is
         // stamped as `type`. The schema cap is measured on `payload` before
         // this framing (in emit/emit_fields), so nesting never changes which
         // events are dropped.
@@ -160,7 +160,7 @@ impl EventEmitter {
             .map_err(|e| EmitError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         line.push('\n');
 
-        // Honor the declared retention class : an ephemeral row goes to
+        // Honor the declared retention class: an ephemeral row goes to
         // the sibling journal beside this emitter's file, rotating on its own
         // size; every other class keeps the emitter's path. The sibling shares
         // the emitter's directory, so the append/rotate machinery below runs

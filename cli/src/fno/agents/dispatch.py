@@ -262,7 +262,7 @@ class DispatchAskResult:
     short_id: str
     reply: Optional[str] = None
     duration_ms: Optional[int] = None
-    # v23 : the create path's substitution verdict, passed through to
+    # v23: the create path's substitution verdict, passed through to
     # the caller's receipt. None means unknown-or-match.
     model_substituted: Optional[dict] = None
 
@@ -463,7 +463,7 @@ def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
             "If you meant a model VENDOR, that is -P/--provider.",
             exit_code=2,
         )
-    # One builder, shared with the `dispatch-lanes` seam : the pane
+    # One builder, shared with the `dispatch-lanes` seam: the pane
     # sentence derives from the tuple here too, so neither seam can name a
     # harness the other has since admitted.
     raise DispatchAskError(
@@ -1669,7 +1669,7 @@ def _claude_create_path(
         resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
     )
 
-    # v23 : reconcile the REQUEST with the session's observed model so a
+    # v23: reconcile the REQUEST with the session's observed model so a
     # silent substitution is named, not remembered. A fresh spawn with no sample
     # yet probes `no-model-yet` and stays silent (an unanswered probe is not a
     # verdict); a REVIVE reads history, so its answer is deterministic here.
@@ -1751,7 +1751,7 @@ def _claude_create_path(
         cwd=str(cwd),
         log_path=str(touched_log_path) if touched_log_path is not None else "",
         short_id=short_id,
-        # Canonical identity at birth : a bg claude row is born routable
+        # Canonical identity at birth: a bg claude row is born routable
         # by name. A raced uuid-resolution miss leaves harness_session_id None;
         # reconcile / send-time heal backfills it.
         harness="claude",
@@ -2410,7 +2410,7 @@ def dispatch_spawn(
     Raises:
         :class:`DispatchAskError`: every documented failure mode.
     """
-    # 0. Launch-time headroom picking : fills the gap only when no
+    # 0. Launch-time headroom picking: fills the gap only when no
     # --account was given, before the tier-remap check so that check sees the
     # real overlay. One of the two spawn seams - the default `pane` substrate
     # never reaches here and calls the same helper itself. A --resume spawn is
@@ -2770,7 +2770,7 @@ def dispatch_spawn(
                             exit_code=2,
                         )
                     # An explicit --account COMPOSES with the restored route, the
-                    # same way it composes with a flag-supplied one : the
+                    # same way it composes with a flag-supplied one: the
                     # route wins endpoint+auth+model as one unit through the
                     # settings file, and the account's CLAUDE_CONFIG_DIR rides the
                     # spawn env to select the per-account daemon. Nothing here
@@ -4100,7 +4100,7 @@ def reconcile_agents(
             # An id-less persistent pane can be healthy while Codex is still
             # creating its rollout. Heal it from the pane's own process tree;
             # the session index is not needed for this correlation. Gated on
-            # ref VALIDITY, not truthiness : a ref that names no pane
+            # ref VALIDITY, not truthiness: a ref that names no pane
             # must not send the row down the pane arm.
             if not entry.harness_session_id and mux_ref_names_a_pane(entry.mux):
                 if entry.status in _TERMINAL_AGENT_STATUSES:
@@ -4316,7 +4316,7 @@ def reconcile_agents(
             # Deliberately ahead of the claude-on-PATH guard: this probes the mux
             # and the pid, never the claude CLI, so a host where claude was
             # removed can still retire a provably dead pane. Gated on ref
-            # VALIDITY, not truthiness : a ref that names no pane is
+            # VALIDITY, not truthiness: a ref that names no pane is
             # not a pane row and must not be pane-probed.
             if mux_ref_names_a_pane(entry.mux):
                 if entry.status in _TERMINAL_AGENT_STATUSES:
@@ -4499,7 +4499,7 @@ def reconcile_agents(
                     continue
                 new_status = "live" if reachable else "orphaned"
 
-                # US4 heal : a live claude row whose canonical id never landed
+                # US4 heal: a live claude row whose canonical id never landed
                 # (the uuid resolution raced at spawn) is unroutable-but-live. Resolve
                 # it from claude's own store -- the same jsonl the liveness probe just
                 # read -- and fold the write into reconcile's single batched cycle. A
@@ -5468,7 +5468,7 @@ def _switchboard_exchange(
     and mirrors B's reply into A's view, with no autonomous relay.
     """
     auto, ceiling = _load_a2a_settings()
-    # US6 : the first-use confirm gates the first autonomous hop.
+    # US6: the first-use confirm gates the first autonomous hop.
     # On a no / headless / unconfirmed gate this downgrades to observed mode, so
     # the hop below runs as a single mirrored hop with no autonomous relay.
     auto = _a2a_first_use_gate(auto, ceiling)
@@ -5788,7 +5788,7 @@ def _mux_pane_send(
             _record_failure("pre-submit")
             return False
 
-    # Audit floor : the row this pane write leaves is written by the
+    # Audit floor: the row this pane write leaves is written by the
     # Rust verb itself (`fno mux pane send`), one layer below, so it covers a
     # direct caller too. This lane only DECLARES its provenance (--source) so
     # the floor's row joins the bus record; it must not write a second row of
@@ -7182,7 +7182,7 @@ def _deliver_live(
                 or not entry.mux
             ):
                 break
-        # Heal after the pane miss : a codex row whose pane is gone
+        # Heal after the pane miss: a codex row whose pane is gone
         # but whose thread is loaded in the app-server rebinds to the thread
         # lane, and the wrapped body rides turn/start instead of the durable
         # queue. Every other verdict keeps the durable fallback.
@@ -7201,7 +7201,7 @@ def _deliver_live(
                 )
         return False
 
-    # Codex hosted thread : the daemon's thread actor drives the turn.
+    # Codex hosted thread: the daemon's thread actor drives the turn.
     # A thread row (harness codex, interactive, no short_id, no mux ref) has
     # neither a pane for _mux_pane_send above nor a live route through
     # agent.deliver below - the Rust daemon does not implement deliver for a
@@ -7222,7 +7222,7 @@ def _deliver_live(
         _record("codex-thread-switchboard-miss")
         return False
 
-    # Keeper-hosted lane-B thread : the row has neither a pane above
+    # Keeper-hosted lane-B thread: the row has neither a pane above
     # nor a lane-A socket below - its keeper unix socket IS the live
     # transport. The same mail-inject verb drives it with --harness naming the
     # hosted harness (which owns the settle delay and the confirm store); the
@@ -7285,7 +7285,7 @@ def _deliver_live(
     # config.agents.a2a.auto is on) is in _switchboard_exchange. It returns True
     # when delivered via the switchboard, or None to demote to the MCP/socket
     # path below (B not a live stream thread, or daemon unreachable).
-    # node : provenance for the autonomous relay continuations. The sender's
+    # node: provenance for the autonomous relay continuations. The sender's
     # ctx wraps A's turns; the recipient's ctx (from/to swapped) wraps B's. None
     # when there is no mail envelope, leaving the relay raw (an unwrapped hop
     # never reaches _deliver_live, unaffected).

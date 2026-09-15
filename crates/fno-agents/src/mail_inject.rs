@@ -63,7 +63,7 @@ fn contract_enter_delay_ms(
 }
 
 /// The settle delay belongs to the pane RECEIVING the paste, not to a fixed
-/// harness : a claude constant sent to a codex recipient fires the CR
+/// harness: a claude constant sent to a codex recipient fires the CR
 /// while the codex TUI is still ingesting the paste, so the envelope sits
 /// unsent in its composer. Callers resolve the recipient first; `claude_ask`
 /// passes `Claude` because its lane is claude-only.
@@ -152,7 +152,7 @@ impl MailInjectHarness {
     }
 }
 
-/// Axis-rename tombstone : the harness axis was `--provider`, now
+/// Axis-rename tombstone: the harness axis was `--provider`, now
 /// `--harness/-H`. A model vendor routes only at spawn. Mirrors the Python
 /// `_flag_aliases.PROVIDER_AXIS_TOMBSTONE` (kept in lockstep).
 const PROVIDER_AXIS_TOMBSTONE: &str = concat!(
@@ -780,7 +780,7 @@ fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) 
     }
 }
 
-/// Deliver `text` to a keeper-hosted lane-B thread : resolve the row,
+/// Deliver `text` to a keeper-hosted lane-B thread: resolve the row,
 /// connect to its keeper socket, paste the envelope inside bracketed-paste
 /// guards as one `Input` frame, settle the hosted harness's own delay, then
 /// send the wire-level CR - and confirm by CONTENT in the hosted harness's
@@ -848,7 +848,7 @@ pub fn deliver_via_keeper_socket_in(
     // relays every Output chunk to this connection with a BLOCKING write
     // under the client lock, so an unread socket backpressures the keeper
     // into the hosted TUI and freezes it for the rest of the budget. Every
-    // poll drains and DISCARDS - paint is never read as evidence ;
+    // poll drains and DISCARDS - paint is never read as evidence;
     // the only reader here is the buffer's, not the matcher's.
     let confirm_stream = transport.stream.try_clone().ok();
     if let Some(cs) = confirm_stream.as_ref() {
@@ -1474,7 +1474,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         text = crate::provider::render_verb_seed(&text, recipient_capability_row(args.harness));
     }
 
-    // Forged-envelope predicate on UNWRAPPED bodies : a single-line
+    // Forged-envelope predicate on UNWRAPPED bodies: a single-line
     // payload has no legitimate reason to embed an `<fno_mail>` tag mid-line.
     let home = crate::paths::AgentsHome::from_env();
     if let Some(code) = forged_envelope_decision_at(&text, Some(&home.registry_json())) {
@@ -2408,7 +2408,7 @@ mod tests {
 
     #[test]
     fn content_confirm_needs_full_identity_not_a_shared_prefix() {
-        // AC1-HP : two messages can share their first 48 characters.
+        // AC1-HP: two messages can share their first 48 characters.
         // The needle is the FULL marker line, so a sibling whose tail differs
         // never confirms, and no truncation can make one message's landing
         // read as another's.
@@ -2712,7 +2712,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // The keeper lane : a FAKE keeper speaking the real frame
+    // The keeper lane: a FAKE keeper speaking the real frame
     // protocol, a registry row binding the session id to its socket, and a
     // temp pi sessions root. The real live journey is the last group's.
     // ------------------------------------------------------------------
