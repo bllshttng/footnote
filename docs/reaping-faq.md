@@ -240,8 +240,8 @@ Each item here cost a real session time. One corrects an older belief.
 
 1. **`open work` is not a backlog chore.** The row waits for its node to ship. Deleting or hand-closing the node is falsifying work.
 2. **A second claude account holds rows the ambient account cannot see.** `no job matching <id>` from one root is a wrong-root absence.
-3. **`claude rm` takes the short id.** The full session id answers `No job matching` and exits 0. The exit code reads as success.
-4. **`claude rm` refuses a session whose cwd has uncommitted changes.** In a canonical checkout that cwd never goes clean.
+3. **`claude rm` takes the short id.** The full session id answers `No job matching` and exits 0. The exit code reads as success. Retirement no longer runs `claude rm` at all; the trap now meets only `fno agents rm`.
+4. **`claude rm` refuses a session whose cwd has uncommitted changes.** In a canonical checkout that cwd never goes clean. Retirement no longer runs `claude rm` at all; the trap now meets only `fno agents rm`.
 5. **A keeper-held pane reads dead to a fresh server while its child lives.** Positive death evidence decides a stop (`gc.rs:330-333`).
 6. **A daemon older than the installed binary reports every status as `unknown`.** Unknown keeps rows. Run `fno agents list` and read its warning. Measured on 2026-09-10: one restart turned 57 unknown rows into 26 orphaned, 16 writing, 12 quiet, and 2 parked.
 7. **The mux sweep runs only on the manual verb.** An older belief held that nothing scheduled it. Today the verb runs it (`client.rs:2408-2415`), and neither daemon arm does.

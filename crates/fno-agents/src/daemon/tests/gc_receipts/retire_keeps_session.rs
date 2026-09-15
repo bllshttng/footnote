@@ -177,9 +177,9 @@ fn stage_kept_row(
 }
 
 /// The production seam set, exactly as the daemon shell wires it (`gc.rs`
-/// `gc_sweep`): the real graph read, the real stop routing, the real
-/// active-surface and mux-member functions. Only the transcript store and
-/// the age read are staged - they locate the quiet, they touch no harness.
+/// `gc_sweep`): the real graph read, the real stop routing, the real retire
+/// surface and mux-member functions. Only the transcript store and the age
+/// read are staged - they locate the quiet, they touch no harness.
 fn production_sweep(home: &AgentsHome, quiet: std::path::PathBuf) -> GcSummary {
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     let stop_home = home.clone();
@@ -193,7 +193,7 @@ fn production_sweep(home: &AgentsHome, quiet: std::path::PathBuf) -> GcSummary {
         &move |_| Some(vec![quiet.clone()]),
         &uniform_ages(2 * 3600),
         &move |e| gc_sweep::stop_row_process(&stop_home, e),
-        &crate::gc_native::apply_active_surface_removal,
+        &crate::gc_native::apply_retire_surface,
         &crate::gc_native::apply_mux_member_retirement,
         &crate::claude_roster::read_all_agents,
         &gc_sweep::production_tree_probe,
@@ -266,5 +266,303 @@ fn retiring_a_claude_thread_row_keeps_the_harness_session() {
         staged_active_surface(&home, "claude", "abcd1234-1111-2222-3333-444444444444").as_deref(),
         Some("not-applicable"),
         "the receipt names the session kept, not removed"
+    );
+}
+
+/// AC1-RM: the split is total. The retire surface keeps the session; the
+/// removal surface (`fno agents rm`'s cascade) is still the one door that
+/// runs `claude rm`.
+#[test]
+fn rm_still_removes_what_retirement_keeps() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (_dir, home) = staged_graph_home();
+    let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
+    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root());
+    let mut e = state::RegistryEntry::default();
+    e.name = "worker-rm".into();
+    e.short_id = "abcd1234".into();
+    e.origin = Some("spawn".into());
+    e.harness = Some("claude".into());
+    e.harness_session_id = Some("abcd1234-1111-2222-3333-444444444444".into());
+    e.created_at = "2026-09-01T00:00:00Z".into();
+
+    let kept = crate::gc_native::apply_retire_surface(&e);
+    assert!(
+        matches!(kept, crate::daemon::CascadeOutcome::NotApplicable),
+        "{kept:?}"
+    );
+    let kept_log = fake.argv_log();
+    assert!(
+        !kept_log.lines().any(|l| l.starts_with("rm ")),
+        "the retire surface never rms: {kept_log}"
+    );
+
+    let removed = crate::gc_native::apply_active_surface_removal(&e);
+    assert!(
+        matches!(removed, crate::daemon::CascadeOutcome::Removed),
+        "{removed:?}"
+    );
+    let removed_log = fake.argv_log();
+    assert!(
+        removed_log.lines().any(|l| l == "rm abcd1234"),
+        "the removal surface still rms: {removed_log}"
+    );
+}
+
+/// AC1-EDGE: an `update_registry` write that drops rows with no receipt on
+/// disk stages both receipts naming the remover, and touches neither
+/// harness: no `claude rm`, and the codex session index is byte-identical.
+#[test]
+fn an_update_registry_drop_stages_receipts_and_keeps_both_harnesses() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (dir, home) = staged_graph_home();
+    let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
+    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root());
+    let codex_home = tempfile::tempdir().unwrap();
+    let old_codex_home = std::env::var_os("CODEX_HOME");
+    std::env::set_var("CODEX_HOME", codex_home.path());
+    let index = codex_home.path().join("session_index.jsonl");
+    std::fs::write(
+        &index,
+        "{\"id\":\"sess-codex-kept\",\"name\":\"kept\"}\n{\"id\":\"sess-codex-dropped\",\"name\":\"dropped\"}\n",
+    )
+    .unwrap();
+    let index_before = std::fs::read(&index).unwrap();
+
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut claude_row = state::RegistryEntry::default();
+        claude_row.name = "worker-edge".into();
+        claude_row.short_id = "abcd1234".into();
+        claude_row.origin = Some("spawn".into());
+        claude_row.harness = Some("claude".into());
+        claude_row.harness_session_id = Some("abcd1234-1111-2222-3333-444444444444".into());
+        claude_row.created_at = "2026-09-01T00:00:00Z".into();
+        let mut codex_row = state::RegistryEntry::default();
+        codex_row.name = "worker-codex".into();
+        codex_row.short_id = "codex99".into();
+        codex_row.origin = Some("spawn".into());
+        codex_row.harness = Some("codex".into());
+        codex_row.harness_session_id = Some("sess-codex-dropped".into());
+        codex_row.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(claude_row);
+        r.entries.push(codex_row);
+    })
+    .unwrap();
+    crate::state::update_registry(&home.registry_json(), |r| r.entries.clear()).unwrap();
+
+    let claude_receipt: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::receipt::reap_receipt_path_for(
+            &home,
+            "claude",
+            "abcd1234-1111-2222-3333-444444444444",
+        ))
+        .expect("the claude drop stages its receipt"),
+    )
+    .unwrap();
+    assert!(
+        claude_receipt["removed_by"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty()),
+        "the receipt names the remover: {claude_receipt}"
+    );
+    let codex_receipt: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(crate::receipt::reap_receipt_path_for(
+            &home,
+            "codex",
+            "sess-codex-dropped",
+        ))
+        .expect("the codex drop stages its receipt"),
+    )
+    .unwrap();
+    assert!(
+        codex_receipt["removed_by"]
+            .as_str()
+            .is_some_and(|r| !r.is_empty()),
+        "the receipt names the remover: {codex_receipt}"
+    );
+    let log = fake.argv_log();
+    assert!(
+        !log.lines().any(|l| l.starts_with("rm ")),
+        "a registry write never rms the harness session: {log}"
+    );
+    assert_eq!(
+        std::fs::read(&index).unwrap(),
+        index_before,
+        "the codex session index is byte-identical"
+    );
+    match &old_codex_home {
+        Some(v) => std::env::set_var("CODEX_HOME", v),
+        None => std::env::remove_var("CODEX_HOME"),
+    }
+}
+
+/// AC1-PROC: the one cascade arm retirement keeps. A cursor-agent row with a
+/// live worker-server child still has that leaked process reaped, while its
+/// remote session state is untouched by definition. The reaped tree is
+/// detached (the spawner exits, the branch reparents): a process the test
+/// itself owns would sit as an unreaped zombie after the SIGTERM, and a
+/// zombie answers the reap's survival probe.
+#[cfg(unix)]
+#[test]
+fn retiring_a_cursor_agent_row_still_reaps_its_worker_server() {
+    use std::io::BufRead;
+    let bin_dir = tempfile::tempdir().unwrap();
+    let worker_server = bin_dir.path().join("cursor-agent-worker-server");
+    std::fs::write(&worker_server, "#!/bin/sh\nsleep 30\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&worker_server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let owner_script = bin_dir.path().join("owner.sh");
+    std::fs::write(
+        &owner_script,
+        format!("#!/bin/sh\n'{}' 30 & wait\n", worker_server.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&owner_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The double fork: the outer shell prints the detached owner's pid and
+    // exits, so the owner (and the worker server it holds) reparent to
+    // launchd and nothing in the reaped tree is this test's child. The
+    // owner's own stdio is cut: a shared stdout pipe would hold this read
+    // open until the whole branch dies.
+    let mut outer = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(format!(
+            "'{}' >/dev/null 2>&1 & echo $!",
+            owner_script.display()
+        ))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut pid_line = String::new();
+    std::io::BufReader::new(outer.stdout.take().unwrap())
+        .read_line(&mut pid_line)
+        .unwrap();
+    let owner: u32 = pid_line.trim().parse().unwrap();
+    let owner_start = crate::daemon::process_start_time(owner).unwrap();
+    let _ = outer.wait();
+    // The census reads `ps`; give the new branch a moment to appear in it.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let mut e = state::RegistryEntry::default();
+    e.name = "cursor-row".into();
+    e.short_id = "cursor-row".into();
+    e.origin = Some("spawn".into());
+    e.harness = Some("cursor-agent".into());
+    e.pid = Some(owner);
+    e.pid_start_time = Some(owner_start);
+    e.created_at = "2026-09-01T00:00:00Z".into();
+
+    let outcome = crate::gc_native::apply_retire_surface(&e);
+    assert!(
+        matches!(outcome, crate::daemon::CascadeOutcome::Removed),
+        "the worker server was reaped: {outcome:?}"
+    );
+    // The owner shell's `wait` returns the moment its reaped child dies, and
+    // the shell then exits: its death IS the death proof.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && crate::daemon::process_start_time(owner).is_some()
+    {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        crate::daemon::process_start_time(owner).is_none(),
+        "the leaked worker-server branch is gone"
+    );
+}
+
+/// AC1-PLAN: the two planner retirement routes reach the same staging
+/// function, so the same seam change covers them: a planner on a superseded
+/// node and a halted planner both retire, and the fake `claude` logs no
+/// `rm` for either.
+#[test]
+fn the_planner_routes_retire_without_rming_the_harness_session() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (dir, home) = staged_graph_home();
+    stage_graph(
+        dir.path(),
+        json!([
+            {
+                "id": "n-plan-a",
+                "status": "superseded",
+                "sessions": [{
+                    "phase": "blueprint",
+                    "harness": "claude",
+                    "session_id": "aaaa1111-1111-2222-3333-444444444444",
+                    "started_at": "2026-09-01T00:00:00Z",
+                }],
+            },
+            {
+                "id": "n-plan-b",
+                "status": "ready",
+                "sessions": [{
+                    "phase": "blueprint",
+                    "harness": "claude",
+                    "session_id": "bbbb2222-1111-2222-3333-444444444444",
+                    "started_at": "2026-09-01T00:00:00Z",
+                }],
+            },
+        ]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut a = state::RegistryEntry::default();
+        a.name = "bp-moved".into();
+        a.short_id = "bpaaa111".into();
+        a.origin = Some("spawn".into());
+        a.harness = Some("claude".into());
+        a.harness_session_id = Some("aaaa1111-1111-2222-3333-444444444444".into());
+        a.created_at = "2026-09-01T00:00:00Z".into();
+        let mut b = state::RegistryEntry::default();
+        b.name = "bp-halted".into();
+        b.short_id = "bpbbb222".into();
+        b.origin = Some("spawn".into());
+        b.harness = Some("claude".into());
+        b.harness_session_id = Some("bbbb2222-1111-2222-3333-444444444444".into());
+        b.created_at = "2026-09-01T00:00:00Z".into();
+        b.inside_leg = Some(state::InsideLegReport {
+            state: state::InsideLegState::Done,
+            seq: 4,
+            reason: None,
+            received_at: "2026-09-01T00:00:00Z".into(),
+            ttl_ms: None,
+        });
+        r.entries.push(a);
+        r.entries.push(b);
+    })
+    .unwrap();
+
+    let fake_a = FakeClaude::install("bpaaa111", "aaaa1111-1111-2222-3333-444444444444");
+    let _swap = EnvSwap::to(&fake_a.bin_dir(), &fake_a.daemon_dir(), home.root());
+    let store_dir = home.root().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let quiet = quiet_transcript(&store_dir, "q.jsonl", 2 * 3600);
+    let summary = production_sweep(&home, quiet);
+
+    assert_eq!(summary.retired.len(), 2, "{:?}", summary.retired);
+    let bases: Vec<&str> = summary.retired.iter().map(|(_, b)| b.as_str()).collect();
+    assert!(
+        bases
+            .iter()
+            .any(|b| *b == "planning finished on n-plan-a: node superseded"),
+        "{bases:?}"
+    );
+    assert!(
+        bases
+            .iter()
+            .any(|b| *b == "planning halted on n-plan-b: turn ended with no plan"),
+        "{bases:?}"
+    );
+    let log = fake_a.argv_log();
+    assert!(
+        !log.lines().any(|l| l.starts_with("rm ")),
+        "neither planner route rms the harness session: {log}"
+    );
+    assert!(
+        log.lines().any(|l| l == "stop bpaaa111"),
+        "the retirement stops each worker: {log}"
     );
 }

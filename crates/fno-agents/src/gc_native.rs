@@ -135,6 +135,20 @@ pub(crate) fn apply_active_surface_removal(e: &RegistryEntry) -> CascadeOutcome 
     )
 }
 
+/// Retirement's ACTIVE-SURFACE step. A retirement stops the worker and KEEPS
+/// the session: the harness session is the resume state the resume door
+/// replays, so claude, codex and opencode measure not-applicable and nothing
+/// is deleted. `fno agents rm` is the only door that removes session state,
+/// through [`apply_active_surface_removal`]. The one cascade arm retirement
+/// still runs is cursor-agent's: its worker-server sweep ends leaked
+/// PROCESSes, and a leaked process is not session state.
+pub(crate) fn apply_retire_surface(e: &RegistryEntry) -> CascadeOutcome {
+    match e.harness_name() {
+        "cursor-agent" => apply_active_surface_removal(e),
+        _ => CascadeOutcome::NotApplicable,
+    }
+}
+
 /// The mux squad store's default host session, shared with the daemon's
 /// other mux calls (`crates/fno/src/proto.rs` `DEFAULT_SESSION`).
 pub(crate) const MUX_DEFAULT_SERVER: &str = "main";

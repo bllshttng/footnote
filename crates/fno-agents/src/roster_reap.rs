@@ -525,7 +525,7 @@ pub fn roster_reap(
         &|e| store.borrow_mut().matches(e),
         &crate::gc::probe_row_age,
         crate::daemon::now_epoch_secs(),
-        &crate::gc_native::apply_active_surface_removal,
+        &crate::gc_native::apply_retire_surface,
     )
 }
 
