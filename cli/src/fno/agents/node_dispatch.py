@@ -110,7 +110,7 @@ def resolve_node_spawn(
         raise SpawnError(
             f"refusing to dispatch {node_id}: the node dict {caller} passed "
             "carries no dispatch_verb key; the projection feeding this "
-            "dispatcher is lossy (x-0961); fix the projection, not the node."
+            "dispatcher is lossy (id x-1111); fix the projection, not the node."
         )
     verb_source = (
         "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
