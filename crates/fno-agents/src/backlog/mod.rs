@@ -818,13 +818,6 @@ pub fn soak_gaps(graph: &Path, now: chrono::DateTime<chrono::Utc>) -> Vec<String
         return vec!["no clean parity sample recorded yet".into()];
     };
     let mut gaps = Vec::new();
-    let age_days = (now - since).num_days();
-    if age_days < 7 {
-        gaps.push(format!(
-            "soak clean since {} is {age_days} day(s) old; the soak needs 7",
-            since.format("%Y-%m-%d")
-        ));
-    }
     let covered: std::collections::HashSet<String> = meta(&connection, "soak_clean_days")
         .ok()
         .flatten()
@@ -1010,8 +1003,10 @@ mod tests {
     }
 
     #[test]
-    fn flipgate_soak_eight_clean_days_have_no_gaps() {
-        // AC9-HP: clean samples on eight consecutive UTC days read clean.
+    fn flipgate_soak_days_covered_read_clean() {
+        // AC9-HP: clean samples covering every UTC day of the run read
+        // clean, whatever the run's age. Law d-bbbb5a26 waived the 7-day
+        // clock, so a same-day run passes with today's sample alone.
         let (dir, graph) = fixture("graph.json");
         let now = chrono::Utc::now();
         for offset in (0..8).rev() {
@@ -1023,6 +1018,10 @@ mod tests {
             .unwrap();
         }
         assert_eq!(soak_gaps(&graph, now), Vec::<String>::new());
+        let (day_dir, day_graph) = fixture("graph.json");
+        record_parity_sample(&day_graph, &sample_report(0, vec![]), now).unwrap();
+        assert_eq!(soak_gaps(&day_graph, now), Vec::<String>::new());
+        drop(day_dir);
         drop(dir);
     }
 
@@ -1059,9 +1058,10 @@ mod tests {
     }
 
     #[test]
-    fn flipgate_soak_missing_day_and_young_run_each_name_the_gap() {
+    fn flipgate_soak_missing_day_names_the_gap() {
         // AC11-EDGE: a run whose day 2 has no sample names that date, and
-        // a run younger than 7 days names its age.
+        // a young run names no age gap (law d-bbbb5a26 waived the 7-day
+        // clock).
         let (dir, graph) = fixture("graph.json");
         let now = chrono::Utc::now();
         let clean = sample_report(0, vec![]);
@@ -1075,7 +1075,7 @@ mod tests {
             "{gaps:?}"
         );
         assert!(
-            gaps.iter().any(|gap| gap.contains("day(s) old")),
+            !gaps.iter().any(|gap| gap.contains("day(s) old")),
             "{gaps:?}"
         );
         drop(dir);
