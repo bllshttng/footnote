@@ -142,7 +142,7 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
         holder_pid = victim.pid
         code, _, err = run(
             [
-                "fno-agents", "flight-acquire", SLEEPER_KEY,
+                "fno", "agents", "claim", "flight-acquire", SLEEPER_KEY,
                 "--holder", "probe", "--pid", str(holder_pid), "--ttl-ms", "3600000",
             ],
             cwd=cwd,
@@ -180,7 +180,10 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
     finally:
         sleeper.send_signal(signal.SIGKILL)
         if holder_pid is not None:
-            run(["fno-agents", "flight-release", SLEEPER_KEY, "--holder", "probe"], cwd=cwd)
+            run(
+                ["fno", "agents", "claim", "flight-release", SLEEPER_KEY, "--holder", "probe"],
+                cwd=cwd,
+            )
     return 0
 
 
