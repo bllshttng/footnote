@@ -81,6 +81,9 @@ pub mod codex_ask;
 #[doc(hidden)]
 pub mod codex_fake_daemon;
 pub mod codex_inject;
+/// Public because `codex_resume` (pub, exercised by the parity test) names
+/// [`CodexRoute`] in its signature.
+pub mod codex_route;
 pub mod codex_store;
 pub mod codex_thread;
 mod codex_thread_entry;

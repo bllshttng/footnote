@@ -7,19 +7,43 @@ use std::time::Duration;
 use super::{first_line_or, fno_bin};
 use crate::spawn_journal::ReentryVerdict;
 
+/// The reentry refused exit, mirrored (crates/fno never links fno-agents);
+/// twin of `reentry::REENTRY_REFUSED_EXIT`.
+const REENTRY_REFUSED_EXIT: i32 = 3;
+
+/// Why `run_resume_argv` failed. The split is load-bearing (x-3954): the mux
+/// gesture fail-opens to the declared-form render ONLY on `Unavailable`; a
+/// `Refused` line names the door that restores the route and spawns nothing.
+pub(super) enum ResumeArgvError {
+    /// The door refuses by name - a routed codex row whose route cannot ride
+    /// an argv-only pane spawn. Never fail-open.
+    Refused(String),
+    /// The verb is missing, timed out, or answered malformed. Fail-open to
+    /// the declared form, flagged degraded, as before.
+    Unavailable(String),
+}
+
 /// (x-eb79) Shell `fno-agents resume-argv <harness> <sid> --cwd <dir> [--cd]
 /// --json` OFF the core loop, bounded like `run_reentry_plan`. The one
 /// implementation of the codex resume argv the gestures consume - this
 /// server never rebuilds it. Every failure shape (timeout, missing binary,
-/// non-zero exit, unparseable JSON) is a typed `Err` the caller fail-opens
-/// to the declared-form render.
+/// unparseable JSON) is a typed `Unavailable` the caller fail-opens to the
+/// declared-form render; exit 3 from the verb is a `Refused` (x-3954): the
+/// reason names the restoring door, and nothing spawns.
 pub(super) async fn run_resume_argv(
     harness: &str,
     session_id: &str,
     grant_cwd: &str,
     pin_cd: bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, ResumeArgvError> {
     const ARGV_TIMEOUT: Duration = Duration::from_secs(20);
+    let refused = |o: &std::process::Output| {
+        ResumeArgvError::Refused(first_line_or(
+            &String::from_utf8_lossy(&o.stderr),
+            "resume argv: the codex route cannot ride this door; \
+             resume it with `fno agents resume <row>`",
+        ))
+    };
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
     command.args([
@@ -40,28 +64,40 @@ pub(super) async fn run_resume_argv(
         .kill_on_drop(true);
     let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(ARGV_TIMEOUT, fut).await {
-        Err(_) => Err(format!("resume argv for {harness}: timed out")),
-        Ok(Err(_)) => Err(format!("resume argv for {harness}: fno-agents unavailable")),
+        Err(_) => Err(ResumeArgvError::Unavailable(format!(
+            "resume argv for {harness}: timed out"
+        ))),
+        Ok(Err(_)) => Err(ResumeArgvError::Unavailable(format!(
+            "resume argv for {harness}: fno-agents unavailable"
+        ))),
         Ok(Ok(o)) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            let v: serde_json::Value = serde_json::from_str(stdout.trim())
-                .map_err(|e| format!("resume argv for {harness}: {e}"))?;
+            let v: serde_json::Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+                ResumeArgvError::Unavailable(format!("resume argv for {harness}: {e}"))
+            })?;
             let argv: Vec<String> = v
                 .get("argv")
                 .and_then(|a| a.as_array())
-                .ok_or_else(|| format!("resume argv for {harness}: no argv in reply"))?
+                .ok_or_else(|| {
+                    ResumeArgvError::Unavailable(format!(
+                        "resume argv for {harness}: no argv in reply"
+                    ))
+                })?
                 .iter()
                 .filter_map(|t| t.as_str().map(str::to_string))
                 .collect();
             if argv.is_empty() {
-                return Err(format!("resume argv for {harness}: empty argv"));
+                return Err(ResumeArgvError::Unavailable(format!(
+                    "resume argv for {harness}: empty argv"
+                )));
             }
             Ok(argv)
         }
-        Ok(Ok(o)) => Err(first_line_or(
+        Ok(Ok(o)) if o.status.code() == Some(REENTRY_REFUSED_EXIT) => Err(refused(&o)),
+        Ok(Ok(o)) => Err(ResumeArgvError::Unavailable(first_line_or(
             &String::from_utf8_lossy(&o.stderr),
             &format!("resume argv for {harness}: refused"),
-        )),
+        ))),
     }
 }
 

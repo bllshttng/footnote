@@ -680,6 +680,43 @@ pub(crate) fn build_resume_argv_split(
     Some(argv)
 }
 
+/// The env(1) assignment tokens for one env pair set, prefixed ahead of the
+/// argv - the shape the mux verdict prefix prints and both resume print arms
+/// (claude's canonical plan, codex's masked route env) reuse.
+pub(crate) fn env_prefixed(env: &[(String, String)], argv: &[String]) -> Vec<String> {
+    let mut prefixed: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    prefixed.extend(argv.iter().cloned());
+    prefixed
+}
+
+/// The `--print-command` tail: the pane form when the row has a mux ref, else
+/// the in-terminal exec form. Inspection only - shell-quoted paths and ids;
+/// any key-masked env already rides `argv` as tokens.
+pub(crate) fn print_relaunch_command(
+    session: Option<&str>,
+    cwd: &str,
+    argv: &[String],
+    identity: &[String],
+    worker: &str,
+) {
+    if let Some(session) = session {
+        let pane = mux_pane_run_argv(session, cwd, argv, identity, Some(worker));
+        let quoted = pane
+            .iter()
+            .map(|a| shlex_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("fno {quoted}");
+    } else {
+        let quoted = argv
+            .iter()
+            .map(|a| shlex_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!("cd {} && exec {}", shlex_quote(cwd), quoted);
+    }
+}
+
 /// The `fno-agents resume-argv` verb (x-eb79): render one harness's
 /// interactive-resume argv through the ONE builder the CLI verb lane uses,
 /// so the mux gesture consumes the same argv instead of re-deriving the
@@ -722,6 +759,54 @@ pub fn run_resume_argv(rest: &[String]) -> i32 {
     }
     let harness = positional[0];
     let session_id = positional[1];
+    // x-3954: this verb's stdout is a recipe the mux gesture pastes into a
+    // pane, and a pane spawn has no secret-free channel for a route's key
+    // (the claude verdict prefix puts `env K=V` on the argv, visible in ps).
+    // A routed codex row therefore refuses here by name instead of printing
+    // the unrouted recipe, and the caller (and the operator) are pointed at
+    // the door that restores the route. No row, or an unrouted row, changes
+    // nothing.
+    if harness == "codex" {
+        if let Some(home) = crate::paths::AgentsHome::from_env_opt() {
+            let entries = match crate::client_verbs::read_registry_entries(&home.registry_json()) {
+                Ok(e) => e,
+                Err(_) => Vec::new(),
+            };
+            let row = entries.iter().find(|e| {
+                e.get("harness_session_id")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(session_id)
+            });
+            if let Some(row) = row {
+                let name = row
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(session_id);
+                let identity = crate::codex_route::row_route_identity(
+                    row.get("harness").and_then(serde_json::Value::as_str),
+                    row.get("route_provider_id")
+                        .and_then(serde_json::Value::as_str),
+                    row.get("model_name").and_then(serde_json::Value::as_str),
+                );
+                let refusal = match identity {
+                    Err(reason) => Some(format!(
+                        "{name} was launched on a codex route and it cannot be carried \
+                         through this door ({reason}); resume it with \
+                         `fno agents resume {name}`, which restores the route"
+                    )),
+                    Ok(Some((provider, _))) => Some(format!(
+                        "{name} runs on codex route {provider}; resume it with \
+                         `fno agents resume {name}`, which restores the route"
+                    )),
+                    Ok(None) => None,
+                };
+                if let Some(line) = refusal {
+                    eprintln!("resume-argv: {line}");
+                    return crate::reentry::REENTRY_REFUSED_EXIT;
+                }
+            }
+        }
+    }
     match build_resume_argv_split(harness, session_id, cwd.as_deref(), pin_cd) {
         Some(argv) => {
             if json {

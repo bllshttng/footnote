@@ -241,15 +241,33 @@ def test_the_stamp_is_cleared_by_whatever_clears_a_route():
     assert ROUTE_PROVIDER_ENV in SCRUB_AUTH_VARS
 
 
-def test_a_codex_route_carries_the_same_stamp():
+def test_a_codex_route_carries_the_same_stamp(tmp_path, monkeypatch):
     # Without it a routed codex worker resolves "unknown" and a shared provider
-    # reached through codex still launches the full panel.
-    import inspect
+    # reached through codex still launches the full panel. The stamp is BUILT in
+    # Rust now (codex_route.rs appends FNO_ROUTE_PROVIDER to CodexRoute.env);
+    # the Python lane relays the builder's answer verbatim, so the parity is
+    # asserted on a resolved route, not on Python source (x-3954).
+    from fno.rust_binary import find_dev_binary
 
+    if find_dev_binary() is None:
+        pytest.skip("compiled fno-agents binary not present")
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[model_routing]\n"
+        '[model_routing.roles]\ntidy = "oai,glm-5.2"\n'
+        "[model_routing.providers.oai]\n"
+        'protocol = "openai"\n'
+        'base_url = "https://example.test/v1"\n'
+        'api_key_env = "OPENAI_API_KEY"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
     from fno.agents import model_routing
 
-    source = inspect.getsource(model_routing.resolve_codex_route)
-    assert "ROUTE_PROVIDER_ENV" in source
+    route = model_routing.resolve_codex_route("tidy")
+    assert route is not None
+    assert route.env.get("FNO_ROUTE_PROVIDER") == "oai"
 
 
 def test_a_stamp_alone_does_not_count_as_a_recorded_route(tmp_path):

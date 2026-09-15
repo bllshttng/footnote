@@ -19,6 +19,7 @@
 use crate::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
+use std::path::Path;
 
 /// The fields an overlay block may legally carry.
 const OVERLAY_FIELDS: [&str; 4] = ["permission_mode", "effort", "substrate", "args"];
@@ -149,9 +150,53 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("link-meta") => resolve_link_meta(&payload),
         Some("pane-group") => resolve_pane_group(&payload),
         Some("fallback") => resolve_fallback(&payload),
+        Some("codex-route") => resolve_codex_route_kind(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route"
         )),
+    }
+}
+
+/// The codex route builder behind Python's `resolve_codex_route`: the payload
+/// names the role-picked (provider, model) plus the spawn cwd; the answer
+/// carries the three `-c` tokens and the env (key + stamp) to the Python
+/// parent over this one stdout pipe. `unrouted` marks the deliberate no-op
+/// (an anthropic-protocol provider belongs to the claude lane, silent in
+/// Python exactly as before); `refusal` names a misconfiguration the spawn
+/// surfaces as a notice. Key-free, like every answer this verb prints.
+fn resolve_codex_route_kind(payload: &Value) -> Result<Value, String> {
+    let provider = payload
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let model = payload.get("model").and_then(Value::as_str).unwrap_or("");
+    let cwd = payload.get("cwd").and_then(Value::as_str).unwrap_or("");
+    if provider.is_empty() || model.is_empty() || cwd.is_empty() {
+        return Ok(json!({
+            "refusal": "spawn-overlay codex-route: payload needs provider, model and cwd",
+            "unrouted": Value::Null,
+        }));
+    }
+    match crate::codex_route::resolve_codex_route(Path::new(cwd), provider, model) {
+        Ok(route) => Ok(json!({
+            "refusal": Value::Null,
+            "unrouted": Value::Null,
+            "provider": route.provider,
+            "model": route.model,
+            "config_args": route.config_args,
+            "env": route.env,
+        })),
+        Err(err) => {
+            let (refusal, unrouted) = match &err {
+                crate::codex_route::CodexRouteError::Unrouted(reason) => {
+                    (Value::Null, json!(reason))
+                }
+                crate::codex_route::CodexRouteError::Refused(reason) => {
+                    (json!(reason), Value::Null)
+                }
+            };
+            Ok(json!({"refusal": refusal, "unrouted": unrouted}))
+        }
     }
 }
 

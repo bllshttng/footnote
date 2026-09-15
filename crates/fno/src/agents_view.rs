@@ -168,6 +168,12 @@ pub struct RegistryAgent {
     /// render joins it into the subline when it differs from the label; the
     /// row's `name` is never rewritten from it.
     pub harness_title: Option<String>,
+    /// (x-3954) The spawn-recorded model-provider identity, read straight off
+    /// the registry row. Presence (`Some`, not `openai`) is the routed fact the
+    /// workspace restore refuses on; the routed predicate lives in
+    /// `server.rs::member_routed_codex_refusal`, whose twin is
+    /// `codex_route::row_route_identity` in fno-agents.
+    pub route_provider_id: Option<String>,
 }
 
 /// See [`RegistryAgent::liveness`]. `Alive`/`Dead` are confident reads;
@@ -2151,6 +2157,11 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             liveness,
             liveness_measured_at: measured_at,
             harness_title,
+            route_provider_id: row
+                .get("route_provider_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         });
     }
     // Stable order so row-set equality (the change gate) and the rendered
@@ -2365,6 +2376,8 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             liveness: Liveness::Alive,
             liveness_measured_at: None,
             harness_title: None,
+            // A synthesized foreign roster row carries no registry stamps.
+            route_provider_id: None,
         });
     }
     drop(reg_ids); // release the borrow of `out` before extending it
@@ -2424,6 +2437,8 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             liveness: Liveness::Alive,
             liveness_measured_at: None,
             harness_title: r.harness_title.clone(),
+            // A synthesized parked child records no route axis of its own.
+            route_provider_id: None,
         });
     }
     out.extend(parked);
@@ -4321,6 +4336,7 @@ config_dir = "~/.claude-alt"
         RegistryAgent {
             model: None,
             route: None,
+            route_provider_id: None,
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,

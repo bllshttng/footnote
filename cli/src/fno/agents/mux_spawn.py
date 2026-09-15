@@ -3585,6 +3585,11 @@ def dispatch_spawn_pane(
         # prevents the generic env wrapper from resolving a Claude route.
         route_env = dict(codex_route.env) if codex_route is not None else {}
         launch_role = None
+        # x-3954: the row records the route IDENTITY (never an endpoint or a
+        # key); a relaunch re-resolves the route in Rust from today's config.
+        if codex_route is not None and codex_route.provider:
+            route_provider_id = codex_route.provider
+            model_name = codex_route.model
 
     effective_message: Optional[str] = None
     if is_verb_seed(message):
@@ -4418,13 +4423,12 @@ def dispatch_spawn_pane(
         # CLAUDE_CONFIG_DIR by construction, so recording one would promise a
         # restore that silently leaves the account behind.
         #
-        # CLAUDE only, for the same reason. A codex route lives in `-c` config
-        # args (`model_providers.<name>` + `model_provider`), not in the env -
-        # `CodexRoute.env` carries only the API key. Recording that env would let
-        # a relaunch "restore the route" into codex's DEFAULT provider holding the
-        # route's key: half a restore, reported as a whole one. Codex route
-        # survival needs an artifact this design does not model, so it stays
-        # unrecorded and codex relaunch behavior is unchanged.
+        # CLAUDE only: the file IS claude's `--settings` artifact. A codex route
+        # carries its endpoint in `-c` config args, which this sidecar cannot
+        # model; codex instead records its route IDENTITY on the row
+        # (`route_provider_id`, `model_name`), and every relaunch door
+        # re-resolves the route in Rust (`codex_route.rs`) or refuses - never a
+        # half restore onto codex's default provider.
         # Materialized inside the reap guard below, NOT here: it does mkdir +
         # open + replace under the state dir, the pane is already running by this
         # point, and an OSError escaping uncaught would leave a live pane with no

@@ -283,13 +283,18 @@ impl super::Core {
             .await
             {
                 Ok(argv) => Ok((argv, false)),
-                // Fail-open: the fallback IS today's declared-form render,
-                // never a second divergent builder. The degradation is named
-                // to the operator, never silent.
-                Err(reason) => match resume_argv_for(&harness, &session_id) {
-                    Ok(argv) => Ok((argv, true)),
-                    Err(_) => Err(reason),
-                },
+                // x-3954: fail-open ONLY on Unavailable - the fallback IS
+                // today's declared-form render, never a second divergent
+                // builder, and the degradation is named to the operator. A
+                // `Refused` (a routed codex row) goes back as the gesture's
+                // refusal notice and spawns nothing.
+                Err(super::agent_actions::ResumeArgvError::Unavailable(reason)) => {
+                    match resume_argv_for(&harness, &session_id) {
+                        Ok(argv) => Ok((argv, true)),
+                        Err(_) => Err(reason),
+                    }
+                }
+                Err(super::agent_actions::ResumeArgvError::Refused(line)) => Err(line),
             };
             let _ = core_tx
                 .send(super::CoreMsg::ResumeArgvReady {

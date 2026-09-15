@@ -116,6 +116,42 @@ def _configure_codex(monkeypatch: pytest.MonkeyPatch) -> None:
         lambda settings: ModelRoutingBlock(providers=OPENAI_PROVIDER),
     )
 
+    # x-3954: the provider half of the route resolves in Rust through the
+    # spawn-overlay verb. These journeys test the ROLE-to-argv plumbing, not
+    # the builder (the marked tests in test_model_routing.py pin the real
+    # binary), so answer the codex-route kind with exactly the tokens Rust
+    # builds; every other kind rides the real transport.
+    from fno.agents import spawn_overlay_client
+
+    real_call = spawn_overlay_client.spawn_overlay_call
+
+    def fake_overlay(payload):
+        if payload.get("kind") != "codex-route":
+            return real_call(payload)
+        provider = payload["provider"]
+        model = payload["model"]
+        return {
+            "refusal": None,
+            "unrouted": None,
+            "provider": provider,
+            "model": model,
+            "config_args": [
+                "-c",
+                "model_providers."
+                + provider
+                + "={ base_url = 'https://example.test/v1', env_key = 'OPENAI_API_KEY', wire_api = 'chat' }",
+                "-c",
+                "model_provider='" + provider + "'",
+                "-c",
+                "model='" + model + "'",
+            ],
+            "env": [["OPENAI_API_KEY", "openai-key"], ["FNO_ROUTE_PROVIDER", provider]],
+        }
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_overlay_client.spawn_overlay_call", fake_overlay
+    )
+
 
 def test_real_manifest_reaches_claude_worker_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

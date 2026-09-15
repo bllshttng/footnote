@@ -1463,12 +1463,6 @@ def refresh_provider_default_tiers(
     )
 
 
-# Default codex wire protocol for a third-party OpenAI-compatible endpoint
-# (z.ai's paas/v4 speaks Chat Completions). Codex's own default is "responses"
-# (OpenAI's API); a routed third-party provider almost always wants "chat".
-DEFAULT_CODEX_WIRE_API = "chat"
-
-
 class CodexRoute(NamedTuple):
     """Codex-lane (OpenAI-protocol) routing result.
 
@@ -1479,30 +1473,22 @@ class CodexRoute(NamedTuple):
     spawn env; ``config_args`` is prepended to the codex argv as global flags.
 
     ``env`` also carries :data:`ROUTE_PROVIDER_ENV`, so a codex worker can name
-    its own model provider exactly as a claude-lane worker can.
+    its own model provider exactly as a claude-lane worker can. ``provider``
+    and ``model`` are the route IDENTITY the registry row records (x-3954);
+    every relaunch door re-resolves the endpoint from today's config in Rust
+    (``codex_route.rs``), so no endpoint or key is ever persisted.
     """
 
     env: dict[str, str]
     config_args: list[str]
-
-
-def _toml_literal(value: str) -> Optional[str]:
-    """Wrap ``value`` as a TOML literal string (single-quoted, no escapes), or
-    None if it can't be embedded safely. Rejects a single quote (would break the
-    literal string) AND any control char - notably NUL, which would otherwise
-    survive into the codex argv and make ``subprocess`` raise ``ValueError:
-    embedded null byte``, breaking resolve_codex_route's never-raise contract.
-    These are controlled config values we won't try to escape; bail fail-safe."""
-    if "'" in value or any(ord(c) < 0x20 for c in value):
-        return None
-    return f"'{value}'"
+    provider: str = ""
+    model: str = ""
 
 
 def resolve_codex_route(
     role: Optional[str],
     *,
     settings: "Optional[SettingsModel]" = None,
-    env: Optional[Mapping[str, str]] = None,
     notice: Optional[Callable[[str], object]] = None,
     business_lookup: Optional[BusinessRoleLookup] = None,
 ) -> Optional[CodexRoute]:
@@ -1511,11 +1497,19 @@ def resolve_codex_route(
 
     Mirrors :func:`resolve_route`'s fail-safe contract: a protected role, a
     disabled block, an unrouted role, an unconfigured provider, a NON-openai
-    provider (that belongs to the claude lane), a missing base_url/key, or a
-    value that can't be safely embedded in TOML all return ``None`` (with a
-    one-line notice where a misconfiguration is worth surfacing). The legacy
-    path never raises; an opted-in business lookup fails closed with the same
-    typed errors as the Claude lane.
+    provider (that belongs to the claude lane, silently), a missing
+    base_url/key, or a value that can't be safely embedded in TOML all return
+    ``None`` (with a one-line notice where a misconfiguration is worth
+    surfacing). The legacy path never raises; an opted-in business lookup fails
+    closed with the same typed errors as the Claude lane.
+
+    The provider half (record read, protocol check, key, TOML tokens) is owned
+    by Rust (`codex_route.rs`) through the spawn-overlay verb: ONE builder
+    serves spawn and every relaunch door, so the two cannot disagree. The key
+    resolves in the verb's process env, so tests pin it with ``monkeypatch
+    .setenv`` and a temp ``FNO_CONFIG``. The answer's ``refusal`` surfaces as a
+    notice; ``unrouted`` (the claude-lane case) stays silent, exactly as
+    before.
     """
     requested_role = (role or "").strip()
     name = _normalize(requested_role)
@@ -1531,11 +1525,6 @@ def resolve_codex_route(
         )
         return None
 
-    if env is None:
-        import os
-
-        env = os.environ
-
     block = _routing_block(settings)
     if not getattr(block, "enabled", True):
         return None
@@ -1545,85 +1534,40 @@ def resolve_codex_route(
         return None
     pname, model = target
 
-    provider = _resolve_provider(pname, block)
-    if provider is None:
+    import os
+
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
+
+    try:
+        answer = spawn_overlay_call(
+            {"kind": "codex-route", "provider": pname, "model": model, "cwd": os.getcwd()}
+        )
+    except SpawnOverlayUnavailable as exc:
         _emit(
             notice,
-            f"model-routing (codex): provider {pname!r} for role {name!r} is "
-            f"not configured; using the default codex model",
+            f"model-routing (codex): route builder unavailable ({exc}); "
+            "using the default codex model",
         )
         return None
-
-    protocol = (provider.get("protocol") or "anthropic").lower()
-    if protocol != "openai":
+    refusal = answer.get("refusal")
+    if refusal:
+        _emit(notice, f"model-routing (codex): {refusal}")
+        return None
+    if answer.get("unrouted"):
         # An anthropic provider belongs to the claude lane, not here. Silent
         # None (not an error): a role shared across lanes just no-ops on codex.
         return None
-
-    base_url = provider.get("base_url") or ""
-    if not base_url:
-        _emit(notice, f"model-routing (codex): provider {pname!r} has no base_url")
-        return None
-
-    api_key_env = provider.get("api_key_env") or "OPENAI_API_KEY"
-    key = _resolve_key(provider, env)
-    if not key:
-        _emit(
-            notice,
-            f"model-routing (codex): no API key for provider {pname!r} "
-            f"(role {name!r}); using the default codex model",
-        )
-        return None
-
-    # The provider name becomes a TOML table key (model_providers.<pname>) and a
-    # config value; only a bareword identifier is safe in the -c argument.
-    import re
-
-    if not re.fullmatch(r"[A-Za-z0-9_-]+", pname):
-        _emit(
-            notice,
-            f"model-routing (codex): provider name {pname!r} is not a safe codex "
-            f"provider id; using the default codex model",
-        )
-        return None
-
-    wire_api = provider.get("wire_api") or DEFAULT_CODEX_WIRE_API
-
-    # Build the inline model-provider config. Every embedded value is a TOML
-    # literal string; a value we can't embed safely aborts the route.
-    lits = {
-        "base_url": _toml_literal(base_url),
-        "env_key": _toml_literal(api_key_env),
-        "wire_api": _toml_literal(wire_api),
-        "provider": _toml_literal(pname),
-        "model": _toml_literal(model),
-    }
-    if any(v is None for v in lits.values()):
-        _emit(
-            notice,
-            f"model-routing (codex): provider {pname!r} has a value that can't "
-            f"be embedded in TOML; using the default codex model",
-        )
-        return None
-
-    provider_table = (
-        f"model_providers.{pname}={{ base_url = {lits['base_url']}, "
-        f"env_key = {lits['env_key']}, wire_api = {lits['wire_api']} }}"
-    )
-    config_args = [
-        "-c",
-        provider_table,
-        "-c",
-        f"model_provider={lits['provider']}",
-        "-c",
-        f"model={lits['model']}",
-    ]
+    config_args = answer.get("config_args") or []
+    env_pairs = answer.get("env") or []
+    route_env = {str(k): str(v) for k, v in env_pairs}
     # The same stamp the claude lane writes. Without it a routed codex worker
     # resolves provider "unknown" and ignores its account's subagent budget, so
     # a shared provider reached through codex still launches the full panel.
     return CodexRoute(
-        env={api_key_env: key, ROUTE_PROVIDER_ENV: pname},
-        config_args=config_args,
+        env=route_env,
+        config_args=list(config_args),
+        provider=str(answer.get("provider") or pname),
+        model=str(answer.get("model") or model),
     )
 
 

@@ -750,12 +750,12 @@ def _codex_create_path(
         model=model,
         model_basis="requested" if model else None,
         effort=effort,
-        # The THIRD Python mint path, after the pane and bg paths; the Rust
-        # counterpart in codex_ask.rs stamps the same field.
+        route_provider_id=result.provider or None,
+        model_name=result.model or None,
+        # The THIRD Python mint path; codex_ask.rs stamps the same field.
         origin="spawn",
-        # x-98ab: the node this spawn was FOR, resolved by the caller's
-        # provenance pass - never this process's ambient value, which names
-        # the SPAWNING session's node.
+        # x-98ab: the node this spawn was FOR (the caller's provenance pass),
+        # never this process's ambient value.
         node=node,
         # The one-shot codex create lane: non-interactive by construction.
         substrate="headless",

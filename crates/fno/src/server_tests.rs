@@ -1237,12 +1237,12 @@ fn agent_rows_pane_dead_corroborates_over_an_unmeasured_registry_liveness() {
 
 #[test]
 fn agent_rows_watch_only_appendix_carries_unmeasured_from_registry_liveness() {
-    // x-9de7: the paneless (watch-only) join site has no pane fact to
-    // consult at all, so `unmeasured` passes the registry's own
-    // corroboration read straight through.
+    // x-9de7: the paneless (watch-only) join site has no pane fact to consult,
+    // so `unmeasured` passes the registry's own corroboration read straight through.
     let paneless = |name: &str, liveness: agents_view::Liveness| RegistryAgent {
         model: None,
         route: None,
+        route_provider_id: None,
         spawned_by_session: None,
         session_id: None,
         harness_session_id: None,
