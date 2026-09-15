@@ -44,7 +44,7 @@ Every placement flag implies `--substrate pane`.
 
 ## Crowns
 
-`--crown/-k` grants an orchestrator crown over the named territory. Repeat it with epic id(s) to crown a Director over the set. One project name crowns a project king. Several projects crown a portfolio. The altitude derives from what you name. There is no `--level`. A node that is not an epic is refused, because implementers get no crowns. The grantor derives from THIS session and is never self-declared. Crowns work on the pane and thread substrates. Thread crowns are claude-only until the court plumbing learns the opencode serve lane. Headless refuses, because its one-shot exits before it can reign. If the caller already holds the named territory, add `--succeed`: that flag transfers the crown and strips the caller atomically.
+`--crown/-k` grants an orchestrator crown over the named territory. Repeat it with epic id(s) to crown a Director over the set. One project name crowns a project king. Several projects crown a portfolio. The altitude derives from what you name. There is no `--level`. A node that is not an epic is refused, because implementers get no crowns. The grantor derives from THIS session and is never self-declared. Crowns work on the pane and thread substrates. Thread crowns are claude-only until the court plumbing learns the opencode serve lane. Headless refuses, because its one-shot exits before it can reign. If the caller already holds the named territory, add `--succeed`: that flag transfers the crown and strips the caller atomically. The sitting king must run it from its own session. From an operator terminal there is no caller to strip, so the spawn declines the crown and launches the heir uncrowned. The recovery is in [fleet-faq.md](../fleet-faq.md).
 
 ## Misc
 
