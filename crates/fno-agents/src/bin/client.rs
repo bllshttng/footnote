@@ -40,6 +40,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "codex-assign-project",
     "compaction",
     "component-verdict",
+    "context-run",
     "provider-cap",
     "source-pin",
     "court-orphans",
@@ -486,6 +487,17 @@ async fn run(args: Vec<String>) -> i32 {
     // a sweep reads tables, manifests, or piped rows from disk.
     if verb == "honesty-sweep" {
         return fno_agents::honesty_sweep::run_honesty_sweep(&args[1..]);
+    }
+
+    // `context-run`: one runner for every fno SessionStart/PostCompact context
+    // producer (see context_run.rs doc). Direct dispatch; no daemon RPC - a
+    // session-start hook must work when nothing else is answering. Same
+    // `matches!` treatment as `state` so it stays out of CLIENT_VERB_USAGE /
+    // RUST_CLIENT_VERBS and the routable-verb parity guard; registered in
+    // ALL_CLIENT_ACTIONS so the verb-surface ratchet's binary probe still
+    // reads it.
+    if matches!(verb, "context-run") {
+        return fno_agents::context_run::run_context_run(&args[1..]);
     }
 
     // `probe-run`: see its own doc in acceptance_evidence.rs. Direct dispatch.
