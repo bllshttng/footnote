@@ -1,4 +1,4 @@
-//! The `spawn-gate` verb (x-6089): the ONE spawn gate answered over one
+//! The `spawn-gate` verb : the ONE spawn gate answered over one
 //! subprocess round trip, so every door - pane, routed, account, and the
 //! native bg/headless arms - reads the same question answered in one place.
 //!
@@ -467,7 +467,7 @@ fn fleet_row(slots: usize, cap: usize) -> Value {
     row.insert("key".into(), json!("agents.max_live"));
     row.insert(
         "note".into(),
-        json!("x-3f84: rows are not what the machine spends; see the machine gates"),
+        json!("x-aaaa: rows are not what the machine spends; see the machine gates"),
     );
     Value::Object(row)
 }

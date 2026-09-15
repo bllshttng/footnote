@@ -2161,7 +2161,7 @@ event_types:
         node:
           type: string
           description: "The backlog node this spawn was FOR, from the spawn request. Absent when the caller named no node; the retirement cascade reads it as a provenance source."
-        # Parent-edge provenance : the spawning session's ambient env,
+        # Parent-edge provenance: the spawning session's ambient env,
         # captured at launch so a worker can be traced BACK to the conversation
         # that decided to spawn it. All optional; absent for legacy spawns.
         spawned_by_session:

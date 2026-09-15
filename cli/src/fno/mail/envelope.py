@@ -1,11 +1,11 @@
 """The ``<fno_mail>`` agent-to-agent envelope renderer -- the SINGLE source for
-the wire format G1 (x-26df). A Rust mirror of this renderer used to live in
-``crates/fno-agents/src/claude_drive.rs``; node x-1904 deleted it as dead code
+the wire format G1. A Rust mirror of this renderer used to live in
+``crates/fno-agents/src/claude_drive.rs``; node deleted it as dead code
 once the live inject path moved to the bracketed-paste transport in
 ``mail_inject.rs``, which renders no envelope of its own and takes the already
 -wrapped text this module produced. This module is now the sole renderer.
 
-Rendered once here and shared by every live-delivery producer (node x-1f23): the
+Rendered once here and shared by every live-delivery producer (node): the
 claude ``control.sock`` inject (``fno-agents mail-inject``), the codex/gemini
 daemon deliver, and the relay PTY hop (which uses the single-line transport
 variant built from :func:`fno_mail_open`).
@@ -152,7 +152,7 @@ def fleet_has_crown_at(registry_path: Path) -> bool:
     The path is an ARGUMENT, and it is the cache key. A zero-argument cached
     read is a global keyed on nothing: the first caller in a process fixes the
     answer for every caller after it, so the result depends on execution order
-    rather than on the root the caller asked about (x-3d21 R5). This mirrors
+    rather than on the root the caller asked about (R5). This mirrors
     the Rust ``fleet_has_crown_at`` in ``crates/fno-agents/src/mail_inject.rs``,
     which has taken its path as an argument from the start.
 
@@ -178,7 +178,7 @@ def fleet_has_crown() -> bool:
     two are configured apart. A missing file is not an error -- ``load_registry``
     returns ``[]`` -- so the fail-safe below never fires and the rank is
     dropped on a genuinely crowned fleet. One resolver per state file, and it
-    is the writer's (x-3d21 R4).
+    is the writer's (R4).
     """
     return fleet_has_crown_at(agents_registry_path())
 

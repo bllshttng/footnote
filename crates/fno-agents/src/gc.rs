@@ -87,7 +87,7 @@ pub struct GcRow {
     /// an assignment in flight. `blocked` (waiting on input) and `working`
     /// keep the planner hold.
     pub turn_ended: bool,
-    /// A hold computed beside the work verdict : the cascade's
+    /// A hold computed beside the work verdict: the cascade's
     /// conflict between witnesses, or the PR-state confirm contradicting a
     /// done node. Decided in the sweep where the route and the graph read
     /// live; relayed here so the keep is named by the policy, never silently
@@ -111,7 +111,7 @@ pub struct GcRow {
     /// nothing, so a fresh mtime without a living writer is an artifact -
     /// but an absent or unanswerable pid never does: only ESRCH is death.
     pub pid_gone: bool,
-    /// A `reap --release` ruling for THIS row : the release lifts
+    /// A `reap --release` ruling for THIS row: the release lifts
     /// the transcript-unresolved gate, so an absent transcript age retires
     /// instead of holding. Set only when the verb's ruling matched the row;
     /// a missing age is never quiet on any other path.
@@ -129,7 +129,7 @@ pub struct GcRow {
 }
 
 impl GcRow {
-    /// The session-shaped release : the ONE predicate the policy
+    /// The session-shaped release: the ONE predicate the policy
     /// arm and the sweep's obligation yields both read, so they cannot
     /// drift. A released row's own open do row is the stale record of work
     /// that moved on, never a live assignment.
@@ -180,17 +180,17 @@ pub enum KeepReason {
     /// Origin is not `spawn` (adopted, or nothing recorded): only a row fno
     /// itself spawned retires, whatever the work state says.
     NotSpawn { origin: String },
-    /// No declared source resolved a node for the session : the
+    /// No declared source resolved a node for the session: the
     /// reverse join, the registry field, the row name, and the transcript
     /// all answered nothing (d-bbcd48b5 recovers provenance from any
     /// declared source; nothing left to recover from is the one honest
     /// keep).
     NoProvenance,
-    /// Two provenance sources resolved DIFFERENT nodes : witnesses
+    /// Two provenance sources resolved DIFFERENT nodes: witnesses
     /// that disagree are not evidence, so the row is held rather than
     /// retired on a guess.
     NodeConflict { a: String, b: String },
-    /// The node reads done but its PR state contradicts : an open
+    /// The node reads done but its PR state contradicts: an open
     /// additional PR, or a RECORDED merge_status that is not `merged`. An
     /// absent merge_status does not hold - absence has three explanations
     /// and none is `unmerged` - and rides the basis as unrecorded instead.
@@ -308,7 +308,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // d-81c6da7e: a finished planner's quiet gate is 1200 s, not
             // the 900 s every other row takes. A released planner skipped
             // the marker question by ruling, so only its quiet gate is
-            // left. : the lane keeps precedence over the
+            // left.: the lane keeps precedence over the
             // session-shaped releases below, and an unfinished assignment
             // holds even when the node's status would free a non-planner.
             if let Some(assignments) = &row.planning {
@@ -433,7 +433,7 @@ pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
     }
 }
 
-/// The production transcript-age seam : the NEWEST TIMESTAMPED
+/// The production transcript-age seam: the NEWEST TIMESTAMPED
 /// transcript entry, read through the shared truth probe (one batched,
 /// single-flighted child per sweep) - not a file stat, whose untimestamped
 /// trailing records keep a dead file reading fresh (measured median +20 min,
@@ -2778,7 +2778,7 @@ mod tests {
         );
     }
 
-    // ── : the reaper asks the session, not only the node ──────────
+    // ──: the reaper asks the session, not only the node ──────────
 
     /// An open-work row that is quiet past the grace - the shape the old
     /// policy held forever.

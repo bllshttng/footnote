@@ -822,7 +822,7 @@ def run_status(
             },
         )
     else:
-        # Additive review signal : computed AFTER the authoritative CI
+        # Additive review signal: computed AFTER the authoritative CI
         # verdict so a slow/failed review read can never delay or corrupt it.
         # Any failure degrades to "unknown"/None and leaves the CI verdict +
         # exit code untouched.
@@ -1046,7 +1046,7 @@ def run_status(
         # total > 0 is load bearing: an empty rollup and an all-green
         # one both have zero unsettled entries, and only one of them
         # is decided. Existence must be stated, not inherited.
-        # verdict != unknown too : a zero-real-check-run
+        # verdict != unknown too: a zero-real-check-run
         # rollup can have zero unsettled entries (every StatusContext
         # already settled) while still being an undecided read.
         "settled": verdict != "unknown" and counts["total"] > 0 and counts["unsettled"] == 0,
@@ -1123,7 +1123,7 @@ def run_status(
         # The obvious "read this, not green": ready iff CI is green AND
         # no optional finding is unresolved AND review coverage is a
         # counted pass. Coverage joined the conjunction because `fno
-        # pr merge` already read it : with it absent here, the
+        # pr merge` already read it: with it absent here, the
         # two verbs answered opposite ways from one payload and every
         # ready: true PR refused at the merge gate. The blockers list
         # names WHICH conjunct failed - a bare false has one

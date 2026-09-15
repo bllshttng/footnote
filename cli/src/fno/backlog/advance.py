@@ -1566,7 +1566,7 @@ def _retask_first(
 # `advance(project=<lane-id>)` finds no same-project `next`, so the top-level
 # parallel dispatcher stays the single lane authority instead of each lane
 # fanning out past `max_lanes`.
-# The parking lot is NOT lane-isolated : the post-merge ritual resolves
+# The parking lot is NOT lane-isolated: the post-merge ritual resolves
 # `parking_lot_path` against the canonical root unconditionally and writes there.
 # It is a serial one-shot durable step whose write vehicles are already safe on
 # the shared canonical file (capture add file-locks; the narrative append is
@@ -1759,7 +1759,7 @@ def _ensure_lane_worktree(
             f"{(proc.stderr or proc.stdout or '').strip()[:200]}"
         )
     worktree = Path(path)
-    # policy=never : ensure printed the repo main-checkout path itself
+    # policy=never: ensure printed the repo main-checkout path itself
     # (launch in place, no worktree). Skip every worktree-only side effect - the
     # `.fno` heal + setup-worktree.sh would corrupt the canonical checkout
     # (Locked Decision 4: callers guard worktree-only work on path == repo root).
@@ -2045,7 +2045,7 @@ def dispatch_lanes(
                 {
                     "node_id": node_id,
                     "short_id": short_id,
-                    # The exact registered name from the spawn receipt ;
+                    # The exact registered name from the spawn receipt;
                     # never a re-mint that can disagree with the registry.
                     "agent_name": lane_receipt.get("agent_name", ""),
                     "lane": True,
@@ -3555,7 +3555,7 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     from fno.graph.ladder import is_cold_dispatchable
 
     entries = wire_rows(path=graph_json())
-    # Containers are never dispatched as workers : a dependent that is
+    # Containers are never dispatched as workers: a dependent that is
     # itself some other node's `parent` is an epic, and `/target` builds its
     # leaves, not the box. Mirror cmd_next's `_pick_ready` exclusion on this
     # edge-following path so a now-unblocked epic dependent is skipped here too.
@@ -3646,7 +3646,7 @@ def _walker_live_at(project_root: str) -> bool:
     from fno.claims.verdict import claim_verdicts
 
     try:
-        # live OR suspect : a suspect walker claim is still an occupied
+        # live OR suspect: a suspect walker claim is still an occupied
         # lane; treat it as live so we never double-launch into that repo.
         key = f"walker:{project_root}"
         state = claim_verdicts([key], root=Path(project_root)).get(key, {}).get("state")
@@ -3772,7 +3772,7 @@ def _converge_one(
     except Exception as exc:  # noqa: BLE001
         return skip("claim-error", detail=str(exc))
 
-    # Reserve-to-outcome span : every exit that is not a dispatch
+    # Reserve-to-outcome span: every exit that is not a dispatch
     # returns the boot-window reservation, so a raise between acquire and the
     # dispatched receipt can no longer strand the bridge (dispatch: was
     # held forever by exactly that shape).
@@ -4373,7 +4373,7 @@ def advance_epic(
     # path, this standalone epic verb has no paired advance() call to record the
     # decision, so emit the skip receipt here or a gated epic advance is silent in
     # the event stream (codex P2 - LD#12 parity). There is deliberately NO
-    # whole-pass `walker:` guard here : `_walker_key()` resolves THIS
+    # whole-pass `walker:` guard here: `_walker_key()` resolves THIS
     # process's canonical repo root, so one live walker in the epic repo refused
     # the entire pass, including every child living in a different repository.
     # `_converge_one` probes `_walker_live_at(root)` per child against that

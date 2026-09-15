@@ -2,7 +2,7 @@
 //! an a2a turn into a LIVE adopted `claude --bg` session over the daemon
 //! `control.sock`. Python's `_deliver_live` runs it as a binary subprocess and
 //! falls back to the durable bus queue ONLY when this reports not-delivered
-//! (live-inject-first, durable fallback -- node x-1f23, epic x-07c1).
+//! (live-inject-first, durable fallback -- node, epic).
 //!
 //! Binary-direct (Python subprocess), NOT a routable `fno agents` verb -- it is
 //! dispatched via `matches!` in `client.rs`, like `version`/`--emit-schema`, so it
@@ -13,7 +13,7 @@
 //! ([`crate::claude_attach`]). Post-attach the socket is a RAW keystroke pipe, so
 //! the turn is bracketed-PASTED as raw bytes and submitted with a wire-level CR --
 //! NOT an `op:'reply'` JSON frame, which would land (auth key included) as literal
-//! text in the recipient input box, unsent (node x-178e). The `<fno_mail>` envelope is
+//! text in the recipient input box, unsent (node x-aaaa). The `<fno_mail>` envelope is
 //! rendered Python-side (the single renderer, shared by the codex/gemini + relay
 //! paths) and injected verbatim here, so this verb is a dumb transport.
 //!
@@ -22,7 +22,7 @@
 //! A submitted turn is recorded verbatim; an unsent input box records nothing. This
 //! replaces the earlier transcript-GROWTH proxy, which false-confirmed on a BUSY
 //! recipient whose transcript grows continuously from an unrelated turn (node
-//! x-178e).
+//! x-aaaa).
 //!
 //! ponytail: content-confirm still has one bounded edge -- a BUSY recipient may
 //! queue the injected turn past the poll budget; we report not-confirmed and Python
@@ -63,7 +63,7 @@ fn contract_enter_delay_ms(
 }
 
 /// The settle delay belongs to the pane RECEIVING the paste, not to a fixed
-/// harness (x-4b0b): a claude constant sent to a codex recipient fires the CR
+/// harness : a claude constant sent to a codex recipient fires the CR
 /// while the codex TUI is still ingesting the paste, so the envelope sits
 /// unsent in its composer. Callers resolve the recipient first; `claude_ask`
 /// passes `Claude` because its lane is claude-only.
@@ -126,7 +126,7 @@ const CR_RESUBMIT_EVERY: u32 = 8;
 /// Live-inject target harness. `claude` is the default `control.sock` path;
 /// `codex` routes to the app-server daemon ([`crate::codex_inject`], US8);
 /// `keeper` types the envelope into a lane-B thread's pty through the keeper
-/// socket's `Input` frames (x-0ea6). The keeper recipient's settle delay and
+/// socket's `Input` frames. The keeper recipient's settle delay and
 /// confirm target resolve from the HOSTED harness's own row - the TUI
 /// receiving the paste - never from this variant's lane label.
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -152,7 +152,7 @@ impl MailInjectHarness {
     }
 }
 
-/// Axis-rename tombstone (x-bab1): the harness axis was `--provider`, now
+/// Axis-rename tombstone : the harness axis was `--provider`, now
 /// `--harness/-H`. A model vendor routes only at spawn. Mirrors the Python
 /// `_flag_aliases.PROVIDER_AXIS_TOMBSTONE` (kept in lockstep).
 const PROVIDER_AXIS_TOMBSTONE: &str = concat!(
@@ -223,7 +223,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut attempts = DEFAULT_ATTEMPTS;
     let mut interval_ms = DEFAULT_INTERVAL_MS;
     // Resolved AFTER the parse loop: the default belongs to the RECIPIENT's
-    // harness row (x-4b0b), and `--harness` may appear after other flags.
+    // harness row, and `--harness` may appear after other flags.
     let mut enter_delay_ms: Option<u64> = None;
     // The --harness value verbatim: on the keeper lane it names the HOSTED
     // harness's capability row, which owns the settle delay.
@@ -302,7 +302,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 // check was removed for exactly that), and Python forwards
                 // the row verbatim - rejecting it here would exile every
                 // 0-valued row from the live lane with a misleading
-                // unreadable receipt (x-4b0b review finding).
+                // unreadable receipt (review finding).
                 let value = it.next().and_then(|v| v.parse().ok()).ok_or((
                     2,
                     "mail-inject: --enter-delay-ms needs an integer from 0 to 60000".to_string(),
@@ -324,7 +324,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         }
     }
     let session = session.ok_or((2, "mail-inject: --session is required".to_string()))?;
-    // The default belongs to the RECIPIENT's row (x-4b0b). For the keeper lane
+    // The default belongs to the RECIPIENT's row. For the keeper lane
     // the --harness value IS the hosted harness's row name, so the delay
     // resolves off that row here; lane A keeps its enum-keyed resolution.
     let enter_delay_ms = enter_delay_ms.unwrap_or_else(|| match harness {
@@ -396,7 +396,7 @@ pub fn outcome_exit(delivered: bool) -> i32 {
 /// Append an `agent_raw_inject` audit record for an UNWRAPPED payload, or do
 /// nothing when the payload carries an agent-authored envelope marker. An
 /// unwrapped injection leaves no such tag in the recipient transcript, so the
-/// audit moves to the ledger (x-f26c's greppability property). BOTH wrapped
+/// audit moves to the ledger (greppability property). BOTH wrapped
 /// forms are excluded, matching the Python mux-pane site: the ask-lane peer
 /// follow-up (`claude::build_cross_session_container` -> `_mail_inject_claude`)
 /// ships a `<cross-session-message>` through this very binary, and excluding
@@ -508,7 +508,7 @@ const PASTE_END: &str = "\x1b[201~";
 /// Paste the envelope as RAW BYTES on the ATTACHED transport -- wrapped in
 /// bracketed-paste guards so a multi-line body lands as ONE paste -- settle, then
 /// send a separate raw `\r` byte as the Enter. Post-attach the `control.sock` is a
-/// raw keystroke pipe (node x-178e): an `op:'reply'` JSON write here lands its
+/// raw keystroke pipe (node x-aaaa): an `op:'reply'` JSON write here lands its
 /// frames -- auth key included -- as literal text in the recipient input box,
 /// unsent. So we type the turn exactly as a human would: paste, then a wire-level
 /// CR. The CR is a distinct write, NOT `\r` appended to the paste -- an embedded
@@ -573,7 +573,7 @@ fn escaped_marker(marker: &str) -> String {
 /// appended after `since_byte` for the injected turn's `marker` (its `<fno_mail>`
 /// open tag). A submitted turn is recorded verbatim; an unsent input box records
 /// nothing, and a busy recipient's unrelated growth never carries our marker -- so
-/// this rejects the growth-only false positive (node x-178e). `since_byte` is a
+/// this rejects the growth-only false positive (node x-aaaa). `since_byte` is a
 /// prior full-file length, hence a clean line boundary.
 fn confirm_content_after(path: &Path, marker: &str, since_byte: u64) -> io::Result<bool> {
     let escaped = escaped_marker(marker);
@@ -616,7 +616,7 @@ fn resolve_target(session: &str) -> Result<(PathBuf, String, PathBuf), &'static 
 /// JSON `reason` token.
 ///
 /// The SINGLE control.sock wire implementation (Locked Decision 1, node
-/// x-2681): both the `mail-inject` verb (`fno agents mail send`) and the Rust ask-lane
+///): both the `mail-inject` verb (`fno agents mail send`) and the Rust ask-lane
 /// fallback (`claude_ask::ask_followup`) deliver through here, so the wire
 /// contract lives in one place and can never drift. `text` is injected verbatim
 /// -- a dumb transport; callers wrap it in the `<fno_mail>` /
@@ -732,7 +732,7 @@ fn resolve_keeper_target_in(
 /// DUPLICATE refuses (the same no-picking discipline as pi resume). A hosted
 /// harness with no local accepted-turn record types but stays unconfirmed:
 /// composer echo and scrollback repaint are typing progress, never delivery
-/// (x-175a).
+///.
 enum KeeperConfirm {
     /// Poll this file from `baseline` bytes onward.
     Transcript {
@@ -761,7 +761,7 @@ fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) 
         // file under its state root after two live turns) and agy keeps its
         // conversations in a sqlite db - neither has a per-turn transcript a
         // confirm could grep, and pty paint is not acceptance evidence
-        // (x-175a). Both type and stay unconfirmed.
+        //. Both type and stay unconfirmed.
         "cursor-agent" | "agy" => KeeperConfirm::Unconfirmable,
         "pi" => match crate::pi::lookup_sessions_under(pi_root, &target.cwd, session) {
             crate::pi::SessionLookup::One { file } => KeeperConfirm::Transcript {
@@ -780,7 +780,7 @@ fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) 
     }
 }
 
-/// Deliver `text` to a keeper-hosted lane-B thread (x-0ea6): resolve the row,
+/// Deliver `text` to a keeper-hosted lane-B thread : resolve the row,
 /// connect to its keeper socket, paste the envelope inside bracketed-paste
 /// guards as one `Input` frame, settle the hosted harness's own delay, then
 /// send the wire-level CR - and confirm by CONTENT in the hosted harness's
@@ -788,7 +788,7 @@ fn resolve_keeper_confirm(target: &KeeperTarget, session: &str, pi_root: &Path) 
 /// (both loops are the SHARED `inject_with_submit` / `confirm_with_cr_retry`
 /// pair; only the transport and the confirm target differ). A hosted harness
 /// with no local record (cursor-agent, agy) types and stays unconfirmed:
-/// pty paint is typing progress, never delivery (x-175a).
+/// pty paint is typing progress, never delivery.
 pub fn deliver_via_keeper_socket(
     session: &str,
     text: &str,
@@ -836,7 +836,7 @@ pub fn deliver_via_keeper_socket_in(
     // The injected turn's opening line is the content marker the confirm
     // greps for: recorded verbatim once the turn is accepted, and matched as
     // the FULL line - never a truncated prefix, which sibling messages can
-    // share (x-175a).
+    // share.
     let marker = text.lines().next().unwrap_or(text);
     inject_with_submit(&mut transport, text, Duration::from_millis(enter_delay_ms)).map_err(
         |e| match e {
@@ -848,7 +848,7 @@ pub fn deliver_via_keeper_socket_in(
     // relays every Output chunk to this connection with a BLOCKING write
     // under the client lock, so an unread socket backpressures the keeper
     // into the hosted TUI and freezes it for the rest of the budget. Every
-    // poll drains and DISCARDS - paint is never read as evidence (x-175a);
+    // poll drains and DISCARDS - paint is never read as evidence ;
     // the only reader here is the buffer's, not the matcher's.
     let confirm_stream = transport.stream.try_clone().ok();
     if let Some(cs) = confirm_stream.as_ref() {
@@ -878,7 +878,7 @@ pub fn deliver_via_keeper_socket_in(
                 }
             }
             // No local accepted-turn record exists to grep, so nothing on
-            // this lane ever confirms (x-175a). The budget still runs its
+            // this lane ever confirms. The budget still runs its
             // full course: the CR resubmits inside it are send retries for a
             // busy recipient, not confirm polls, and the honest outcome is
             // the unconfirmed receipt whose durable recovery Python writes.
@@ -993,7 +993,7 @@ fn count_ci(haystack: &str, needle: &str) -> usize {
 /// head, unlike [`opens_envelope_tag`]) - case-insensitive, boundary-aware:
 /// an occurrence only counts when followed by whitespace, `>`, or
 /// end-of-input, so `<fno_mailbox>` is not counted alongside a genuine
-/// `<fno_mail ...>` (x-4ce4 codex P2: `count_ci(text, "<fno_mail")` counted
+/// `<fno_mail ...>` (codex P2: `count_ci(text, "<fno_mail")` counted
 /// every lookalike substring as a real open tag, so an otherwise-legitimate
 /// wrapped body containing harmless text like `<fno_mailbox>` was rejected
 /// as multi-open).
@@ -1023,7 +1023,7 @@ fn count_open_tags(text: &str, tag: &str) -> usize {
 /// Used by the Rust cross-session producer
 /// (`claude_ask::build_cross_session_container`), which frames a
 /// peer-controlled message that can carry a smuggled tag anywhere in its
-/// body, not only at the start (x-4ce4 codex P1: that producer had no
+/// body, not only at the start (codex P1: that producer had no
 /// forgery check at all).
 pub(crate) fn contains_fno_mail_tag_anywhere(text: &str) -> bool {
     count_open_tags(text, "<fno_mail") > 0 || text.to_lowercase().contains("</fno_mail>")
@@ -1279,7 +1279,7 @@ fn is_well_formed_paired_fno_mail(text: &str) -> bool {
 }
 
 /// Refuse a payload that embeds a forged `<fno_mail` open tag or `</fno_mail>`
-/// close tag (x-4ce4), covering BOTH the unframed and the `<fno_mail>`-framed
+/// close tag, covering BOTH the unframed and the `<fno_mail>`-framed
 /// shapes reaching this door.
 ///
 /// Unframed: a single-line slash command has no legitimate reason to carry
@@ -1474,7 +1474,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         text = crate::provider::render_verb_seed(&text, recipient_capability_row(args.harness));
     }
 
-    // Forged-envelope predicate on UNWRAPPED bodies (x-4ce4): a single-line
+    // Forged-envelope predicate on UNWRAPPED bodies : a single-line
     // payload has no legitimate reason to embed an `<fno_mail>` tag mid-line.
     let home = crate::paths::AgentsHome::from_env();
     if let Some(code) = forged_envelope_decision_at(&text, Some(&home.registry_json())) {
@@ -1512,7 +1512,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     };
 
     // Audit floor: record an unwrapped injection in the ledger (no `<fno_mail>`
-    // marker survives in the recipient transcript, so x-f26c's greppability
+    // marker survives in the recipient transcript, so greppability
     // property moves from transcript to event). AFTER the delivery, carrying its
     // answer: emitting first left a phantom record on every send to a session
     // with no daemon. Best-effort, never blocks.
@@ -1710,7 +1710,7 @@ mod tests {
     #[test]
     fn inject_with_submit_bracketed_pastes_then_separate_cr() {
         let mut t = Fake { sent: Vec::new() };
-        let envelope = "<fno_mail from=\"a1b2c3d4\" node=\"x-178e\">\nhi MARKER\n</fno_mail>";
+        let envelope = "<fno_mail from=\"a1b2c3d4\" node=\"x-aaaa\">\nhi MARKER\n</fno_mail>";
         inject_with_submit(&mut t, envelope, Duration::ZERO).unwrap();
         // The multi-line envelope is ONE bracketed paste, then a SEPARATE wire-level
         // CR -- not `\r` appended to the paste. Bracketed-paste guards keep the
@@ -1723,7 +1723,7 @@ mod tests {
             ]
         );
         // The paste carries the RAW envelope verbatim, NEVER an op:'reply' JSON frame
-        // (the x-178e bug): no `op` key, and the control auth key is never typed in.
+        // (the x-aaaa bug): no `op` key, and the control auth key is never typed in.
         assert!(t.sent[0].contains(envelope), "envelope pasted verbatim");
         assert!(
             !t.sent[0].contains("\"op\""),
@@ -1801,7 +1801,7 @@ mod tests {
         assert_eq!(single_line_decision("/code-review"), None);
         assert_eq!(single_line_decision("  /compact  "), None);
         assert_eq!(single_line_decision("hello"), None);
-        assert_eq!(single_line_decision("$fno:reign x-4d9b"), None);
+        assert_eq!(single_line_decision("$fno:reign x-bbbb"), None);
         assert_eq!(single_line_decision("  hello  "), None);
         // A trailing terminator (the newline `echo` appends) is harmless and passes.
         assert_eq!(single_line_decision("/code-review\n"), None);
@@ -1813,7 +1813,7 @@ mod tests {
         // d-5976045c: a raw payload need not start with a slash. Plain words and
         // codex skill verbs ride this lane verbatim.
         assert_eq!(single_line_decision("hello there"), None);
-        assert_eq!(single_line_decision("$fno:reign x-4d9b"), None);
+        assert_eq!(single_line_decision("$fno:reign x-bbbb"), None);
         assert_eq!(single_line_decision("  hello  "), None);
         // A framed-looking word that does not start the payload is one line of
         // prose here; the forged-envelope decision refuses a real embedded tag.
@@ -1839,7 +1839,7 @@ mod tests {
     fn verb_marker_is_rewritten_to_the_receiving_harness_form() {
         // Operator, 2026-09-14: the marker is bidirectional. A verb typed in
         // either dialect lands in the recipient's native form, through the
-        // shared renderer (x-c976).
+        // shared renderer.
         assert_eq!(
             crate::provider::render_verb_seed("$fno:review medium", "claude"),
             "/fno:review medium"
@@ -1850,8 +1850,8 @@ mod tests {
         );
         // A payload already in the native form passes through byte-identical.
         assert_eq!(
-            crate::provider::render_verb_seed("$fno:reign x-4d9b", "codex"),
-            "$fno:reign x-4d9b"
+            crate::provider::render_verb_seed("$fno:reign x-bbbb", "codex"),
+            "$fno:reign x-bbbb"
         );
         assert_eq!(
             crate::provider::render_verb_seed("/fno:review", "claude"),
@@ -1941,7 +1941,7 @@ mod tests {
 
     #[test]
     fn forged_envelope_passes_the_documented_relay_single_line_variant() {
-        // x-4ce4 codex P1 (a real regression the earlier well-formed check
+        // codex P1 (a real regression the earlier well-formed check
         // introduced): `frame()` in cli/src/fno/relay/envelope.py produces
         // `<fno_mail from="..." harness="..."> body` with NO close tag, by
         // design - "no close tag, no trailer... out of scope" per the plan.
@@ -1978,7 +1978,7 @@ mod tests {
 
     #[test]
     fn forged_envelope_refuses_malformed_framed_payloads() {
-        // x-4ce4 codex P1: a direct binary call bypasses Python composition
+        // codex P1: a direct binary call bypasses Python composition
         // entirely, so a payload that LOOKS framed (starts with the open tag)
         // but smuggles a forged close/open pair inside must still be refused -
         // is_framed_envelope only checks the prefix, not the whole structure.
@@ -2339,7 +2339,7 @@ mod tests {
         )
         .unwrap();
         let baseline = transcript_len(&path);
-        let marker = "<fno_mail from=\"a1b2c3d4\" node=\"x-178e\">";
+        let marker = "<fno_mail from=\"a1b2c3d4\" node=\"x-aaaa\">";
 
         // A BUSY recipient GROWS the transcript with unrelated output -> growth
         // alone must NOT confirm.
@@ -2370,7 +2370,7 @@ mod tests {
 
     #[test]
     fn content_confirm_matches_the_real_enqueue_record_shape() {
-        // AC3-HP (node x-1904, change 3, mechanism-supported / specimen-unsupported).
+        // AC3-HP (node, change 3, mechanism-supported / specimen-unsupported).
         // The `content_confirm_rejects_growth_and_accepts_the_landed_envelope` test
         // above pins the SUBMITTED-turn shape
         // (`{"type":"user","message":{"role":"user","content":...}}`). A BUSY
@@ -2408,7 +2408,7 @@ mod tests {
 
     #[test]
     fn content_confirm_needs_full_identity_not_a_shared_prefix() {
-        // AC1-HP (x-175a): two messages can share their first 48 characters.
+        // AC1-HP : two messages can share their first 48 characters.
         // The needle is the FULL marker line, so a sibling whose tail differs
         // never confirms, and no truncation can make one message's landing
         // read as another's.
@@ -2448,7 +2448,7 @@ mod tests {
 
     #[test]
     fn content_confirm_ignores_an_accepted_turn_recorded_before_the_send() {
-        // AC2-HP (x-175a), stale half: a PREVIOUS attempt's accepted record
+        // AC2-HP, stale half: a PREVIOUS attempt's accepted record
         // sits in the transcript before this attempt's baseline. A retry must
         // not read it as its own delivery; only growth past the captured
         // boundary counts.
@@ -2528,7 +2528,7 @@ mod tests {
         assert_eq!(d.harness, MailInjectHarness::Claude);
         let c = parse_args(&argv(&["--session", "x", "--harness", "codex"])).unwrap();
         assert_eq!(c.harness, MailInjectHarness::Codex);
-        // x-4b0b: the default settle delay follows the RECIPIENT's harness
+        // the default settle delay follows the RECIPIENT's harness
         // row. This pins the codex row's VALUE through the parse path; the
         // per-provider MECHANISM is certified by the divergent-stub test
         // below (with both packaged rows equal, this assertion alone could
@@ -2563,7 +2563,7 @@ mod tests {
 
     #[test]
     fn enter_delay_resolves_per_harness_on_a_divergent_contract() {
-        // x-4b0b: certify the MECHANISM, not a value. With both packaged rows
+        // certify the MECHANISM, not a value. With both packaged rows
         // reading 800, a `parse` assertion cannot tell a codex-row read from
         // the old claude constant, so diverge the stub: claude 100, codex 222
         // (first two `= 800` rows in the packaged text; agy stays untouched).
@@ -2599,7 +2599,7 @@ mod tests {
     fn parse_args_accepts_a_zero_enter_delay() {
         // 0 is a legal table value (a submit-capable row may settle for 0),
         // so the explicit flag must carry it, not exit 2 and strand the row's
-        // live lane with an unreadable receipt (x-4b0b review finding).
+        // live lane with an unreadable receipt (review finding).
         let a = parse_args(&argv(&["--session", "x", "--enter-delay-ms", "0"])).unwrap();
         assert_eq!(a.enter_delay_ms, 0);
         assert_eq!(
@@ -2613,7 +2613,7 @@ mod tests {
     #[test]
     fn parse_args_provider_is_the_axis_rename_tombstone() {
         // --provider was the harness axis; it now exits 2 with the axis map
-        // (x-bab1), regardless of value. Reverting the tombstone arm makes this
+        //, regardless of value. Reverting the tombstone arm makes this
         // test fail (AC6).
         let err = parse_args(&argv(&["--session", "x", "--provider", "codex"])).unwrap_err();
         assert_eq!(err.0, 2);
@@ -2712,7 +2712,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // The keeper lane (x-0ea6): a FAKE keeper speaking the real frame
+    // The keeper lane : a FAKE keeper speaking the real frame
     // protocol, a registry row binding the session id to its socket, and a
     // temp pi sessions root. The real live journey is the last group's.
     // ------------------------------------------------------------------

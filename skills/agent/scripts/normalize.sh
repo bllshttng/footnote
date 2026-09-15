@@ -143,7 +143,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---- 1. smart-quote normalization (bash 3.2 safe: printf octal, no \u) -------
-# U+201C/201D -> "  ; U+2018/2019 -> '  (the #1 phone failure mode).
+# U+201C/201D -> "; U+2018/2019 -> '  (the #1 phone failure mode).
 ldq=$(printf '\342\200\234')   # U+201C left double quote
 rdq=$(printf '\342\200\235')   # U+201D right double quote
 lsq=$(printf '\342\200\230')   # U+2018 left single quote
@@ -187,7 +187,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
   # `read -r -a <<<` stops at the first newline, so a multi-line task whose
   # first line ends in a posture word would silently drop lines 2+ when the run
   # is rebuilt (gemini CRITICAL). `-d ''` reads to the NUL the here-string never
-  # contains, consuming the whole payload; it returns non-zero at EOF, so `|| :`
+  # contains, consuming the whole payload; it returns non-zero at EOF, so `||:`
   # keeps the pipeline happy. IFS (space/tab/newline) does the word-split.
   IFS=$' \t\n' read -r -d '' -a _toks <<< "$msg" || :
   set +f
@@ -264,7 +264,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
   # The trailing run may have consumed the whole payload (`codex yolo merge`
   # with no task) -> refuse with no spawn (Boundaries: empty task fails loud).
   [[ -z "$msg" ]] && emit_error "empty task: only posture modifiers, nothing to dispatch"
-  # Leading posture-word guard : bare posture words (bg|headless) are
+  # Leading posture-word guard: bare posture words (bg|headless) are
   # TRAILING only (consumed right-anchored above). A LEADING posture word whose
   # remainder is a /command passthrough (e.g. `bg /goal ...`) is the user meaning
   # the substrate but mis-ordering it; left alone it is not consumed, the payload
@@ -350,7 +350,7 @@ set +f
 # A backlog node id matches `^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$` (tier 1, exact) -
 # the shape parse-claims-arg.sh and graph-resolve.sh already use, so any
 # configured id_prefix/id_hex_width classifies, not just `ab-`. Two id-free entry
-# modes layer on top :
+# modes layer on top:
 #   tier 2 - a single slug-shaped token is a slug CANDIDATE the SKILL resolves
 #            via `fno backlog get`, falling through to describe-it on a miss.
 #            Bare hex rides this lane too: the resolver is format-agnostic and
@@ -912,7 +912,7 @@ esac
 # is NOT a build command (sigma-review finding 4), so it must never be
 # no-merge'd. The flag (never a free-text token) is the carrier: the fold does
 # not read prose. Family membership is asked of the single source
-# ; this file carries no hand-copied spelling list to drift.
+#; this file carries no hand-copied spelling list to drift.
 case "$payload_mode" in
   build|passthrough)
     if _normalize_is_family "$message" && [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" --no-merge "* ]]; then

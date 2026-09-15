@@ -48,7 +48,7 @@ pub fn run_claim(args: &[String]) -> i32 {
     if op == "long-holds" {
         return crate::claims::run_claim_long_holds(&args[1..]);
     }
-    // The backlog one-in-flight gate's lock operations : arguments of
+    // The backlog one-in-flight gate's lock operations: arguments of
     // this verb, never new leaves. The lock is held in the name of the
     // CALLING process (--pid), never this short-lived binary, and a dead
     // holder is reclaimed on the pid probe - for a one-shot subprocess the

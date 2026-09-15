@@ -1,4 +1,4 @@
-//! Typed classification for the `fno` front door (x-861c).
+//! Typed classification for the `fno` front door.
 //!
 //! One clap declaration set owns the native-vs-forward boundary and the
 //! already-typed native verbs; the carry-verbatim mux families (pane, block,
@@ -120,7 +120,7 @@ pub struct MuxRoot {
 }
 
 /// Shared machine-output flag group for the scriptable no-positional verbs
-/// (x-81b6 contracts build on this): one declaration, `-J` as the short alias.
+/// (contracts build on this): one declaration, `-J` as the short alias.
 #[derive(Args, Debug, PartialEq, Eq)]
 pub struct JsonOnly {
     /// Emit machine-readable JSON on stdout
@@ -491,7 +491,7 @@ mod tests {
 }
 
 /// The common mux verb flags: the server axis plus the machine-output flag
-/// every scriptable verb parses (x-861c). One declaration; the deprecation
+/// every scriptable verb parses. One declaration; the deprecation
 /// note fires here when the legacy `--session` spelling binds. Verb-specific
 /// tokens ride through in `rest`, order kept, so each verb's own grammar
 /// still refuses its unknowns.
@@ -568,7 +568,7 @@ impl MuxCommon {
     }
 }
 
-/// `fno mux thread <name>`'s flags (x-07c2/x-9b60): the portal reach and the
+/// `fno mux thread <name>`'s flags (/): the portal reach and the
 /// placement trio, one typed declaration replacing the verb's scan and its
 /// flag-value macro.
 #[derive(Parser, Debug, Default, PartialEq, Eq)]

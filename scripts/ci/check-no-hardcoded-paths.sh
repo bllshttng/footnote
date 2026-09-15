@@ -5,7 +5,7 @@
 # After Phase 03 of the path-config migration (plan 2026-05-14-path-config-impl),
 # all path resolution must go through:
 #   Python: from fno import paths  (paths.state_dir(), paths.graph_json(), ...)
-#   Bash : source "$(fno config paths shell-stub)"  then use $STATE_DIR, $GRAPH_JSON_PATH, etc.
+#   Bash: source "$(fno config paths shell-stub)"  then use $STATE_DIR, $GRAPH_JSON_PATH, etc.
 #
 # Run: bash scripts/ci/check-no-hardcoded-paths.sh
 # Exits 0 when no violations found; exits 1 with a report when violations detected.
