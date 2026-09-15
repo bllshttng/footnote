@@ -20,6 +20,9 @@
 # same way it does for every advance worker. There is no per-run flag. The
 # per-run override is a typed message on the spawn itself:
 #   fno agents spawn --node <id> '/fno:target --no-merge <id>'
+# A typed /target or /blueprint must agree with the verb the node derives
+# (x-2c0d); on disagreement the spawn refuses before any lane is spent, so
+# drop the verb from the payload and let --node supply it.
 #
 # --route provider/model: per-dispatch explicit model route (x-b0b4), forwarded
 #   to every worker spawn only when typed. Fails CLOSED in the spawn.
