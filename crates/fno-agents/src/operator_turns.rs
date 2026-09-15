@@ -109,18 +109,13 @@ fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// sha256 of the first `min(offset, 4096)` bytes: the rotation tripwire. An
-/// in-place rewrite at the same or larger size invalidates the cursor.
-fn head_digest(transcript: &Path, offset: u64) -> String {
-    let mut buf = Vec::new();
-    let ok = std::fs::File::open(transcript)
-        .and_then(|f| f.take(offset.min(HEAD_SAMPLE_BYTES)).read_to_end(&mut buf))
-        .is_ok();
-    if !ok {
-        return String::new();
-    }
+/// sha256 over the first `min(offset, 4096)` bytes of `prefix`, the head
+/// sample read once per invocation: the rotation tripwire. An in-place
+/// rewrite at the same or larger size invalidates the cursor.
+fn head_digest(prefix: &[u8], offset: u64) -> String {
+    let cut = (offset as usize).min(prefix.len());
     let mut h = Sha256::new();
-    h.update(&buf);
+    h.update(&prefix[..cut]);
     to_hex(&h.finalize())
 }
 
@@ -213,14 +208,17 @@ fn turn_ts_epoch(obj: &Value) -> Option<f64> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(t) {
         return Some(secs(dt.timestamp(), dt.timestamp_subsec_micros()));
     }
-    chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f")
+    if let Ok(nd) = chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f") {
+        return Some(secs(
+            nd.and_utc().timestamp(),
+            nd.and_utc().timestamp_subsec_micros(),
+        ));
+    }
+    // A date-only stamp reads as midnight UTC, as Python's fromisoformat did.
+    let date_only = chrono::NaiveDate::parse_from_str(t, "%Y-%m-%d")
         .ok()
-        .map(|nd| {
-            secs(
-                nd.and_utc().timestamp(),
-                nd.and_utc().timestamp_subsec_micros(),
-            )
-        })
+        .and_then(|d| d.and_hms_opt(0, 0, 0))?;
+    Some(secs(date_only.and_utc().timestamp(), 0))
 }
 
 /// A single-line slash command or `$fno:` verb with flag-shaped args only.
@@ -306,9 +304,15 @@ fn fresh_state(transcript: &Path) -> ScanState {
 }
 
 /// The saved cursor, else fresh: missing, invalid, wrong-typed, alien,
-/// past-EOF, head-mismatched, or head-less all reset.
-fn load_state(path: &Path, transcript: &Path, transcript_len: u64) -> ScanState {
-    let fresh = fresh_state(transcript);
+/// past-EOF, head-mismatched, or head-less all reset. `head_prefix` is the
+/// transcript's first `min(size, 4096)` bytes, read once by the caller.
+fn load_state(
+    path: &Path,
+    transcript_str: &str,
+    head_prefix: &[u8],
+    transcript_len: u64,
+) -> ScanState {
+    let fresh = fresh_state(Path::new(transcript_str));
     let Ok(raw) = std::fs::read_to_string(path) else {
         return fresh;
     };
@@ -318,8 +322,7 @@ fn load_state(path: &Path, transcript: &Path, transcript_len: u64) -> ScanState 
     let Some(obj) = saved.as_object() else {
         return fresh;
     };
-    let transcript_str = transcript.display().to_string();
-    if obj.get("transcript").and_then(|v| v.as_str()) != Some(transcript_str.as_str()) {
+    if obj.get("transcript").and_then(|v| v.as_str()) != Some(transcript_str) {
         return fresh;
     }
     let Some(offset) = obj.get("offset").and_then(|v| v.as_u64()) else {
@@ -340,7 +343,7 @@ fn load_state(path: &Path, transcript: &Path, transcript_len: u64) -> ScanState 
     let Some(head) = obj.get("head_sha256").and_then(|v| v.as_str()) else {
         return fresh;
     };
-    if head != head_digest(transcript, offset) {
+    if head != head_digest(head_prefix, offset) {
         return fresh;
     }
     let mut skipped = BTreeMap::new();
@@ -366,7 +369,7 @@ fn load_state(path: &Path, transcript: &Path, transcript_len: u64) -> ScanState 
         })
         .collect();
     ScanState {
-        transcript: transcript_str,
+        transcript: transcript_str.to_string(),
         offset,
         line_no,
         head_sha256: head.to_string(),
@@ -458,8 +461,13 @@ fn read_queue(
         |e: std::io::Error| format!("transcript {} unreadable: {e}", transcript.display());
     let mut file = std::fs::File::open(transcript).map_err(unreadable)?;
     let size = file.metadata().map_err(unreadable)?.len();
+    // One head sample serves every rotation check this read makes.
+    let want = size.min(HEAD_SAMPLE_BYTES) as usize;
+    let mut head = vec![0u8; want];
+    file.read_exact(&mut head).map_err(unreadable)?;
     let spath = scan_path(capture_dir, session);
-    let mut state = load_state(&spath, transcript, size);
+    let transcript_str = transcript.display().to_string();
+    let mut state = load_state(&spath, &transcript_str, &head, size);
     file.seek(SeekFrom::Start(state.offset))
         .map_err(unreadable)?;
     let mut raw = Vec::new();
@@ -499,7 +507,7 @@ fn read_queue(
     // a half-written row and derived turn ids stay stable across reads.
     let acked = read_acked_turn_ids(&ledger_path(capture_dir, session));
     state.turns.retain(|t| !acked.contains(&t.turn_id));
-    state.head_sha256 = head_digest(transcript, state.offset);
+    state.head_sha256 = head_digest(&head, state.offset);
     let mut warnings = Vec::new();
     let mut cursor_error = None;
     if let Err(e) = save_state(&spath, &state) {
@@ -629,6 +637,11 @@ mod tests {
             )],
         );
         assert_eq!(out.payload.turns[0].ts_epoch, Some(1788728400.0));
+        let out = read_raw(
+            "naive-date-only",
+            &[user_row_ts(json!("ask"), "u-date", "2026-09-06")],
+        );
+        assert_eq!(out.payload.turns[0].ts_epoch, Some(1788652800.0));
     }
 
     #[test]
@@ -820,8 +833,10 @@ mod tests {
         let ro = dir.join("ro-capture");
         std::fs::create_dir_all(&ro).unwrap();
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let out = read_queue("s", &tp, &ro, NOW).unwrap();
+        // Capture the Result before restoring, so a panic cannot leak 0o500.
+        let out = read_queue("s", &tp, &ro, NOW);
         std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let out = out.unwrap();
         assert_eq!(out.payload.depth, 1);
         let err = out.payload.cursor_error.as_deref().unwrap_or_default();
         assert!(err.starts_with(&format!("{}: ", scan_path(&ro, "s").display())));
