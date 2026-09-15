@@ -189,6 +189,7 @@ pub mod reclaim;
 pub mod reentry;
 pub mod registry_json;
 pub mod rename;
+pub mod restart_run;
 pub mod resume_args;
 pub mod resume_receipt;
 pub mod resume_wake;
