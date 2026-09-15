@@ -269,6 +269,20 @@ def test_epic_advance_undeclared_node_derives_the_target_intake(iso, monkeypatch
     assert disp[0]["data"]["verb_source"] == "none-declared"
 
 
+def test_none_node_refuses_before_anything_is_spent(iso, monkeypatch):
+    """AC3-HP, x-2c0d: a caller that passes no node dict at all is refused
+    before any worker name, claim, or subprocess call - the builtin path has
+    no verb evidence, and unknown is not permission to guess."""
+    repo = iso.repo()
+    calls = _record_spawns(monkeypatch)
+
+    with pytest.raises(adv.SpawnError) as exc:
+        adv._spawn_worker("x-2c0d", str(repo), caller="test", node=None)
+
+    assert not calls, "no worker may be spent on a missing node dict"
+    assert "no node dict" in str(exc.value)
+
+
 def test_field_absent_node_dict_refuses_naming_the_loss(iso, monkeypatch):
     """AC9-EDGE, x-ebd2 posture: a node dict built without a dispatch_verb key
     at all (the pre-fix projection) REFUSES before any worker, claim, or model

@@ -359,7 +359,7 @@ def test_advance_worker_reads_config_default(monkeypatch):
     monkeypatch.setattr(
         "fno.config.load_settings", lambda: _fake_settings("acceptEdits")
     )
-    advance._spawn_worker("x-test", None, "slug")
+    advance._spawn_worker("x-test", None, "slug", node=_spawn_node())
     assert "--permission-mode" in captured["cmd"]
     i = captured["cmd"].index("--permission-mode")
     assert captured["cmd"][i + 1] == "acceptEdits"
@@ -370,7 +370,7 @@ def test_advance_worker_explicit_flag_wins_over_config(monkeypatch):
 
     captured = _capture_spawn(monkeypatch, advance)
     monkeypatch.setattr("fno.config.load_settings", lambda: _fake_settings("plan"))
-    advance._spawn_worker("x-test", None, "slug", permission_mode="acceptEdits")
+    advance._spawn_worker("x-test", None, "slug", permission_mode="acceptEdits", node=_spawn_node())
     i = captured["cmd"].index("--permission-mode")
     assert captured["cmd"][i + 1] == "acceptEdits"
 
@@ -383,7 +383,7 @@ def test_advance_worker_unset_config_falls_to_builtin(monkeypatch):
 
     captured = _capture_spawn(monkeypatch, advance)
     monkeypatch.setattr("fno.config.load_settings", lambda: _fake_settings(""))
-    advance._spawn_worker("x-test", None, "slug")
+    advance._spawn_worker("x-test", None, "slug", node=_spawn_node())
     i = captured["cmd"].index("--permission-mode")
     assert captured["cmd"][i + 1] == SPAWN_PERMISSION_BUILTIN
 
@@ -503,6 +503,12 @@ def test_think_worker_explicit_pane_uses_shared_capability_gate(monkeypatch):
 import shutil  # noqa: E402
 import stat  # noqa: E402
 import subprocess as _sp  # noqa: E402
+
+
+def _spawn_node(**kw):
+    """The minimal node dict the x-2c0d refusal demands: difficulty low
+    derives /target, exactly what the old builtin path ran."""
+    return {"id": "x-test", "dispatch_verb": None, "difficulty": "low", **kw}
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="spawn.sh needs jq")

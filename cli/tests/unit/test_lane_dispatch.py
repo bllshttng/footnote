@@ -25,6 +25,12 @@ from fno.claims.lanes import active_lane_count, find_lane_slot
 from fno.config import WORKTREE_LOCAL_KEYS, _worktree_local_override
 
 
+def _spawn_node(**kw):
+    """The minimal node dict the x-2c0d refusal demands: difficulty low
+    derives /target, exactly what the old builtin path ran."""
+    return {"id": "x-test", "dispatch_verb": None, "difficulty": "low", **kw}
+
+
 def _nodes(*specs):
     return [{"id": i, "domain": d, "title": i, "slug": i} for i, d in specs]
 
@@ -400,7 +406,7 @@ def test_spawn_worker_forwards_vendor_in_spawn_argv(tmp_path, monkeypatch):
         model="glm-5.3-flash[1m]",
         provider="claude",
         harness="claude",
-        vendor="zai",
+        vendor="zai", node=_spawn_node(),
     )
 
     assert captured["cmd"][captured["cmd"].index("--provider") + 1] == "zai"

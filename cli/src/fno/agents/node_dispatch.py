@@ -100,27 +100,23 @@ def resolve_node_spawn(
             )
         source = "rd"
     node_verb = (verb or "").strip() or None
-    # x-0961/x-ebd2: classify the RAW declaration from the DICT alone. A dict
-    # without the key is a lossy projection: REFUSE before anything is spent.
-    # A None node keeps its warning + path.
-    if isinstance(node, dict) and "dispatch_verb" not in node:
+    # x-0961/x-ebd2/x-2c0d: classify the RAW declaration from the DICT alone.
+    # No node dict, or one without the key, is a lossy projection: REFUSE
+    # before anything is spent - a worker, a lane slot, a claim, a model.
+    if not isinstance(node, dict):
+        raise SpawnError(
+            f"refusing to dispatch {node_id}: {caller} passed no node dict; "
+            "the builtin path has no verb evidence"
+        )
+    if "dispatch_verb" not in node:
         raise SpawnError(
             f"refusing to dispatch {node_id}: the node dict {caller} passed "
             "carries no dispatch_verb key; the projection feeding this "
             "dispatcher is lossy (x-0961); fix the projection, not the node."
         )
-    if isinstance(node, dict):
-        verb_source = (
-            "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
-        )
-    else:
-        verb_source = "field-absent"
-        print(
-            f"advance: WARNING: dispatching {node_id} with no node dict "
-            f"({caller}); the builtin target path runs with no verb_source "
-            "evidence (x-0961).",
-            file=sys.stderr,
-        )
+    verb_source = (
+        "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
+    )
     # x-ebd2: the effective workflow verb. Reconcile bypasses (its explicit
     # command spells the de-stub pass).
     effective_verb: Optional[str] = None

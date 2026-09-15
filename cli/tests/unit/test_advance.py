@@ -20,6 +20,7 @@ exactly where advance reads them.
 
 from __future__ import annotations
 
+
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,13 @@ from types import SimpleNamespace
 import pytest
 
 from fno.rust_binary import find_dev_binary
+
+
+def _spawn_node(**kw):
+    """The minimal node dict the x-2c0d refusal demands: difficulty low
+    derives /target, exactly what the old builtin path ran."""
+    return {"id": "x-test", "dispatch_verb": None, "difficulty": "low", **kw}
+
 
 requires_rust = pytest.mark.skipif(
     find_dev_binary() is None,
@@ -737,7 +745,7 @@ def test_spawn_worker_attaches_gate_exit_and_last_gate_line(monkeypatch):
         ),
     )
     with pytest.raises(adv.SpawnError) as ei:
-        adv._spawn_worker("ab-2222aaaa", None)
+        adv._spawn_worker("ab-2222aaaa", None, node=_spawn_node())
     exc = ei.value
     assert exc.exit_code == 79
     assert exc.detail == _GATE_LINE
@@ -751,7 +759,7 @@ def test_spawn_worker_gate_detail_falls_back_to_stderr_head(monkeypatch):
         adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(79, "", "daemon unreachable")),
     )
     with pytest.raises(adv.SpawnError) as ei:
-        adv._spawn_worker("ab-2222aaaa", None)
+        adv._spawn_worker("ab-2222aaaa", None, node=_spawn_node())
     assert ei.value.exit_code == 79
     assert ei.value.detail == "daemon unreachable"
 
@@ -1258,7 +1266,7 @@ def test_spawn_worker_argv_with_cwd(monkeypatch):
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    sid = adv._spawn_worker("ab-2222aaaa", "/work/dir")
+    sid = adv._spawn_worker("ab-2222aaaa", "/work/dir", node=_spawn_node())
 
     assert sid == "abc12345"
     cmd = captured["cmd"]
@@ -1289,7 +1297,7 @@ def test_spawn_worker_threads_model_and_provider(monkeypatch):
         return _FakeProc(0, _CODEX_THREAD_RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    adv._spawn_worker("ab-2222aaaa", "/w", model="glm-4.7", provider="codex")
+    adv._spawn_worker("ab-2222aaaa", "/w", model="glm-4.7", provider="codex", node=_spawn_node())
     cmd = captured["cmd"]
     assert cmd[cmd.index("--harness") + 1] == "codex"
     assert cmd[cmd.index("--model") + 1] == "glm-4.7"
@@ -1309,7 +1317,7 @@ def test_spawn_worker_default_provider_claude(monkeypatch):
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    adv._spawn_worker("ab-2222aaaa", "/w")
+    adv._spawn_worker("ab-2222aaaa", "/w", node=_spawn_node())
     cmd = captured["cmd"]
     assert cmd[cmd.index("--harness") + 1] == "claude"
     assert "--model" not in cmd
@@ -1326,7 +1334,7 @@ def test_spawn_worker_argv_fresh_when_no_cwd(monkeypatch):
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    sid = adv._spawn_worker("ab-2222aaaa", None)
+    sid = adv._spawn_worker("ab-2222aaaa", None, node=_spawn_node())
 
     assert sid == "abc12345"
     cmd = captured["cmd"]
@@ -1347,7 +1355,7 @@ def test_spawn_worker_default_substrate_bg(monkeypatch):
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    adv._spawn_worker("ab-2222aaaa", "/w")
+    adv._spawn_worker("ab-2222aaaa", "/w", node=_spawn_node())
     cmd = captured["cmd"]
     assert cmd[cmd.index("--substrate") + 1] == "thread"
 
@@ -1367,7 +1375,7 @@ def test_spawn_worker_verb_routes_command_and_brief_env(monkeypatch):
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker(
-        "ab-2222aaaa", "/w", verb="/think", brief="explore the retry design"
+        "ab-2222aaaa", "/w", verb="/think", brief="explore the retry design", node=_spawn_node()
     )
     cmd = captured["cmd"]
     assert cmd[-1] == "/think ab-2222aaaa"  # verb path: no no-merge token
@@ -1389,7 +1397,7 @@ def test_spawn_worker_verb_normalizes_codex_thread(monkeypatch):
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker(
-        "ab-2222aaaa", "/w", harness="codex", provider="codex-acct", verb="/think"
+        "ab-2222aaaa", "/w", harness="codex", provider="codex-acct", verb="/think", node=_spawn_node()
     )
     cmd = captured["cmd"]
     assert cmd[cmd.index("--substrate") + 1] == "thread"
@@ -1410,7 +1418,7 @@ def test_spawn_worker_thread_without_session_id_refuses(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     with pytest.raises(adv.SpawnError, match="no launch-identity receipt"):
         adv._spawn_worker(
-            "ab-2222aaaa", "/w", harness="codex", provider="codex", verb="/target"
+            "ab-2222aaaa", "/w", harness="codex", provider="codex", verb="/target", node=_spawn_node()
         )
 
 
@@ -1422,7 +1430,7 @@ def test_spawn_worker_bg_still_requires_short_id(monkeypatch):
         lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, "no receipt on the claude bg lane")),
     )
     with pytest.raises(adv.SpawnError):
-        adv._spawn_worker("ab-2222aaaa", "/w")  # default -> claude/bg
+        adv._spawn_worker("ab-2222aaaa", "/w", node=_spawn_node())  # default -> claude/bg
 
 
 def test_spawn_worker_extra_env_reaches_subprocess(monkeypatch):
@@ -1439,7 +1447,7 @@ def test_spawn_worker_extra_env_reaches_subprocess(monkeypatch):
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    adv._spawn_worker("ab-2222aaaa", "/w", extra_env={"CLAUDE_CONFIG_DIR": "/acct/x"})
+    adv._spawn_worker("ab-2222aaaa", "/w", extra_env={"CLAUDE_CONFIG_DIR": "/acct/x"}, node=_spawn_node())
     assert captured["env"]["CLAUDE_CONFIG_DIR"] == "/acct/x"
 
 
@@ -1569,7 +1577,7 @@ def test_spawn_worker_auto_merge_drops_no_merge(monkeypatch):
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    adv._spawn_worker("ab-2222aaaa", None)  # node_cwd=None -> load_settings()
+    adv._spawn_worker("ab-2222aaaa", None, node=_spawn_node())  # node_cwd=None -> load_settings()
     assert captured["cmd"][-1] == "/target ab-2222aaaa"  # no no-merge
 
 
@@ -1585,7 +1593,7 @@ def test_spawn_worker_unknown_harness_raises_resolve_error(monkeypatch):
         ),
     )
     with pytest.raises(DispatchResolveError):
-        adv._spawn_worker("ab-2222aaaa", "/w", harness="bogus")
+        adv._spawn_worker("ab-2222aaaa", "/w", harness="bogus", node=_spawn_node())
 
 
 def test_advance_resolver_error_is_non_fatal(iso, monkeypatch):
@@ -1656,7 +1664,17 @@ def test_spawn_worker_declared_verb_lands_in_name(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     # /think: an allowlisted verb exercises the same code-mapping mechanics the
     # vocabulary refuses for unlisted ones.
-    adv._spawn_worker("x-7aa8abc1", None, "daily-pass", verb="/think")
+    monkeypatch.setattr(
+        adv, "_grid_lane_for", lambda node, **kw: (None, None, None, None, None)
+    )
+    adv._spawn_worker(
+        "x-7aa8abc1",
+        None,
+        "daily-pass",
+        verb="/think",
+        # declare the verb so the low difficulty does not derive /target over it
+        node=_spawn_node(dispatch_verb="/think"),
+    )
     name = captured["cmd"][-2]
     assert name.startswith("th-7aa8abc1-")
 
@@ -1672,7 +1690,7 @@ def test_spawn_worker_name_includes_slug(monkeypatch):
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    adv._spawn_worker("ab-2222aaaa", None, "cargo-bootstrapper")
+    adv._spawn_worker("ab-2222aaaa", None, "cargo-bootstrapper", node=_spawn_node())
     assert captured["cmd"][-2] == "t-2222aaaa-cargo"
 
 
@@ -1682,7 +1700,7 @@ def test_spawn_worker_name_collision_raises_already_running(monkeypatch):
         lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(2, "", "agent tgt-x already exists")),
     )
     with pytest.raises(adv.SpawnAlreadyRunning):
-        adv._spawn_worker("ab-2222aaaa", None)
+        adv._spawn_worker("ab-2222aaaa", None, node=_spawn_node())
 
 
 def test_spawn_worker_other_failure_raises_spawn_error(monkeypatch):
@@ -1691,7 +1709,7 @@ def test_spawn_worker_other_failure_raises_spawn_error(monkeypatch):
         lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(1, "", "daemon unreachable")),
     )
     with pytest.raises(adv.SpawnError):
-        adv._spawn_worker("ab-2222aaaa", None)
+        adv._spawn_worker("ab-2222aaaa", None, node=_spawn_node())
 
 
 def test_spawn_worker_refuses_source_reconcile_impossible_pair():
@@ -1699,7 +1717,7 @@ def test_spawn_worker_refuses_source_reconcile_impossible_pair():
     with pytest.raises(adv.SpawnError, match="impossible pair"):
         adv._spawn_worker(
             "x-7aa8abc1", None, "daily-pass",
-            source="ac", reconcile_manifest="/tmp/manifest.json",
+            source="ac", reconcile_manifest="/tmp/manifest.json", node=_spawn_node(),
         )
 
 
@@ -1734,8 +1752,13 @@ def test_spawn_worker_unknown_verb_word_refuses(monkeypatch):
         adv.subprocess, "run",
         lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or pytest.fail("must not spawn")),
     )
+    monkeypatch.setattr(
+        adv, "_grid_lane_for", lambda node, **kw: (None, None, None, None, None)
+    )
     with pytest.raises(Exception, match="unknown dispatch verb"):
-        adv._spawn_worker("x-1", None, "s", verb="/impeccable")
+        adv._spawn_worker(
+        "x-1", None, "s", verb="/impeccable", node=_spawn_node(dispatch_verb="/impeccable")
+    )
 
 
 def test_spawn_worker_skips_noise_line_mentioning_short_id(monkeypatch):
@@ -1743,7 +1766,7 @@ def test_spawn_worker_skips_noise_line_mentioning_short_id(monkeypatch):
     parse; the real receipt on a later line still wins (gemini review)."""
     noisy = 'note: writing short_id to log\n' + _RECEIPT
     monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, noisy)))
-    assert adv._spawn_worker("ab-2222aaaa", None) == "abc12345"
+    assert adv._spawn_worker("ab-2222aaaa", None, node=_spawn_node()) == "abc12345"
 
 
 def test_spawn_worker_exit0_no_receipt_raises_spawn_error(monkeypatch):
@@ -1752,7 +1775,7 @@ def test_spawn_worker_exit0_no_receipt_raises_spawn_error(monkeypatch):
         lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, "some banner noise\n", "")),
     )
     with pytest.raises(adv.SpawnError):
-        adv._spawn_worker("ab-2222aaaa", None)
+        adv._spawn_worker("ab-2222aaaa", None, node=_spawn_node())
 
 
 # ---------------------------------------------------------------------------
@@ -1766,7 +1789,7 @@ def test_spawn_worker_accepts_codex_thread_full_id_receipt(monkeypatch):
     monkeypatch.setattr(
         adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _CODEX_THREAD_RECEIPT))
     )
-    identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex")
+    identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex", node=_spawn_node())
     assert identity == "0198c0de-1111-7000-8000-00000000000a"
 
 
@@ -1780,7 +1803,7 @@ def test_spawn_worker_refuses_codex_head8_launch_identity(monkeypatch):
         adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, head8_receipt))
     )
     with pytest.raises(adv.SpawnError) as excinfo:
-        adv._spawn_worker("ab-2222aaaa", None, harness="codex")
+        adv._spawn_worker("ab-2222aaaa", None, harness="codex", node=_spawn_node())
     assert "65.5" in str(excinfo.value) or "head-8" in str(excinfo.value)
 
 
@@ -1788,7 +1811,7 @@ def test_spawn_worker_still_accepts_claude_head8_short_id(monkeypatch):
     """A claude jobId head-8 is 32 random bits (UUIDv4) and stays a legal
     launch identity; only codex is refused by shape."""
     monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, _RECEIPT)))
-    assert adv._spawn_worker("ab-2222aaaa", None) == "abc12345"
+    assert adv._spawn_worker("ab-2222aaaa", None, node=_spawn_node()) == "abc12345"
 
 
 def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
@@ -1799,7 +1822,7 @@ def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
         '"session_id":"0198c0de-2222-7000-8000-00000000000b","status":"live"}\n'
     )
     monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(0, receipt)))
-    identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex")
+    identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex", node=_spawn_node())
     assert identity == "0198c0de-2222-7000-8000-00000000000b"
 
 
@@ -1817,7 +1840,7 @@ def test_spawn_worker_fills_receipt_out_param(monkeypatch, tmp_path):
     )
     ev = tmp_path / "events.jsonl"
     receipt: dict = {}
-    sid = adv._spawn_worker("ab-2222aaaa", None, events_path=ev, receipt=receipt)
+    sid = adv._spawn_worker("ab-2222aaaa", None, events_path=ev, receipt=receipt, node=_spawn_node())
     row = json.loads(ev.read_text().splitlines()[-1])
     assert row["type"] == adv.EVENT_SPAWNED
     payload = row["data"]
@@ -1832,7 +1855,7 @@ def test_spawn_worker_receipt_stays_empty_on_spawn_error(monkeypatch):
         adv.subprocess, "run", lambda cmd, **kw: (_naming_passthrough(cmd, **kw) or _FakeProc(1, "", "daemon unreachable")),
     )
     with pytest.raises(adv.SpawnError):
-        adv._spawn_worker("ab-2222aaaa", None, receipt=receipt)
+        adv._spawn_worker("ab-2222aaaa", None, receipt=receipt, node=_spawn_node())
     assert receipt == {}
 
 
@@ -2614,7 +2637,7 @@ def test_spawn_worker_passes_substrate_bg(monkeypatch):
     """AC1-HP: the fire-and-forget spawn carries `--substrate bg` immediately
     after `--provider claude` (the x-3ab8 default `pane` would stall it)."""
     captured = _capture_spawn_argv(monkeypatch)
-    sid = adv._spawn_worker("ab-2222aaaa", "/tmp/x", "some-slug")
+    sid = adv._spawn_worker("ab-2222aaaa", "/tmp/x", "some-slug", node=_spawn_node())
     assert sid == "abc12345"  # receipt parse unchanged
     cmd = captured["cmd"]
     assert "--substrate" in cmd and cmd[cmd.index("--substrate") + 1] == "thread"
@@ -2627,7 +2650,7 @@ def test_spawn_worker_reconcile_keeps_substrate_bg(monkeypatch):
     (substrate is orthogonal to the /target ... --reconcile payload token)."""
     captured = _capture_spawn_argv(monkeypatch)
     sid = adv._spawn_worker(
-        "ab-2222aaaa", "/tmp/x", "some-slug", reconcile_manifest="/tmp/m.md"
+        "ab-2222aaaa", "/tmp/x", "some-slug", reconcile_manifest="/tmp/m.md", node=_spawn_node()
     )
     assert sid == "abc12345"
     cmd = captured["cmd"]
@@ -2645,7 +2668,7 @@ def test_spawn_worker_error_contract_unchanged(monkeypatch):
                             or _FakeProc(returncode=2, stderr="agent already exists")),
     )
     with pytest.raises(adv.SpawnAlreadyRunning):
-        adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug")
+        adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug", node=_spawn_node())
 
     monkeypatch.setattr(
         adv.subprocess, "run",
@@ -2654,7 +2677,7 @@ def test_spawn_worker_error_contract_unchanged(monkeypatch):
         ),
     )
     with pytest.raises(adv.SpawnError):
-        adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug")
+        adv._spawn_worker("ab-2222aaaa", "/tmp/x", "slug", node=_spawn_node())
 
 
 # ---------------------------------------------------------------------------
@@ -2681,7 +2704,7 @@ def test_spawn_worker_auto_merge_true_omits_no_merge(monkeypatch):
 
     captured = _capture_spawn_argv(monkeypatch)
     monkeypatch.setattr(_config, "load_settings_for_repo", lambda _p: _settings_ns(auto_merge=True))
-    adv._spawn_worker("ab-2222aaaa", "/work/dir")
+    adv._spawn_worker("ab-2222aaaa", "/work/dir", node=_spawn_node())
     assert captured["cmd"][-1] == "/target ab-2222aaaa"
 
 
@@ -2691,7 +2714,7 @@ def test_spawn_worker_auto_merge_reconcile_variant(monkeypatch):
 
     captured = _capture_spawn_argv(monkeypatch)
     monkeypatch.setattr(_config, "load_settings_for_repo", lambda _p: _settings_ns(auto_merge=True))
-    adv._spawn_worker("ab-2222aaaa", "/work/dir", reconcile_manifest="/tmp/m.md")
+    adv._spawn_worker("ab-2222aaaa", "/work/dir", reconcile_manifest="/tmp/m.md", node=_spawn_node())
     assert captured["cmd"][-1] == "/target --reconcile /tmp/m.md ab-2222aaaa"
 
 
@@ -2708,7 +2731,7 @@ def test_spawn_worker_auto_merge_reads_dependent_cwd(monkeypatch):
         return _settings_ns(auto_merge=True)
 
     monkeypatch.setattr(_config, "load_settings_for_repo", _lsfr)
-    adv._spawn_worker("ab-2222aaaa", "/dependent/repo")
+    adv._spawn_worker("ab-2222aaaa", "/dependent/repo", node=_spawn_node())
     assert seen["path"] == "/dependent/repo"
     assert captured["cmd"][-1] == "/target ab-2222aaaa"
 
@@ -2724,7 +2747,7 @@ def test_spawn_worker_auto_merge_read_failure_no_merge(monkeypatch):
         raise RuntimeError("corrupt toml")
 
     monkeypatch.setattr(_config, "load_settings_for_repo", _boom)
-    adv._spawn_worker("ab-2222aaaa", "/work/dir")
+    adv._spawn_worker("ab-2222aaaa", "/work/dir", node=_spawn_node())
     assert captured["cmd"][-1] == "/target --no-merge ab-2222aaaa"
 
 
@@ -2963,7 +2986,7 @@ def _spawn_argv(monkeypatch, *, provider, perm_config, permission_mode=None, sub
         },
     )
 
-    adv._spawn_worker("ab-2222aaaa", None, "next", provider=provider, permission_mode=permission_mode)
+    adv._spawn_worker("ab-2222aaaa", None, "next", provider=provider, permission_mode=permission_mode, node=_spawn_node())
     return captured["cmd"]
 
 
@@ -3332,7 +3355,12 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    sid = adv._spawn_worker(node_id, "/w", slug, source="ab", verb="/blueprint")
+    monkeypatch.setattr(
+        adv, "_grid_lane_for", lambda node, **kw: (None, None, None, None, None)
+    )
+    sid = adv._spawn_worker(
+        node_id, "/w", slug, source="ab", verb="/blueprint", node=_spawn_node(difficulty="medium")
+    )
 
     assert sid == "abc12345"
     assert len(calls) == 1  # exactly one worker launch requested
@@ -3430,7 +3458,7 @@ def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
         "/w",
         provider="codex",
         harness="codex",
-        dispatch_account="zai-cutover-1",
+        dispatch_account="zai-cutover-1", node=_spawn_node(),
     )
 
     cmd = captured["cmd"]
@@ -3451,7 +3479,7 @@ def test_spawn_worker_omits_the_carrier_when_not_a_cutover(monkeypatch):
         return _FakeProc(0, _RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    adv._spawn_worker("ab-2222aaaa", "/w")
+    adv._spawn_worker("ab-2222aaaa", "/w", node=_spawn_node())
     assert "--dispatch-account" not in captured["cmd"]
 
 
@@ -3470,9 +3498,12 @@ def test_spawn_worker_refuses_a_state_root_key_in_extra_env(monkeypatch):
         pytest.fail("must not spawn with a state-root override on the wrapper")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        adv, "_grid_lane_for", lambda node, **kw: (None, None, None, None, None)
+    )
     with pytest.raises(adv.SpawnError) as exc:
         adv._spawn_worker(
-            "ab-2222aaaa", "/w", extra_env={"HOME": "/accounts/zai-1/home"}
+            "ab-2222aaaa", "/w", extra_env={"HOME": "/accounts/zai-1/home"}, node=_spawn_node()
         )
     assert "HOME" in str(exc.value)
     assert "--dispatch-account" in str(exc.value)
@@ -3491,7 +3522,7 @@ def test_spawn_worker_still_accepts_a_non_state_root_extra_env(monkeypatch):
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker(
-        "ab-2222aaaa", "/w", extra_env={"ANTHROPIC_BASE_URL": "https://x"}
+        "ab-2222aaaa", "/w", extra_env={"ANTHROPIC_BASE_URL": "https://x"}, node=_spawn_node()
     )
     assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://x"
 
@@ -3866,7 +3897,7 @@ def test_spawn_worker_harvests_seam_receipt_from_stderr(monkeypatch):
         adv.subprocess, "run",
         _fake_seam_run(f"noise before\n{_SPAWN_NOTE}\nnoise after\n"),
     )
-    sid = adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt)
+    sid = adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt, node=_spawn_node())
 
     assert sid == "abc12345"
     assert receipt["notes"] == (_SPAWN_NOTE,)
@@ -3879,7 +3910,7 @@ def test_spawn_worker_note_harvest_caps_at_twenty(monkeypatch):
     flood = "\n".join(f"fno agents spawn: axis {i} ignored" for i in range(25))
     monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run(flood))
 
-    adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt)
+    adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt, node=_spawn_node())
 
     assert len(receipt["notes"]) == 20
 
@@ -3954,7 +3985,7 @@ def test_unreadable_stderr_never_wedges_the_launch(monkeypatch):
     receipt: dict = {}
     monkeypatch.setattr(adv.subprocess, "run", _fake_seam_run(None))
 
-    sid = adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt)
+    sid = adv._spawn_worker("ab-2222aaaa", "/w", receipt=receipt, node=_spawn_node())
 
     assert sid == "abc12345" and receipt["notes"] == ()
 
