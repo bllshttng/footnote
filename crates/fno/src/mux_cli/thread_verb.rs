@@ -4,7 +4,6 @@
 //! `resolve_session`, the timeout constants, the exit codes, the proto
 //! types, the selector parsers) in exactly one place.
 use super::*;
-use clap::Parser as _;
 
 /// `fno mux thread <name> [--portal N|new] [--tab SEL] [--split DIR]
 /// [--workspace NAME] [--at PANE]` (x-07c2, hidden): the outside-the-TUI

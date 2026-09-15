@@ -570,6 +570,68 @@ pub struct ThreadArgs {
     pub name: Option<String>,
 }
 
+/// `fno mux block pipe`'s flags. Values stay strings here; the pure
+/// validators (`parse_u64`, `parse_block_sel`) keep their exact refusals
+/// when the parser converts.
+#[derive(Parser, Debug, Default, PartialEq, Eq)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+pub struct BlockPipeArgs {
+    /// Server (socket session) this verb addresses
+    #[arg(long, value_name = "NAME")]
+    pub server: Option<String>,
+    /// Deprecated spelling of --server (warns)
+    #[arg(long, hide = true, value_name = "NAME")]
+    pub session: Option<String>,
+    /// Emit machine-readable JSON on stdout
+    #[arg(long)]
+    pub json: bool,
+    /// Force when the target pane is not idle
+    #[arg(long)]
+    pub force: bool,
+    /// Source pane id to read the completed block from
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Target pane id to pipe into
+    #[arg(long)]
+    pub to: Option<String>,
+    /// Which block to read (last | <seq>)
+    #[arg(long)]
+    pub block: Option<String>,
+}
+
+/// `fno mux block annotate`'s flags; same string-then-validate shape as
+/// [`BlockPipeArgs`].
+#[derive(Parser, Debug, Default, PartialEq, Eq)]
+#[command(
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+pub struct BlockAnnotateArgs {
+    /// Server (socket session) this verb addresses
+    #[arg(long, value_name = "NAME")]
+    pub server: Option<String>,
+    /// Deprecated spelling of --server (warns)
+    #[arg(long, hide = true, value_name = "NAME")]
+    pub session: Option<String>,
+    /// Source pane id to read the block from
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Which block to read (last | <seq>)
+    #[arg(long)]
+    pub block: Option<String>,
+    /// The node the finding is recorded against
+    #[arg(long)]
+    pub node: Option<String>,
+    /// The finding text
+    #[arg(short = 'm', long)]
+    pub message: Option<String>,
+}
+
 /// One command-qualified refusal line for a parse failure. The caller prints
 /// it to stderr and exits 2; clap's own multi-line usage block never reaches
 /// the operator.

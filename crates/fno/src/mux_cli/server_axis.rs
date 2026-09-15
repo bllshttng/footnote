@@ -6,8 +6,6 @@
 //! The shared `--server <s>` / `--json` flag prefix every small verb parses
 //! rides here too, beside the resolver it feeds.
 
-use std::ffi::OsString;
-
 use crate::proto::DEFAULT_SESSION;
 
 /// The mux server axis, ruled 2026-09-10 (x-f209): a server is one socket and
@@ -64,13 +62,4 @@ pub fn resolve_session(explicit: Option<&str>, env: Option<&str>) -> String {
         }
     }
     resolved
-}
-
-/// Read the value of a `--flag value` pair, advancing `i` past the value.
-pub fn flag_value(args: &[OsString], i: &mut usize, flag: &str) -> Result<String, String> {
-    *i += 1;
-    args.get(*i)
-        .and_then(|a| a.to_str())
-        .map(str::to_string)
-        .ok_or_else(|| format!("{flag} needs a value"))
 }

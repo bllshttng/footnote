@@ -5,7 +5,7 @@
 
 use std::ffi::OsString;
 
-use super::{run_on_existing_server, MuxCommon, ControlVerb, EXIT_OK, EXIT_USAGE};
+use super::{run_on_existing_server, ControlVerb, MuxCommon, EXIT_OK, EXIT_USAGE};
 
 /// `fno mux rows [--json]` : the one row-set receipt. Prints the
 /// row set the server last derived, each row carrying the paint verdict.

@@ -244,6 +244,9 @@ fn mux_carry_role(rest: &[OsString]) -> Role {
         // a bare `mux pane` (no verb) falls through to MuxUsage. Nothing
         // under `mux pane` ever forwards to Python (AC).
         Some("pane") if rest.len() > 1 => Role::MuxPane(rest[1..].to_vec()),
+        // `mux block <verb> ...`: block porcelain; a bare `mux block`
+        // falls through to MuxUsage. Never forwards to Python.
+        Some("block") if rest.len() > 1 => Role::MuxBlock(rest[1..].to_vec()),
         // (x-d865) layout script porcelains, same carry-verbatim shape.
         Some("tab") if rest.len() > 1 => Role::MuxTab(rest[1..].to_vec()),
         Some("layout") if rest.len() > 1 => Role::MuxLayout(rest[1..].to_vec()),
