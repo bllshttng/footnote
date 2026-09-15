@@ -24,7 +24,7 @@ use crate::{
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
 use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
-use crate::king_termination::{bound_breached, king_quiet_body};
+use crate::king_termination::{bound_breached, king_output, king_quiet_body};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11474,27 +11474,6 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
     }
 }
 
-fn king_output(
-    decision: &str,
-    reason: Option<TerminationReason>,
-    message: &str,
-    actionable: i64,
-    fires: u64,
-) -> String {
-    serde_json::json!({
-        "driver": "king",
-        "decision": decision,
-        "termination_reason": reason,
-        // `reason` carries the human-readable why, distinct from the enum
-        // above: a stop hook reader wants the top actionable row, not a tag.
-        "reason": message,
-        "message": message,
-        "actionable": actionable,
-        "fires": fires,
-    })
-    .to_string()
-}
-
 fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     // A missing manifest is the only safe silent allow, exactly as on the
     // target path: a session nobody crowned is not a king, and blocking one
@@ -11584,6 +11563,17 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     }
 
     let history = crate::loop_king::king_fire_history(&project_events, &session_id);
+    // The hook's half of the reign record: a beat the model skipped still
+    // lands a row. Sits after the cancel-sentinel check, so a cancelled crown
+    // writes none. The return value is ignored, so no decision changes.
+    crate::king_checkin::hook_beat(
+        &project_events,
+        &parsed.cwd,
+        &manifest.scope,
+        &session_id,
+        &history,
+        chrono::Utc::now(),
+    );
     let dry = history.dry;
     // The bounds every block below owes, in one place, so no branch grows its own.
     let bounded = |dry: u64, waiting: &str| {
