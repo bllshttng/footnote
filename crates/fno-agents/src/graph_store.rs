@@ -2008,22 +2008,61 @@ pub fn create_backup(path: &Path) -> Option<PathBuf> {
             }
         }
     }
-    let mut existing: Vec<PathBuf> = std::fs::read_dir(&dir)
+    let _ = rotate_backups(&dir, &prefix);
+    Some(backup)
+}
+
+/// Shared backup-rotation prune: keep the newest GRAPH_BACKUP_KEEP files
+/// matching `prefix` in `dir`, and on a collapse (newest at most a tenth of
+/// its predecessor, the state canary's threshold) rename that predecessor to
+/// `pre-shrink.<name>` so the last good copy survives rotation. Returns the
+/// pin path. Pins are never pruned: `pre-shrink.` never starts with a backup
+/// prefix.
+/// ponytail: one pin per collapse, uncapped; cap pre-shrink.* if pins pile up.
+pub(crate) fn rotate_backups(dir: &Path, prefix: &str) -> Option<PathBuf> {
+    let mut existing: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.file_name()
-                .map(|n| n.to_string_lossy().starts_with(&prefix))
+                .map(|n| n.to_string_lossy().starts_with(prefix))
                 .unwrap_or(false)
         })
         .collect();
     existing.sort();
+    let mut pin = None;
+    if existing.len() >= 2 {
+        let prev = existing[existing.len() - 2].clone();
+        let now = std::fs::metadata(existing.last()?)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let was = std::fs::metadata(&prev).map(|m| m.len()).unwrap_or(0);
+        if was > 0 && now <= was / 10 {
+            let pin_path = dir.join(format!(
+                "pre-shrink.{}",
+                prev.file_name()?.to_string_lossy()
+            ));
+            match std::fs::rename(&prev, &pin_path) {
+                Ok(()) => {
+                    eprintln!(
+                        "graph backup collapsed from {was} to {now} bytes; the last good copy is kept out of rotation at {}",
+                        pin_path.display()
+                    );
+                    pin = Some(pin_path);
+                }
+                // Rename failed: leave the copy in place and drop it from the
+                // prune list either way, so this pass cannot delete it.
+                Err(_) => {}
+            }
+            existing.remove(existing.len() - 2);
+        }
+    }
     if existing.len() > GRAPH_BACKUP_KEEP {
         for old in &existing[..existing.len() - GRAPH_BACKUP_KEEP] {
             let _ = std::fs::remove_file(old);
         }
     }
-    Some(backup)
+    pin
 }
 
 /// Atomic whole-file write: temp sibling + rename (store._write_json).
@@ -2626,6 +2665,94 @@ mod tests {
         assert_eq!(std::fs::read(&created).unwrap(), b"current graph");
         assert_eq!(std::fs::read(&retained).unwrap(), b"retained bytes");
         assert_eq!(std::fs::read(&unrelated).unwrap(), b"unrelated bytes");
+    }
+
+    fn count_prefixed(dir: &Path, prefix: &str) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
+            .count()
+    }
+
+    #[test]
+    fn rotate_backups_pins_the_last_good_copy_on_a_collapse() {
+        // AC1-HP: a 10,000-byte backup followed by a 64-byte one pins the
+        // good copy out of rotation, and 12 further small writes cannot
+        // delete the pin. The 2026-09-06 wipe shape.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("backups");
+        std::fs::create_dir(&dir).unwrap();
+        let good = dir.join("graph.json.bak.20260914T000000000000");
+        std::fs::write(&good, vec![b'x'; 10_000]).unwrap();
+        std::fs::write(
+            dir.join("graph.json.bak.20260914T000001000000"),
+            vec![b'y'; 64],
+        )
+        .unwrap();
+
+        let pin = rotate_backups(&dir, "graph.json.bak.").expect("pin on collapse");
+
+        let expected = dir.join("pre-shrink.graph.json.bak.20260914T000000000000");
+        assert_eq!(pin, expected);
+        assert_eq!(std::fs::read(&expected).unwrap().len(), 10_000);
+        assert!(!good.exists(), "good copy moved out of rotation");
+
+        for i in 2..14 {
+            std::fs::write(
+                dir.join(format!("graph.json.bak.20260914T0000{i:02}000000")),
+                vec![b'z'; 64],
+            )
+            .unwrap();
+            rotate_backups(&dir, "graph.json.bak.");
+        }
+        assert_eq!(count_prefixed(&dir, "graph.json.bak."), 10);
+        assert_eq!(std::fs::read(&expected).unwrap().len(), 10_000);
+
+        // AC1-EDGE: exactly one tenth is the collapse boundary (now <= was/10).
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("backups");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("graph.json.bak.20260914T100000000000"),
+            vec![b'x'; 10_000],
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("graph.json.bak.20260914T100001000000"),
+            vec![b'y'; 1_000],
+        )
+        .unwrap();
+        assert!(rotate_backups(&dir, "graph.json.bak.").is_some());
+        assert_eq!(count_prefixed(&dir, "pre-shrink."), 1);
+    }
+
+    #[test]
+    fn rotate_backups_leaves_an_ordinary_shrink_in_rotation() {
+        // AC1-ERR: 1,001 bytes after 10,000 is a normal shrink; two empty
+        // backups are not a collapse either. No pin, None returned.
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("backups");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(
+            dir.join("graph.json.bak.20260914T200000000000"),
+            vec![b'x'; 10_000],
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("graph.json.bak.20260914T200001000000"),
+            vec![b'y'; 1_001],
+        )
+        .unwrap();
+
+        assert!(rotate_backups(&dir, "graph.json.bak.").is_none());
+        assert_eq!(count_prefixed(&dir, "pre-shrink."), 0);
+        assert_eq!(count_prefixed(&dir, "graph.json.bak."), 2);
+
+        std::fs::write(dir.join("graph.json.bak.20260914T200000000000"), b"").unwrap();
+        std::fs::write(dir.join("graph.json.bak.20260914T200001000000"), b"").unwrap();
+        assert!(rotate_backups(&dir, "graph.json.bak.").is_none());
+        assert_eq!(count_prefixed(&dir, "pre-shrink."), 0);
     }
 
     #[test]
