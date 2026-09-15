@@ -63,10 +63,18 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
 
     ids = sorted(set(stalled_ids))
     key = dedupe_key(ids)
+    # The channel is keyed by the escalating king: the marker the fold sweeps
+    # and the needle the text carries must name this king, or two reigning
+    # kings take turns closing each other's question. The scope rides
+    # the key handed to the renderer, which formats it opaquely, so the crate
+    # stays untouched.
+    scope = _escalation_scope(session_id)
+    marker = f"{MARKER}:{scope}" if scope else MARKER
     # Render BEFORE the fold: a refusal must raise while the channel is still
     # untouched. The channel's empty branch closes open asks, so reaching it
     # with a refused set would read as a clean board.
-    answer = _render(ids, key, reason, live=live, unknown_reason=unknown_reason)
+    answer = _render(ids, f"{scope}:{key}" if scope else key, reason, live=live,
+                     unknown_reason=unknown_reason)
     if not answer.get("ok"):
         raise ValueError(answer.get("message", "king escalation refused"))
     outcome, qid = reconcile_channel(
@@ -74,7 +82,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         root=root,
         session_id=session_id,
         cwd=cwd,
-        marker=MARKER,
+        marker=marker,
         subject="king-escalation",
         identities=ids,
         question=lambda _key: answer["question"],
@@ -88,6 +96,33 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         asker=canonical_handle(session_id) if session_id else None,
     )
     return ("recorded", qid) if outcome == "asked" else (outcome, qid)
+
+
+def _escalation_scope(session_id: "str | None") -> "str | None":
+    """The escalating king's crown scope, else None.
+
+    The channel is keyed by the king as well as the marker: two reigning
+    kings measure different stuck sets on their own beats, and a marker-only
+    channel lets each one's ask close the other's question. A scopeless
+    caller stays on the legacy shared channel.
+    """
+    if not session_id:
+        return None
+    try:
+        from fno.agents.registry import load_registry
+        from fno.harness_identity import session_identity_key
+
+        needle = session_identity_key(session_id)
+
+        def _keyed(r: object) -> "str | None":
+            sid = getattr(r, "harness_session_id", None)
+            return session_identity_key(sid) if sid else None
+
+        row = next((r for r in load_registry() if _keyed(r) == needle), None)
+    except Exception:  # noqa: BLE001 - an unreadable registry never blocks the ask
+        return None
+    scope = getattr(row, "crown_scope", None) if row is not None else None
+    return scope if isinstance(scope, str) and scope.strip() else None
 
 
 def resolve_presiding_king(session_id: "str | None") -> "dict | None":
