@@ -1,6 +1,6 @@
 //! How a resume wake delivers, and when its receipt may say live.
 //!
-//! Split out of `client_verbs.rs` (x-6ac3): that file is over the 5,000-line
+//! Split out of `client_verbs.rs` : that file is over the 5,000-line
 //! budget and shrink-only, and the wake-delivery + respawn-confirm question
 //! outgrew living beside the argv parsers. Callers keep thin call sites in
 //! `client_verbs.rs`; the delivery and confirmation logic lives here.
@@ -89,7 +89,7 @@ pub(crate) fn acquire_named_session_claim(
 const RESUME_WAKE_MESSAGE: &str = "continue";
 
 /// Deliver a resume wake to a codex thread row over the app-server daemon
-/// (x-6ac3). Exit 0 is a positive receipt: the daemon accepted the turn. An
+///. Exit 0 is a positive receipt: the daemon accepted the turn. An
 /// `Err` maps to exit 16 carrying the reason token (`no-daemon`, `io-error`),
 /// never an exec that may have done nothing under a captured stdin.
 pub(crate) fn run_codex_thread_delivery(
@@ -183,7 +183,7 @@ impl ViewportIo for ShellViewportIo {
 }
 
 /// The codex resume arm for rows whose thread is reachable over the app-server
-/// (x-4a68): a thread row delivers directly, and a pane row whose pane is dead
+/// a thread row delivers directly, and a pane row whose pane is dead
 /// but whose thread is loaded in the app-server gets the message over
 /// `turn/start` and attaches a `--remote unix://` viewport. `None` means this
 /// route does not answer and the caller's claim / pane / exec paths run
@@ -206,7 +206,7 @@ pub(crate) fn codex_resume_route(
     if entry.get("harness").and_then(Value::as_str) != Some("codex") {
         return None;
     }
-    // A thread row delivers over the daemon, never a terminal exec (x-6ac3):
+    // A thread row delivers over the daemon, never a terminal exec :
     // `codex resume <id>` needs a tty and a headless caller has none.
     if entry.get("substrate").and_then(Value::as_str) == Some("thread") {
         return Some(run_codex_thread_delivery(
@@ -368,7 +368,7 @@ fn wake_loaded_thread(
 
 /// The production wake route: the real pane probe, the real loaded-thread
 /// read, the real mux shell-out. The seams in [`codex_resume_route`] stay for
-/// tests (x-4a68).
+/// tests.
 pub(crate) fn codex_resume_wake_route(
     name: &str,
     entry: &Value,
@@ -598,7 +598,7 @@ where
         return 16;
     }
 
-    // x-6ac3: `updated_at` advancing proves the job relaunched, never that
+    // `updated_at` advancing proves the job relaunched, never that
     // the worker is answering - the same receipt-can-lie shape the node
     // recorded (`is live again` printed, then truth read stalled). The
     // receipt may say live only when the truth probe agrees, within a
@@ -1089,7 +1089,7 @@ mod tests {
         std::fs::remove_dir_all(temp.path()).ok();
     }
 
-    // ---- x-4a68 wake-route fixtures -------------------------------------
+    // ---- wake-route fixtures -------------------------------------
 
     struct ScriptedViewport {
         launched: std::sync::Mutex<Vec<Vec<String>>>,

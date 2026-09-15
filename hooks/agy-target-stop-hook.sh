@@ -97,7 +97,7 @@ LIVE_STATE_FILE=$(fno-agents state path target-state 2>/dev/null || true)
 # The verb answers THIS cwd's spaces-layout slice whether or not a manifest
 # lives there; when that answer is not on disk, the manifest init wrote at the
 # workspace root is the one to gate on. agy fires Stop from unrelated cwds, so
-# an empty answer alone never fired this fallback (x-3227 review, T9).
+# an empty answer alone never fired this fallback (review, T9).
 [[ -z "$LIVE_STATE_FILE" || ! -f "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 TARGET_CWD="$ROOT"
@@ -426,7 +426,7 @@ verb_rc=0
 if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
     DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
 else
-    # x-3227 sibling: this adapter only ever gates target plans, so its
+    # sibling: this adapter only ever gates target plans, so its
     # done_probes get the session cargo build-dir env the same way the claude
     # adapter exports it. The config surface's own answer, exported only when
     # it reads as that answer; any failure leaves the env unset.
