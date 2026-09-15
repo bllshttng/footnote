@@ -284,6 +284,10 @@ RUST_CLIENT_VERBS = frozenset(
         # JSON in, the {inject, applied, suppressed, messages} plan out;
         # Python calls it via fno.agents.spawn_axes_client.
         "spawn-axes",
+        # The node's verb against the payload's verb (x-2c0d): payload JSON
+        # in, the {action: pass|profile|compose|refuse} answer out; Python
+        # calls it via fno.rust_binary.verb_call at the spawn seam.
+        "node-seed",
         # The failover chain walk (x-8975 budget port): payload JSON in, the
         # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
         "fallback-chain",
@@ -544,6 +548,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "blueprint-feed": "Territory feed for the backlog supervisor's blueprinter tick: --scope <s> prints the standing worker + unfed ideas as JSON; --deliver mails the window; --repair <r> records a failed delivery.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
     "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",
+    "node-seed": "The node's verb against the payload's verb (x-2c0d): JSON payload on stdin, the {action: pass|profile|compose|refuse} answer on stdout; invoked by fno.rust_binary.verb_call at the spawn seam, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",

@@ -114,6 +114,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "session-start-bytes",
     "spawn",
     "spawn-gate",
+    "node-seed",
     "spawn-overlay",
     "spawn-axes",
     "fallback-chain",
@@ -591,6 +592,14 @@ async fn run(args: Vec<String>) -> i32 {
     // and reads the admit (with the held claim keys) or the refusal back.
     if verb == "spawn-gate" {
         return fno_agents::spawn_gate_verb::run_spawn_gate(&args[1..]);
+    }
+
+    // `node-seed`: the node's verb against the payload's verb (see
+    // node_seed.rs doc). Direct dispatch; no daemon RPC. The Python spawn
+    // seam projects the lifecycle table's answer plus seed-slot facts and
+    // applies the pass / profile / compose / refuse answer verbatim.
+    if verb == "node-seed" {
+        return fno_agents::node_seed::run_node_seed(&args[1..]);
     }
 
     // `spawn-overlay`: the harness-keyed spawn-defaults resolver (see
