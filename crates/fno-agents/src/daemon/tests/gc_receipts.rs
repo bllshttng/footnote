@@ -4786,7 +4786,12 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
     assert_eq!(stop_effect.outcome, "confirmed-removed");
     assert_eq!(
         stop_effect.detail.as_deref(),
-        Some("claude stop ran; session sess-bgrow")
+        Some("claude session ended; session sess-bgrow")
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// The blueprint retirement families, split by the file budget; the
+/// fixtures above are the shared seams.
+#[path = "gc_receipts/blueprint_retirement.rs"]
+mod blueprint_retirement;

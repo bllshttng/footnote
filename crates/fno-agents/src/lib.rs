@@ -109,6 +109,7 @@ pub mod finalize;
 pub mod fleet_incident;
 pub mod flight_gate;
 pub mod gc;
+pub mod gc_claude_stop;
 pub mod gc_inventory;
 pub mod gc_native;
 pub mod gc_sweep;
@@ -961,6 +962,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
     // live-but-unowned PID to exited); this REMOVES the row entirely.
     "agent_row_reaped",
+    // One row per daemon retire tick that held rows: every held id
+    // with its reason, detail and age, so the fleet reads one event stream.
+    "retire_holds",
     // One bounded count summary for every configured state-retention pass.
     "state_reap",
     "graph_write_gate",

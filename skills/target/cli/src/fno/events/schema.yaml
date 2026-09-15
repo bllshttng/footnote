@@ -2755,6 +2755,19 @@ event_types:
           type: string
           description: "The sweep that confirmed this removal, such as roster-reap."
 
+  - name: retire_holds
+    description: "One row per daemon retire tick that HELD rows (x-d8bc): every held id with its reason, detail, age and escalation flag, so a fleet question reads one event stream instead of parsing bucket counts. Zero holds writes nothing."
+    sources: [daemon]
+    data:
+      required: [scheduler, holds]
+      properties:
+        scheduler:
+          type: string
+          description: "The scheduler that ran the tick, 'daemon'."
+        holds:
+          type: array
+          description: "One object per held row: id, reason, detail, age_s (nullable), escalated."
+
   - name: pr_nudge_sent
     description: "The nudge ladder acted on a session the retirement sweep keeps on an open PR: mailed or resumed it to drive the PR to merge. attempt counts from 1; delivered reports receipt-confirmed landing (the send's exit 0 covers queued envelopes too). receipt carries the mail verb's own line, or exit <code> when it printed nothing; fallback names the rung that took over mid-pass; undelivered counts this budget's attempts that never landed."
     sources: [daemon]

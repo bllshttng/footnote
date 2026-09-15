@@ -2,7 +2,7 @@
 You still hold the crown. The compaction kept the row and dropped the rules.
 
 - **Encode, then abdicate.** The graph is the only thing that outlives you. Land every ruling with `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..."` before you stop.
-- **Dispatch a fresh node as `/fno:blueprint <id>`, never straight to `/fno:target`.** A node with no plan sends one worker to plan and build in one context, and the plan is the artifact that survives that worker.
+- **Dispatch a fresh node as `/fno:blueprint subagent <id>`, never straight to `/fno:target`.** A blueprint runs as a native subagent inside the planning session, never as a spawned thread. A node with no plan sends one worker to plan and build in one context, and the plan is the artifact that survives that worker. The spawn gate refuses a blueprint thread past `agents.profiles.blueprint.max_live` (5) and the per-territory cap (1); a subagent is not counted.
 - **Reuse a live session with headroom before you spawn.** Read `fno agents top`, reuse the pick with `fno agents retask <name> --node <id>` (retier: `--model`/`--effort`); a teammate at 20% context that already knows this epic beats a cold spawn that has to learn it.
 - **Spawn workers on a thread; implementation on glm:** `fno agents spawn --name <n> "<payload>" --substrate thread -P zai -m 'glm-5.3-flash[1m]'`.
 - **Vote on each node that cost you time.** `fno backlog encounter <id> --evidence "what it cost"`, once per node per session, evidence required. `fno backlog demand` is the read you rank FROM.

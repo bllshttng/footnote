@@ -81,6 +81,12 @@ pub struct GcRow {
     /// marker question is answered (the operator ruled the assignment
     /// over), so only the 1200 s quiet gate remains.
     pub planning_released: bool,
+    /// The row's latest inside-leg report reads `done`: the turn
+    /// ended and the session is not waiting. A halted planner - one whose
+    /// turn ended with no plan on the node - counts as finished, never as
+    /// an assignment in flight. `blocked` (waiting on input) and `working`
+    /// keep the planner hold.
+    pub turn_ended: bool,
     /// A hold computed beside the work verdict (x-5a62): the cascade's
     /// conflict between witnesses, or the PR-state confirm contradicting a
     /// done node. Decided in the sweep where the route and the graph read
@@ -143,6 +149,12 @@ impl GcRow {
 /// revision assignment stays outstanding).
 pub const PLANNING_COMPLETE_STATUSES: [&str; 5] =
     ["done", "ready", "in_progress", "in_review", "shipped"];
+
+/// Statuses that finish a planning assignment with NO marker: a
+/// node that moved to `deferred` or `superseded` has nothing left to plan.
+/// The assignment is over even though this session wrote no close and no
+/// plan - waiting forever on a moved-on node is the hold it cures.
+pub const PLANNING_MOVED_ON_STATUSES: [&str; 2] = ["deferred", "superseded"];
 
 /// The idle grace for a PLANNER row whose planning assignment is finished
 /// (law d-81c6da7e): 20 quiet minutes, not the 900 s every other row takes.
@@ -307,10 +319,17 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                 // vacuous all() would retire a row the graph could not
                 // describe. It falls through to the open-work gate below.
                 if !assignments.is_empty() {
+                    // three facts finish an assignment beside the
+                    // markers - the node moved on (deferred or superseded,
+                    // nothing left to plan), and the planner halted (its
+                    // last inside-leg report reads done: the turn ended
+                    // with no plan, and it is not waiting on anything).
                     let unfinished = assignments.iter().find(|(n, s)| {
-                        !PLANNING_COMPLETE_STATUSES.contains(&s.as_str())
-                            || !(row.planning_closed.contains(n)
-                                || row.planning_plan_written.contains(n))
+                        let moved_on = PLANNING_MOVED_ON_STATUSES.contains(&s.as_str());
+                        let marked = row.planning_closed.contains(n)
+                            || row.planning_plan_written.contains(n);
+                        let complete = PLANNING_COMPLETE_STATUSES.contains(&s.as_str()) && marked;
+                        !(moved_on || complete || row.turn_ended)
                     });
                     return match unfinished {
                         None => grace_gate(row, PLANNING_IDLE_RETIRE_SECS),
@@ -1021,6 +1040,28 @@ pub fn maybe_retirement_sweep(
             Some(&detail),
             interval.as_secs(),
         );
+        // AC5: every held row lands in the journal once per tick -
+        // one `retire_holds` row beside the tick, so a fleet question reads
+        // the event stream instead of parsing bucket counts. Zero holds
+        // writes nothing.
+        if !summary.holds.is_empty() {
+            let _ = journal.append(
+                "retire_holds",
+                serde_json::json!({
+                    "scheduler": "daemon",
+                    "holds": summary
+                        .holds
+                        .iter()
+                        .map(|h| {
+                            serde_json::json!({
+                                "id": h.id, "reason": h.reason, "detail": h.detail,
+                                "age_s": h.age_s, "escalated": h.escalated,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                }),
+            );
+        }
     });
 }
 
@@ -1396,6 +1437,144 @@ mod tests {
         );
     }
 
+    /// AC5-HP: a tick whose sweep held rows writes ONE
+    /// `retire_holds` journal row naming each held id, beside the tick row.
+    #[test]
+    fn a_tick_with_held_rows_writes_one_retire_holds_event() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // The agents home sits UNDER dir so the production graph read
+        // (home.root().parent()/graph.json) answers dir/graph.json.
+        let home = AgentsHome::at(dir.path().join("agents"));
+        home.ensure_root().unwrap();
+        std::fs::write(
+            dir.path().join("graph.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "entries": [{
+                    "id": "x-h1",
+                    "status": "idea",
+                    "project": "p",
+                    "sessions": [{
+                        "phase": "blueprint",
+                        "harness": "codex",
+                        "session_id": "s-h1",
+                        "started_at": "2026-09-01T00:00:00Z",
+                    }],
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::state::update_registry(&home.registry_json(), |r| {
+            let mut e = crate::state::RegistryEntry::default();
+            e.name = "bp-x-h1-a".into();
+            e.short_id = "bp-x-h1-a".into();
+            e.origin = Some("spawn".into());
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some("s-h1".into());
+            e.created_at = "2026-09-01T00:00:00Z".into();
+            e.status = crate::AgentStatus::Exited;
+            r.entries.push(e);
+        })
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let in_flight = Arc::new(AtomicBool::new(false));
+            let cell: Arc<RetireIntervalCell> = Arc::new(Mutex::new(None));
+            let mut last = Instant::now() - Duration::from_secs(301);
+            crate::gc::maybe_retirement_sweep(
+                &mut last,
+                &in_flight,
+                &cell,
+                home.clone(),
+                dir.path().to_path_buf(),
+                home.events_jsonl(),
+                Duration::from_secs(300),
+                || crate::reap_render::MuxSweep::Skipped,
+            );
+            // The production age probe pays a real subprocess on this
+            // fixture (two probes, seconds apiece under load), so the tick
+            // can land long past the 5 s deadline the empty-home tests use.
+            wait_for_line(&home.events_jsonl(), "\"arm\":\"retire\"", 90);
+            wait_for_line(&home.events_jsonl(), "\"type\":\"retire_holds\"", 90);
+        });
+        let holds_row = std::fs::read_to_string(home.events_jsonl())
+            .unwrap()
+            .lines()
+            .find(|l| l.contains("\"type\":\"retire_holds\""))
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .expect("one retire_holds row for the held planner");
+        let holds = holds_row["data"]["holds"].as_array().expect("holds list");
+        assert_eq!(holds.len(), 1, "{holds_row}");
+        assert_eq!(holds[0]["id"], "bp-x-h1-a");
+        assert_eq!(
+            holds[0]["reason"],
+            "planning assignment not finished by this session"
+        );
+        assert_eq!(holds_row["data"]["scheduler"], "daemon");
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// AC5-EDGE: a tick with zero holds writes NO `retire_holds`
+    /// row, even when the pass kept a row under a hold-free bucket.
+    #[test]
+    fn a_tick_with_zero_holds_writes_no_retire_holds_event() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (dir, home) = retirement_sweep_tmp_home("no-holds");
+        let registry = serde_json::json!({
+            "schema_version": 10,
+            "agents": [{
+                "name": "target-x-1-adopted",
+                "cwd": dir.display().to_string(),
+                "status": "exited",
+                "created_at": "2026-09-06T00:00:00Z",
+                "harness": "claude",
+                "harness_session_id": "sess-adopted",
+                "short_id": "abc123",
+                "origin": "adopted",
+            }],
+        });
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::fs::write(
+            home.registry_json(),
+            serde_json::to_string(&registry).unwrap(),
+        )
+        .unwrap();
+        run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Skipped);
+        let count = std::fs::read_to_string(home.events_jsonl())
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("\"type\":\"retire_holds\""))
+            .count();
+        assert_eq!(count, 0, "no holds, no journal row");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Poll for a journal line until `secs` elapse (the retire_holds row is
+    /// appended right after the tick row; the append is a plain write).
+    fn wait_for_line(path: &std::path::Path, needle: &str, secs: u64) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if std::fs::read_to_string(path)
+                .map(|c| c.contains(needle))
+                .unwrap_or(false)
+            {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("line never landed in {path:?}: {needle}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     #[test]
     fn state_reap_event_reports_counts() {
         let _env = crate::claims::test_env_lock()
@@ -1764,6 +1943,7 @@ mod tests {
             planning_closed: Vec::new(),
             planning_plan_written: Vec::new(),
             planning_released: false,
+            turn_ended: false,
             confirm_hold: None,
             session_terminal: None,
             superseded_by_live_peer: None,
@@ -1971,6 +2151,82 @@ mod tests {
             ..retiring()
         };
         assert_eq!(gc_decide(&planner, GRACE), (GcAction::Retire, None));
+    }
+
+    /// AC3-HP: a planner whose only assignment is a moved-on node -
+    /// `deferred` or `superseded` - retires with no close and no plan:
+    /// there is nothing left to plan.
+    #[test]
+    fn a_planner_on_a_moved_on_node_retires_without_a_marker() {
+        for status in ["deferred", "superseded"] {
+            let planner = GcRow {
+                work: WorkState::Open {
+                    node: "x-m1".into(),
+                    status: status.into(),
+                },
+                planning: Some(vec![("x-m1".to_string(), status.to_string())]),
+                transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
+                ..retiring()
+            };
+            assert_eq!(
+                gc_decide(&planner, GRACE),
+                (GcAction::Retire, None),
+                "{status}"
+            );
+        }
+    }
+
+    /// AC3-ERR: a planner whose assignment is unfinished keeps as
+    /// `PlanningUnclosed`. The sweep maps `blocked`, `working`, and an
+    /// absent inside-leg report to the same fact: the turn has not ended.
+    #[test]
+    fn a_planner_whose_turn_has_not_ended_keeps() {
+        let planner = GcRow {
+            work: WorkState::Open {
+                node: "x-m2".into(),
+                status: "idea".into(),
+            },
+            planning: Some(vec![("x-m2".to_string(), "idea".to_string())]),
+            turn_ended: false,
+            transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&planner, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::PlanningUnclosed {
+                    node: "x-m2".into(),
+                    status: "idea".into(),
+                })
+            )
+        );
+    }
+
+    /// AC3-EDGE: a halted planner (latest inside-leg report `done`)
+    /// on an unfinished node retires past the planner grace, and keeps as
+    /// Active inside it.
+    #[test]
+    fn a_halted_planner_retires_past_the_grace_and_keeps_inside_it() {
+        let halted = GcRow {
+            work: WorkState::Open {
+                node: "x-m3".into(),
+                status: "idea".into(),
+            },
+            planning: Some(vec![("x-m3".to_string(), "idea".to_string())]),
+            turn_ended: true,
+            transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
+            ..retiring()
+        };
+        assert_eq!(gc_decide(&halted, GRACE), (GcAction::Retire, None));
+        let young = GcRow {
+            transcript_age_s: Some(1100),
+            ..halted
+        };
+        assert_eq!(
+            gc_decide(&young, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 1100 }))
+        );
     }
 
     #[test]
@@ -2675,6 +2931,7 @@ mod tests {
             planning_closed: Vec::new(),
             planning_plan_written: Vec::new(),
             planning_released: false,
+            turn_ended: false,
             confirm_hold: None,
             session_terminal: None,
             superseded_by_live_peer: None,
@@ -2705,6 +2962,7 @@ mod tests {
             planning_closed: Vec::new(),
             planning_plan_written: Vec::new(),
             planning_released: false,
+            turn_ended: false,
             confirm_hold: None,
             session_terminal: None,
             superseded_by_live_peer: None,

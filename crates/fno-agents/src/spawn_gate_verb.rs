@@ -187,6 +187,46 @@ mod probe {
                     out,
                 );
             }
+            // The blueprint axis shows the same verdict a spawn would get
+            //: gate-status never lies about a bp spawn's odds.
+            let bp_name = opt_str_of(payload, "name").unwrap_or_default();
+            let bp_live = spawn_gate::live_rows(&registry_path, &mut warnings);
+            if let Err(receipt) = spawn_gate::check_blueprint_cap(
+                &config_cwd,
+                &registry_path,
+                &bp_name,
+                spawn_gate::gate_node().as_deref(),
+                &bp_live,
+            ) {
+                let parsed: Value = serde_json::from_str(&receipt).unwrap_or(Value::Null);
+                let reason = parsed
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("blueprint_cap")
+                    .to_string();
+                let remedy = parsed
+                    .get("remedy")
+                    .and_then(Value::as_str)
+                    .unwrap_or("plan it in a native subagent (law d-94853e86)");
+                let count = parsed
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .map(|c| c.to_string())
+                    .unwrap_or_default();
+                let max_word = parsed
+                    .get("max_live")
+                    .or_else(|| parsed.get("max_live_per_territory"))
+                    .and_then(Value::as_u64)
+                    .map(|m| m.to_string())
+                    .unwrap_or_default();
+                return refuse_with(
+                    &reason,
+                    format!("{count} live blueprint row(s) at cap {max_word}; {remedy}"),
+                    parsed,
+                    &[],
+                    out,
+                );
+            }
             // Memory terms: the same two the gate refuses on (x-8c8c).
             let avail = spawn_gate::available_ram_gb();
             let swap = spawn_gate::swap_used_pct();

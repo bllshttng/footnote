@@ -474,6 +474,13 @@ pub fn parse_dispatch_agent_name(name: Option<&str>) -> Option<Parsed> {
     }
 }
 
+/// Is this a blueprint dispatch name? The grammar answers it, never a
+/// prefix test: `bp-x-1-slug`, `ac-bp-x-2-slug` and `sob-bp-x-3-slug` all
+/// parse to verb `bp`; `t-x-4-slug` does not (AC4-HP).
+pub fn is_blueprint_name(name: &str) -> bool {
+    parse_dispatch_agent_name(Some(name)).is_some_and(|p| p.verb == "bp")
+}
+
 /// Verb code for a pre-cutover convention name (`target-*` -> `t`,
 /// `think-*` -> `th`), else None: the legacy-read window helper.
 pub fn legacy_verb_code(name: Option<&str>) -> Option<String> {
@@ -617,6 +624,17 @@ pub fn run_name_codes() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AC4-HP: the grammar answers the blueprint question - every
+    /// verb-bp name matches whatever its source prefix, and a target row
+    /// never does.
+    #[test]
+    fn blueprint_names_parse_by_verb_not_prefix() {
+        assert!(is_blueprint_name("bp-x-3-slug"));
+        assert!(is_blueprint_name("ac-bp-x-1-slug"));
+        assert!(is_blueprint_name("sob-bp-x-2-slug"));
+        assert!(!is_blueprint_name("t-x-4-slug"));
+    }
 
     #[test]
     fn mint_dispatch_form_and_shaving() {

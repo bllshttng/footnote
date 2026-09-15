@@ -148,6 +148,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
             .iter()
             .map(|(id, age_s)| json!({"id": id, "age_s": age_s}))
             .collect();
+        let probe_unread: Vec<Value> = summary
+            .kept_probe_unread
+            .iter()
+            .map(|(id, detail)| json!({"id": id, "detail": detail}))
+            .collect();
         let pair = |rows: &Vec<(String, String)>| -> Vec<Value> {
             rows.iter()
                 .map(|(id, reason)| json!({"id": id, "reason": reason}))
@@ -218,6 +223,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_open_pr": pair(&summary.kept_open_pr),
                 "kept_planning_unclosed": planning_unclosed,
                 "kept_active": active,
+                "kept_probe_unread": probe_unread,
                 "kept_transcript_unresolved": summary.kept_transcript_unresolved,
                 "kept_graph_unreadable": summary.kept_graph_unreadable,
                 "kept_dirty": pathed(&summary.kept_dirty),
@@ -341,6 +347,12 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     for (id, age_s) in &summary.kept_active {
         out.push_str(&format!(
             "  kept {id} (active: transcript written {age_s}s ago)\n"
+        ));
+    }
+    for (id, detail) in &summary.kept_probe_unread {
+        out.push_str(&format!(
+            "  kept {id} (probe unread: {detail}){}\n",
+            hold_line(summary, id)
         ));
     }
     for hold in &summary.kept_transcript_unresolved {
@@ -639,6 +651,7 @@ mod tests {
             "kept_open_work",
             "kept_open_do_row",
             "kept_active",
+            "kept_probe_unread",
             "kept_transcript_unresolved",
             "kept_graph_unreadable",
             "kept_dirty",
@@ -708,6 +721,40 @@ mod tests {
         let live = render_reap(&s, false, false);
         assert!(live.contains("  pruned a1"), "{live}");
         assert!(!live.contains("would prune"), "{live}");
+    }
+
+    #[test]
+    fn an_unread_probe_row_prints_its_line_and_json_key() {
+        // an unread probe is its own bucket, never `active` - the
+        // render must show both the text line and the JSON key.
+        let mut s = GcSummary::default();
+        s.kept_probe_unread.push((
+            "bp-x-1".into(),
+            "truth probe answered nothing within its bound; no inside-leg report on the row".into(),
+        ));
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains(
+                "  kept bp-x-1 (probe unread: truth probe answered nothing within its bound; no inside-leg report on the row)"
+            ),
+            "{text}"
+        );
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(
+            v.get("kept_probe_unread")
+                .and_then(|k| k.as_array())
+                .map(|a| a.len()),
+            Some(1),
+            "{out}"
+        );
+        assert_eq!(
+            v.get("kept_active")
+                .and_then(|k| k.as_array())
+                .map(|a| a.len()),
+            Some(0),
+            "kept_active stays empty: {out}"
+        );
     }
 
     #[test]
