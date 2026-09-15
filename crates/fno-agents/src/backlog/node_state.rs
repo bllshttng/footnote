@@ -170,13 +170,7 @@ pub struct StateReceipt {
 }
 
 fn read_rows_for(graph: &Path) -> Result<Vec<Value>, StateError> {
-    let sqlite = crate::backlog::backend(graph) == crate::backlog::Backend::Sqlite;
-    let mut rows = if sqlite {
-        crate::backlog::read_entries(graph)
-            .map_err(|e| StateError::Store(StoreError::Invalid(format!("{e}"))))?
-    } else {
-        graph_store::read_defaulted(graph, false)?
-    };
+    let mut rows = graph_store::read_rows(graph)?;
     graph_store::apply_defaults(&mut rows, false);
     Ok(rows)
 }

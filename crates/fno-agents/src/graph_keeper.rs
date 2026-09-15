@@ -253,6 +253,12 @@ struct StoreState {
     /// Readers share, writers exclude: read guards for handlers that only
     /// read the owned graph, write guards for the ones that publish.
     gate: RwLock<()>,
+    /// One read guard per in-flight REQUEST, held from handle_request through
+    /// the reply write. Shutdown ladders on the write guard, so it cannot cut
+    /// a request that is mid-publish or mid-reply (x-385e: the old ladder
+    /// dropped its guard before exit and a later request died mid-frame with
+    /// its client reading a hangup for a write that answered ok).
+    inflight: RwLock<()>,
     /// The parsed graph, validated by file identity on every hit. Seeded by
     /// the write path (commit/op) rather than invalidated, so a mutating
     /// fleet still hits. Never held for a corrupt/malformed/empty graph.
@@ -772,6 +778,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         canonical: cfg.canonical,
         lock_timeout: cfg.lock_timeout,
         gate: RwLock::new(()),
+        inflight: RwLock::new(()),
         cache: RwLock::new(None),
         file_opens: AtomicU64::new(0),
         snapshots: Mutex::new(std::collections::VecDeque::new()),
@@ -1149,20 +1156,23 @@ fn serve_client(
                 // survived-hangup vs survived-close line; an explicit
                 // shutdown ends the process here, so in-flight writers on
                 // other threads are bounded by the atomic-replace publish.
-                // Wait out an in-flight mutation first (x-f188 change 3):
-                // a bounded try_write ladder; when it cannot land within
-                // lock_timeout, answer busy and KEEP SERVING instead of
-                // exiting mid-write.
+                // Wait out in-flight REQUESTS first (x-f188 change 3, x-385e
+                // change 5): a bounded try_write ladder on the inflight lock;
+                // when it cannot land within lock_timeout, answer busy and
+                // KEEP SERVING instead of exiting mid-write. Once held, the
+                // guard stays held until exit: no request is mid-publish or
+                // mid-reply, and a request arriving later blocks until the
+                // process dies under it.
                 let deadline = std::time::Instant::now() + state.lock_timeout;
-                let mut gate_guard: Option<std::sync::RwLockWriteGuard<'_, ()>> = None;
+                let mut inflight_guard: Option<std::sync::RwLockWriteGuard<'_, ()>> = None;
                 while std::time::Instant::now() < deadline {
-                    if let Ok(g) = state.gate.try_write() {
-                        gate_guard = Some(g);
+                    if let Ok(g) = state.inflight.try_write() {
+                        inflight_guard = Some(g);
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(20));
                 }
-                let Some(gate_guard) = gate_guard else {
+                let Some(inflight_guard) = inflight_guard else {
                     let _ = stream.write_all(&encode(
                         TAG_RESPONSE,
                         json!({"id": 0, "ok": false, "error": {"kind": "busy",
@@ -1173,7 +1183,11 @@ fn serve_client(
                     let _ = stream.flush();
                     return;
                 };
-                drop(gate_guard);
+                // Held to exit: never dropped before process::exit(0). Once
+                // the write guard is ours, no request is mid-publish or
+                // mid-reply, and a request arriving later blocks on
+                // inflight.read() until the process dies under it.
+                let _ = &inflight_guard;
                 let _ = stream.write_all(&encode(
                     TAG_RESPONSE,
                     json!({"id": 0, "ok": true, "result": "shutdown"})
@@ -1189,6 +1203,11 @@ fn serve_client(
                 std::process::exit(0);
             }
             Incoming::Request(payload) => {
+                // x-385e: hold an inflight guard from handling through the
+                // reply write. Shutdown ladders on this lock, so a request
+                // that is mid-publish or mid-reply cannot be cut by an
+                // exiting keeper.
+                let _inflight = state.inflight.read().unwrap_or_else(|e| e.into_inner());
                 let reply = handle_request(&state, &payload);
                 let body = serde_json::to_vec(&reply).unwrap_or_else(|_| {
                     json!({"id": 0, "ok": false,
@@ -2954,35 +2973,54 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let p = params.get("params").cloned().unwrap_or(Value::Null);
     let client_base = params.get("base_version").and_then(Value::as_str);
     let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
-    let base = state_version(state)?;
-    if let Some(expected) = client_base {
-        if base != expected {
-            return Err(StoreError::Conflict);
+    // x-385e change 5: a foreign writer that publishes between this op's
+    // gated read and the flock check surfaces as Conflict; retry the
+    // read-apply-publish cycle while the gate is held, so the op lands
+    // instead of replying kind conflict (the measured session-close
+    // traceback). The client-supplied base stays terminal: the CALLER's
+    // snapshot is what it names, retrying cannot refresh it.
+    for attempt in 0..5u8 {
+        let base = state_version(state)?;
+        if let Some(expected) = client_base {
+            if base != expected {
+                return Err(StoreError::Conflict);
+            }
         }
+        let mut entries = read_state(state, false, true)?;
+        let op_result = apply_op(&mut entries, name, &p)?;
+        let outcome = match graph_store::locked_mutate(
+            &state.graph,
+            MutateInput {
+                entries,
+                canonical_path: state.canonical.then(|| state.graph.clone()),
+                base_version: base,
+                // The Python client sends the begin snapshot's map with every op
+                // (a session op that opens or closes a do row re-derives
+                // in_progress like any full write); a caller that sends none
+                // keeps stored statuses.
+                plan_rungs: plan_rung_map(&p),
+            },
+            state.lock_timeout,
+        ) {
+            Ok(outcome) => outcome,
+            // Conflict only: a LockTimeout is a wedged or genuinely busy
+            // lock, and retrying it inside one op would multiply the caller's
+            // deadline (the wedged-writer test bounds it at 12s).
+            Err(StoreError::Conflict) if attempt + 1 < 5 => {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        if state.backend() == Backend::Json {
+            seed_cache(state, outcome.entries.clone(), &outcome.version);
+        }
+        return Ok(json!({
+            "op": op_result,
+            "outcome": outcome_json(&outcome),
+        }));
     }
-    let mut entries = read_state(state, false, true)?;
-    let op_result = apply_op(&mut entries, name, &p)?;
-    let outcome = graph_store::locked_mutate(
-        &state.graph,
-        MutateInput {
-            entries,
-            canonical_path: state.canonical.then(|| state.graph.clone()),
-            base_version: base,
-            // The Python client sends the begin snapshot's map with every op
-            // (a session op that opens or closes a do row re-derives
-            // in_progress like any full write); a caller that sends none
-            // keeps stored statuses.
-            plan_rungs: plan_rung_map(&p),
-        },
-        state.lock_timeout,
-    )?;
-    if state.backend() == Backend::Json {
-        seed_cache(state, outcome.entries.clone(), &outcome.version);
-    }
-    Ok(json!({
-        "op": op_result,
-        "outcome": outcome_json(&outcome),
-    }))
+    unreachable!("every loop arm returns")
 }
 
 /// The typed backlog API over the wire: one keeper op per
@@ -3304,6 +3342,7 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             gate: RwLock::new(()),
+            inflight: RwLock::new(()),
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
@@ -3397,6 +3436,7 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             gate: RwLock::new(()),
+            inflight: RwLock::new(()),
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
@@ -3863,6 +3903,7 @@ mod tests {
             canonical: false,
             lock_timeout: Duration::from_secs(2),
             gate: RwLock::new(()),
+            inflight: RwLock::new(()),
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
@@ -4056,6 +4097,7 @@ mod tests {
             canonical: true,
             lock_timeout: Duration::from_secs(2),
             gate: RwLock::new(()),
+            inflight: RwLock::new(()),
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),

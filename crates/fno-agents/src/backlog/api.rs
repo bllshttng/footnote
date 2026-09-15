@@ -481,57 +481,19 @@ pub fn version(store: &Store) -> Result<i64, ApiError> {
 // -- writes ----------------------------------------------------------------
 
 /// Read, apply the typed mutation to the named rows, publish through
-/// `locked_mutate` (which owns the backend switch and the one transaction).
-/// `Ok(false)` from `apply` is a domain refusal: nothing is written and the
-/// counter stays put, which is AC15's failed-mutation arm.
-///
-/// The cycle is optimistic: the pre-read stamp is held as `base_version`, so
-/// an interleaved writer surfaces as a conflict instead of a lost write. A
-/// lost race (conflict or a contended lock) retries the whole
-/// snapshot-read-apply-publish cycle a bounded few times before the refusal
-/// names it, so callers keep the "lands or names a refusal" contract without
-/// learning the retry. `apply` reruns over a FRESH read each attempt, so a
-/// retry never overwrites what another writer just landed.
+/// `graph_store::mutate_rows` (the one optimistic cycle every whole-graph
+/// writer shares). `Ok(false)` from `apply` is a domain refusal: nothing is
+/// written and the counter stays put, which is AC15's failed-mutation arm.
 fn mutate(
     store: &Store,
     mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
 ) -> Result<bool, ApiError> {
-    const ATTEMPTS: usize = 5;
-    for attempt in 0..ATTEMPTS {
-        let base = crate::graph_store::base_version(&store.graph)?;
-        let mut working: Vec<Value> = read_rows(store)?;
-        let changed = apply(&mut working)?;
-        if !changed {
-            return Ok(false);
-        }
-        match crate::graph_store::locked_mutate(
-            &store.graph,
-            crate::graph_store::MutateInput {
-                entries: working,
-                canonical_path: None,
-                base_version: base,
-                plan_rungs: None,
-            },
-            MUTATE_TIMEOUT,
-        ) {
-            Ok(_) => return Ok(true),
-            Err(
-                err @ (crate::graph_store::StoreError::Conflict
-                | crate::graph_store::StoreError::LockTimeout(..)),
-            ) if attempt + 1 < ATTEMPTS => {
-                let _ = err;
-                std::thread::sleep(MUTATE_RETRY_BACKOFF);
-            }
-            Err(err) => return Err(err.into()),
-        }
-    }
-    unreachable!("every loop arm returns")
+    let landed =
+        crate::graph_store::mutate_rows(&store.graph, MUTATE_TIMEOUT, None, None, |rows| {
+            apply(rows).map_err(crate::graph_store::StoreError::Invalid)
+        })?;
+    Ok(landed.is_some())
 }
-
-/// Flat delay between optimistic-mutation retries. The settle's full-jitter
-/// backoff exists because correlated sweepers re-lined up; a mutation's
-/// window is one read-apply pass, so a flat short wait rides it out.
-const MUTATE_RETRY_BACKOFF: Duration = Duration::from_millis(100);
 
 fn fresh_version(store: &Store) -> i64 {
     version(store).unwrap_or(0)

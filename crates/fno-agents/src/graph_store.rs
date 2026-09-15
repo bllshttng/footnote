@@ -2453,6 +2453,77 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// One rows reader for every writer: the backend switch plus the default
+/// pass. `api::read_rows` and `node_state::read_rows_for` were this same
+/// shape twice; both delegate here now.
+pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
+    let mut rows = match crate::backlog::backend(path) {
+        crate::backlog::Backend::Sqlite => {
+            crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
+        }
+        crate::backlog::Backend::Json => read_defaulted(path, false)?,
+    };
+    apply_defaults(&mut rows, false);
+    Ok(rows)
+}
+
+/// The optimistic mutation cycle every whole-graph writer shares: stamp a
+/// base, read fresh rows, apply, publish over that base, and retry the whole
+/// cycle on [`StoreError::Conflict`] or [`StoreError::LockTimeout`]. `apply`
+/// re-runs over a FRESH read every attempt, so a retry never overwrites what
+/// another writer just landed; `Ok(false)` is a domain refusal that writes
+/// nothing. Lifted from `backlog::api::mutate` so the writers that used to
+/// publish stale snapshots (x-385e) share one loop instead of four shapes.
+pub fn mutate_rows(
+    path: &Path,
+    timeout: Duration,
+    plan_rungs: Option<BTreeMap<String, String>>,
+    mut hook: Option<&mut dyn FnMut(&[Value]) -> Result<(), StoreError>>,
+    mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, StoreError>,
+) -> Result<Option<MutateOutcome>, StoreError> {
+    const ATTEMPTS: usize = 5;
+    const RETRY_BACKOFF: Duration = Duration::from_millis(100);
+    for attempt in 0..ATTEMPTS {
+        let base = base_version(path)?;
+        let mut working = read_rows(path)?;
+        if !apply(&mut working)? {
+            return Ok(None);
+        }
+        // The hook reborrow is block-scoped: a binding held across the match
+        // would keep `hook` mutably borrowed into the next loop iteration
+        // (E0499).
+        let published = {
+            let h: Option<&mut dyn FnMut(&[Value]) -> Result<(), StoreError>> = match hook.as_mut()
+            {
+                Some(h) => Some(&mut **h),
+                None => None,
+            };
+            locked_mutate_with_hook(
+                path,
+                MutateInput {
+                    entries: working,
+                    canonical_path: None,
+                    base_version: base,
+                    plan_rungs: plan_rungs.clone(),
+                },
+                timeout,
+                h,
+            )
+        };
+        match published {
+            Ok(outcome) => return Ok(Some(outcome)),
+            Err(err @ (StoreError::Conflict | StoreError::LockTimeout(..)))
+                if attempt + 1 < ATTEMPTS =>
+            {
+                let _ = err;
+                std::thread::sleep(RETRY_BACKOFF);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("every loop arm returns")
+}
+
 // ---------------------------------------------------------------------------
 // Read path with defaults (read_graph / read_graph_strict, store-side)
 // ---------------------------------------------------------------------------
@@ -3203,6 +3274,66 @@ mod tests {
         assert!(body.starts_with("{\n  \"entries\": [\n    {"));
         assert!(body.ends_with("\n"));
         assert!(out.dropped == 0);
+    }
+
+    #[test]
+    fn mutate_rows_retries_when_a_row_lands_between_read_and_publish() {
+        // x-385e change 2, first acceptance line: a concurrent writer lands
+        // between the cycle's read and publish; the loop conflicts, re-reads,
+        // and both rows persist.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+        let mut apply_runs = 0usize;
+        let outcome = mutate_rows(&graph, Duration::from_secs(5), None, None, |rows| {
+            apply_runs += 1;
+            if apply_runs == 1 {
+                // The concurrent idea: a fresh-base whole publish of a row
+                // this cycle's snapshot does not hold.
+                let base = base_version(&graph).unwrap();
+                let mut foreign = read_rows(&graph).unwrap();
+                foreign.push(json!({"id": "x-fresh", "title": "landed mid-cycle"}));
+                locked_mutate(
+                    &graph,
+                    MutateInput {
+                        entries: foreign,
+                        canonical_path: None,
+                        base_version: base,
+                        plan_rungs: None,
+                    },
+                    Duration::from_secs(5),
+                )
+                .unwrap();
+            }
+            rows.push(json!({"id": "x-mine", "title": "mine"}));
+            Ok(true)
+        })
+        .unwrap();
+        assert!(outcome.is_some(), "the cycle landed on its second attempt");
+        assert_eq!(apply_runs, 2, "apply ran once per attempt, exactly twice");
+        let ids: Vec<String> = read_rows(&graph)
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(ids.contains(&"x-fresh".to_string()), "ids: {ids:?}");
+        assert!(ids.contains(&"x-mine".to_string()), "ids: {ids:?}");
+    }
+
+    #[test]
+    fn mutate_rows_no_change_publishes_nothing() {
+        // x-385e change 2, second acceptance line: apply's Ok(false) is a
+        // domain refusal; the file digest must not move.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+        let before = file_content_version(&graph);
+        let landed = mutate_rows(&graph, Duration::from_secs(5), None, None, |_rows| {
+            Ok(false)
+        })
+        .unwrap();
+        assert!(landed.is_none(), "no publish on a domain refusal");
+        assert_eq!(file_content_version(&graph), before, "digest unchanged");
     }
 
     #[test]
