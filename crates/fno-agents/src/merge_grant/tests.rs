@@ -354,7 +354,7 @@ fn root_from_cwd(entry: &Value) -> Option<PathBuf> {
 }
 
 fn drain(entries: &[Value], claims: &dyn Fn(&str) -> ClaimState) -> Value {
-    queue_from_entries(entries, claims, &root_from_cwd, &|_p| live())
+    queue_from_entries(entries, claims, &root_from_cwd, &|_p| live(), 0)
 }
 
 #[test]
@@ -425,6 +425,73 @@ fn queue_counts_a_missing_slug_or_checkout_as_unknown() {
 }
 
 #[test]
+fn queue_skips_done_nodes() {
+    let entries = vec![
+        queue_node("ab-done", 1, json!({"status": "done"})),
+        queue_node("ab-open", 2, json!({"status": "in_review"})),
+    ];
+    let out = drain(&entries, &stale_claims());
+    assert_eq!(out["candidates"], json!(1), "{out}");
+    let queue = out["queue"].as_array().expect("queue is an array");
+    assert_eq!(queue.len(), 1, "{out}");
+    assert_eq!(queue[0]["pr"], json!(2), "{out}");
+}
+
+#[test]
+fn queue_reads_root_and_config_once_per_checkout() {
+    let entries = vec![
+        queue_node("ab-one", 1, json!({})),
+        queue_node("ab-two", 2, json!({})),
+        queue_node("ab-three", 3, json!({})),
+    ];
+    let roots = std::cell::Cell::new(0usize);
+    let configs = std::cell::Cell::new(0usize);
+    let claims = claims_of(vec![("ab-one", Free), ("ab-two", Free), ("ab-three", Free)]);
+    let out = queue_from_entries(
+        &entries,
+        &claims,
+        &|e| {
+            roots.set(roots.get() + 1);
+            root_from_cwd(e)
+        },
+        &|_p| {
+            configs.set(configs.get() + 1);
+            live()
+        },
+        0,
+    );
+    assert_eq!(out["queue"].as_array().expect("queue").len(), 3, "{out}");
+    assert_eq!(roots.get(), 1, "root_of runs once per checkout");
+    assert_eq!(configs.get(), 1, "cfg_of runs once per checkout");
+}
+
+#[test]
+fn queue_rotates_its_head_by_the_tick_index() {
+    let entries = vec![
+        queue_node("ab-rot1", 1, json!({})),
+        queue_node("ab-rot2", 2, json!({})),
+        queue_node("ab-rot3", 3, json!({})),
+    ];
+    let claims = claims_of(vec![
+        ("ab-rot1", Free),
+        ("ab-rot2", Free),
+        ("ab-rot3", Free),
+    ]);
+    let order = |rotate: u64| -> Vec<i64> {
+        let out = queue_from_entries(&entries, &claims, &root_from_cwd, &|_p| live(), rotate);
+        out["queue"]
+            .as_array()
+            .expect("queue is an array")
+            .iter()
+            .map(|row| row["pr"].as_i64().expect("pr is an integer"))
+            .collect()
+    };
+    assert_eq!(order(0), vec![1, 2, 3]);
+    assert_eq!(order(1), vec![2, 3, 1]);
+    assert_eq!(order(5), vec![3, 1, 2]);
+}
+
+#[test]
 fn repo_slug_from_pr_url_reads_owner_and_repo() {
     assert_eq!(
         repo_slug_from_pr_url("https://github.com/owner/repo/pull/7").as_deref(),
@@ -459,9 +526,16 @@ fn unreadable_graph_reads_unknown_and_the_queue_reads_error() {
         "{}",
         v["reason"]
     );
-    let queue = queue_op(Err("bad json".to_string()));
-    let q: Value = serde_json::from_str(&queue).expect("queue is json");
+    let q = queue_op(Err("bad json".to_string()), 0, std::time::Instant::now());
     assert_eq!(q["error"], json!("graph unreadable: bad json"));
+    assert!(q["elapsed_ms"].is_u64(), "{q}");
+}
+
+#[test]
+fn queue_receipt_carries_elapsed_ms() {
+    let q = queue_op(Ok(vec![]), 0, std::time::Instant::now());
+    assert_eq!(q["candidates"], json!(0), "{q}");
+    assert!(q["elapsed_ms"].is_u64(), "{q}");
 }
 
 #[test]
