@@ -147,7 +147,7 @@ def test_caller_kind_priority_mcp_beats_cron(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# dispatcher — a machine dispatch no session asked for (x-eab2)
+# dispatcher: a machine dispatch no session asked for
 # ---------------------------------------------------------------------------
 
 
