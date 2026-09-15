@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from subprocess import run as run_subprocess
 from pathlib import Path
 from typing import Any, Sequence
@@ -129,3 +130,34 @@ def claim_verdicts(
             raise ClaimSweepOmission(f"native claim sweep omitted existing claim {key!r}; refusing to assume free")
         verdicts[key] = {"key": key, "state": "free"}
     return verdicts
+
+
+def reclaimable_stamp(row: dict[str, Any]) -> str | None:
+    """UTC ISO instant an unresolved claim's bounded grace ends, or None.
+
+    Only a row carrying an integer ``reclaimable_at`` (epoch ms, from the
+    native sweep) has a clock exit; a live claim or a pid-suspect claim
+    invents no time.
+    """
+    reclaimable_at = row.get("reclaimable_at")
+    if not isinstance(reclaimable_at, int) or isinstance(reclaimable_at, bool):
+        return None
+    return datetime.fromtimestamp(reclaimable_at / 1000, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def reclaimable_note(row: dict[str, Any]) -> str | None:
+    """Human note for when the claim turns reclaimable, or None.
+
+    ``reclaimable at <UTC> (in N min)``, or ``reclaimable now`` once the
+    instant passed between classification and print.
+    """
+    stamp = reclaimable_stamp(row)
+    if stamp is None:
+        return None
+    remaining_s = (row["reclaimable_at"] - datetime.now(timezone.utc).timestamp() * 1000) / 1000
+    if remaining_s <= 0:
+        return "reclaimable now"
+    minutes = max(1, round(remaining_s / 60))
+    return f"reclaimable at {stamp} (in {minutes} min)"

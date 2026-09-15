@@ -234,9 +234,15 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     claim = claim_status(key, root=claims_root_for(key))
     state = claim.get("state")
     if state not in _REQUEUEABLE_CLAIM_STATES:
+        from fno.claims.verdict import reclaimable_note
+
         holder = claim.get("holder")
         holder_note = f", holder {holder!r}" if holder else ""
-        typer.echo(f"requeue: claim {key} reads {state}{holder_note}; only {' or '.join(_REQUEUEABLE_CLAIM_STATES)} may requeue.", err=True)
+        basis = claim.get("basis")
+        basis_note = f" ({basis})" if basis else ""
+        note = reclaimable_note(claim)
+        grace_note = f"; {note}: re-run fno backlog requeue {node_id} then" if note else ""
+        typer.echo(f"requeue: claim {key} reads {state}{basis_note}{holder_note}; only {' or '.join(_REQUEUEABLE_CLAIM_STATES)} may requeue{grace_note}.", err=True)
         raise typer.Exit(code=3)
 
     open_rows = [r for r in (row.get("sessions") or []) if is_open_do_row(r)]
