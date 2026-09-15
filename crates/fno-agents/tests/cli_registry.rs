@@ -85,6 +85,7 @@ fn the_real_binary_refuses_unknown_restart_flags_before_any_daemon_contact() {
     // any daemon contact, so the probe cannot restart anything.
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_fno-agents"))
         .args(["restart", "--json", "--definitely-not-a-flag"])
+        .envs(fno_agents::test_run::self_owner_env())
         .output()
         .expect("binary spawns");
     assert_eq!(out.status.code(), Some(2));
