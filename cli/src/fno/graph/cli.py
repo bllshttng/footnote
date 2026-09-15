@@ -3884,9 +3884,7 @@ def cmd_update(
     # Project the graph-authoritative fields (nav mirror + forward-only status)
     # onto the plan when a mirrored OR status-affecting field changed. Routed
     # through the fresh-re-read helper (not the pre-recompute `projected_node`)
-    # so the node carries its recomputed status: a `--locked-by` claim reads
-    # `claimed` -> plan `in_progress` (AC1-HP; the claim goes through this update
-    # path, not the `claim` verb). Best-effort.
+    # so the node carries its recomputed status. Best-effort.
     if projected_node[0] and (
         locked_by is not None
         or priority is not None
@@ -3909,13 +3907,10 @@ def cmd_update(
             ],
             # The operator typed --type/--difficulty, so THIS node's value is
             # observed: write it through, scoped to this id, never the fan-out.
+            supplied = {"type": type_, "difficulty": difficulty}
             mirror_keys_for=(
                 projected_node[0]["id"],
-                frozenset(
-                    k
-                    for k, v in (("type", type_), ("difficulty", difficulty))
-                    if v is not None
-                ),
+                frozenset(k for k, v in supplied.items() if v is not None),
             ),
             # An explicit `--difficulty null` is the ONE clear the projector
             # honors for that key; a graph None on its own never deletes it.
@@ -7308,10 +7303,9 @@ def _project_plans_from_graph(
     or unreadable plan never fails the mutation.
 
     ``mirror_keys_for`` pairs the ONE node whose extra keys (``type``,
-    ``difficulty``) may be written with those keys, set only by the
-    ``--type``/``--difficulty`` paths where the operator supplied the value.
-    It is an id, not a flag: this projection repaints ancestors and siblings
-    too, and their values are still mint-time defaults.
+    ``difficulty``) may be written with those keys, set only where the
+    operator supplied the value. It is an id, not a flag: this projection
+    repaints ancestors and siblings too, and their values are defaults.
     """
     ids = [i for i in dict.fromkeys(node_ids) if i]
     if not ids:
