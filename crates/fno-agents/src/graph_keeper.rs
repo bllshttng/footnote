@@ -427,10 +427,14 @@ fn sample_parity(state: &StoreState, last_sampled: &mut Option<String>) {
     let Ok(report) = report else {
         return;
     };
-    *last_sampled = Some(version);
+    // Record BEFORE the sampler cursor advances: a failed record (a busy
+    // write lock) retries the whole sample next window instead of dropping
+    // it, which matters when the dropped sample was divergent.
+    if crate::backlog::record_parity_sample(&state.graph, &report, chrono::Utc::now()).is_ok() {
+        *last_sampled = Some(version);
+    }
     // graph_meta carries the gate's evidence; the journal emit stays for
     // observers, but nothing reads it for the soak any more.
-    let _ = crate::backlog::record_parity_sample(&state.graph, &report, chrono::Utc::now());
     if let Some(events) = &state.events {
         let emitter = crate::events::EventEmitter::new(events, "daemon");
         let _ = emitter.emit(
