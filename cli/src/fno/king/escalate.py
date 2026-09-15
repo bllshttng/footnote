@@ -59,8 +59,6 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     from :func:`fno.king.state.reign_state`; the dedupe key is unchanged
     either way.
     """
-    import re
-
     from fno.agents.stale_escalate import dedupe_key, reconcile_channel
     from fno.graph._constants import extract_node_ids, is_wellformed_node_id
     from fno.harness_identity import canonical_handle
