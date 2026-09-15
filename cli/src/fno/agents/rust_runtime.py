@@ -745,20 +745,6 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
         raise SystemExit(2)
 
 
-def _node_row(node: str) -> Optional[dict]:
-    """The backlog row for a ``--node`` id (slug accepted), or None when the
-    graph is unreadable - the caller refuses, an unknown node proves no verb."""
-    from fno.graph.load import load_graph
-
-    try:
-        for rec in load_graph():
-            if rec.get("id") == node or rec.get("slug") == node:
-                return rec
-    except Exception:  # noqa: BLE001 - an unreadable graph cannot prove a verb
-        return None
-    return None
-
-
 def _node_seed_at_seam(args: "Sequence[str]") -> "Sequence[str]":
     """Compose or verify the seed of a ``--node`` spawn, pre-route (x-2c0d).
 
@@ -769,6 +755,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "Sequence[str]":
     dispatch). Crown and resume spawns skip; an empty seed is left to the
     door's node-seed render (the brief env and the worktree ensure)."""
     from fno.agents.harness_map import DispatchResolveError, node_seed
+    from fno.agents.node_dispatch import find_node_row
     from fno.agents.spawn_defaults import _seed_of, replace_seed
 
     node = _spawn_flag_value(args, "--node")
@@ -782,7 +769,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "Sequence[str]":
     if not (seed or "").strip():
         return args
     try:
-        new = node_seed(seed, node, _node_row(node))
+        new = node_seed(seed, node, find_node_row(node))
     except DispatchResolveError as exc:
         print(f"fno agents spawn: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc

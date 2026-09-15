@@ -466,6 +466,21 @@ class NodeSeed:
         return ensure_launch_workdir(self.recorded_cwd, self.node_id, agent_name, harness)
 
 
+def find_node_row(node: str) -> Optional[dict]:
+    """The backlog row for ``node`` (id or slug accepted), or None when the
+    graph is unreadable or names no such row. One lookup for the door's seed
+    render and the spawn seam's verb check."""
+    try:
+        from fno.graph.load import load_graph
+
+        for candidate in load_graph():
+            if candidate.get("id") == node or candidate.get("slug") == node:
+                return candidate
+    except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn
+        return None
+    return None
+
+
 def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]:
     """Render a node's seed (verb command + brief env) for the spawn door.
 
@@ -477,15 +492,7 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
     from fno.graph.ladder import plan_rung as _node_plan_rung
     from fno.provenance.autobrief import resolve_dispatch_brief
 
-    seed_rec: Optional[dict] = None
-    try:
-        from fno.graph.load import load_graph
-        for candidate in load_graph():
-            if candidate.get("id") == node or candidate.get("slug") == node:
-                seed_rec = candidate
-                break
-    except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn
-        seed_rec = None
+    seed_rec = find_node_row(node)
     seed_node_id = (seed_rec or {}).get("id") or node
     if not isinstance(seed_rec, dict) or not str(seed_rec.get("dispatch_verb") or "").strip():
         print(

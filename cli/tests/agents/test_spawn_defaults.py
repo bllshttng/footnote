@@ -513,6 +513,125 @@ def test_strict_seam_forwards_the_verb_on_every_spawn(
     assert all(p["work_verb"] == "target" for p in resolves)
 
 
+def _stub_resolve_keep_journal(monkeypatch: pytest.MonkeyPatch, decision: dict):
+    """Stub only the resolve op; journal ops ride the real transport so the
+    spawn_defaults_applied row still lands in the pinned journal file."""
+    import fno.route_slot_client as rsc
+
+    real = rsc.route_slot_call
+    seen: list[dict] = []
+
+    def _call(payload: dict) -> dict:
+        seen.append(payload)
+        if "op" in payload:
+            return real(payload)
+        answer = dict(decision)
+        chain = answer.get("chain") or []
+        terminal = chain[-1] if chain else ""
+        if terminal.startswith("slot=config "):
+            answer.setdefault(
+                "refusal_terminal",
+                {"class": "config", "text": terminal[len("slot=config "):]},
+            )
+        return answer
+
+    monkeypatch.setattr(rsc, "route_slot_call", _call)
+    return seen
+
+
+def test_a_prose_node_spawn_routes_the_derived_blueprint_verb(
+    journal: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC7 (x-2c0d). The x-2e1f no-axis argv - prose plus --node, no lane
+    flag - composes the node's derived verb BEFORE defaults, so the work
+    profile follows it instead of the crown fallback."""
+    import fno.agents.rust_runtime as rr
+
+    seen = _stub_resolve_keep_journal(
+        monkeypatch,
+        {
+            "status": "pick",
+            "candidate": {
+                "harness": "claude",
+                "model": "glm",
+                "lane": "b",
+                "lane_rung": "agents.profiles.blueprint.lanes[0]",
+                "lane_index": 0,
+                "lane_fields": {"provider": "claude", "model": "glm"},
+                "evidence": {"capacity": "ok"},
+            },
+            "chain": ["slot agents.profiles.blueprint lanes walked in declared order"],
+        },
+    )
+    import fno.agents.spawn_defaults as sd
+
+    monkeypatch.setattr(
+        sd, "_grid_node", lambda toks, env=None: {"id": "x-1", "difficulty": "medium"}
+    )
+    monkeypatch.setattr(
+        "fno.agents.node_dispatch.find_node_row",
+        lambda node: {"id": "x-1", "dispatch_verb": None, "difficulty": "medium"},
+    )
+    args = rr._node_seed_at_seam(
+        ["spawn", "--name", "w", "--node", "x-1", "--cwd", "/tmp/w", "port the parser"]
+    )
+    err = io.StringIO()
+    out = _inject(args, err=err, routing=_Routing(enforce_inventory=True))
+    assert out[-1] == "/blueprint x-1\n\nport the parser"
+    resolves = [p for p in seen if "event" not in p and "op" not in p]
+    assert resolves and resolves[0]["work_verb"] == "blueprint"
+    rows = _decision(journal)
+    assert rows, seen
+    assert rows[0]["verb"] == "blueprint"
+    assert rows[0]["resolved"]["model"]["rung"] == "agents.profiles.blueprint.lanes[0]"
+
+
+def test_a_low_node_spawn_routes_the_target_verb(
+    journal: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC7 control. The same shape on a low node derives /target: the profile
+    follows the node. From-config posture injects the refusal spelling, so
+    the composed command is the no-merge template."""
+    import fno.agents.rust_runtime as rr
+
+    seen = _stub_resolve_keep_journal(
+        monkeypatch,
+        {
+            "status": "pick",
+            "candidate": {
+                "harness": "claude",
+                "model": "m",
+                "lane": "t",
+                "lane_rung": "agents.profiles.target.lanes[0]",
+                "lane_index": 0,
+                "lane_fields": {},
+                "evidence": {"capacity": "ok"},
+            },
+            "chain": ["slot agents.profiles.target lanes walked in declared order"],
+        },
+    )
+    import fno.agents.spawn_defaults as sd
+
+    monkeypatch.setattr(
+        sd, "_grid_node", lambda toks, env=None: {"id": "x-1", "difficulty": "low"}
+    )
+    monkeypatch.setattr(
+        "fno.agents.node_dispatch.find_node_row",
+        lambda node: {"id": "x-1", "dispatch_verb": None, "difficulty": "low"},
+    )
+    args = rr._node_seed_at_seam(
+        ["spawn", "--name", "w", "--node", "x-1", "port the parser"]
+    )
+    err = io.StringIO()
+    out = _inject(args, err=err, routing=_Routing(enforce_inventory=True))
+    assert out[-1] == "/target --no-merge x-1\n\nport the parser"
+    resolves = [p for p in seen if "event" not in p and "op" not in p]
+    assert resolves and resolves[0]["work_verb"] == "target"
+    rows = _decision(journal)
+    assert rows, seen
+    assert rows[0]["verb"] == "target"
+
+
 # ---------------------------------------------------------------------------
 # x-84b2: the --node mint routes through the dispatch vocabulary
 # ---------------------------------------------------------------------------
