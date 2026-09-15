@@ -5,8 +5,8 @@
 //! hook's buffered flush.
 
 use super::{
-    entry_holds_session, inside_leg_state_str, is_non_terminal, notify_transition,
-    now_rfc3339_like, update_registry_offloaded,
+    entry_holds_session, inside_leg_state_str, is_non_terminal, now_rfc3339_like,
+    update_registry_offloaded,
 };
 use crate::codex_thread::TurnReceipt;
 use crate::events::EventEmitter;
@@ -133,14 +133,13 @@ async fn write_thread_inside_leg(
     .await
     .unwrap_or(None);
     if let Some((body, is_done)) = notify {
-        let want = if is_done {
-            notify_on_done
-        } else {
-            notify_on_blocked
-        };
-        if want {
-            notify_transition(name.clone(), body);
-        }
+        notify_badge(
+            name.clone(),
+            body,
+            is_done,
+            notify_on_blocked,
+            notify_on_done,
+        );
     }
     let _ = emitter.emit(
         "codex_thread_inside_leg",
@@ -159,8 +158,9 @@ async fn write_thread_inside_leg(
 /// intent `(body, is_done)` when the report ENTERED blocked/done (x-dd84).
 /// Both writers route through here - the claude hook's buffered flush and the
 /// codex thread driver's direct write (x-fd66) - so the gate, the capability
-/// clear, and the episode edge cannot drift apart. `None` on a stale-seq drop
-/// or a row that holds no such session.
+/// clear, and the episode edge cannot drift apart. A crowned row's done is a
+/// turn end under its reign, so it carries no intent. `None` on a stale-seq
+/// drop or a row that holds no such session.
 pub(super) fn gate_inside_leg_onto_row(
     registry: &mut crate::state::Registry,
     session_uuid: &str,
@@ -183,11 +183,9 @@ pub(super) fn gate_inside_leg_onto_row(
             let body = rep_reason.unwrap_or_else(|| state_str.to_string());
             if crate::state::enters(prev_state, rep_state, crate::state::InsideLegState::Blocked) {
                 notify = Some((body, false));
-            } else if crate::state::enters(
-                prev_state,
-                rep_state,
-                crate::state::InsideLegState::Done,
-            ) {
+            } else if e.crown_level.is_none()
+                && crate::state::enters(prev_state, rep_state, crate::state::InsideLegState::Done)
+            {
                 notify = Some((body, true));
             }
             e.inside_leg = Some(rep);
@@ -195,4 +193,92 @@ pub(super) fn gate_inside_leg_onto_row(
         }
     }
     notify
+}
+
+/// Which channel a badge transition may use. A done badge is a desk event:
+/// with `mux.notify_on_done` on it toasts locally and never journals. A
+/// blocked badge needs the operator, so it rides the notice lane. A knob off
+/// is Quiet.
+pub(super) enum BadgeLane {
+    Quiet,
+    Toast,
+    Notice,
+}
+
+pub(super) fn badge_lane(is_done: bool, on_blocked: bool, on_done: bool) -> BadgeLane {
+    if is_done {
+        if on_done {
+            BadgeLane::Toast
+        } else {
+            BadgeLane::Quiet
+        }
+    } else if on_blocked {
+        BadgeLane::Notice
+    } else {
+        BadgeLane::Quiet
+    }
+}
+
+/// The ONE badge-lane pick, called from every report site: the three former
+/// copies of the notify_on_done/on_blocked pick collapse here, so the done
+/// and blocked lanes cannot drift apart.
+pub(super) fn notify_badge(
+    title: String,
+    body: String,
+    is_done: bool,
+    on_blocked: bool,
+    on_done: bool,
+) {
+    match badge_lane(is_done, on_blocked, on_done) {
+        BadgeLane::Quiet => {}
+        BadgeLane::Toast => local_toast(&title, &body),
+        BadgeLane::Notice => notify_transition(title, body),
+    }
+}
+
+/// The lane for a badge that needs the operator: fire-and-forget through
+/// `fno inbox notify`, which toasts AND appends the `operator_notice` journal
+/// row the status sinks forward. Detached inside `operator_notice` so a
+/// missing or slow spawn can never stall the registry write that observed the
+/// transition; a spawn failure is logged and dropped - the write has already
+/// succeeded.
+pub(crate) fn notify_transition(title: String, body: String) {
+    crate::operator_notice::notify_operator(&title, &body, None);
+}
+
+/// The toast argv, pure so tests pin the escaping: macOS quotes the body into
+/// `osascript -e`, escaping backslash first then double quote, the exact
+/// escaping the Python dispatch uses; other hosts pass argv to notify-send.
+pub(super) fn toast_argv(os: &str, title: &str, body: &str) -> Vec<String> {
+    if os == "macos" {
+        let esc_body = body.replace('\\', "\\\\").replace('"', "\\\"");
+        let esc_title = title.replace('\\', "\\\\").replace('"', "\\\"");
+        vec![
+            "osascript".to_string(),
+            "-e".to_string(),
+            format!("display notification \"{esc_body}\" with title \"{esc_title}\""),
+        ]
+    } else {
+        vec![
+            "notify-send".to_string(),
+            title.to_string(),
+            body.to_string(),
+        ]
+    }
+}
+
+/// A done badge's desk toast: Rust fires the OS toast itself and writes no
+/// journal row, so the flip never reaches a status sink. Hermetic tests skip
+/// it; a spawn failure or a timeout is dropped, since the registry write has
+/// already landed.
+fn local_toast(title: &str, body: &str) {
+    if std::env::var_os("FNO_TEST_HERMETIC").is_some_and(|v| v == "1") {
+        return;
+    }
+    let argv = toast_argv(std::env::consts::OS, title, body);
+    std::thread::spawn(move || {
+        let mut cmd = std::process::Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        let _ = crate::bounded_cmd::output_with_timeout(cmd, 5);
+    });
 }

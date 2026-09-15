@@ -1284,6 +1284,85 @@ fn gate_inside_leg_onto_row_notifies_once_per_done_episode() {
     assert_eq!(n, None);
 }
 
+/// A crowned row's done is a turn end under its reign: the gate carries no
+/// notify intent, the report still lands and reads done, and a blocked
+/// report still pages the operator.
+#[test]
+fn gate_inside_leg_onto_row_crowned_done_is_quiet_but_lands() {
+    let mut registry = state::Registry::default();
+    let mut row = thread_entry("t-king", AgentStatus::Live, None);
+    row.codex_session_id = Some("sid-king".into());
+    row.crown_level = Some(2);
+    registry.entries.push(row);
+
+    let rep = |seq, st, reason: Option<&str>| state::InsideLegReport {
+        state: st,
+        seq,
+        reason: reason.map(String::from),
+        received_at: "2020-01-01T00:00:00Z".into(),
+        ttl_ms: None,
+    };
+
+    // Working at seq 1 lands with no intent.
+    let n = gate_inside_leg_onto_row(
+        &mut registry,
+        "sid-king",
+        rep(1, state::InsideLegState::Working, None),
+    );
+    assert_eq!(n, None);
+
+    // Done at seq 2: no intent, but the row reads done at seq 2.
+    let n = gate_inside_leg_onto_row(
+        &mut registry,
+        "sid-king",
+        rep(2, state::InsideLegState::Done, None),
+    );
+    assert_eq!(n, None, "a crowned row's done carries no notify intent");
+    assert_eq!(registry.entries[0].inside_leg.as_ref().unwrap().seq, 2);
+    assert_eq!(
+        registry.entries[0].inside_leg.as_ref().unwrap().state,
+        state::InsideLegState::Done
+    );
+
+    // Blocked at seq 3 still pages the operator.
+    let n = gate_inside_leg_onto_row(
+        &mut registry,
+        "sid-king",
+        rep(
+            3,
+            state::InsideLegState::Blocked,
+            Some("Claude needs your permission"),
+        ),
+    );
+    assert_eq!(n, Some(("Claude needs your permission".to_string(), false)));
+}
+
+/// The lane table: done toasts when the knob is on, blocked rides the notice
+/// lane, a knob off is Quiet.
+#[test]
+fn badge_lane_table() {
+    use crate::daemon::thread_row_status::{badge_lane, toast_argv, BadgeLane};
+
+    assert!(matches!(badge_lane(true, true, true), BadgeLane::Toast));
+    assert!(matches!(badge_lane(false, true, true), BadgeLane::Notice));
+    assert!(matches!(badge_lane(true, true, false), BadgeLane::Quiet));
+    assert!(matches!(badge_lane(false, false, true), BadgeLane::Quiet));
+
+    // The toast argv matches the Python dispatch's escaping (AC3).
+    assert_eq!(
+        toast_argv("macos", "king \"a\"", "c:\\d"),
+        vec![
+            "osascript".to_string(),
+            "-e".to_string(),
+            "display notification \"c:\\\\d\" with title \"king \\\"a\\\"\"".to_string(),
+        ]
+    );
+    assert_eq!(
+        toast_argv("linux", "t", "b"),
+        vec!["notify-send".to_string(), "t".to_string(), "b".to_string()]
+    );
+}
+
 /// Poll until the row named `t` carries an inside-leg report matching
 /// `pred`, and return it. Polling instead of a fixed sleep: the writer runs
 /// off the actor task, so a sleep bets the write landed; this waits for the
