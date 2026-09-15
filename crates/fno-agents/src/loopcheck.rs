@@ -10106,7 +10106,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 });
                 watch_lease::attach_watch_refusal(
                     &mut block_event,
-                    watching_refusal.as_ref().map(|(_, kind)| kind),
+                    watching_refusal.as_ref().map(|(_, kind)| *kind),
                 );
                 emit("loop_check", block_event);
                 return (
