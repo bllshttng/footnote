@@ -263,7 +263,7 @@ def collect_failures(
                                 entry["first_error"] = err
         else:
             # No log text (a fetch failure or an empty log): the job object
-            # still names WHICH step failed (x-611d) beside the consequence
+            # still names WHICH step failed beside the consequence
             # the unreached steps spell out.
             steps = _fetch_job_steps(owner, repo, job_id, cwd, runner)
             job_unreached = unreached_job_steps(steps)
