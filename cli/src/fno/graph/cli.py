@@ -3900,14 +3900,14 @@ def cmd_update(
         # Include the OLD parent on a reparent so its now-stale rollup repaints
         # alongside the new parent's (the converger walks each id's ancestors in
         # the post-mutation graph, so the old chain is only reachable via this id).
+        # The operator typed --type/--difficulty, so THIS node's value is
+        # observed: write it through, scoped to this id, never the fan-out.
+        supplied = {"type": type_, "difficulty": difficulty}
         _project_plans_from_graph(
             [
                 projected_node[0]["id"],
                 *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
             ],
-            # The operator typed --type/--difficulty, so THIS node's value is
-            # observed: write it through, scoped to this id, never the fan-out.
-            supplied = {"type": type_, "difficulty": difficulty}
             mirror_keys_for=(
                 projected_node[0]["id"],
                 frozenset(k for k, v in supplied.items() if v is not None),
