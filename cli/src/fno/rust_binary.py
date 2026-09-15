@@ -126,13 +126,13 @@ def resolve_binary() -> Optional[Path]:
     return None
 
 
-def call_binary_json(verb: str, args: Sequence[str] = ()) -> tuple[Optional[str], Any]:
+def call_binary_json(verb: str, args: Sequence[str] = (), *, timeout: float = 60) -> tuple[Optional[str], Any]:
     """Run one direct ``fno-agents`` client verb and parse its JSON stdout.
 
     Returns ``(error, parsed)``: ``error`` is None on success; a missing
-    binary, non-zero exit, or unparseable stdout yields a short error text and
-    a None payload. Callers keep the failure shape theirs (refuse closed,
-    raise, or exit) - this seam only standardizes the door.
+    binary, non-zero exit, timeout, or unparseable stdout yields a short error
+    text and a None payload. Callers keep the failure shape theirs (refuse
+    closed, raise, or exit) - this seam only standardizes the door.
     """
     import json
     import subprocess
@@ -142,8 +142,10 @@ def call_binary_json(verb: str, args: Sequence[str] = ()) -> tuple[Optional[str]
         return ("fno-agents binary not found", None)
     try:
         proc = subprocess.run(
-            [str(binary), verb, *args], capture_output=True, text=True, timeout=60
+            [str(binary), verb, *args], capture_output=True, text=True, timeout=timeout
         )
+    except subprocess.TimeoutExpired:
+        return (f"timed out after {timeout:.1f}s", None)
     except OSError as exc:
         return (str(exc)[:200], None)
     if proc.returncode != 0:

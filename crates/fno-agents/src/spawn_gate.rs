@@ -2703,7 +2703,10 @@ MemAvailable:    8000000 kB\n";
     /// while the words (axis, detail, bound) survive intact.
     #[test]
     fn receipt_figures_are_null_when_the_instrument_never_answered() {
-        let cpu = check_cpu_axis(None, Some("ps unavailable: timed out after 5.0s"));
+        let cpu = check_cpu_axis(
+            None,
+            Some("process table unavailable: timed out after 5.0s"),
+        );
         let fields = receipt_fields(&cpu.payload);
         assert_eq!(fields["axis"], "cpu_instrument");
         for key in [

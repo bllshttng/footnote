@@ -496,7 +496,7 @@ def _instrument_admission():
         axis="cpu_instrument",
         reason=(
             "spawn-gate: the CPU instrument is unreadable "
-            "(footprint unavailable: ps unavailable: timed out after 5.0s); "
+            "(footprint unavailable: process table unavailable: timed out after 5.0s); "
             "refusing to spawn (--force to bypass)"
         ),
         share_low=0.0,
@@ -523,7 +523,7 @@ def test_the_cpu_admission_arm_goes_dark_when_the_instrument_never_answered(
     arm = dl._cpu_admission_arm()
     assert arm.state == dl.DARK
     assert arm.value is None
-    assert "ps unavailable: timed out after 5.0s" in arm.reason
+    assert "process table unavailable: timed out after 5.0s" in arm.reason
 
 
 def test_a_dark_cpu_admission_arm_never_refuses_the_lane_answer(monkeypatch) -> None:
@@ -579,7 +579,7 @@ def test_a_dark_footprint_leaves_top_consumers_none(monkeypatch) -> None:
     fabricated consumer list."""
     _healthy_reading(monkeypatch)
     monkeypatch.setattr(
-        dl, "_fleet_snapshot", lambda: (None, _rows(6), "ps unavailable", 5)
+        dl, "_fleet_snapshot", lambda: (None, _rows(6), "process table unavailable", 5)
     )
 
     census = dl.read_lanes().census
