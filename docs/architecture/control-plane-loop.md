@@ -38,6 +38,17 @@ Every red row names its cause as the first rule that holds. If no rule fires, th
 - `scheduler_down`: Every interval-bearing arm on the scheduler is silent together, and at least one holds an observed receipt. The job is not running, and the arm is fine.
 - `unexplained`: The scheduler looks healthy. The arm itself did not tick.
 
+### Stuck work
+
+`arm_watch` also pages on work that is stuck outside the arms table. One module, `crates/fno-agents/src/stuck_work.rs`, answers "what work is stuck" for three readers: `fno agents status` (the `stuck_work` payload and the `stuck work:` block), the arm tick (the findings fold into the notice token and body under the `control plane: needs attention` title), and the king check-in (the `control plane:` reading).
+
+Two findings:
+
+- **Hung verb.** A process whose argv0 basename is `fno`, `fno-py` or `fno-agents` (or whose argv0 is a python interpreter driving a `/fno-py` script) is a verb. It is hung when its age passes three times its declared `--timeout` (raw form `30`, `30s`, `30m`, `30h`), else 1800 s. The long-lived shapes are excluded by one const: `fno --server`, a bare `fno` with no verb, and any argv carrying `daemon`, `attach`, `mux` or the pair `loop run`. `fno-agents-daemon` and `fno-agents-worker` never match the basename rule.
+- **Dead holder.** A `flight:` claim held more than 300 s whose holder pid probe reads `absent` on this host. Only `flight:` holds count: they are pid-scoped by design, while session claims outlive their ambient pid on purpose.
+
+The read fails loud: a `ps` that cannot run or an unreadable claims dir is an error, never an empty list, so a blind read cannot page as "nothing is stuck". The daemon drain is the other half of the same clock: its `backlog advance` child runs under a wall clock equal to the lease its own flight lock carries (`flight_gate::FLIGHT_TTL_MS`), and a child killed at the bound journals an `active_backlog_skip` with reason `advance-timeout`.
+
 ## What was deleted
 
 Three layers of bash control-plane machinery were removed:
