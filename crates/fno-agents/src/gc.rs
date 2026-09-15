@@ -1040,6 +1040,28 @@ pub fn maybe_retirement_sweep(
             Some(&detail),
             interval.as_secs(),
         );
+        // x-d8bc AC5: every held row lands in the journal once per tick -
+        // one `retire_holds` row beside the tick, so a fleet question reads
+        // the event stream instead of parsing bucket counts. Zero holds
+        // writes nothing.
+        if !summary.holds.is_empty() {
+            let _ = journal.append(
+                "retire_holds",
+                serde_json::json!({
+                    "scheduler": "daemon",
+                    "holds": summary
+                        .holds
+                        .iter()
+                        .map(|h| {
+                            serde_json::json!({
+                                "id": h.id, "reason": h.reason, "detail": h.detail,
+                                "age_s": h.age_s, "escalated": h.escalated,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                }),
+            );
+        }
     });
 }
 
@@ -1413,6 +1435,144 @@ mod tests {
                 "--dry-run"
             ]
         );
+    }
+
+    /// x-d8bc AC5-HP: a tick whose sweep held rows writes ONE
+    /// `retire_holds` journal row naming each held id, beside the tick row.
+    #[test]
+    fn a_tick_with_held_rows_writes_one_retire_holds_event() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // The agents home sits UNDER dir so the production graph read
+        // (home.root().parent()/graph.json) answers dir/graph.json.
+        let home = AgentsHome::at(dir.path().join("agents"));
+        home.ensure_root().unwrap();
+        std::fs::write(
+            dir.path().join("graph.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "entries": [{
+                    "id": "x-h1",
+                    "status": "idea",
+                    "project": "p",
+                    "sessions": [{
+                        "phase": "blueprint",
+                        "harness": "codex",
+                        "session_id": "s-h1",
+                        "started_at": "2026-09-01T00:00:00Z",
+                    }],
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::state::update_registry(&home.registry_json(), |r| {
+            let mut e = crate::state::RegistryEntry::default();
+            e.name = "bp-x-h1-a".into();
+            e.short_id = "bp-x-h1-a".into();
+            e.origin = Some("spawn".into());
+            e.harness = Some("codex".into());
+            e.harness_session_id = Some("s-h1".into());
+            e.created_at = "2026-09-01T00:00:00Z".into();
+            e.status = crate::AgentStatus::Exited;
+            r.entries.push(e);
+        })
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let in_flight = Arc::new(AtomicBool::new(false));
+            let cell: Arc<RetireIntervalCell> = Arc::new(Mutex::new(None));
+            let mut last = Instant::now() - Duration::from_secs(301);
+            crate::gc::maybe_retirement_sweep(
+                &mut last,
+                &in_flight,
+                &cell,
+                home.clone(),
+                dir.path().to_path_buf(),
+                home.events_jsonl(),
+                Duration::from_secs(300),
+                || crate::reap_render::MuxSweep::Skipped,
+            );
+            // The production age probe pays a real subprocess on this
+            // fixture (two probes, seconds apiece under load), so the tick
+            // can land long past the 5 s deadline the empty-home tests use.
+            wait_for_line(&home.events_jsonl(), "\"arm\":\"retire\"", 90);
+            wait_for_line(&home.events_jsonl(), "\"type\":\"retire_holds\"", 90);
+        });
+        let holds_row = std::fs::read_to_string(home.events_jsonl())
+            .unwrap()
+            .lines()
+            .find(|l| l.contains("\"type\":\"retire_holds\""))
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+            .expect("one retire_holds row for the held planner");
+        let holds = holds_row["data"]["holds"].as_array().expect("holds list");
+        assert_eq!(holds.len(), 1, "{holds_row}");
+        assert_eq!(holds[0]["id"], "bp-x-h1-a");
+        assert_eq!(
+            holds[0]["reason"],
+            "planning assignment not finished by this session"
+        );
+        assert_eq!(holds_row["data"]["scheduler"], "daemon");
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// x-d8bc AC5-EDGE: a tick with zero holds writes NO `retire_holds`
+    /// row, even when the pass kept a row under a hold-free bucket.
+    #[test]
+    fn a_tick_with_zero_holds_writes_no_retire_holds_event() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let (dir, home) = retirement_sweep_tmp_home("no-holds");
+        let registry = serde_json::json!({
+            "schema_version": 10,
+            "agents": [{
+                "name": "target-x-1-adopted",
+                "cwd": dir.display().to_string(),
+                "status": "exited",
+                "created_at": "2026-09-06T00:00:00Z",
+                "harness": "claude",
+                "harness_session_id": "sess-adopted",
+                "short_id": "abc123",
+                "origin": "adopted",
+            }],
+        });
+        std::fs::create_dir_all(home.root()).unwrap();
+        std::fs::write(
+            home.registry_json(),
+            serde_json::to_string(&registry).unwrap(),
+        )
+        .unwrap();
+        run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Skipped);
+        let count = std::fs::read_to_string(home.events_jsonl())
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains("\"type\":\"retire_holds\""))
+            .count();
+        assert_eq!(count, 0, "no holds, no journal row");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Poll for a journal line until `secs` elapse (the retire_holds row is
+    /// appended right after the tick row; the append is a plain write).
+    fn wait_for_line(path: &std::path::Path, needle: &str, secs: u64) {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            if std::fs::read_to_string(path)
+                .map(|c| c.contains(needle))
+                .unwrap_or(false)
+            {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("line never landed in {path:?}: {needle}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[test]
