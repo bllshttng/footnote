@@ -10084,54 +10084,8 @@ fn copy_source_refuses_open_truncated_and_implicit_blocks() {
 }
 
 // ---- the keeper contract (re-adopt, sweep, list) --------------------
-
-/// The sibling keeper binary when both crates are built side by side
-/// (CI and this repo's dev flow both do). `None` = skip loudly rather
-/// than fake a green: these tests assert REAL process survival.
-fn keeper_test_bin() -> Option<std::path::PathBuf> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../fno-agents/target/debug/fno-agents-worker");
-    p.exists().then(|| p.canonicalize().unwrap_or(p))
-}
-
-struct KeeperProcess(std::process::Child);
-
-impl Drop for KeeperProcess {
-    fn drop(&mut self) {
-        // SAFETY: SIGKILL to a process this test spawned.
-        unsafe {
-            libc::kill(self.0.id() as libc::pid_t, libc::SIGKILL);
-        }
-        let _ = self.0.wait();
-    }
-}
-
-fn spawn_keeper_for_test(
-    bin: &std::path::Path,
-    sock: &std::path::Path,
-    provider: &[&str],
-) -> KeeperProcess {
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args([
-        "--pane",
-        "--sock",
-        &sock.to_string_lossy(),
-        "--session",
-        "kt",
-        "--pane-key",
-        "3",
-        "--cwd",
-        "/tmp",
-        "--",
-    ]);
-    cmd.args(provider);
-    let child = cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .expect("keeper spawns");
-    KeeperProcess(child)
-}
+// The re-adoption spawn helpers live in server/tests/keeper_adopt_tests.rs,
+// their only consumers (shrink-only file budget).
 
 #[test]
 fn keeper_survives_shutdown_sweep_and_plain_panes_do_not() {
