@@ -2662,7 +2662,7 @@ def _emit_human(
         out(
             f"fno doctor: evals REGRESSING - {', '.join(ev['regressed'])} dropped "
             f"against the prior {int(ev.get('window_days') or 7)}d window; run "
-            "`fno doctor evals report --trend`."
+            "`fno doctor evals trend`."
         )
 
     agents = result.get("launch_agents") or {}

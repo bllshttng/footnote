@@ -3310,7 +3310,7 @@ def test_doctor_renders_evals_regressing_row(monkeypatch: pytest.MonkeyPatch) ->
     assert "evals REGRESSING" in result.stdout
     assert "r dropped" in result.stdout
     assert "prior 7d window" in result.stdout
-    assert "fno doctor evals report --trend" in result.stdout
+    assert "fno doctor evals trend" in result.stdout
 
 
 def test_doctor_renders_evals_unknown_row_without_history(

@@ -1,7 +1,6 @@
 """Report fold + graduation (US3): AC2-HP, AC6-HP."""
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -355,50 +354,34 @@ def _cli_rows(hp: Path) -> None:
 
 
 # AC4-HP: 3-of-3 prior then 1-of-3 recent -> regressed, exit 4.
-def test_report_cli_trend_regressed_exit_4(tmp_path: Path) -> None:
+def test_trend_cli_regressed_exit_4(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hp = tmp_path / "h.jsonl"
     _cli_rows(hp)
-    res = runner.invoke(evals_app, ["report", "--trend", "--history", str(hp)])
+    monkeypatch.setattr("fno.paths.evals_history", lambda: hp)
+    res = runner.invoke(evals_app, ["trend"])
     assert res.exit_code == 4
     assert "REGRESSED: r" in res.stdout
     assert "prior" in res.stdout and "recent" in res.stdout
 
 
-def test_report_cli_trend_healthy_exit_0(tmp_path: Path) -> None:
+def test_trend_cli_healthy_exit_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hp = tmp_path / "h.jsonl"
     now = datetime.now(timezone.utc)
     for days in (10.0, 1.0):
         for _ in range(2):
             _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(now - timedelta(days=days))})
-    res = runner.invoke(evals_app, ["report", "--trend", "--history", str(hp)])
+    monkeypatch.setattr("fno.paths.evals_history", lambda: hp)
+    res = runner.invoke(evals_app, ["trend"])
     assert res.exit_code == 0
     assert "REGRESSED" not in res.stdout
 
 
-# AC4-ERR: no history prints no_data at exit 0; the --compare conflict exits 1.
-def test_report_cli_trend_no_data_exit_0(tmp_path: Path) -> None:
-    res = runner.invoke(evals_app, ["report", "--trend", "--history", str(tmp_path / "none.jsonl")])
+# AC4-ERR: no history prints no_data at exit 0.
+def test_trend_cli_no_data_exit_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fno.paths.evals_history", lambda: tmp_path / "none.jsonl")
+    res = runner.invoke(evals_app, ["trend"])
     assert res.exit_code == 0
     assert "no_data" in res.stdout
-
-
-def test_report_cli_trend_compare_conflict_exit_1(tmp_path: Path) -> None:
-    res = runner.invoke(
-        evals_app,
-        ["report", "--trend", "--compare", "v1", "--history", str(tmp_path / "none.jsonl")],
-    )
-    assert res.exit_code == 1
-    assert "mutually exclusive" in res.output
-
-
-def test_report_cli_trend_json(tmp_path: Path) -> None:
-    hp = tmp_path / "h.jsonl"
-    _cli_rows(hp)
-    res = runner.invoke(evals_app, ["report", "--trend", "--json", "--history", str(hp)])
-    assert res.exit_code == 4
-    view = json.loads(res.stdout)
-    assert view["regressed"] == ["r"]
-    assert view["window_days"] >= 1
 
 
 # --- time axis: the windowed alarm and the trend (x-cf8f) ---

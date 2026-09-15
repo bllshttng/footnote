@@ -472,7 +472,7 @@ fn setsid_hook(cmd: &mut Command) {
     // here it runs in the child after fork, before exec, single-threaded.
     unsafe {
         cmd.pre_exec(|| {
-            unsafe { libc::setsid() };
+            libc::setsid();
             Ok(())
         })
     };

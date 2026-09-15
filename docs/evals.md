@@ -42,7 +42,8 @@ Success criteria must be **mechanical** (develop-tests discipline): a task with 
 | Command | What it does |
 |---|---|
 | `fno doctor evals run [--task ID] [--tier T] [--repeat K] [--provider P] [--variant NAME] [--ref REF] [--lane NAME] [--cohort ID]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). `--variant v1 --ref REF` scores a change (see Variants). `--lane NAME --cohort ID` qualifies a model lane (see Lanes). |
-| `fno doctor evals report [--since N] [--graduate] [--json] [--compare vN] [--trend]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. `--compare vN` scores a variant against baseline. `--trend` scores the recent window against the prior one (see Trend). |
+| `fno doctor evals report [--since N] [--graduate] [--json] [--compare vN]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. `--compare vN` scores a variant against baseline. |
+| `fno doctor evals trend` | Score the recent window against the prior one, per task (exit 4 when a regression-tier task dropped). See Trend. |
 | `fno doctor evals macro [--since 30d] [--topic TYPE:LABEL] [--window 20] [--all] [--json] [--events PATH]` | Fold existing event journals into a recurring failure-pattern leaderboard, or drill into one pattern. |
 | `fno doctor evals graduate <id>` | Retag a capability task's YAML to regression. |
 | `fno doctor evals grade --brief B --golden G` | Grade a research brief against a golden doc (three mechanical assertions); exit 0 green. |
@@ -74,7 +75,7 @@ The variant axis answers "did this change help?". The trend axis answers "are we
 
 Where the history lives: `~/.fno/evals-history.jsonl` (`config.paths.evals_history`), one append-only line per task-run, one writer. It is not a git artifact: a bank run needs a spawn-capable machine, and rows are per machine. It is not a second journal either. The `evals_scheduled_run` event is the receipt that a run happened. The history rows are what it graded.
 
-A window is `evals.stale_days` days (default 7) - the same length every health surface already calls "recent". `fno doctor evals report --trend` scores the recent window `(now - W, now]` against the prior window `(now - 2W, now - W]`, per task, with the same improved/regressed/unchanged verdicts the variant compare prints. Tasks present in only one window land in the missing lists with no verdict. `regressed` names regression-tier tasks whose verdict is `regressed`, and drives exit 4.
+A window is `evals.stale_days` days (default 7) - the same length every health surface already calls "recent". `fno doctor evals trend` scores the recent window `(now - W, now]` against the prior window `(now - 2W, now - W]`, per task, with the same improved/regressed/unchanged verdicts the variant compare prints. Tasks present in only one window land in the missing lists with no verdict. `regressed` names regression-tier tasks whose verdict is `regressed`, and drives exit 4.
 
 The default report's regression alarm reads the recent window too. A 50-day-old flake fixed three minutes later no longer holds exit 4 open. `tiers`, `tasks` and `flakes` stay the all-rows long view. `fno doctor` prints `evals REGRESSING - <ids> dropped against the prior <W>d window`, and `fno backlog triage health` appends ` REGRESSED <n>` to its evals line.
 

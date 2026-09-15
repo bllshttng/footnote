@@ -157,6 +157,54 @@ def run_command(
     raise typer.Exit(code=0)
 
 
+@evals_app.command("trend")
+def trend_command() -> None:
+    """Score the recent window against the prior one (docs/evals.md, Trend).
+
+    Exit codes:
+      0  rendered (or no data)
+      4  regressed: a regression-tier task dropped against the prior window
+
+    Zero typer.Options by design (x-72fc): the Python flag surface never
+    grows, so the trend view is a leaf, not a --trend flag on report.
+    """
+    from datetime import datetime, timezone
+
+    from fno.config import load_settings
+    from fno.evals.report import compare_windows, load_rows
+    from fno.paths import evals_history
+
+    history_file = evals_history()
+    if not history_file.exists():
+        typer.echo("evals trend: no_data (no history yet)")
+        raise typer.Exit(code=0)
+    view = compare_windows(
+        load_rows(history_file),
+        window_days=int(load_settings().evals.stale_days),
+        now=datetime.now(timezone.utc),
+    )
+    typer.echo(_render_trend(view))
+    raise typer.Exit(code=4 if view["regressed"] else 0)
+
+
+def _render_trend(view: dict) -> str:
+    lines = [f"Eval trend: prior since {view['prior_start']}, recent since {view['recent_start']}"]
+    for tid, t in view["tasks"].items():
+        p, r = t["prior"], t["recent"]
+        lines.append(
+            f"  {tid}  prior {p['pass_at_1']:.0%} ({p['runs']})  "
+            f"recent {r['pass_at_1']:.0%} ({r['runs']})  "
+            f"delta={t['delta']:+.2f}  {t['verdict']}"
+        )
+    for label, miss in (("prior", view["missing_in_prior"]),
+                        ("recent", view["missing_in_recent"])):
+        if miss:
+            lines.append(f"  missing in {label}: {', '.join(miss)}")
+    if view["regressed"]:
+        lines.append(f"  REGRESSED: {', '.join(view['regressed'])}")
+    return "\n".join(lines)
+
+
 @evals_app.command("report")
 def report_command(
     since: Optional[int] = typer.Option(None, "--since", help="Fold only the most recent N runs."),
@@ -164,7 +212,6 @@ def report_command(
     n: int = typer.Option(3, "--consecutive", help="Consecutive passes required for graduation eligibility."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
     compare: Optional[str] = typer.Option(None, "--compare", help="Score this variant round (v<N>) against baseline instead of the default fold."),
-    trend: bool = typer.Option(False, "--trend", help="Score the recent window against the prior one (see docs/evals.md, Trend)."),
     history_file: Optional[Path] = typer.Option(None, "--history", help="History file (default: paths.evals_history())."),
 ) -> None:
     """Fold evals history: per-tier pass rates, pass@1, pass^k, flakes, alarm.
@@ -181,7 +228,6 @@ def report_command(
     from fno.evals.report import (
         build_report,
         compare_variants,
-        compare_windows,
         graduation_candidates,
         load_rows,
     )
@@ -189,38 +235,6 @@ def report_command(
     if history_file is None:
         from fno.paths import evals_history
         history_file = evals_history()
-
-    if trend and compare is not None:
-        typer.echo("Error: --trend and --compare are mutually exclusive", err=True)
-        raise typer.Exit(code=1)
-
-    if trend:
-        if not history_file.exists():
-            typer.echo("evals report: no_data (no history yet)")
-            raise typer.Exit(code=0)
-        view = compare_windows(
-            load_rows(history_file),
-            window_days=int(load_settings().evals.stale_days),
-            now=datetime.now(timezone.utc),
-        )
-        if json_output:
-            typer.echo(_json.dumps(view, indent=2))
-        else:
-            typer.echo(f"Eval trend: prior since {view['prior_start']}, recent since {view['recent_start']}")
-            for tid, t in view["tasks"].items():
-                p, r = t["prior"], t["recent"]
-                typer.echo(
-                    f"  {tid}  prior {p['pass_at_1']:.0%} ({p['runs']})  "
-                    f"recent {r['pass_at_1']:.0%} ({r['runs']})  "
-                    f"delta={t['delta']:+.2f}  {t['verdict']}"
-                )
-            for label, miss in (("prior", view["missing_in_prior"]),
-                                ("recent", view["missing_in_recent"])):
-                if miss:
-                    typer.echo(f"  missing in {label}: {', '.join(miss)}")
-            if view["regressed"]:
-                typer.echo(f"  REGRESSED: {', '.join(view['regressed'])}")
-        raise typer.Exit(code=4 if view["regressed"] else 0)
 
     if compare is not None:
         if not VARIANT_RE.match(compare):
