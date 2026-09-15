@@ -1004,7 +1004,7 @@ def run_status(
     # Rerun recovery, probed on every green read of a live PR (fail-open).
     # A recovery is history of one head (docs, `Reuse across reads of one
     # head`); `runs` is the listing fetch_pr_rest already read.
-    rerun = None
+    rerun: Optional[dict] = None
     if verdict == "green" and not is_terminal:
         head_sha = pr_json.get("headRefOid")
         prior_green = (
