@@ -1156,8 +1156,8 @@ fn serve_client(
                 // survived-hangup vs survived-close line; an explicit
                 // shutdown ends the process here, so in-flight writers on
                 // other threads are bounded by the atomic-replace publish.
-                // Wait out in-flight REQUESTS first (x-f188 change 3): a
-                // bounded try_write ladder on the inflight lock;
+                // Wait out in-flight REQUESTS first: a bounded try_write
+                // ladder on the inflight lock;
                 // when it cannot land within lock_timeout, answer busy and
                 // KEEP SERVING instead of exiting mid-write. Once held, the
                 // guard stays held until exit: no request is mid-publish or
