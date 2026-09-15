@@ -629,6 +629,7 @@ def dispatch_post_merge_ritual(
         claims.acquire_claim(
             lock_key, holder, ttl_ms=_POST_MERGE_DISPATCH_TTL_MS,
             reason="post-merge ritual dispatch", root=canonical,
+            pid_provenance=claims.HOLDER_PROCESS,
         )
     except claims.CLAIM_UNAVAILABLE:
         # In-flight, not done, not a reason to crash the merge-dispatch tick
