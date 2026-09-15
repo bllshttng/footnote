@@ -311,11 +311,43 @@ class TestCachedNegativeNamesItsInput:
         # whether or not the recompute arm fires.
         assert note == "coverage row pinned to 74106361b at 2026-08-28T07:15:38Z"
 
-    def test_a_fail_attestation_is_not_a_later_pass(self, monkeypatch, tmp_path):
-        """Only a PASS overtakes an uncovered row. A later FAIL agrees with it."""
+    def test_a_later_fail_at_the_head_overtakes_the_row(
+        self, monkeypatch, tmp_path
+    ):
+        """A fail round spends a round and moves the count even when the row's
+        word still reads uncovered, so it overtakes like a pass does."""
         _isolate_logs(monkeypatch, tmp_path)
         failed = _pass_attestation("2026-08-28T07:48:55Z")
         failed["data"]["verdict"] = "fail"
+        _write_log(tmp_path, _uncovered_row("2026-08-28T07:15:38Z"), failed)
+        fired = []
+
+        def fake_fire(pr_number, cwd, head):
+            fired.append((pr_number, head))
+            refreshed = _uncovered_row("2026-08-28T07:15:38Z")
+            refreshed["ts"] = "2026-08-28T08:00:00Z"
+            refreshed["data"]["rounds_used"] = 1
+            _write_log(
+                tmp_path,
+                _uncovered_row("2026-08-28T07:15:38Z"),
+                failed,
+                refreshed,
+            )
+            return True, ""
+
+        monkeypatch.setattr(_reviews, "_fire_review_coverage_verb", fake_fire)
+        data, note = _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
+
+        assert fired == [(1242, _H)], fired
+        assert "recomputed" in note
+
+    def test_a_fail_at_another_head_does_not_overtake(self, monkeypatch, tmp_path):
+        """The chain is scoped by exact head sha: a round for another commit
+        says nothing about this head's row."""
+        _isolate_logs(monkeypatch, tmp_path)
+        failed = _pass_attestation("2026-08-28T07:48:55Z")
+        failed["data"]["verdict"] = "fail"
+        failed["data"]["head_sha"] = "f" * 40
         _write_log(tmp_path, _uncovered_row("2026-08-28T07:15:38Z"), failed)
         fired = []
         monkeypatch.setattr(
@@ -325,6 +357,31 @@ class TestCachedNegativeNamesItsInput:
         )
         _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
         assert fired == []
+
+    def test_the_recomputed_row_is_not_overtaken_again(
+        self, monkeypatch, tmp_path
+    ):
+        """The recompute writes a row stamped after the attestation, so the
+        next read finds nothing newer than the row - the arm cannot spin."""
+        _isolate_logs(monkeypatch, tmp_path)
+        failed = _pass_attestation("2026-08-28T07:48:55Z")
+        failed["data"]["verdict"] = "fail"
+        _write_log(
+            tmp_path,
+            _uncovered_row("2026-08-28T07:15:38Z"),
+            failed,
+            _uncovered_row("2026-08-28T08:00:00Z"),
+        )
+        fired = []
+        monkeypatch.setattr(
+            _reviews,
+            "_fire_review_coverage_verb",
+            lambda *a, **k: (fired.append(a) or (True, "")),
+        )
+        data, note = _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
+
+        assert fired == []
+        assert "recomputed" not in note
 
     def test_the_pin_names_the_head_and_the_time(self, monkeypatch, tmp_path):
         """Corollary 5's field. A reader who cannot see the pin cannot tell a

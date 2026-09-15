@@ -454,7 +454,9 @@ def review_coverage_for_gate(
     07:48:55Z, the gate still refused, and two readers reached opposite wrong
     conclusions. So an uncovered row is overtaken when an in-scope attestation
     for the same head is NEWER than the row, and the read is paid only on the
-    uncovered branch, where it can change the answer.
+    uncovered branch, where it can change the answer. A later fail at the same
+    head overtakes too: the verdict does not flip the row's word, but the
+    round and the review count it reports have moved.
 
     Returns ``(data_or_None, note)``; ``note`` is ``""`` when no recompute ran,
     else ``"recomputed"``, ``"recompute produced no row"``,
@@ -573,7 +575,8 @@ def split_pin_note(note: str) -> tuple[str, str]:
 def _uncovered_row_overtaken(
     data: Optional[dict], row_ts: str, cwd: Optional[str], head: Optional[str]
 ) -> bool:
-    """Whether a head-matching UNCOVERED row has been overtaken by a later pass.
+    """Whether a head-matching UNCOVERED row has been overtaken by a later
+    attestation.
 
     Narrow by construction. It fires only for a row that is UNCOVERED at the
     head being asked about, and only when an in-scope attestation pinned to
@@ -581,6 +584,11 @@ def _uncovered_row_overtaken(
     head mismatch and an unknown row are all handled by the arms beside it,
     and a row with no timestamp cannot be compared, so it is left alone rather
     than recomputed on a guess.
+
+    Any verdict overtakes, not only a pass. A later fail at the head moved
+    what the row reports - a round is spent, and the review count changed -
+    even though the row's word may still read uncovered. A retraction is a
+    fail row too, so no verdict filter stays.
 
     The chain read is scoped by exact head sha, never by branch: the question
     is only "did something attest THIS head after the row was written", and a
@@ -600,7 +608,6 @@ def _uncovered_row_overtaken(
     return any(
         _is_after(str(event.get("ts") or ""), row_ts, row_at)
         and event.get("head_sha") == head
-        and event.get("verdict") == "pass"
         for event in chain
     )
 
