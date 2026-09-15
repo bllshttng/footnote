@@ -2,8 +2,8 @@
 //! PR's node with no worker alive.
 //!
 //! DonePRGreen means the PR merged; it does not mean the node closed (the
-//! x-bf53 specimen: a king stopped the worker four minutes after its merge,
-//! and the node read in_review until a peer ran reconcile by hand). The
+//! specimen: a king stopped the worker four minutes after its merge, and
+//! the node read in_review until a peer ran reconcile by hand). The
 //! merge verb closes its node in a child bound to the worker's lifetime, so
 //! a killed, crashed, or 429-dead worker takes the closer with it. This arm
 //! is the session-free floor: it shells the same bare
@@ -219,10 +219,10 @@ mod tests {
         let stdout = r#"{
   "dry_run": false,
   "candidates": [
-    {"node_id": "x-bf53", "pr_number": 1797, "pr_url": "u", "plan_path": null}
+    {"node_id": "ab-179a", "pr_number": 1797, "pr_url": "u", "plan_path": null}
   ],
   "closed": [
-    {"node_id": "x-bf53", "pr_number": 1797, "pr_url": "u", "plan_stamped": true, "sentinel": "s"}
+    {"node_id": "ab-179a", "pr_number": 1797, "pr_url": "u", "plan_stamped": true, "sentinel": "s"}
   ],
   "promise_unmet": [
     {"node_id": "a", "reason": "r"},

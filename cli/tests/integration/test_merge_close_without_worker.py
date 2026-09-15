@@ -1,4 +1,4 @@
-"""A merged PR's node closes with no worker alive (x-18c5).
+"""A merged PR's node closes with no worker alive.
 
 Specimen: PR 1797 merged, the worker was stopped four minutes later, and its
 node read in_review until a peer ran reconcile by hand. The merge verb closes
