@@ -197,3 +197,10 @@ def test_lane_off_detail_names_the_key_that_read_false():
     assert watchdog.lane_off_detail(settings(rec=False)) == "recovery.enabled=false"
     assert watchdog.lane_off_detail(settings(auto=False)) == "autonomy.enabled=false"
     assert "unresolved" in watchdog.lane_off_detail(SimpleNamespace())
+
+    # The bool reader and the detail share one gate resolution: armed False
+    # must never pair with "keys all read true".
+    assert watchdog.lane_armed(settings()) is True
+    for stub in (settings(wd=False), settings(rec=False), settings(auto=False), SimpleNamespace()):
+        assert watchdog.lane_armed(stub) is False
+        assert watchdog.lane_off_detail(stub) != "watchdog keys all read true (transient)"
