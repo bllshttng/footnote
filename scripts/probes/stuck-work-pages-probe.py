@@ -40,6 +40,7 @@ def _reexec_into_venv() -> None:
 _reexec_into_venv()
 
 from fno import paths  # noqa: E402
+from fno.rust_binary import resolve_binary  # noqa: E402
 
 SLEEPER_KEY = "flight:probe-stuck-work"
 POLL_BUDGET_S = 12 * 60
@@ -140,15 +141,19 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
         victim = subprocess.Popen(["true"])
         victim.wait()
         holder_pid = victim.pid
+        agents_bin = resolve_binary()
+        if agents_bin is None:
+            return fail("flight-acquire", "no fno-agents binary resolved")
         code, _, err = run(
             [
-                "fno", "agents", "claim", "flight-acquire", SLEEPER_KEY,
+                str(agents_bin), "claim", "flight-acquire", SLEEPER_KEY,
                 "--holder", "probe", "--pid", str(holder_pid), "--ttl-ms", "3600000",
             ],
             cwd=cwd,
         )
         if code != 0:
-            return fail("flight-acquire", err.strip()[:200])
+            # Config-noise lines lead stderr; the verdict is the tail.
+            return fail("flight-acquire", (err.strip().splitlines() or ["?"])[-1][:200])
 
         budget = POLL_BUDGET_S
         found = None
@@ -181,7 +186,7 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
         sleeper.send_signal(signal.SIGKILL)
         if holder_pid is not None:
             run(
-                ["fno", "agents", "claim", "flight-release", SLEEPER_KEY, "--holder", "probe"],
+                [str(agents_bin), "claim", "flight-release", SLEEPER_KEY, "--holder", "probe"],
                 cwd=cwd,
             )
     return 0
