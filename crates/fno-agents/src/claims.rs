@@ -2683,8 +2683,13 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
             // Extend exactly what `fno agents claim status` would call live:
             // only a STALE verdict refuses (x-b445). Live and Suspect both
             // extend, so a session past its TTL whose pid or session witness
-            // reads live can renew its own lease again.
-            if crate::claim_verbs::status_verdict(&rec).0 == ClaimState::Stale {
+            // reads live can renew its own lease again. The verdict runs only
+            // for an EXPIRED record: TTL expiry is the only refused state a
+            // live holder can be in, so the unexpired per-stop renewal never
+            // pays the session witness's registry read and transcript probe.
+            if is_expired(&rec, now_ms())
+                && crate::claim_verbs::status_verdict(&rec).0 == ClaimState::Stale
+            {
                 return Ok(false);
             }
             rec
