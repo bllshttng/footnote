@@ -892,7 +892,7 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
 ## fno agents spawn --node
 
-Every node-bearing spawn passes the verb seam (x-2c0d). The seam projects the
+Every node-bearing spawn passes the verb seam. The seam projects the
     lifecycle table's ANSWER - never a copy of the table - plus the seed slot,
     the crown/resume flags and the row facts to the hidden ``fno-agents
     node-seed`` verb, and applies its answer verbatim before any lane is
