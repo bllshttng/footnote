@@ -261,6 +261,11 @@ fn king_spawn_with(
         .env("FNO_CLAIMS_ROOT", home)
         .env("FNO_HOME", home)
         .env("FNO_AGENTS_HOME", home.join("agents"))
+        // The board resolves its fno-py shellout FNO_PY-first, ahead of PATH
+        // (scrape::fno_py), so a machine with the wheel installed under the uv
+        // tools bin runs the REAL CLI against the real machine-wide question
+        // index and every fixture stub here never fires. Pin the stub.
+        .env("FNO_PY", stubs.join("fno-py"))
         .env("PATH", format!("{}:{}", stubs.display(), real_path))
         .output()
         .unwrap();
@@ -1230,6 +1235,7 @@ fn external_read_timeout_king_board_blocks_named() {
         ])
         .env("FNO_CLAIMS_ROOT", bin_dir.path())
         .env("FNO_HOME", bin_dir.path())
+        .env("FNO_PY", stubs.join("fno-py"))
         .env(
             "PATH",
             format!(
