@@ -91,6 +91,11 @@ surface:
   control: crates/fno-agents/src/king_board.rs build_board  # an answerer known BEFORE the sweep ran
   answerers:
     - at: crates/fno-agents/src/king_board.rs build_board (undispatched filter)
+      # ^ `at:` is `path[:lines] symbol (note)`: the validator greps that symbol,
+      #   and each free `name(` call in `reads:`, in every language tree at the
+      #   merge base; a reader in another tree that no answerer names is
+      #   refused on plans created after the tree gate date, and warned on
+      #   quick and older plans
       disposition: dual-logic              # dual-logic | shared-vocabulary | generated-artifact | out-of-scope
       reads: "inputs.undispatched.rows()"   # the expression the site evaluates, quoted
       feed: "fno backlog undispatched --json"         # the command believed to supply the site

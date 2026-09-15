@@ -147,6 +147,14 @@ fn main() {
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
     }
+    // `surface-check`: the plan surface: shape check plus the cross-language
+    // symbol walk (see surface_check.rs doc). Dispatched BEFORE `run` like
+    // backlog-update: the action list is shrink-only (d-fe66560a), so this
+    // verb is never registered and never routed. scripts/validate-plan.sh
+    // shells HERE and reads the E/W/X/O/U line protocol back.
+    if args.first().map(String::as_str) == Some("surface-check") {
+        std::process::exit(fno_agents::surface_check::run_surface_check(&args[1..]));
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

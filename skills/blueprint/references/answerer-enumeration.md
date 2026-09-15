@@ -27,6 +27,7 @@ Sweep the repo for every place that reads or writes the answer. The pitfalls cor
 - Never truncate or post-process a search whose zero you intend to trust.
 - Never `| head` a hit list. Never `grep -c` through a wrapper. Quote every pathspec.
 - Name the sweep's positive control before running it: one answerer you already know, which the command must return. A sweep that misses its control is a wrong sweep, not a clean tree.
+- Walk every language tree the symbol lives in, at the tree root, never a narrowed subpath. During a port the twin in the other tree often keeps the same name. The validator greps each changed answerer's symbol at the merge base. It reads the identifier after the path in `at:`, and each free `name(` call in `reads:`. It refuses a reader in another language that no answerer names.
 - Never trust a hit list for a symbol you guessed rather than read. Open one answerer and read the symbol it uses before sweeping for it.
 
 That last rule is the non-zero twin of the zero-hit trap, and it is worse. A zero invites doubt. A non-empty result reads as confirmation. The retracted lead specimen of this protocol came from grepping `SRC_PLANLESS`, an invented symbol. The search returned hits (`SRC_UNDISPATCHED`), and a partial list for a symbol that does not exist read as complete.
@@ -84,6 +85,8 @@ Nine are many answerers to one question. The tenth is the inverse: one answerer 
 One of the ten is verified here rather than taken on report. "How long may this read take?" is real: each external read in the king board gets a slice of ONE budget (`run_with_timeout` in `crates/fno-agents/src/king_board.rs`), and the stop gate hands its own bound in as that whole-board budget (`BoardOpts.budget_ms`, set from `stopgate_read_timeout()` in `crates/fno-agents/src/loopcheck.rs`). The inner bound is a slice of the outer one, so the two can never disagree about who kills a slow read.
 
 The eleventh, measured the same night: "is this the operator?" has six env markers, a legacy marker, a process-tree walk and a tty as answerers. The markers outrank the tty, so a human at a keyboard was refused as agent `operator`. The fix is precedence in `resolve_owned_identity`, and it is its own node. The specimen records the shape.
+
+Two more, measured 2026-09-13 and 2026-09-14, and in both the enumeration that was supposed to catch them had already run and passed. In the first, the sweep named a narrowed Rust pathspec, two files. Its own pattern returned a twentieth file over the whole crates tree: the store's work-state reader. A review round found that reader instead. The changed answerer's `reads:` quoted the open-row predicate, and that name exists in both trees. The cross-language walk now names the store and the keeper. In the second, a plan ported a provider counter from Python to Rust. Hand measurement found five Python readers beyond the gate: the capacity probe, an explain gate, the top lane's rows, route resolution and advance width. A Rust-only count opens a new dual implementation, and nothing sweeping one tree refuses it.
 
 ## Worked example: the king board, read correctly
 
