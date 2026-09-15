@@ -87,9 +87,9 @@ impl ReentryTransition {
 pub struct ReentryPlan {
     pub resolved: bool,
     pub transition: String,
-    /// "attach" | "respawn". The transition is the caller's INTENT; this is
-    /// what the plan actually does, and a consumer decides how to run it
-    /// from here.
+    /// "attach" | "respawn" | "resume" | "bg-resume". The transition is the
+    /// caller's INTENT; this is what the plan actually does, and a consumer
+    /// decides how to run it from here.
     pub mechanism: String,
     pub name: String,
     pub fno_id: Option<String>,
@@ -187,6 +187,115 @@ pub fn validate_route_settings(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The cwd a relaunch must run in: the dir whose projects-dir slug actually
+/// holds the transcript, not the (possibly stale) recorded registration cwd.
+/// A session that ran EnterWorktree after registration has its transcript
+/// under the worktree's project dir, while the recorded cwd is the
+/// pre-EnterWorktree canonical - relaunching there looks for the transcript
+/// in the wrong dir and lands on the wrong branch.
+///
+/// Tries the recorded cwd (which must also still EXIST) then its git
+/// worktrees; the first whose `<projects>/<slug>/<uuid>.jsonl` exists wins.
+/// On a miss it globs every project dir for the transcript and takes the
+/// first existing directory the transcript itself records, newest file and
+/// newest record first. Last fallback is the recorded cwd, naming the branch
+/// on stderr (a probe that does not name the store it read is the trap the
+/// king's own SKILL.md warns about).
+pub(crate) fn resolve_resume_cwd(
+    claude_home: &crate::claude_ask::ClaudeHome,
+    recorded: &str,
+    uuid: &str,
+) -> std::path::PathBuf {
+    if uuid.is_empty() {
+        return std::path::PathBuf::from(recorded);
+    }
+    let projects = claude_home.projects_dir();
+    let transcript = format!("{}.jsonl", uuid);
+    let recorded_pb = std::path::PathBuf::from(recorded);
+    let recorded_slug = crate::claude_ask::claude_cwd_slug(&recorded_pb);
+    // Probe the recorded cwd first: the common case (no EnterWorktree) keeps
+    // the transcript under its own project dir, and a stat is far cheaper
+    // than spawning `git worktree list` on every resume. Only on a miss do
+    // we enumerate candidates. A missing dir never wins, whatever its slug
+    // holds: launching there would refuse anyway.
+    if recorded_pb.is_dir() && projects.join(&recorded_slug).join(&transcript).exists() {
+        return recorded_pb;
+    }
+    let candidates =
+        crate::manifest_lookup::git_worktree_paths(Path::new(recorded)).unwrap_or_default();
+    for cand in &candidates {
+        let slug = crate::claude_ask::claude_cwd_slug(cand);
+        if projects.join(&slug).join(&transcript).exists() {
+            eprintln!(
+                "fno agents resume: cwd resolved from the transcript's project dir ({})",
+                cand.display()
+            );
+            return cand.clone();
+        }
+    }
+    // Last probe before the fallback: the transcript names its own cwd on
+    // every record. Newest transcript file first, newest record first; the
+    // first entry whose directory still exists wins. The recorded
+    // registration cwd may predate a worktree move no `git worktree list`
+    // knows about.
+    let mut hits: Vec<(std::time::SystemTime, std::path::PathBuf)> = Vec::new();
+    if let Ok(per_project) = std::fs::read_dir(&projects) {
+        for proj in per_project.flatten() {
+            let f = proj.path().join(&transcript);
+            if !f.is_file() {
+                continue;
+            }
+            let modified = f
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            hits.push((modified, f));
+        }
+    }
+    hits.sort_by(|a, b| b.0.cmp(&a.0));
+    // Only the newest records matter (the newest record carries the cwd the
+    // session ended in), so read the file's TAIL, not the whole transcript.
+    const TAIL_BYTES: u64 = 256 * 1024;
+    for (_, f) in &hits {
+        let Ok(mut file) = std::fs::File::open(f) else {
+            continue;
+        };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if std::io::Seek::seek(
+            &mut file,
+            std::io::SeekFrom::Start(len.saturating_sub(TAIL_BYTES)),
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let mut text = String::new();
+        if std::io::Read::read_to_string(&mut file, &mut text).is_err() {
+            continue;
+        }
+        for line in text.lines().rev() {
+            let Ok(v) = serde_json::from_str::<Value>(line) else {
+                continue;
+            };
+            if let Some(cwd) = v.get("cwd").and_then(Value::as_str) {
+                if Path::new(cwd).is_dir() {
+                    eprintln!(
+                        "fno agents resume: cwd resolved from the transcript's own cwd record ({})",
+                        cwd
+                    );
+                    return std::path::PathBuf::from(cwd);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "fno agents resume: no transcript found under any candidate for {uuid}; \
+         using the recorded cwd ({})",
+        recorded
+    );
+    recorded_pb
+}
+
 fn derived_short_id(session_id: &str) -> String {
     // The claude jobId is the leading 8 hex of the session UUID by
     // construction; re-derive it only when the id actually has that shape.
@@ -206,43 +315,6 @@ fn substrate_of(entry: &RegistryEntry) -> &'static str {
     } else {
         "bg"
     }
-}
-
-/// The dead-arm refusal for a row no CLI can restore under its own id.
-/// Self-teaching runtime text: it names the picker route precisely enough to
-/// follow with no doc open, because after `jobs/<short>/state.json` is gone
-/// this message IS the remedy.
-fn refusal_naming_the_picker(
-    name: &str,
-    session_id: &str,
-    cwd: &str,
-    short_id: &str,
-    claude_home: &crate::claude_ask::ClaudeHome,
-) -> String {
-    let state_note = if short_id.is_empty() {
-        format!(
-            "row {name:?} derives no claude jobId from session {session_id}, \
-             so `claude respawn` has no target"
-        )
-    } else {
-        let state = claude_home.jobs_dir_for(short_id).join("state.json");
-        format!(
-            "row {name:?} has no job state at {}, so no CLI can put session \
-             {session_id} back in agent view under its own id: `claude --bg \
-             --resume` always forks a new one",
-            state.display()
-        )
-    };
-    format!(
-        "{state_note}. Two routes remain, both by hand. Rejoin under the SAME id: \
-         run `claude agents` BARE in {cwd} (no --cwd, --safe-mode, --permission-mode \
-         or --settings, or the picker is replaced by an attach hint), type /resume \
-         at the dispatch input, pick the session, press Enter. Needs claude 2.1.212+, \
-         lists only sessions of that directory, and refuses a session live in another \
-         terminal. Or take the conversation back in THIS terminal under a NEW id, \
-         losing the agent-view row and the registry binding: \
-         `claude --resume {session_id}`."
-    )
 }
 
 /// Resolve one row's re-entry plan, or refuse naming the missing evidence.
@@ -402,11 +474,20 @@ pub fn resolve_reentry_with(
     // cwd: a relaunch needs a working directory that exists; an attach does
     // too (claude resolves the session against its project dir). An explicit
     // --cwd replacement (the operator re-homing a row whose worktree moved)
-    // outranks the recorded value for both the check and the plan.
-    let cwd = cwd_override
-        .filter(|c| !c.is_empty())
-        .unwrap_or(entry.cwd.as_str());
-    if !Path::new(cwd).is_dir() {
+    // outranks the recorded value for both the check and the plan. A launch
+    // with no override resolves the cwd from where the transcript actually
+    // lives, so plan and launch agree on the directory claude keys the
+    // session to.
+    let cwd = match cwd_override.filter(|c| !c.is_empty()) {
+        Some(c) => c.to_string(),
+        _ if transition.starts_a_process() => {
+            resolve_resume_cwd(claude_home, entry.cwd.as_str(), &session_id)
+                .to_string_lossy()
+                .into_owned()
+        }
+        _ => entry.cwd.clone(),
+    };
+    if !Path::new(&cwd).is_dir() {
         return Err(format!(
             "row {name:?} cwd {:?} is unreachable; re-entry would launch somewhere that does not exist",
             cwd
@@ -427,36 +508,53 @@ pub fn resolve_reentry_with(
             argv.push(short_id.clone());
         }
         ReentryTransition::Resume | ReentryTransition::Recover => {
-            // jobs/<short>/state.json is what `claude respawn` reads. Present
-            // means the row can come back under its own id; gone means no CLI
-            // can, and the plan refuses naming the picker instead of handing
-            // back a `claude --resume` that forks a new session id.
-            mechanism = "respawn".to_string();
-            if short_id.is_empty()
-                || !claude_home
-                    .jobs_dir_for(&short_id)
-                    .join("state.json")
-                    .is_file()
-            {
-                return Err(refusal_naming_the_picker(
-                    name,
-                    &session_id,
-                    cwd,
-                    &short_id,
-                    claude_home,
+            // Three restore routes, tried in order. `jobs/<short>/state.json`
+            // is what `claude respawn` reads; present means the row comes
+            // back under its own id from its saved launch. A mux row keeps
+            // `claude --resume` on its pane (a pane hosts a foreground
+            // session). Everything else - the bg row whose job dir the
+            // daemon reaper already took - comes back under its own id with
+            // `claude --bg --resume`: measured on 2.1.272, a stopped session
+            // continues under the SAME id, and a live one answers with a
+            // copy notice the launcher must refuse.
+            if short_id.is_empty() {
+                return Err(format!(
+                    "row {name:?} derives no claude jobId from session {session_id}; \
+                     no transport key for respawn or bg-resume"
                 ));
             }
-            argv.push("claude".into());
-            argv.push("respawn".into());
-            argv.push(short_id.clone());
+            if claude_home
+                .jobs_dir_for(&short_id)
+                .join("state.json")
+                .is_file()
+            {
+                mechanism = "respawn".to_string();
+                argv.push("claude".into());
+                argv.push("respawn".into());
+                argv.push(short_id.clone());
+            } else if entry.mux.is_some() {
+                mechanism = "resume".to_string();
+                argv.push("claude".into());
+                argv.push("--resume".into());
+                argv.push(session_id.clone());
+            } else {
+                mechanism = "bg-resume".to_string();
+                argv.push("claude".into());
+                argv.push("--bg".into());
+                argv.push("--resume".into());
+                argv.push(session_id.clone());
+            }
         }
     }
-    // The route rides `--settings` only on the ATTACH arm. `claude respawn`
-    // restarts the job from its own saved launch, ignores extra arguments with
-    // a warning (measured: "extra arguments ignored: --settings ..."), and the
-    // job's saved launch already carries the route the original spawn applied
-    // - appending the flag here would teach a route story the binary drops.
-    if mechanism == "attach" {
+    // The route rides `--settings` on every arm except `respawn`. `claude
+    // respawn` restarts the job from its own saved launch, ignores extra
+    // arguments with a warning (measured: "extra arguments ignored:
+    // --settings ..."), and the job's saved launch already carries the route
+    // the original spawn applied - appending the flag now would teach a route
+    // story the binary drops. `claude --resume` and `claude --bg --resume`
+    // start a process from the ambient namespace, so the recorded route must
+    // ride along.
+    if mechanism != "respawn" {
         if let Some(path) = entry
             .route_settings_path
             .as_deref()
@@ -1228,14 +1326,104 @@ mod tests {
         assert!(err.contains("claude-only"), "{err}");
     }
 
+    /// The shared helper snapshots git's path; hand-rolling it resolved by name.
+    fn _git(repo: &Path, args: &[&str]) {
+        let out = crate::git_test_helpers::git_run(args, repo).unwrap();
+        assert!(out.status.success(), "git {args:?} failed in {repo:?}");
+    }
+
     #[test]
-    fn reentry_plan_respawn_refuses_and_names_the_picker_when_job_state_is_gone() {
+    fn resolve_resume_cwd_picks_the_transcripts_worktree_over_the_stale_recorded_cwd() {
+        // Shells git: a sibling test blanks PATH, so this is the PATH-dependent
+        // work PATH_TEST_MUTEX covers.
+        let _p = crate::path_test_guard();
+        // Registered at the canonical checkout; transcript under a worktree's
+        // project dir (the EnterWorktree case). Resume must resolve to the
+        // worktree, not the pre-EnterWorktree recorded cwd.
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonicalize: macOS houses tempfile under /var/folders (a symlink to
+        // /private/var/folders), and `git` records the resolved /private/var
+        // path while the test's PathBuf carries /var - the slugs would diverge.
+        let home = tmp.path().canonicalize().unwrap();
+        let canonical = home.join("repo");
+        std::fs::create_dir_all(&canonical).unwrap();
+        _git(&canonical, &["init", "-q"]);
+        _git(&canonical, &["config", "user.email", "t@t"]);
+        _git(&canonical, &["config", "user.name", "t"]);
+        _git(&canonical, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let wt = home.join("wt");
+        _git(
+            &canonical,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/x",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        let uuid = "9d2874cb-9365-48c0-aeb6-9e1d244f4cd3";
+        let wt_project = ClaudeHome::at(&home)
+            .projects_dir()
+            .join(crate::claude_ask::claude_cwd_slug(&wt));
+        std::fs::create_dir_all(&wt_project).unwrap();
+        std::fs::write(wt_project.join(format!("{uuid}.jsonl")), "[]").unwrap();
+
+        let resolved = resolve_resume_cwd(&ClaudeHome::at(home), canonical.to_str().unwrap(), uuid);
+        assert_eq!(
+            resolved, wt,
+            "resolved to the transcript's worktree, not the recorded cwd"
+        );
+    }
+
+    #[test]
+    fn resolve_resume_cwd_falls_back_to_recorded_when_no_transcript_exists() {
+        // No transcript under any candidate: fall back to the recorded cwd and
+        // say so on stderr. An absent number beats a guessed one.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let recorded = home.join("recorded");
+        std::fs::create_dir_all(&recorded).unwrap();
+
+        let resolved = resolve_resume_cwd(
+            &ClaudeHome::at(home),
+            recorded.to_str().unwrap(),
+            "deadbeef-0000-0000-0000-000000000000",
+        );
+        assert_eq!(resolved, recorded);
+    }
+
+    #[test]
+    fn resolve_resume_cwd_confirms_recorded_when_its_slug_holds_the_transcript() {
+        // The transcript under the recorded cwd's own slug confirms it; no
+        // worktree enumeration needed.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let recorded = home.join("recorded");
+        std::fs::create_dir_all(&recorded).unwrap();
+        let uuid = "aaaaaaaa-0000-0000-0000-000000000000";
+        let project = ClaudeHome::at(&home)
+            .projects_dir()
+            .join(crate::claude_ask::claude_cwd_slug(&recorded));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{uuid}.jsonl")), "[]").unwrap();
+
+        let resolved = resolve_resume_cwd(&ClaudeHome::at(home), recorded.to_str().unwrap(), uuid);
+        assert_eq!(resolved, recorded);
+    }
+
+    #[test]
+    fn reentry_plan_bg_resumes_a_dead_bg_row_under_its_own_id() {
+        // Job state gone, no mux ref: the plan is the same-id bg resume the
+        // probe measured, not a refusal.
         let mut e = row("gone");
         e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
         e.short_id = "9a1b2c3d".into();
         e.launch_account = Some("default".into());
         let (_tmp, home) = staged_home(&[]); // no jobs/<short>/state.json
-        let err = resolve_reentry_with(
+        let plan = resolve_reentry_with(
             &reg(vec![e]),
             "gone",
             ReentryTransition::Resume,
@@ -1244,17 +1432,133 @@ mod tests {
             &home,
             None,
         )
-        .unwrap_err();
-        // The refusal must carry the picker route with no doc open: the bare
-        // `claude agents` invocation, the /resume gesture, and the full id.
-        assert!(err.contains("claude agents"), "{err}");
-        assert!(err.contains("/resume"), "{err}");
-        assert!(
-            err.contains("9a1b2c3d-eeee-ffff-0000-111122223333"),
-            "{err}"
+        .unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude".to_string(),
+                "--bg".to_string(),
+                "--resume".to_string(),
+                "9a1b2c3d-eeee-ffff-0000-111122223333".to_string(),
+            ]
         );
-        assert!(err.contains("state.json"), "{err}");
-        assert!(err.contains("claude --bg --resume"), "{err}");
+    }
+
+    #[test]
+    fn reentry_plan_bg_resume_rides_the_recorded_route_and_namespace() {
+        // A routed bg row on a config-dir account: the bg resume starts a NEW
+        // process from the ambient namespace, so both the route file and the
+        // config dir must ride the plan.
+        let dir = std::env::temp_dir().join("reentry-test-route-bg.json");
+        write_route(&dir, false);
+        let mut e = row("routed");
+        e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
+        e.short_id = "9a1b2c3d".into();
+        e.provider = Some("zai".into());
+        e.launch_account = Some("makers".into());
+        e.route_settings_path = Some(dir.to_string_lossy().to_string());
+        e.cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let (_tmp, home) = staged_home(&[]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "routed",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "bg-resume");
+        assert_eq!(
+            plan.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/acct/makers/cfg")
+        );
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude".to_string(),
+                "--bg".to_string(),
+                "--resume".to_string(),
+                "9a1b2c3d-eeee-ffff-0000-111122223333".to_string(),
+                "--settings".to_string(),
+                dir.to_string_lossy().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reentry_plan_keeps_a_mux_row_on_its_pane_foreground_resume() {
+        // A mux row hosts a foreground session on its pane, so the restore
+        // route is the plain `claude --resume`, never a second bg job.
+        let mut e = row("paned");
+        e.harness_session_id = Some("9a1b2c3d-eeee-ffff-0000-111122223333".into());
+        e.short_id = "9a1b2c3d".into();
+        e.launch_account = Some("default".into());
+        e.mux = Some(MuxRef {
+            session: "main".into(),
+            pane_id: 0,
+        });
+        let (_tmp, home) = staged_home(&[]);
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "paned",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.mechanism, "resume");
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "9a1b2c3d-eeee-ffff-0000-111122223333".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn reentry_plan_resolves_a_lost_cwd_from_the_transcripts_own_record() {
+        // The recorded cwd is gone and no git worktree knows the session. The
+        // transcript itself names the live directory; the plan must use it.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = ClaudeHome::at(tmp.path());
+        let live = tmp.path().join("live-dir");
+        std::fs::create_dir_all(&live).unwrap();
+        let uuid = "9a1b2c3d-eeee-ffff-0000-111122223333";
+        // Transcript under the slug of the MISSING recorded dir: the first
+        // probe must not win just because the slug matches.
+        let recorded = tmp.path().join("gone-dir");
+        let slug = crate::claude_ask::claude_cwd_slug(&recorded);
+        let project = ClaudeHome::at(tmp.path()).projects_dir().join(slug);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(format!("{uuid}.jsonl")),
+            format!("{{\"cwd\":\"{}\"}}\n", live.display()),
+        )
+        .unwrap();
+
+        let mut e = row("moved");
+        e.harness_session_id = Some(uuid.into());
+        e.short_id = "9a1b2c3d".into();
+        e.launch_account = Some("default".into());
+        e.cwd = recorded.to_string_lossy().to_string();
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "moved",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            &home,
+            None,
+        )
+        .unwrap();
+        assert_eq!(plan.cwd, live.to_string_lossy().to_string());
     }
 
     #[test]

@@ -1689,6 +1689,7 @@ async fn portal_ctl_claude_row_replies_the_landing_not_the_fallback() {
             argv: vec!["/bin/cat".into()],
             env: vec![],
             config_dir: None,
+            mechanism: None,
         }),
     });
 
@@ -1788,6 +1789,7 @@ async fn portal_ctl_reaches_a_paneless_row_whose_key_also_matches_a_hosted_row()
             argv: vec!["/bin/cat".into()],
             env: vec![],
             config_dir: None,
+            mechanism: None,
         }),
     });
 

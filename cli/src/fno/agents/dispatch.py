@@ -1665,8 +1665,8 @@ def _claude_create_path(
 
     # Best-effort full session-UUID capture (ab-f1b0ccd1, AC1-HP): persisted for
     # the stream-json adopt lane; a miss leaves None and never gates the launch.
-    # A revival records the SOURCE conversation's id - `--bg --resume` forks and
-    # claude mints a fresh uuid no flag can learn; the fork is announced below.
+    # A revival records the SOURCE conversation's id - the `spawn --resume` door
+    # forks by construction (claude mints a fresh uuid), announced below.
     session_uuid = (
         resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
     )
@@ -6531,9 +6531,9 @@ def _roster_entry_for_session(session_uuid: str) -> Optional["AgentEntry"]:
 
 def _respawn_claude_session(short_id: str) -> int:
     """Shell the public ``claude respawn <shortid>`` verb - the identity-
-    PRESERVING revival (same uuid, one roster row), the opposite of the
-    identity-breaking ``--bg --resume`` fork. Returns the honest subprocess exit
-    code; claude absent or a timeout return non-zero so the caller falls through.
+    PRESERVING revival (same uuid, one roster row). A bare ``--bg --resume``
+    without a target id mints a fresh one: the fork rung's job, not this
+    one's. Returns the honest exit code; claude absent or timeout is non-zero.
     """
     try:
         proc = subprocess.run(
