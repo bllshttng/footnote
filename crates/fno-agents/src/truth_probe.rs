@@ -296,7 +296,10 @@ fn lower_state_for_resume<'a>(
     basis: Option<&str>,
 ) -> &'a str {
     if reachability == Some("unreachable")
-        && matches!(basis, Some("pane-gone") | Some("process-gone"))
+        && matches!(
+            basis,
+            Some("pane-gone") | Some("process-gone") | Some("exit-recorded")
+        )
         && matches!(state, "working" | "watching" | "your-move")
     {
         return "stalled";
@@ -1159,6 +1162,13 @@ mod tests {
         );
         assert_eq!(
             lower_state_for_resume("working", Some("unreachable"), Some("process-gone")),
+            "stalled"
+        );
+        // An exit record is the same affirmative evidence class: reconcile
+        // PROVED the child gone before writing it, so a daemon-stopped row
+        // relaunches too instead of refusing inconclusive forever.
+        assert_eq!(
+            lower_state_for_resume("working", Some("unreachable"), Some("exit-recorded")),
             "stalled"
         );
         // A silent / no-evidence unreachable is NOT affirmatively dead: the
