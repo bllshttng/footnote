@@ -269,7 +269,7 @@ The minimum ephemeral horizon is 672 hours because `human_touch` and claim conte
 
 `fno doctor event gc` refuses a shorter horizon and deletes only expired rows explicitly marked `ephemeral`.
 
-Durable rows also leave the files: `crates/fno-agents/src/events_store.rs` ingests every complete durable journal line into the `events.db` beside the journal (before a rotation renames it and before a history read), where it is kept for 30 days. Ephemeral rows are never ingested; the `.ephemeral` siblings stay out of the store. A line the store cannot type or timestamp is still stored, with a `reject_reason` naming the first failure.
+Durable rows also leave the files. `crates/fno-agents/src/events_store.rs` ingests every complete durable journal line into the `events.db` beside the journal, before a rotation renames it and before a history read. The store keeps durable rows for 30 days. Ephemeral rows are never ingested. The `.ephemeral` siblings stay out of the store. A line the store cannot type or timestamp is still stored, with a `reject_reason` naming the first failure.
 
 It also refuses the cross-project global daemon journal. That journal is shared by every project on the machine, so a single project's TTL policy must not rewrite it.
 
