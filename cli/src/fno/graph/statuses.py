@@ -39,7 +39,7 @@ STATUS_MIGRATION: dict[str, str] = {"claimed": "in_progress"}
 # shipped) and `superseded` (replaced) are terminal; every other rung is a
 # state a node can return from. One spelling shared by the store's
 # closure-release hook, the tracker backends' closed set, and the reaper's
-# node settlement, so they cannot drift (x-94f8).
+# node settlement, so they cannot drift.
 TERMINAL_RUNGS: frozenset[str] = frozenset({"done", "superseded"})
 
 # The label prefix every unmeasured admit carries. Readers split live from
@@ -76,7 +76,7 @@ def node_is_done(entry: object) -> bool:
     """The one WORK-done read: the node's stored ruling, nothing else.
 
     Every Python reader that asks "is this node's work done" calls this
-    (x-c672); ``completed_at`` spellings are retired from that question
+    ; ``completed_at`` spellings are retired from that question
     (measured 0 divergence in graph and archive). Superseded is deliberately
     absent - a superseded node's WORK is not done, it was replaced, and only
     rebindability reads it that way.
@@ -190,7 +190,7 @@ def is_open_phase_row(row: object, phase: str) -> bool:
     Same shape as :func:`is_open_do_row` for any lifecycle phase: identified
     (harness + session_id), bounded (started_at), and not yet closed. The do
     flavor additionally drives status derivation; other phases (a spawn-opened
-    review row, x-4342) open and close without wedging node status.
+    review row) open and close without wedging node status.
     """
     if not isinstance(row, dict):
         return False
@@ -287,7 +287,7 @@ def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
 
 
 def closed_worker_session_ids(entry: dict) -> set[str]:
-    """Session ids whose own phase row closed and none is open (the x-6f98
+    """Session ids whose own phase row closed and none is open (the
     receipt): finished with THIS node ahead of the predicate."""
     closed: set[str] = set()
     open_ids: set[str] = set()

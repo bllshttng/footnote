@@ -1,4 +1,4 @@
-//! Spawn gate (x-c5cc): global concurrency cap + free-RAM floor + queue loop.
+//! Spawn gate : global concurrency cap + free-RAM floor + queue loop.
 //!
 //! Called at the top of the client `spawn` arm for the `bg`/`headless`
 //! substrates only (`pane` re-execs into the Python CLI, whose mirrored gate
@@ -9,7 +9,7 @@
 //! (worker provenance) and the RAM floor reads system `vm_stat`/meminfo. The
 //! claude daemon roster is consulted only as a LIVENESS ORACLE for fno bg rows
 //! that carry no local pid, and by the post-spawn QoS demotion helper — never
-//! as a population to count (x-bdf9: the roster's non-work sessions must not
+//! as a population to count (: the roster's non-work sessions must not
 //! consume worker slots; only rows that are ALSO in the fno registry count).
 //! The gate's only writes are its own claims (`spawn-gate` check→dispatch mutex,
 //! `worker:<name>` headless slot claims). Every guard fails OPEN on read errors
@@ -43,7 +43,7 @@ use std::collections::HashSet;
 /// Distinct from the convention codes (2, 13, 14, 15, 18, 127).
 pub const EXIT_QUEUE_TIMEOUT: i32 = 75;
 pub const EXIT_NO_WAIT: i32 = 76;
-/// The per-territory team cap refused the spawn (x-e221), or its attribution
+/// The per-territory team cap refused the spawn, or its attribution
 /// was unreadable. The team cap is the one permanent, non-queueable machine
 /// refusal with its own number, so a caller never retries it as capacity.
 pub const EXIT_TERRITORY_CAP: i32 = 86;
@@ -56,7 +56,7 @@ pub const EXIT_PROVIDER_CAP: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
 pub const EXIT_KING_SHARE: i32 = 80;
 pub const EXIT_REGISTRY_SCHEMA: i32 = 81;
-/// A durable fleet incident stop is active (x-77db) - refused before every
+/// A durable fleet incident stop is active - refused before every
 /// bypass branch, `--force` and `FNO_SPAWN_GATE=0` included. In-flight
 /// workers are untouched; only new admission is refused. Same number as the
 /// Python gate's EXIT_FLEET_STOP (byte-parity for the fleet pair).
@@ -78,7 +78,7 @@ pub const EXIT_GATE_UNAVAILABLE: i32 = 87;
 /// receipt it prints (byte-shape unchanged from when `run_gate` printed it
 /// itself), and the event fields the Python transport emits through `_refuse`
 /// for spawns that enter Python (locked decision 5 - refusal events stay
-/// Python-emitted; the native arm itself still emits nothing, x-ab75 owns a
+/// Python-emitted; the native arm itself still emits nothing, owns a
 /// Rust emit). The eprintln prose stays at the refusal site either way.
 #[derive(Debug, Clone)]
 pub struct Refusal {
@@ -111,7 +111,7 @@ impl Refusal {
     }
 }
 
-/// The first admission boundary of the native gate (x-77db): a durable
+/// The first admission boundary of the native gate : a durable
 /// incident stop or an unreadable incident state refuses before the
 /// `FNO_SPAWN_GATE=0` operator bypass, before `--force`, and before any
 /// capacity math. Mail stays ungated so the incident can be announced and
@@ -147,7 +147,7 @@ fn fleet_incident_gate() -> Result<(), Refusal> {
 const QUEUE_POLL: Duration = Duration::from_secs(2);
 const QUEUE_PROGRESS_EVERY: Duration = Duration::from_secs(30);
 const QUEUE_TIMEOUT: Duration = Duration::from_secs(600);
-/// x-7783 LD4: the CPU-hold re-sample gap and the admission debounce. Longer
+/// LD4: the CPU-hold re-sample gap and the admission debounce. Longer
 /// than the slot poll because the `ps` CPU column is a decaying average on
 /// macOS - two reads 2s apart are one sample twice. Mirrors
 /// `spawn_gate.py::CPU_HOLD_POLL_S`.
@@ -441,7 +441,7 @@ pub fn gate_node() -> Option<String> {
 }
 
 /// The liveness-filtered registry rows behind [`slot_count`], exposed so the
-/// per-territory cap (x-e221) can read the rows' worked NODES without a second
+/// per-territory cap can read the rows' worked NODES without a second
 /// liveness implementation.
 pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec<RegistryEntry> {
     let live_roster_short_ids: std::collections::HashSet<String> =
@@ -488,7 +488,7 @@ pub(crate) fn live_rows(registry_path: &Path, warnings: &mut Vec<String>) -> Vec
 /// Count fno WORKER SLOTS in use for the `max_live` cap: liveness-filtered fno
 /// registry rows + live `worker:<name>` headless slot claims.
 ///
-/// This is deliberately NOT the full claude daemon roster (x-bdf9). The roster
+/// This is deliberately NOT the full claude daemon roster. The roster
 /// carries every live claude session, dozens of memory-plugin observers and
 /// resident-idle sessions among them, none of which is fno work; counting them
 /// let the slot cap read "20/15" with zero real build workers running and wedge
@@ -659,7 +659,7 @@ pub(crate) fn territory_of_node(
     Some((format!("loose:{project}"), loose))
 }
 
-/// The per-territory team cap (x-e221). `Err` carries the refusal receipt the
+/// The per-territory team cap. `Err` carries the refusal receipt the
 /// caller prints; `None` territory reads as UNKNOWN and refuses closed - the
 /// cap never counts an unknown as headroom. A spawn that works no node skips
 /// the check entirely: the team cap does not apply to it.
@@ -1015,7 +1015,7 @@ impl GateGuard {
     }
 }
 
-/// Pure parity core (x-91b5, AC2-FR): would a bypass in this env emit
+/// Pure parity core (AC2-FR): would a bypass in this env emit
 /// `spawn-cap`? True iff `FNO_SPAWN_GATE=0` AND no non-empty test-context
 /// marker. Mirrors `fno.events.gate_escape.should_emit_spawn_cap` exactly; a
 /// shared JSON fixture (`gate_escape_spawn_cap_parity.json`) asserts the two
@@ -1153,7 +1153,7 @@ pub fn run_gate(
     registry_path: &Path,
     input: GateInput,
 ) -> Result<GateGuard, Refusal> {
-    // x-77db: the incident stop gates BEFORE the operator bypass below - a
+    // the incident stop gates BEFORE the operator bypass below - a
     // circuit breaker that a flag can bypass is not a circuit breaker.
     fleet_incident_gate()?;
 
@@ -1167,7 +1167,7 @@ pub fn run_gate(
     let cap = agents_config::max_live(config_cwd) as usize;
     let floor_gb = agents_config::min_free_gb(config_cwd);
     let swap_cap = agents_config::max_swap_pct(config_cwd);
-    // x-7783 AC7: the retired trigger (max_load_per_cpu) is not read here;
+    // AC7: the retired trigger (max_load_per_cpu) is not read here;
     // the CPU axis consumes the payload's admission, which the Python decider
     // computed from its own config read.
     let name = input.name.as_str();
@@ -1282,7 +1282,7 @@ pub fn run_gate(
     let mut last_progress = Instant::now();
     let mut announced = false;
     let mut last_slots: usize = 0;
-    // x-7783 LD4: a fleet-over sample holds, and admission after a hold is
+    // LD4: a fleet-over sample holds, and admission after a hold is
     // debounced to CPU_ADMIT_SAMPLES consecutive under-ceiling samples.
     let mut held_on_cpu = false;
     let mut under_streak: u32 = 0;
@@ -1367,7 +1367,7 @@ pub fn run_gate(
             if now.duration_since(since) >= MUTEX_WAIT_BUDGET {
                 if fail_closed {
                     // Contention is a peer or a corpse, never a full cap. The
-                    // takeover asks THE single reap decision (x-9c91): force
+                    // takeover asks THE single reap decision : force
                     // only a provably-dead holder, queue past anything else.
                     match takeover_dead_gate_mutex(root.as_deref()) {
                         Takeover::Freed => {
@@ -1482,7 +1482,7 @@ pub fn run_gate(
                 }
                 return Ok(guard);
             }
-            // x-7783 Change 3: the CPU axis decides BEFORE the census, so a
+            // Change 3: the CPU axis decides BEFORE the census, so a
             // hold never pays the registry scan and the slot cap stays the
             // backstop behind it (LD1).
             let cpu = check_cpu_axis(prefetched.as_deref(), probe_err.as_deref());
@@ -1934,7 +1934,7 @@ fn check_ram_floor(floor_gb: f64, max_swap_pct: f64) -> Result<(), Refusal> {
     }
 }
 
-/// x-7783 Change 3: the payload's `admission` object, computed by the ONE
+/// Change 3: the payload's `admission` object, computed by the ONE
 /// Python decider (`cpu_admission`) and consumed verbatim by this gate. The
 /// Rust gate computes no verdict of its own.
 #[derive(Debug, Clone, Deserialize)]
@@ -2029,7 +2029,7 @@ pub struct FootprintCausePayload {
     #[serde(default)]
     spare_pool_cpu_cores: f64,
     /// 1-min load average, for the status line only. It decides nothing
-    /// anywhere (x-7783 LD1).
+    /// anywhere (LD1).
     #[serde(default)]
     #[allow(dead_code)] // read only through serde: display context, decides nothing
     load_1m: Option<f64>,
@@ -2038,7 +2038,7 @@ pub struct FootprintCausePayload {
     cpu_capacity_cores: f64,
     /// The `_emit_failure` shape: when footprint cannot measure at all it
     /// still answers, carrying this key and exit 4. Its words travel into
-    /// the instrument refusal (x-7783 keeps that contract).
+    /// the instrument refusal (keeps that contract).
     #[serde(default)]
     error: Option<String>,
     /// The decider's answer. Absent on a degraded payload: the gate refuses
@@ -2046,13 +2046,13 @@ pub struct FootprintCausePayload {
     #[serde(default)]
     admission: Option<AdmissionPayload>,
     /// The whole-machine band's verdict from the ONE Python decider
-    /// (`machine_pressure`); the machine_watch arm reads it verbatim (x-d6ad
+    /// (`machine_pressure`); the machine_watch arm reads it verbatim (
     /// LD3). Absent on a degraded payload: the arm reads that as
     /// `machine_unreadable`, never as calm.
     #[serde(default)]
     pub(crate) machine: Option<MachinePressurePayload>,
     /// Top fleet consumers by summed ps %cpu; the machine_watch escalation
-    /// names the first three by their own argv strings (x-d6ad AC7).
+    /// names the first three by their own argv strings (AC7).
     #[serde(default)]
     pub(crate) top: Vec<TopConsumer>,
 }
@@ -2082,7 +2082,7 @@ pub struct TopConsumer {
     pub(crate) command: String,
 }
 
-/// The payload's `machine` object (x-d6ad LD3/LD4): computed by
+/// The payload's `machine` object (LD3/LD4): computed by
 /// `machine_pressure` in doctor_footprint.py, read verbatim here. This module
 /// computes no machine verdict of its own.
 #[derive(Debug, Clone, Deserialize)]
@@ -2119,7 +2119,7 @@ pub(crate) struct CpuAdmission {
     pub(crate) token: &'static str,
 }
 
-/// Read the CPU axis from the prefetched footprint payload (x-7783 LD3).
+/// Read the CPU axis from the prefetched footprint payload (LD3).
 ///
 /// The Python decider `cpu_admission` (doctor_footprint.py) is the ONE
 /// decider; this gate maps its `admission.verdict` to the same four branches
@@ -2201,7 +2201,7 @@ const FOOTPRINT_PROBE_BUDGET: Duration = Duration::from_secs(8);
 
 /// The probe argv: the narrow console script when it resolves, else the
 /// same `--json --cause-only` reading through `fno_py_cmd()` (PATH-robust:
-/// x-cf15). `fno` itself is deliberately NOT a
+///). `fno` itself is deliberately NOT a
 /// candidate: it is the Rust shim, and a gate probe must not route through
 /// its provisioning waits. The fno-py leg always yields an argv; a
 /// genuinely missing wheel surfaces as a failed read the refusal names,
@@ -2220,7 +2220,7 @@ fn footprint_probe_argv() -> Option<Vec<String>> {
 }
 
 /// The status footer's reading and the store keeper's path note, from ONE
-/// footprint probe (x-d6ad): `(machine line, keeper note)`. Both best-effort
+/// footprint probe : `(machine line, keeper note)`. Both best-effort
 /// - a machine whose footprint cannot be read yields `(None, None)`, never a
 /// stale or fabricated line.
 pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
@@ -2238,7 +2238,7 @@ pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
 
 /// The footer line from a parsed payload. It reads the `machine` object - the
 /// ONE Python decider's verdict - and leads with the busy fraction against
-/// the band, never with a bare load figure (x-d6ad AC9/LD2).
+/// the band, never with a bare load figure (AC9/LD2).
 fn machine_footer_line(payload: &FootprintCausePayload) -> Option<String> {
     let machine = payload.machine.as_ref()?;
     let load = machine
@@ -2436,7 +2436,7 @@ enum Takeover {
     Unreadable(String),
 }
 
-/// THE single reap decision (x-9c91) for the spawn-gate mutex: force only a
+/// THE single reap decision for the spawn-gate mutex: force only a
 /// provably-dead holder, queue past anything else. Used when a provider cap
 /// applies, where an unserialized overshoot would break the cap.
 fn takeover_dead_gate_mutex(root: Option<&Path>) -> Takeover {
@@ -2465,7 +2465,7 @@ fn takeover_dead_gate_mutex(root: Option<&Path>) -> Takeover {
     Takeover::Kept(bucket)
 }
 
-/// The king-share refusal (x-3f84 W4 / x-5283 LD1): the share divides
+/// The king-share refusal (W4 / LD1): the share divides
 /// `max_live` by CROWNS; `held` counts the caller's own worker rows; a caller
 /// with no resolved session is not share-checked; waiting cannot help, so
 /// this refuses like the provider cap. Every number comes from
@@ -2746,7 +2746,7 @@ mod tests {
         );
     }
 
-    /// x-8c8c: the macOS swapusage line parses to percent used; a malformed
+    /// the macOS swapusage line parses to percent used; a malformed
     /// line and a zero total both read as unreadable.
     #[test]
     fn parse_swapusage_reads_the_sysctl_line() {
@@ -2905,7 +2905,7 @@ mod tests {
 
     #[test]
     fn spawn_cap_guard_agrees_with_python_gate_fixture() {
-        // x-91b5 AC2-FR: this Rust guard must agree with the Python
+        // AC2-FR: this Rust guard must agree with the Python
         // should_emit_spawn_cap on every fixture row. Both read the same JSON;
         // a drift on either side fails its own assertion.
         let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2987,7 +2987,7 @@ MemAvailable:    8000000 kB\n";
 
     /// The `fno agents status` machine line: the busy fraction against the
     /// band, the verdict, and the load and runnable census beside them
-    /// (x-d6ad AC9), with the pool named so a caller sees the pool's share
+    /// (AC9), with the pool named so a caller sees the pool's share
     /// before a spawn is ever refused on it.
     #[test]
     fn machine_status_line_names_band_verdict_and_census() {
@@ -3029,7 +3029,7 @@ MemAvailable:    8000000 kB\n";
         assert!(line.starts_with("unreadable · load_15m unknown"), "{line}");
     }
 
-    /// x-7783 AC9: the shared fixture pins the branch this gate takes per
+    /// AC9: the shared fixture pins the branch this gate takes per
     /// payload. The Python suite feeds the same file to `cpu_admission`, so
     /// neither runtime can grow its own opinion about who gets in.
     #[test]
@@ -3769,7 +3769,7 @@ MemAvailable:    8000000 kB\n";
         );
     }
 
-    /// AC1-FR (x-bdf9): the Rust gate and the Python mirror must return the same
+    /// AC1-FR : the Rust gate and the Python mirror must return the same
     /// slot count for the same synthetic registry+roster. Both suites read this
     /// ONE fixture; a divergence in either gate's counting rule (e.g. re-adding
     /// the roster to the slot count) fails its own assertion. A populated roster
@@ -3865,7 +3865,7 @@ MemAvailable:    8000000 kB\n";
         std::env::remove_var("FNO_CLAIMS_ROOT");
         std::env::remove_var("FNO_CLAUDE_DAEMON_DIR");
     }
-    // --- the per-territory team cap fixture (x-e221 AC9) -------------------
+    // --- the per-territory team cap fixture (AC9) -------------------
     // The scenarios were recorded when the Python gate was a second counting
     // leg; the Python leg is deleted and these are the recorded contract now,
     // checked honestly against the one remaining count.

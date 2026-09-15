@@ -204,11 +204,11 @@ mod tests {
 
     #[test]
     fn the_short_json_spelling_parses_like_the_long_one() {
-        let dir = write_graph(&[node("x-997a", "fewer-gated")]);
+        let dir = write_graph(&[node("x-cccc", "fewer-gated")]);
         let graph = dir.path().join("graph.json").display().to_string();
         let args = vec![
             "-J".to_string(),
-            "x-997a".to_string(),
+            "x-cccc".to_string(),
             "--graph".to_string(),
             graph,
         ];

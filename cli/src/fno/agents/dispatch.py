@@ -262,7 +262,7 @@ class DispatchAskResult:
     short_id: str
     reply: Optional[str] = None
     duration_ms: Optional[int] = None
-    # v23 (x-2019): the create path's substitution verdict, passed through to
+    # v23 : the create path's substitution verdict, passed through to
     # the caller's receipt. None means unknown-or-match.
     model_substituted: Optional[dict] = None
 
@@ -417,7 +417,7 @@ _DEFAULT_FOLLOWUP_TIMEOUT_SEC = 600.0
 def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
     """Validate a harness at the thread/headless spawn seam.
 
-    Substrate-aware (x-43bd): membership in ``SPAWN_HARNESSES`` says a seam
+    Substrate-aware : membership in ``SPAWN_HARNESSES`` says a seam
     arm exists, and the capability row says which of the two lanes it opens.
     A harness whose ``state_root_grant`` stance for the requested substrate
     reads ``"unmeasured"`` is refused here rather than silently inheriting a
@@ -449,7 +449,7 @@ def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
     from fno.agents.harness_map import is_declared
 
     if not is_declared(name):
-        # x-f579: an undeclared harness HAS a lane - the pane - so this refusal
+        # an undeclared harness HAS a lane - the pane - so this refusal
         # must name that lane rather than the accept set. It must not fall into
         # the deprecated-harness text below either: that one names agy as a
         # successor, a harness the operator never mentioned (the same trap the
@@ -463,7 +463,7 @@ def _check_spawn_harness(name: str, *, headless: bool = False) -> None:
             "If you meant a model VENDOR, that is -P/--provider.",
             exit_code=2,
         )
-    # One builder, shared with the `dispatch-lanes` seam (x-d145): the pane
+    # One builder, shared with the `dispatch-lanes` seam : the pane
     # sentence derives from the tuple here too, so neither seam can name a
     # harness the other has since admitted.
     raise DispatchAskError(
@@ -605,7 +605,7 @@ def _derive_log_path(name: str) -> Path:
 
 def _touch_log_path(name: str) -> Optional[Path]:
     """Create (or reuse) the log file a mint site is about to record as a
-    registry row's ``log_path`` (x-7bcd AC4): a ``log_path`` pointing at
+    registry row's ``log_path`` (AC4): a ``log_path`` pointing at
     nothing is a claim, not evidence, so the file must exist before the row
     does. Returns ``None`` on a failed create (disk full, EROFS, a
     permission error) instead of raising or returning a path nothing backs,
@@ -731,7 +731,7 @@ def _codex_create_path(
     assert session_id is not None  # codex.create raises NoSessionIdError otherwise
 
     # The parent edge is captured BEFORE the row so the durable registry row
-    # and the lifecycle event name the same parent (x-132c: this path used to
+    # and the lifecycle event name the same parent (: this path used to
     # stamp the event only, leaving the row - the surface consumers read -
     # without lineage).
     _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
@@ -754,7 +754,7 @@ def _codex_create_path(
         model_name=result.model or None,
         # The THIRD Python mint path; codex_ask.rs stamps the same field.
         origin="spawn",
-        # x-98ab: the node this spawn was FOR (the caller's provenance pass),
+        # the node this spawn was FOR (the caller's provenance pass),
         # never this process's ambient value.
         node=node,
         # The one-shot codex create lane: non-interactive by construction.
@@ -784,7 +784,7 @@ def _codex_create_path(
             exit_code=12,
         ) from exc
 
-    # Spawn birth (x-8cd5 Wave 6): the codex create path is the third spawn
+    # Spawn birth (Wave 6): the codex create path is the third spawn
     # seam after _claude_create_path and mux_spawn, and was the one a death
     # could dangle from. Emit to the daemon lifecycle log with the parent edge
     # (captured above, alongside the row's own stamp).
@@ -822,7 +822,7 @@ def _codex_create_path(
     )
 
 
-# Moved to fno.agents.spawn_lineage (x-5c25, file budget); re-exported here.
+# Moved to fno.agents.spawn_lineage (file budget); re-exported here.
 from fno.agents.spawn_lineage import (  # noqa: E402
     _capture_parent_edge,
     _report_unlinked_parent,
@@ -1004,7 +1004,7 @@ def _lane_b_thread_spawn(
     passthrough: Optional[Sequence[str]] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
 ) -> dict:
-    """Host a lane-B harness thread on a pane-less keeper (x-889a).
+    """Host a lane-B harness thread on a pane-less keeper.
 
     A lane-B harness (``thread_lane`` == ``"keeper"``: a transcript on disk
     but no live process fno could hand a session to) gets its thread by fno
@@ -1018,7 +1018,7 @@ def _lane_b_thread_spawn(
     ships resolves the id into a Drive-tier attach id with no
     ``agents_view.rs`` edit.
 
-    Wired into :func:`dispatch_spawn` as of x-43bd: the pi thread branch
+    Wired into :func:`dispatch_spawn` as of : the pi thread branch
     calls this after the seam check, and the journey
     (cli/tests/agents/test_pi_spawn_journey.py) enters through the public
     ``fno agents spawn -H pi --substrate thread`` surface. Lane A (claude,
@@ -1257,7 +1257,7 @@ def _keeper_seed_submit(
 ) -> None:
     """Deliver a thread spawn's seed to its keeper-hosted TUI.
 
-    A spawn that leaves the worker idle is the x-f22f shape: a row that did
+    A spawn that leaves the worker idle is the shape: a row that did
     nothing. The keeper honors Input only from its ONE subscriber seat
     (first come, first seated) and never replays its ring to a late
     connection, so this drives the whole seed dance on ONE connection taken
@@ -1447,7 +1447,7 @@ def _claude_create_path(
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
-    # x-50d0: the row this resume forks FROM (fork_lineage.lineage_row_for);
+    # the row this resume forks FROM (fork_lineage.lineage_row_for);
     # states every axis the caller left unstated.
     lineage_row: object | None = None,
     # The model token the ROUTE named (-P vendor/model or --route
@@ -1466,17 +1466,17 @@ def _claude_create_path(
     ``agent_ask_failed``.  On registry-write failure, detaches the lock
     (AC1-FR) and surfaces the orphaned short_id in the error message.
 
-    x-dfa4: ``--yolo`` maps to bypassPermissions for claude (was a no-op); an
+    : ``--yolo`` maps to bypassPermissions for claude (was a no-op); an
     explicit ``permission_mode`` wins (the two are mutually exclusive upstream).
     """
-    # x-dfa4: fold --yolo -> bypassPermissions; an explicit mode wins. Both unset
+    # fold --yolo -> bypassPermissions; an explicit mode wins. Both unset
     # leaves the argv byte-identical to today (matches the Rust bg path).
     effective_mode = permission_mode or ("bypassPermissions" if yolo else None)
 
     from fno.agents.harnesses import claude as claude_mod
     from fno.harness_identity import claude_transport_short_id
 
-    # x-9844 Lane 2 / x-7fef: every resume takes the session single-writer
+    # Lane 2 / every resume takes the session single-writer
     # claim here, PINNED to the spawned supervisor's pid, and it deliberately
     # outlives this process: a dead supervisor makes it dead-pid (the next
     # acquire reclaims it) and a live one refuses a second writer - unlike a
@@ -1576,7 +1576,7 @@ def _claude_create_path(
                 time.sleep(_PIN_LOOKUP_BACKOFF_S)
         return False
 
-    # x-ae2d: materialize the route file BEFORE the supervisor exists; at
+    # materialize the route file BEFORE the supervisor exists; at
     # row-write time its I/O would sit after the launch and an OSError strands
     # a live supervisor with no row. Content-addressed, so this is the path
     # bg_create resolves (including the account overlay). Route-bearing rows
@@ -1589,7 +1589,7 @@ def _claude_create_path(
         else None
     )
 
-    # x-42c5, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.
+    #, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.
     # bg_create snapshots dict(os.environ) to build the NEW worker's own
     # persistent env; popping post-call is too late, the snapshot already
     # happened and the var would ride into that worker's environment (see
@@ -1657,11 +1657,11 @@ def _claude_create_path(
     short_id = result.session_id_out
     assert short_id is not None  # parse_short_id raises otherwise
 
-    # x-7fef: re-pin the claim off this transient process and onto the spawned
+    # re-pin the claim off this transient process and onto the spawned
     # supervisor, so the claim lives and dies with the writer it guards.
     pinned_to_supervisor = _pin_claim_to_supervisor(short_id)
 
-    # Best-effort full session-UUID capture (ab-f1b0ccd1, AC1-HP): persisted for
+    # Best-effort full session-UUID capture (AC1-HP): persisted for
     # the stream-json adopt lane; a miss leaves None and never gates the launch.
     # A revival records the SOURCE conversation's id - the `spawn --resume` door
     # forks by construction (claude mints a fresh uuid), announced below.
@@ -1669,11 +1669,11 @@ def _claude_create_path(
         resume_session_id if revive else claude_mod.resolve_session_uuid_at_spawn(short_id)
     )
 
-    # v23 (x-2019): reconcile the REQUEST with the session's observed model so a
+    # v23 : reconcile the REQUEST with the session's observed model so a
     # silent substitution is named, not remembered. A fresh spawn with no sample
     # yet probes `no-model-yet` and stays silent (an unanswered probe is not a
     # verdict); a REVIVE reads history, so its answer is deterministic here.
-    # x-50d0: an inherited lineage model is part of the request, so the probe
+    # an inherited lineage model is part of the request, so the probe
     # sees it instead of reading a real substitution as no request at all.
     src = lineage_row
     lineage_model = fork_lineage.inherited_model(src, model, route_model)
@@ -1720,9 +1720,9 @@ def _claude_create_path(
             file=sys.stderr,
         )
 
-    # Capture the spawning session's ambient identity (Task 2.2, x-30f6).
+    # Capture the spawning session's ambient identity (Task 2.2).
     # Best-effort: never raises, degrades to (None, None, None) when absent.
-    # spawn_trigger was already popped before bg_create above (x-42c5 ordering fix).
+    # spawn_trigger was already popped before bg_create above (ordering fix).
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
     lineage_reason = _report_unlinked_parent(spawned_by_session)
 
@@ -1732,7 +1732,7 @@ def _claude_create_path(
     # its own grantor proves nothing.
     crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
 
-    # Registry write. Create the file the row records (x-7bcd AC4): a
+    # Registry write. Create the file the row records (AC4): a
     # log_path pointing at nothing is a claim, not evidence, and the
     # resolvable-handle guard only checks the field is non-empty, not that
     # the file exists.
@@ -1751,11 +1751,11 @@ def _claude_create_path(
         cwd=str(cwd),
         log_path=str(touched_log_path) if touched_log_path is not None else "",
         short_id=short_id,
-        # Canonical identity at birth (x-ec59): a bg claude row is born routable
+        # Canonical identity at birth : a bg claude row is born routable
         # by name. A raced uuid-resolution miss leaves harness_session_id None;
         # reconcile / send-time heal backfills it.
         harness="claude",
-        # x-50d0: provider/model/requested axes and the predecessor edge come
+        # provider/model/requested axes and the predecessor edge come
         # from fork_lineage.axis_overrides - lineage row where the caller was
         # silent, byte-identical stamps where there is none.
         **fork_lineage.axis_overrides(
@@ -1782,20 +1782,20 @@ def _claude_create_path(
         # every row born here ran the detached thread. The event this path
         # emits already says substrate="thread".
         substrate="thread", fno_id=session_uuid or short_id,
-        # x-ae2d: the route this launch got, so a relaunch can come back on it.
+        # the route this launch got, so a relaunch can come back on it.
         # ROUTE only, never an account overlay: the account settings file omits
         # CLAUDE_CONFIG_DIR by construction (it cannot live in a file read FROM
         # that config), so recording it would promise a restore that silently
         # leaves the account behind. Resolved before the launch (above) so its
         # I/O cannot strand a live supervisor.
         route_settings_path=route_settings_path,
-        # x-d285: the account axis, resolved by the caller (explicit > picked >
+        # the account axis, resolved by the caller (explicit > picked >
         # "default" on a fresh spawn; the source row's value on a revive; None
         # when the evidence is genuinely absent). Stamped verbatim - this seam
         # does not guess, because a silent default is how the wrong bill gets
         # paid.
         launch_account=launch_account,
-        # x-98ab: the node this spawn was FOR, resolved by the caller's
+        # the node this spawn was FOR, resolved by the caller's
         # provenance pass - never this process's ambient value, which names
         # the SPAWNING session's node.
         node=node,
@@ -1812,7 +1812,7 @@ def _claude_create_path(
     king_loop_armed: Optional[bool] = None
     king_unarmed_reason = ""
 
-    # x-9844 Fix 3: a revival REPLACES the existing exited same-name row in place
+    # Fix 3: a revival REPLACES the existing exited same-name row in place
     # (never appends a duplicate name). The load-modify-write is atomic under
     # update_registry's own lock, so a concurrent reader sees the old exited row
     # or the new live row, never a torn/absent state.
@@ -1821,7 +1821,7 @@ def _claude_create_path(
         nonlocal crown_outcome, crown_cleared
         nonlocal king_loop_armed, king_unarmed_reason
         entry = new_entry
-        # One-live-crown guard (x-7685), inside the write lock so the check and
+        # One-live-crown guard, inside the write lock so the check and
         # the stamp are atomic against a racing spawn. If a non-terminal row
         # already reigns over this scope, decline the crown and spawn UNCROWNED
         # rather than refuse the spawn: an uncrowned worker can still be given the
@@ -1916,7 +1916,7 @@ def _claude_create_path(
             )
             print(f"spawn: crown over {crown_scope!r} recorded; {tail}", file=sys.stderr)
     except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
-        # Birth's failure counterpart (x-8cd5 Wave 6): the supervisor launched
+        # Birth's failure counterpart (Wave 6): the supervisor launched
         # but no registry row names it, so without this the orphan's later
         # death would join no birth in the daemon log.
         events.emit_spawn_failed(
@@ -1936,7 +1936,7 @@ def _claude_create_path(
         # mid-cycle: the subprocess already created the
         # supervisor, so the orphan signal stays valid.
         lock_handle.detach()
-        # x-7fef: do NOT release the writer claim here. The orphaned supervisor
+        # do NOT release the writer claim here. The orphaned supervisor
         # is the transcript's writer even though no registry row names it, so a
         # supervisor-pinned claim is the only thing that stops a later wake from
         # opening a second one.
@@ -1970,9 +1970,9 @@ def _claude_create_path(
             exit_code=12,
         ) from exc
 
-    # x-7fef degrade: the supervisor pid was never resolved (sidecar race), so
+    # degrade: the supervisor pid was never resolved (sidecar race), so
     # the claim is still pinned to this exiting process and would go dead-pid on
-    # exit anyway. Fall back to the pre-x-7fef lifetime - release and warn -
+    # exit anyway. Fall back to the pre-change lifetime - release and warn -
     # rather than leave a claim whose pid lies about who is writing.
     if writer_claim_holder is not None and resume_session_id and not pinned_to_supervisor:
         _release_writer_claim()
@@ -1983,7 +1983,7 @@ def _claude_create_path(
             file=sys.stderr,
         )
 
-    # Spawn birth (x-30f6, x-8cd5 Wave 6): exactly one per successful create,
+    # Spawn birth (Wave 6): exactly one per successful create,
     # written to the daemon lifecycle log so it joins the death events the
     # daemon emits there (agent_orphan_reaped / agent_row_reaped / etc.).
     events.emit_spawned(
@@ -2103,7 +2103,7 @@ def _is_revival(
     existing: "AgentEntry", provider: str, resume_session_id: Optional[str]
 ) -> bool:
     """True iff spawning an existing same-name row with ``--resume`` is a revival,
-    not a collision (x-9844 Fix 3).
+    not a collision (Fix 3).
 
     Gated on: the spawn carries ``--resume``, both the spawn and the row are
     claude, the row's own recorded ``claude_session_uuid`` equals the ``--resume``
@@ -2137,7 +2137,7 @@ def _is_revival(
 
 
 def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str]]:
-    """The route a relaunch of ``entry`` must come back on, or ``None`` (x-ae2d).
+    """The route a relaunch of ``entry`` must come back on, or ``None``.
 
     The claude relaunch door: a ``--resume`` revive starts a NEW supervisor, and
     its route comes only from the flags on THAT invocation, so a revive issued
@@ -2153,7 +2153,7 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
     under, which is a behavior change wearing the word "resume". The one
     exception is the provider-DEFAULT haiku tier: that value was never the
     operator's choice, so it re-resolves against today's registry (the
-    2026-08-17 operator rule, x-5cc5) with a stderr note naming the move.
+    2026-08-17 operator rule) with a stderr note naming the move.
 
     Raises:
         DispatchAskError: exit 2, when the row names a route file that is gone
@@ -2215,7 +2215,7 @@ def _pick_account_overlay(
     """Consult the picker for a spawn that named no account, or None.
 
     Returns the full :class:`AccountOverlay` (env AND account_id), because the
-    spawn seams stamp the picked id on the row's ``launch_account`` (x-d285);
+    spawn seams stamp the picked id on the row's ``launch_account`` ;
     the env alone drops the one fact re-entry needs.
 
     Advisory in every direction (see :func:`pick_account_id`): a routed spawn
@@ -2410,12 +2410,12 @@ def dispatch_spawn(
     Raises:
         :class:`DispatchAskError`: every documented failure mode.
     """
-    # 0. Launch-time headroom picking (x-7d45): fills the gap only when no
+    # 0. Launch-time headroom picking : fills the gap only when no
     # --account was given, before the tier-remap check so that check sees the
     # real overlay. One of the two spawn seams - the default `pane` substrate
     # never reaches here and calls the same helper itself. A --resume spawn is
     # never picked for (the transcript lives under its birth config dir).
-    # x-d285: a picked overlay names its account id; launch_account wins.
+    # a picked overlay names its account id; launch_account wins.
     effective_launch_account = launch_account
     launch_account_source = launch_provenance.seam_launch_source(launch_account)
     if account_env is None and harness == "claude" and not resume_session_id:
@@ -2678,7 +2678,7 @@ def dispatch_spawn(
                     exit_code=12,
                 )
 
-            # Revive-in-place (x-9844 Fix 3): a --resume spawn whose target uuid
+            # Revive-in-place (Fix 3): a --resume spawn whose target uuid
             # matches an EXITED same-name claude row is a revival, not a
             # collision - the row is updated in place below (new short_id, same
             # uuid) instead of refused. Every other same-name case stays
@@ -2692,7 +2692,7 @@ def dispatch_spawn(
                     exit_code=2,
                 )
 
-            # x-ae2d: a revive must come back on the route the row was born with
+            # a revive must come back on the route the row was born with
             # unless this invocation resolved one of its own; raises exit 2 when
             # the recorded route is unrestorable. Keyed on the RESOLVED route,
             # never on --role being mentioned: resolve_route is fail-SAFE, so
@@ -2711,14 +2711,14 @@ def dispatch_spawn(
                     ),
                     None,
                 )
-            # x-d285: the minted row's account axis. A fresh spawn positively
+            # the minted row's account axis. A fresh spawn positively
             # knows (explicit id, picked id, "default"); a revive's account is
             # a fact about the SOURCE row, resolved by uuid alone. No source
             # evidence means unknown (None), never "default": stamping default
             # on a revive is the silent wrong-account re-entry.
             row_launch_account = effective_launch_account
             row_launch_account_source = launch_account_source
-            # x-50d0: the row this resume forks FROM, matched by uuid alone.
+            # the row this resume forks FROM, matched by uuid alone.
             lineage_row = fork_lineage.lineage_row_for(entries, resume_session_id)
             if lineage_row is not None and node is None:
                 # A wake fork (new name, no caller node) carries the lineage
@@ -2770,7 +2770,7 @@ def dispatch_spawn(
                             exit_code=2,
                         )
                     # An explicit --account COMPOSES with the restored route, the
-                    # same way it composes with a flag-supplied one (x-5ed4): the
+                    # same way it composes with a flag-supplied one : the
                     # route wins endpoint+auth+model as one unit through the
                     # settings file, and the account's CLAUDE_CONFIG_DIR rides the
                     # spawn env to select the per-account daemon. Nothing here
@@ -2952,7 +2952,7 @@ def dispatch_spawn(
                     )
 
                 # 4b2. opencode bg: delegate to the Rust serve lane. This arm
-                # exists because node dispatch (x-84a8) forces spawn onto the
+                # exists because node dispatch forces spawn onto the
                 # Python parser, and without the arm an opencode bg spawn died
                 # on the retired-gemini fallthrough. The resolved node is
                 # carried explicitly into the Rust serve lane; role, resume, and crown
@@ -3002,7 +3002,7 @@ def dispatch_spawn(
                     # nothing and the worker would launch on the AMBIENT account.
                     # Refuse instead. Silently billing the wrong account is the
                     # failure --account and --dispatch-account are both
-                    # fail-closed to prevent (x-c33e).
+                    # fail-closed to prevent.
                     if account_env:
                         raise DispatchAskError(
                             "a pinned account is not carried on the codex "
@@ -3113,10 +3113,10 @@ class ReconcileResult:
     skipped: list[dict] = field(default_factory=list)
     errors: list[dict] = field(default_factory=list)
     # Live rows whose null canonical harness_session_id reconcile healed from the
-    # harness store (x-ec59). Empty list (not absent) distinguishes "ran, nothing
+    # harness store. Empty list (not absent) distinguishes "ran, nothing
     # to heal" from "healed": each entry is {name, provider, harness_session_id}.
     backfilled: list[dict] = field(default_factory=list)
-    # x-d914: rows whose structurally impossible mux ref reconcile cleared. Each
+    # rows whose structurally impossible mux ref reconcile cleared. Each
     # entry is {name, provider, harness, cleared_mux}; empty list = ran, nothing
     # to clear.
     mux_cleared: list[dict] = field(default_factory=list)
@@ -3872,7 +3872,7 @@ def _stop_agent_inner(
                     exit_code=1,
                 )
 
-            # x-dead task 3.1: the shellout's receipt is verified before the
+            # task 3.1: the shellout's receipt is verified before the
             # word `stopped` prints.
             _mark_stopped_orphaned(name, existing)
             receipt = wake_set_refusal(name, short_id, existing)
@@ -3959,11 +3959,11 @@ def reconcile_agents(
     skipped: list[dict] = []
     errors: list[dict] = []
     backfilled: list[dict] = []
-    # x-d914: rows whose structurally impossible mux ref was cleared (each
+    # rows whose structurally impossible mux ref was cleared (each
     # entry carries the cleared ref), with one ``mux_ref_cleared`` event each.
     mux_cleared: list[dict] = []
     # name -> (probed short_id, resolved harness_session_id) for a live row
-    # whose canonical id never landed (x-ec59). Folded into the SAME batched
+    # whose canonical id never landed. Folded into the SAME batched
     # update_registry write as the status flips, so no new write cycle or lock
     # scope appears. The probed short_id is retained so the write only stamps a row
     # that STILL matches what we probed: a slow reconcile can race a rm + same-name
@@ -3993,7 +3993,7 @@ def reconcile_agents(
     # registry mtime never changes.
     pending_updates: dict[str, tuple[AgentEntry, AgentStatus]] = {}
 
-    # x-d914: a mux ref that names no pane (a default-zero, an empty dict) is a
+    # a mux ref that names no pane (a default-zero, an empty dict) is a
     # wrong value, and a wrong value is worse than no value -- 49 of 51 live
     # rows carry ``mux: None`` and every reader handles that, while the broken
     # shape made six live workers unreachable in every mux path. Queue the
@@ -4100,7 +4100,7 @@ def reconcile_agents(
             # An id-less persistent pane can be healthy while Codex is still
             # creating its rollout. Heal it from the pane's own process tree;
             # the session index is not needed for this correlation. Gated on
-            # ref VALIDITY, not truthiness (x-d914): a ref that names no pane
+            # ref VALIDITY, not truthiness : a ref that names no pane
             # must not send the row down the pane arm.
             if not entry.harness_session_id and mux_ref_names_a_pane(entry.mux):
                 if entry.status in _TERMINAL_AGENT_STATUSES:
@@ -4316,7 +4316,7 @@ def reconcile_agents(
             # Deliberately ahead of the claude-on-PATH guard: this probes the mux
             # and the pid, never the claude CLI, so a host where claude was
             # removed can still retire a provably dead pane. Gated on ref
-            # VALIDITY, not truthiness (x-d914): a ref that names no pane is
+            # VALIDITY, not truthiness : a ref that names no pane is
             # not a pane row and must not be pane-probed.
             if mux_ref_names_a_pane(entry.mux):
                 if entry.status in _TERMINAL_AGENT_STATUSES:
@@ -4499,7 +4499,7 @@ def reconcile_agents(
                     continue
                 new_status = "live" if reachable else "orphaned"
 
-                # US4 heal (x-ec59): a live claude row whose canonical id never landed
+                # US4 heal : a live claude row whose canonical id never landed
                 # (the uuid resolution raced at spawn) is unroutable-but-live. Resolve
                 # it from claude's own store -- the same jsonl the liveness probe just
                 # read -- and fold the write into reconcile's single batched cycle. A
@@ -5036,7 +5036,7 @@ def _daemon_rpc(
 # read_timeout exceeds the daemon's per-turn ceiling
 # (SWITCHBOARD_TURN_TIMEOUT_MS=120s) plus its 5s grace, so a real reply is never
 # cut short and the client never abandons a turn the daemon is still driving.
-# The detached background relay continuation (_relay_worker_loop, x-1f23) runs
+# The detached background relay continuation (_relay_worker_loop) runs
 # off-thread and wants the full ceiling for its own reason: a genuine multi-hop
 # stream exchange. The first hop needs the same number for the reason below.
 _SWITCHBOARD_READ_TIMEOUT = 130.0
@@ -5089,7 +5089,7 @@ def _load_a2a_settings() -> tuple[bool, int]:
 
 def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
     """Wrap a relay hop body in the peer's ``<fno_mail>`` envelope, or return it
-    raw when no context is supplied (an unwrapped hop) (node x-1f23). The stream-json
+    raw when no context is supplied (an unwrapped hop) (node). The stream-json
     switchboard injects a whole turn, so this uses the paired multiline form, not
     the relay single-line PTY variant."""
     if ctx is None:
@@ -5169,7 +5169,7 @@ def _run_relay_loop(
                     "to": target,
                     "from": peer,
                     # Wrap each continuation in the sending peer's <fno_mail> so the
-                    # relay turn carries provenance, not just the seed (node x-1f23).
+                    # relay turn carries provenance, not just the seed (node).
                     "body": _wrap_relay_body(cur, (mail_ctxs or {}).get(peer)),
                     "mirror": False,
                     "recipient_identity": target_identity,
@@ -5237,7 +5237,7 @@ def _kickoff_background_relay(
     recipient_identities: "Mapping[str, SwitchboardIdentity]",
 ) -> None:
     """Run the A2A relay in a DETACHED background process so the caller returns
-    immediately (ab-3bd520ab).
+    immediately.
 
     The relay is autonomous — no human waits on it — so blocking the
     ``fno agents mail send`` caller for up to ``turn_ceiling × 130s`` was pure
@@ -5327,7 +5327,7 @@ def _a2a_first_use_gate(
     confirm_timeout_seconds: float = _A2A_CONFIRM_TIMEOUT_SECONDS,
     config_lock_timeout_seconds: float = _A2A_CONFIG_LOCK_TIMEOUT_SECONDS,
 ) -> bool:
-    """First-use confirm for the autonomous a2a relay (US6, ab-098967b4).
+    """First-use confirm for the autonomous a2a relay (US6).
 
     Returns the EFFECTIVE ``auto`` after gating. Only the autonomous relay
     (``auto=True``) is gated; observed mode (``auto=False``, incl. the
@@ -5445,7 +5445,7 @@ def _switchboard_exchange(
 ) -> Optional[bool]:
     """Drive a stream-json switchboard exchange (Group 2, Tasks 3.1 + 4.1).
 
-    ``mail_ctxs`` (node x-1f23) maps each endpoint name to its ``<fno_mail>``
+    ``mail_ctxs`` (node) maps each endpoint name to its ``<fno_mail>``
     sender context. When set (the mail-send path), every autonomous relay
     continuation is wrapped so later peer turns keep provenance, not just the
     seed. An unwrapped hop passes None, so the raw path stays unchanged.
@@ -5462,13 +5462,13 @@ def _switchboard_exchange(
     bounded autonomous relay that follows (drive A with B's reply, then B with
     A's reply, ... up to ``config.agents.a2a.turn_ceiling`` total turns) is
     kicked off in a DETACHED background process and the caller returns
-    ``True`` immediately (ab-3bd520ab) — it no longer blocks for up to
+    ``True`` immediately — it no longer blocks for up to
     ``turn_ceiling × 130s``, so the relay hop keeps the full ceiling: nothing
     is waiting on it. When ``auto`` is False, a single OBSERVED hop drives B
     and mirrors B's reply into A's view, with no autonomous relay.
     """
     auto, ceiling = _load_a2a_settings()
-    # US6 (ab-098967b4): the first-use confirm gates the first autonomous hop.
+    # US6 : the first-use confirm gates the first autonomous hop.
     # On a no / headless / unconfirmed gate this downgrades to observed mode, so
     # the hop below runs as a single mirrored hop with no autonomous relay.
     auto = _a2a_first_use_gate(auto, ceiling)
@@ -5528,7 +5528,7 @@ def _switchboard_exchange(
 # for ~10s (40 * 250ms) before reporting not-confirmed; give it headroom.
 _MAIL_INJECT_TIMEOUT_S = 20.0
 
-# Liveness-scaled confirm budget (node x-1904, change 2). The enqueue record is
+# Liveness-scaled confirm budget (node, change 2). The enqueue record is
 # written at submit time, not at turn end, so a healthy busy recipient confirms
 # in well under a second -- the default 10s budget already exists only to cover
 # recipients the daemon successfully attached to, i.e. ones already proven
@@ -5574,7 +5574,7 @@ from fno.agents.mail_ctx import _MailCtx, _build_mail_ctx  # noqa: E402
 _WAKE_NAME_PREFIX = "wake-"
 
 
-# Poll budget for the mux lane's content confirm (node x-1904, change 3),
+# Poll budget for the mux lane's content confirm (node, change 3),
 # matched to the claude control.sock lane's default (crates/fno-agents/src/
 # mail_inject.rs DEFAULT_ATTEMPTS/DEFAULT_INTERVAL_MS): 40 * 250ms = 10s. Kept
 # in parity so neither keystroke lane is structurally more patient than the
@@ -5637,7 +5637,7 @@ def _mux_pane_send(
     claim is best-effort (an unclaimed pane refuses the acquire; send proceeds),
     but a failed send fails closed -> durable.
 
-    ``confirm`` (node x-1904, mail-delivery default): the mux lane had no
+    ``confirm`` (node, mail-delivery default): the mux lane had no
     confirm at all before this -- the busy-veto stood in for one, wrongly,
     since it refused before any byte was written rather than checking whether
     the byte landed. When set, a bytes-written success from the unguarded paste
@@ -5687,7 +5687,7 @@ def _mux_pane_send(
     if not session or pane_id is None:
         _record_failure("pre-submit")
         return False
-    # x-e21e: the entry IS the row, so the bus-only gate reads it directly --
+    # the entry IS the row, so the bus-only gate reads it directly --
     # a bus-only recipient never gets a pane paste, same as the control.sock
     # and codex lanes.
     if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
@@ -5696,7 +5696,7 @@ def _mux_pane_send(
     from fno.agents.harness_map import capabilities_or_undeclared
 
     harness = getattr(entry, "harness", "") or ""
-    # x-f579: the posture answers submit_keys=[enter] for an undeclared
+    # the posture answers submit_keys=[enter] for an undeclared
     # harness, so the pane delivery arm below runs for it unchanged. Its
     # `["unsupported"]` refusal names harness_capabilities.toml, which stays
     # correct for declared harnesses and unreachable for undeclared ones.
@@ -5735,7 +5735,7 @@ def _mux_pane_send(
     except (KeyError, TypeError):
         _record_failure("pre-submit")
         return False
-    # Envelope by default (node x-3a64): every agent-to-agent pane drive carries
+    # Envelope by default (node): every agent-to-agent pane drive carries
     # the same attribution the mail lane produces, and the read-back gate refuses
     # a pane showing an option prompt (a submit there dismisses the payload and
     # selects the highlighted default). `raw=True` is the keystroke opt-out.
@@ -5788,7 +5788,7 @@ def _mux_pane_send(
             _record_failure("pre-submit")
             return False
 
-    # Audit floor (x-91ba): the row this pane write leaves is written by the
+    # Audit floor : the row this pane write leaves is written by the
     # Rust verb itself (`fno mux pane send`), one layer below, so it covers a
     # direct caller too. This lane only DECLARES its provenance (--source) so
     # the floor's row joins the bus record; it must not write a second row of
@@ -6105,7 +6105,7 @@ def _mux_pane_send(
         _record_failure("pre-submit")
         return False
     if not claimed and _MUX_CLAIM_HELD_MARKER in claim_detail:
-        # x-4b0b review finding: the settle window between paste and CR is a
+        # review finding: the settle window between paste and CR is a
         # single-writer window. A HELD claim means another writer is mid-burst
         # on this pane; pasting now interleaves two envelopes under one CR,
         # which submits both concatenated. Wait out the concurrent burst, then
@@ -6190,7 +6190,7 @@ def mail_inject_probe(recipient: str) -> tuple[bool, str]:
         return False, "probe-unavailable"
 
 
-#: The one delivery-policy value that forbids prompt-line injection (x-e21e).
+#: The one delivery-policy value that forbids prompt-line injection.
 #: A DELIVERY-POLICY fact, never a liveness verdict: a bus-only session may be
 #: alive and mid-turn, it just belongs on the durable bus. Kept as a literal
 #: (compared everywhere) because the registry field is an open
@@ -6200,7 +6200,7 @@ BUS_ONLY_POLICY = "bus-only"
 
 def _mux_recipient_transcript(entry: "AgentEntry") -> Optional[Path]:
     """Locate the mux recipient's OWN claude transcript by session uuid, the
-    confirm target for :func:`_mux_pane_send`'s ``confirm`` mode (node x-1904).
+    confirm target for :func:`_mux_pane_send`'s ``confirm`` mode (node).
 
     Reuses the resolver `fno.doctor._find_transcript_for` already used for the
     self-diagnostic surface rather than writing a second transcript-by-uuid
@@ -6226,7 +6226,7 @@ def _mux_content_confirm(
     interval_s: float = _MUX_CONFIRM_INTERVAL_S,
 ) -> bool:
     """Poll ``transcript`` for ``marker`` in lines appended after ``since_byte``
-    (node x-1904, change 3): content, not growth, mirroring the claude
+    (node, change 3): content, not growth, mirroring the claude
     control.sock lane's ``confirm_content_after``/``escaped_marker`` pair
     (``crates/fno-agents/src/mail_inject.rs``) so both keystroke lanes confirm
     delivery the same way. ``marker`` is escaped the same way ``json.dumps``
@@ -6261,7 +6261,7 @@ def _mux_content_confirm(
 
 
 def _hold_lapsed_for(entry) -> bool:
-    """True when ``entry``'s ``bus-only`` flag no longer holds mail (x-481e).
+    """True when ``entry``'s ``bus-only`` flag no longer holds mail.
 
     Busy mode arms the flag with a clock (``fno.mail.hold``). A row with no
     clock under any of its addresses is not a busy-mode hold at all - it is a
@@ -6350,7 +6350,7 @@ def _mail_inject_keeper(
     sender: Optional[str] = None,
     reason_out: Optional[list] = None,
 ) -> bool:
-    """Inject ``text`` into a keeper-hosted lane-B thread (x-0ea6) via the
+    """Inject ``text`` into a keeper-hosted lane-B thread via the
     ``fno-agents mail-inject --harness <hosted>`` verb.
 
     ``harness`` is the hosted harness from the recipient's row. It names the
@@ -6373,7 +6373,7 @@ def _mail_inject_keeper(
         if reason_out is not None:
             reason_out.append(reason)
 
-    # x-e21e, same discipline as lane A: a bus-only recipient gets no prompt-
+    #, same discipline as lane A: a bus-only recipient gets no prompt-
     # line paste on any transport, refused before the binary and the socket.
     if _delivery_policy_refusal(recipient) == BUS_ONLY_POLICY:
         _record(BUS_ONLY_POLICY)
@@ -6401,14 +6401,14 @@ def _mail_inject_claude(
     self_send: bool = False,
 ) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
-    via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
+    via the ``fno-agents mail-inject`` verb (G1 substrate, node).
 
     Returns True only when the verb confirms the turn landed in the recipient
     transcript; any miss (binary absent, recipient not on the roster, not
     confirmed within the poll budget) returns False so the caller writes the
     durable fallback.
 
-    ``reason_out`` (node x-1904), when a non-empty list, receives the verb's own
+    ``reason_out`` (node), when a non-empty list, receives the verb's own
     reason token (not-confirmed / attach-failed / io-error / no-transcript /
     not-injectable / unsafe-text) so a durable demotion receipt can name WHY the
     live lane missed instead of a generic live-miss. It is a side-channel rather
@@ -6417,7 +6417,7 @@ def _mail_inject_claude(
     unparseable stdout names that boundary too, so the receipt never silently
     reverts to a bare live-miss at the Python edge.
 
-    ``liveness_scaled`` (node x-1904, change 2): pass the raised confirm budget
+    ``liveness_scaled`` (node, change 2): pass the raised confirm budget
     (``_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS``) when the caller's OWN liveness
     signal already reports the recipient mid-turn, so a long tool call gets room
     to yield back to the prompt before the confirm gives up. The unscaled
@@ -6429,7 +6429,7 @@ def _mail_inject_claude(
     its own ``from`` in the transcript, an unwrapped one has nowhere else to
     record who fired it.
 
-    ``harness`` (x-4b0b), when the caller already holds the recipient's roster
+    ``harness``, when the caller already holds the recipient's roster
     row, is that row's harness and names the settle-delay table row directly.
     ``None`` resolves it from the roster by session id; a miss (no row, no
     registry, or a harness the table does not know) falls back to claude, the
@@ -6440,7 +6440,7 @@ def _mail_inject_claude(
         if reason_out is not None:
             reason_out.append(reason)
 
-    # x-e21e: a bus-only recipient never gets a prompt-line paste, on any lane
+    # a bus-only recipient never gets a prompt-line paste, on any lane
     # that routes through this injector. Refused BEFORE the binary, the roster,
     # and the socket: no transport call at all.
     if _delivery_policy_refusal(recipient) == BUS_ONLY_POLICY:
@@ -6453,7 +6453,7 @@ def _mail_inject_claude(
         return False
     from fno.agents.harness_map import capabilities, DispatchResolveError
 
-    # x-4b0b: the settle delay belongs to the RECIPIENT's harness row, not to a
+    # the settle delay belongs to the RECIPIENT's harness row, not to a
     # claude constant. A claude-shaped timing sent to another harness's pane
     # decides the CR by the wrong table row. The caller's row wins when held
     # (it is the same lookup without a registry re-read, and it stays correct
@@ -6497,7 +6497,7 @@ def _mail_inject_claude(
     return _run_mail_inject(argv, text, timeout, _record)
 
 
-# Rung-2 (x-eea5 1.1) probe budget: a revived session needs a moment to bind its
+# Rung-2 (1.1) probe budget: a revived session needs a moment to bind its
 # control.sock before the rung-1 inject probe can land. Two short attempts bound
 # the wait; a miss falls through to the fork rung, which still delivers the mail.
 _RESPAWN_REINJECT_ATTEMPTS = 2
@@ -6546,7 +6546,7 @@ def _respawn_claude_session(short_id: str) -> int:
 
 
 def _lineage_seed_prefix(root_uuid: str) -> str:
-    """The one-line lineage marker prefixed to a fork's seed prompt (x-eea5 1.2).
+    """The one-line lineage marker prefixed to a fork's seed prompt (1.2).
 
     Carries the ROOT uuid durably in the transcript so the fork's own fence can
     resolve its lineage. A registry field was the plan's first choice but is
@@ -6664,7 +6664,7 @@ def wake_and_deliver(
     the second wake finds the first's row live and is refused as
     ``wake-already-in-flight``.
 
-    The uuid-scoped single-writer claim lives in ``_claude_create_path`` (x-7fef),
+    The uuid-scoped single-writer claim lives in ``_claude_create_path``,
     not here: it is taken for every resume, pinned to the SPAWNED supervisor's
     pid, and outlives this process. Holding it here instead would pin liveness to
     the short-lived ``fno agents mail send`` process, so the claim would guard only the
@@ -6688,12 +6688,12 @@ def wake_and_deliver(
 
     from fno.harness_identity import claude_transport_short_id, canonical_handle
 
-    # Rung 2 (x-eea5 1.1): an exited-but-rostered session revives IN PLACE via
+    # Rung 2 (1.1): an exited-but-rostered session revives IN PLACE via
     # `claude respawn <shortid>` (identity-preserving: same uuid, one roster
     # row), then the rung-1 inject probe re-runs against the revived session.
     # A respawn miss (claude absent, non-zero) or an inject that still does not
     # land in the probe budget falls through to the fork rung (rung 3) so the
-    # mail is never dropped. The x-7fef single-writer claim still guards rung 3.
+    # mail is never dropped. The single-writer claim still guards rung 3.
     try:
         entry = _roster_entry_for_session(session_uuid)
     except (RegistryVersionError, ValueError):
@@ -6827,7 +6827,7 @@ def wake_and_deliver(
             or getattr(result, "name", "")
             or "unknown"
         )
-        # Rung 3 forked a new incarnation (x-eea5 1.2): make it loud. The receipt
+        # Rung 3 forked a new incarnation (1.2): make it loud. The receipt
         # names both the new handle and the old lineage, and the seed prompt above
         # carried the lineage prefix. A fork is never silent.
         print(
@@ -6927,7 +6927,7 @@ def _mail_inject_codex(
     origin: Optional[str] = None,
 ) -> bool:
     """Inject ``text`` into a live codex session over the app-server daemon socket
-    via the ``fno-agents mail-inject --harness codex`` verb (US8, node x-d899).
+    via the ``fno-agents mail-inject --harness codex`` verb (US8, node).
 
     ``thread_id`` is the codex threadId (full UUID). Returns True only when the
     daemon accepts the turn; any miss (binary absent, no daemon socket, thread
@@ -6935,7 +6935,7 @@ def _mail_inject_codex(
     codex app-server daemon only exists when the user runs it
     (``codex app-server daemon start``); absent it this is a clean no-op.
 
-    ``reason_out`` (x-e21e), when a non-empty list, receives the live lane's
+    ``reason_out``, when a non-empty list, receives the live lane's
     cause on a miss -- the same side-channel contract as
     :func:`_mail_inject_claude`, so a bus-only refusal names itself in the
     caller's receipt instead of reading as a generic live-miss."""
@@ -6943,7 +6943,7 @@ def _mail_inject_codex(
 
     from fno import rust_binary
 
-    # x-e21e: same injector-level gate as the claude lane; see
+    # same injector-level gate as the claude lane; see
     # _delivery_policy_refusal.
     if _delivery_policy_refusal(thread_id) == BUS_ONLY_POLICY:
         if reason_out is not None:
@@ -7074,16 +7074,16 @@ def _deliver_live(
     family1_state: Optional[str] = None,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
-    caller writes the durable fallback when this returns False -- node x-1f23).
+    caller writes the durable fallback when this returns False -- node).
 
-    ``reason_out`` (node x-1904), when a non-empty list, receives the live
+    ``reason_out`` (node), when a non-empty list, receives the live
     lane's own cause (the claude control.sock vocabulary from
     :func:`_mail_inject_claude`, the codex daemon RPC reason, or a mux token) so
     a durable demotion receipt can name WHY the live lane missed instead of a
     generic live-miss. A side-channel, not a second return value, so callers
     and test mocks that read this as a plain bool are unaffected.
 
-    ``family1_state`` (node x-1904, change 2) is the caller's ALREADY-COMPUTED
+    ``family1_state`` (node, change 2) is the caller's ALREADY-COMPUTED
     :func:`_registered_family1_state` classification for ``entry`` -- passed in
     rather than recomputed here, since ``dispatch_send`` already resolves it
     before calling this function and a second call would re-read the recipient
@@ -7097,7 +7097,7 @@ def _deliver_live(
     transport below carries the same wrapped turn, ``agy`` mux entries included.
 
     For claude peers: the ``control.sock`` inject via the ``fno-agents
-    mail-inject`` verb (G1, x-26df) is the live primitive for adopted
+    mail-inject`` verb (G1) is the live primitive for adopted
     ``claude --bg`` sessions, replacing the dead per-worker messaging socket; the
     switchboard / MCP fast lanes still apply first for stream-json / MCP-routed
     peers.
@@ -7182,7 +7182,7 @@ def _deliver_live(
                 or not entry.mux
             ):
                 break
-        # Heal after the pane miss (x-4a68): a codex row whose pane is gone
+        # Heal after the pane miss : a codex row whose pane is gone
         # but whose thread is loaded in the app-server rebinds to the thread
         # lane, and the wrapped body rides turn/start instead of the durable
         # queue. Every other verdict keeps the durable fallback.
@@ -7201,7 +7201,7 @@ def _deliver_live(
                 )
         return False
 
-    # Codex hosted thread (x-de10): the daemon's thread actor drives the turn.
+    # Codex hosted thread : the daemon's thread actor drives the turn.
     # A thread row (harness codex, interactive, no short_id, no mux ref) has
     # neither a pane for _mux_pane_send above nor a live route through
     # agent.deliver below - the Rust daemon does not implement deliver for a
@@ -7222,7 +7222,7 @@ def _deliver_live(
         _record("codex-thread-switchboard-miss")
         return False
 
-    # Keeper-hosted lane-B thread (x-0ea6): the row has neither a pane above
+    # Keeper-hosted lane-B thread : the row has neither a pane above
     # nor a lane-A socket below - its keeper unix socket IS the live
     # transport. The same mail-inject verb drives it with --harness naming the
     # hosted harness (which owns the settle delay and the confirm store); the
@@ -7285,7 +7285,7 @@ def _deliver_live(
     # config.agents.a2a.auto is on) is in _switchboard_exchange. It returns True
     # when delivered via the switchboard, or None to demote to the MCP/socket
     # path below (B not a live stream thread, or daemon unreachable).
-    # node x-1f23: provenance for the autonomous relay continuations. The sender's
+    # node : provenance for the autonomous relay continuations. The sender's
     # ctx wraps A's turns; the recipient's ctx (from/to swapped) wraps B's. None
     # when there is no mail envelope, leaving the relay raw (an unwrapped hop
     # never reaches _deliver_live, unaffected).
@@ -7320,8 +7320,8 @@ def _deliver_live(
         return True
 
     # Live inject over control.sock (adopted `claude --bg`, the fno-agents
-    # mail-inject verb, G1; node x-1f23). This is the SOLE claude live lane: the
-    # PTY worker.sock lane retired with daemon PTY hosting (x-f54c, x-3dac), and
+    # mail-inject verb, G1; node). This is the SOLE claude live lane: the
+    # PTY worker.sock lane retired with daemon PTY hosting, and
     # the redundant MCP-channel fast lane retired here (US5) because it reported
     # hosted on an unconfirmed bytes-written push (Locked Decision 4) while
     # reaching no peer the control.sock lane cannot. The mail-inject verb resolves
@@ -7331,7 +7331,7 @@ def _deliver_live(
     # Recipient resolution guarantees no former MCP recipient is stranded:
     # mcp_channel_id is minted 1:1 from short_id by its sole producer
     # (register_mcp_channel), so it IS a roster-resolvable id. Live rows can carry
-    # an empty plain `short_id` (x-3dac), so mcp_channel_id is the load-bearing
+    # an empty plain `short_id`, so mcp_channel_id is the load-bearing
     # fallback for an MCP-registered row whose short_id field was since cleared.
     recipient = entry.harness_session_id or entry.short_id or entry.mcp_channel_id
     if not recipient:
@@ -7342,7 +7342,7 @@ def _deliver_live(
         wrapped,
         reason_out=reason_out,
         liveness_scaled=family1_state == "working",
-        # x-4b0b: the row is in hand; pass its harness so the settle delay
+        # the row is in hand; pass its harness so the settle delay
         # reads the recipient's table row without a registry re-read (and
         # stays correct when `recipient` is a short_id or mcp_channel_id).
         harness=getattr(entry, "harness", None) or None,
@@ -7619,7 +7619,7 @@ def dispatch_send(
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
-    Live-inject-first (node x-1f23): live delivery is attempted FIRST and the
+    Live-inject-first (node): live delivery is attempted FIRST and the
     durable inbox envelope is written ONLY when the recipient is not
     live-reachable or the live inject does not confirm. A confirmed live
     (``hosted``) send is self-recording in the transcript and is NOT also queued;
@@ -7780,7 +7780,7 @@ def dispatch_send(
             flush=True,
         )
 
-    # 3. Per-agent flock. Confirmed (node x-1904, change 6): this `with` block
+    # 3. Per-agent flock. Confirmed (node, change 6): this `with` block
     # spans the ENTIRE rest of the send, including the live-delivery attempt
     # below -- not only the registry read/identity-check mutation it exists to
     # guard (the "second resolution under that lock closes the read/lock race"
@@ -7835,7 +7835,7 @@ def dispatch_send(
                 ) from exc
 
             # 4c. Capture sender provenance for the <fno_mail> envelope and the
-            # durable fallback record (node x-1f23). Sender identity is
+            # durable fallback record (node). Sender identity is
             # best-effort: an unregistered caller leaves from_session None and
             # exclusion falls back to the always-present from_ name. from_model is
             # NOT set on the durable envelope (AgentEntry has no model field; we do
@@ -7897,7 +7897,7 @@ def dispatch_send(
                 """Write the durable FALLBACK envelope: the pending-queue for an
                 offline recipient, or the recovery record when a live inject did
                 not land. The jsonl bus is the fallback tier now, not a peer to the
-                live path (node x-1f23). Drain-on-wake semantics are unchanged.
+                live path (node). Drain-on-wake semantics are unchanged.
 
                 Delegates to :func:`_queue_durable_fallback`, the same helper the
                 lock-timeout handler below uses, so a message queued from inside
@@ -7969,7 +7969,7 @@ def dispatch_send(
 
                 _live_delivered = False
                 _live_reason: list = []
-                # x-e21e: the row's own policy names the durable queue's cause
+                # the row's own policy names the durable queue's cause
                 # even when no live rung was attemptable (an idle registered
                 # leader), so the receipt never reads as a live-miss.
                 _bus_only = (
@@ -8535,7 +8535,7 @@ def dispatch_send_to_project(
 
     # No live peer: durable queue addressed to the project itself. The envelope
     # (and bus mirror) record to == project (to_kind=project); the next drain in
-    # that project picks it up, EXCLUDING the sender (Group 1, ab-ba91b807). The
+    # that project picks it up, EXCLUDING the sender (Group 1). The
     # sender identity is best-effort - exclusion falls back to the from_ name.
     from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
 

@@ -1252,7 +1252,7 @@ mod tests {
         let (_dir, path) = journal(&[
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"scope": "x-a792", "change": "first"}),
+                json!({"scope": "x-aaaa", "change": "first"}),
             ),
             json!({"ts": "2026-09-10T09:00:00Z", "type": "phase_transition", "source": "loop", "data": {"phase": "review"}}),
             checkin(
@@ -1261,10 +1261,10 @@ mod tests {
             ),
             checkin(
                 "2026-09-10T12:00:00Z",
-                json!({"scope": "x-a792", "change": "merged PR 1710", "open_prs_fleet": 3}),
+                json!({"scope": "x-aaaa", "change": "merged PR 1710", "open_prs_fleet": 3}),
             ),
         ]);
-        let payload = scan(std::slice::from_ref(&path), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&path), "x-aaaa").unwrap();
         assert_eq!(payload["scanned"], json!(2), "only reign rows are read");
         assert_eq!(payload["matched"], json!(2));
         let events = payload["events"].as_array().unwrap();
@@ -1278,15 +1278,15 @@ mod tests {
         let (_dir, path) = journal(&[
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"crown_scope": "x-a792", "change": "old"}),
+                json!({"crown_scope": "x-aaaa", "change": "old"}),
             ),
             checkin(
                 "2026-09-10T08:30:00Z",
-                json!({"scope": "x-a792", "result": "no change"}),
+                json!({"scope": "x-aaaa", "result": "no change"}),
             ),
             checkin("2026-09-10T09:00:00Z", json!({"change": "no scope named"})),
         ]);
-        let payload = scan(std::slice::from_ref(&path), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&path), "x-aaaa").unwrap();
         assert_eq!(payload["matched"], json!(0));
         assert_eq!(payload["rejected"], json!(3));
         let legacy = payload["rejected_legacy"].as_array().unwrap();
@@ -1300,7 +1300,7 @@ mod tests {
     fn missing_journal_reads_as_positive_zero() {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("absent.jsonl");
-        let payload = scan(std::slice::from_ref(&absent), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&absent), "x-aaaa").unwrap();
         assert_eq!(payload["scanned"], json!(0));
         assert_eq!(payload["matched"], json!(0));
         let journals = payload["journals"].as_array().unwrap();
@@ -1321,7 +1321,7 @@ mod tests {
         drop(fh);
         // A corrupt line is stored with its reject_reason; it is never a
         // reign row, so the read succeeds and reports zero.
-        let payload = scan(std::slice::from_ref(&path), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&path), "x-aaaa").unwrap();
         assert_eq!(payload["scanned"], json!(0));
         assert_eq!(payload["matched"], json!(0));
         let journals = payload["journals"].as_array().unwrap();
@@ -1339,7 +1339,7 @@ mod tests {
             "{}",
             checkin(
                 "2026-09-09T08:00:00Z",
-                json!({"scope": "x-a792", "change": "rotated past"}),
+                json!({"scope": "x-aaaa", "change": "rotated past"}),
             )
         )
         .unwrap();
@@ -1348,7 +1348,7 @@ mod tests {
             "{}",
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"scope": "x-a792", "change": "older"}),
+                json!({"scope": "x-aaaa", "change": "older"}),
             )
         )
         .unwrap();
@@ -1359,12 +1359,12 @@ mod tests {
             "{}",
             checkin(
                 "2026-09-10T12:00:00Z",
-                json!({"scope": "x-a792", "change": "newest"}),
+                json!({"scope": "x-aaaa", "change": "newest"}),
             )
         )
         .unwrap();
         drop(fh);
-        let payload = scan(&[rotated, live], "x-a792").unwrap();
+        let payload = scan(&[rotated, live], "x-aaaa").unwrap();
         assert_eq!(payload["scanned"], json!(3));
         assert_eq!(payload["matched"], json!(3));
         let events = payload["events"].as_array().unwrap();
@@ -1394,14 +1394,14 @@ mod tests {
         let mirror = dir.path().join("global.jsonl");
         let row = checkin(
             "2026-09-10T12:00:00Z",
-            json!({"scope": "x-a792", "change": "mirrored"}),
+            json!({"scope": "x-aaaa", "change": "mirrored"}),
         );
         for path in [&space, &mirror] {
             let mut fh = std::fs::File::create(path).unwrap();
             writeln!(fh, "{row}").unwrap();
             drop(fh);
         }
-        let payload = scan(&[space, mirror], "x-a792").unwrap();
+        let payload = scan(&[space, mirror], "x-aaaa").unwrap();
         assert_eq!(payload["matched"], json!(1));
         assert_eq!(payload["duplicates"], json!(1));
     }
@@ -1416,12 +1416,12 @@ mod tests {
             "{}",
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"crown_scope": "x-a792", "change": "old"}),
+                json!({"crown_scope": "x-aaaa", "change": "old"}),
             )
         )
         .unwrap();
         drop(fh);
-        let payload = scan(std::slice::from_ref(&rotated), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&rotated), "x-aaaa").unwrap();
         let legacy = payload["rejected_legacy"].as_array().unwrap();
         assert_eq!(legacy.len(), 1);
         assert!(
@@ -1437,7 +1437,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("events.jsonl");
         std::fs::create_dir(dir.path().join("events.db")).unwrap();
-        let err = scan(std::slice::from_ref(&live), "x-a792").unwrap_err();
+        let err = scan(std::slice::from_ref(&live), "x-aaaa").unwrap_err();
         assert!(err.contains("events.db"), "err: {err}");
     }
 
@@ -1445,11 +1445,11 @@ mod tests {
     fn run_relays_json_and_human_formats() {
         let (_dir, path) = journal(&[checkin(
             "2026-09-10T12:00:00Z",
-            json!({"scope": "x-a792", "change": "did a thing", "open_prs_fleet": 3}),
+            json!({"scope": "x-aaaa", "change": "did a thing", "open_prs_fleet": 3}),
         )]);
         let args = vec![
             "--scope".to_string(),
-            "x-a792".to_string(),
+            "x-aaaa".to_string(),
             "--events-path".to_string(),
             path.display().to_string(),
             "--json".to_string(),
@@ -1463,12 +1463,12 @@ mod tests {
     fn the_short_json_spelling_parses_like_the_long_one() {
         let (_dir, path) = journal(&[checkin(
             "2026-09-10T12:00:00Z",
-            json!({"scope": "x-a792", "change": "did a thing", "open_prs_fleet": 3}),
+            json!({"scope": "x-aaaa", "change": "did a thing", "open_prs_fleet": 3}),
         )]);
         let args = vec![
             "-J".to_string(),
             "--scope".to_string(),
-            "x-a792".to_string(),
+            "x-aaaa".to_string(),
             "--events-path".to_string(),
             path.display().to_string(),
         ];

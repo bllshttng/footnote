@@ -506,7 +506,7 @@ class PostMergeBlock(BaseModel):
     maintainer_marker: Optional[str] = None
     enabled: bool = True
     self_reap: bool = False
-    # Canonical-sync : all three default to the feature-off state so a
+    # Canonical-sync: all three default to the feature-off state so a
     # fresh install does nothing. sync_command is the project's whole sync
     # incantation (run via `bash -lc` from the canonical checkout); sync_paths
     # gates it on the merged file list (empty = always run); auto_run arms the
@@ -1308,7 +1308,7 @@ class ReviewBlock(BaseModel):
     # the env var holding that identity's PAT.
     peer_identity: Optional[str] = None
     peer_token_env: Optional[str] = None
-    # Reviewer logins honored-if-present but NOT required : the gate
+    # Reviewer logins honored-if-present but NOT required: the gate
     # never waits for them, but a blocking finding from one still holds it.
     # None resolves to DEFAULT_OPTIONAL_APPS via resolved_optional_apps;
     # explicit [] is a real opt-out; a non-empty list EXTENDS the default.
@@ -2049,7 +2049,7 @@ class DispatchBlock(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    # DEPRECATED : the harness axis lives in the stage table
+    # DEPRECATED: the harness axis lives in the stage table
     # (`agents.profiles.<verb>.provider`); this key reads as the fallback rung
     # beneath it for one release. The fold runs at resolution time
     # (fno.agents.harness_map); the operator-facing surface is `fno config doctor`.
@@ -2237,7 +2237,7 @@ class AgentsBlock(SweepKeys):
     happy_routed_panes: bool = False
     # Row-retirement grace in SECONDS. Full contract: FIELD_META.
     retire_grace_s: int = Field(default=900, ge=0)
-    # Sweep cadence in SECONDS ; clamped under a third of the grace. Full contract: FIELD_META.
+    # Sweep cadence in SECONDS; clamped under a third of the grace. Full contract: FIELD_META.
     retire_interval_s: int = Field(default=300, ge=0)
     # Reaper-hold escalation in SECONDS. Full contract: FIELD_META.
     hold_escalate_after_s: int = Field(default=5400, ge=0)
@@ -2703,7 +2703,7 @@ class ThinkSpawnBlock(BaseModel):
     # config.dispatch.substrate; this value is consulted only when that shared
     # setting is absent so upgrades preserve an operator's prior launch shape.
     substrate: Optional[str] = None
-    # B : how an attended session handles a born node. ``offer`` (default,
+    # B: how an attended session handles a born node. ``offer`` (default,
     # byte-for-byte) prints a copy-pasteable handoff line; ``spawn`` opts
     # into a real bg /think dispatch. Fail-safe to ``offer`` so a garbage value
     # never auto-spawns against operator intent.
@@ -2887,7 +2887,7 @@ class AutoMergeBlock(BaseModel):
     # change to either spelling set must move both readers and the
     # git-protection hook, or the gates split on exactly that spelling.
     enabled: bool = False
-    # ACTOR scope : who may merge once `enabled` passes. Replaces
+    # ACTOR scope: who may merge once `enabled` passes. Replaces
     # `dispatch.auto_merge`, which spelled the same decision in another table.
     #   none     - humans only, via `fno do pr merge`
     #   dispatch - autonomously dispatched /target workers may merge too
@@ -3662,7 +3662,7 @@ class MuxBlock(BaseModel):
     notify_on_blocked: bool = True
     # Also notify on a terminal `done` hook transition. Off by default.
     notify_on_done: bool = False
-    # Catch-up digest on attach : when a client attaches to a session it
+    # Catch-up digest on attach: when a client attaches to a session it
     # last left more than `attach_digest_threshold_min` ago, render a
     # "while you were gone" overlay (fold of events + ledger) instead of raw
     # scrollback. Read straight from settings.yaml by the interactive Rust mux
@@ -3673,7 +3673,7 @@ class MuxBlock(BaseModel):
     # attach (and the Rust reader parses it as u64, silently rejecting negatives
     # to the default), so pin the floor at 1 minute here.
     attach_digest_threshold_min: int = Field(default=10, ge=1)
-    # Focus-follows-mouse over coding panes : hovering a pane makes it the
+    # Focus-follows-mouse over coding panes: hovering a pane makes it the
     # keyboard focus after a short settle. Read straight from settings.yaml by the
     # interactive Rust client (same split-brain as attach_digest); modeled here so
     # the off-switch is discoverable via `fno config get/set`.
@@ -3681,7 +3681,7 @@ class MuxBlock(BaseModel):
     # Show the mux status row. The interactive Rust client reads this directly
     # from config.toml, matching the `hover_focus` startup path.
     status_row: bool = True
-    # The mux chrome theme name : one of the shipped palettes the modal
+    # The mux chrome theme name: one of the shipped palettes the modal
     # chrome reads (`terminal`, `catppuccin`, `tokyo-night`, `gruvbox`). Read by
     # the interactive Rust client via the same config ladder as `hover_focus`;
     # an unknown name falls back to `terminal` WITH a notice, never silently.
@@ -4300,7 +4300,7 @@ class SettingsModel(ConfigBlock):
 # config.local.toml is flat, so no `config.` prefix.
 WORKTREE_LOCAL_KEYS: frozenset[str] = frozenset(
     {
-        # post_merge.parking_lot_path was removed : the ritual is a
+        # post_merge.parking_lot_path was removed: the ritual is a
         # serial one-shot durable write, already safe on the shared canonical
         # file; a per-lane redirect only orphaned the prose.
         "project.id",
