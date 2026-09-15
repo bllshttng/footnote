@@ -728,7 +728,7 @@ fn r_control_plane(ctx: &Ctx) -> Result<Value, String> {
     Ok(json!({ "attention": attention }))
 }
 
-/// One territory row per scope : live against cap, the blueprinter
+/// One territory row per scope: live against cap, the blueprinter
 /// handle, and the kingless mark, read from the same projection the spawn
 /// gate's cap enforces. An `membership: unknown` row is a failed reading, so
 /// a blind spot prints `READER FAILED territory` instead of an empty table.

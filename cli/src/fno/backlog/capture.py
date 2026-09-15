@@ -171,7 +171,7 @@ def find_unparseable_fu_lines(text: str) -> list[tuple[int, str]]:
 #
 # A *managed item* is a checkbox line that carries a type token. Four types:
 #   followup  fu-XXXXXX    (minted 6-hex OR a hand-authored slug like fu-cwd339,
-#               ; only 6-hex is MINTED, see mint_fu_id)
+#             ; only 6-hex is MINTED, see mint_fu_id)
 #   carveout  cv-XXXXXXXX  (8 hex; lifecycle owned by carveouts.jsonl + retro)
 #   node      ab-XXXXXXXX  (8 hex; transient - Phase 2 `tidy` ejects filed nodes)
 #   human     a maintainer-marker tag (config-driven via post_merge.maintainer_marker;
