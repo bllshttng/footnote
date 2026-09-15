@@ -2170,9 +2170,21 @@ pub(crate) fn run_with_release(
             } else {
                 None
             };
+            // A live `working` report is a turn plausibly in flight: the seq
+            // witness alone would read its silence as quiet and retire a
+            // session whose last word was mid-Edit (2026-09-14 specimen: the
+            // stop landed 146 s after a transcript that ends mid-Edit, the
+            // row's badge still `working`). `is_live_at` ages the badge out,
+            // so a hung turn holds only while its ttl says the report is
+            // authoritative.
+            let live_working = e.inside_leg.as_ref().is_some_and(|leg| {
+                leg.state == crate::state::InsideLegState::Working
+                    && leg.is_live_at(now.max(0) as u64)
+            });
             let quiet_witness = fresh_age.is_none()
                 && age.is_some()
                 && e.inside_leg.is_some()
+                && !live_working
                 && fresh_seq == e.inside_leg.as_ref().map(|leg| leg.seq);
             let still_quiet = worker_finished(e, fresh_age, grace_secs, None)
                 // The release lift (x-e3cc): a missing age reads quiet for
@@ -2190,6 +2202,10 @@ pub(crate) fn run_with_release(
                         // probe with no lifting witness is a NAMED hold -
                         // never kept_active, never an invented age 0.
                         let detail = match (e.inside_leg.as_ref(), fresh_seq) {
+                            _ if live_working => {
+                                "truth probe answered nothing within its bound; a live working report is on the row"
+                                    .to_string()
+                            }
                             (None, _) => {
                                 "truth probe answered nothing within its bound; no inside-leg report on the row"
                                     .to_string()

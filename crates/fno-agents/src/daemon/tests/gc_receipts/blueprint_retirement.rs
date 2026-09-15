@@ -6,6 +6,83 @@ use super::*;
 use super::{no_agents, quiet_transcript, stage_graph, staged_graph_home, uniform_ages};
 use crate::gc_sweep::{self, GcSummary};
 
+/// The crown specimen (2026-09-14): a do-phase claude row whose transcript
+/// ends mid-Edit with the badge still `working` and live. A fresh working
+/// report is a turn plausibly in flight, so it blocks the tick retirement
+/// even with an unanswered probe and an unchanged seq.
+#[test]
+fn a_live_working_report_blocks_the_tick_retirement() {
+    let (_dir, home) = staged_probe_unread_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let now = chrono::Utc::now();
+    crate::state::update_registry(&home.registry_json(), |r| {
+        if let Some(row) = r.entries.iter_mut().find(|e| e.name == "worker-x-u1") {
+            let leg = row.inside_leg.as_mut().unwrap();
+            leg.state = state::InsideLegState::Working;
+            leg.ttl_ms = Some(90_000);
+            leg.received_at = now.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        }
+    })
+    .unwrap();
+    let calls = std::cell::Cell::new(0u32);
+    let age_seam = |entries: &[&state::RegistryEntry]| {
+        let n = calls.get();
+        calls.set(n + 1);
+        entries
+            .iter()
+            .map(|e| {
+                let age = if n == 0 { Some(1500i64) } else { None };
+                (crate::gc::row_handle(e), age)
+            })
+            .collect()
+    };
+    let summary = run_probe_unread_sweep(&home, &emitter, &age_seam);
+    assert_eq!(summary.retired.len(), 0, "{:?}", summary.retired);
+    let (id, detail) = summary
+        .kept_probe_unread
+        .iter()
+        .find(|(id, _)| id == "worker-x-u1")
+        .expect("the live working row holds");
+    assert_eq!(id, "worker-x-u1");
+    assert!(
+        detail.contains("a live working report is on the row"),
+        "{detail}"
+    );
+    assert!(summary.kept_active.is_empty(), "{:?}", summary.kept_active);
+}
+
+/// The same badge aged past its ttl is no longer authoritative: the quiet
+/// witness lifts, and the row retires on the same sweep logic.
+#[test]
+fn an_expired_working_report_no_longer_blocks() {
+    let (_dir, home) = staged_probe_unread_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let stale = chrono::Utc::now() - chrono::Duration::seconds(200);
+    crate::state::update_registry(&home.registry_json(), |r| {
+        if let Some(row) = r.entries.iter_mut().find(|e| e.name == "worker-x-u1") {
+            let leg = row.inside_leg.as_mut().unwrap();
+            leg.state = state::InsideLegState::Working;
+            leg.ttl_ms = Some(90_000);
+            leg.received_at = stale.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        }
+    })
+    .unwrap();
+    let calls = std::cell::Cell::new(0u32);
+    let age_seam = |entries: &[&state::RegistryEntry]| {
+        let n = calls.get();
+        calls.set(n + 1);
+        entries
+            .iter()
+            .map(|e| {
+                let age = if n == 0 { Some(1500i64) } else { None };
+                (crate::gc::row_handle(e), age)
+            })
+            .collect()
+    };
+    let summary = run_probe_unread_sweep(&home, &emitter, &age_seam);
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+}
+
 /// AC1-HP: a claude thread row classified would-retire, whose fresh
 /// re-read answers NOTHING (the staged timeout), whose registry
 /// `inside_leg.seq` is unchanged since classification, still stages: the
