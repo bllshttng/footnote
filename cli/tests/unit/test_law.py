@@ -933,7 +933,7 @@ class TestLawSetSweep:
         assert len(rows) == 1, "the law itself is recorded"
 
 
-# ── the subject is a topic, never a bare node or PR id (x-b7f6) ───────────────
+# ── the subject is a topic, never a bare node or PR id ────────────────────────
 
 
 @pytest.mark.parametrize("subject", ["x-1df4", "pr-1157"])

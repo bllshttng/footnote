@@ -2,8 +2,8 @@
 //! same file `fno inbox decisions` reads first. The Python verb
 //! (`list_decisions`) stays the format owner; this module mirrors its
 //! flatten and lifecycle derivation for the Rust readers that cannot shell
-//! out under fleet load - `prove_it_verdicts` measured ~25s per Python call
-//! (x-b7f6 measured 67.0s for the session-start variant), which breaks every
+//! out under fleet load - `prove_it_verdicts` measured ~25s per Python call,
+//! and the session-start variant measured 67.0s, which breaks every
 //! hook budget the read runs inside.
 
 use serde_json::{json, Value};

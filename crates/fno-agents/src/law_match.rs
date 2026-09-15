@@ -327,9 +327,9 @@ fn law_answer_with(req: &LawRequest, near: Vec<String>) -> LawAnswer {
     }
     cands.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.ts.cmp(&a.1.ts)));
     let total = cands.len();
-    // Near-law warnings ride at the FRONT of lines (x-b7f6): the recording
-    // session reads them before the open-question sweep, because the point
-    // is to stop a duplicate BEFORE it is repeated, not to route it after.
+    // Near-law warnings ride at the FRONT of lines: the recording session
+    // reads them before the open-question sweep, because the point is to
+    // stop a duplicate BEFORE it is repeated, not to route it after.
     let mut lines: Vec<String> = near;
     for (_, q, _) in cands.iter().take(10) {
         let law_id = &req.law.decision_id;
@@ -653,7 +653,7 @@ fn is_pr_subject(s: &str) -> bool {
 
 /// Near-law lines for a law being recorded: live laws on the same subject
 /// (casefold equality) or a nearby subject (shared `tokens()`), at most 5,
-/// newest first. A warning at record time, never a refusal (x-01e7).
+/// newest first. A warning at record time, never a refusal.
 fn near_law_lines_from(index: &decision_index::Index, law: &LawRow) -> Vec<String> {
     let new_id = law.decision_id.as_str();
     let new_subject = law.subject.as_deref().unwrap_or("").trim();
