@@ -42,35 +42,48 @@ def lineage_of(registry_path, agent_name: str) -> list:
     return []
 
 
-def find_rows(since: str) -> tuple[list, str]:
+def find_rows(since: str) -> tuple[list, bool, str]:
     """Retasked dispatch_spawned rows in the window, via the fno binary.
 
     The verb reads every journal the writers write, so the probe ships no
     second resolver and cannot disagree with it about where rows live.
+    Returns (rows, truncated, err): truncated means the verb collected
+    fewer rows than it matched, so a verdict drawn from rows alone could
+    miss the one lineaged row.
     """
-    proc = subprocess.run(
-        [
-            "fno", "doctor", "event", "find", "dispatch_spawned",
-            "--field", "retask=retasked",
-            "--since", since,
-            "--limit", "200",  # per journal; existence needs any one match
-            "--json",
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                "fno", "doctor", "event", "find", "dispatch_spawned",
+                "--field", "retask=retasked",
+                "--since", since,
+                "--limit", "200",  # per journal; existence needs any one match
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        return [], False, f"could not run fno doctor event find: {exc}"
     if proc.returncode not in (0, 3):
-        return [], proc.stderr.strip() or f"fno doctor event find exited {proc.returncode}"
+        lines = [ln for ln in proc.stderr.splitlines() if ln.strip()]
+        detail = next(
+            (ln for ln in reversed(lines) if ln.startswith("error:")),
+            " ".join(proc.stderr.split()) or f"exited {proc.returncode}",
+        )
+        return [], False, f"fno doctor event find: {detail}"
     try:
         payload = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        return [], "fno doctor event find printed no JSON"
+        return [], False, "fno doctor event find printed no JSON"
     rows = payload.get("matches", [])
     if proc.returncode == 3 and not rows:
         # An unreadable journal could hide the row, so absence is unproven.
         unreadable = len(payload.get("unreadable_files") or [])
-        return [], f"fno doctor event find hit {unreadable} unreadable journal(s)"
-    return rows, ""
+        return [], False, f"fno doctor event find hit {unreadable} unreadable journal(s)"
+    if not payload.get("file_count"):
+        return [], False, "fno resolved no event journals to search"
+    return rows, payload.get("match_count", 0) > len(rows), ""
 
 
 def check(rows: list, registry_path) -> tuple[bool, str]:
@@ -153,8 +166,10 @@ def main() -> int:
     if not args.since:
         ap.error("--since is required (e.g. --since 6h) unless --self-test")
 
-    rows, err = find_rows(args.since)
+    rows, truncated, err = find_rows(args.since)
     ok, line = (False, err) if err else check(rows, args.registry)
+    if not ok and truncated:
+        line = f"{line}; some in-window matches were not collected (--limit)"
     if ok:
         print(line)
         return 0
