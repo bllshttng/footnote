@@ -962,7 +962,7 @@ def render(err, block):
             raw = entry.get("decision_id") if isinstance(entry, dict) else entry
             return (
                 "consolidation entry decision_id `%s` (%s) is not a decision id "
-                "(expected d-<hex>, e.g. d-a4b6e1c8)" % (raw, section)
+                "(expected d-<hex>)" % (raw, section)
             )
         if field == "reason":
             named = entry.get("id") if isinstance(entry, dict) else None

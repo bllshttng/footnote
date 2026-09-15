@@ -44,8 +44,8 @@
 #   summary: launched=<n> parked=<n> already=<n> skipped=<n> done=<n> failed=<n> capped=<n>[ nothing-up-next]
 #
 # Invariants (Failure Modes section of the plan):
-#   - The launch is the door (fno agents spawn), the one launch verb (law
-#     d-496680aa). The substrate is the detached thread lane. NEVER
+#   - The launch is the door (fno agents spawn), the one launch verb. The
+#     substrate is the detached thread lane. NEVER
 #     `--bare`/`-p` (those force the API-credit pool and strip skills/hooks).
 #   - A failed dispatch is surfaced and leaves the node `ready`/re-dispatchable;
 #     never reports a launch that did not happen; never silently swallows.

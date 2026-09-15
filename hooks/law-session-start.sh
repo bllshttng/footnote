@@ -5,7 +5,7 @@
 # The failure this closes, measured 2026-09-02: a session loaded using-fno at
 # full context, was asked about the language boundary, searched docs/,
 # AGENTS.md and the loaded rule files, concluded the direction was
-# unrecorded, and argued against a port - while law d-1d474a79 mandating
+# unrecorded, and argued against a port - while a live law mandating
 # exactly that port had been live for six hours. It never searched the
 # decision store, because nothing told it to.
 #

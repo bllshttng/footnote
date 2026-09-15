@@ -363,7 +363,7 @@ set +f
 # MUST match tier 1, or the re-normalize would reclassify as tier 2 forever. The
 # describe-it fuzzy tier (tier 4) is whatever is left - free prose - and lives
 # entirely in the SKILL body behind a confirm.
-# x-8151/d-450caaeb: family membership is answered by the owner's one
+# Family membership is answered by the owner's one
 # shell-readable surface, `fno agents target-family` - a pure, side-effect-free
 # verb (no daemon, no config read) whose answer comes from the canonical
 # merge_posture table. This file carries NO hand-copied spelling list: the
