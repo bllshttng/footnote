@@ -493,7 +493,7 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                     return EXIT_USAGE;
                 }
             },
-            "--json" => json_out = true,
+            "--json" | "-J" => json_out = true,
             "--compare" => match value("--compare") {
                 Ok(v) => compare = Some(v),
                 Err(()) => return EXIT_USAGE,
