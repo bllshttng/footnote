@@ -420,12 +420,9 @@ class AgentEntry:
     # default to None so pre-existing rows and callers that pass none of them
     # round-trip safely (additive-optional: the Rust crate has no
     # deny_unknown_fields, so it ignores these keys on read).
-    #   spawned_by_session — the parent session id (CLAUDE_CODE_SESSION_ID /
-    #                        CODEX_SESSION_ID / GEMINI_SESSION_ID, whichever
-    #                        is set; claude takes precedence if multiple are).
-    #   spawned_by_harness — "claude" | "codex" | "gemini"; None when no
-    #                        session env var is present.
-    #   spawned_by_cwd     — parent $PWD at spawn time.
+    #   spawned_by_session — the spawning session's ambient identity; two
+    #                        identity families, or two disagreeing ids,
+    #                        record no edge.
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
@@ -665,6 +662,7 @@ class AgentEntry:
     liveness: Optional[str] = None
     liveness_measured_at: Optional[str] = None
     harness_title: Optional[str] = None
+    lineage_kind: Optional[str] = None
 
     # v27: WHO chose `launch_account`, vocabulary from
     # spawn_flag_owners. None on "default", inherited, and unattributable
