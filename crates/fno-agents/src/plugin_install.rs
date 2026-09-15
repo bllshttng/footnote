@@ -662,7 +662,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
                 stage = args.get(i + 1).cloned();
                 i += 2;
             }
-            "--json" => {
+            "--json" | "-J" => {
                 json = true;
                 i += 1;
             }

@@ -14,7 +14,7 @@ pub(super) fn workspace_restore(args: &[OsString], env_session: Option<&str>) ->
     while let Some(a) = it.next() {
         match a.to_str() {
             Some("--dry-run") => dry_run = true,
-            Some("--json") => json = true,
+            Some("--json") | Some("-J") => json = true,
             Some("--harness") => {
                 harness = Some(match it.next().and_then(|v| v.to_str()) {
                     Some(v) => v.to_string(),

@@ -91,7 +91,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 .to_str()
                 .ok_or_else(|| "non-UTF-8 argument".to_string())?;
             match tok {
-                "--json" => json = true,
+                "--json" | "-J" => json = true,
                 "--stale-after" => {
                     let Some(value) = args.get(i + 1).and_then(|a| a.to_str()) else {
                         return Err("--stale-after needs a value".into());
@@ -143,7 +143,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     i += 1;
                     break;
                 }
-                "--json" => json = true,
+                "--json" | "-J" => json = true,
                 "--server" | "--session" => {
                     note_server_flag(tok);
                     let Some(v) = sargs.get(i + 1) else {
@@ -335,7 +335,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             };
         }
         match tok {
-            "--json" => json = true,
+            "--json" | "-J" => json = true,
             "--server" | "--session" => {
                 note_server_flag(tok);
                 let Some(v) = sargs.get(i + 1) else {

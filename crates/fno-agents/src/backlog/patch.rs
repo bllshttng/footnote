@@ -1053,7 +1053,7 @@ fn parse_args(args: &[String]) -> Result<(PatchRequest, Option<PathBuf>, bool), 
                     .ok_or((1, format!("--set needs field=value, got '{v}'")))?;
                 req.sets.push((field.to_string(), value.to_string()));
             }
-            "--json" => json_out = true,
+            "--json" | "-J" => json_out = true,
             other if other.starts_with('-') => {
                 return Err((1, format!("unknown flag {other}")));
             }

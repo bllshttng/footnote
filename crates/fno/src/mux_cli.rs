@@ -1797,7 +1797,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
         match a.to_str() {
             Some("--dry-run") => dry_run = true,
             Some("--include-named") => include_named = true,
-            Some("--json") => json = true,
+            Some("--json") | Some("-J") => json = true,
             Some("--tabs-only") => tabs_only = true,
             Some("--dead-only") => dead_only = true,
             Some("--include-used-shells") => include_used_shells = true,
