@@ -8,10 +8,10 @@
 //! the user's global `~/.claude/CLAUDE.md` plus every file its top-level `@`
 //! lines import (B), and the current project's memory index (C,
 //! `~/.claude/projects/<slug>/memory/MEMORY.md`, the same slug
-//! [`crate::client_verbs::claude_cwd_slug`] resolves for the transcript
+//! [`crate::claude_ask::claude_cwd_slug`] resolves for the transcript
 //! store). Best-effort: a missing piece counts as zero bytes.
 
-use crate::client_verbs::claude_cwd_slug;
+use crate::claude_ask::claude_cwd_slug;
 use std::path::PathBuf;
 
 fn user_claude_md_bytes(home: &std::path::Path) -> u64 {

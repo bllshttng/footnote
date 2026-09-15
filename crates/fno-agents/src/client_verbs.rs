@@ -1300,14 +1300,6 @@ fn resolve_entry_with_heal_scoped(
 /// adopt path scans these. Mirrors [`crate::paths::canonical_repo_root`] but
 /// returns every worktree, not just the main checkout. Empty outside a git repo
 /// (callers also fall back to `cwd`).
-/// claude's projects-dir slug for a cwd: both '/' and '.' replaced with '-'
-/// (matches Python's `fno.provenance.resolver._slug`). Not reversible, so the
-/// resume path resolves cwd by trying candidates and slug-checking rather than
-/// decoding a slug back to a path.
-pub(crate) fn claude_cwd_slug(path: &Path) -> String {
-    path.to_string_lossy().replace('/', "-").replace('.', "-")
-}
-
 /// Collision-safe 8-char handle from a session id (the final-eight convention),
 /// falling back to the whole trimmed id when shorter. The row's `short_id`, so
 /// `peek`/`ask`/`resume` resolve the adopted orphan.

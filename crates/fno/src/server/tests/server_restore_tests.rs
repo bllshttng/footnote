@@ -1663,6 +1663,7 @@ fn workspace_restore_fills_a_held_claude_portal_from_its_plan() {
             argv: vec!["/bin/cat".into()],
             env: vec![],
             config_dir: None,
+            mechanism: None,
         }),
     )]
     .into();

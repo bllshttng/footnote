@@ -212,7 +212,7 @@ pub(crate) fn resolve_resume_cwd(
     let projects = claude_home.projects_dir();
     let transcript = format!("{}.jsonl", uuid);
     let recorded_pb = std::path::PathBuf::from(recorded);
-    let recorded_slug = crate::client_verbs::claude_cwd_slug(&recorded_pb);
+    let recorded_slug = crate::claude_ask::claude_cwd_slug(&recorded_pb);
     // Probe the recorded cwd first: the common case (no EnterWorktree) keeps
     // the transcript under its own project dir, and a stat is far cheaper
     // than spawning `git worktree list` on every resume. Only on a miss do
@@ -224,7 +224,7 @@ pub(crate) fn resolve_resume_cwd(
     let candidates =
         crate::manifest_lookup::git_worktree_paths(Path::new(recorded)).unwrap_or_default();
     for cand in &candidates {
-        let slug = crate::client_verbs::claude_cwd_slug(cand);
+        let slug = crate::claude_ask::claude_cwd_slug(cand);
         if projects.join(&slug).join(&transcript).exists() {
             eprintln!(
                 "fno agents resume: cwd resolved from the transcript's project dir ({})",
@@ -253,10 +253,26 @@ pub(crate) fn resolve_resume_cwd(
         }
     }
     hits.sort_by(|a, b| b.0.cmp(&a.0));
+    // Only the newest records matter (the newest record carries the cwd the
+    // session ended in), so read the file's TAIL, not the whole transcript.
+    const TAIL_BYTES: u64 = 256 * 1024;
     for (_, f) in &hits {
-        let Ok(text) = std::fs::read_to_string(f) else {
+        let Ok(mut file) = std::fs::File::open(f) else {
             continue;
         };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if std::io::Seek::seek(
+            &mut file,
+            std::io::SeekFrom::Start(len.saturating_sub(TAIL_BYTES)),
+        )
+        .is_err()
+        {
+            continue;
+        }
+        let mut text = String::new();
+        if std::io::Read::read_to_string(&mut file, &mut text).is_err() {
+            continue;
+        }
         for line in text.lines().rev() {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
                 continue;
@@ -1352,7 +1368,7 @@ mod tests {
         let wt_project = home
             .join(".claude")
             .join("projects")
-            .join(crate::client_verbs::claude_cwd_slug(&wt));
+            .join(crate::claude_ask::claude_cwd_slug(&wt));
         std::fs::create_dir_all(&wt_project).unwrap();
         std::fs::write(wt_project.join(format!("{uuid}.jsonl")), "[]").unwrap();
 
@@ -1392,7 +1408,7 @@ mod tests {
         let project = home
             .join(".claude")
             .join("projects")
-            .join(crate::client_verbs::claude_cwd_slug(&recorded));
+            .join(crate::claude_ask::claude_cwd_slug(&recorded));
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join(format!("{uuid}.jsonl")), "[]").unwrap();
 
@@ -1520,7 +1536,7 @@ mod tests {
         // Transcript under the slug of the MISSING recorded dir: the first
         // probe must not win just because the slug matches.
         let recorded = tmp.path().join("gone-dir");
-        let slug = crate::client_verbs::claude_cwd_slug(&recorded);
+        let slug = crate::claude_ask::claude_cwd_slug(&recorded);
         let project = tmp.path().join(".claude").join("projects").join(slug);
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(

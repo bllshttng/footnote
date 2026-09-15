@@ -621,6 +621,22 @@ where
             }
             last_state = state;
         }
+        // Second witness, bg-resume only: claude's own roster. The fno
+        // daemon's truth view lags a same-id relaunch (its exit record
+        // outranks the new process until reconcile re-adopts), while a
+        // non-terminal roster row IS the session's own account of being
+        // back under the same id.
+        if plan.mechanism == "bg-resume" {
+            let roster = crate::claude_roster::read_all_agents();
+            if let Some(row) = roster.find(&plan.short_id) {
+                let state = row.state.as_deref().unwrap_or("present");
+                if !crate::claude_roster::is_terminal_roster_state(state) {
+                    live = true;
+                    last_state = format!("roster:{state}");
+                    break;
+                }
+            }
+        }
     }
     if !live {
         eprintln!(
@@ -914,6 +930,84 @@ mod tests {
         assert_eq!(row.fno_id.as_deref(), Some("fid-keep"));
         assert_eq!(row.harness_session_id.as_deref(), Some("sess-uuid"));
         assert!(row.exited_at.is_none());
+        std::fs::remove_dir_all(temp.path()).ok();
+    }
+
+    #[test]
+    fn bg_resume_accepts_the_claude_roster_as_a_live_witness() {
+        // The fno truth view can lag a same-id relaunch (a stale exit record
+        // reads unreachable until reconcile). A non-terminal roster row for
+        // the relaunched short id is the session's own account of being
+        // back, so the poll accepts it instead of timing out at 16.
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let jobs = claude_home.jobs_dir_for("abcd1234");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(
+            bin.join("claude"),
+            "#!/bin/sh\nif [ \"$1\" = \"agents\" ]; then \
+             echo '[{\"id\":\"abcd1234\",\"sessionId\":\"sess-uuid\",\"state\":\"idle\"}]'; fi\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(&bin));
+
+        let plan = crate::reentry::ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "bg-resume".into(),
+            name: "w1".into(),
+            fno_id: None,
+            node: None,
+            session_id: "sess-uuid".into(),
+            short_id: "abcd1234".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: temp.path().display().to_string(),
+            substrate: "bg".into(),
+            mux: None,
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "mkdir -p '{jobs}' && printf '%s' \
+                     '{{\"state\":\"working\",\"updatedAt\":\"2026-09-15T00:00:00Z\"}}' \
+                     > '{jobs}/state.json'",
+                    jobs = jobs.display()
+                ),
+            ],
+            env: Default::default(),
+        };
+        let home = AgentsHome::at(temp.path().join("agents-home"));
+        seed_exited_row(&home, "w1", "sess-uuid");
+        let code = run_and_confirm_respawn_with_truth(
+            &plan,
+            "w1",
+            "resume",
+            "agent_resumed",
+            &home,
+            claude_home.clone(),
+            // The stale fno view: never live, never terminal.
+            |_| Some("unreachable".to_string()),
+            |_| {},
+        );
+        match &old_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(code, 0);
+        let reg = crate::state::load_registry(&home.registry_json()).unwrap();
+        let row = reg.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert_eq!(row.status, crate::AgentStatus::Live);
         std::fs::remove_dir_all(temp.path()).ok();
     }
 

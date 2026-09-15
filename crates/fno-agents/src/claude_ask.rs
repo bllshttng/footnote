@@ -267,6 +267,14 @@ pub fn py_repr(s: &str) -> String {
 // ===========================================================================
 
 /// Resolver for claude's own session state under `$HOME/.claude`.
+/// claude's projects-dir slug for a cwd: both '/' and '.' replaced with '-'
+/// (matches Python's `fno.provenance.resolver._slug`). Not reversible, so
+/// the resume path resolves cwd by trying candidates and slug-checking
+/// rather than decoding a slug back to a path.
+pub(crate) fn claude_cwd_slug(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "-").replace('.', "-")
+}
+
 /// Mirrors `_claude_session_registry._sessions_dir` / `_jobs_dir_for`.
 /// HOME is read from the environment so tests can pin it.
 #[derive(Debug, Clone)]
