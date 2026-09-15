@@ -83,12 +83,6 @@ def project_node_to_plan(
     this the corrected node's graph is active while its plan doc stays terminal
     and dispatch keeps refusing it - the correction verb appears to work and
     changes nothing anyone can use.
-
-    ``done`` was added on the second one: `reopen` shipped calling this with a
-    ``superseded``-only condition, so it cleared ``completed_at`` and left the
-    plan terminal. The unit tests missed it because their fixture replaced the
-    projector with a no-op, which is the "guard on one of N paths" trap wearing
-    a test's clothes.
     """
     try:
         target, fields, rest = read_plan_file(plan_path)

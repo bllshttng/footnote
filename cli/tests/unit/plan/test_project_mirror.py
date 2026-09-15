@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from fno.plan._project import project_node_to_plan
-from fno.plan._stamp import read_plan_file
+from fno.plan._stamp import parse_frontmatter, read_plan_file
 
 _PLAN = """\
 ---
@@ -335,3 +337,38 @@ def test_mirror_type_default_off_keeps_the_doc_authoritative(tmp_path):
     assert project_node_to_plan({"type": "epic"}, plan) is False
     _, fields, _ = read_plan_file(plan)
     assert fields["type"] == "bug"
+
+
+_FINALIZED_PLAN = """\
+---
+node: x-abcd
+status: ready
+created: 2026-07-08
+difficulty: medium
+size: M
+type: feature
+done_probes:
+  - fno x --json | grep -oE 'scope: [a-z]+'
+---
+
+# A plan
+
+body text
+"""
+
+
+def test_graph_write_keeps_a_finalized_plan_valid_and_ready(tmp_path):
+    """AC4-HP: the reported file. A graph write over a finalized plan must not
+    rewrite the status or band, and every string it emits must survive a
+    yaml.safe_load of the doc."""
+    plan = _write_plan(tmp_path, _FINALIZED_PLAN)
+    node = {"status": "in_progress", "difficulty": "low", "priority": "p1"}
+
+    assert project_node_to_plan(node, plan) is True
+
+    _fields, block, _rest = parse_frontmatter(plan.read_text(encoding="utf-8"))
+    loaded = yaml.safe_load(block)
+    assert loaded["status"] == "ready"
+    assert loaded["difficulty"] == "medium"
+    assert loaded["priority"] == "p1"
+    assert loaded["done_probes"] == ["fno x --json | grep -oE 'scope: [a-z]+'"]
