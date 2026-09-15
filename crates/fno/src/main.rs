@@ -713,6 +713,167 @@ mod tests {
         assert_eq!(decide_role(&os(&["mux", "bogus"]), false), Role::MuxUsage);
     }
 
+    // --- x-23fa characterization: the carry families' accepted argv, pinned
+    // before the command-tree cutover (AC1-HP). Every assert here passed on
+    // the pre-cutover main; the same roles and byte-exact tails must survive
+    // the typed-tree dispatch. ---
+
+    fn os_raw(bytes: &[u8]) -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(bytes.to_vec())
+    }
+
+    #[test]
+    fn char_carry_families_keep_their_byte_exact_tails() {
+        // pane run with an embedded command; a --help inside the payload is
+        // the payload's, never ours.
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "pane", "run", "--cwd", "/x", "--", "claude", "--help"]),
+                true
+            ),
+            Role::MuxPane(os(&["run", "--cwd", "/x", "--", "claude", "--help"]))
+        );
+        // A non-UTF-8 byte in the tail survives byte-exact.
+        let mut raw = os(&["mux", "pane", "ls"]);
+        raw.push(os_raw(&[0xff]));
+        let mut expect = os(&["ls"]);
+        expect.push(os_raw(&[0xff]));
+        assert_eq!(decide_role(&raw, false), Role::MuxPane(expect));
+        // The hidden keeper subtree rides the pane family.
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "pane", "keeper", "list", "--stale-after", "5s"]),
+                false
+            ),
+            Role::MuxPane(os(&["keeper", "list", "--stale-after", "5s"]))
+        );
+        // layout: MuxCommon::take strips common flags from any position.
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "layout", "--json", "apply", "spec.toml"]),
+                false
+            ),
+            Role::MuxLayout(os(&["--json", "apply", "spec.toml"]))
+        );
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "layout", "apply", "spec.toml", "--json"]),
+                false
+            ),
+            Role::MuxLayout(os(&["apply", "spec.toml", "--json"]))
+        );
+        // thread: reseat takes the rest after the verb; a bare name is a row.
+        assert_eq!(
+            decide_role(&os(&["mux", "thread", "reseat", "7"]), false),
+            Role::MuxThreadReseat(os(&["7"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "thread", "wk"]), false),
+            Role::MuxThread(os(&["wk"]))
+        );
+        // view: -h is usage; a selector rides verbatim.
+        assert_eq!(
+            decide_role(&os(&["mux", "view", "-h"]), false),
+            Role::MuxUsage
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "view", "x919", "--url", "--json"]), false),
+            Role::MuxView(os(&["x919", "--url", "--json"]))
+        );
+        // serve --web parses into the bridge args; the tombstone refuses by name.
+        assert!(matches!(
+            decide_role(&os(&["mux", "serve", "--web"]), false),
+            Role::MuxWeb(_)
+        ));
+        assert_eq!(
+            decide_role(&os(&["mux", "squad"]), false),
+            Role::MuxRemoved("squad".into())
+        );
+        // The remaining leaves and families carry their argv verbatim.
+        assert_eq!(
+            decide_role(&os(&["mux", "web", "reap", "--json"]), false),
+            Role::MuxWebCtl(os(&["reap", "--json"]))
+        );
+        assert_eq!(
+            decide_role(
+                &os(&[
+                    "mux",
+                    "retire-session",
+                    "a",
+                    "--harness",
+                    "h",
+                    "--session-id",
+                    "i"
+                ]),
+                false
+            ),
+            Role::MuxRetireSession(os(&["a", "--harness", "h", "--session-id", "i"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "rows", "--json"]), false),
+            Role::MuxRows(os(&["--json"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "where", "x919"]), false),
+            Role::MuxWhere(os(&["x919"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "workspace", "prune", "--dry-run"]), false),
+            Role::MuxWorkspace(os(&["prune", "--dry-run"]))
+        );
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "block", "pipe", "--from", "4", "--to", "2"]),
+                false
+            ),
+            Role::MuxBlock(os(&["pipe", "--from", "4", "--to", "2"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "tab", "ls", "--json"]), false),
+            Role::MuxTab(os(&["ls", "--json"]))
+        );
+        assert_eq!(
+            decide_role(&os(&["mux", "pane", "-h"]), false),
+            Role::MuxPane(os(&["-h"]))
+        );
+    }
+
+    #[test]
+    fn char_bare_families_and_unknown_verbs_are_usage() {
+        // Bare families and unknown family words land on the usage role
+        // (exit 2 on stderr) - never a forward. An unknown verb INSIDE a
+        // family is the family's refusal: today it rides the family role
+        // (`mux pane bogus` -> MuxPane(["bogus"]), refused downstream);
+        // after the cutover the classifier refuses it by name (AC1-ERR), so
+        // the classifier-level pin covers the bare/unknown-family shapes.
+        for bad in [
+            vec!["mux"],
+            vec!["mux", "bogus"],
+            vec!["mux", "pane"],
+            vec!["mux", "block"],
+            vec!["mux", "layout"],
+            vec!["mux", "workspace"],
+            vec!["mux", "web"],
+            vec!["mux", "where"],
+            vec!["mux", "view"],
+            vec!["mux", "retire-session"],
+            vec!["mux", "ls", "x"],
+        ] {
+            let argv: Vec<OsString> = bad.iter().map(OsString::from).collect();
+            assert!(
+                matches!(decide_role(&argv, false), Role::MuxUsage),
+                "expected usage for {bad:?}"
+            );
+        }
+        // The family-internal unknown verbs ride the family role today;
+        // the families themselves refuse them (exit 2) downstream.
+        let argv = os(&["mux", "pane", "bogus"]);
+        assert_eq!(decide_role(&argv, false), Role::MuxPane(os(&["bogus"])));
+        let argv = os(&["mux", "tab", "bogus"]);
+        assert_eq!(decide_role(&argv, false), Role::MuxTab(os(&["bogus"])));
+    }
+
     #[test]
     fn serve_parses_the_status_flag_like_stop() {
         // `--status` is the read door beside `--stop`: it parses alone and
