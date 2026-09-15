@@ -1243,6 +1243,7 @@ fn agent_rows_watch_only_appendix_carries_unmeasured_from_registry_liveness() {
     let paneless = |name: &str, liveness: agents_view::Liveness| RegistryAgent {
         model: None,
         route: None,
+        route_provider_id: None,
         spawned_by_session: None,
         session_id: None,
         harness_session_id: None,
