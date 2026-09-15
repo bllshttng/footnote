@@ -177,7 +177,7 @@ fn main() {
         std::process::exit(fno_agents::evals_trend::run_evals_trend(&args[1..]));
     }
     // `evals-attempt`: the native attempt-eligibility verdict for eval history
-    // rows (x-ecda). Transport-only, dispatched here like evals-trend: the
+    // rows. Transport-only, dispatched here like evals-trend: the
     // Python runner asks it per attempt at write time; the report re-asks it
     // over whole-history batches at read time.
     if args.first().map(String::as_str) == Some("evals-attempt") {
