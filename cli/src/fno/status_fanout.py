@@ -1,4 +1,4 @@
-"""Status-sink fanout: the dumb dispatcher (x-2057).
+"""Status-sink fanout: the dumb dispatcher.
 
 Layer 2 of the status-breakpoints protocol. Workers emit x-dbaf protocol-family
 events (``task_started`` / ``task_done`` / ``blocked`` / ``run_summary``) once to
@@ -710,19 +710,20 @@ def _dispatch_text_webhook(
     (ntfy parses JSON bodies only on its root URL, so an envelope reaches the
     reader as literal JSON). A Discord-shaped post (``field == "content"``)
     sends ``allowed_mentions: {"parse": []}`` so a worker-influenced reason
-    containing ``@everyone`` cannot ping the server. For any non-Discord field the
-    rendered text is defanged - ``<!`` -> ``&lt;!`` - so Slack's broadcast tokens
-    (``<!channel>`` / ``<!here>`` / ``<!everyone>`` / ``<!subteam^...>``) render as
-    literal text instead of pinging the workspace (Slack shows ``&lt;`` as ``<``,
-    so the visible text is unchanged; ntfy is plain text and unaffected)."""
+    containing ``@everyone`` cannot ping the server. In JSON mode any non-Discord
+    field has its rendered text defanged - ``<!`` -> ``&lt;!`` - so Slack's
+    broadcast tokens (``<!channel>`` / ``<!here>`` / ``<!everyone>`` /
+    ``<!subteam^...>``) render as literal text instead of pinging the workspace
+    (Slack shows ``&lt;`` as ``<``, so the visible text is unchanged); raw mode
+    posts before that point, so a plain-text channel shows the text verbatim."""
     url, err = _resolve_url(sink)
     if url is None:
         return SHORT_CIRCUIT, err or "no url"
     rendered = _render_template(sink.template, event)
-    if sink.field != "content":
-        rendered = rendered.replace("<!", "&lt;!")
     if sink.raw_body:
         return _deliver(url, {}, fanout, raw=rendered)
+    if sink.field != "content":
+        rendered = rendered.replace("<!", "&lt;!")
     body: dict[str, Any] = {sink.field: rendered}
     if sink.field == "content":
         body["allowed_mentions"] = {"parse": []}

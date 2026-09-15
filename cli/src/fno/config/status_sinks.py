@@ -1,7 +1,7 @@
 """Status-fanout config models (``config.status_fanout``, ``config.status_sinks[]``).
 
-Extracted from the config monolith by the file-budget gate (x-46de) and
-re-exported from ``fno.config`` so every importer stays unchanged.
+Extracted from the config monolith to keep that file under its line
+budget, and re-exported from ``fno.config`` so every importer stays unchanged.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class StatusFanoutConfig(BaseModel):
 
 
 class StatusSinkConfig(BaseModel):
-    """One status sink (``config.status_sinks[]``, x-2057).
+    """One status sink (``config.status_sinks[]``).
 
     Semantic errors (unknown type, out-of-whitelist ``match`` key, both/neither
     of ``url``/``url_env``, duplicate ``name`` across the list) RAISE at config

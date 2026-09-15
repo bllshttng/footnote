@@ -1,4 +1,4 @@
-"""Tests for the status-sink fanout (x-2057).
+"""Tests for the status-sink fanout.
 
 Layer 2 of the status-breakpoints protocol: a dumb, config-driven dispatcher
 that sweeps ``.fno/events.jsonl`` and routes x-dbaf protocol-family events to
