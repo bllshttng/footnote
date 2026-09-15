@@ -26,7 +26,7 @@ from typing import Any, Callable, Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
-from fno.agents.naming import AgentNameError, dispatch_agent_name
+from fno.agents.naming import AgentNameError, dispatch_agent_name, verb_code_for
 from fno.agents.node_dispatch import node_spawn_argv, resolve_node_spawn
 from fno.agents import spawn_gate as _spawn_gate
 from fno.agents.sandbox_probe import EXIT_SANDBOX_UNREACHABLE
@@ -1364,6 +1364,15 @@ def _spawn_worker(
         source=source,
         caller=caller,
     )
+    # x-3582: a blueprint dispatch reuses the earliest finished planner on the
+    # epic before it cold-spawns one. Every other verb spawns as before.
+    retask_fallthrough = ""
+    if not args.is_reconcile and args.verb.lstrip("/") == "blueprint":
+        reused, retask_fallthrough = _retask_first(
+            node_id, args, dispatch_reservation, events_path, caller, receipt
+        )
+        if reused:
+            return reused
     from fno.harness_identity import (
         CODEX_SHORT_ADDRESS_RULE,
         is_unsafe_short_address,
@@ -1464,33 +1473,33 @@ def _spawn_worker(
     )[:_SPAWN_NOTE_CAP]
     # One row per launch: only the spawner knows the resolved argv, and it
     # sits after the guards, so the row is proof of a launch that happened.
-    _emit(
-        EVENT_SPAWNED,
-        {
-            "node_id": node_id,
-            "short_id": launch_identity,
-            "agent_name": args.agent_name,
-            "harness": args.harness,
-            "vendor": args.vendor or "",
-            "model": args.model or "",
-            "account": args.dispatch_account or "",
-            "substrate": args.substrate,
-            "command": args.command,
-            "verb": args.verb,
-            "verb_source": args.verb_source,
-            "cwd": args.node_cwd or "",
-            "caller": caller,
-            "grid": args.grid_reason or "",
-            "decision": "; ".join(args.decision),
-        },
-        events_path,
-    )
+    spawned_row = {
+        "node_id": node_id,
+        "short_id": launch_identity,
+        "agent_name": args.agent_name,
+        "harness": args.harness,
+        "vendor": args.vendor or "",
+        "model": args.model or "",
+        "account": args.dispatch_account or "",
+        "substrate": args.substrate,
+        "command": args.command,
+        "verb": args.verb,
+        "verb_source": args.verb_source,
+        "cwd": args.node_cwd or "",
+        "caller": caller,
+        "grid": args.grid_reason or "",
+        "decision": "; ".join(args.decision),
+    }
+    if retask_fallthrough:
+        spawned_row["retask_fallthrough"] = retask_fallthrough
+    _emit(EVENT_SPAWNED, spawned_row, events_path)
     if receipt is not None:
         # Filled from the same values the EVENT_SPAWNED row carries, so the
         # row and the receipt cannot disagree (the row has no harness-
         # independent form; prov is what it records). agent_name (x-84b2) is
         # the exact registered name: callers copy it into their dispatched
         # events instead of re-minting a lookalike.
+        row_notes = tuple(notes) + (retask_fallthrough,) if retask_fallthrough else notes
         receipt.update(
             {
                 "short_id": launch_identity,
@@ -1499,10 +1508,115 @@ def _spawn_worker(
                 "verb": args.verb,
                 "verb_source": args.verb_source,
                 "agent_name": args.agent_name,
-                "notes": notes,
+                "notes": row_notes,
             }
         )
     return launch_identity
+
+
+def _retask_first(
+    node_id: str,
+    args,
+    dispatch_reservation: Optional[tuple],
+    events_path: Optional[Path],
+    caller: str,
+    receipt: Optional[dict],
+) -> tuple[Optional[str], str]:
+    """Reuse a finished blueprint planner for this dispatch before a cold spawn.
+
+    Returns ``(reused_session_id, fallthrough)``. A session id means the node
+    was dispatched by retask and no spawn may run. A fallthrough string names
+    a refused attempt (before /clear) for the cold path's event row; an empty
+    one means no candidate was found.
+    """
+    from fno.agents.cli import _release_dispatch_claims, _spawn_guard_decision
+    from fno.agents.registry import load_registry
+    from fno.agents.retask import finished_planner, run_retask
+    from fno.claims.cli import HANDOVER_HOLDER_PREFIX
+    from fno.config import load_settings
+    from fno.graph.load import load_graph
+
+    try:
+        graph = {
+            n["id"]: n for n in load_graph() if isinstance(n, dict) and n.get("id")
+        }
+        candidate = finished_planner(
+            load_registry(),
+            node_id=node_id,
+            graph=graph,
+            project_id=_base_project_id(Path(args.node_cwd or ".")),
+            project_of=lambda cwd: _base_project_id(Path(cwd)),
+        )
+    except Exception as exc:  # noqa: BLE001 - a read error must not block the spawn
+        print(
+            f"WARNING: blueprint reuse read failed, cold-spawning {node_id}: {exc}",
+            file=sys.stderr,
+        )
+        return None, ""
+    if candidate is None:
+        return None, ""
+    if dispatch_reservation is not None:
+        _safe_release(*dispatch_reservation)
+    new_name = dispatch_agent_name(None, verb_code_for("blueprint"), node_id)
+    guard, _code = _spawn_guard_decision(
+        node_id,
+        f"retask:{os.getpid()}",
+        cwd=args.node_cwd,
+        handover_holder=f"{HANDOVER_HOLDER_PREFIX}{new_name}",
+    )
+    if guard.get("verdict") != "dispatchable":
+        raise SpawnAlreadyRunning(
+            f"retask guard refused {node_id}: {guard.get('reason') or guard.get('verdict')}"
+        )
+    receipt_row = run_retask(candidate.name, node=node_id, settings=load_settings())
+    if receipt_row.get("status") == "retasked":
+        _emit(
+            EVENT_SPAWNED,
+            {
+                "node_id": node_id,
+                "short_id": receipt_row.get("current_session_id"),
+                "agent_name": receipt_row.get("registry_name"),
+                "harness": args.harness,
+                "vendor": args.vendor or "",
+                "model": args.model or "",
+                "account": args.dispatch_account or "",
+                "substrate": candidate.substrate,
+                "command": args.command,
+                "verb": args.verb,
+                "verb_source": args.verb_source,
+                "cwd": args.node_cwd or "",
+                "caller": caller,
+                "grid": args.grid_reason or "",
+                "decision": "; ".join(args.decision),
+                "retask": "retasked",
+                "reused_worker": candidate.name,
+            },
+            events_path,
+        )
+        if receipt is not None:
+            receipt.update(
+                {
+                    "short_id": receipt_row.get("current_session_id"),
+                    "substrate": candidate.substrate,
+                    "harness": args.harness,
+                    "verb": args.verb,
+                    "verb_source": args.verb_source,
+                    "agent_name": receipt_row.get("registry_name"),
+                    "notes": (),
+                }
+            )
+        return receipt_row.get("current_session_id"), ""
+    reason = receipt_row.get("reason") or receipt_row.get("status") or "refused"
+    claims = [(guard["reservation_key"], guard["reservation_holder"])]
+    if guard.get("node_claim_key"):
+        claims.append((guard["node_claim_key"], guard["node_claim_holder"]))
+    _release_dispatch_claims(*claims)
+    if receipt_row.get("cleared"):
+        raise SpawnError(
+            f"retask of {candidate.name} onto {node_id} refused after /clear: "
+            f"{reason}; not cold-spawning over the cleared row"
+        )
+    return None, f"{candidate.name}: {reason}"
 
 
 # ---------------------------------------------------------------------------
