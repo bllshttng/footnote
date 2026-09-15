@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import subprocess
 from datetime import datetime, timezone
-from pathlib import Path
 import typer
 
 graph_app = typer.Typer(help="Inspect or export the durable graph store.")
@@ -29,27 +27,27 @@ def export_graph(now: bool = typer.Option(False, "--now", help="Wait for a fresh
     typer.echo(f"graph export: {result['path']} at {result['version']}")
 
 
-# The flip (task 10.1): soak via the keeper's backend_gate op; tree gates via check-graph-flip-gates.sh.
+# The flip: soak gaps come from the keeper's backend_gate op, the parity
+# negative control runs in-process, and the tree checks (reader census,
+# writer ratchet, table ownership) are CI's job on every PR and main push.
 
 
-def _gate_gaps(client, repo_root: Path) -> list[str]:
+def _gate_gaps(client) -> list[str]:
+    """Keeper soak gaps plus the in-process parity negative control. The
+    tree checks (reader census, writer ratchet, table ownership) belong to
+    CI: guards.yml runs them on every pull request and every push to main."""
     gaps = list(client.request("backend_gate", {}).get("gaps") or [])
-    try:
-        proc = subprocess.run(
-            ["bash", str(repo_root / "scripts/ci/check-graph-flip-gates.sh")],
-            capture_output=True, text=True, timeout=2400,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        gaps.append(f"flip gates could not run: {exc}")
-    else:
-        gaps.extend(
-            line[len("flip-gate: FAIL: ") :]
-            for line in (proc.stdout + proc.stderr).splitlines()
-            if line.startswith("flip-gate: FAIL: ")
-        )
-        if proc.returncode not in (0, 1):
-            gaps.append("flip gates could not run (see scripts/ci/check-graph-flip-gates.sh)")
+    from fno.graph.parity import negative_control
+
+    if negative_control() != 0:
+        gaps.append("negative control failed")
     return gaps
+
+
+def _keeper_gaps(client) -> list[str]:
+    """The soak clock alone, for the read-only status watch: no copy, no
+    temp keeper, no negative control."""
+    return list(client.request("backend_gate", {}).get("gaps") or [])
 
 
 def _keepers() -> str:
@@ -75,7 +73,7 @@ def _flip(target: str) -> None:
         typer.echo(f"backend={current} already; nothing to flip")
         return
     if target == "sqlite":
-        gaps = _gate_gaps(client, Path(__file__).resolve().parents[3])
+        gaps = _gate_gaps(client)
         if gaps:
             for gap in gaps:
                 typer.echo(f"graph backend: refused: {gap}", err=True)
@@ -103,7 +101,8 @@ def graph_backend(
         from fno import paths
         from fno.graph.store import _client_for
 
-        state = _client_for(paths.graph_json()).request("backend_status", {})
+        client = _client_for(paths.graph_json())
+        state = client.request("backend_status", {})
         since = (
             datetime.fromtimestamp(int(state["since_ms"]) / 1000, tz=timezone.utc)
             if state.get("since_ms")
@@ -114,6 +113,12 @@ def graph_backend(
         typer.echo(
             f"backend={state.get('backend')} since={since_text} days={days} keepers={_keepers()}"
         )
+        gaps = _keeper_gaps(client)
+        if gaps:
+            for gap in gaps:
+                typer.echo(f"gate: {gap}")
+        else:
+            typer.echo("gate: soak clean")
         return
     if target not in ("sqlite", "json"):
         raise typer.BadParameter("backend takes 'sqlite', 'json', or 'status'")

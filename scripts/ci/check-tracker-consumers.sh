@@ -23,4 +23,21 @@ PY=(uv run --project "$ROOT/cli" python3)
 }
 "${PY[@]}" "$TOOL" --verbs >/dev/null
 "${PY[@]}" "$TOOL" --reads >/dev/null
+
+# Writer ratchet: only the publish path (graph/store.py) and the archive
+# leg (graph/cli.py) may call the store's atomic write. A new call site is
+# a writer that would keep writing a file nobody reads after the flip.
+# `|| true`: a clean tree exits the last grep 1 (no selection), and this
+# script runs under `set -euo pipefail`.
+offenders=$(grep -rEn '\b_write_json\(|write_atomic\(' --include='*.py' "$ROOT/cli/src/fno" \
+    | grep -v '_write_atomic(' \
+    | cut -d: -f1 | sort -u \
+    | grep -vE '/graph/(store|cli)\.py$' \
+    | sed "s|$ROOT/cli/src/fno/||" || true)
+if [[ -n "$offenders" ]]; then
+    echo "check-tracker-consumers: direct graph-store writers outside the publish path:" >&2
+    echo "$offenders" | sed 's/^/  /' >&2
+    exit 1
+fi
+
 echo "check-tracker-consumers: OK - verbs classified, reads attributed, self-test green"

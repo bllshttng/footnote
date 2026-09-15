@@ -2284,8 +2284,13 @@ pub fn locked_mutate_with_hook(
     apply_defaults(&mut pre, false);
     let mut pre_normalized = pre.clone();
     recompute_statuses_with_plan_rungs(&mut pre_normalized, input.plan_rungs.as_ref());
-    let mut shadow_before = pre_normalized.clone();
-    canonicalize_entries(&mut shadow_before);
+    // The shadow baseline is the rows AS READ: the db holds the last
+    // publish, so `raw` IS that publish. A change normalization alone makes
+    // (defaults, settles, ownership stamps, children) must compare unequal
+    // against this baseline to reach the store. Deriving the baseline from
+    // the normalized pre-image instead hid exactly those changes, and the
+    // db row stayed stale for good.
+    let shadow_before = raw.clone();
     let status_normalized: std::collections::HashMap<String, String> = pre_normalized
         .iter()
         .filter(|e| is_dict(e))
