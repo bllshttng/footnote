@@ -381,9 +381,13 @@ echo "--- Rust: no plan-status reader ---"
 EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/blueprint_judge.rs
 crates/fno-agents/src/delivery_completion.rs
 crates/fno-agents/src/kill_criteria.rs
-crates/fno-agents/src/merge_hold.rs"
+crates/fno-agents/src/merge_hold.rs
+crates/fno-agents/src/surface_check.rs"
 # merge_hold.rs reads only the dispatch_hold block (the hold the merge gate
 # refuses on); it never extracts a plan status, so the shelling rule does not
+# apply to it.
+# surface_check.rs reads only the surface: block (shape + the cross-language
+# walk); it never extracts a plan status, so the shelling rule does not
 # apply to it.
 
 # The spelling detector below catches ordinary plan readers; the semantic
