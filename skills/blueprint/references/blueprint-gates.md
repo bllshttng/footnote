@@ -33,6 +33,23 @@ if [[ -n "${CLAIMS_ID:-}" ]]; then
 fi
 ```
 
+**Take the node claim.** Right after `CLAIMS_ID` resolves, read the claim. A live or suspect claim means a caller covers this run (the subagent wrapper, a spawn-handover worker, a crown): print the holder and open nothing. Otherwise open the claim and keep the holder, so an early halt can release exactly that holder.
+
+```bash
+OPENED_HOLDER=""
+if [[ -n "${CLAIMS_ID:-}" ]]; then
+  CLAIM_STATE="$(fno agents claim status "node:$CLAIMS_ID" --json | jq -r '.state')"
+  if [[ "$CLAIM_STATE" == "live" || "$CLAIM_STATE" == "suspect" ]]; then
+    echo "blueprint: node:$CLAIMS_ID already held by $(fno agents claim status "node:$CLAIMS_ID" --json | jq -r '.holder'). Planning under that claim."
+  else
+    OPEN_RECEIPT="$(fno backlog session open "$CLAIMS_ID" --json)" || exit 1
+    OPENED_HOLDER="$(printf '%s' "$OPEN_RECEIPT" | jq -r '.holder')"
+  fi
+fi
+```
+
+**Halt release.** With `OPENED_HOLDER` set, every halt after this block and before `session close` runs `fno agents claim release "node:$CLAIMS_ID" --holder "$OPENED_HOLDER"`. Never pass `--stamp-do`. The halts in scope are the Consolidation Gate halt, the validate-and-finalize failure, and the post-write claims refusal.
+
 After resolution, the plan body proceeds as if the user had pasted the
 node's title plus details directly. The classifier below sees a raw
 description (no slashes, no `.md`) and skips the failure-mode grep.

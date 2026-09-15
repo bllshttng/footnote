@@ -8166,7 +8166,7 @@ def cmd_done(
     if reparented_out[0]:
         typer.echo(_reparent_receipt(reparented_out[0]))
 
-    # Operator-authority matrix (LD3/LD29): `fno backlog done` is an allowed
+    # Superuser-authority matrix (LD3/LD29): `fno backlog done` is an allowed
     # action during a drive window, but audit-tag it so the trail attributes
     # the completion to the operator rather than the LLM. Best-effort.
     try:

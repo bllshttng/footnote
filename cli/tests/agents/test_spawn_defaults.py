@@ -531,3 +531,74 @@ def test_mint_node_name_is_the_source_less_manual_t_form(
     )
     name = sd._mint_node_name("x-84b2", None, "glm-5.3-flash")
     assert name == "t-84b2-ab-names-glm"
+
+
+# ---------------------------------------------------------------------------
+# a verbless --node spawn routes by the node's derived verb
+# ---------------------------------------------------------------------------
+
+
+def _stub_grid_node(monkeypatch: pytest.MonkeyPatch, node_id: str = "x-1") -> None:
+    import fno.agents.spawn_defaults as sd
+
+    monkeypatch.setattr(sd, "_grid_node", lambda toks, env=None: {"id": node_id, "plan_path": ""})
+
+
+def test_verbless_node_spawn_routes_by_the_derived_verb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC4-HP: an empty seed plus the seam's node_verb resolves the
+    blueprint profile - the resolve payload names the work verb, and the
+    journal row carries verb=blueprint with the real (still empty) seed."""
+    seen = _stub_route_slot(
+        monkeypatch,
+        {
+            "status": "pick",
+            "candidate": {
+                "harness": "claude",
+                "model": "m",
+                "lane": "r",
+                "lane_rung": "agents.profiles.blueprint.lanes[0]",
+                "lane_index": 0,
+                "lane_fields": {},
+                "evidence": {"capacity": "ok"},
+            },
+            "chain": ["slot agents.profiles.blueprint lanes walked in declared order"],
+        },
+    )
+    _stub_grid_node(monkeypatch)
+    err = io.StringIO()
+    inject_spawn_defaults(
+        ["spawn", "--name", "p", "--node", "x-1", "--substrate", "thread"],
+        settings=_Settings(),
+        stderr=err,
+        env={},
+        node_verb="blueprint",
+    )
+    resolves = [p for p in seen if "event" not in p]
+    assert resolves, seen
+    assert all(p["work_verb"] == "blueprint" for p in resolves)
+    journals = [p for p in seen if "event" in p]
+    assert journals, seen
+    rows = [p["event"] for p in journals]
+    assert all(row["verb"] == "blueprint" for row in rows)
+    assert all(row["seed"] is None for row in rows)
+
+
+def test_crown_stays_crown_when_the_seam_sends_no_verb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC4-HP control: the same verbless spawn without node_verb keeps the
+    crown profile - the verb, not the flag, decides."""
+    seen = _stub_route_slot(monkeypatch, {"status": "no-lanes", "candidate": None, "chain": []})
+    _stub_grid_node(monkeypatch)
+    err = io.StringIO()
+    inject_spawn_defaults(
+        ["spawn", "--name", "p", "--node", "x-1", "--substrate", "thread"],
+        settings=_Settings(),
+        stderr=err,
+        env={},
+    )
+    journals = [p["event"] for p in seen if "event" in p]
+    assert journals, seen
+    assert all(row["verb"] == "crown" for row in journals)

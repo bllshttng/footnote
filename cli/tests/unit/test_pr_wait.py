@@ -60,8 +60,9 @@ def test_settled_green_exits_the_status_code(monkeypatch, capsys) -> None:
     out = capsys.readouterr()
     assert '"settled": true' in out.out  # the final payload is re-emitted
     # The spend line is the promise that separates the verb from the loops it
-    # replaces: the spender sees its spend at exit.
-    assert "gh call(s) this invocation" in out.err
+    # replaces: the spender sees its spend at exit, with the tick count beside
+    # the call total so a whole wait never reads as one read.
+    assert "gh call(s) over 1 status read(s) this invocation" in out.err
 
 
 def test_settled_red_exits_one_not_two(monkeypatch, capsys) -> None:

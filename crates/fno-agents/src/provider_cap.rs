@@ -154,6 +154,12 @@ fn provider_of(row: &Value) -> String {
         .and_then(|om| om.get("model"))
         .and_then(Value::as_str)
         .unwrap_or("");
+    if model.is_empty() {
+        // Trap 2 keeps observed_model first; a row that never measured one
+        // still names its vendor axis in `provider`, and a lane of "unknown"
+        // is a member no gate can ever refuse on.
+        return s_field(row, "provider").unwrap_or("unknown").to_string();
+    }
     provider_from_model(model)
 }
 
@@ -286,6 +292,47 @@ fn ts_epoch(ts: &str) -> Option<i64> {
         .map(|dt| dt.timestamp())
 }
 
+/// The far horizon a parsed reset may reach before it reads as a misread
+/// (mirrors error_taxonomy._MAX_RESET_HORIZON_S).
+const RESET_HORIZON_S: i64 = 14 * 24 * 3600;
+
+/// The reset epoch a capped 429 excerpt names, from its first
+/// `YYYY-MM-DD[T ]HH:MM(:SS)?` stamp. A stamp carrying its own offset
+/// (`Z` / `+HH:MM`) parses as-is; a naive stamp resolves only in the named
+/// zone, so a lane with no configured zone reads None (refuse to guess). An
+/// epoch farther than [`RESET_HORIZON_S`] past `now` is a misread, not a
+/// deadline, and reads None too.
+pub fn reset_epoch_from_excerpt(text: &str, tz: Option<&str>, now: i64) -> Option<i64> {
+    static STAMP_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static OFFSET_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let stamp_re = STAMP_RE
+        .get_or_init(|| regex::Regex::new(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?").unwrap());
+    let m = stamp_re.find(text)?;
+    let mut stamp = m.as_str().replacen(' ', "T", 1);
+    if stamp.len() == 16 {
+        stamp.push_str(":00");
+    }
+    let rest = &text[m.end()..];
+    let offset_re = OFFSET_RE.get_or_init(|| regex::Regex::new(r"^[+-]\d{2}:\d{2}").unwrap());
+    let epoch = if rest.starts_with('Z') {
+        chrono::DateTime::parse_from_rfc3339(&format!("{stamp}Z"))
+            .ok()?
+            .timestamp()
+    } else if let Some(off) = offset_re.find(rest) {
+        chrono::DateTime::parse_from_rfc3339(&format!("{stamp}{}", off.as_str()))
+            .ok()?
+            .timestamp()
+    } else {
+        // A naive stamp means what the record's reset_timezone says; with
+        // none (or an unparseable zone name) it is refused, never guessed.
+        use chrono::TimeZone as _;
+        let zone = tz?.parse::<chrono_tz::Tz>().ok()?;
+        let naive = chrono::NaiveDateTime::parse_from_str(&stamp, "%Y-%m-%dT%H:%M:%S").ok()?;
+        zone.from_local_datetime(&naive).single()?.timestamp()
+    };
+    (epoch <= now + RESET_HORIZON_S).then_some(epoch)
+}
+
 /// Pure core of the runtime-state resolution so tests never race process env.
 fn runtime_state_path_from(
     env_path: Option<&std::ffi::OsStr>,
@@ -346,6 +393,36 @@ fn account_reset_timezones(candidates: &[PathBuf]) -> BTreeMap<String, String> {
     out
 }
 
+/// Zones from config.toml `[[accounts.records]]` (agents_config's candidate
+/// chain, a file the settings.yaml reader never opens), keyed by record id
+/// AND by the provider prefix of its route (`zai/glm-5.3[1m]` keys `zai`),
+/// so a lane whose rows carry only the provider axis still resolves its
+/// vendor stamp.
+fn record_reset_timezones(cwd: &Path) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let Some(records) = crate::agents_config::config_lookup(cwd, &["accounts", "records"]) else {
+        return out;
+    };
+    let Some(records) = records.as_array() else {
+        return out;
+    };
+    for rec in records {
+        let Some(tz) = rec.get("reset_timezone").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Some(id) = rec.get("id").and_then(|v| v.as_str()) {
+            out.entry(id.to_string()).or_insert_with(|| tz.to_string());
+        }
+        if let Some(route) = rec.get("route").and_then(|v| v.as_str()) {
+            if let Some(provider) = route.split('/').next().filter(|p| !p.is_empty()) {
+                out.entry(provider.to_string())
+                    .or_insert_with(|| tz.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// The settings candidates in Python loader order: FNO_CONFIG, the project's
 /// `.fno/settings.yaml`, the global `~/.fno/settings.yaml`.
 pub fn settings_candidates(cwd: &Path) -> Vec<PathBuf> {
@@ -373,6 +450,13 @@ pub struct CapScan {
     pub settings_candidates: Vec<std::path::PathBuf>,
     /// AgentsHome root: compaction stamps live under `<root>/compacting/`.
     pub compaction_home: std::path::PathBuf,
+    /// HOME-style root whose claude sessions dir (via
+    /// [`crate::claude_ask::ClaudeHome::sessions_dir`]) maps a thread row's
+    /// 8-hex short_id to its full session uuid.
+    pub claude_home: std::path::PathBuf,
+    /// `reset_timezone` zones read from config.toml `[[accounts.records]]`,
+    /// keyed by record id and by route provider prefix.
+    pub record_zones: BTreeMap<String, String>,
 }
 
 /// The env-resolved scan, built once and shared by the status verb and the
@@ -384,6 +468,10 @@ pub fn default_scan(home: &AgentsHome, cwd: &Path) -> CapScan {
         runtime_state: runtime_state_path(cwd),
         settings_candidates: settings_candidates(cwd),
         compaction_home: home.root().to_path_buf(),
+        claude_home: crate::claude_ask::ClaudeHome::from_env()
+            .home()
+            .to_path_buf(),
+        record_zones: record_reset_timezones(cwd),
     }
 }
 
@@ -404,6 +492,21 @@ pub fn snapshot_with(
     let rows = registry_rows(&scan.registry)?;
     let timezones = account_reset_timezones(&scan.settings_candidates);
     let now_f = now_epoch as f64;
+    // One walk of claude's sessions dir serves every thread row: resolving
+    // per row re-reads the same directory once per row on every tick.
+    let thread_ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| {
+            if s_field(row, "session_id").is_some() {
+                return None;
+            }
+            s_field(row, "short_id")
+        })
+        .collect();
+    let resolved_ids = crate::claude_ask::resolve_session_uuids(
+        &crate::claude_ask::ClaudeHome::at(scan.claude_home.clone()),
+        &thread_ids,
+    );
     let mut lanes: BTreeMap<(String, String), Vec<CapMember>> = BTreeMap::new();
     for row in &rows {
         let Some(name) = s_field(row, "name") else {
@@ -432,7 +535,14 @@ pub fn snapshot_with(
             held: None,
             excerpt: None,
         };
-        let transcript = session_id
+        // A thread row (the daemon's bg lane) carries only the 8-hex
+        // short_id; resolve the full session uuid through claude's sessions
+        // dir so the transcript is reachable (the d8996f9b specimen read
+        // transcript-not-found through this hole while its lane walled).
+        let lookup_id = session_id
+            .clone()
+            .or_else(|| s_field(row, "short_id").and_then(|jid| resolved_ids.get(jid).cloned()));
+        let transcript = lookup_id
             .as_deref()
             .and_then(|sid| crate::claude_drive::find_transcript_in(&scan.projects_dir, sid));
         if let Some(t) = &transcript {
@@ -446,7 +556,7 @@ pub fn snapshot_with(
             let cs = crate::compaction::compaction_state(
                 &crate::paths::AgentsHome::at(scan.compaction_home.clone()),
                 &harness,
-                session_id.as_deref().unwrap_or(""),
+                lookup_id.as_deref().unwrap_or(""),
                 Some(t),
                 now_epoch,
             );
@@ -463,10 +573,28 @@ pub fn snapshot_with(
     }
     let mut out: Vec<CapLane> = Vec::new();
     for ((provider, account), members) in lanes {
-        let reset_raw = health_reset_at(&scan.runtime_state, &account);
+        let capped: Vec<&CapMember> = members.iter().filter(|m| m.capped).collect();
+        // Zone for the lane's vendor stamps: the account key first, then the
+        // record id / route-provider keys the config record table adds.
+        let lane_tz = timezones
+            .get(&account)
+            .cloned()
+            .or_else(|| scan.record_zones.get(&account).cloned())
+            .or_else(|| scan.record_zones.get(&provider).cloned());
+        let reset_raw = health_reset_at(&scan.runtime_state, &account).or_else(|| {
+            // No health lock: the newest stamp among the capped members is
+            // the lane's reset, naive stamps resolved in the lane's zone.
+            capped
+                .iter()
+                .filter_map(|m| {
+                    m.excerpt
+                        .as_deref()
+                        .and_then(|ex| reset_epoch_from_excerpt(ex, lane_tz.as_deref(), now_epoch))
+                })
+                .max()
+        });
         let reset_epoch = reset_raw.filter(|r| *r as f64 > now_f);
         let reset_passed_epoch = reset_raw.filter(|r| *r as f64 <= now_f);
-        let capped: Vec<&CapMember> = members.iter().filter(|m| m.capped).collect();
         let capped_n = capped.len();
         // A capped member whose 429 is newer than the passed reset is a NEW
         // strand, not a returning one; `newest_assistant` is RFC3339.
@@ -490,7 +618,7 @@ pub fn snapshot_with(
         } else {
             "closed"
         };
-        let missing = if timezones.contains_key(&account) {
+        let missing = if lane_tz.is_some() {
             Vec::new()
         } else {
             vec![account.clone()]
@@ -1602,7 +1730,9 @@ mod tests {
             projects_dir: projects,
             runtime_state: state,
             settings_candidates: vec![],
-            compaction_home: home,
+            compaction_home: home.clone(),
+            claude_home: home,
+            record_zones: BTreeMap::new(),
         }
     }
 
@@ -1674,6 +1804,186 @@ mod tests {
         assert_eq!(glm[0].members.len(), 3);
         assert_eq!(glm[0].state, "open");
         assert_eq!(glm[0].reset_epoch, Some(9_999_999_999));
+    }
+
+    /// AC1-HP: a thread row (short_id only, no session_id, no observed_model)
+    /// resolves its transcript through the jobId and reads capped in its lane.
+    #[test]
+    fn ac1_hp_thread_row_resolves_through_its_job_id() {
+        let root = std::env::temp_dir().join(format!("pc-ac1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let uuid = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
+        write(
+            &claude_home.join("registry.json"),
+            r#"{"schema_version":25,"agents":[{"name":"w-d899","short_id":"d8996f9b","harness":"claude","provider":"zai","launch_account":"default","state":"working"}]}"#,
+        );
+        write(
+            &crate::claude_ask::ClaudeHome::at(claude_home.clone())
+                .sessions_dir()
+                .join("1.json"),
+            &format!(
+                r#"{{"jobId":"d8996f9b","kind":"bg","messagingSocketPath":null,"sessionId":"{uuid}","cwd":"/tmp"}}"#
+            ),
+        );
+        write(
+            &projects.join(format!("{uuid}.jsonl")),
+            &format!("{OK_LINE}\n{FOUR29_LINE}\n"),
+        );
+        let scan = CapScan {
+            claude_home: claude_home.clone(),
+            record_zones: BTreeMap::new(),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, 1_000_000_000, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "zai:default")
+            .expect("zai:default lane");
+        assert!(lane.members[0].capped, "{:?}", lane.members[0]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC2-ERR: the same thread row with no sessions file stays
+    /// transcript-not-found and the lane stays closed.
+    #[test]
+    fn ac2_err_thread_row_without_sessions_file_stays_unknown() {
+        let root = std::env::temp_dir().join(format!("pc-ac2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let uuid = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
+        write(
+            &claude_home.join("registry.json"),
+            r#"{"schema_version":25,"agents":[{"name":"w-d899","short_id":"d8996f9b","harness":"claude","provider":"zai","launch_account":"default","state":"working"}]}"#,
+        );
+        write(
+            &projects.join(format!("{uuid}.jsonl")),
+            &format!("{OK_LINE}\n{FOUR29_LINE}\n"),
+        );
+        let scan = CapScan {
+            claude_home: claude_home.clone(),
+            record_zones: BTreeMap::new(),
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        let snap = snapshot_with(&scan, 1_000_000_000, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "zai:default")
+            .expect("zai:default lane");
+        assert!(!lane.members[0].capped);
+        assert_eq!(
+            lane.members[0].cap_unknown.as_deref(),
+            Some("transcript-not-found")
+        );
+        assert_eq!(lane.state, "closed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// AC3-HP/ERR: the specimen naive stamp parses in the record's zone, is
+    /// refused with none or an unknown zone, and an offset stamp needs no zone.
+    #[test]
+    fn ac3_reset_epoch_from_excerpt_zones_and_refusals() {
+        let now = 1_789_400_000i64;
+        // Specimen: "2026-09-15 18:41:02" is Singapore time -> 10:41:02Z.
+        let excerpt = "API Error: Request rejected (429) · [1308][Usage limit reached for 5 hour. Your limit will reset at 2026-09-15 18:41:02][20260911143739fc56663065714c5e]";
+        assert_eq!(
+            reset_epoch_from_excerpt(excerpt, Some("Asia/Singapore"), now),
+            Some(1_789_468_862)
+        );
+        assert_eq!(
+            reset_epoch_from_excerpt("reset at 2026-09-15T10:41:02Z", None, now),
+            Some(1_789_468_862)
+        );
+        assert_eq!(
+            reset_epoch_from_excerpt("reset at 2026-09-15 18:41:02]", None, now),
+            None,
+            "no zone: refuse to guess"
+        );
+        assert_eq!(
+            reset_epoch_from_excerpt("reset at 2026-02-15 18:41:02]", Some("Not/AZone"), now),
+            None,
+            "unknown zone: refuse to guess"
+        );
+        assert_eq!(
+            reset_epoch_from_excerpt("no stamp here", Some("Asia/Singapore"), now),
+            None
+        );
+        assert_eq!(
+            reset_epoch_from_excerpt(
+                "reset at 2026-09-15 18:41:02]",
+                Some("Asia/Singapore"),
+                now - 30 * 24 * 3600
+            ),
+            None,
+            "beyond the 14-day horizon: a misread, not a deadline"
+        );
+    }
+
+    /// AC4-HP: a config record's route-provider zone resolves the capped
+    /// member's vendor stamp into the lane's reset, opening the lane.
+    #[test]
+    fn ac4_hp_record_zone_opens_the_lane_on_the_excerpt_stamp() {
+        let root = std::env::temp_dir().join(format!("pc-ac4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let claude_home = root.join("home");
+        let projects = root.join("projects").join("-repo");
+        let uuid = "d8996f9b-8854-4f22-8c28-c7819c6d0316";
+        write(
+            &claude_home.join("registry.json"),
+            format!(
+                r#"{{"schema_version":25,"agents":[{{"name":"w-zai","session_id":"{uuid}","harness":"claude","provider":"zai","launch_account":"default","state":"working"}}]}}"#
+            )
+            .as_str(),
+        );
+        // The transcript's 429 carries the vendor's naive stamp; the row has
+        // no observed_model, so the provider comes from the row itself.
+        write(
+            &projects.join(format!("{uuid}.jsonl")),
+            &format!(
+                "{OK_LINE}\n{}\n",
+                FOUR29_LINE.replace("2026-09-11 14:37:39", "2026-09-15 18:41:02")
+            ),
+        );
+        let mut zones = BTreeMap::new();
+        zones.insert("zai".to_string(), "Asia/Singapore".to_string());
+        let scan = CapScan {
+            claude_home: claude_home.clone(),
+            record_zones: zones,
+            ..scan(
+                claude_home.join("registry.json"),
+                projects.parent().unwrap().to_path_buf(),
+                root.join("runtime-state.json"),
+                claude_home.clone(),
+            )
+        };
+        // `now` sits before the stamp and inside the 14-day parse horizon.
+        let snap = snapshot_with(&scan, 1_789_400_000, &cfg(2)).unwrap();
+        let lane = snap
+            .lanes
+            .iter()
+            .find(|l| l.lane == "zai:default")
+            .expect("zai:default lane");
+        assert_eq!(lane.state, "open");
+        assert_eq!(lane.reset_epoch, Some(1_789_468_862));
+        assert!(
+            lane.missing_reset_timezone.is_empty(),
+            "the record's zone names the lane resolved"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1896,6 +2206,8 @@ mod tests {
             runtime_state: root.join("runtime-state.json"),
             settings_candidates: vec![root.join("settings.yaml")],
             compaction_home: root.clone(),
+            claude_home: root.clone(),
+            record_zones: BTreeMap::new(),
         }
     }
 

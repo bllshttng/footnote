@@ -126,13 +126,17 @@ def test_unreached_runner_steps_is_none_on_old_logs_without_prologue() -> None:
     assert _failures.unreached_runner_steps(log) is None
 
 
-def test_unreached_job_steps_uses_position_after_failure() -> None:
-    """Captured 2026-08-23 from a real failed job: steps after the failure
-    record conclusion 'skipped', byte-identical to a condition-skip."""
+def test_unreached_job_steps_keeps_only_later_skipped_steps() -> None:
+    """Reverses the old positional premise: a workflow carrying
+    `if: ${{ !cancelled() }}` runs its later steps, so a step after the
+    failure can read `success` - PR 1823 named 13 guard steps unreached that
+    had run and passed. A later step counts as unreached only when its OWN
+    conclusion is `skipped`."""
     steps = [
         {"name": "Set up job", "status": "completed", "conclusion": "success"},
         {"name": "Checkout", "status": "completed", "conclusion": "success"},
         {"name": "cargo test --all-targets", "status": "completed", "conclusion": "failure"},
+        {"name": "guard: api budget", "status": "completed", "conclusion": "success"},
         {"name": "cargo test --all-targets (fno mux)", "status": "completed", "conclusion": "skipped"},
         {"name": "Schema parity check", "status": "completed", "conclusion": "skipped"},
         {"name": "Post Checkout", "status": "completed", "conclusion": "success"},
@@ -217,6 +221,48 @@ def test_collect_failures_reports_a_status_context_without_pretending_a_log() ->
     )
     assert entries[0]["check"] == "stacked-base-guard"
     assert "no job log" in entries[0]["detail"]
+
+
+def test_collect_failures_names_the_failed_step_without_a_log() -> None:
+    """The no-log branch fetched the job steps and named the steps
+    fail-fast never reached, but never the step that failed - the cause
+    without the consequence's neighbour."""
+    steps = [
+        {"name": "Set up job", "status": "completed", "conclusion": "success"},
+        {"name": "Checkout", "status": "completed", "conclusion": "success"},
+        {"name": "pytest", "status": "completed", "conclusion": "failure"},
+        {"name": "ruff + mypy", "status": "completed", "conclusion": "skipped"},
+        {"name": "Post Checkout", "status": "completed", "conclusion": "success"},
+    ]
+    entries = _failures.collect_failures(
+        [_actions_check()], runner=_fake_runner("", steps, log_ok=False)
+    )
+    e = entries[0]
+    assert e["step"] == "pytest"
+    assert e["unreached_steps"] == ["ruff + mypy"]
+    assert "log unavailable" in e["detail"]
+
+
+def test_collect_failures_replays_a_known_job_id_without_reads() -> None:
+    """x-c770: a job id is minted per attempt, so a known id is the same
+    completed job - its entry replays and no log or job-object read fires."""
+    steps = [
+        {"name": "Build", "status": "completed", "conclusion": "failure"},
+        {"name": "Test", "status": "completed", "conclusion": "skipped"},
+    ]
+    runner = _fake_runner("plain output\n", steps)
+    first = _failures.collect_failures([_actions_check()], runner=runner)
+    replayed = _failures.collect_failures(
+        [_actions_check()], runner=runner, known={first[0]["job_id"]: first[0]}
+    )
+    assert replayed == first
+    calls: list[str] = []
+    _failures.collect_failures(
+        [_actions_check()],
+        runner=_fake_runner("plain output\n", steps, calls=calls),
+        known={first[0]["job_id"]: first[0]},
+    )
+    assert calls == [], "a known job id must spend no read"
     assert calls == []  # nothing fetched: there is nothing to fetch
 
 

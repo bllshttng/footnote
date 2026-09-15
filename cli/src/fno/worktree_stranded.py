@@ -218,7 +218,6 @@ _remote_refs_stale = False
 # is re-detected next tick.
 _FETCH_TIMEOUT_S = 15.0
 _PUSH_TIMEOUT_S = 30.0
-_DAEMON_TIMEOUT_S = 20.0
 
 
 def _run(argv: list[str], timeout: float) -> Optional[subprocess.CompletedProcess]:

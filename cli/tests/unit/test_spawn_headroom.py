@@ -256,13 +256,14 @@ def test_child_lane_resolution_pin_then_grid_then_verb_profile(monkeypatch):
     """x-fa3a: the helper mirrors the spawn seam - pin > grid pick (priced
     through its route) > the verb profile's own lane."""
     from fno.backlog import advance as adv
+    from fno.agents import node_dispatch
 
     calls = _record_vendor(monkeypatch)
     assert adv._child_lane_vendor({"id": "x"}, model=None, provider="claude") == "vendor:claude:bare"
     assert calls == [([], "claude")]
 
     calls.clear()
-    monkeypatch.setattr(adv, "_node_effective_verb", lambda node: "target")
+    monkeypatch.setattr(node_dispatch, "node_effective_verb", lambda node: "target")
     monkeypatch.setattr(
         adv, "_grid_lane_for",
         lambda node, *, model, provider, verb: ("codex", "m", "openai/gpt", None, None),
@@ -276,7 +277,7 @@ def test_child_lane_resolution_pin_then_grid_then_verb_profile(monkeypatch):
         adv, "_grid_lane_for",
         lambda node, *, model, provider, verb: (None, None, None, None, "grid=unarmed"),
     )
-    monkeypatch.setattr(adv, "_node_effective_verb", lambda node: "blueprint")
+    monkeypatch.setattr(node_dispatch, "node_effective_verb", lambda node: "blueprint")
     _wire_profiles(
         monkeypatch,
         profiles={"blueprint": SimpleNamespace(route="", model="opus", provider="")},
@@ -287,8 +288,9 @@ def test_child_lane_resolution_pin_then_grid_then_verb_profile(monkeypatch):
 
 def test_an_unresolvable_child_lane_returns_none(monkeypatch):
     from fno.backlog import advance as adv
+    from fno.agents import node_dispatch
 
-    monkeypatch.setattr(adv, "_node_effective_verb", _boom)
+    monkeypatch.setattr(node_dispatch, "node_effective_verb", _boom)
     assert adv._child_lane_vendor({"id": "x"}, model=None, provider=None) is None
 
 
@@ -324,9 +326,10 @@ def test_a_profile_with_no_routing_names_no_lane(monkeypatch):
     """Nothing the spawn would inherit names a lane, so the child keeps the
     binding-provider rule instead of pricing against the caller's own env."""
     from fno.backlog import advance as adv
+    from fno.agents import node_dispatch
 
     _record_vendor(monkeypatch)
-    monkeypatch.setattr(adv, "_node_effective_verb", lambda node: None)
+    monkeypatch.setattr(node_dispatch, "node_effective_verb", lambda node: None)
     monkeypatch.setattr(
         adv, "_grid_lane_for",
         lambda node, *, model, provider, verb: (None, None, None, None, "grid=unarmed"),

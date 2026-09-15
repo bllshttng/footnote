@@ -568,6 +568,23 @@ verb_rc=0
 if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
     DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
 else
+    # x-3227: done_probes inherit the session cargo build-dir env, TARGET loops
+    # only (probes run for target plans, and the settle sweep below must stay
+    # the hook's last `fno` call for a king driver). The hook env is replayed
+    # from the session snapshot and fno declares none, so a probe running cargo
+    # falls back to .cargo/config.toml's {cargo-cache-home} tree - cold every
+    # fire, dead at the 60s kill. The config surface's own answer, exported
+    # only when it reads as that answer; any failure leaves the env unset.
+    if [[ "$DRIVER" == "target" ]] && [[ -z "${CARGO_BUILD_BUILD_DIR:-}" ]] \
+        && command -v fno >/dev/null 2>&1; then
+        _session_build_dir=$(fno config build-dir 2>/dev/null || true)
+        case "$_session_build_dir" in
+            */"{workspace-path-hash}")
+                export CARGO_BUILD_BUILD_DIR="$_session_build_dir"
+                ;;
+        esac
+        unset _session_build_dir
+    fi
     # One settle sweep before the checker, TARGET loops only: a lost review
     # invocation becomes a `lost` attestation row, so the gate's next read
     # answers a named refusal instead of waiting on silence. A king driver

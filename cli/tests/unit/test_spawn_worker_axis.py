@@ -20,6 +20,22 @@ import pytest
 
 from fno.backlog import advance
 
+
+def _node_row(
+    node_id: str, difficulty: str | None = "low", verb: str | None = None
+) -> dict:
+    """The minimal node dict tests pass to the dispatcher.
+
+    Key presence is what the projection check reads; difficulty low derives
+    /target, matching what the builtin path asserted before the None branch
+    was deleted. An out-of-family ``verb`` rides the row so the lifecycle
+    table abstains and the explicit verb wins, as the deleted None path did."""
+    return {
+        "id": node_id,
+        "dispatch_verb": verb or "",
+        "difficulty": difficulty,
+    }
+
 _REAL_SUBPROCESS_RUN = advance.subprocess.run
 
 
@@ -109,7 +125,7 @@ def test_stage_table_harness_drives_both_launch_and_command(monkeypatch):
     `$fno:target` message no claude worker can run.
     """
     captured = _capture(monkeypatch, _settings(stage_harness="codex"))
-    advance._spawn_worker("x-0000", None, "slug")
+    advance._spawn_worker("x-0000", None, "slug", node=_node_row("x-0000"))
     assert _flag(captured["cmd"], "--harness") == "codex", _why(captured)
     assert _message(captured["cmd"]).startswith("$fno:target"), _why(captured)
 
@@ -117,7 +133,7 @@ def test_stage_table_harness_drives_both_launch_and_command(monkeypatch):
 def test_explicit_harness_pins_both(monkeypatch):
     """Same config, `harness="claude"` explicit: claude launch, claude spelling."""
     captured = _capture(monkeypatch, _settings(stage_harness="codex"))
-    advance._spawn_worker("x-0000", None, "slug", harness="claude")
+    advance._spawn_worker("x-0000", None, "slug", harness="claude", node=_node_row("x-0000"))
     assert _flag(captured["cmd"], "--harness") == "claude", _why(captured)
     assert _message(captured["cmd"]).startswith("/target"), _why(captured)
 
@@ -125,7 +141,7 @@ def test_explicit_harness_pins_both(monkeypatch):
 def test_provider_pins_the_surface_not_only_the_launch(monkeypatch):
     """`provider` IS the harness axis here, so it must reach the resolver."""
     captured = _capture(monkeypatch, _settings(stage_harness="claude"))
-    advance._spawn_worker("x-0000", None, "slug", provider="codex")
+    advance._spawn_worker("x-0000", None, "slug", provider="codex", node=_node_row("x-0000"))
     assert _flag(captured["cmd"], "--harness") == "codex", _why(captured)
     assert _message(captured["cmd"]).startswith("$fno:target"), _why(captured)
 
@@ -133,7 +149,7 @@ def test_provider_pins_the_surface_not_only_the_launch(monkeypatch):
 def test_no_config_falls_back_to_the_resolvers_builtin(monkeypatch):
     """Nothing set anywhere: the resolver owns the claude fallback, not `prov`."""
     captured = _capture(monkeypatch, _settings())
-    advance._spawn_worker("x-0000", None, "slug")
+    advance._spawn_worker("x-0000", None, "slug", node=_node_row("x-0000"))
     assert _flag(captured["cmd"], "--harness") == "claude", _why(captured)
     assert _message(captured["cmd"]).startswith("/target"), _why(captured)
 
@@ -143,9 +159,48 @@ def test_launch_harness_disagreeing_with_the_surface_refuses(monkeypatch):
     this node exists to close: refuse rather than ship a mismatched pair."""
     captured = _capture(monkeypatch, _settings())
     with pytest.raises(advance.SpawnError) as exc:
-        advance._spawn_worker("x-0000", None, "slug", harness="claude", provider="codex")
+        advance._spawn_worker("x-0000", None, "slug", harness="claude", provider="codex", node=_node_row("x-0000"))
     assert "harness" in str(exc.value)
     assert "cmd" not in captured, "refused before spawning"
+
+
+# --- the machine-dispatch spawn env ------------------------------------------
+
+
+def _resolve(monkeypatch, source):
+    monkeypatch.setattr("fno.config.load_settings", lambda: _settings())
+    monkeypatch.setattr(
+        advance, "_grid_lane_for", lambda node, **kw: (None, None, None, None, None)
+    )
+    from fno.agents.node_dispatch import resolve_node_spawn
+
+    return resolve_node_spawn("x-0000", None, "slug", source=source)
+
+
+def test_machine_source_dispatch_carries_trigger_and_no_identity(monkeypatch):
+    """A merge-triggered dispatch is asked for by no session: the spawn env
+    carries the dispatcher trigger and no ambient identity marker."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dispatcher-session-1")
+    args = _resolve(monkeypatch, source="ac")
+    assert "CLAUDE_CODE_SESSION_ID" not in args.env
+    assert args.env["FNO_SPAWN_TRIGGER"] == "dispatch:ac"
+
+
+def test_reconcile_source_names_rd_in_the_trigger(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dispatcher-session-1")
+    args = _resolve(monkeypatch, source="rd")
+    assert args.env["FNO_SPAWN_TRIGGER"] == "dispatch:rd"
+    assert "CLAUDE_CODE_SESSION_ID" not in args.env
+
+
+def test_human_and_blueprint_sources_keep_the_ambient_edge(monkeypatch):
+    """A blueprint's closing advance and a source-less spawn were asked for by
+    a session: the env keeps the parent edge and carries no trigger."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dispatcher-session-1")
+    for source in ("sob", None):
+        args = _resolve(monkeypatch, source=source)
+        assert args.env.get("CLAUDE_CODE_SESSION_ID") == "dispatcher-session-1"
+        assert "FNO_SPAWN_TRIGGER" not in args.env
 
 
 # --- the receipt ------------------------------------------------------------
@@ -169,7 +224,7 @@ def test_spawn_emits_one_dispatch_spawned_row(monkeypatch, tmp_path):
     captured = _capture(monkeypatch, _settings(stage_harness="codex"))
     ev = tmp_path / "events.jsonl"
     advance._spawn_worker(
-        "x-0000", None, "slug", caller="_converge_one", events_path=ev
+        "x-0000", None, "slug", caller="_converge_one", events_path=ev, node=_node_row("x-0000"),
     )
     rows = _rows(ev, "dispatch_spawned")
     assert len(rows) == 1
@@ -189,7 +244,7 @@ def test_receipt_names_the_pinned_account_record(monkeypatch, tmp_path):
     _capture(monkeypatch, _settings())
     ev = tmp_path / "events.jsonl"
     advance._spawn_worker(
-        "x-0000", None, "slug", dispatch_account="ccr", events_path=ev
+        "x-0000", None, "slug", dispatch_account="ccr", events_path=ev, node=_node_row("x-0000"),
     )
     assert _rows(ev, "dispatch_spawned")[0]["data"]["account"] == "ccr"
 
@@ -210,7 +265,7 @@ def test_failed_spawn_emits_no_receipt(monkeypatch, tmp_path):
     )
     ev = tmp_path / "events.jsonl"
     with pytest.raises(advance.SpawnError):
-        advance._spawn_worker("x-0000", None, "slug", events_path=ev)
+        advance._spawn_worker("x-0000", None, "slug", events_path=ev, node=_node_row("x-0000"))
     assert _rows(ev, "dispatch_spawned") == []
 
 
@@ -268,7 +323,7 @@ def test_failed_spawn_captures_the_refusal_tail(monkeypatch):
 
     monkeypatch.setattr(advance.subprocess, "run", fake_run)
     with pytest.raises(advance.SpawnError) as exc:
-        advance._spawn_worker("x-0000", None, "slug")
+        advance._spawn_worker("x-0000", None, "slug", node=_node_row("x-0000"))
     assert "refusing to spawn" in str(exc.value)
     assert "max_fleet_cpu_share ceiling" in str(exc.value)
     assert "cmd" not in captured, "failure came from the subprocess, not the argv"
@@ -286,7 +341,7 @@ def test_failed_spawn_single_line_stderr_is_captured_whole(monkeypatch):
 
     monkeypatch.setattr(advance.subprocess, "run", fake_run)
     with pytest.raises(advance.SpawnError) as exc:
-        advance._spawn_worker("x-0000", None, "slug")
+        advance._spawn_worker("x-0000", None, "slug", node=_node_row("x-0000"))
     assert "boom: no spawn" in str(exc.value)
     assert exc.value.detail == "boom: no spawn"
 def test_grid_lane_for_pinned_model_takes_its_declared_row(monkeypatch):
@@ -420,7 +475,7 @@ def test_blueprint_dispatch_retasks_a_finished_planner_and_spawns_nothing(
     )
     ev = tmp_path / "events.jsonl"
     got = advance._spawn_worker(
-        "x-bbbb", None, "slug", verb="blueprint", caller="advance", events_path=ev
+        "x-bbbb", None, "slug", verb="blueprint", caller="advance", events_path=ev, node=_node_row("x-bbbb", difficulty="medium"),
     )
     assert got == "1a2b3c4d-1111-2222-3333-444455556666"
     assert "cmd" not in captured, "a reuse dispatch must not spawn"
@@ -452,7 +507,7 @@ def test_retask_refused_before_clear_falls_through_to_one_cold_spawn(
         },
     )
     ev = tmp_path / "events.jsonl"
-    advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev)
+    advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev, node=_node_row("x-bbbb", difficulty="medium"))
     assert "cmd" in captured, "the refusal falls through to one cold spawn"
     data = _rows(ev, "dispatch_spawned")[0]["data"]
     assert data["retask_fallthrough"] == "ac-bp-x-aaaa-slug: thread_view_unavailable"
@@ -472,7 +527,7 @@ def test_retask_refused_after_clear_raises_and_spawns_nothing(monkeypatch, tmp_p
     )
     ev = tmp_path / "events.jsonl"
     with pytest.raises(advance.SpawnError) as exc:
-        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev)
+        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev, node=_node_row("x-bbbb", difficulty="medium"))
     assert "ac-bp-x-aaaa-slug" in str(exc.value)
     assert "rename_refused" in str(exc.value)
     assert "cmd" not in captured
@@ -490,7 +545,7 @@ def test_guard_refusal_skips_as_already_running_without_retask(monkeypatch, tmp_
         verdict="already-running",
     )
     with pytest.raises(advance.SpawnAlreadyRunning) as exc:
-        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint")
+        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", node=_node_row("x-bbbb", difficulty="medium"))
     assert "reservation-held" in str(exc.value)
     assert not seen["retask_calls"]
     assert "cmd" not in captured
@@ -507,7 +562,7 @@ def test_target_dispatch_never_reads_the_registry_for_reuse(monkeypatch, tmp_pat
     monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
     monkeypatch.setattr("fno.agents.retask.finished_planner", _boom)
     ev = tmp_path / "events.jsonl"
-    advance._spawn_worker("x-0000", None, "slug", events_path=ev)
+    advance._spawn_worker("x-0000", None, "slug", events_path=ev, node=_node_row("x-0000"))
     assert "cmd" in captured
     data = _rows(ev, "dispatch_spawned")[0]["data"]
     assert "retask" not in data

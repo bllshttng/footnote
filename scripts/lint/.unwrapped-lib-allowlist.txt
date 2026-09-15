@@ -177,7 +177,7 @@ reconcile-throttle.sh
 # library: exposes eval_sweep_maybe_fire; no standalone CLI.
 eval-sweep-throttle.sh
 
-# W8 operator-authority enforcement (cv-b36e32b1). Sourced by
+# W8 superuser-authority enforcement (cv-b36e32b1). Sourced by
 # hooks/target-stop-hook.sh; drive_authority_active() is a thin bash consumer
 # of the EXISTING `fno agents drive-authority` verb (which IS the wrapped entry
 # point). Pure sourcing library; no standalone CLI of its own.

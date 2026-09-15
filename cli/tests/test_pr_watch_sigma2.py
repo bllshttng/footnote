@@ -700,7 +700,10 @@ class TestControlPlaneArmRows:
         assert by_arm["pr_watch_merge"]["skip_reason"] == "disabled"
         assert by_arm["pr_watch_merge"]["interval_s"] == 600
         detail = by_arm["pr_watch_merge"]["detail"]
-        assert detail.startswith("outcome=disabled")
+        # The merge row speaks its own grammar now: the sweep verdict, then
+        # the skip. A clean skip still names no phase.
+        assert detail.startswith("merge sweep=")
+        assert detail.endswith("pr_watch disabled")
         assert "phase" not in detail, (
             f"a clean skip must not name a phase. Got: {detail}"
         )

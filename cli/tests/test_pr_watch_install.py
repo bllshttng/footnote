@@ -1858,19 +1858,17 @@ def test_liveness_report_carries_interval_and_merge_scan(
         launch_agents_dir=tmp_path,
         marks={"last_tick": tick_iso, "last_attempt": None,
                "last_end": None, "completed_tick": None,
-               "merge_scan": {"completed": True, "completed_at": tick_iso,
-                              "eligible": 0, "attempted": 0}},
+               "merge_scan": {"completed": True, "completed_at": tick_iso}},
     )
     assert report["verdict"] == "healthy"
     assert report["interval_seconds"] == 600
     assert report["merge_scan"]["completed"] is True
     assert report["merge_scan"]["completed_at"] == tick_iso
-    assert report["merge_scan"]["eligible"] == 0
 
 
 def test_tick_watermarks_copy_scanned_into_merge_scan(tmp_path):
     """The status line renders scanned from the marks copy, so the copy must
-    carry the receipt's scanned count the way it already carries eligible."""
+    carry the receipt's scanned count."""
     from fno.pr_watch._install import _tick_watermarks
 
     events_file = tmp_path / "events.jsonl"
@@ -1879,8 +1877,7 @@ def test_tick_watermarks_copy_scanned_into_merge_scan(tmp_path):
         tick_data={
             "open_prs": 3, "acted": 0, "swept_count": 13, "swept": {},
             "dropped_count": 0, "dropped": {},
-            "merge_scan": {"completed": True, "scanned": 13,
-                           "eligible": 0, "attempted": 0},
+            "merge_scan": {"completed": True, "scanned": 13},
         },
     )
 
@@ -1900,7 +1897,7 @@ def test_tick_watermarks_scanned_none_without_the_field(tmp_path):
         tick_data={
             "open_prs": 3, "acted": 0, "swept_count": 13, "swept": {},
             "dropped_count": 0, "dropped": {},
-            "merge_scan": {"completed": True, "eligible": 0, "attempted": 0},
+            "merge_scan": {"completed": True},
         },
     )
 
@@ -1933,8 +1930,7 @@ def test_status_prints_scanned_in_merge_scan_line(
         tick_data={
             "open_prs": 3, "acted": 0, "swept_count": 13, "swept": {},
             "dropped_count": 0, "dropped": {},
-            "merge_scan": {"completed": True, "scanned": 13,
-                           "eligible": 0, "attempted": 0},
+            "merge_scan": {"completed": True, "scanned": 13},
         },
     )
 

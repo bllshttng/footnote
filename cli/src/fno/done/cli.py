@@ -896,7 +896,7 @@ def done_command(
     tag_bits.extend(rollup_tags)
     typer.echo(f"fno backlog done: {node_id} -> done  " + "  ".join(tag_bits))
 
-    # Operator-authority matrix (LD3/LD29): the top-level `fno done` verb is an
+    # Superuser-authority matrix (LD3/LD29): the top-level `fno done` verb is an
     # allowed action during a drive window, but audit-tag it so the trail
     # attributes the completion to the operator rather than the LLM. Mirrors
     # `graph/cli.py::cmd_done` exactly so both done verbs emit the identical

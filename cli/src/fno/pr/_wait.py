@@ -141,7 +141,9 @@ def wait_status(
     rc: int = 2
     payload: dict = {}
     out_text, err_text = "", ""
+    ticks = 0
     while True:
+        ticks += 1
         rc, payload, out_text, err_text = _poll(pr, cwd)
         # A CONFLICTING head never settles: GitHub starts no `pull_request`
         # workflow on it, so `checks.total` stays 0 and `settled` below can
@@ -155,7 +157,7 @@ def wait_status(
             and payload.get("pr_state") == "OPEN"
             and "stale_reason" not in payload
         ):
-            _emit(out_text, err_text)
+            _emit(out_text, err_text, ticks)
             sys.stderr.write(
                 f"wait: PR {pr} is CONFLICTING at {str(payload.get('head') or '')[:8]}. "
                 "GitHub starts no checks on a conflicting PR, so none will arrive. "
@@ -164,11 +166,11 @@ def wait_status(
             return 5
         done = payload.get("green") if until == "green" else payload.get("settled")
         if done:
-            _emit(out_text, err_text)
+            _emit(out_text, err_text, ticks)
             return rc
         now = clock()
         if now + interval > deadline:
-            _emit(out_text, err_text)
+            _emit(out_text, err_text, ticks)
             sys.stderr.write(
                 f"wait: still not {until} after {int(timeout)}s; last verdict "
                 f"{payload.get('verdict')}. Re-arm the wait or read the PR.\n"
@@ -188,8 +190,6 @@ def _wait_review(
     counter: Optional[Callable[..., Optional[int]]] = None,
 ) -> int:
     """Poll the review count until it grows past the first-read baseline."""
-    from fno.pr import _proc
-
     if counter is None:
         # Resolved at call time, not as a default argument: tests replace the
         # module attribute, and a def-time default would keep the real reader.
@@ -206,7 +206,9 @@ def _wait_review(
     deadline = clock() + max(0.0, timeout)
     baseline: Optional[int] = None
     last: Optional[int] = None
+    ticks = 0
     while True:
+        ticks += 1
         count = counter(pr, cwd, slug)
         if count is not None:
             last = count
@@ -217,7 +219,7 @@ def _wait_review(
                     f"wait: {count - baseline} new review(s) on PR {pr} "
                     f"({baseline} -> {count}).\n"
                 )
-                sys.stderr.write(f"note: {_proc.GH_CALLS} gh call(s) this invocation\n")
+                sys.stderr.write(_spend_note(ticks, "review"))
                 return 0
         now = clock()
         if now + interval > deadline:
@@ -226,22 +228,34 @@ def _wait_review(
                 f"wait: still no new review after {int(timeout)}s; {observed}. "
                 "Re-arm the wait or read the PR.\n"
             )
-            sys.stderr.write(f"note: {_proc.GH_CALLS} gh call(s) this invocation\n")
+            sys.stderr.write(_spend_note(ticks, "review"))
             return 2
         sleeper(interval)
 
 
-def _emit(out_text: str, err_text: str) -> None:
+def _spend_note(ticks: int, noun: str) -> str:
+    """`note: N gh call(s) over T <noun> read(s) this invocation` + budget.
+
+    The tick count rides beside the call total: a whole wait never reads as
+    one read's spend.
+    """
+    from fno.pr import _proc, _quota
+
+    return (
+        f"note: {_proc.GH_CALLS} gh call(s) over {ticks} {noun} read(s) this "
+        f"invocation{_quota.budget_note()}\n"
+    )
+
+
+def _emit(out_text: str, err_text: str, ticks: int) -> None:
     """Re-emit the final tick's captured output plus the spend counter.
 
     The gh-call line is the one promise that separates this verb from the
     hand-rolled loops it replaces: the spender sees its spend at exit.
     """
-    from fno.pr import _proc
-
     sys.stdout.write(out_text)
     sys.stderr.write(err_text)
-    sys.stderr.write(f"note: {_proc.GH_CALLS} gh call(s) this invocation\n")
+    sys.stderr.write(_spend_note(ticks, "status"))
 
 
 def main(argv: "list[str]") -> int:

@@ -278,12 +278,15 @@ def test_rust_merge_strategy_allowlist_matches_model() -> None:
     )
 
 
-def test_auto_merge_grant_is_python_only() -> None:
-    """The grant decision has one leg: Python.
+def test_auto_merge_grant_rust_leg_matches_the_inventory() -> None:
+    """The grant decision has one Rust reader and one caller.
 
-    The Rust reader was deleted because it had zero callers. This guard pins
-    that deletion so a second implementation cannot silently regrow beside
-    the Python predicate.
+    The Rust reader was deleted once because it had zero callers, and this
+    guard pinned that deletion. x-7aaf regrew it with a real caller: the
+    Rust durable-grant verdict reads the live grant leaf. The guard now pins
+    the inventory instead - `agents_config.rs` is the reader,
+    `merge_grant.rs` its one caller - so a third, drift-prone leg still
+    cannot regrow silently.
     """
     root = _repo_root()
     rust_hits = [
@@ -295,7 +298,12 @@ def test_auto_merge_grant_is_python_only() -> None:
         if "target" not in p.relative_to(root).parts
         and "auto_merge_grant" in p.read_text(encoding="utf-8")
     ]
-    assert not rust_hits, f"Rust leg of auto_merge_grant regrew: {rust_hits}"
+    expected = {"agents_config.rs", "merge_grant.rs"}
+    found = {p.name for p in rust_hits}
+    assert found == expected, (
+        f"Rust auto_merge_grant legs drifted from the inventory: expected "
+        f"{sorted(expected)} (reader + its one caller), found {sorted(found)}"
+    )
     py_hits = [
         p
         for p in (root / "cli" / "src" / "fno").rglob("*.py")

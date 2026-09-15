@@ -258,7 +258,10 @@ def test_king_rule_and_exit_name_the_king_channel_not_decide():
     assert "--authority" in rule
     exit_section = text[text.index("Before you abdicate") :]
     assert "fno backlog note" in exit_section
-    assert "refuses every agent session" in exit_section
+    # Agents answer by default: the exit names the answer verb and the
+    # escalation-note lane, not a closed door.
+    assert "--authority crown" in exit_section
+    assert "escalation note" in exit_section
 
 
 def test_king_mailbox_addresses_full_session_ids():

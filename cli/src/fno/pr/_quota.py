@@ -355,12 +355,33 @@ def record_refusal(stderr: str) -> None:
         print(f"gh budget: refusal not recorded: {exc}", file=sys.stderr)
 
 
+# The most recent fleet-budget status answer: set only when backoff_live ran,
+# so a --refresh read (which never asks) prints no budget text.
+LAST_BUDGET: Optional[dict] = None
+
+
+def budget_note() -> str:
+    """`, fleet budget X of Y points in the last 60s`, or "" when the ledger
+    never answered this process (the ledger number, not core-remaining,
+    answers "is the machine being refused")."""
+    answer = LAST_BUDGET
+    if not isinstance(answer, dict):
+        return ""
+    points, cap = answer.get("points_60s"), answer.get("cap")
+    if isinstance(points, int) and isinstance(cap, int):
+        return f", fleet budget {points} of {cap} points in the last 60s"
+    return ""
+
+
 def backoff_live() -> bool:
     """Whether the fleet ledger holds a live GitHub-refusal backoff."""
+    global LAST_BUDGET
     try:
         answer = _gh_budget({"op": "status"})
     except VerbUnavailable:
+        LAST_BUDGET = None
         return False
+    LAST_BUDGET = answer if isinstance(answer, dict) else None
     return answer.get("backoff_remaining_s", 0) > 0
 
 

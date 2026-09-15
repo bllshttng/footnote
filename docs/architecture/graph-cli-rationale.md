@@ -53,7 +53,7 @@ the report so a flagged fan-out's outcome rides in the --json payload
 silent success). Two lanes, one shared RunState bounding the batch's blast
 radius (AC1-EDGE):
 - `needs_think` group -> FORCE a fan-out /think+/blueprint design pass.
-The decompose invocation IS the operator consent (Locked Decision 3),
+The decompose invocation IS the superuser consent (Locked Decision 3),
 so the gate + attended-offer are overridden (mirrors the
 dispatch_conversational env-forcing); the caps still bound it. A spawn
 that does not fire leaves the child `idea` with its stub on disk.

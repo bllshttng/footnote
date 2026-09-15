@@ -76,10 +76,11 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # the sandbox_posture request), storage_only: 56 -> 58. v30 added
     # git_grant (the effective Git common-dir receipt), storage_only:
     # 58 -> 59. last_activity_basis joined the required list (the age's
-    # instrument word): 43 -> 44.
-    assert payload["declared_count"] == 59
+    # instrument word): 43 -> 44. v32 added stop (fno's own stop record),
+    # storage_only: 59 -> 60.
+    assert payload["declared_count"] == 60
     assert payload["required_count"] == 44
-    assert payload["accounted_count"] == 59
+    assert payload["accounted_count"] == 60
     assert payload["known_gaps"] == {}
 
 

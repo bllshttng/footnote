@@ -1152,23 +1152,6 @@ def schedule_shadow(
     }
 
 
-def _node_effective_verb(node: dict) -> Optional[str]:
-    """The effective workflow verb for a node dict, or None when the
-    lifecycle table abstains. One wrapper so every advance door derives ONE
-    answer per node. Raises DispatchResolveError on an unanswerable node; the
-    caller's spawn-failure path owns it."""
-    from fno.agents import harness_map
-    from fno.graph.ladder import plan_rung as _node_plan_rung
-
-    verb, _note = harness_map.resolve_effective_verb(
-        verb=(node.get("dispatch_verb") or "").strip() or None,
-        difficulty=node.get("difficulty"),
-        plan_rung=_node_plan_rung(node).value,
-        node_id=node.get("id"),
-    )
-    return verb
-
-
 def refuse_unknown_source(verb_name: str, source):
     """An unknown --source refuses at the door (exit 2), never defaults."""
     import typer
@@ -1999,11 +1982,13 @@ def dispatch_lanes(
                 # DECLINE pins too: an unpinned spawn re-consults the grid at the
                 # spawn seam, and a capacity change in between could land the worker
                 # on a harness the worktree was not keyed for.
+                from fno.agents.node_dispatch import node_effective_verb
+
                 lane_grid_harness, lane_grid_model, lane_grid_route, lane_grid_account, lane_grid_why = _grid_lane_for(
                     node,
                     model=resolved_model,
                     provider=eff_harness,
-                    verb=_node_effective_verb(node),
+                    verb=node_effective_verb(node),
                 )
                 lane_placement_harness = _lane_harness(
                     lane_grid_harness or eff_harness, str(root)
@@ -3626,6 +3611,9 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
             # difficulty rides alongside so the grid resolver sees the work axis.
             "model": e.get("model"),
             "difficulty": e.get("difficulty"),
+            # The dispatcher refuses a dict with no dispatch_verb key, so
+            # the projection carries it (raw, may be None).
+            "dispatch_verb": e.get("dispatch_verb"),
             "cross_project": (e.get("project") or None) != (closed_project or None),
         })
     return out
@@ -4227,7 +4215,9 @@ def _child_lane_vendor(
             if vendor is not None or pin in dict(load_settings().agents.provider_limits):
                 return vendor or pin
             return None  # no vendor opinion: the binding cap prices this child
-        verb = _node_effective_verb(child)
+        from fno.agents.node_dispatch import node_effective_verb
+
+        verb = node_effective_verb(child)
         harness, _m, route, _a, _why = _grid_lane_for(
             child, model=model, provider=None, verb=verb
         )

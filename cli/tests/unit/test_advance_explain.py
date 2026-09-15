@@ -394,13 +394,14 @@ def test_explain_and_the_dispatch_grid_pick_name_the_same_model(monkeypatch):
     dispatch path resolves for the same node, on both verbs."""
     _slot_world(monkeypatch)
     from fno.backlog import advance as adv
+    from fno.agents.node_dispatch import node_effective_verb
     from fno.backlog.explain import routing_for
 
     for verb, difficulty in (("/fno:blueprint", "medium"), ("/fno:target", "low")):
         node = _explain_node("x-parity", dispatch_verb=verb, difficulty=difficulty)
         explained = routing_for(node)["candidate"]["model"]
         _h, model, _r, _a, why = adv._grid_lane_for(
-            node, model=None, provider=None, verb=adv._node_effective_verb(node)
+            node, model=None, provider=None, verb=node_effective_verb(node)
         )
         assert why is None
         assert explained == model

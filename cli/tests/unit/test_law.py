@@ -119,7 +119,7 @@ def test_one_call_records_and_prints_a_decision_id(
     data = rows[0]["data"]
     assert data["decision_id"] == decision_id
     # The honest attribution is what survived the trade: a chat recording never
-    # claims the operator lane.
+    # claims the superuser lane.
     assert data["authority_source"] == "chat_attested"
 
 
@@ -363,7 +363,7 @@ def test_chat_recording_can_supersede_another_chat_row(
 
     Same call, same session, the superseded row's authority is the only thing
     that changed. It records and stamps `superseded_by` on the prior row. So the
-    refusal above is the operator-authority guard firing, not supersession being
+    refusal above is the superuser-authority guard firing, not supersession being
     broken outright.
     """
     from fno.decide import list_decisions
@@ -411,7 +411,7 @@ def test_require_marked_caller_prefers_the_resolved_session(
     )
     monkeypatch.setattr(decide, "_attended_terminal", lambda: True)
     # A terminal is present too, and the session still wins: the row must not
-    # claim the operator lane just because someone happened to be at a tty.
+    # claim the superuser lane just because someone happened to be at a tty.
     assert decide.require_marked_caller() == "chat_attested"
 
 
@@ -473,7 +473,7 @@ def test_supersedes_must_be_a_decision_id(
 # they assert a person at a terminal read the diff. The door's chat_attested
 # value cannot carry that fact, because any harness-descended process records
 # the same value, so the write chokepoint refuses the whole family for every
-# non-operator authority (WaiverAuthorityRefusedError). The exact affirmative
+# non-superuser authority (WaiverAuthorityRefusedError). The exact affirmative
 # decision value is the one an agent would reach for, so it is the probe.
 
 WAIVER_SUBJECT = "review-coverage-waiver:acme/widgets#42@" + ("c" * 40)

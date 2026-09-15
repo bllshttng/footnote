@@ -40,7 +40,7 @@ command -v bash >/dev/null 2>&1 || { skip "bash not on PATH"; exit 77; }
 setup_env() {
     TMP_DIR="$(mktemp -d)"
     HOME_DIR="${TMP_DIR}/home"
-    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno"
+    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno" "${TMP_DIR}/bin"
     TRANSCRIPT_FILE="${TMP_DIR}/transcript.jsonl"
     printf '{"role":"model","parts":[{"text":"hello"}]}\n' > "$TRANSCRIPT_FILE"
     STATE_FILE="${TMP_DIR}/.fno/target-state.md"
@@ -51,6 +51,11 @@ created_at: 2026-06-27T00:00:00Z
 attended: false
 ---
 STATE
+    # Pin `fno-agents state path` into the sandbox (x-3227 review, T6): the
+    # real verb answers the SPACES slice of whatever cwd it runs in, so an
+    # ambient binary scatters the adapter's events journal outside TMP_DIR.
+    cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" "${TMP_DIR}/bin/fno-agents"
+    chmod 755 "${TMP_DIR}/bin/fno-agents"
 }
 cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
 
@@ -65,7 +70,7 @@ run_hook() {
     HOOK_RC=0
     HOOK_STDOUT=$(
         cd "$cwd" || exit 1
-        env "$@" bash "$HOOK" <<< "$input_json" 2>"$err_file"
+        env FNO_TEST_SPACE="${TMP_DIR}/.fno" PATH="${TMP_DIR}/bin:$(safe_path)" "$@" bash "$HOOK" <<< "$input_json" 2>"$err_file"
     ) || HOOK_RC=$?
     HOOK_STDERR="$(cat "$err_file")"; rm -f "$err_file"
 }

@@ -13,7 +13,7 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from fno.agents.harness_map import (
     DispatchResolveError, capabilities, dispatch_command,
-    normalize_command, resolve_effective_verb,
+    normalize_command,
 )
 from fno.agents.mux_spawn import resolve_mux_session
 from fno.agents.naming import parse_many
@@ -100,12 +100,15 @@ def _source_preflight(entry: AgentEntry) -> dict:
         return {"status": "refused", "reason": reason or "source_node_unresolved"}
 
     pr_number = source.get("pr_number")
-    if pr_number is None:
+    closed = source.get("status") == "superseded" or (
+        source.get("status") == "done" and source.get("merge_status") == "merged"
+    )
+    if pr_number is None or closed:
         return {"status": "ready", "source_node_id": source.get("id")}
 
     try:
         result = subprocess.run(
-            ["fno", "do", "pr", "status", str(pr_number), "--refresh"],
+            ["fno", "do", "pr", "status", str(pr_number)],
             cwd=source.get("cwd") or None,
             capture_output=True,
             text=True,
@@ -114,13 +117,7 @@ def _source_preflight(entry: AgentEntry) -> dict:
         )
         payload = json.loads(result.stdout.strip().splitlines()[-1])
     except (OSError, ValueError, IndexError, subprocess.TimeoutExpired) as exc:
-        return {
-            "status": "refused",
-            "reason": "source_pr_status_unknown",
-            "source_node_id": source.get("id"),
-            "pr": pr_number,
-            "error": str(exc),
-        }
+        payload = {"error": str(exc)}
 
     state = str(payload.get("pr_state") or payload.get("state") or "").upper()
     if state in {"MERGED", "CLOSED"} or (state == "OPEN" and payload.get("green") is True):
@@ -146,6 +143,7 @@ def _source_preflight(entry: AgentEntry) -> dict:
         "source_node_id": source.get("id"),
         "pr": pr_number,
         "verdict": payload.get("verdict"),
+        "error": payload.get("error"),
     }
 
 
@@ -281,25 +279,6 @@ def resolve_thread_viewport(
     raise RetaskTransportError("thread_view_join_missed")
 
 
-def _resolve_node_verb(node: str) -> str:
-    """The node's next lifecycle verb; an abstain (None) means ``target``.
-    Raises DispatchResolveError on a rung the table cannot answer."""
-    from fno.graph.ladder import plan_rung as node_plan_rung
-    from fno.graph.load import load_graph
-
-    rec = next(
-        (n for n in load_graph() if isinstance(n, dict) and n.get("id") == node), None
-    )
-    verb, _note = resolve_effective_verb(
-        verb=rec.get("dispatch_verb") if rec else None,
-        difficulty=rec.get("difficulty") if rec else None,
-        plan_rung=node_plan_rung(rec).value,
-        node_id=node,
-    )
-    # The table answers canonical "/blueprint"; probe and rename take the bare word.
-    return (verb or "target").lstrip("/") or "target"
-
-
 def resolve_target_coordinate(
     node: str,
     *,
@@ -308,7 +287,14 @@ def resolve_target_coordinate(
     effort: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> RetaskCoordinate:
-    verb = _resolve_node_verb(node)
+    # The node's next lifecycle verb; an abstain (None) means ``target``.
+    # The table answers canonical "/blueprint"; probe and rename take the
+    # bare word. One lookup and one wrapper, shared with the door.
+    from fno.agents.node_dispatch import find_node_row, node_effective_verb
+
+    verb = (node_effective_verb(find_node_row(node), node_id=node) or "target").lstrip(
+        "/"
+    ) or "target"
     args = ["spawn", "--name", "retask-probe"]
     if model is not None:
         args += ["--model", model]

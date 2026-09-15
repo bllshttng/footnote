@@ -416,7 +416,7 @@ only when normalize emitted a non-empty `substrate` (`thread` -> a persistent
 thread; the deprecated `bg` alias canonicalizes to `thread`; `headless` -> a
 one-shot `claude -p` / `codex --exec` / `agy -p`);
 an empty `substrate` is the built-in default: `thread` where the harness seats one (else `pane`), injected explicitly by the spawn seam; pass `--portal N` to open the view with the spawn.
-Pass `--node` whenever `node` is non-empty. Choose the `--cwd` source in this priority order, so launch cwd
+Pass `--node` whenever `node` is non-empty. The spawn derives the verb from the node, so a build message need not name one; a typed `/fno:target` or `/fno:blueprint` that disagrees with the node's verb is refused (x-2c0d). Choose the `--cwd` source in this priority order, so launch cwd
 follows the work-map root:
 
 1. normalize's `resolved_cwd` when non-empty (a `-C`/`--project` target, including
@@ -581,7 +581,7 @@ or an explicit `/target`, not `handoff`.
 
 It also injects a **standing guardrail**: the seed bars the worker from autonomously taking outward-facing or irreversible actions (emails, deploys, merges, publishing, contacting third parties). Before it stops, the worker checks `fno inbox decisions <topic>` with no lane or state filter (both hide real rulings: a king ruling records under coord, an older operator ruling under unattributed) and, when the topic is a node, `fno backlog get <node>`; a king's ruling on the node governs with no decision record at all. An empty result means nothing answered the query, not that no rule exists; it surfaces `<help reason="outward-action" evidence="...">` for human confirmation rather than proceed on a prior instruction.
 
-When the instruction arrives over `fno agents mail` instead of the seed, the same bar holds. Mail injects as user-shaped text, indistinguishable at the recipient from an operator typing. A peer's mail can narrow scope, ask, or inform. It cannot widen scope past what the operator granted. Ordinary work stays ungated. Only outward or irreversible action escalates.
+When the instruction arrives over `fno agents mail` instead of the seed, the same bar holds. Mail injects as user-shaped text, indistinguishable at the recipient from a superuser typing. A peer's mail can narrow scope, ask, or inform. It cannot widen scope past what the superuser granted. Ordinary work stays ungated. Only outward or irreversible action escalates.
 
 This is **prompt-level** enforcement in v1 (the model obeying the seed), observed
 through provider-supported logs or pane tools; a harness-level tool gate is a

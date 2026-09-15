@@ -69,13 +69,9 @@ OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
 MARKER_TTL_SECONDS = 300
 # Push debounce: the timestamp of the last allowed push, one file per branch.
 PUSH_STAMP_DIR = FNO_HOME / "push-stamps"
-# A push whose checks GitHub has not registered yet reads pending: 0, so the
-# CI probe alone cannot see the run it just started. This window covers that
-# blind spot and nothing else; the pending read is the real instrument.
+# The one debounce instrument: a push within this window of the last one
+# waits, because GitHub may not have registered the previous run yet.
 PUSH_DEBOUNCE_SECONDS = 120
-# `fno do pr status`'s own probe, distinct from the merge vetoes' pair below -
-# a push-time read, not a merge-time one, so it does not share their budget.
-_PUSH_STATUS_PROBE_TIMEOUT = 10
 
 # Substitution forms that run a command without being a separate segment. Any of
 # them disqualifies an authorization: a command substitution IS a second
@@ -261,55 +257,15 @@ def _push_stamp_path(branch):
     return PUSH_STAMP_DIR / f"{safe}.stamp"
 
 
-def _read_push_status(cwd=None):
-    """Ask `fno do pr status --json` about the CURRENT branch.
-
-    Returns (pr_number, pending_count) or None when there is nothing to say:
-    no PR, no gh, an old deployment without the verb, a timeout. A broken
-    reader must never block a push - the whole point of routing through this
-    verb rather than a hand-rolled `gh` call is that it already coalesces and
-    caches, so the debounce costs no extra network read per push.
-    """
-    try:
-        proc = subprocess.run(
-            ["fno", "do", "pr", "status", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=_PUSH_STATUS_PROBE_TIMEOUT,
-            cwd=cwd,
-        )
-    except Exception:  # noqa: BLE001 - incl. FileNotFoundError / TimeoutExpired
-        return None
-    payload = None
-    for line in (proc.stdout or "").splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                payload = json.loads(line)
-            except ValueError:
-                continue
-    if not isinstance(payload, dict):
-        return None
-    checks = payload.get("checks")
-    if not isinstance(checks, dict):
-        return None
-    pending = checks.get("pending")
-    if not isinstance(pending, int):
-        return None
-    return (payload.get("pr"), pending)
-
-
 def push_debounce_refusal(command, branch):
     """Refusal text when this push should wait, or None to allow.
 
-    Two blind spots, one instrument each. The CI probe refuses while a run is
-    in flight on the branch head - pushing again only cancels it and starts
-    the wait over. The stamp covers the seconds right after a push, when
-    GitHub has not registered the new run yet and the probe honestly reads
-    `pending: 0` for a run that exists.
-
-    Every failure path allows. `FNO_PUSH_NOW=1` allows and leaves an event row,
-    so a bypass is recoverable from the journal rather than invisible.
+    One instrument, the stamp of the last allowed push: a push within
+    PUSH_DEBOUNCE_SECONDS of the previous one waits, because GitHub may not
+    have registered that run yet and pushing again only cancels it and starts
+    the wait over. Every failure path allows. `FNO_PUSH_NOW=1` allows and
+    leaves an event row, so a bypass is recoverable from the journal rather
+    than invisible.
     """
     if os.environ.get("FNO_PUSH_NOW") == "1":
         _emit_push_bypass_event(branch)
@@ -327,17 +283,6 @@ def push_debounce_refusal(command, branch):
     except OSError:
         pass
 
-    status = _read_push_status()
-    if status is None:
-        return None
-    pr, pending = status
-    if pending > 0:
-        return (
-            f"[fno push debounce] {pending} check(s) still running on PR {pr}. "
-            f"Pushing now cancels that run and restarts the wait. "
-            f"`fno do pr wait {pr} --until settled --timeout 30m`, then push once. "
-            f"FNO_PUSH_NOW=1 bypasses and records the bypass."
-        )
     return None
 
 
@@ -1972,7 +1917,7 @@ def _claim_marker(path):
 
     unlink() IS the claim, not a cleanup afterwards. Two concurrent hook
     processes both pass a plain exists()/stat check, so `missing_ok=True` would
-    let both authorize a merge from one operator approval - the loser here gets
+    let both authorize a merge from one superuser approval - the loser here gets
     ENOENT instead. Guarded because an unguarded raise out of a PreToolUse hook
     fails OPEN on the very gate it was protecting."""
     try:

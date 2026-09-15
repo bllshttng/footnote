@@ -4,7 +4,7 @@
 //!
 //! Read-only fold over transcripts, like [`crate::digest`]: no daemon RPC,
 //! nothing written. Reuses [`crate::claude_drive::claude_projects_dir`] and
-//! [`crate::client_verbs::claude_cwd_slug`] - the transcript store this crate
+//! [`crate::claude_ask::claude_cwd_slug`] - the transcript store this crate
 //! already resolves for `resume`/`adopt`, not a second path guess.
 //!
 //! The census this verb answers directly: 64,792 Bash calls over 21 days, 91%
@@ -14,8 +14,8 @@
 //! feeding `/fewer-permission-prompts` with a measured allowlist instead of a
 //! guessed one.
 
+use crate::claude_ask::claude_cwd_slug;
 use crate::claude_drive::claude_projects_dir;
-use crate::client_verbs::claude_cwd_slug;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

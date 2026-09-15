@@ -301,6 +301,19 @@ fn label_matches(e: &RegistryEntry, token: &str) -> bool {
     e.name == token || e.aliases.iter().any(|a| a == token)
 }
 
+/// Stamp fno's own stop on a row, at the doors that stop a worker without
+/// retiring it: the stop handler (the `fno agents stop` verb and the
+/// provider-cap stop) and the terminal-stop sweep. The record is the row's
+/// memory that fno did this, so the work readers never read the harness
+/// `stopped` state as finished work. A resume clears it.
+pub fn record_stop(e: &mut RegistryEntry, by: &str, reason: Option<String>) {
+    e.stop = Some(StopRecord {
+        by: by.to_string(),
+        at: crate::daemon::now_rfc3339_like(),
+        reason,
+    });
+}
+
 impl Registry {
     /// Resolve by the primary key. The pair, never the id
     /// alone: id shapes differ per harness (claude uuid4, codex uuid7 whose
@@ -465,6 +478,19 @@ pub struct InsideLegReport {
     pub received_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
+}
+
+/// fno's own stop of a worker, so the harness `stopped` state it leaves
+/// behind is never read as finished work. `by` is `stop-verb` (the stop
+/// handler serves `fno agents stop` and the provider-cap stop) or
+/// `terminal-sweep` (the finalize-marked bg worker teardown). A resume
+/// clears the record; absence means fno never stopped the row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StopRecord {
+    pub by: String,
+    pub at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// How long a codex thread's `working` inside-leg report stays authoritative
@@ -920,6 +946,15 @@ pub struct RegistryEntry {
     /// (additive-optional, no schema bump).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exited_at: Option<String>,
+    /// fno's own stop, stamped by the stop handler and the terminal-stop
+    /// sweep (schema v32). The work readers treat a harness `stopped` state
+    /// as terminal only when this is absent, so a row fno stopped holds as
+    /// unfinished instead of retiring as finished work. Skip-when-`None`
+    /// keeps every other row slim; the bump turns a pre-v32 writer's silent
+    /// erasure of the stamp into a loud version refusal, the same
+    /// writer-protection rationale as the v16/v22 bumps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopRecord>,
     /// The mux hosting ref for a pane-substrate agent (4a-G2): `Some` means
     /// this row's PTY is a pane in `mux.session`, and pane-exit facts /
     /// live-inject / sideline badges all key on it. `None` for every daemon

@@ -404,6 +404,114 @@ def test_source_preflight_joins_exact_session_and_refuses_open_non_green(
     assert receipt["pr"] == 1168
 
 
+@pytest.mark.parametrize(
+    "source_overrides",
+    [
+        {"status": "done", "merge_status": "merged"},
+        {"status": "superseded"},
+    ],
+)
+def test_source_preflight_trusts_a_graph_closed_source_node(monkeypatch, source_overrides):
+    import fno.agents.retask as retask
+
+    row = _row()
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-source",
+            "cwd": "/repo",
+            "pr_number": 2042,
+            "sessions": [{"harness": "codex", "session_id": "old-session"}],
+            **source_overrides,
+        }],
+    )
+    monkeypatch.setattr(
+        retask.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("no pr status read"),
+    )
+
+    receipt = retask._source_preflight(row)
+
+    assert receipt["status"] == "ready"
+    assert receipt["source_node_id"] == "x-source"
+
+
+@pytest.mark.parametrize(
+    "source_overrides",
+    [
+        {"status": "in_review"},
+        {"status": "done", "merge_status": None},
+    ],
+)
+def test_source_preflight_reads_an_open_source_pr_once_without_refresh(
+    monkeypatch,
+    source_overrides,
+):
+    import fno.agents.retask as retask
+
+    row = _row()
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-source",
+            "cwd": "/repo",
+            "pr_number": 1168,
+            "sessions": [{"harness": "codex", "session_id": "old-session"}],
+            **source_overrides,
+        }],
+    )
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        return SimpleNamespace(
+            returncode=1,
+            stdout=json.dumps({
+                "pr_state": "OPEN",
+                "green": True,
+                "head_sha": "source-head",
+                "verdict": "green",
+            }),
+        )
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+
+    receipt = retask._source_preflight(row)
+
+    assert receipt["status"] == "ready"
+    assert calls == [["fno", "do", "pr", "status", "1168"]]
+
+
+def test_source_preflight_folds_a_pr_status_failure_into_the_unknown_refusal(
+    monkeypatch,
+):
+    import fno.agents.retask as retask
+
+    row = _row()
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{
+            "id": "x-source",
+            "cwd": "/repo",
+            "pr_number": 1168,
+            "status": "in_review",
+            "sessions": [{"harness": "codex", "session_id": "old-session"}],
+        }],
+    )
+
+    def run(*_args, **_kwargs):
+        raise _subprocess.TimeoutExpired(cmd="fno do pr status", timeout=60)
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+
+    receipt = retask._source_preflight(row)
+
+    assert receipt["status"] == "refused"
+    assert receipt["reason"] == "source_pr_status_unknown"
+    assert "error" in receipt
+
+
 def test_source_preflight_multi_phase_entries_on_one_node_are_not_ambiguous(
     monkeypatch,
 ):
@@ -546,6 +654,83 @@ def test_run_retask_parses_codex_clear_receipt_before_accepting_successor(monkey
     assert receipt["transition"] == "succession"
     assert receipt["registry_rows"] == 1
     assert renamed == [{"node": "x-bdb9", "registry_path": None}]
+
+
+def test_run_retask_on_a_thread_a_portal_already_shows_submits_into_that_portal(monkeypatch):
+    import fno.agents.retask as retask
+
+    row = _row(substrate="thread", mux=None, fno_id="F")
+    target = retask.RetaskCoordinate(
+        harness="codex", provider=None, model="gpt-5.6-sol", effort="high",
+        substrate="thread", permission_mode=None, route=None, account=None,
+    )
+    successor = SimpleNamespace(
+        name=row.name,
+        harness="codex",
+        harness_session_id="new-session",
+        predecessor_session_ids=["old-session"],
+        forked_from_session_id=None,
+    )
+    reads = iter([
+        "› Ask Codex to do anything\n",
+        "To continue this session, run codex resume old-session\n",
+        "Model: gpt-5.6-sol (reasoning high, summaries auto)",
+    ])
+    commands: list[list[str]] = []
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
+    monkeypatch.setattr(retask, "load_registry", lambda **_kwargs: [successor])
+    monkeypatch.setattr(
+        retask,
+        "rename_agent",
+        lambda *_args, **_kwargs: SimpleNamespace(name="target-x-bdb9"),
+    )
+    monkeypatch.setattr("fno.agents.registry.project_verified_tier", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("fno.agents.mux_spawn._pane_osc_title", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._evaluate_manifest_screen",
+        lambda *_args, **_kwargs: _screen_verdict(),
+    )
+    monkeypatch.setattr(retask, "resolve_mux_session", lambda *_args, **_kwargs: "sess")
+
+    def run(command, **_kwargs):
+        if _is_name_verb(command):
+            return _REAL_SUBPROCESS_RUN(command, **_kwargs)
+        commands.append([str(p) for p in command])
+        if "thread" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="portal 3: already showing bp-xbdb9-retask\n",
+                stderr="",
+            )
+        if "pane" in command and "ls" in command:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [{"name": "bp-xbdb9-retask", "fno_id": "F", "pane_id": 41}]
+                ),
+                stderr="",
+            )
+        if "read" in command:
+            return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "retasked"
+    door_calls = [c for c in commands if "thread" in c]
+    assert len(door_calls) == 1, "one control-door call, joined not reopened"
+    pane_ops = [
+        c for c in commands
+        if any(word in c for word in ("read", "wait", "send"))
+    ]
+    assert pane_ops, "the transaction ran over the joined pane"
+    assert all("41" in c for c in pane_ops), "every pane op names the joined pane"
+    submit_ops = [c for c in pane_ops if "send" in c and any("x-bdb9" in p for p in c)]
+    assert len(submit_ops) == 1, "the target submit rode the joined pane"
 
 
 def test_run_retask_succession_verdict_rides_the_shared_classifier(monkeypatch):

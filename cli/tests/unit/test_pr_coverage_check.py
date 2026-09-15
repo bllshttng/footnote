@@ -2525,7 +2525,7 @@ def _waive_env(monkeypatch, tmp_path):
 
     from fno.agents import self_stamp
 
-    # No harness identity + a terminal is the one state the operator lane
+    # No harness identity + a terminal is the one state the superuser lane
     # permits; a resolved session identity is the one it refuses.
     monkeypatch.setattr(
         self_stamp,
@@ -2685,7 +2685,7 @@ def test_coverage_waive_refuses_an_agent_session_positively(
     cap = capsys.readouterr()
     assert rc == 3
     assert "coverage-waive refused" in cap.err
-    assert "cannot record under operator authority" in cap.err
+    assert "cannot record under superuser authority" in cap.err
     subject = _coverage_gate.scoped_waiver_subject("acme/widgets", 42, WAIVE_HEAD)
     assert _coverage_gate.law_authority(subject)[0] == "none"
 

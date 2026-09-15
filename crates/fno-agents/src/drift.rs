@@ -86,7 +86,7 @@ pub enum DriftState {
 ///
 /// A `None` on either side yields [`DriftState::Unknown`] (fail-safe). Otherwise
 /// any difference in canonical path, mtime, or size is [`DriftState::Drifted`].
-/// Path drift and content drift are both "drifted" -- the operator's remedy
+/// Path drift and content drift are both "drifted" -- the remedy
 /// (`fno agents restart`) is the same either way. [`DriftState::DaemonDown`] is
 /// never produced here; the async wrapper decides it from the status probe.
 pub fn classify(running: Option<&ExeFingerprint>, on_disk: Option<&ExeFingerprint>) -> DriftState {
@@ -151,7 +151,7 @@ pub fn keeper_path_note(top_commands: &[String], installed_exe: Option<&Path>) -
     Some(format!("store keeper: {argv0} ({kind})"))
 }
 
-/// Format the operator-facing drift warning, or `None` when there is nothing to
+/// Format the agent-actionable drift warning, or `None` when there is nothing to
 /// warn about (`Fresh`/`DaemonDown`/`Unknown`). The message is advisory and
 /// names the exact remedy verb. The caller routes it to **stderr** only, so a
 /// `--json` stdout consumer is never contaminated (Locked Decision #5).
@@ -168,9 +168,8 @@ pub fn drift_warning(state: &DriftState, pid: Option<u32>) -> Option<String> {
             };
             Some(format!(
                 "fno agents: {who} is an older build than the installed binary; \
-                 `fno agents restart` fixes it but restarts every worker on the \
-                 shared daemon, so it is an operator action - surface it to the \
-                 operator instead of running it from an agent session."
+                 run `fno agents restart` to pick up the new build (it restarts \
+                 the daemon only and keeps PTY workers)."
             ))
         }
         DriftState::Fresh | DriftState::DaemonDown | DriftState::Unknown => None,
@@ -326,7 +325,11 @@ mod tests {
         assert!(msg.contains("fno agents restart"), "names the remedy verb");
         assert!(msg.contains("build"), "describes a build mismatch");
         assert!(msg.contains("91627"), "names the pid when known");
-        assert!(msg.contains("operator"), "names who can act");
+        assert!(
+            !msg.contains("operator"),
+            "the restart is not operator-only"
+        );
+        assert!(!msg.contains("--mux"), "the restart has no mux leg");
         assert!(!msg.contains('\n'), "stays on one line");
     }
 

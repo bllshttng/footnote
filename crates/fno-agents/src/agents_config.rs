@@ -830,6 +830,46 @@ pub fn auto_merge_enabled(cwd: &Path) -> bool {
     false
 }
 
+/// Whether the live config grants merge authority to a dispatch lane: an
+/// `[auto_merge] grant = "dispatch"` leaf, or the legacy `[dispatch]
+/// auto_merge = true` when the same file carries no `grant` leaf.
+///
+/// MIRROR NOTE: this mirrors `AutoMergeBlock._coerce_grant` plus the legacy
+/// fold of `_alias_am_grant` in `fno/config`. The fold is per file: a
+/// canonical `grant` leaf present in a candidate decides that file (a
+/// canonical `grant = "none"` is never masked by the file's own legacy key);
+/// otherwise a `[dispatch] auto_merge` leaf decides it, and only a real TOML
+/// boolean `true` grants. A file with neither leaf falls through to the next
+/// candidate. Only the trimmed string `dispatch` grants; anything else, and
+/// every malformed value, fails safe toward withheld.
+pub fn auto_merge_grant_dispatches(cwd: &Path) -> bool {
+    for path in config_candidates(cwd) {
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return false,
+        };
+        let Some(table) = parse_config(&content) else {
+            return false;
+        };
+        if let Some(grant) = table
+            .get("auto_merge")
+            .and_then(|am| am.as_table())
+            .and_then(|am| am.get("grant"))
+        {
+            return grant.as_str().map(str::trim) == Some("dispatch");
+        }
+        if let Some(flag) = table
+            .get("dispatch")
+            .and_then(|d| d.as_table())
+            .and_then(|d| d.get("auto_merge"))
+        {
+            return flag.as_bool() == Some(true);
+        }
+    }
+    false
+}
+
 /// The Python coercer's affirmative set, in Rust. Anything else is false, so a
 /// typo still fails safe toward disabled.
 fn affirmative(value: &toml::Value) -> bool {
@@ -1904,6 +1944,64 @@ mod tests {
             );
         }
         clear_config_env();
+    }
+
+    // --- auto_merge.grant dispatch reader ---------------------------------
+
+    #[test]
+    fn auto_merge_grant_reads_a_padded_dispatch_literal() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("amg-padded", "[auto_merge]\ngrant = \" dispatch \"\n");
+        std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+        let got = auto_merge_grant_dispatches(&cwd);
+        clear_config_env();
+        assert!(got, "a padded dispatch literal must grant");
+    }
+
+    #[test]
+    fn auto_merge_grant_honors_the_legacy_dispatch_auto_merge_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("amg-legacy", "[dispatch]\nauto_merge = true\n");
+        std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+        let got = auto_merge_grant_dispatches(&cwd);
+        clear_config_env();
+        assert!(got, "legacy [dispatch] auto_merge = true must grant");
+    }
+
+    #[test]
+    fn auto_merge_grant_canonical_none_outranks_legacy_true_in_one_file() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings(
+            "amg-both",
+            "[auto_merge]\ngrant = \"none\"\n\n[dispatch]\nauto_merge = true\n",
+        );
+        std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+        let got = auto_merge_grant_dispatches(&cwd);
+        clear_config_env();
+        assert!(!got, "a canonical grant leaf in the same file must decide");
+    }
+
+    #[test]
+    fn auto_merge_grant_rejects_none_non_string_and_string_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (i, body) in [
+            "[auto_merge]\ngrant = \"none\"\n",
+            "[auto_merge]\ngrant = true\n",
+            "[dispatch]\nauto_merge = \"true\"\n",
+        ]
+        .iter()
+        .enumerate()
+        {
+            clear_config_env();
+            let cwd = write_project_settings(&format!("amg-reject-{i}"), &format!("{body}\n"));
+            std::env::set_var("FNO_CONFIG", cwd.join(".fno/config.toml"));
+            let got = auto_merge_grant_dispatches(&cwd);
+            clear_config_env();
+            assert!(!got, "{body:?} must not grant");
+        }
     }
 
     // --- review.optional_apps reader ---------------------------------------

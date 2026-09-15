@@ -153,19 +153,6 @@ def _validate(worktree: Path, authority: ManifestAuthority) -> tuple[Path, bytes
     return state_path, content
 
 
-def archive_target_manifest(
-    worktree: Path,
-    attempt: str,
-    authority: ManifestAuthority,
-) -> ManifestArchiveReceipt:
-    """Validate and archive the immutable target manifest without overwrite."""
-    if not _SAFE_ATTEMPT.fullmatch(attempt):
-        raise ManifestAuthorityError("attempt id is not safe for an archive filename")
-    state_path, content = _validate(Path(worktree), authority)
-    archive_dir = Path(authority.plan_path + ".artifacts")
-    archive_path = archive_dir / f"target-state-{attempt}.md"
-    digest = _archive_exact(state_path, archive_path, content)
-    return ManifestArchiveReceipt(path=str(archive_path), content_hash=digest)
 
 
 def _archive_exact(state_path: Path, archive_path: Path, content: bytes) -> str:
@@ -224,38 +211,6 @@ def _restore_target_manifest(
     return True
 
 
-def prepare_target_handoff(
-    worktree: Path,
-    attempt: str,
-    authority: ManifestAuthority,
-    *,
-    release_exact: Callable[[str, str], object] | None = None,
-    claims_root: Path | None = None,
-) -> ManifestPrepareReceipt:
-    """Archive the manifest and release only its exact claim, or restore custody."""
-    if release_exact is None:
-        from fno.claims.core import release_claim
-        from fno.claims.io import claims_root_for
-
-        def release_exact(key: str, holder: str) -> object:
-            return release_claim(
-                key,
-                holder=holder,
-                root=claims_root or claims_root_for(key),
-                strict=True,
-            )
-
-    if not _SAFE_ATTEMPT.fullmatch(attempt):
-        raise ManifestAuthorityError("attempt id is not safe for an archive filename")
-    state_path, content = _validate(Path(worktree), authority)
-    archive_path = Path(authority.plan_path + ".artifacts") / f"target-state-{attempt}.md"
-    return prepare_manifest_and_release(
-        state_path,
-        archive_path,
-        claim_key=f"node:{authority.node}",
-        holder=authority.claim_holder,
-        release_exact=release_exact,
-    )
 
 
 def prepare_manifest_and_release(

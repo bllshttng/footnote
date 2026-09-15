@@ -15,7 +15,7 @@
 #
 # ephemeralMessage over userMessage on purpose: userMessage is user-shaped, and
 # this repo's pitfalls corpus records that user-shaped injection is
-# indistinguishable from an operator typing (the mail-probe entry).
+# indistinguishable from a superuser typing (the mail-probe entry).
 #
 # NEVER blocks. Always exits 0 and degrades to silence when anything it reads
 # is missing: no jq, no fno, no registry row, no crown. An uncrowned session

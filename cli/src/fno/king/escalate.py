@@ -1,17 +1,14 @@
 """Escalate a stalled king board to the operator, exactly once per stalled set.
 
 A king terminating ``NoProgress`` exits quietly: work pending, nothing moving,
-nobody told. The escalation is the telling, a question in the operator queue
-because the queue survives the next turn. Idempotence keys on the stalled id
-SET - a respawned king meeting the same board records no second question,
-while a different board is the SAME ask, re-measured: the channel supersedes
-the stale row and asks once on the new reading. The board churns; the
-question does not.
+nobody told. The escalation is the telling, a question in the operator queue.
+Idempotence keys on the stalled id set within the king's own channel: a
+respawned king meeting the same board records no second question, and a
+changed board supersedes only that king's stale row.
 
-The operator-facing text is rendered in the ``fno-agents`` crate
-(``king-escalation-text``, x-ff27): a question states only a reading its
-producer passed, and the renderer refuses an empty set as data. This module
-keeps the fold (dedupe, supersede, delivery) and the liveness read.
+The operator-facing text renders in the ``fno-agents`` crate
+(``king-escalation-text``, x-ff27); this module keeps the fold and the
+liveness read.
 """
 from __future__ import annotations
 
@@ -29,11 +26,13 @@ def _render(
     unknown_reason: "str | None" = None,
     verdict: "str | None" = None,
     scope: "str | None" = None,
+    session_id: "str | None" = None,
 ) -> dict:
     """One round-trip with the crate renderer (d-b6cc1a2a: new code in
     ``crates/``). ``ok: false`` is a REFUSAL, not a failure: the caller must
     raise, never fall back to Python text - the fallback is the defect.
     ``verdict`` (first word = verdict name, x-4d4f) and ``scope`` ride along.
+    Naming ``session_id`` scopes the answer's ``marker`` to that king.
     """
     from fno.rust_binary import verb_call
 
@@ -47,6 +46,7 @@ def _render(
             "unknown_reason": unknown_reason,
             "verdict": verdict,
             "scope": scope,
+            "session_id": session_id,
         },
     )
 
@@ -58,12 +58,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
              scope: "str | None" = None) -> "tuple[str, str]":
     """Record one operator question for this stalled set.
 
-    Returns ``(outcome, question_id)`` where outcome is ``recorded``,
-    ``duplicate``, ``answered`` or ``closed``. Raises on a store failure or a
-    renderer refusal; a quiet failure here would put the king back in the
-    silence this verb exists to break. ``live`` and ``unknown_reason`` come
-    from :func:`fno.king.state.reign_state`; the dedupe key is unchanged
-    either way.
+    Returns ``(outcome, question_id)``; raises rather than failing quiet.
     """
     from fno.agents.stale_escalate import dedupe_key, reconcile_channel
     from fno.harness_identity import canonical_handle
@@ -72,10 +67,11 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     key = dedupe_key(ids)
     # Render BEFORE the fold: a refusal must raise while the channel is still
     # untouched. The channel's empty branch closes open asks, so reaching it
-    # with a refused set would read as a clean board.
+    # with a refused set would read as a clean board. Naming the session
+    # scopes the answer's marker to this king.
     answer = _render(
         ids, key, reason, live=live, unknown_reason=unknown_reason,
-        verdict=verdict, scope=scope,
+        verdict=verdict, scope=scope, session_id=session_id,
     )
     if not answer.get("ok"):
         raise ValueError(answer.get("message", "king escalation refused"))
@@ -84,7 +80,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         root=root,
         session_id=session_id,
         cwd=cwd,
-        marker=MARKER,
+        marker=answer.get("marker") or MARKER,
         subject="king-escalation",
         identities=ids,
         question=lambda _key: answer["question"],

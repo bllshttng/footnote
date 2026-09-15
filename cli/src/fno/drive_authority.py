@@ -16,7 +16,7 @@ is an authoritative "an operator is driving now" signal.
 
 Stop-hook / PreToolUse consumption seam: call ``fno agents drive-authority``
 (exit 0 when active) or import ``is_drive_authority_active``. The full
-operator-authority matrix enforcement + its integration test land in Wave 8
+superuser-authority matrix enforcement + its integration test land in Wave 8
 (design Open Question #10); this module is the shared detection foundation.
 
 Lives at the platform layer rather than under ``fno.agents``: it is a read-only
@@ -103,7 +103,7 @@ def emit_operator_initiated(
 ) -> None:
     """Audit-tag an operator-initiated action taken during a drive window.
 
-    The operator-authority matrix (design LD3/LD29) *allows* informational
+    The superuser-authority matrix (design LD3/LD29) *allows* informational
     actions -- ``fno backlog done``, ``fno gate set``, artifact edits -- while
     an operator holds a drive window, but tags them so the audit trail
     attributes the action to the operator rather than the LLM. The generic

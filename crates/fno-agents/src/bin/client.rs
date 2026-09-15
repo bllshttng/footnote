@@ -994,7 +994,12 @@ async fn run(args: Vec<String>) -> i32 {
                 return 2;
             }
         };
-        return fno_agents::restart_run::run_restart(parsed.force, parsed.json.json).await;
+        return fno_agents::restart_run::run_restart(
+            parsed.force,
+            parsed.json.json,
+            parsed.if_drifted,
+        )
+        .await;
     }
 
     // `reap` is the manual dead-row GC (x-b1aa): the SAME sweep the daemon runs
@@ -2635,6 +2640,15 @@ async fn run_status(json_out: bool) -> i32 {
                         "arms_attention".into(),
                         serde_json::to_value(arms_attention(&arms)).unwrap_or(Value::Null),
                     );
+                    // What work is stuck right now: hung verbs and dead
+                    // flight holders, from the one stuck_work read.
+                    obj.insert(
+                        "stuck_work".into(),
+                        fno_agents::stuck_work::status_value(
+                            &std::env::current_dir()
+                                .unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                        ),
+                    );
                     // x-f188 change 4: the drift verdict as a field, so the
                     // census reads it from JSON instead of regex-parsing the
                     // stderr sentence.
@@ -2753,6 +2767,9 @@ fn degraded_status_payload(arms: &[fno_agents::tick_ledger::ArmStatus]) -> Value
         "daemon": null,
         "arms": arms,
         "arms_attention": arms_attention(arms),
+        "stuck_work": fno_agents::stuck_work::status_value(
+            &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        ),
     })
 }
 
@@ -2763,6 +2780,11 @@ fn print_status_human(result: &Value, arms: &[fno_agents::tick_ledger::ArmStatus
     println!("control-plane arms:");
     for arm in arms {
         println!("  {}", arm.line);
+    }
+    if let Some(stuck) = result.get("stuck_work") {
+        for line in fno_agents::stuck_work::render_lines(stuck) {
+            println!("{line}");
+        }
     }
     let Some(daemon) = result.get("daemon").and_then(Value::as_object) else {
         return;

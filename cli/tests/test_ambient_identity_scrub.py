@@ -375,3 +375,16 @@ def test_scrub_list_covers_the_measured_codex_identity_env() -> None:
     flags = ambient_identity_env_unset_args()
     for name in measured:
         assert name in flags, f"{name} missing from the env -u strip flags"
+
+
+def test_worker_environment_drops_the_spawn_trigger() -> None:
+    """The floor drops the spawn cause with the identity: a worker must never
+    inherit its parent's FNO_SPAWN_TRIGGER, or its own later spawns would wear
+    the parent's dispatcher label. A gh-less PATH keeps the probe hermetic."""
+    from fno.setup.github_cli import worker_environment
+
+    result = worker_environment(
+        {"PATH": "/definitely-not-a-bin-dir", "FNO_SPAWN_TRIGGER": "dispatch:ac"}
+    )
+    assert result["PATH"] == "/definitely-not-a-bin-dir"
+    assert "FNO_SPAWN_TRIGGER" not in result

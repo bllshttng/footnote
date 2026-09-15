@@ -63,6 +63,9 @@ pub(crate) struct Probe {
     /// `None` on a detached HEAD.
     pub head_branch: Option<String>,
     pub dirty: Vec<String>,
+    /// Paths the incoming range (`origin/<default>` side only) touches; empty
+    /// when behind is 0 or the read failed (fail-open, payload-only overlap).
+    pub incoming: Vec<String>,
 }
 
 /// A stale tracking ref can under-report `behind`, but it cannot invent an
@@ -95,6 +98,27 @@ pub(crate) fn probe(canonical: &Path, fetch: bool) -> Probe {
         Some((Some(ahead), Some(behind)))
     })
     .unwrap_or((None, None));
+    let incoming: Vec<String> = if behind.unwrap_or(0) > 0 {
+        git_out(
+            canonical,
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                &format!("{default}...origin/{default}"),
+            ],
+            PROBE_TIMEOUT_SECS,
+        )
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let ahead_commits: Vec<String> = git_out(
         canonical,
         &[
@@ -132,6 +156,7 @@ pub(crate) fn probe(canonical: &Path, fetch: bool) -> Probe {
         tip_sha,
         head_branch,
         dirty,
+        incoming,
     }
 }
 
@@ -210,6 +235,30 @@ fn ahead_recovery(canonical: &Path, p: &Probe) -> String {
     format!("git -C {canonical} branch rescue/canonical-{tip12} {default} && {second}")
 }
 
+/// Uncommitted paths that block a fast-forward: every dirty path the payload
+/// file list OR the incoming range touches. Git refuses the merge on exactly
+/// this set; a failed incoming read falls back to the payload-only overlap.
+fn blocking_paths(files: &[String], p: &Probe) -> Vec<String> {
+    let mut blocking: Vec<String> = p
+        .dirty
+        .iter()
+        .filter(|f| files.contains(f) || p.incoming.contains(f))
+        .cloned()
+        .collect();
+    blocking.sort();
+    blocking.dedup();
+    blocking
+}
+
+/// Display cap shared by every path list the verb prints; the stash
+/// pathspec keeps every path.
+fn show_cap(paths: &[String]) -> String {
+    match paths.len() {
+        n if n > SHOW_CAP => format!("{}, (+{} more)", paths[..SHOW_CAP].join(", "), n - SHOW_CAP),
+        _ => paths.join(", "),
+    }
+}
+
 fn build_refusal(
     canonical: &Path,
     files: &[String],
@@ -217,27 +266,12 @@ fn build_refusal(
     sha: Option<&str>,
     p: &Probe,
 ) -> Option<String> {
-    let mut blocking: Vec<String> = files
-        .iter()
-        .filter(|f| p.dirty.contains(f))
-        .cloned()
-        .collect();
-    blocking.sort();
-    blocking.dedup();
+    let blocking = blocking_paths(files, p);
     let canonical_display = canonical.display();
     let mut blocks: Vec<String> = Vec::new();
 
     if !blocking.is_empty() {
-        let shown = match blocking.len() {
-            n if n > SHOW_CAP => {
-                format!(
-                    "{}, (+{} more)",
-                    blocking[..SHOW_CAP].join(", "),
-                    n - SHOW_CAP
-                )
-            }
-            _ => blocking.join(", "),
-        };
+        let shown = show_cap(&blocking);
         let date = chrono::Utc::now().format("%Y-%m-%d");
         let pr = pr.map(|n| n.to_string()).unwrap_or_else(|| "0".into());
         let sha12: String = sha
@@ -251,7 +285,7 @@ fn build_refusal(
         blocks.push(format!(
             "post-merge sync: canonical checkout is dirty - the pull would refuse:\n\
              \x20 checkout: {canonical_display}\n\
-             \x20 blocking (uncommitted + touched by this merge): {shown}\n\
+             \x20 blocking (uncommitted + touched by the incoming commits): {shown}\n\
              \x20 recovery: git -C {canonical_display} stash push -u -m \"fno post-merge sync {date} PR #{pr} {sha12}\" -- {paths}\n\
              \x20 marker withheld, will retry once the blocking paths are committed or stashed"
         ));
@@ -320,26 +354,15 @@ fn build_answer(payload: &Value) -> Value {
         ));
     }
     if !p.dirty.is_empty() {
-        let shown = match p.dirty.len() {
-            n if n > SHOW_CAP => {
-                format!(
-                    "{}, (+{} more)",
-                    p.dirty[..SHOW_CAP].join(", "),
-                    n - SHOW_CAP
-                )
-            }
-            _ => p.dirty.join(", "),
-        };
+        let shown = show_cap(&p.dirty);
         notes.push(format!("canonical dirty: {shown}"));
     }
 
-    let mut blocking: Vec<String> = files
-        .iter()
-        .filter(|f| p.dirty.contains(f))
-        .cloned()
-        .collect();
-    blocking.sort();
-    blocking.dedup();
+    let blocking = blocking_paths(&files, &p);
+    if !blocking.is_empty() {
+        let shown = show_cap(&blocking);
+        notes.push(format!("fast-forward blocked by: {shown}"));
+    }
 
     json!({
         "default_branch": p.default,
@@ -625,5 +648,51 @@ mod tests {
         }
         assert_eq!(answer["refusal"], Value::Null);
         assert_eq!(answer["default_branch"], "main");
+    }
+
+    /// Advance origin by two commits through the seed clone (older touches
+    /// `f1`, newest touches `f2`) and fetch in `canonical`, so the probe sees
+    /// behind 2 with a two-path incoming range.
+    fn advance_origin_two_commits(r: &Repo) {
+        let seed = r.canonical.parent().unwrap().join("seed");
+        commit_file(&seed, "f1", "v1", "older touches f1");
+        commit_file(&seed, "f2", "v2", "newest touches f2");
+        git(&seed, &["push", "-q", "origin", "main"]);
+        git(&r.canonical, &["fetch", "-q", "origin"]);
+    }
+
+    #[test]
+    fn incoming_dirt_from_an_older_merge_blocks() {
+        let r = repo_with_origin();
+        advance_origin_two_commits(&r);
+        std::fs::write(r.canonical.join("f1"), "dirty").unwrap();
+        std::fs::write(r.canonical.join("f3"), "dirty").unwrap();
+        let p = probe(&r.canonical, false);
+        assert_eq!(p.behind, Some(2));
+        let refusal = build_refusal(
+            &r.canonical,
+            &payload_files(&["f2"]),
+            Some(7),
+            Some(&"a".repeat(40)),
+            &p,
+        );
+        let refusal = refusal.unwrap();
+        assert!(refusal.contains("-- 'f1'"));
+        assert!(!refusal.contains("'f3'"));
+    }
+
+    #[test]
+    fn the_answer_names_blockers_without_a_file_list() {
+        let r = repo_with_origin();
+        advance_origin_two_commits(&r);
+        std::fs::write(r.canonical.join("f1"), "dirty").unwrap();
+        std::fs::write(r.canonical.join("f3"), "dirty").unwrap();
+        let answer = build_answer(&json!({ "canonical": r.canonical.to_string_lossy() }));
+        assert_eq!(answer["blocking"], json!(["f1"]));
+        let notes = answer["notes"].as_array().unwrap();
+        assert!(notes.iter().any(|n| n
+            .as_str()
+            .unwrap()
+            .starts_with("fast-forward blocked by: f1")));
     }
 }

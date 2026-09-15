@@ -953,6 +953,20 @@ pub fn run_authorized_merge_capture(args: &[String]) -> (i32, String, String) {
         );
         return (0, out, String::new());
     }
+    // The grant ops are the durable-grant reader riding this verb's payload,
+    // the same transport the hold ops use: `{"op": "grant-verdict", ...}`
+    // answers one PR, `{"op": "grant-queue", ...}` answers the merge queue.
+    if payload
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(|op| op.starts_with("grant-"))
+    {
+        let out = crate::merge_grant::run_op(
+            payload.get("op").and_then(Value::as_str).unwrap_or(""),
+            &payload,
+        );
+        return (0, out, String::new());
+    }
     let request = match parse_request(&payload) {
         Ok(request) => request,
         Err(message) => return (2, String::new(), format!("authorized-merge: {message}\n")),
