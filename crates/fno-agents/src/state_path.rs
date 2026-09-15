@@ -3,7 +3,8 @@
 //! hooks call this instead of spelling `<repo>/.fno/<file>`, so the location
 //! has one owner per language and the two agree through the slug contract in
 //! `paths::space_slug`. Binary-direct (no daemon), resolved from the process
-//! cwd.
+//! cwd. The `escalations` key is Rust-owned: nothing in Python reads the
+//! directory, so it has no Python accessor to mirror.
 
 use std::path::PathBuf;
 
@@ -21,7 +22,7 @@ pub fn run(args: &[String]) -> i32 {
         args
     };
     let Some(name) = args.first() else {
-        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap>");
+        eprintln!("usage: fno-agents state path <target-state|run-log|events|plans|inbox|kings|scratchpad|status-sinks|worktree-log|codemap|escalations>");
         return 2;
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -31,7 +32,7 @@ pub fn run(args: &[String]) -> i32 {
     let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
     let Some(path) = resolve(name, &cwd) else {
         eprintln!(
-            "error: unknown state path {name} (known: codemap, events, inbox, kings, plans, run-log, scratchpad, status-sinks, target-state, worktree-log)"
+            "error: unknown state path {name} (known: codemap, escalations, events, inbox, kings, plans, run-log, scratchpad, status-sinks, target-state, worktree-log)"
         );
         return 2;
     };
@@ -69,6 +70,9 @@ fn resolve(name: &str, cwd: &std::path::Path) -> Option<PathBuf> {
         "status-sinks" => Some(space.join("status-sinks")),
         "worktree-log" => Some(space.join("worktree-log.jsonl")),
         "codemap" => Some(wt.join("codemap.md")),
+        // Rust-owned: the escalation notes directory (crate::escalation).
+        // Nothing in Python reads it, so there is no Python accessor to mirror.
+        "escalations" => Some(crate::escalation::dir(cwd)),
         _ => None,
     }
 }
