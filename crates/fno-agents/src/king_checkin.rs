@@ -372,7 +372,9 @@ fn r_board(
 fn r_escalations(cwd: &Path, folded: &Result<Value, String>) -> Result<Value, String> {
     let dir = crate::escalation::dir(cwd);
     let notes = crate::escalation::scan(&dir).map_err(|e| format!("unreadable ({e})"))?;
-    let folded = folded.clone()?;
+    let folded = folded
+        .clone()
+        .map_err(|e| format!("board fold unreadable, so scope filtering is down ({e})"))?;
     let scope_ids: std::collections::HashSet<&str> = folded
         .get("fold")
         .and_then(|f| f.get("nodes"))
@@ -926,29 +928,22 @@ fn render_lines(
             let reading = by_name("escalations")
                 .map(|r| &r.value)
                 .unwrap_or(&Value::Null);
-            if let Some(reason) = reading.get("unreadable") {
+            let rows = reading
+                .get("rows")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let open = reading.get("open").and_then(|v| v.as_i64()).unwrap_or(0);
+            let overdue = reading.get("overdue").and_then(|v| v.as_i64()).unwrap_or(0);
+            lines.push(format!("escalations: open {open}, overdue {overdue}"));
+            for row in rows.iter().take(MAX_COURT_ROWS) {
                 lines.push(format!(
-                    "escalations: unreadable ({})",
-                    reason.as_str().unwrap_or("unknown")
+                    "  {} ({}), deadline {}, {}",
+                    dash(row.get("title")),
+                    dash(row.get("class")),
+                    dash(row.get("deadline")),
+                    dash(row.get("state")),
                 ));
-            } else {
-                let rows = reading
-                    .get("rows")
-                    .and_then(|r| r.as_array())
-                    .cloned()
-                    .unwrap_or_default();
-                let open = reading.get("open").and_then(|v| v.as_i64()).unwrap_or(0);
-                let overdue = reading.get("overdue").and_then(|v| v.as_i64()).unwrap_or(0);
-                lines.push(format!("escalations: open {open}, overdue {overdue}"));
-                for row in rows.iter().take(MAX_COURT_ROWS) {
-                    lines.push(format!(
-                        "  {} ({}), deadline {}, {}",
-                        dash(row.get("title")),
-                        dash(row.get("class")),
-                        dash(row.get("deadline")),
-                        dash(row.get("state")),
-                    ));
-                }
             }
         }
     }

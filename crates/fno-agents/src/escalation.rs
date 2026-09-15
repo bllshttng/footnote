@@ -1,9 +1,9 @@
 //! Escalation notes: one markdown file per superuser-tier call, written by a
-//! king into the project's escalations directory and read here by the daemon's
-//! fanout loop (delivery), the king check-in (overdue action) and `state path`
-//! (shell hooks). The note stands alone: it names what is being decided, why
-//! now, every option with its consequence, the recommendation, and the default
-//! taken on silence. No ids, so a phone push reads complete.
+//! king into the project's escalations directory and read here by the king
+//! check-in (overdue action) and `state path` (shell hooks). The note stands
+//! alone: it names what is being decided, why now, every option with its
+//! consequence, the recommendation, and the default taken on silence. No ids,
+//! so a phone push reads complete.
 
 use std::path::{Path, PathBuf};
 

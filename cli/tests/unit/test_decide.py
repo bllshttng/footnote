@@ -2381,13 +2381,13 @@ def test_no_identity_and_no_terminal_refuses_operator_authority(
     )
     assert refused.exit_code != 0, refused.output
     assert "no terminal" in refused.output
-    refused_without_flag = runner.invoke(
+    unattributed_write = runner.invoke(
         decide_app,
         ["--subject", "pr-923", "--decision", "a note", "--decided-by", "J.N. Choi"],
     )
     # No gate since 2026-09-14: the unattributed caller records into the
     # unattributed lane, and the stated name is a claim, not the decider.
-    assert refused_without_flag.exit_code == 0, refused_without_flag.output
+    assert unattributed_write.exit_code == 0, unattributed_write.output
     payload = json.loads(
         runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
     )
@@ -3181,11 +3181,11 @@ def test_only_an_attended_caller_writes_attested_by(
             disposition="single",
         ),
     )
-    refused = runner.invoke(
+    agent_write = runner.invoke(
         decide_app, ["--subject", "pr-921", "--decision", "held"]
     )
     # Agents answer by default (2026-09-14): the row records, attests nothing.
-    assert refused.exit_code == 0, refused.output
+    assert agent_write.exit_code == 0, agent_write.output
     agent_row = json.loads(
         runner.invoke(decide_app, ["list", "--subject", "pr-921", "--json"]).stdout
     )["decisions"][0]
