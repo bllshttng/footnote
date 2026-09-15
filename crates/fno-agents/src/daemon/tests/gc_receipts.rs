@@ -4800,3 +4800,8 @@ mod blueprint_retirement;
 /// seam runs for real against a fake `claude` on PATH.
 #[path = "gc_receipts/retire_keeps_session.rs"]
 mod retire_keeps_session;
+
+/// The spawn-edge kind families (a PEER handoff never holds its spawner),
+/// split by the file budget; the fixtures above are the shared seams.
+#[path = "gc_receipts/lineage_kind.rs"]
+mod lineage_kind;
