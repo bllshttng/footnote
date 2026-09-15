@@ -198,6 +198,8 @@ def test_resolve_falls_back_to_cargo_dev(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
+    # The smoke lanes export FRONT for the built binary; this leg is below it.
+    monkeypatch.delenv("FNO_AGENTS_FRONT", raising=False)
     monkeypatch.setattr(rust_binary, "_cargo_dev_binary", lambda: dev)
     assert rust_binary.resolve_binary() == dev
 
@@ -207,6 +209,7 @@ def test_resolve_returns_none_when_absent(monkeypatch) -> None:
     monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
+    monkeypatch.delenv("FNO_AGENTS_FRONT", raising=False)
     monkeypatch.setattr(rust_binary, "_cargo_dev_binary", lambda: None)
     assert rust_binary.resolve_binary() is None
 
