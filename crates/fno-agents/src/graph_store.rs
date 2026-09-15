@@ -2066,6 +2066,10 @@ pub(crate) fn rotate_backups(dir: &Path, prefix: &str) -> Option<PathBuf> {
 }
 
 /// Atomic whole-file write: temp sibling + rename (store._write_json).
+/// x-385e change 4: a publish answers Ok only after its bytes are durable:
+/// the file fsync propagates (the swallowed `.ok()` let a publish answer Ok
+/// before it could survive a crash), and the rename itself is synced by
+/// fsyncing the parent directory.
 pub fn write_atomic(path: &Path, body: &str) -> Result<(), StoreError> {
     let tmp = path.with_file_name(format!(
         "{}.tmp-{}",
@@ -2077,9 +2081,15 @@ pub fn write_atomic(path: &Path, body: &str) -> Result<(), StoreError> {
     {
         let mut f = File::create(&tmp)?;
         f.write_all(body.as_bytes())?;
-        f.sync_all().ok();
+        f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
+    let dir = File::open(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
+    dir.sync_all()?;
     Ok(())
 }
 
@@ -2108,9 +2118,10 @@ pub struct MutateOutcome {
     /// (~/.fno/graph.json), which gates claim release and board renders.
     pub is_canonical: bool,
     /// The content digest of the published bytes, computed from the same
-    /// `body` the atomic replace wrote (not re-read from the file). A caller
-    /// that pairs this digest with a file stat can PROVE the file still holds
-    /// this publish before caching against it.
+    /// `body` the atomic replace wrote and verified by the under-lock
+    /// read-back (x-385e change 4): when the cycle answers Ok the file holds
+    /// these bytes. A caller that pairs this digest with a file stat can
+    /// PROVE the file still holds this publish before caching against it.
     pub version: String,
 }
 
@@ -2434,6 +2445,22 @@ pub fn locked_mutate_with_hook(
             .map(|error| format!("SQLite shadow write for {} failed: {error}", path.display()));
         (backup, warning, version)
     };
+
+    // x-385e change 4: still under the lock, read the published bytes back
+    // and compare digests. Every receipt (idea, session close, note) rides
+    // this Ok, so a publish that silently failed to land refuses instead of
+    // claiming success.
+    let readback = if sqlite_backend {
+        crate::backlog::version(path).map_err(StoreError::Sqlite)?
+    } else {
+        file_content_version(path)
+    };
+    if readback != version {
+        return Err(StoreError::Invalid(format!(
+            "publish read-back mismatch on {}: wrote {version}, file holds {readback}",
+            path.display()
+        )));
+    }
 
     Ok(MutateOutcome {
         entries,
@@ -3334,6 +3361,41 @@ mod tests {
         .unwrap();
         assert!(landed.is_none(), "no publish on a domain refusal");
         assert_eq!(file_content_version(&graph), before, "digest unchanged");
+    }
+
+    #[test]
+    fn a_landed_publish_reads_back_its_own_digest_and_leaves_no_tmp() {
+        // x-385e change 4, first acceptance line: the returned version equals
+        // the file's content digest and no graph.json.tmp-* sibling remains.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+        let outcome = locked_mutate(
+            &graph,
+            MutateInput {
+                entries: vec![json!({"id": "ab-1", "title": "t"})],
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.version,
+            file_content_version(&graph),
+            "the Ok version names the bytes the file actually holds"
+        );
+        let tmp_siblings: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(
+            tmp_siblings.is_empty(),
+            "no tmp siblings remain: {tmp_siblings:?}"
+        );
     }
 
     #[test]
