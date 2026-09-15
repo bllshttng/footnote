@@ -3,6 +3,58 @@
 //! Moved verbatim out of server.rs (file budget shrink). Parent helpers
 //! resolve through the glob.
 use super::*;
+
+/// The sibling keeper binary when both crates are built side by side
+/// (CI and this repo's dev flow both do). `None` = skip loudly rather
+/// than fake a green: these tests assert REAL process survival.
+fn keeper_test_bin() -> Option<std::path::PathBuf> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../fno-agents/target/debug/fno-agents-worker");
+    p.exists().then(|| p.canonicalize().unwrap_or(p))
+}
+
+struct KeeperProcess(std::process::Child);
+
+impl Drop for KeeperProcess {
+    fn drop(&mut self) {
+        // SAFETY: SIGKILL to a process this test spawned.
+        unsafe {
+            libc::kill(self.0.id() as libc::pid_t, libc::SIGKILL);
+        }
+        let _ = self.0.wait();
+    }
+}
+
+fn spawn_keeper_for_test(
+    bin: &std::path::Path,
+    sock: &std::path::Path,
+    provider: &[&str],
+) -> KeeperProcess {
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args([
+        "--pane",
+        "--sock",
+        &sock.to_string_lossy(),
+        "--session",
+        "kt",
+        "--pane-key",
+        "3",
+        "--cwd",
+        "/tmp",
+        "--",
+    ]);
+    cmd.args(provider);
+    // The keeper outlives the server by design, so without an owner
+    // it survives this test run as a ppid-1 orphan. The test binary IS the
+    // owner; the watchdog inside the keeper reaps it when the run ends.
+    cmd.envs(crate::test_owner::self_owner_env());
+    let child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("keeper spawns");
+    KeeperProcess(child)
+}
 #[test]
 fn keeper_readopt_adopts_the_surviving_child_and_binds_it_to_its_member() {
     let Some(bin) = keeper_test_bin() else {

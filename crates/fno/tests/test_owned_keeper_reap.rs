@@ -68,8 +68,8 @@ fn every_keeper_spawning_test_file_routes_through_the_owner_wiring() {
         "positive control: tests/common/mod.rs must be scanned"
     );
     assert!(
-        matched.iter().any(|n| n == "server_tests.rs"),
-        "positive control: src/server_tests.rs must be scanned"
+        matched.iter().any(|n| n == "keeper_adopt_tests.rs"),
+        "positive control: src/server/tests/keeper_adopt_tests.rs must be scanned"
     );
 }
 
