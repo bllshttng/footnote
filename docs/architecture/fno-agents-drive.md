@@ -86,4 +86,7 @@ Liveness is the daemon's job (the watchdog evicts stale drivers; recovery clears
 - Rust unit: ring cursor, drive mode/authority, control-frame parse, status eligibility (LD28), sentinel detector (incl. split / double-lead / not-followed), step buffer (per-line / multi-line / per-byte).
 - Rust real-subprocess e2e (`tests/drive_e2e.rs`): full WS keystroke -> PTY -> output roundtrip with window + event lifecycle; second-driver Busy + non-PTY/ghost rejection; heartbeat watchdog eviction; watch input rejection + no-window + multi-watcher.
 - Python: `drive_authority` detection across modes + corrupt-state skip + the CLI verb's exit codes.
-- Bash (W8): `tests/hooks/test_drive_authority_enforcement.sh` - operator-authority matrix integration test. Real-CLI detection across interactive/step/paranoid (active) and watch/none/corrupt (inactive); the `drive_authority_active` seam (exit-code passthrough + fail-open when `fno` absent); and the stop-hook refusal decision (promise during drive refused; promise / `session_satisfied` without drive honored). Wired into `cli-ci`.
+- Bash (W8): `tests/hooks/test_drive_authority_enforcement.sh` - the superuser-authority matrix integration test. Wired into `cli-ci`.
+  - Real-CLI detection across interactive/step/paranoid (active) and watch/none/corrupt (inactive).
+  - The `drive_authority_active` seam: exit-code passthrough. It fails open with no `fno` binary.
+  - Stop-hook refusals: a promise during an active drive is refused. A promise without drive is honored.

@@ -830,7 +830,7 @@ def resolve_dispatch_model(
     inventory: Optional[Inventory] = None,
 ) -> tuple[Optional[str], str, list[str]]:
     """Apply the full precedence chain; ``(model, decision_source, chain)``.
-    Pins bypass the band filter - operator authority outranks routing."""
+    Pins bypass the band filter - superuser authority outranks routing."""
     if explicit:
         return explicit, "explicit", ["explicit"]
     if task_model:

@@ -45,8 +45,12 @@ QUESTION_CLOSED_EVENT = "operator_question_closed"
 QUESTION_MARKER = "operator_question"
 # SessionStart has a 1.5s hook budget. Reachability may scan multi-gigabyte
 # harness stores, so the report gives it one bounded slice and renders an
-# explicit unknown for anything that cannot finish in time.
-LIVENESS_BUDGET_SECONDS = 0.05
+# explicit unknown for anything that cannot finish in time. The slice is a
+# ceiling, not a sleep: the pipe answers the moment the forked child sends.
+# The child is a fork of a possibly multi-threaded process, which alone can
+# cost more than 50ms on a loaded machine, so the ceiling sits at 0.5s --
+# under the SessionStart budget, over the worst fork.
+LIVENESS_BUDGET_SECONDS = 0.5
 
 
 class OutstandingError(Exception):

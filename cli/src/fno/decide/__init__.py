@@ -138,19 +138,19 @@ class IndexWriteError(RuntimeError):
 
 
 class RefusedAuthorityError(RuntimeError):
-    """An agent session tried to record a ruling as operator law."""
+    """An agent session tried to record a ruling as superuser law."""
 
     def __init__(self, agent_handle: str, origin: str | None = None) -> None:
         detail = f" from {origin} origin" if origin else ""
         super().__init__(
-            f"agent {agent_handle} cannot record under operator authority{detail}"
+            f"agent {agent_handle} cannot record under superuser authority{detail}"
         )
         self.agent_handle = agent_handle
         self.origin = origin
 
 
 class WaiverAuthorityRefusedError(RefusedAuthorityError):
-    """A non-operator authority tried to mint review-coverage waiver evidence.
+    """A non-superuser authority tried to mint review-coverage waiver evidence.
 
     Distinct from :class:`RefusedAuthorityError` because the remedy differs and
     the generic refusal's advice points at the law door - the exact door this
@@ -164,7 +164,7 @@ class WaiverAuthorityRefusedError(RefusedAuthorityError):
         RuntimeError.__init__(
             self,
             f"'{subject}' is a review-coverage waiver subject: waiver evidence "
-            "needs operator authority, and a chat-attested row proves only "
+            "needs superuser authority, and a chat-attested row proves only "
             "that a session was addressed, not that a person reviewed "
             "anything. Waivers are recorded by the attended command "
             "`fno do pr coverage-waive <pr> --reason \"...\"` at an operator "
@@ -227,8 +227,8 @@ def _attended_terminal() -> bool:
     STATE THE LIMIT PLAINLY, because the honest claim is narrower than the rule
     it satisfies. A tty is OBTAINABLE: `script -q /dev/null <cmd>` makes this
     return True from a context with no person in it. So this raises the cost of
-    forging the operator lane, and does not prevent it. It is one signal, never
-    proof, and it never stands alone: it opens the operator lane, the lane
+    forging the superuser lane, and does not prevent it. It is one signal, never
+    proof, and it never stands alone: it opens the superuser lane, the lane
     still needs an explicit `--authority operator`, and the fail-closed third
     state catches everything else.
 
@@ -270,8 +270,8 @@ def _resolve_decider(
     Three states, and the third fails closed:
 
     1. a session identity resolves -> stamp that handle, agent lane
-    2. no identity, a terminal on stdin -> the operator lane is open
-    3. no identity, no terminal -> operator authority is REFUSED
+    2. no identity, a terminal on stdin -> the superuser lane is open
+    3. no identity, no terminal -> superuser authority is REFUSED
 
     State 3 exists because state 2 used to be everything that was not state 1,
     which made it an absence. Scrubbing the environment was enough to reach it.
@@ -308,7 +308,7 @@ def _resolve_decider(
         # record, and attested_by marks it as one a person stood behind.
         #
         # Authority is NOT defaulted to operator here. Law is never inherited
-        # by silence, in any state: a caller who wants the operator lane says
+        # by silence, in any state: a caller who wants the superuser lane says
         # so. Forging law then costs two deliberate acts rather than one.
         decider = decided_by or "operator"
         attested = origin if origin is not None else decider

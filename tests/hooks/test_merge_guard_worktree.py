@@ -1023,7 +1023,7 @@ def test_override_log_entry_cannot_be_forged_with_a_newline():
 def test_claim_marker_wins_exactly_once():
     """The unlink IS the claim, so exactly one caller can win. Two concurrent
     hook processes both pass the freshness stat; without an atomic claim, one
-    operator approval would authorize two merges."""
+    superuser approval would authorize two merges."""
     with tempfile.TemporaryDirectory() as td:
         _, marker = _with_marker(td)
         assert git_protection._claim_marker(marker) is True

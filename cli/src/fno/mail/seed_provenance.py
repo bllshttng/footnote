@@ -1,7 +1,7 @@
 """Attribution for the one message that defines a worker's whole task: its seed.
 
 Every a2a message sent by ``fno agents mail send`` arrives wrapped in ``<fno_mail>``, so
-a recipient can tell agent-authored text from operator-authored text and an
+a recipient can tell agent-authored text from superuser-authored text and an
 auditor can ``grep '</fno_mail>'`` a transcript to enumerate what was injected.
 The spawn seed carried no such envelope. That inverts the risk: the seed is the
 single message that defines a worker's entire task, and it was precisely the one

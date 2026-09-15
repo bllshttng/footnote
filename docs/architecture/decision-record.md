@@ -45,9 +45,9 @@ Three caller states decide which of those get written, and the third fails close
 
 1. A session identity resolves. The handle is stamped into `decided_by`, and the row reads as coordination.
 2. No identity, and a terminal on stdin. `attested_by` is written, and `--authority operator` is accepted.
-3. No identity, and no terminal. Operator authority is REFUSED. `decided_by` says `unattributed-caller`.
+3. No identity, and no terminal. Superuser authority is REFUSED. `decided_by` says `unattributed-caller`.
 
-Law is never DEFAULTED, in any state. A caller who wants the operator lane passes `--authority operator`. Omit it at a terminal and the row records with no authority, which reads as `unattributed`.
+Law is never DEFAULTED, in any state. A caller who wants the superuser lane passes `--authority operator`. Omit it at a terminal and the row records with no authority, which reads as `unattributed`.
 
 State 3 exists because state 2 used to be everything that was not state 1. That made attendance an ABSENCE, and `env -u CLAUDE_CODE_SESSION_ID fno backlog decide --authority operator` was enough to forge an attested row in the law lane.
 
@@ -195,4 +195,4 @@ The one-step door (`fno inbox law set`) has no staged proposal, no content hash,
 
 The cost of that trade, measured rather than assumed: `require_marked_caller` answers `chat_attested` off `resolve_self_identity`, which walks process ancestry. The door is not "a mail-injected slash command". It is ANY process descended from a harness session. That includes an agent's own Bash call with no user-shaped text anywhere. The narrower mail shape is the one that cannot be detected. Across every transcript in this machine's claude project directory, 2173 user turns carrying an `<fno_mail>` envelope were recorded with `promptSource: "typed"` and 2439 with `origin: {"kind": "human"}`. `fno agents mail send --raw` strips the envelope that is the one remaining marker. The door is the law LANE and never the `operator` VALUE: `_resolve_decider` still refuses an `operator` claim from a resolved session. The asymmetry buys honesty. A session can mint a law row and cannot retract one, because `retract_decision` requires `operator`.
 
-One family is closed to the chat door entirely: subjects under `review-coverage-waiver`, the merge gate's waiver evidence. These refuse every non-operator authority at the write chokepoint. A waiver asserts a person read the diff. No chat row can carry that fact. The attended `fno do pr coverage-waive` command is the only path.
+One family is closed to the chat door entirely: subjects under `review-coverage-waiver`, the merge gate's waiver evidence. These refuse every non-superuser authority at the write chokepoint. A waiver asserts a person read the diff. No chat row can carry that fact. The attended `fno do pr coverage-waive` command is the only path.
