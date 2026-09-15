@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# x-5aef task 3.1: the auditor's reproduction, promoted to a rerunnable
-# probe. Seeds an isolated store with one synthetic v2 receipt carrying
-# only `active-surface=confirmed-removed` - the incomplete evidence the
-# retirement gate used to certify - stamped with the CURRENT build, runs
-# `reap --verify`, and requires the refusal. A pass prints the refusal
-# reason it observed; exit 0. If the gate accepts the receipt, exit 1 with
-# the observed JSON: the gate certifies an incomplete retirement again.
+# Rerunnable probe. Seeds an isolated store with one synthetic v2 receipt
+# carrying only `active-surface=confirmed-removed` - the incomplete
+# evidence the retirement gate used to certify - stamped with the CURRENT
+# retirement contract, runs `reap --verify`, and requires the refusal. A
+# pass prints the refusal reason it observed; exit 0. If the gate accepts
+# the receipt, exit 1 with the observed JSON: the gate certifies an
+# incomplete retirement again.
 #
 # Read-only against real state: everything lands in a mktemp home, never
 # the operator's ~/.fno. Idempotent by construction.
@@ -22,20 +22,25 @@ if ! command -v "$BIN" >/dev/null 2>&1 && [ ! -x "$BIN" ]; then
     exit 2
 fi
 
-# The receipt must carry the CURRENT build's pin, or the verifier skips it
-# as stale and the probe proves nothing. Read the pin off the binary's own
-# verify output - the same quantity the gate compares.
+# The receipt must carry the CURRENT contract pin, or the verifier skips
+# it as another contract and the probe proves nothing. Read the pin off
+# the binary's own verify output - the same quantity the gate compares.
 probe_home="$(mktemp -d)"
 cleanup() { rm -rf "$probe_home"; }
 trap cleanup EXIT
-if ! build_json="$(FNO_AGENTS_HOME="$probe_home" "$BIN" reap --verify --since 1h --json)"; then
+if ! verify_json="$(FNO_AGENTS_HOME="$probe_home" "$BIN" reap --verify --since 1h --json)"; then
     # An empty isolated store exits 1 by design (no evidence); the JSON
-    # still names the build.
+    # still names the build and the contract.
     :
 fi
-build="$(printf '%s' "$build_json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["build"])')"
+build="$(printf '%s' "$verify_json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["build"])')"
 if [ -z "$build" ]; then
     echo "probe: could not read the build pin from '$BIN' reap --verify" >&2
+    exit 2
+fi
+contract="$(printf '%s' "$verify_json" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["contract"])')"
+if [ -z "$contract" ]; then
+    echo "probe: could not read the contract pin from '$BIN' reap --verify" >&2
     exit 2
 fi
 
@@ -53,6 +58,7 @@ cat > "$probe_home/reap-receipts/claude-probe-synthetic-0001.json" <<RECEIPT
   "resume": "claude --resume probe-synthetic-0001",
   "schema_version": 2,
   "writer_build": "$build",
+  "retirement_contract": "$contract",
   "effects": [
     {
       "op": "active-surface",

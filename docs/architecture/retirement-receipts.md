@@ -12,9 +12,9 @@ The effects, in order: the confirmed stop, the native active-surface removal, th
 
 ## The receipt and its required ops
 
-Receipts live in `<agents home>/reap-receipts/`, one per retired session, keyed by harness and session id. Each carries a build stamp (`writer_build`) baked from the crates subtree rev, so a receipt written by another build skips instead of failing the audit.
+Receipts live in `<agents home>/reap-receipts/`, one per retired session, keyed by harness and session id. Each carries the retirement contract (`retirement_contract`, the required op set promised) and a build stamp (`writer_build`) as provenance. A receipt on another contract, or with no contract, skips instead of failing the audit.
 
-`reap --verify` audits a window of the store against the CURRENT build. A pass means the promised outcome, not a nonempty list: every verified receipt must carry four effect ops, each at `confirmed-removed`, `confirmed-already-absent`, or `not-applicable`:
+`reap --verify` audits a window of the store against the CURRENT contract, so a correct retirement still counts after a reinstall moves the build. A pass means the promised outcome, not a nonempty list: every verified receipt must carry four effect ops, each at `confirmed-removed`, `confirmed-already-absent`, or `not-applicable`:
 
 | Op | What it proves |
 |---|---|
@@ -27,8 +27,8 @@ Receipts live in `<agents home>/reap-receipts/`, one per retired session, keyed 
 
 `--expect-sessions <a>,<b>` adds a cohort. Every named session must appear among the verified retirements, so a pass can cover a named set instead of whatever the window happens to hold. The report carries `expected` and `missing`.
 
-The gate also derives its cohort, always on. It reads the retained events log: the active journal and its one rotated generation. Every in-window `agent_row_reaped` event without a `receipt_staged` stamp names a session. The gate checks that a receipt file exists for that harness and session id. A stale-build receipt is accounted for: existence is the test. A retirement that dropped a row without a receipt fails the gate. Nobody needs to pass `--expect-sessions`. The report carries `reaped_events`, so a zero names itself.
+The gate also derives its cohort, always on. It reads the retained events log: the active journal and its one rotated generation. Every in-window `agent_row_reaped` event without a `receipt_staged` stamp names a session. The gate checks that a receipt file exists for that harness and session id. A receipt on another contract is accounted for: existence is the test. A retirement that dropped a row without a receipt fails the gate. Nobody needs to pass `--expect-sessions`. The report carries `reaped_events`, so a zero names itself.
 
 ## The rerunnable probe
 
-`scripts/probes/retirement-gate-refuses-incomplete.sh` seeds an isolated home with the synthetic incomplete receipt (one op, current-build stamp), runs the verifier, and requires the refusal. Exit 0 with the refusal reason means the gate holds. Exit 1 means the gate certifies an incomplete retirement again. Run it against a freshly built binary before trusting the gate from source.
+`scripts/probes/retirement-gate-refuses-incomplete.sh` seeds an isolated home with the synthetic incomplete receipt (one op, current-contract stamp), runs the verifier, and requires the refusal. Exit 0 with the refusal reason means the gate holds. Exit 1 means the gate certifies an incomplete retirement again. Run it against a freshly built binary before trusting the gate from source.

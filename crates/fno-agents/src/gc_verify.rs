@@ -1,18 +1,19 @@
-//! The retirement verifier (x-70e1 task 5): a READ-ONLY audit of the
-//! receipts store that answers "did the currently deployed build actually
-//! retire, resumably, in this window" - and refuses everything else.
+//! The retirement verifier: a READ-ONLY audit of the receipts store that
+//! answers "did a writer that promised the current retirement contract
+//! actually retire, resumably, in this window" - and refuses everything
+//! else.
 //!
-//! A pass requires, for every receipt in the window: a build stamp naming
-//! the CURRENT binary (a dry run, an older daemon, a fixture run never
-//! counts), the FULL required op set (`native-stop`,
-//! `active-surface`, `resume-evidence`, `mux-member`, each at a confirmed or
-//! measured not-applicable outcome), and nothing unconfirmed. An empty
-//! store, an unreadable receipt, a partial effect set: each is a named
-//! refusal with a nonzero exit - this verb must fail before its evidence
-//! exists, because it is the plan's done probe. The required set is what
-//! closes the synthetic-receipt hole: the auditor's receipt carried one op
-//! and the gate certified it; a pass now means the promised outcome, not a
-//! nonempty list.
+//! A pass requires, for every receipt in the window: a contract stamp
+//! naming the CURRENT retirement contract (a receipt from a writer that
+//! never promised the required op set never counts), the FULL required op
+//! set (`native-stop`, `active-surface`, `resume-evidence`, `mux-member`,
+//! each at a confirmed or measured not-applicable outcome), and nothing
+//! unconfirmed. An empty store, an unreadable receipt, a partial effect
+//! set: each is a named refusal with a nonzero exit - this verb must fail
+//! before its evidence exists, because it is the plan's done probe. The
+//! required set is what closes the synthetic-receipt hole: the auditor's
+//! receipt carried one op and the gate certified it; a pass now means the
+//! promised outcome, not a nonempty list.
 //!
 //! The gate also derives its cohort: every in-window
 //! `agent_row_reaped` event that does not carry `receipt_staged` names a
@@ -20,12 +21,18 @@
 //! a retirement that dropped a row without persisting its receipt is
 //! visible without anyone passing `--expect-sessions`.
 //!
-//! A stale build (a receipt stamped by any other binary, including the
-//! previous deploy) SKIPS: it can never verify, and it must not rebrand the
+//! The pin is the CONTRACT the writer promised, not its build. The build
+//! moves on every merge that touches `crates/` (post-merge sync reinstalls
+//! after each merge), so a build pin reads a correct retirement as stale
+//! whenever an unrelated merge lands between the write and the audit. A
+//! receipt on another contract (including one written before the stamp
+//! existed) SKIPS: it can never verify, and it must not rebrand the
 //! fleet's rollout tail as failure - during any rollout the window holds
-//! both builds' receipts, and those refusals would hold the probe red for
-//! a full window. Only current-build receipts enter `verified`, so a
-//! window of nothing but stale receipts still fails on empty evidence.
+//! both contracts' receipts, and those refusals would hold the probe red
+//! for a full window. Only current-contract receipts enter `verified`, so
+//! a window of nothing but other-contract receipts still fails on empty
+//! evidence. The writer build stays on the receipt and in the report as
+//! provenance.
 
 use std::path::PathBuf;
 
@@ -102,35 +109,32 @@ impl VerifyReport {
             "missing": self.missing,
             "reaped_events": self.reaped_events,
             "build": current_build(),
+            "contract": retirement_contract(),
         })
     }
 }
 
-/// The identity of the BUILD, not of the running executable: the pin every
-/// receipt in the window must carry.
+/// The identity of the BUILD that wrote a receipt: provenance, not the
+/// audit pin. The pin is `retirement_contract`.
 ///
 /// The writer and the verifier are never the same file. `fno-agents-daemon`
 /// writes the receipt; `fno-agents` runs `reap --verify`. One `cargo install`
-/// lays down three separate executables, so any pin read off the running
-/// exe (its path, its mtime, its own hash) differs between writer and reader
-/// and the audit can never pass. It did not: a 523-receipt window read 0
-/// verified, every current-daemon receipt named stale over a 5-second mtime
-/// gap between the two binaries of one install.
-///
-/// So the pin is what the whole triad bakes at compile time: the crates/
-/// subtree rev from build.rs, the same quantity `fno doctor update` already
-/// uses to prove the three bins are ONE build. Two deployments of the same
-/// package version still differ whenever the source moved. A rebuild of
-/// identical source shares a stamp, which is correct - it is the same build.
-/// The `-dirty` suffix names an uncommitted tree so a dev build never passes
-/// itself off as the committed rev.
+/// lays down three separate executables, so any identity read off the
+/// running exe (its path, its mtime, its own hash) differs between writer
+/// and reader. The build sidesteps that: it is what the whole triad bakes
+/// at compile time - the crates/ subtree rev from build.rs, the same
+/// quantity `fno doctor update` already uses to prove the three bins are
+/// ONE build. Two deployments of the same package version still differ
+/// whenever the source moved. A rebuild of identical source shares a
+/// stamp, which is correct - it is the same build. The `-dirty` suffix
+/// names an uncommitted tree so a dev build never passes itself off as
+/// the committed rev.
 ///
 /// The known limit: a build with no git checkout to read (a crates.io
 /// tarball) bakes the rev `unknown`, so every such build of one package
-/// version shares a pin. The audit then verifies at version granularity
-/// there. That is the weaker end of the trade, and it is the end that still
-/// works: pinning harder than the triad can agree on is what made the audit
-/// unpassable in the first place.
+/// version shares a stamp. Provenance then reads at version granularity
+/// there. That is the weaker end of the trade, and it is the end that
+/// still works.
 pub fn current_build() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let rev = env!("FNO_AGENTS_CRATES_REV");
@@ -156,6 +160,14 @@ pub const REQUIRED_OPS: [&str; 4] = [
     "resume-evidence",
     "mux-member",
 ];
+
+/// The retirement contract a receipt's writer promised: the required op
+/// set. Derived from `REQUIRED_OPS`, so adding an op changes the stamp in
+/// the same commit and receipts written before it skip instead of
+/// refusing.
+pub fn retirement_contract() -> String {
+    REQUIRED_OPS.join(",")
+}
 
 /// The outcomes that count as applied (or measured not-applicable) for a
 /// required op.
@@ -187,8 +199,8 @@ pub fn verify(home: &AgentsHome, since_secs: u64, expected: &[String]) -> Verify
         return report;
     };
     let now = chrono::Utc::now();
-    let build = current_build();
-    let mut skipped_builds: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let contract = retirement_contract();
+    let mut skipped_writers: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut paths: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -206,32 +218,34 @@ pub fn verify(home: &AgentsHome, since_secs: u64, expected: &[String]) -> Verify
             &name,
             now,
             since_secs,
-            build.as_str(),
-            &mut skipped_builds,
+            contract.as_str(),
+            &mut skipped_writers,
         );
     }
     // A window that verified nothing and refused nothing reads as a silent
     // red: `problems` empty, `passes` false, and no reason on the page. Name
     // the shape, with the counts that separate its causes. On the live fleet
-    // this exact output (523 checked, 0 verified, 0 problems) hid a build pin
+    // this exact output (523 checked, 0 verified, 0 problems) hid a pin
     // that could never match, and reading it took a source dive.
     if report.verified.is_empty() && report.problems.is_empty() {
-        // Every in-window receipt read here was written by another build:
-        // name it and the remedy, since this string is the only thing an
-        // operator reads when the window is red.
-        let remedy = if skipped_builds.is_empty() {
+        // Every in-window receipt read here was written on another
+        // contract: name it and the remedy, since this string is the only
+        // thing an operator reads when the window is red. Deploying still
+        // fixes it - a writer daemon on an older contract is an older
+        // build.
+        let remedy = if skipped_writers.is_empty() {
             String::new()
         } else {
             format!(
-                ". Written by: {}. Run `fno doctor update` to deploy the current build ({build:?}).",
-                skipped_builds.into_iter().collect::<Vec<_>>().join(", ")
+                ". Written by: {}. Run `fno doctor update` to deploy the current contract ({contract:?}).",
+                skipped_writers.into_iter().collect::<Vec<_>>().join(", ")
             )
         };
         report.problems.push(VerifyProblem {
             receipt: format!("window of {since_secs}s"),
             reason: format!(
-                "no retirement by the current build to verify: {} receipt(s) read, \
-                 {} from another build, none stamped {build:?}{remedy}",
+                "no retirement on the current contract to verify: {} receipt(s) read, \
+                 {} on another contract, none stamped {contract:?}{remedy}",
                 report.checked,
                 report.skipped.len()
             ),
@@ -242,17 +256,18 @@ pub fn verify(home: &AgentsHome, since_secs: u64, expected: &[String]) -> Verify
     report
 }
 
-/// Audit one receipt: window, population, build stamp, and the required op
-/// set. Each unmet condition is a named refusal; only a receipt carrying
-/// every required op at a confirmed or not-applicable outcome verifies.
+/// Audit one receipt: window, population, contract stamp, and the
+/// required op set. Each unmet condition is a named refusal; only a
+/// receipt stamped with the current contract and carrying every required
+/// op at a confirmed or not-applicable outcome verifies.
 fn audit_receipt(
     report: &mut VerifyReport,
     path: &std::path::Path,
     name: &str,
     now: chrono::DateTime<chrono::Utc>,
     since_secs: u64,
-    build: &str,
-    skipped_builds: &mut std::collections::BTreeSet<String>,
+    contract: &str,
+    skipped_writers: &mut std::collections::BTreeSet<String>,
 ) {
     report.checked += 1;
     let receipt = match read_reap_receipt(path) {
@@ -278,32 +293,37 @@ fn audit_receipt(
     if (now - reaped).num_seconds() > since_secs as i64 {
         return; // outside the window: not this report's population
     }
-    // A removal receipt (`removed_by` set, the x-b150 shape) records a
-    // deliberate operator removal, not a reap: it carries no effect
-    // records by contract, so demanding them here would make one plain
-    // `fno agents rm` red the whole window.
+    // A removal receipt (`removed_by` set) records a deliberate operator
+    // removal, not a reap: it carries no effect records by contract, so
+    // demanding them here would make one plain `fno agents rm` red the
+    // whole window.
     if receipt.removed_by.is_some() {
         return; // removal receipt: not a retirement, not this audit's population
     }
-    let stamped = receipt.writer_build.as_deref().unwrap_or_default();
-    if stamped != build {
-        skipped_builds.insert(if stamped.is_empty() {
-            "(unstamped)".to_string()
-        } else {
-            stamped.to_string()
-        });
+    // The pin is the contract the writer promised, never its build: the
+    // build moves on every merge that touches crates/, and a build pin
+    // would read a correct retirement as stale after any unrelated
+    // reinstall. A writer that promised a different contract (or none -
+    // every pre-stamp receipt) skips as the rollout tail.
+    let writer_build = receipt
+        .writer_build
+        .clone()
+        .unwrap_or_else(|| "(unstamped)".into());
+    let stamped = receipt.retirement_contract.as_deref().unwrap_or_default();
+    if stamped != contract {
+        skipped_writers.insert(writer_build.clone());
         report.skipped.push(VerifyProblem {
             receipt: name.to_string(),
             reason: format!(
-                "stale build: receipt written by {:?}, this verifier is {build:?} (a dry run or an older daemon never counts)",
-                stamped
+                "other contract: receipt promised {:?} (written by {writer_build:?}), this verifier requires {contract:?}",
+                if stamped.is_empty() { "(unstamped)" } else { stamped }
             ),
         });
         return;
     }
-    // The gate (x-5aef task 2.1): every required op must be present and
-    // confirmed (or measured not-applicable). A missing op names itself and
-    // what the receipt carries, so the refusal is evidence, not a bare red.
+    // The gate: every required op must be present and confirmed (or
+    // measured not-applicable). A missing op names itself and what the
+    // receipt carries, so the refusal is evidence, not a bare red.
     let mut missing: Vec<&str> = Vec::new();
     for required in REQUIRED_OPS {
         let rec = receipt.effects.iter().find(|e| e.op == required);
@@ -358,7 +378,7 @@ fn audit_receipt(
         session_id: receipt.harness_session_id,
         row_name: receipt.row_name,
         reaped_at: receipt.reaped_at,
-        writer_build: build.to_string(),
+        writer_build,
         effects: receipt
             .effects
             .iter()
@@ -495,8 +515,10 @@ mod tests {
         .unwrap()
     }
 
-    fn stamp(receipt: &mut ReapReceipt, build: Option<&str>) {
-        receipt.writer_build = build.map(str::to_string);
+    fn stamp(receipt: &mut ReapReceipt, contract: Option<&str>) {
+        receipt.retirement_contract = contract.map(str::to_string);
+        // The writer build is always present: it is provenance, not the pin.
+        receipt.writer_build = Some(current_build());
         receipt.reaped_at = crate::daemon::now_rfc3339_like();
     }
 
@@ -520,8 +542,8 @@ mod tests {
         ]
     }
 
-    /// The auditor's shape: ONE op (the only op the pre-x-5aef producer
-    /// ever wrote). Stale/out-of-window fixtures carry it because their
+    /// The auditor's shape: ONE op (the only op the pre-gate producer
+    /// ever wrote). Other-contract/out-of-window fixtures carry it because their
     /// content never reaches the effects checks.
     fn confirmed_effect() -> EffectRecord {
         effect("active-surface", "confirmed-removed")
@@ -555,14 +577,17 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_build_never_passes_the_audit() {
-        // A receipt stamped by another binary can never verify. It skips -
-        // no PER-RECEIPT refusal, because any rollout holds both builds'
-        // receipts - and the audit fails on empty evidence, with the window
-        // itself naming why.
+    fn an_older_contract_never_passes_the_audit() {
+        // A receipt promising a different contract can never verify. It
+        // skips - no PER-RECEIPT refusal, because any rollout holds both
+        // contracts' receipts - and the audit fails on empty evidence,
+        // with the window itself naming why.
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("old"), None).unwrap();
-        stamp(&mut receipt, Some("fno-agents 0.0.1"));
+        stamp(
+            &mut receipt,
+            Some("native-stop,active-surface,resume-evidence"),
+        );
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
 
@@ -573,14 +598,14 @@ mod tests {
         assert!(
             report.problems[0]
                 .reason
-                .contains("no retirement by the current build"),
+                .contains("no retirement on the current contract"),
             "{:?}",
             report.problems
         );
-        // The window's own reason names the writer build and the remedy -
+        // The window's own reason names the writer builds and the remedy -
         // the only thing an operator reads when this is red.
         assert!(
-            report.problems[0].reason.contains("fno-agents 0.0.1"),
+            report.problems[0].reason.contains(&current_build()),
             "{:?}",
             report.problems
         );
@@ -589,11 +614,15 @@ mod tests {
             "{:?}",
             report.problems
         );
+        // The skip names the promised contract and the writer build.
         assert!(
             report
                 .skipped
                 .iter()
-                .any(|p| p.reason.contains("stale build")),
+                .any(|p| p.reason.contains("other contract")
+                    && p.reason
+                        .contains("native-stop,active-surface,resume-evidence")
+                    && p.reason.contains(&current_build())),
             "{:?}",
             report.skipped
         );
@@ -601,10 +630,11 @@ mod tests {
 
     #[test]
     fn an_unstamped_v1_receipt_reads_stale() {
-        // Pre-stamp receipts (writer_build absent) are the deployed fleet's
-        // own history: skip, never verify, never refuse PER RECEIPT. The
-        // window itself still says why it is red - a report with nothing in
-        // `problems` and nothing in `verified` names no reason at all.
+        // Pre-stamp receipts (retirement_contract absent) are the deployed
+        // fleet's own history: skip, never verify, never refuse PER
+        // RECEIPT. The window itself still says why it is red - a report
+        // with nothing in `problems` and nothing in `verified` names no
+        // reason at all.
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("v1"), None).unwrap();
         stamp(&mut receipt, None);
@@ -616,20 +646,20 @@ mod tests {
         assert!(report.skipped.len() == 1, "{:?}", report.skipped);
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
         assert!(
-            report.problems[0].reason.contains("1 from another build"),
+            report.problems[0].reason.contains("1 on another contract"),
             "{:?}",
             report.problems
         );
     }
 
     #[test]
-    fn a_current_build_with_confirmed_effects_passes() {
-        // AC11-HP: current-build receipts naming the matched identities,
+    fn a_current_contract_with_confirmed_effects_passes() {
+        // Current-contract receipts naming the matched identities, writer
         // build and confirmed effects - and the audit passes.
         let home = temp_home();
         for name in ["a", "b"] {
             let mut receipt = build_reap_receipt(&row(name), None).unwrap();
-            stamp(&mut receipt, Some(current_build().as_str()));
+            stamp(&mut receipt, Some(retirement_contract().as_str()));
             receipt.effects = confirmed_effects();
             write_reap_receipt(&home, &receipt).unwrap();
         }
@@ -644,18 +674,18 @@ mod tests {
     }
 
     #[test]
-    fn a_rollout_window_passes_on_current_build_evidence_alone() {
-        // The live rollout shape: the previous deploy's receipts sit in the
-        // window beside this build's. They skip; the current-build receipt
-        // verifies; the audit passes - the rollout tail never holds the
-        // probe red for a full window.
+    fn a_rollout_window_passes_on_current_contract_evidence_alone() {
+        // The live rollout shape: receipts written before an op was added
+        // sit in the window beside current-contract receipts. They skip;
+        // the current-contract receipt verifies; the audit passes - the
+        // rollout tail never holds the probe red for a full window.
         let home = temp_home();
         let mut old = build_reap_receipt(&row("prev"), None).unwrap();
-        stamp(&mut old, Some("fno-agents 0.3.2 (2942a5f3b7cf, release)"));
+        stamp(&mut old, Some("native-stop,active-surface,resume-evidence"));
         old.effects = vec![confirmed_effect()];
         write_reap_receipt(&home, &old).unwrap();
         let mut cur = build_reap_receipt(&row("live"), None).unwrap();
-        stamp(&mut cur, Some(current_build().as_str()));
+        stamp(&mut cur, Some(retirement_contract().as_str()));
         cur.effects = confirmed_effects();
         write_reap_receipt(&home, &cur).unwrap();
 
@@ -666,6 +696,57 @@ mod tests {
         assert_eq!(report.checked, 2);
     }
 
+    /// The done probe, in unit form: a receipt written by an older build
+    /// on the CURRENT contract verifies, and the verified row carries
+    /// that older build as provenance. A merge that reinstalls the
+    /// binary between the write and the audit no longer reds the probe.
+    #[test]
+    fn an_older_build_on_the_current_contract_verifies() {
+        let home = temp_home();
+        let mut receipt = build_reap_receipt(&row("older"), None).unwrap();
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
+        receipt.writer_build =
+            Some("fno-agents 0.3.2 rev cf7e0875703610d488e3ee2b2bdecdfc3f39fdb0".into());
+        receipt.effects = confirmed_effects();
+        write_reap_receipt(&home, &receipt).unwrap();
+
+        let report = verify(&home, 24 * 3600, &[]);
+        assert!(report.passes(), "{:?}", report.problems);
+        assert_eq!(
+            report.verified[0].writer_build,
+            "fno-agents 0.3.2 rev cf7e0875703610d488e3ee2b2bdecdfc3f39fdb0"
+        );
+    }
+
+    /// The promise is the contract, so an older build on the current
+    /// contract is still fully audited: drop the mux-member op and the
+    /// audit refuses, naming it.
+    #[test]
+    fn an_older_build_on_the_current_contract_without_mux_member_refuses() {
+        let home = temp_home();
+        let mut receipt = build_reap_receipt(&row("older"), None).unwrap();
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
+        receipt.writer_build =
+            Some("fno-agents 0.3.2 rev cf7e0875703610d488e3ee2b2bdecdfc3f39fdb0".into());
+        receipt.effects = vec![
+            effect("native-stop", "confirmed-removed"),
+            effect("active-surface", "confirmed-removed"),
+            effect("resume-evidence", "confirmed-removed"),
+        ];
+        write_reap_receipt(&home, &receipt).unwrap();
+
+        let report = verify(&home, 24 * 3600, &[]);
+        assert!(!report.passes());
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.reason.contains("mux-member")),
+            "{:?}",
+            report.problems
+        );
+    }
+
     #[test]
     fn a_partial_effect_set_fails_the_audit() {
         // AC11-EDGE: an unconfirmed effect (a kept native surface) is never
@@ -674,7 +755,7 @@ mod tests {
         // refusal is the unconfirmed-outcome one, not the missing-op one.
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("part"), None).unwrap();
-        stamp(&mut receipt, Some(current_build().as_str()));
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![
             effect("native-stop", "confirmed-removed"),
             effect("active-surface", "kept"),
@@ -693,7 +774,7 @@ mod tests {
         );
     }
 
-    /// x-5aef AC1-HP, the auditor's exact reproduction: one current-build
+    /// The auditor's exact reproduction: one current-contract
     /// v2 receipt carrying only `active-surface=confirmed-removed`, no
     /// native stop, no resume evidence, no cohort. The old gate certified
     /// it (`passes:true, verified:1`); this gate refuses and names the ops
@@ -702,7 +783,7 @@ mod tests {
     fn ac1_hp_a_single_op_receipt_is_refused() {
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("synthetic"), None).unwrap();
-        stamp(&mut receipt, Some(current_build().as_str()));
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![confirmed_effect()];
         write_reap_receipt(&home, &receipt).unwrap();
 
@@ -728,14 +809,14 @@ mod tests {
         );
     }
 
-    /// x-5aef AC1-EDGE: the full set at confirmed/not-applicable outcomes
+    /// The full set at confirmed/not-applicable outcomes
     /// verifies; the same receipt with `resume-evidence` at `failed`
     /// refuses, naming that op.
     #[test]
     fn ac1_edge_full_set_verifies_and_a_failed_op_refuses() {
         let home = temp_home();
         let mut full = build_reap_receipt(&row("full"), None).unwrap();
-        stamp(&mut full, Some(current_build().as_str()));
+        stamp(&mut full, Some(retirement_contract().as_str()));
         full.effects = vec![
             effect("native-stop", "confirmed-removed"),
             effect("active-surface", "confirmed-already-absent"),
@@ -748,7 +829,7 @@ mod tests {
         assert_eq!(report.verified.len(), 1);
 
         let mut failed = build_reap_receipt(&row("failed"), None).unwrap();
-        stamp(&mut failed, Some(current_build().as_str()));
+        stamp(&mut failed, Some(retirement_contract().as_str()));
         failed.effects = vec![
             effect("native-stop", "confirmed-removed"),
             effect("active-surface", "confirmed-removed"),
@@ -769,14 +850,13 @@ mod tests {
         );
     }
 
-    /// AC2-HP: a current-build receipt carrying the pre-gate op set
-    /// (everything but mux-member) refuses, names the missing op, and the
-    /// stale owner note is gone from the refusal.
+    /// AC2-HP: a current-contract receipt carrying the pre-gate op set
+    /// (everything but mux-member) refuses, names the missing op.
     #[test]
     fn ac2_hp_a_receipt_without_the_mux_member_op_refuses() {
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("premux"), None).unwrap();
-        stamp(&mut receipt, Some(current_build().as_str()));
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![
             effect("native-stop", "confirmed-removed"),
             effect("active-surface", "confirmed-removed"),
@@ -792,11 +872,6 @@ mod tests {
             .find(|p| p.receipt != "window of 86400s")
             .expect("a per-receipt refusal names the missing op");
         assert!(refusal.reason.contains("mux-member"), "{:?}", refusal);
-        assert!(
-            !refusal.reason.contains("x-7649"),
-            "the stale owner note is gone: {:?}",
-            refusal
-        );
     }
 
     /// AC2-EDGE: all four ops with mux-member measured
@@ -805,7 +880,7 @@ mod tests {
     fn ac2_edge_not_applicable_mux_member_passes_with_no_events_log() {
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("nomux"), None).unwrap();
-        stamp(&mut receipt, Some(current_build().as_str()));
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = vec![
             effect("native-stop", "confirmed-removed"),
             effect("active-surface", "confirmed-removed"),
@@ -835,7 +910,7 @@ mod tests {
         // A live unrelated receipt so the window is not empty-shaped: the
         // assertion targets the events problem specifically.
         let mut receipt = build_reap_receipt(&row("live"), None).unwrap();
-        stamp(&mut receipt, Some(current_build().as_str()));
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
 
@@ -885,7 +960,10 @@ mod tests {
         );
         // A stale-build receipt on disk: existence satisfies the cohort.
         let mut stale = build_reap_receipt(&row("staleholder"), None).unwrap();
-        stamp(&mut stale, Some("fno-agents 0.0.1"));
+        stamp(
+            &mut stale,
+            Some("native-stop,active-surface,resume-evidence"),
+        );
         stale.effects = confirmed_effects();
         write_reap_receipt(&home, &stale).unwrap();
         write_event(
@@ -900,7 +978,7 @@ mod tests {
         // A verified receipt keeps the rest of the report green so any
         // failure is attributable to the derived cohort.
         let mut receipt = build_reap_receipt(&row("live"), None).unwrap();
-        stamp(&mut receipt, Some(current_build().as_str()));
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
 
@@ -933,13 +1011,13 @@ mod tests {
         writeln!(f, "{line}").unwrap();
     }
 
-    /// x-5aef AC2-HP: a window holding a verified receipt for `a` only,
+    /// A window holding a verified receipt for `a` only,
     /// with a cohort of a and b, refuses and names b.
     #[test]
     fn ac2_hp_the_cohort_names_missing_sessions() {
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("a"), None).unwrap();
-        stamp(&mut receipt, Some(current_build().as_str()));
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
 
@@ -962,13 +1040,13 @@ mod tests {
         assert_eq!(json["missing"].as_array().map(|a| a.len()), Some(1));
     }
 
-    /// x-5aef AC2-EDGE: no `--expect-sessions`, the cohort check
+    /// No `--expect-sessions`, the cohort check
     /// contributes nothing and the pass predicate is unchanged.
     #[test]
     fn ac2_edge_without_expectations_the_gate_is_unchanged() {
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("a"), None).unwrap();
-        stamp(&mut receipt, Some(current_build().as_str()));
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
         let report = verify(&home, 24 * 3600, &[]);
@@ -979,7 +1057,10 @@ mod tests {
     fn a_receipt_outside_the_window_is_not_audited() {
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("old"), None).unwrap();
-        stamp(&mut receipt, Some("fno-agents 0.0.1"));
+        stamp(
+            &mut receipt,
+            Some("native-stop,active-surface,resume-evidence"),
+        );
         receipt.effects = confirmed_effects();
         write_reap_receipt(&home, &receipt).unwrap();
         // Age the receipt past the window without rewriting it: the file's
@@ -1001,7 +1082,7 @@ mod tests {
         assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
         assert!(
             report.problems[0].reason.contains("1 receipt(s) read")
-                && report.problems[0].reason.contains("0 from another build"),
+                && report.problems[0].reason.contains("0 on another contract"),
             "{:?}",
             report.problems
         );
@@ -1009,12 +1090,12 @@ mod tests {
 
     #[test]
     fn a_removal_receipt_is_not_this_audits_population() {
-        // The x-b150 removal receipt (removed_by set, no effect records by
+        // The removal receipt (removed_by set, no effect records by
         // contract) must not red the window: one plain `fno agents rm` is a
         // deliberate operator removal, not a failed reap.
         let home = temp_home();
         let mut receipt = build_reap_receipt(&row("rm-row"), None).unwrap();
-        stamp(&mut receipt, Some(current_build().as_str()));
+        stamp(&mut receipt, Some(retirement_contract().as_str()));
         receipt.removed_by = Some("operator".into());
         write_reap_receipt(&home, &receipt).unwrap();
 
@@ -1031,7 +1112,7 @@ mod tests {
         assert!(
             report.problems[0]
                 .reason
-                .starts_with("no retirement by the current build to verify"),
+                .starts_with("no retirement on the current contract to verify"),
             "{:?}",
             report.problems
         );
