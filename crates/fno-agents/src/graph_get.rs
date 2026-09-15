@@ -215,13 +215,12 @@ mod tests {
         assert_eq!(run_graph_get(&args), 0);
     }
 
-    /// Serializes tests that set `FNO_TRACKER_BACKEND`: process-wide env, so a
-    /// concurrent reader elsewhere in this binary must never see it mid-flip.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn an_external_backend_refuses_the_default_store_but_not_an_explicit_one() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        // The shared env lock, not a private one: king_verdict_inputs' tests
+        // read FNO_TRACKER_BACKEND under `claims::test_env_lock`, and two
+        // locks would let this flip land mid-read there.
+        let _guard = crate::claims::test_env_lock();
         std::env::set_var("FNO_TRACKER_BACKEND", "github");
         let refused = run_graph_get(&["x-997a".to_string()]);
         let dir = write_graph(&[node("x-997a", "fewer-gated")]);

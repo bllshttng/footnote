@@ -23,7 +23,7 @@ from fno.outstanding.core import read_open_questions, read_question_events
 STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
 
 
-def _fake_render(ids, key, reason, *, live=None, unknown_reason=None) -> dict:
+def _fake_render(ids, key, reason, *, live=None, unknown_reason=None, verdict=None, scope=None) -> dict:
     """The renderer runs in the fno-agents crate; the fake keeps its
     contract where the fold tests depend on it: the marker+key leads."""
     return {
@@ -404,3 +404,43 @@ def test_mail_presiding_king_true_only_on_a_zero_exit(monkeypatch) -> None:
         lambda *a, **k: _Proc(1, "msg-1 delivered (hosted)\n"),
     )
     assert mail_presiding_king("l1-king", STALLED, "NoProgress") is False
+
+
+# --- the reign verdict rides the renderer (x-4d4f) ------------------------------
+
+
+def test_escalate_threads_verdict_and_scope_to_the_renderer(tmp_path: Path, monkeypatch) -> None:
+    """The verdict and its scope ride the payload into the renderer; the
+    rendered words themselves are the crate's contract (king_escalation.rs)."""
+    seen: dict = {}
+
+    def _spy(ids, key, reason, *, live=None, unknown_reason=None, verdict=None, scope=None) -> dict:
+        seen.update(
+            ids=ids, key=key, reason=reason,
+            live=live, unknown_reason=unknown_reason, verdict=verdict, scope=scope,
+        )
+        return _fake_render(ids, key, reason)
+
+    monkeypatch.setattr("fno.king.escalate._render", _spy)
+
+    escalate(
+        ["reading:undelivered:x-a792"], reason="Budget", root=tmp_path,
+        session_id="k-test", cwd=tmp_path,
+        verdict="stalled undelivered 9", scope="x-a792",
+    )
+    assert seen["verdict"] == "stalled undelivered 9"
+    assert seen["scope"] == "x-a792"
+    assert seen["ids"] == ["reading:undelivered:x-a792"]
+
+
+def test_escalate_raises_on_a_renderer_refusal(tmp_path: Path, monkeypatch) -> None:
+    """``ok: false`` is a refusal, not a fallback: the caller raises while the
+    channel is untouched - no question is recorded from refused text."""
+    def _refuse(ids, key, reason, **_kw) -> dict:
+        return {"ok": False, "message": "king escalation refused: empty set"}
+
+    monkeypatch.setattr("fno.king.escalate._render", _refuse)
+    with pytest.raises(ValueError, match="refused"):
+        escalate(STALLED, reason="Budget", root=tmp_path, session_id="k-test", cwd=tmp_path)
+    assert read_open_questions(tmp_path) == []
+

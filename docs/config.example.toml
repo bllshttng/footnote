@@ -713,6 +713,8 @@ checkin_interval = "30m"
 checkin_text = "reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop."
 # The /goal conditions a reign self-injects (default: board clean for the scope, court unsplit, no stand-down order; never /goal clear on NoProgress).
 goal_text = "reign goal. When every node in the crown scope reads done or superseded, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress."
+# The verdict's compaction bound (default 3): post-compact context snapshots tolerated for one crowned session before `fno agents king verdict` reads degraded. Default 3 because one crown on one node produced two compaction-caused retractions in one evening.
+compaction_ceiling = 3
 
 [accounts]
 # Name of the account record currently active for provider rotation.

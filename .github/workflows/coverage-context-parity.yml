@@ -8,6 +8,7 @@ name: coverage-context-parity
 # runs only scripts/ci/check-coverage-context-parity.sh, and only when one of
 # the surfaces (or the check itself) changes.
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths: &parity_paths

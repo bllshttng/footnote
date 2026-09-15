@@ -642,6 +642,7 @@ FIELD_META: dict[str, Meta] = {
     "king.checkin_interval": Meta("advanced", "The /loop interval a reign self-injects (default 30m). Fail-safe: a value that is not <digits>[smhd] degrades to 30m at load, never raises."),
     "king.checkin_text": Meta("advanced", "The /loop prompt text a reign self-injects at each check-in (default: run fno agents king checkin, which gathers the readings, diffs the last beat, and journals reign_checkin; print 'no change' when idle)."),
     "king.goal_text": Meta("advanced", "The /goal conditions a reign self-injects (default: board clean for the scope, court unsplit, no stand-down order; never /goal clear on NoProgress)."),
+    "king.compaction_ceiling": Meta("advanced", "The verdict's compaction bound (default 3): post-compact context snapshots tolerated for one crowned session before `fno agents king verdict` reads degraded. Default 3 because one crown on one node produced two compaction-caused retractions in one evening."),
     # --- config.accounts.* (account rotation; managed by `fno config accounts`) ---
     "accounts.active": Meta("never", "Name of the account record currently active for provider rotation."),
     "accounts.auto_switch": Meta("never", "Swap to a failover account automatically when the active one is locked out."),

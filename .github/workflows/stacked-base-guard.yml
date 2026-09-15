@@ -29,6 +29,7 @@ name: stacked-base-guard
 # deliberately not made here.
 
 on:
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened, edited]
   push:

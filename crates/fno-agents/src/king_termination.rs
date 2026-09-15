@@ -611,4 +611,23 @@ mod tests {
         let b = bound_breached(2, 2, 3, "waiting").expect("breach");
         assert_eq!(b.reason, TerminationReason::Budget);
     }
+
+    #[test]
+    fn a_budget_breach_is_an_escalation_reason_now() {
+        // The terminate closure escalates on NoProgress OR Budget.
+        // The reason tag the closure hands escalate_stalled is the enum's
+        // own name, so the question says Budget when Budget stopped it.
+        let b = bound_breached(40, 0, 40, "waiting").expect("breach");
+        assert_eq!(format!("{:?}", b.reason), "Budget");
+    }
+
+    #[test]
+    fn the_quiet_board_reading_id_shape_is_stable() {
+        // The quiet-board terminal escalates this one reading id; its
+        // stability is what keeps reconcile at one question per crown, not
+        // one per count. The mint lives in king_escalation (x-ff27).
+        let scope = "x-a792";
+        let row = crate::king_escalation::reading_undelivered(scope);
+        assert_eq!(row, "reading:undelivered:x-a792");
+    }
 }

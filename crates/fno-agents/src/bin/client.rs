@@ -690,7 +690,13 @@ async fn run(args: Vec<String>) -> i32 {
     // court-fold: Python resolves the caller's crown scope and pins the
     // journal path (identity and paths are Python-owned), the native side
     // owns the scan so the file-budget Python-tree ratchet holds.
+    // `--verdict` is the same journals read as a tenure verdict (law
+    // d-fe66560a: the verdict rides this action as an argument, never a
+    // new action).
     if verb == "king-history" {
+        if args.iter().skip(1).any(|a| a == "--verdict") {
+            return fno_agents::king_history::run_king_verdict(&args[1..]);
+        }
         return fno_agents::king_history::run_king_history(&args[1..]);
     }
 

@@ -311,7 +311,7 @@ fn coerce_positive_int(v: &toml::Value, default: u32) -> u32 {
 /// Mirror of the Python `_parse_duration_to_seconds`: `"5m"`/`"30s"`/`"2h"`/
 /// `"1d"`, a bare digit string, or an integer; `None` for zero, negative, or
 /// unparseable.
-fn parse_duration_to_seconds(v: &toml::Value) -> Option<i64> {
+pub(crate) fn parse_duration_to_seconds(v: &toml::Value) -> Option<i64> {
     match v {
         toml::Value::Integer(i) => {
             let secs = *i;

@@ -225,8 +225,12 @@ def test_map_covers_current_surface_once():
     # `fleet-incident` argument (law d-fe66560a: no new client action), so
     # it allocates no row: counted from the merged file, 624. (The
     # backlog-update patch door is likewise transport-only and takes no
-    # row.)
-    assert len(mapped) == 626, (
+    # row.) This branch allocates `agents king verdict`, the reign tenure
+    # verdict read: the direct binary spelling `agents king-verdict` took a
+    # row and then gave it back (law d-fe66560a refuses the new client
+    # action, so the verdict rides `king-history --verdict` and the dashed
+    # leaf is gone again): counted from the merged file, 626 -> 627.
+    assert len(mapped) == 627, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
