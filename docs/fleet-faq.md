@@ -467,7 +467,7 @@ The same read reported both branches as 32 commits behind `main`. That is the no
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
 
-- **A hook fails Permission denied and the fix is already merged.** PR TBD. Session start now prints `[fno-checkout-behind]` and `[fno-checkout-ff-blocked]` for a stale main checkout, naming the uncommitted files that block the fast-forward.
+- **A hook fails Permission denied and the fix is already merged.** PR 2069. Session start now prints `[fno-checkout-behind]` and `[fno-checkout-ff-blocked]` for a stale main checkout, naming the uncommitted files that block the fast-forward.
 - **The merge gate refuses a real cross-model review.** PR 1595. The self lane counts any real review now, whatever produced it.
 - **My PR reads rounds 5 of 2.** PR 1426. A rebase or a fix under 100 interdiff lines carries its verdict now.
 
