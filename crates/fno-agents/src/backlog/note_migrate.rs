@@ -8,7 +8,7 @@
 //! source position and are never truncated.
 use crate::backlog::node_state::{self, HISTORY_MARKER_KEY, STATE_KEY};
 use crate::backlog::note_history;
-use crate::graph_store::{self, MutateInput};
+use crate::graph_store;
 use serde_json::{json, Value};
 use sha2::Digest as _;
 use std::path::PathBuf;
@@ -489,22 +489,23 @@ fn run_migrate(
             journaled_count.set(n);
             Ok(())
         };
-        let candidate = build_candidate(
-            &entries,
-            id,
-            entry.as_ref(),
-            matches!(verdict, RowVerdict::TerminalVerbatim),
-        );
-        let published = graph_store::locked_mutate_with_hook(
+        let published = graph_store::mutate_rows(
             graph,
-            MutateInput {
-                entries: candidate,
-                canonical_path: None,
-                base_version: None,
-                plan_rungs: None,
-            },
             std::time::Duration::from_secs(30),
+            None,
             Some(&mut hook),
+            |rows| {
+                // Build the candidate from the FRESH read, never the
+                // pre-loop snapshot that republished stale rows.
+                let candidate = build_candidate(
+                    rows,
+                    id,
+                    entry.as_ref(),
+                    matches!(verdict, RowVerdict::TerminalVerbatim),
+                );
+                *rows = candidate;
+                Ok(true)
+            },
         );
         if published.is_err() {
             unresolved.push((id.clone(), "apply failed; row left intact".into()));

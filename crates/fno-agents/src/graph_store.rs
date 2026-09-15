@@ -2066,6 +2066,10 @@ pub(crate) fn rotate_backups(dir: &Path, prefix: &str) -> Option<PathBuf> {
 }
 
 /// Atomic whole-file write: temp sibling + rename (store._write_json).
+/// A publish answers Ok only after its bytes are durable:
+/// the file fsync propagates (the swallowed `.ok()` let a publish answer Ok
+/// before it could survive a crash), and the rename itself is synced by
+/// fsyncing the parent directory.
 pub fn write_atomic(path: &Path, body: &str) -> Result<(), StoreError> {
     let tmp = path.with_file_name(format!(
         "{}.tmp-{}",
@@ -2077,9 +2081,15 @@ pub fn write_atomic(path: &Path, body: &str) -> Result<(), StoreError> {
     {
         let mut f = File::create(&tmp)?;
         f.write_all(body.as_bytes())?;
-        f.sync_all().ok();
+        f.sync_all()?;
     }
     std::fs::rename(&tmp, path)?;
+    let dir = File::open(
+        path.parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new(".")),
+    )?;
+    dir.sync_all()?;
     Ok(())
 }
 
@@ -2108,9 +2118,10 @@ pub struct MutateOutcome {
     /// (~/.fno/graph.json), which gates claim release and board renders.
     pub is_canonical: bool,
     /// The content digest of the published bytes, computed from the same
-    /// `body` the atomic replace wrote (not re-read from the file). A caller
-    /// that pairs this digest with a file stat can PROVE the file still holds
-    /// this publish before caching against it.
+    /// `body` the atomic replace wrote and verified by the under-lock
+    /// read-back: when the cycle answers Ok the file holds
+    /// these bytes. A caller that pairs this digest with a file stat can
+    /// PROVE the file still holds this publish before caching against it.
     pub version: String,
 }
 
@@ -2125,13 +2136,14 @@ pub struct MutateInput {
     /// Configured canonical graph path, when the caller knows it; the
     /// closure-release and board-render gates key on it.
     pub canonical_path: Option<PathBuf>,
-    /// The snapshot version (the file-content digest at begin time). The
-    /// cycle refuses to publish over a changed file, so a caller whose read
-    /// ran outside the lock retries on [`StoreError::Conflict`] instead of
-    /// silently clobbering an interleaved writer. `None` only for callers
-    /// that already serialized the whole read-apply-publish cycle under one
-    /// gate (the keeper's own ops).
-    pub base_version: Option<String>,
+    /// The snapshot version ([`base_version`] at the caller's read time).
+    /// Required, never optional: a whole-file publish is only safe when the
+    /// bytes it replaces are the bytes the caller read. The cycle refuses to
+    /// publish over a changed file, so a caller whose read ran outside the
+    /// lock retries on [`StoreError::Conflict`] instead of silently
+    /// clobbering an interleaved writer (`None` let four writers
+    /// publish stale snapshots that dropped every row landed in between).
+    pub base_version: String,
     /// Node id -> the rung of the node's linked plan, as the client computed
     /// it with the Python rung table (`ladder.plan_rung`). Repo law keeps
     /// plan-document reading on the Python side, so the store derives
@@ -2254,15 +2266,13 @@ pub fn locked_mutate_with_hook(
     // under the lock, so every caller (keeper, daemon settle, direct) agrees
     // by construction and a mid-flight flip lands on the next mutation.
     let sqlite_backend = crate::backlog::backend(path) == crate::backlog::Backend::Sqlite;
-    if let Some(expected) = &input.base_version {
-        let current = if sqlite_backend {
-            crate::backlog::version(path).map_err(StoreError::Sqlite)?
-        } else {
-            file_content_version(path)
-        };
-        if current != *expected {
-            return Err(StoreError::Conflict);
-        }
+    let current = if sqlite_backend {
+        crate::backlog::version(path).map_err(StoreError::Sqlite)?
+    } else {
+        file_content_version(path)
+    };
+    if current != input.base_version {
+        return Err(StoreError::Conflict);
     }
     let raw_read = if sqlite_backend {
         RawRead::Entries(crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?)
@@ -2436,6 +2446,22 @@ pub fn locked_mutate_with_hook(
         (backup, warning, version)
     };
 
+    // Still under the lock, read the published bytes back
+    // and compare digests. Every receipt (idea, session close, note) rides
+    // this Ok, so a publish that silently failed to land refuses instead of
+    // claiming success.
+    let readback = if sqlite_backend {
+        crate::backlog::version(path).map_err(StoreError::Sqlite)?
+    } else {
+        file_content_version(path)
+    };
+    if readback != version {
+        return Err(StoreError::Invalid(format!(
+            "publish read-back mismatch on {}: wrote {version}, file holds {readback}",
+            path.display()
+        )));
+    }
+
     Ok(MutateOutcome {
         entries,
         dropped,
@@ -2452,6 +2478,77 @@ fn same_file(a: &Path, b: &Path) -> bool {
         (Ok(x), Ok(y)) => x == y,
         _ => a == b,
     }
+}
+
+/// One rows reader for every writer: the backend switch plus the default
+/// pass. `api::read_rows` and `node_state::read_rows_for` were this same
+/// shape twice; both delegate here now.
+pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
+    let mut rows = match crate::backlog::backend(path) {
+        crate::backlog::Backend::Sqlite => {
+            crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
+        }
+        crate::backlog::Backend::Json => read_defaulted(path, false)?,
+    };
+    apply_defaults(&mut rows, false);
+    Ok(rows)
+}
+
+/// The optimistic mutation cycle every whole-graph writer shares: stamp a
+/// base, read fresh rows, apply, publish over that base, and retry the whole
+/// cycle on [`StoreError::Conflict`] or [`StoreError::LockTimeout`]. `apply`
+/// re-runs over a FRESH read every attempt, so a retry never overwrites what
+/// another writer just landed; `Ok(false)` is a domain refusal that writes
+/// nothing. Lifted from `backlog::api::mutate` so the writers that used to
+/// publish stale snapshots share one loop instead of four shapes.
+pub fn mutate_rows(
+    path: &Path,
+    timeout: Duration,
+    plan_rungs: Option<BTreeMap<String, String>>,
+    mut hook: Option<&mut dyn FnMut(&[Value]) -> Result<(), StoreError>>,
+    mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, StoreError>,
+) -> Result<Option<MutateOutcome>, StoreError> {
+    const ATTEMPTS: usize = 5;
+    const RETRY_BACKOFF: Duration = Duration::from_millis(100);
+    for attempt in 0..ATTEMPTS {
+        let base = base_version(path)?;
+        let mut working = read_rows(path)?;
+        if !apply(&mut working)? {
+            return Ok(None);
+        }
+        // The hook reborrow is block-scoped: a binding held across the match
+        // would keep `hook` mutably borrowed into the next loop iteration
+        // (E0499).
+        let published = {
+            let h: Option<&mut dyn FnMut(&[Value]) -> Result<(), StoreError>> = match hook.as_mut()
+            {
+                Some(h) => Some(&mut **h),
+                None => None,
+            };
+            locked_mutate_with_hook(
+                path,
+                MutateInput {
+                    entries: working,
+                    canonical_path: None,
+                    base_version: base,
+                    plan_rungs: plan_rungs.clone(),
+                },
+                timeout,
+                h,
+            )
+        };
+        match published {
+            Ok(outcome) => return Ok(Some(outcome)),
+            Err(err @ (StoreError::Conflict | StoreError::LockTimeout(..)))
+                if attempt + 1 < ATTEMPTS =>
+            {
+                let _ = err;
+                std::thread::sleep(RETRY_BACKOFF);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("every loop arm returns")
 }
 
 // ---------------------------------------------------------------------------
@@ -2893,7 +2990,7 @@ mod tests {
             MutateInput {
                 entries: vec![json!({"id": "ab-1", "title": "t", "details": ""})],
                 canonical_path: None,
-                base_version: None,
+                base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             Duration::from_secs(2),
@@ -2906,7 +3003,7 @@ mod tests {
             MutateInput {
                 entries: vec![json!({"id": "ab-1", "completion_note": "   "})],
                 canonical_path: None,
-                base_version: None,
+                base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             Duration::from_secs(2),
@@ -2919,7 +3016,7 @@ mod tests {
             MutateInput {
                 entries: vec![json!({"id": "ab-1", "title": "t"})],
                 canonical_path: None,
-                base_version: None,
+                base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             Duration::from_secs(2),
@@ -3194,7 +3291,7 @@ mod tests {
             MutateInput {
                 entries,
                 canonical_path: None,
-                base_version: None,
+                base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             Duration::from_secs(2),
@@ -3204,6 +3301,101 @@ mod tests {
         assert!(body.starts_with("{\n  \"entries\": [\n    {"));
         assert!(body.ends_with("\n"));
         assert!(out.dropped == 0);
+    }
+
+    #[test]
+    fn mutate_rows_retries_when_a_row_lands_between_read_and_publish() {
+        // First acceptance line: a concurrent writer lands
+        // between the cycle's read and publish; the loop conflicts, re-reads,
+        // and both rows persist.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+        let mut apply_runs = 0usize;
+        let outcome = mutate_rows(&graph, Duration::from_secs(5), None, None, |rows| {
+            apply_runs += 1;
+            if apply_runs == 1 {
+                // The concurrent idea: a fresh-base whole publish of a row
+                // this cycle's snapshot does not hold.
+                let base = base_version(&graph).unwrap();
+                let mut foreign = read_rows(&graph).unwrap();
+                foreign.push(json!({"id": "x-fresh", "title": "landed mid-cycle"}));
+                locked_mutate(
+                    &graph,
+                    MutateInput {
+                        entries: foreign,
+                        canonical_path: None,
+                        base_version: base,
+                        plan_rungs: None,
+                    },
+                    Duration::from_secs(5),
+                )
+                .unwrap();
+            }
+            rows.push(json!({"id": "x-mine", "title": "mine"}));
+            Ok(true)
+        })
+        .unwrap();
+        assert!(outcome.is_some(), "the cycle landed on its second attempt");
+        assert_eq!(apply_runs, 2, "apply ran once per attempt, exactly twice");
+        let ids: Vec<String> = read_rows(&graph)
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect();
+        assert!(ids.contains(&"x-fresh".to_string()), "ids: {ids:?}");
+        assert!(ids.contains(&"x-mine".to_string()), "ids: {ids:?}");
+    }
+
+    #[test]
+    fn mutate_rows_no_change_publishes_nothing() {
+        // Second acceptance line: apply's Ok(false) is a
+        // domain refusal; the file digest must not move.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+        let before = file_content_version(&graph);
+        let landed = mutate_rows(&graph, Duration::from_secs(5), None, None, |_rows| {
+            Ok(false)
+        })
+        .unwrap();
+        assert!(landed.is_none(), "no publish on a domain refusal");
+        assert_eq!(file_content_version(&graph), before, "digest unchanged");
+    }
+
+    #[test]
+    fn a_landed_publish_reads_back_its_own_digest_and_leaves_no_tmp() {
+        // First acceptance line: the returned version equals
+        // the file's content digest and no graph.json.tmp-* sibling remains.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+        let outcome = locked_mutate(
+            &graph,
+            MutateInput {
+                entries: vec![json!({"id": "ab-1", "title": "t"})],
+                canonical_path: None,
+                base_version: base_version(&graph).unwrap(),
+                plan_rungs: None,
+            },
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.version,
+            file_content_version(&graph),
+            "the Ok version names the bytes the file actually holds"
+        );
+        let tmp_siblings: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(
+            tmp_siblings.is_empty(),
+            "no tmp siblings remain: {tmp_siblings:?}"
+        );
     }
 
     #[test]

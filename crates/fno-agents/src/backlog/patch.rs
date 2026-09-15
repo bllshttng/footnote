@@ -853,7 +853,7 @@ pub fn apply_with_timeout(
             MutateInput {
                 entries: planned.working,
                 canonical_path: None,
-                base_version: Some(version),
+                base_version: version,
                 plan_rungs: Some(planned.rungs),
             },
             lock_timeout,

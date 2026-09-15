@@ -72,7 +72,7 @@ fn raw_mutate(graph: &PathBuf, rows: Vec<serde_json::Value>) {
         fno_agents::graph_store::MutateInput {
             entries: rows,
             canonical_path: None,
-            base_version: None,
+            base_version: fno_agents::graph_store::base_version(graph).unwrap(),
             plan_rungs: None,
         },
         std::time::Duration::from_secs(5),
@@ -234,4 +234,98 @@ fn history_dedupe_is_idempotent() {
     }
     let (_, h) = fno_agents::backlog::note_history::read(&graph, Some("h-1"), 0, 100).unwrap();
     assert_eq!(h, 1, "identical records dedupe to one");
+}
+
+#[test]
+fn a_state_write_keeps_a_row_another_writer_landed() {
+    // Thread one loops replace_state on t-1; thread two
+    // appends 30 rows through graph_store::mutate_rows. Every append lands,
+    // and t-1's final revision equals thread one's success count.
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    let mut seed: Vec<serde_json::Value> = (0..500)
+        .map(|i| fixture_node(&format!("r-{i:04}"), "d"))
+        .collect();
+    seed.push(fixture_node("t-1", "d"));
+    write_graph(&graph, &seed);
+    let note_graph = graph.clone();
+    let notes = std::thread::spawn(move || {
+        let mut ok = 0u64;
+        for i in 0..25 {
+            let input = StateWriteInput {
+                node_id: "t-1".to_string(),
+                body: format!("state {i}"),
+                if_revision: None,
+                source_session_id: None,
+                source_harness: None,
+                reads: None,
+            };
+            if node_state::replace_state(&note_graph, &input).is_ok() {
+                ok += 1;
+            }
+            // Yield the flock between writes so the appender thread is not
+            // starved past its lock deadline (see the keeper race test).
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        ok
+    });
+    let append_graph = graph.clone();
+    let appends = std::thread::spawn(move || {
+        let mut landed = Vec::new();
+        for i in 0..30 {
+            let id = format!("c-app-{i:04}");
+            // Outer retry, the shape cmd_idea uses: mutate_rows' internal 5
+            // attempts can exhaust under sustained note-writer contention.
+            let mut landed_here = false;
+            for _attempt in 0..10 {
+                let outcome = fno_agents::graph_store::mutate_rows(
+                    &append_graph,
+                    std::time::Duration::from_secs(30),
+                    None,
+                    None,
+                    |rows| {
+                        rows.push(json!({
+                            "id": id,
+                            "slug": format!("slug-{id}"),
+                            "title": format!("appended {id}"),
+                            "type": "feature",
+                            "status": "intake",
+                            "priority": "p2",
+                        }));
+                        Ok(true)
+                    },
+                );
+                if outcome.is_ok() {
+                    landed_here = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            assert!(landed_here, "append {id} never landed in 10 outer tries");
+            landed.push(id);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        landed
+    });
+    let ok = notes.join().unwrap();
+    let landed = appends.join().unwrap();
+    let final_ids: Vec<String> = read_graph(&graph)
+        .iter()
+        .filter_map(|r| r["id"].as_str().map(str::to_string))
+        .collect();
+    for id in &landed {
+        assert!(
+            final_ids.contains(id),
+            "append {id} landed but is missing from the final graph"
+        );
+    }
+    let row = read_graph(&graph)
+        .into_iter()
+        .find(|r| r["id"] == json!("t-1"))
+        .unwrap();
+    let revision = row[node_state::STATE_KEY]["revision"].as_u64().unwrap();
+    assert_eq!(
+        revision, ok,
+        "t-1 answered ok {ok} times but its final revision is {revision}"
+    );
 }

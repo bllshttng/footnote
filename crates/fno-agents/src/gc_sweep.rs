@@ -4577,12 +4577,13 @@ mod tests {
     }
 
     fn seed_store(home: &AgentsHome, entries: Vec<Value>) {
+        let graph = graph_path(home);
         graph_store::locked_mutate(
-            &graph_path(home),
+            &graph,
             graph_store::MutateInput {
                 entries,
                 canonical_path: None,
-                base_version: None,
+                base_version: graph_store::base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             graph_store::DEFAULT_LOCK_TIMEOUT,
