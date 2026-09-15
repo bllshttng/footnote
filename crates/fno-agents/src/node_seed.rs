@@ -171,39 +171,6 @@ pub fn decide(payload: &Value) -> Value {
     }
 }
 
-/// The hidden verb body: one JSON payload on stdin (or `--payload-file=`),
-/// one answer line on stdout. Exit 0 even for a refusal (the refusal IS the
-/// answer); exit 2 only for transport faults, which the caller reports as
-/// the verb being unavailable.
-pub fn run_node_seed(args: &[String]) -> i32 {
-    use std::io::Read;
-
-    let mut payload = String::new();
-    let read = if let Some(path) = args.iter().find_map(|a| a.strip_prefix("--payload-file=")) {
-        std::fs::read_to_string(path)
-    } else {
-        std::io::stdin()
-            .read_to_string(&mut payload)
-            .map(|_| payload.clone())
-    };
-    let payload = match read {
-        Ok(text) => text,
-        Err(e) => {
-            eprint!("node-seed: cannot read payload: {e}\n");
-            return 2;
-        }
-    };
-    let parsed: Value = match serde_json::from_str(&payload) {
-        Ok(v) => v,
-        Err(e) => {
-            eprint!("node-seed: bad payload: {e}\n");
-            return 2;
-        }
-    };
-    println!("{}", decide(&parsed));
-    0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

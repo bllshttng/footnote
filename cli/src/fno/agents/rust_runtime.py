@@ -282,11 +282,9 @@ RUST_CLIENT_VERBS = frozenset(
         "spawn-overlay",
         # The billing axes of the spawn seam (route/account/model): payload
         # JSON in, the {inject, applied, suppressed, messages} plan out;
-        # Python calls it via fno.agents.spawn_axes_client.
+        # Python calls it via fno.agents.spawn_axes_client. A `node_seed`
+        # field routes the payload to the node-seed decision instead.
         "spawn-axes",
-        # The node's verb vs the payload's verb; Python calls it via
-        # fno.rust_binary.verb_call at the spawn seam.
-        "node-seed",
         # The failover chain walk (x-8975 budget port): payload JSON in, the
         # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
         "fallback-chain",
@@ -546,8 +544,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "spawn-gate": "The ONE spawn gate: reads one stdin JSON payload, writes one {status: admitted, gate/worker keys} or {status: refused, exit_code, receipt, event} answer; gate and probe modes; invoked by the fno.agents.spawn_gate transport.",
     "blueprint-feed": "Territory feed for the backlog supervisor's blueprinter tick: --scope <s> prints the standing worker + unfed ideas as JSON; --deliver mails the window; --repair <r> records a failed delivery.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
-    "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",
-    "node-seed": "The node's verb against the payload's verb: JSON payload on stdin, the {action: pass|profile|compose|refuse} answer on stdout; invoked by fno.rust_binary.verb_call at the spawn seam, not `fno agents` routing.",
+    "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; a `node_seed` field instead answers the node-verb check. Invoked by fno.agents.spawn_axes_client and the spawn seam, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",
@@ -796,9 +793,9 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[List[str], Optional[str]
     from fno.rust_binary import VerbUnavailable, verb_call
 
     try:
-        answer = verb_call("node-seed", payload, VerbUnavailable)
+        answer = verb_call("spawn-axes", {"node_seed": payload}, VerbUnavailable)
     except VerbUnavailable as exc:
-        print(f"fno agents spawn: node-seed verb unavailable: {exc}", file=sys.stderr)
+        print(f"fno agents spawn: spawn-axes unavailable: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
     action = answer.get("action")
     if action == "refuse":

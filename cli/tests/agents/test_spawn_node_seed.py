@@ -264,7 +264,7 @@ def _stub_verb(monkeypatch, answer=None, *, unavailable=None):
     seen: list = []
 
     def _call(verb, payload, unavailable_cls, **kw):
-        seen.append(payload)
+        seen.append(payload.get("node_seed", payload))
         if unavailable is not None:
             raise unavailable_cls(str(unavailable))
         return answer
@@ -312,7 +312,7 @@ def test_seam_names_the_binary_when_the_verb_is_unavailable(monkeypatch, capsys)
     with pytest.raises(SystemExit) as exc:
         _node_seed_at_seam(_seed_args("port it", "--node", "x-1"))
     assert exc.value.code == 2
-    assert "node-seed verb unavailable" in capsys.readouterr().err
+    assert "spawn-axes unavailable" in capsys.readouterr().err
 
 
 def test_seam_skips_without_an_explicit_node_flag(monkeypatch):
@@ -407,9 +407,9 @@ def test_seam_crown_and_resume_pass_with_their_flags_set(monkeypatch):
 
 @requires_rust
 def test_seam_real_binary_refuses_a_disagreeing_verb(monkeypatch):
-    """AC3-HP on the real transport: the compiled node-seed verb refuses the
-    disagreeing family verb and passes the agreeing one; no stubbing of the
-    answer, only of the graph row."""
+    """AC3-HP on the real transport: the compiled spawn-axes node-seed field
+    refuses the disagreeing family verb and passes the agreeing one; no
+    stubbing of the answer, only of the graph row."""
     _stub_row(monkeypatch, _row())
     from fno.agents.rust_runtime import _node_seed_at_seam
 
