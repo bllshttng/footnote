@@ -5,10 +5,9 @@ use crate::restore_gate::{set_restore_registry_rows, RestoreRegistryRowsGuard};
 
 #[path = "server/server_thread_viewer_tests.rs"]
 mod thread_viewer_tests;
-use crate::proto::TemplateName; // x-c4d4 tests; not referenced by name in non-test code
+use crate::proto::TemplateName; // not referenced by name in non-test code
 
-// (x-0719) The portal test family lives in its own module; the file
-// is shrink-only under the file-budget gate.
+// The portal test family lives in its own module; this file is shrink-only.
 #[path = "server/tests/portal_tests.rs"]
 mod portal_tests;
 // Same treatment: the lifecycle-resolution test family.
