@@ -94,7 +94,11 @@ EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
 # shellcheck source=../scripts/lib/events.sh
 [[ -r "$EVENTS_LIB" ]] && source "$EVENTS_LIB" 2>/dev/null || true
 LIVE_STATE_FILE=$(fno-agents state path target-state 2>/dev/null || true)
-[[ -z "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
+# The verb answers THIS cwd's spaces-layout slice whether or not a manifest
+# lives there; when that answer is not on disk, the manifest init wrote at the
+# workspace root is the one to gate on. agy fires Stop from unrelated cwds, so
+# an empty answer alone never fired this fallback (x-3227 review, T9).
+[[ -z "$LIVE_STATE_FILE" || ! -f "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 TARGET_CWD="$ROOT"
 REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
