@@ -1051,8 +1051,12 @@ mod tests {
     /// the unknown-flag refusal.
     #[test]
     fn the_short_json_spelling_selects_the_json_format() {
+        // The run path resolves the state root; point it at a tempdir for the
+        // run and restore it after, under the process-wide env lock.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os(crate::paths::HOME_ENV);
         let dir = tempfile::tempdir().unwrap();
-        // The run path resolves the state root; keep the test hermetic.
         std::env::set_var(crate::paths::HOME_ENV, dir.path());
         let graph = dir.path().join("graph.json");
         std::fs::write(
@@ -1077,7 +1081,13 @@ mod tests {
         let mut long = args;
         long.push("--format".to_string());
         long.push("json".to_string());
-        assert_eq!(run_court_fold(&short), 0);
-        assert_eq!(run_court_fold(&long), 0);
+        let short_rc = run_court_fold(&short);
+        let long_rc = run_court_fold(&long);
+        match saved {
+            Some(v) => std::env::set_var(crate::paths::HOME_ENV, v),
+            None => std::env::remove_var(crate::paths::HOME_ENV),
+        }
+        assert_eq!(short_rc, 0);
+        assert_eq!(long_rc, 0);
     }
 }
