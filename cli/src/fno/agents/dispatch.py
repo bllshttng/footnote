@@ -4971,7 +4971,6 @@ def rpc_roundtrip(
             emit(f"daemon returned oversized frame ({length} bytes)")
             return None
 
-        # bytearray extends in place; `bytes` copies the whole buffer per chunk.
         data = bytearray()
         while len(data) < length:
             chunk = sock.recv(length - len(data))
