@@ -27,10 +27,10 @@ One global append-only log is the system of record. The per-recipient markdown t
 One JSON object per line (`fno.bus.log.Envelope`):
 
 ```json
-{"v":1,"id":"msg-3f8f96","ts":"2026-06-07T19:51:32Z","thread":"msg-3f8f96","from":"alice","to":"bob","kind":"send","provider_from":"claude","provider_to":"codex","in_reply_to":"...","delivery":"hosted","word_count":17,"meta":{...},"body":"..."}
+{"v":1,"id":"msg-3f8f96","ts":"2026-06-07T19:51:32Z","thread":"msg-3f8f96","from":"alice","to":"bob","kind":"send","from_harness":"claude","to_harness":"codex","in_reply_to":"...","delivery":"hosted","word_count":17,"meta":{...},"body":"..."}
 ```
 
-`from` and `to` are canonical registry names, session handles, or project names. `provider_from` and `provider_to` are audit tags, never addresses. Reply correlation uses `request_id` and `in_reply_to` independently of provider tags.
+`from` and `to` are canonical registry names, session handles, or project names. `from_harness` and `to_harness` are audit tags, never addresses (renamed from `provider_from`/`provider_to`, and the reader still accepts the old keys on stored rows). Reply correlation uses `request_id` and `in_reply_to` independently of harness tags.
 
 `word_count` stores the authored body's send-time count under the pure Rule 7 masking rules. It is never recomputed from a stored `<fno_mail>` wrapper.
 
@@ -102,20 +102,18 @@ The rule:
 
 A forwarding pointer written at abdication is the cheaper-looking fix, and it is refused on purpose. The pointer is itself a recorded identity. A second succession leaves it naming a session that is no longer crowned either.
 
-## Recipient crown stamp
+## Crown attributes
 
-Every live-delivered envelope carries the RECIPIENT's own live crown, read at delivery from the same registry:
+Every envelope carries the live crowns of its sender and its reader as header attributes, read at render time from the same registry:
 
 ```
--- your crown: L1 fno
--- your crown: none right now
+from_rank="L1 fno"
+to_rank="L1 fno"     (or to_rank="none")
 ```
 
-The line sits above the sender-standing trailer. The peer-mail authority notice stays the last line inside the envelope.
+`from_rank` is the sender's verified crown. The Rust injection door refuses a payload whose `from_rank` does not match the live registry read for its sender. `to_rank` names the RECIPIENT's own crown. `from_rank` and `to_rank` name verified standing, never authority: they are a display of who holds what, not a grant.
 
-It is a trailer, not a tag attribute. The module's field rule reserves attributes for what a recipient cannot cheaply look up. A reader's own crown is exactly what it fails to look up.
-
-Two gates, in order. With no resolved recipient session id, the envelope carries no line at all. `none right now` is a positive claim about the reader's authority, and an unresolved address is an absence rather than a reading. A crownless fleet (`fleet_has_crown()` false) carries no line either, so those envelopes stay byte-unchanged.
+Two gates, in order, for `to_rank`. With no resolved recipient session id, the attribute is omitted. `none` is a positive claim about the reader's authority, and an unresolved address is an absence rather than a reading. A crownless fleet (`fleet_has_crown()` false) omits it too, so those envelopes stay byte-unchanged. An unreadable registry omits it as well. `fleet_has_crown()` fails open while the crown read fails closed. The two alone once told a live king it had been deposed, so an unreadable registry claims nothing.
 
 ## Job-address lane
 

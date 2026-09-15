@@ -79,8 +79,10 @@ class Envelope:
     """One line in the bus log. ``from_`` serializes to the canonical ``from`` key.
 
     ``from`` and ``to`` are the addresses (registry names, or a project name in
-    ``--to-project`` durable mode). ``provider_from``/``provider_to`` are
-    metadata-only tags for transport selection and audit, never for addressing.
+    ``--to-project`` durable mode). ``from_harness``/``to_harness`` are
+    metadata-only tags for transport selection and audit, never for addressing
+    (they hold a harness name, not a provider; the v2 reshape renamed them from
+    ``provider_from``/``provider_to``).
     Reply correlation uses ``request_id``/``in_reply_to`` exclusively.
     ``meta`` carries inbox-specific passthrough (refs, persist_to_memory) so the
     converged log preserves triage->graph provenance without polluting the
@@ -95,8 +97,8 @@ class Envelope:
     body: str
     ts: str
     v: int = ENVELOPE_VERSION
-    provider_from: Optional[str] = None
-    provider_to: Optional[str] = None
+    from_harness: Optional[str] = None
+    to_harness: Optional[str] = None
     request_id: Optional[str] = None
     in_reply_to: Optional[str] = None
     delivery: Optional[str] = None
@@ -116,10 +118,10 @@ class Envelope:
     # The send lane supplies it so the row and Rule 7 both carry the count of
     # the SAME string -- the raw body, not the wire wrapper.
     word_count: Optional[int] = None
-    # Provenance axis for the authority trailer (ruling d-b328d8c4): the drain
-    # render stamps mail_trailer(origin) from the record itself, never from
-    # body text. Additive: a row written before this field existed reads back
-    # through the legacy meta fallback and renders with the peer trailer.
+    # Provenance axis (ruling d-b328d8c4), classified at write time by
+    # classify_origin and surfaced by the drain render as an origin label.
+    # Additive: a row written before this field existed reads back through the
+    # legacy meta fallback.
     origin: Optional[str] = None
 
     @classmethod
@@ -133,8 +135,8 @@ class Envelope:
         id: Optional[str] = None,
         thread: Optional[str] = None,
         ts: Optional[str] = None,
-        provider_from: Optional[str] = None,
-        provider_to: Optional[str] = None,
+        from_harness: Optional[str] = None,
+        to_harness: Optional[str] = None,
         request_id: Optional[str] = None,
         in_reply_to: Optional[str] = None,
         delivery: Optional[str] = None,
@@ -154,8 +156,8 @@ class Envelope:
             kind=kind,
             body=body,
             ts=ts or _now_iso(),
-            provider_from=provider_from,
-            provider_to=provider_to,
+            from_harness=from_harness,
+            to_harness=to_harness,
             request_id=request_id,
             in_reply_to=in_reply_to,
             delivery=delivery,
@@ -181,7 +183,7 @@ def _now_iso() -> str:
 # last (bodies can be large; keeping them last keeps the line head scannable).
 _ALWAYS = ("v", "id", "ts", "thread", "from", "to", "kind")
 _OPTIONAL = (
-    "provider_from", "provider_to", "request_id", "in_reply_to", "delivery",
+    "from_harness", "to_harness", "request_id", "in_reply_to", "delivery",
     "from_session", "from_model", "to_kind", "word_count", "origin", "meta",
 )
 
@@ -201,10 +203,10 @@ def to_json_line(env: Envelope) -> str:
         "to": env.to,
         "kind": env.kind,
     }
-    if env.provider_from:
-        obj["provider_from"] = env.provider_from
-    if env.provider_to:
-        obj["provider_to"] = env.provider_to
+    if env.from_harness:
+        obj["from_harness"] = env.from_harness
+    if env.to_harness:
+        obj["to_harness"] = env.to_harness
     if env.request_id:
         obj["request_id"] = env.request_id
     if env.in_reply_to:
@@ -247,8 +249,10 @@ def from_json_line(line: str) -> Envelope:
         body=str(obj.get("body", "")),
         ts=str(obj.get("ts", "")),
         v=int(obj.get("v", ENVELOPE_VERSION)),
-        provider_from=obj.get("provider_from"),
-        provider_to=obj.get("provider_to"),
+        # v2 rename: stored rows carry the old provider_* key, so the read
+        # accepts both, following the legacy fallback `origin` uses below.
+        from_harness=obj.get("from_harness") or obj.get("provider_from"),
+        to_harness=obj.get("to_harness") or obj.get("provider_to"),
         request_id=obj.get("request_id"),
         in_reply_to=obj.get("in_reply_to"),
         delivery=obj.get("delivery"),
@@ -481,8 +485,8 @@ def record_hosted_delivery(
     recipient: str,
     body: str,
     thread: Optional[str] = None,
-    provider_from: Optional[str] = None,
-    provider_to: Optional[str] = None,
+    from_harness: Optional[str] = None,
+    to_harness: Optional[str] = None,
     request_id: Optional[str] = None,
     in_reply_to: Optional[str] = None,
     from_session: Optional[str] = None,
@@ -490,10 +494,10 @@ def record_hosted_delivery(
     to_kind: Optional[str] = None,
     word_count: Optional[int] = None,
     to_session: Optional[str] = None,
-    to_harness: Optional[str] = None,
 ) -> Envelope:
     """Append one audit-only record after confirmed hosted delivery. ``to_session``/
-    ``to_harness`` name the session actually injected into, for the landed check."""
+    ``to_harness`` name the session actually injected into, for the landed check
+    (which reads the ``to_harness`` meta copy)."""
     meta = {k: v for k, v in (("to_session", to_session), ("to_harness", to_harness)) if v}
     env = Envelope.new(
         id=msg_id,
@@ -502,8 +506,8 @@ def record_hosted_delivery(
         to=recipient,
         kind="send",
         body=body,
-        provider_from=provider_from,
-        provider_to=provider_to,
+        from_harness=from_harness,
+        to_harness=to_harness,
         request_id=request_id,
         in_reply_to=in_reply_to,
         delivery=HOSTED_DELIVERY,
@@ -526,8 +530,8 @@ def record_typed_delivery(
     pane_id: str,
     mux_session: Optional[str] = None,
     thread: Optional[str] = None,
-    provider_from: Optional[str] = None,
-    provider_to: Optional[str] = None,
+    from_harness: Optional[str] = None,
+    to_harness: Optional[str] = None,
     in_reply_to: Optional[str] = None,
     from_session: Optional[str] = None,
     from_model: Optional[str] = None,
@@ -550,8 +554,8 @@ def record_typed_delivery(
         to=recipient,
         kind="send",
         body=body,
-        provider_from=provider_from,
-        provider_to=provider_to,
+        from_harness=from_harness,
+        to_harness=to_harness,
         in_reply_to=in_reply_to,
         delivery=TYPED_DELIVERY,
         # The reply address, on the row a reader reaches for first. `cmd_reply`

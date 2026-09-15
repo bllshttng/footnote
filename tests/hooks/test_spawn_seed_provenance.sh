@@ -72,7 +72,7 @@ opens="$(printf '%s' "$out" | grep -c '<fno_mail ' || true)"
 closes="$(printf '%s' "$out" | grep -c '</fno_mail>' || true)"
 check "startup emits one open tag" "1" "$opens"
 check "startup emits one close tag" "1" "$closes"
-if printf '%s' "$out" | grep -q 'from_session=\\"119e3c52-0000-7000-8000-000000000000\\"'; then
+if printf '%s' "$out" | grep -q 'from=\\"119e3c52-0000-7000-8000-000000000000\\"'; then
     printf 'ok   full sender session is the reply address\n'
 else
     printf 'FAIL full sender session is the reply address\n  actual: %s\n' "$out"

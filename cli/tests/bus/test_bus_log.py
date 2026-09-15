@@ -34,7 +34,7 @@ def test_envelope_round_trips_with_version_and_from_key(bus):
 
     env = Envelope.new(
         from_="alice", to="bob", kind="send", body="hi there",
-        provider_from="claude", provider_to="codex",
+        from_harness="claude", to_harness="codex",
     )
     line = to_json_line(env)
     obj = json.loads(line)
@@ -51,6 +51,30 @@ def test_envelope_round_trips_with_version_and_from_key(bus):
     assert back.to == "bob"
     assert back.id == env.id
     assert back.body == "hi there"
+
+
+def test_from_harness_to_harness_rename_with_legacy_read(bus):
+    # AC5: new rows carry from_harness/to_harness and never the
+    # provider_* keys; stored rows with the old keys still read back.
+    from fno.bus.log import Envelope, to_json_line, from_json_line
+
+    env = Envelope.new(
+        from_="a", to="b", kind="send", body="x",
+        from_harness="claude", to_harness="codex",
+    )
+    obj = json.loads(to_json_line(env))
+    assert obj["from_harness"] == "claude"
+    assert obj["to_harness"] == "codex"
+    assert "provider_from" not in obj
+    assert "provider_to" not in obj
+
+    legacy = json.dumps(
+        {"v": 1, "id": "msg-1", "from": "a", "to": "b", "kind": "send",
+         "provider_from": "claude", "provider_to": "codex", "body": "x"}
+    )
+    back = from_json_line(legacy)
+    assert back.from_harness == "claude"
+    assert back.to_harness == "codex"
 
 
 def test_append_then_iter_returns_in_order(bus):
@@ -71,27 +95,27 @@ def test_ac5_hp_thread_scan_in_order_with_correlation(bus):
 
     ask = Envelope.new(
         from_="a", to="b", kind="ask", body="status?",
-        provider_from="claude", provider_to="codex", request_id="rq-1",
+        from_harness="claude", to_harness="codex", request_id="rq-1",
     )
     append(ask)
     reply = Envelope.new(
         from_="b", to="a", kind="reply", body="all good",
-        provider_from="codex", provider_to="claude", in_reply_to="rq-1",
+        from_harness="codex", to_harness="claude", in_reply_to="rq-1",
         thread=ask.thread,
     )
     append(reply)
     send = Envelope.new(
         from_="a", to="b", kind="send", body="thanks",
-        provider_from="claude", provider_to="codex", thread=ask.thread,
+        from_harness="claude", to_harness="codex", thread=ask.thread,
     )
     append(send)
 
     convo = list(iter_thread(ask.thread))
     assert [m.kind for m in convo] == ["ask", "reply", "send"]
     assert convo[1].in_reply_to == "rq-1"
-    # provider mix preserved
-    assert convo[0].provider_to == "codex"
-    assert convo[1].provider_from == "codex"
+    # harness mix preserved
+    assert convo[0].to_harness == "codex"
+    assert convo[1].from_harness == "codex"
 
 
 # ---------------------------------------------------------------------------

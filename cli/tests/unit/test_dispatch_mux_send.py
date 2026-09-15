@@ -101,7 +101,9 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
     assert paste.startswith("<fno_mail from=")
     assert paste.rstrip().endswith("</fno_mail>")
     assert "status?" in paste
-    assert "peer mail" in paste, "the authority trailer is the point, not decoration"
+    # The wrapped pair itself is the point; the retired peer-mail
+    # footer no longer renders.
+    assert "peer mail" not in paste
 
 
 def test_read_receipt_identity_mismatch_refuses_before_typing(monkeypatch, capsys):

@@ -34,8 +34,11 @@ def job_lane_send(
         _mail_inject_claude,
         _mail_inject_codex,
     )
-    from fno.agents.self_stamp import resolve_self_model, stamp_from
-    from fno.dispatch_flags import infer_invoking_harness
+    from fno.agents.self_stamp import (
+        resolve_self_harness,
+        resolve_self_model,
+        stamp_from,
+    )
     from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
     from fno.mail.envelope import wrap_fno_mail
     from fno.mail.job_address import resolve_job_address
@@ -72,7 +75,7 @@ def job_lane_send(
         msg_id=msg_id,
         allow_reason=style_exception,
     )
-    sender_harness = infer_invoking_harness()
+    sender_harness = resolve_self_harness()
     sender_model = resolve_self_model()
     # The collision-safe reply address; a reply consults the durable records
     # below, not the envelope.
@@ -81,6 +84,7 @@ def job_lane_send(
         return wrap_fno_mail(
             message,
             from_=sender,
+            harness=sender_harness,
             to=recipient,
             node=job.node_id,
             id=msg_id,
@@ -111,14 +115,13 @@ def job_lane_send(
                 sender=sender,
                 recipient=recipient,
                 body=wrapped,
-                provider_from=sender_harness,
-                provider_to=provider,
+                from_harness=sender_harness,
+                to_harness=provider,
                 from_session=sender_session,
                 from_model=sender_model,
                 to_kind="node",
                 word_count=authored_words,
                 to_session=session_id,
-                to_harness=provider,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -137,7 +140,7 @@ def job_lane_send(
             kind="send",
             body=_envelope(),
             msg_id=msg_id,
-            provider_to=provider,
+            to_harness=provider,
             to_kind="node",
             owner=owner.value,
             from_session=sender_session,

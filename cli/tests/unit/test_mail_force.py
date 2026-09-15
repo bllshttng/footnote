@@ -147,7 +147,10 @@ def test_force_types_the_wrapped_body_not_the_bare_text(_tmp_state, monkeypatch)
     _e, text, kwargs = sent[0]
     assert text.startswith("<fno_mail from=")
     assert "status?" in text
-    assert "peer mail" in text
+    # The wrappedness marker is the paired envelope itself; the
+    # retired peer-mail footer no longer renders.
+    assert text.rstrip().endswith("</fno_mail>")
+    assert "peer mail" not in text
     assert kwargs.get("raw") is not True, (
         "the forced send must cross the read-back gate, so it cannot be raw"
     )

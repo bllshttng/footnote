@@ -368,6 +368,7 @@ def wrap(
             "submit keystroke."
         )
     from fno.agents.self_stamp import (
+        resolve_self_harness,
         resolve_self_session_id,
         stamp_from,
     )
@@ -377,10 +378,12 @@ def wrap(
         wrap_fno_mail,
     )
 
+    sender_harness = resolve_self_harness()
     try:
         return wrap_fno_mail(
             text,
             from_=stamp_from(sender),
+            harness=sender_harness,
             to=to,
             # The collision-safe reply address rides the typed envelope too: a
             # pane drive is exactly the message a recipient most needs to answer.

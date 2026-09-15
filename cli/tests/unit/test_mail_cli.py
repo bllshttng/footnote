@@ -18,7 +18,6 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
-from fno.mail.envelope import FNO_MAIL_TRAILER
 from fno.paths_testing import use_tmpdir
 
 
@@ -514,7 +513,7 @@ def test_named_agent_heads_up_resolves_to_canonical_drain_handle(
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     assert [item["body"] for item in json.loads(drained.stdout)] == [
-        f"Migration is ready\n{FNO_MAIL_TRAILER}"
+        "Migration is ready"
     ]
 
 
@@ -697,7 +696,7 @@ def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
     res = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout.strip().splitlines()[-1])
-    assert [m["body"] for m in payload] == [f"ack from K\n{FNO_MAIL_TRAILER}"]
+    assert [m["body"] for m in payload] == ["ack from K"]
     assert payload[0]["to"] == "019f48e1"
 
     # Ack advanced the cursor: a second drain sees nothing (not re-surfaced).
@@ -738,10 +737,7 @@ def test_legacy_addressed_mail_is_not_drained(runner, mailbox, monkeypatch):
     assert res.exit_code == 0, res.output
     bodies = [m["body"] for m in json.loads(res.stdout.strip().splitlines()[-1])]
     assert "retired form" not in bodies
-    assert set(bodies) == {
-        f"canonical\n{FNO_MAIL_TRAILER}",
-        f"legacy suffix\n{FNO_MAIL_TRAILER}",
-    }
+    assert set(bodies) == {"canonical", "legacy suffix"}
 
 
 def test_send_target_may_be_short_id_shaped(runner, mailbox):
@@ -1200,14 +1196,15 @@ def test_ac3_hp_envelope_carries_real_from_and_the_model_rides_the_bus(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
-    assert 'from="abcd1234"' in body
-    # The compact envelope renders no model or harness attribute; the model
+    # D2: `from` IS the full session id; the model never renders, but
+    # the harness does (spelled through harness_for_provider). The model
     # survives in the bus record, where audit reads it.
+    assert f'from="{sender_sid}"' in body
     assert 'model=' not in body
-    assert 'harness=' not in body
+    assert 'harness="claude-code"' in body
     from fno.bus.log import iter_messages
 
-    row = next(m for m in iter_messages() if 'from="abcd1234"' in m.body)
+    row = next(m for m in iter_messages() if f'from="{sender_sid}"' in m.body)
     assert row.from_model == "claude-opus-4-8"
 
 

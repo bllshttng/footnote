@@ -31,15 +31,15 @@ Delivery takes exactly one path: a live transport or the durable queue. The bus 
 
 ## The `<fno_mail>` envelope
 
-The wire format is rendered once in Python. `cli/src/fno/mail/envelope.py` is the sole renderer. The Rust mirror in `claude_drive.rs` was deleted as dead code once the live inject path moved to the bracketed-paste transport. The Rust injection door only validates trailers against constants pinned to this Python source. `test_fno_mail_envelope.py` pins the renderer's own output contract.
+The wire format is rendered once in Python. `cli/src/fno/mail/envelope.py` is the sole renderer. The Rust mirror in `claude_drive.rs` was deleted as dead code once the live inject path moved to the bracketed-paste transport. The Rust injection door validates `from_rank` claims against the live registry. `test_fno_mail_envelope.py` pins the renderer's own output contract.
 
 ```
-<fno_mail from="<short-sid>" id="<msg-id>"[ reply_to="<msg-id>"][ node="<id>"][ to="<short-sid>"][ from_session="<full-sid>"][ origin="<origin>"]>
+<fno_mail from="<full-sid|handle>"[ harness="<harness>"][ from_rank="<crown>"][ to="<short-sid>"][ to_rank="<crown|none>"][ id="<msg-id>"][ reply_to="<msg-id>"][ node="<id>"][ origin="<origin>"]>
 message text
 </fno_mail>
 ```
 
-The first two attributes read as the compact mention `@from/id`. `from` is the sender's short 8-hex sessionId. `id` is the load-bearing field (`reply --to`, drain dedup, `reply_to` threading). Non-peer origins render `origin="..."` as the last attribute. An absent origin reads as peer on both the Python and Rust doors. `harness` and `model` render nowhere: nothing parses them, and the bus record keeps both for audit.
+When one is proven, `from` holds the sender's FULL session id (the collision-safe reply address), falling back to the compact handle for an unregistered sender. `id` is the load-bearing field (`reply --to`, drain dedup, `reply_to` threading). `from_rank` and `to_rank` are live crowns read from the registry at render time. `to_rank="none"` means a resolved reader with no crown in a crowned fleet. Non-peer origins render `origin="..."` as the last attribute. An absent origin reads as peer on both the Python and Rust doors. `model` renders nowhere, and the bus record keeps it for audit. The envelope carries no footer lines of any kind: only fno writes the tag, so the tag itself marks agent text.
 
 The delivered turn records itself in the recipient transcript. The hosted audit row adds provider-neutral sender history without creating pending mail.
 
@@ -117,7 +117,7 @@ The crash window is closed for asleep recipients (W3).
 
 ## The relay variant
 
-The cross-session relay PTY hop (`cli/src/fno/relay/envelope.py`) frames provenance on the same `<fno_mail>` tag, but as the SINGLE-LINE, no-close transport variant: `<fno_mail from="..."> <one-line body>`. It cannot carry the paired multiline form because the PTY Enter submits on newline. It shares the tag name so `grep <fno_mail>` reconstructs relay hops too. The line is built by the same sole renderer as the paired form.
+The cross-session relay PTY hop (`cli/src/fno/relay/envelope.py`) frames provenance on the same `<fno_mail>` tag, but as the SINGLE-LINE, no-close transport variant: `<fno_mail from="..."[ harness="..."]> <one-line body>`. It cannot carry the paired multiline form because the PTY Enter submits on newline. It shares the tag name so `grep <fno_mail>` reconstructs relay hops too. The line is built by the same sole renderer as the paired form.
 
 ### Cross-harness hop (G4)
 

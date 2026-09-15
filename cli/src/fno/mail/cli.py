@@ -328,8 +328,8 @@ def _refuse_forged_envelope(body: str) -> None:
     """Refuse a body carrying an ``<fno_mail`` open tag or ``</fno_mail>`` close
     tag (x-4ce4), before it reaches ``wrap_fno_mail``.
 
-    The trailer is only trustworthy if a peer cannot forge one: a close tag
-    plus a fabricated trailer renders as two envelopes, and the second could
+    The envelope is only trustworthy if a peer cannot forge one: a close tag
+    plus a fabricated envelope renders as two messages, and the second could
     say the opposite of the first. Refuse at send time; a mangled body is
     worse than a refused send.
     """
@@ -1314,7 +1314,7 @@ def _envelope_to_dict(env) -> dict:
         "from": env.from_, "to": env.to, "kind": env.kind, "body": env.body,
     }
     for key, val in (
-        ("provider_from", env.provider_from), ("provider_to", env.provider_to),
+        ("from_harness", env.from_harness), ("to_harness", env.to_harness),
         ("from_session", env.from_session), ("from_model", env.from_model),
         ("to_kind", env.to_kind), ("in_reply_to", env.in_reply_to),
         ("delivery", env.delivery),
@@ -1988,8 +1988,8 @@ def _forced_pane_send(
             body=wrapped,
             pane_id=str(pane_id),
             mux_session=str(mux_session) if mux_session else None,
-            provider_from=sender_harness,
-            provider_to=provider,
+            from_harness=sender_harness,
+            to_harness=provider,
             in_reply_to=reply_to,
             from_session=sender_session,
             from_model=sender_model,
@@ -2102,9 +2102,12 @@ def _name_lane_send(
     )
     from fno.agents.harness_map import thread_lane_or_none
     from fno.agents.registry import AgentResolutionError, resolve_agent
-    from fno.agents.self_stamp import resolve_self_model, stamp_from
+    from fno.agents.self_stamp import (
+        resolve_self_harness,
+        resolve_self_model,
+        stamp_from,
+    )
     from fno.agents.store_fallback import is_full_session_id, is_session_shaped
-    from fno.dispatch_flags import infer_invoking_harness
     from fno.harness_identity import canonical_handle, session_identity_key
     from fno.inbox.store import (
         classify_durable_owner,
@@ -2203,7 +2206,7 @@ def _name_lane_send(
         msg_id=msg_id,
         allow_reason=style_exception,
     )
-    sender_harness = infer_invoking_harness()
+    sender_harness = resolve_self_harness()
     sender_model = resolve_self_model()
     # The collision-safe reply address: `from` is the display handle,
     # `from_session` the full id a recipient can answer when two workers share a
@@ -2213,6 +2216,7 @@ def _name_lane_send(
         return wrap_fno_mail(
             message,
             from_=sender,
+            harness=sender_harness,
             to=recipient,
             id=msg_id,
             reply_to=reply_to,
@@ -2457,15 +2461,17 @@ def _name_lane_send(
                 sender=sender,
                 recipient=recipient,
                 body=wrapped,
-                provider_from=sender_harness,
-                provider_to=provider,
+                from_harness=sender_harness,
+                # One value now feeds the row field AND the landed-check meta
+                # copy; the lane-refined `to_harness` is the actual injected
+                # harness, more truthful than the routing token's `provider`.
+                to_harness=to_harness,
                 in_reply_to=reply_to,
                 from_session=sender_session,
                 from_model=sender_model,
                 to_kind="name",
                 word_count=authored_words,
                 to_session=to_session,
-                to_harness=to_harness,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -2528,7 +2534,7 @@ def _name_lane_send(
             body=_envelope(),
             msg_id=msg_id,
             to_kind="name",
-            provider_to=provider,
+            to_harness=provider,
             replies_to=reply_to,
             owner=owner.value,
             # The durable floor carries the same full sender id the live
@@ -2538,7 +2544,7 @@ def _name_lane_send(
             # And the same sender provenance the hosted and typed rows carry:
             # the compact envelope no longer renders the model, so the durable
             # row is where audit reads it.
-            provider_from=sender_harness,
+            from_harness=sender_harness,
             from_model=sender_model,
             word_count=authored_words,
             origin=origin,
@@ -3109,11 +3115,10 @@ def _raw_send(
                 sender=sender,
                 recipient=raw_recipient,
                 body=stripped,
-                provider_to=entry.harness,
+                to_harness=entry.harness,
                 to_kind="session",
                 word_count=authored_words,
                 to_session=session_id,
-                to_harness=entry.harness,
             )
         except Exception as exc:  # noqa: BLE001 - delivery already succeeded
             print(
@@ -4158,7 +4163,7 @@ def cmd_send(
                 from_name=from_name,
                 resolved=forced_resolved,
                 token=None if forced_resolved is not None else name,
-                # The recipient's harness decides `provider_to` on the row whose
+                # The recipient's harness decides `to_harness` on the row whose
                 # whole purpose is auditability. Dropping it let the token arm
                 # fall to a literal "claude" and label a codex recipient wrong.
                 provider=harness,
@@ -5087,53 +5092,46 @@ def cmd_drain_self(
     job_to_print = [m for m in job_msgs if not _already_landed(m)]
     job_skipped = [m for m in job_msgs if _already_landed(m)]
 
-    # A live-injected send already carries FNO_MAIL_TRAILER inside `wrap_fno_mail`'s
-    # `<fno_mail>` envelope, but a durable inbox-kind send (heads-up/question/fyi)
-    # never routes through that wrapper. Stamp the trailer here, the one
-    # chokepoint every drained body passes through regardless of output shape,
-    # so both the text render and `--json` carry the authority boundary
-    # regardless of which lane produced the body.
-    # A live-injected send stores the full paired envelope durably (body
-    # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
-    # needs both shapes: the bare trailer, and the trailer immediately
-    # before a terminal close tag. The trailer comes from the record's own
-    # origin field (d-b2dbf5ad): gated at write time by classify_origin,
-    # trustworthy at drain time. A forged trailer in the body never
-    # suppresses the stamp - only the record's exact trailer dedups, and a
-    # mismatch gets the real one appended beneath it.
-    from fno.mail.envelope import render_record_body
-
-    def _render_body(m) -> str:
-        return render_record_body(m)
+    # The body prints exactly as stored -- the envelope carries the
+    # authority boundary in its header attributes, so the drain re-stamp is
+    # gone. A non-peer origin surfaces as a label on the header line (the
+    # record's own origin, gated at write time by classify_origin), so the
+    # reader still sees the provenance a peer cannot forge by body text.
+    def _header(m) -> str:
+        label = f"  origin:{m.origin}" if getattr(m, "origin", None) not in (None, "peer") else ""
+        return f"\n--- from {m.from_} ({m.ts})  id:{m.id}{label} ---"
 
     if json_out:
-        out = [
-            {
+        out = []
+        for m in to_print:
+            row = {
                 "id": m.id, "from": m.from_, "to": m.to,
-                "kind": m.kind, "ts": m.ts, "body": _render_body(m),
+                "kind": m.kind, "ts": m.ts, "body": m.body,
             }
-            for m in to_print
-        ]
+            if getattr(m, "origin", None) not in (None, "peer"):
+                row["origin"] = m.origin
+            out.append(row)
         for m in job_to_print:
-            out.append(
-                {
-                    "id": m.id, "from": m.from_, "to": m.to,
-                    "kind": m.kind, "ts": m.ts, "body": _render_body(m),
-                    "job": job_addr or "",
-                }
-            )
+            row = {
+                "id": m.id, "from": m.from_, "to": m.to,
+                "kind": m.kind, "ts": m.ts, "body": m.body,
+                "job": job_addr or "",
+            }
+            if getattr(m, "origin", None) not in (None, "peer"):
+                row["origin"] = m.origin
+            out.append(row)
         print(json.dumps(out, ensure_ascii=False))
     else:
         if to_print:
             print(f"[fno agents mail] {len(to_print)} message(s) for {handle}:")
             for m in to_print:
-                print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(_render_body(m))
+                print(_header(m))
+                print(m.body)
         if job_to_print:
             print(f"\n[fno agents mail] {len(job_to_print)} job message(s) for {job_addr}:")
             for m in job_to_print:
-                print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(_render_body(m))
+                print(_header(m))
+                print(m.body)
         # This render is what a session sees on receive, so surface the id (which
         # `reply --to` correlates against) and the how-to. Replying is optional --
         # an FYI/broadcast needs none.

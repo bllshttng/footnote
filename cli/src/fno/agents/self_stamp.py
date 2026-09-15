@@ -144,6 +144,23 @@ def resolve_self_handle(
     return None
 
 
+def resolve_self_harness(
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """Return this process's proven harness, or None when unprovable.
+
+    The envelope producers stamp it verbatim: a None omits the ``harness``
+    attribute, never renders a guess (``cli``/``unknown`` never hit the wire,
+    A recorded ruling bars the guesses. The same owned resolution every
+    self_* resolver here uses.
+    """
+    try:
+        ident = resolve_self_identity(env)
+    except Exception:  # noqa: BLE001 - an unresolvable identity is an absence
+        return None
+    return ident.harness or None
+
+
 def resolve_self_session_id(
     env: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:

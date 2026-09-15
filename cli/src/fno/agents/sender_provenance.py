@@ -71,17 +71,29 @@ def _sender_provenance(
     )
 
 
+def stamped_provenance(
+    entry: Optional[AgentEntry],
+    from_name: str,
+    self_proof: Optional[tuple[Optional[str], Optional[str]]] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve, floor, and say a miss aloud: one sender stamp for every send
+    site, so the envelope and the thread row cannot disagree."""
+    from_harness, from_session = _sender_provenance(entry, from_name, self_proof)
+    warn_sender_provenance_miss(from_name, from_harness, from_session)
+    return from_harness, from_session
+
+
 def warn_sender_provenance_miss(
-    from_name: str, provider_from: Optional[str], from_session: Optional[str]
+    from_name: str, from_harness: Optional[str], from_session: Optional[str]
 ) -> None:
     """Say it when sender provenance floors to nothing.
 
     A from_name matching no registry row and no ambient identity ships an
-    envelope every reader renders as harness=unknown with no from_session.
+    envelope with no harness attribute and no from_session.
     Delivery still proceeds - an unattended note must not die for lack of an
     attributable sender - but the miss is no longer silent.
     """
-    if provider_from is not None or from_session is not None:
+    if from_harness is not None or from_session is not None:
         return
     from fno.agents import events
 

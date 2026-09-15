@@ -29,8 +29,8 @@ def test_addressed_fields_round_trip():
         from_session="sess-A",
         from_model="opus-4-8",
         to_kind="name",
-        provider_from="claude",
-        provider_to="claude",
+        from_harness="claude",
+        to_harness="claude",
     )
     line = to_json_line(env)
     back = from_json_line(line)

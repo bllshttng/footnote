@@ -36,7 +36,7 @@ def test_view_json_all_renders_enriched_fields(env, runner):
     from fno.mail.cli import mail_app
 
     _bus("worker-b", "hi b", from_="alice", to_kind="name",
-         provider_from="claude", from_model="opus-4-8", delivery="hosted")
+         from_harness="claude", from_model="opus-4-8", delivery="hosted")
 
     res = runner.invoke(mail_app, ["view", "--json", "--all"])
     assert res.exit_code == 0, res.output
