@@ -163,5 +163,5 @@ When crates/fno can depend on fno-agents and every Identify carries `drift`, the
 
 `fno agents restart` reaches the daemon (terminate, escalate, verify), every stale store keeper (Shutdown + respawn, one per socket), and pane-less stale-wire mux servers. It never reaches a pane keeper, because cycling one can only end its pane, and surviving a restart is the pane keeper's whole purpose. A stale pane keeper is reported as kept. The census rows are the split, and no surface says "everything restarts" and "panes are kept" in one sentence.
 
-`fno doctor update` runs `fno-agents restart` itself when `status --json` reads `drifted` after the triad sync, and never the mux leg.
+When `status --json` reads `drifted` after the triad sync, `fno doctor update` runs `fno-agents restart` itself, and never the mux leg.
 
