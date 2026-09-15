@@ -1,7 +1,7 @@
-//! The `gate:` mutex liveness arm (x-dead direction three): a `gate:` record
-//! names the short-lived process that held the machine-wide mutex, so the
-//! recorded pid IS the verdict and a live spawning session never heals a dead
-//! gate claim. Split from claims.rs to keep the over-budget file shrinking.
+//! The short-lived holder arm: `gate:` keys and `holder-process` leases name
+//! the short-lived process that held them, so the recorded pid IS the verdict
+//! at expiry and a live writing session never heals a dead process's claim.
+//! Split from claims.rs to keep the over-budget file shrinking.
 
 use super::*;
 
@@ -30,6 +30,24 @@ fn gate_record(pid: i32, acquired_at: i64, expires_at: Option<i64>) -> ClaimReco
             machine_id: None,
             metadata: Default::default(),
         }
+    }
+}
+
+fn lease_record(
+    pid: i32,
+    acquired_at: i64,
+    expires_at: Option<i64>,
+    provenance: &str,
+) -> ClaimRecord {
+    // The measured specimen: a post-merge sync lease written by a sync
+    // subprocess that died, wearing the session stamp of the long-lived
+    // session that ran the merge.
+    ClaimRecord {
+        key: "post-merge-sync".into(),
+        holder: "sync-canonical:2033".into(),
+        session_id: Some("s-crown".into()),
+        pid_provenance: Some(provenance.into()),
+        ..gate_record(pid, acquired_at, expires_at)
     }
 }
 
@@ -94,4 +112,65 @@ fn an_offhost_gate_claim_skips_the_pid_arm() {
     let (state, cause) = classify_with_basis(&rec, Some(now), &probe_pid);
     assert_eq!(state, ClaimState::Stale);
     assert_eq!(cause, basis::TTL_EXPIRED);
+}
+
+#[test]
+fn a_live_session_never_heals_an_expired_holder_process_lease() {
+    // THE specimen: the sync process is dead, its TTL expired hours ago,
+    // and the session that wrote the lease is still live. The pid is the
+    // verdict; the witness must not heal it.
+    let now = now_ms();
+    let witness: SessionWitness = &|_| SessionLiveness::Live(basis::TRANSCRIPT_LIVE);
+    let (state, cause) = classify_with_basis_and_exclusivity(
+        &lease_record(-1, now, Some(now - 1), "holder-process"),
+        Some(now),
+        &probe_pid,
+        None,
+        Some(witness),
+    );
+    assert_eq!(state, ClaimState::Stale);
+    assert_eq!(cause, basis::PID_ABSENT);
+}
+
+#[test]
+fn a_live_holder_process_keeps_its_expired_lease_live() {
+    let now = now_ms();
+    let me = std::process::id() as i32;
+    let (state, cause) = classify_with_basis(
+        &lease_record(me, now, Some(now - 1), "holder-process"),
+        Some(now),
+        &probe_pid,
+    );
+    assert_eq!(state, ClaimState::Live);
+    assert_eq!(cause, basis::LIVE);
+}
+
+#[test]
+fn an_unstamped_expired_lease_still_heals_through_its_session() {
+    // Legacy records keep today's verdict: an ambient stamp falls through
+    // to the session witness, and a live witness heals the expired lease.
+    let now = now_ms();
+    let witness: SessionWitness = &|_| SessionLiveness::Live(basis::TRANSCRIPT_LIVE);
+    let (state, cause) = classify_with_basis_and_exclusivity(
+        &lease_record(-1, now, Some(now - 1), "ambient"),
+        Some(now),
+        &probe_pid,
+        None,
+        Some(witness),
+    );
+    assert_eq!(state, ClaimState::Live);
+    assert_eq!(cause, basis::TRANSCRIPT_LIVE);
+}
+
+#[test]
+fn an_unexpired_holder_process_lease_with_a_dead_pid_stays_suspect() {
+    // Only the expired arm changes; inside the TTL the lease stays
+    // protected, matching the gate: precedent.
+    let now = now_ms();
+    let (state, _cause) = classify_with_basis(
+        &lease_record(-1, now, Some(now + 60_000), "holder-process"),
+        Some(now),
+        &probe_pid,
+    );
+    assert_eq!(state, ClaimState::Suspect);
 }
