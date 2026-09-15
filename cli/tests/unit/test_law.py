@@ -15,9 +15,18 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from fno.rust_binary import find_dev_binary
 
 LAW_RECORDED_EXIT = 0
 LAW_REFUSED_EXIT = 3
+
+# Every recording path now routes its statement classification through the
+# `law-match` crate verb (mode validate), so the whole module needs this
+# checkout's own build.
+pytestmark = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents)`",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -94,7 +103,7 @@ def test_one_call_records_and_prints_a_decision_id(
     result = _run(
         [
             "set",
-            "x-12ba",
+            "merge-authority",
             "Merges belong to the operator",
             "--rationale",
             "The operator owns durable policy.",
@@ -151,7 +160,7 @@ def test_coordination_statement_is_refused_with_exit_3(
     index = _isolate(tmp_path, monkeypatch)
     _as_chat_session(monkeypatch)
 
-    result = _run(["set", "x-12ba", decision, "--rationale", "why"])
+    result = _run(["set", "merge-authority", decision, "--rationale", "why"])
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "coordination" in result.output
@@ -164,7 +173,7 @@ def test_missing_rationale_is_refused_with_exit_3(
     index = _isolate(tmp_path, monkeypatch)
     _as_chat_session(monkeypatch)
 
-    result = _run(["set", "x-12ba", "Merges belong to the operator"])
+    result = _run(["set", "merge-authority", "Merges belong to the operator"])
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
     assert "rationale is required" in result.output
@@ -183,7 +192,7 @@ def test_durable_law_probe_records_where_the_refused_shapes_did_not(
     _as_chat_session(monkeypatch)
 
     result = _run(
-        ["set", "x-12ba", "Merges belong to the operator", "--rationale", "why"]
+        ["set", "merge-authority", "Merges belong to the operator", "--rationale", "why"]
     )
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
@@ -216,7 +225,7 @@ def test_unmarked_process_is_refused_with_exit_3(
     _unmarked_process(monkeypatch)
 
     result = _run(
-        ["set", "x-12ba", "Merges belong to the operator", "--rationale", "why"]
+        ["set", "merge-authority", "Merges belong to the operator", "--rationale", "why"]
     )
 
     assert result.exit_code == LAW_REFUSED_EXIT, result.output
@@ -239,7 +248,7 @@ def test_library_refuses_chat_attested_from_an_unmarked_process(
 
     with pytest.raises(UnattributedAuthorityError):
         record_decision(
-            subject="x-12ba",
+            subject="merge-authority",
             decision="Merges belong to the operator",
             rationale="why",
             authority_source="chat_attested",
@@ -259,7 +268,7 @@ def test_library_refuses_a_coordination_statement_in_the_law_lane(
 
     with pytest.raises(LawValidationError, match="coordination"):
         record_decision(
-            subject="x-12ba",
+            subject="merge-authority",
             decision="This PR merges without review",
             rationale="why",
             authority_source="chat_attested",
@@ -285,7 +294,7 @@ def test_attended_terminal_probe_records_where_the_unmarked_process_did_not(
     monkeypatch.setattr(decide, "_attended_terminal", lambda: True)
 
     result = _run(
-        ["set", "x-12ba", "Merges belong to the operator", "--rationale", "why"]
+        ["set", "merge-authority", "Merges belong to the operator", "--rationale", "why"]
     )
 
     assert result.exit_code == LAW_RECORDED_EXIT, result.output
@@ -306,7 +315,7 @@ def _seed_law_row(index: Path, decision_id: str, authority: str) -> None:
                 "ts": "2026-08-29T19:00:00+00:00",
                 "data": {
                     "decision_id": decision_id,
-                    "subject": "x-12ba",
+                    "subject": "merge-authority",
                     "decision": "Merges belong to the operator",
                     "authority_source": authority,
                     "decided_by": "operator" if authority == "operator" else "9ede2d7b",
@@ -334,7 +343,7 @@ def test_chat_recording_cannot_supersede_an_operator_law_row(
     result = _run(
         [
             "set",
-            "x-12ba",
+            "merge-authority",
             "Merges belong to whoever asks",
             "--rationale",
             "why",
@@ -366,7 +375,7 @@ def test_chat_recording_can_supersede_another_chat_row(
     result = _run(
         [
             "set",
-            "x-12ba",
+            "merge-authority",
             "Merges belong to whoever asks",
             "--rationale",
             "why",
@@ -379,7 +388,7 @@ def test_chat_recording_can_supersede_another_chat_row(
     new_id = result.output.strip().splitlines()[-1]
     assert new_id.startswith("d-")
 
-    _, rows, _ = list_decisions("x-12ba", limit=None, lane="law")
+    _, rows, _ = list_decisions("merge-authority", limit=None, lane="law")
     prior = next(r for r in rows if r.get("decision_id") == "d-c4a7c4a7")
     assert prior.get("superseded_by") == new_id
 
@@ -421,7 +430,7 @@ def test_supersedes_naming_no_recoverable_decision_refuses_with_exit_3(
     result = _run(
         [
             "set",
-            "x-12ba",
+            "merge-authority",
             "Merges belong to the operator",
             "--rationale",
             "why",
@@ -444,12 +453,12 @@ def test_supersedes_must_be_a_decision_id(
     result = _run(
         [
             "set",
-            "x-12ba",
+            "merge-authority",
             "Merges belong to the operator",
             "--rationale",
             "why",
             "--supersedes",
-            "x-12ba",
+            "merge-authority",
         ]
     )
 
@@ -503,7 +512,7 @@ def test_waiver_refusal_is_the_subject_not_the_statement(
     result = _run(
         [
             "set",
-            "x-12ba",
+            "merge-authority",
             WAIVER_DECISION,
             "--rationale",
             "the diff was read and the risk is accepted",
@@ -803,7 +812,7 @@ def test_body_with_no_code_fact_records_with_no_reads_row(
     result = _run(
         [
             "set",
-            "x-12ba",
+            "merge-authority",
             "Merges belong to the operator",
             "--rationale",
             "The operator owns durable policy.",
@@ -853,6 +862,8 @@ class TestLawSetSweep:
 
         def fake_verb(verb, payload, *a, **k):
             assert verb == "law-match"
+            if payload["mode"] == "validate":
+                return {"ok": True, "refusal": None}
             assert payload["mode"] == "law"
             assert payload["law"]["subject"] == "file-budget"
             assert payload["questions"][0]["id"] == "q-470f40d2"
@@ -897,6 +908,8 @@ class TestLawSetSweep:
         monkeypatch.setattr("fno.paths.questions_jsonl", lambda: questions)
 
         def broken(*a, **k):
+            if len(a) > 1 and isinstance(a[1], dict) and a[1].get("mode") == "validate":
+                return {"ok": True, "refusal": None}
             raise RuntimeError("matcher exploded")
 
         monkeypatch.setattr("fno.rust_binary.verb_call", broken)
@@ -918,3 +931,66 @@ class TestLawSetSweep:
             json.loads(line) for line in index.read_text().splitlines() if line.strip()
         ]
         assert len(rows) == 1, "the law itself is recorded"
+
+
+# ── the subject is a topic, never a bare node or PR id ────────────────────────
+
+
+@pytest.mark.parametrize("subject", ["x-1df4", "pr-1157"])
+def test_a_node_or_pr_id_is_refused_as_a_law_subject(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, subject: str
+) -> None:
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    result = _run(["set", subject, "Two rounds.", "--rationale", "r"])
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert "a node or PR id is not a law subject" in result.output
+    assert index.read_text() == ""
+
+
+def test_a_topic_subject_citing_a_node_id_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The make-it-fail control: the SAME shape a node-id subject would take
+    is legal inside the decision text; only the SUBJECT is the key."""
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    result = _run(
+        [
+            "set",
+            "review-rounds-cap",
+            "The node x-1df4 dispute is settled: two rounds.",
+            "--rationale",
+            "r",
+        ]
+    )
+
+    assert result.exit_code == LAW_RECORDED_EXIT, result.output
+    assert index.read_text().strip()
+
+
+def test_an_unavailable_validator_refuses_the_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: a statement nobody could classify records nothing. Exit 1
+    stays reserved for 'recorded, index write failed', so the unavailable
+    verb must land on 3."""
+    from fno.rust_binary import VerbUnavailable
+
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    def down(*a, **k):
+        raise VerbUnavailable("the fno-agents binary was not found")
+
+    monkeypatch.setattr("fno.rust_binary.verb_call", down)
+
+    result = _run(["set", "review-rounds", "Two rounds.", "--rationale", "r"])
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert "law validation is unavailable" in result.output
+    assert "Nothing was recorded." in result.output
+    assert index.read_text() == ""

@@ -77,6 +77,11 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/inject-announce.sh prompt"
+          },
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/law-stage-inject.sh",
+            "timeout": 5
           }
         ]
       }

@@ -28,6 +28,7 @@
 //! rules. `--route` writes the one progress note that surfaces an open,
 //! unrouted FAIL on the node.
 
+use crate::decision_index;
 use crate::graph_get::{default_graph_path, external_backend_selected};
 use crate::graph_store::{self, entry_id, s_str};
 use serde_json::{json, Value};
@@ -394,146 +395,36 @@ fn row_for(
     })
 }
 
-/// The machine-wide decision index (`paths.decisions_jsonl()`), the same file
-/// `fno inbox decisions` reads first. The retirement key is the report PATH in
-/// a ruling's text, which needs no subject resolution, so the verb reads the
-/// index directly: measured 2026-09-12, shelling the Python verb costs ~25s
-/// per FAIL row (it folds graph projections and journal roots), which breaks
-/// the SessionStart budget this verb's outstanding leg runs inside. A missing
-/// or damaged index reads as no rulings: a maybe-ruled FAIL re-surfaces, a
-/// live one is never hidden. Damaged lines are skipped, matching the Python
-/// reader's posture.
+/// The machine-wide decision index, read through the shared module
+/// (`decision_index`) so every Rust reader flattens and retires the same way.
+/// The retirement key is the report PATH in a ruling's text, which needs no
+/// subject resolution. A missing or damaged index reads as no rulings: a
+/// maybe-ruled FAIL re-surfaces, a live one is never hidden.
 fn load_rulings() -> Vec<Value> {
-    let path = default_state_path("decisions.jsonl");
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Vec::new();
-    };
-    derive_live_rulings(&text)
+    let path = decision_index::default_state_path("decisions.jsonl");
+    match decision_index::read_live(&path) {
+        Ok(index) => index
+            .rows
+            .into_iter()
+            // Only a row whose `text` can name a report path retires a FAIL.
+            // Law rows carry `decision` and no `text`, and never reach here.
+            .filter(|row| row.get("text").and_then(Value::as_str).is_some())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
-/// The LIVE rulings: decisions whose `text` can still retire a FAIL. Mirrors
-/// `fno inbox decisions`' read: the index stores event ENVELOPES
-/// (`{type, ts, data}`) that the Python reader flattens (data fields at the
-/// top plus `_event_type` and the envelope's `ts`) and rows that are neither
-/// a decision nor a retraction envelope are discarded as damaged. It then
-/// derives lifecycle: a `decision_retracted` row retires its
-/// `target_decision_id` (newest `(ts, reason)` wins) and a decision whose
-/// `supersedes` names another retires that one (newest `(ts, decision_id)`
-/// wins). Only LIVE rulings retire a FAIL, so an overturned ruling un-hides
-/// the FAIL again. ids compare casefolded, the Python reader's own rule.
+/// The LIVE rulings: decisions whose `text` can still retire a FAIL. The
+/// flatten, the retirement derivation and the damaged-line count moved to
+/// [`crate::decision_index::derive_live`]; this wrapper stays as the seam the
+/// module's tests already call.
+#[cfg(test)]
 fn derive_live_rulings(text: &str) -> Vec<Value> {
-    let mut rows: Vec<Value> = Vec::new();
-    for line in text.lines() {
-        let Ok(env) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let Some(data) = env.get("data").and_then(Value::as_object) else {
-            continue;
-        };
-        let Some(etype) = env.get("type").and_then(Value::as_str) else {
-            continue;
-        };
-        if etype != "operator_decision" && etype != "decision_retracted" {
-            continue;
-        }
-        // The Python reader marks an envelope whose required data field is
-        // empty as damaged (discarded), not as a live or retiring row.
-        let required = if etype == "operator_decision" {
-            "decision_id"
-        } else {
-            "target_decision_id"
-        };
-        if data
-            .get(required)
-            .and_then(Value::as_str)
-            .map(str::is_empty)
-            .unwrap_or(true)
-        {
-            continue;
-        }
-        let mut flat = Value::Object(data.clone());
-        let obj = flat.as_object_mut().expect("just built");
-        obj.insert("_event_type".to_string(), json!(etype));
-        obj.insert(
-            "ts".to_string(),
-            env.get("ts").cloned().unwrap_or(Value::Null),
-        );
-        rows.push(flat);
-    }
-    let is_decision = |row: &Value| {
-        matches!(
-            row.get("_event_type").and_then(Value::as_str),
-            Some("operator_decision")
-        )
-    };
-    let rank = |row: &Value, tie: &str| {
-        (
-            row.get("ts")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            row.get(tie)
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-        )
-    };
-    let mut retired: std::collections::BTreeMap<String, (String, String)> = Default::default();
-    for row in rows
-        .iter()
-        .filter(|r| r.get("_event_type").and_then(Value::as_str) == Some("decision_retracted"))
-    {
-        let target = row
-            .get("target_decision_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_lowercase();
-        if target.is_empty() {
-            continue;
-        }
-        let r = rank(row, "reason");
-        if retired.get(&target).map_or(true, |prev| *prev < r) {
-            retired.insert(target, r);
-        }
-    }
-    for row in rows.iter().filter(|r| is_decision(r)) {
-        let target = row
-            .get("supersedes")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_lowercase();
-        if target.is_empty() {
-            continue;
-        }
-        let r = rank(row, "decision_id");
-        if retired.get(&target).map_or(true, |prev| *prev < r) {
-            retired.insert(target, r);
-        }
-    }
-    rows.into_iter()
-        .filter(is_decision)
+    decision_index::derive_live(text)
+        .rows
+        .into_iter()
         .filter(|row| row.get("text").and_then(Value::as_str).is_some())
-        .filter(|row| {
-            let id = row
-                .get("decision_id")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_lowercase();
-            id.is_empty() || !retired.contains_key(&id)
-        })
         .collect()
-}
-
-/// `$FNO_HOME/<name>`, else `$HOME/.fno/<name>`: the same resolution
-/// `graph_get::default_graph_path` applies to the graph store.
-fn default_state_path(name: &str) -> PathBuf {
-    if let Some(v) = std::env::var_os("FNO_HOME") {
-        return PathBuf::from(v).join(name);
-    }
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".fno").join(name)
 }
 
 /// A ruling retires the FAIL when its `text` names the report path.

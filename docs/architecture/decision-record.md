@@ -119,6 +119,8 @@ So the index is its own file, it never rotates, and it holds nothing else. It ca
 
 ## The subject convention
 
+A law subject names a topic. `fno inbox law set` refuses a bare node id or `pr-<n>` subject and exits 3. A ruling filed under the id of the work that prompted it is invisible to a reader who starts from the topic. That invisibility is the defect this page exists for. The node-id and `pr-<n>` convention stays for coord decisions recorded with `fno backlog decide`. There the id IS the recovery path.
+
 When a node exists, use its id. Otherwise use `pr-<n>` or the canonical subject the standing query returns. Durable design work must use that exact spelling so a new synonym does not split history.
 
 The reader takes every subject the writer takes. That is the defect this page was written for. The writer accepted free text while the reader resolved a graph node first, so a ruling about `pr-923` was written, receipted, and lost.
@@ -158,6 +160,27 @@ No session loads law in bulk. The SessionStart law read is deleted (ruling of 20
 ## Gates that consume current law
 
 The review-coverage gate is the reference consumer. Its merge predicate, its `fno do pr status` readiness read, and the Rust stop gate all resolve two subjects: the standing `review-coverage-waiver` and the head-scoped `review-coverage-waiver:<owner/repo>#<pr>@<head>`. Python imports the engine's law-lane live read. Rust shells the canonical query above and parses only `current_law.status` plus the single row's decision value. Only `single` waives, and only a row whose decision equals the affirmative value the coverage-waive command mints counts as that single. Row existence carries no polarity: a note or a denial recorded at a waiver subject is no waiver. A single row with no readable decision is malformed authority and answers unknown, never none. `none` leaves the ordinary predicate untouched. A conflict, a damaged row, or a failed query is UNKNOWN authority. The gate answers UNANSWERED with the probe named, never permission and never a quiet `none`. A recorded waiver is a law row like any other. Retraction, supersession, or head movement changes the verdict the next read returns, and a stale waiver green is replaced by the computed one. The full contract lives in [review-coverage-termination](review-coverage-termination.md).
+
+## Law at the review stage
+
+The standing query reaches a reader who goes looking. The failure this hook closes is the session that never looks. Measured on the live set: 11 laws govern review under 10 subjects, and two of those subjects are bare node ids. The same three rulings were re-derived twice in one day while agents rebuilt rules a live law already carried. So the governing laws are put at the decision point, not behind a search.
+
+Two events trigger the read. Claude fires `hooks/law-stage-inject.sh` on `PostToolUse` with matcher `Skill`. Claude and Codex also fire it on `UserPromptSubmit`, which covers typed and mailed review verbs. `PreToolUse` is not used because its output contract carries `permissionDecision` and `updatedInput` only, with no channel for context. `PostToolUse` and `UserPromptSubmit` accept `hookSpecificOutput.additionalContext`. That output lands beside the review instructions the skill itself prints, and `hooks/review-hold.sh` runs on the same Skill event. The verb is the existing hidden `fno-agents law-match` with a new `mode: stage`. d-fe66560a bars new verbs. The laws come from `decision_index::live_laws`, a direct read of the index. Measured 2026-09-14: the Python read took 67.0s real at load 345 and hits a 10s hook bound. The direct read of the 1.2 MB index takes milliseconds.
+
+Classification is a keyword stage table with one row today. The verb names `code-review`, `review`, `review-changes` and `sigma-review` classify the pending action as the review stage. These are the same four names `hooks/review-hold.sh` carries. The hold keeps its own list on purpose: a shell hold is never ported onto a binary exec its shell tests cannot stub. The laws surface by keyword over the lowercased subject and decision text. The recall was measured against the live corpus with the 11 review laws labeled by hand:
+
+| Pattern over subject + decision text | Review laws found | False positives |
+|---|---|---|
+| `review` | 10 of 11 (misses the ruling filed under a node id) | 0 |
+| `review\|attest\|round\|finding` | 11 of 11 | 3 |
+| `review\|attest\|findings\|max_rounds` | 11 of 11 | 0 |
+| add `lane` | 11 of 11 | 16 |
+
+Semantic matching was measured and rejected. The keyword row already finds 11 of 11 with zero false positives. The repo has no local embedding index. A hook cannot wait on a model call.
+
+A failed index read is a report, never silence. The block says the index `could not be read` and names `fno backlog decisions --lane law --state live` as the manual read. Damaged rows are counted. A review with a readable index and no matching law renders nothing. That silence is the correct answer for that input.
+
+Known limits: a forked review skill may not see main-thread hook context. Verification records which review paths the block reaches. A law whose index write failed stays missing until `fno backlog decide-reindex` runs. A topic subject shaped like a node id (`add-face`) is refused by the `law set` validator even though it names a topic.
 
 ## Review and export
 

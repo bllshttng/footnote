@@ -606,3 +606,33 @@ def test_both_postcompact_reinject_hooks_are_registered_on_supported_harnesses()
             f"{path.name} {event} matcher={matcher!r} reinject set drifted: "
             f"{source_ids}"
         )
+
+
+def test_law_stage_inject_is_wired_on_both_harnesses() -> None:
+    """The law-at-the-review-stage block must reach the decision point on
+    every harness that runs a review: Claude Skill calls (PostToolUse), and
+    the typed or mailed prompt verbs on Claude and Codex (UserPromptSubmit).
+    A registration on one lane only leaves the other harness reviewing
+    against law it never saw."""
+    script = "law-stage-inject.sh"
+    claude = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
+    skill_lane = [
+        hook.get("command", "")
+        for registration in claude["hooks"]["PostToolUse"]
+        if registration.get("matcher") == "Skill"
+        for hook in registration.get("hooks", [])
+    ]
+    assert sum(script in command for command in skill_lane) == 1, skill_lane
+    claude_prompts = [
+        hook.get("command", "")
+        for registration in claude["hooks"]["UserPromptSubmit"]
+        for hook in registration.get("hooks", [])
+    ]
+    assert sum(script in command for command in claude_prompts) == 1, claude_prompts
+    codex = json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))
+    codex_prompts = [
+        hook.get("command", "")
+        for registration in codex["hooks"]["UserPromptSubmit"]
+        for hook in registration.get("hooks", [])
+    ]
+    assert sum(script in command for command in codex_prompts) == 1, codex_prompts

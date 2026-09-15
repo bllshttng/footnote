@@ -1,10 +1,13 @@
 //! The question-to-law matcher (x-cf6a): one pure function set behind a hidden
-//! JSON verb, reached as `fno-agents law-match`. Reads no file - Python keeps
-//! the decision lifecycle read (`list_decisions`) and the open-question fold
-//! (`read_open_questions`) and works only on rows handed to it; this side
-//! only matches.
+//! JSON verb, reached as `fno-agents law-match`. The `stage` and `law` modes
+//! read the decision index through [`crate::decision_index`]; the `ask` and
+//! `validate` modes read no file - Python keeps the decision lifecycle read
+//! (`list_decisions`) and the open-question fold (`read_open_questions`) and
+//! works only on rows handed to it.
 
+use crate::decision_index;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::io::Read;
 
@@ -37,6 +40,26 @@ pub fn tokens(s: &str) -> BTreeSet<String> {
 enum MatchRequest {
     Ask(AskRequest),
     Law(LawRequest),
+    Stage(StageRequest),
+    Validate(ValidateRequest),
+}
+
+/// The raw hook payload, verbatim from the harness event.
+#[derive(Deserialize)]
+struct StageRequest {
+    hook: serde_json::Value,
+}
+
+/// The statement `fno inbox law set` wants recorded. `rationale` and
+/// `supersedes` are Options because both may be absent; Python sends null.
+#[derive(Deserialize)]
+struct ValidateRequest {
+    subject: String,
+    decision: String,
+    #[serde(default)]
+    rationale: Option<String>,
+    #[serde(default)]
+    supersedes: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -267,7 +290,10 @@ fn ask_answer(req: &AskRequest) -> AskAnswer {
 /// subject's tokens, or the exact tier's text rule holds (every `-` part of
 /// a law subject with two or more parts is in the question words). Order is
 /// shared-token count, then newest question.
-fn law_answer(req: &LawRequest) -> LawAnswer {
+/// The pure core: existing tests pin `lines` exactly, so the near-law read
+/// The pure body: near-law lines arrive as a parameter, and the tests pin it
+/// directly so they stay hermetic against the machine index.
+fn law_answer_with(req: &LawRequest, near: Vec<String>) -> LawAnswer {
     let law_tokens = tokens(req.law.subject.as_deref().unwrap_or(""));
     let mut cands: Vec<(usize, &OpenQuestion, Vec<String>)> = Vec::new();
     for q in &req.questions {
@@ -293,7 +319,10 @@ fn law_answer(req: &LawRequest) -> LawAnswer {
     }
     cands.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.ts.cmp(&a.1.ts)));
     let total = cands.len();
-    let mut lines: Vec<String> = Vec::new();
+    // Near-law warnings ride at the FRONT of lines: the recording session
+    // reads them before the open-question sweep, because the point is to
+    // stop a duplicate BEFORE it is repeated, not to route it after.
+    let mut lines: Vec<String> = near;
     for (_, q, _) in cands.iter().take(10) {
         let law_id = &req.law.decision_id;
         let mut ident: Vec<String> = Vec::new();
@@ -353,12 +382,311 @@ fn law_answer(req: &LawRequest) -> LawAnswer {
     }
 }
 
+/// The four review verb names `hooks/review-hold.sh:84` classifies as a
+/// review. Named explicitly rather than pattern-matched, for the same reason
+/// the hold does it that way: a substring rule on "review" would fire on
+/// `code-review-attest` and every future skill that merely mentions one.
+const REVIEW_VERBS: &[&str] = &["code-review", "review", "review-changes", "sigma-review"];
+
+/// The stage table: a stage's keywords decide WHICH laws surface, never
+/// their order. Measured against the live corpus 2026-09-14: `review` alone
+/// finds 10 of 11 review laws (it misses the one filed under a node id);
+/// adding `attest|findings|max_rounds` finds 11 of 11 with zero false
+/// positives.
+const STAGES: &[(&str, &[&str])] = &[("review", &["review", "attest", "findings", "max_rounds"])];
+
+/// Normalize a skill invocation to the bare verb: strip one leading `/` or
+/// `$`, cut at the first whitespace, keep the text after the last `:`. The
+/// order is the one `review-hold.sh:71-76` documents, so a colon inside a
+/// PR URL argument never eats the verb.
+fn normalize_verb(raw: &str) -> String {
+    let stripped = raw
+        .strip_prefix('/')
+        .or_else(|| raw.strip_prefix('$'))
+        .unwrap_or(raw);
+    let head = stripped.split_whitespace().next().unwrap_or("");
+    match head.rsplit_once(':') {
+        Some((_, tail)) => tail.to_string(),
+        None => head.to_string(),
+    }
+}
+
+/// The stage classifier: a Skill tool call reads the skill name under the
+/// keys the harness versions use; any other event reads the prompt's first
+/// whitespace-separated token.
+fn classify_stage(hook: &Value) -> Option<&'static str> {
+    let tool = hook.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let raw = if tool == "Skill" {
+        let input = hook.get("tool_input");
+        let read = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str);
+        let name = read("skill")
+            .or_else(|| read("name"))
+            .or_else(|| read("command"))?;
+        name.to_owned()
+    } else {
+        hook.get("prompt")
+            .and_then(Value::as_str)?
+            .split_whitespace()
+            .next()?
+            .to_owned()
+    };
+    let verb = normalize_verb(&raw);
+    REVIEW_VERBS.contains(&verb.as_str()).then_some("review")
+}
+
+/// The law's first sentence, split at `". "`, `"! "` or `"? "`.
+fn first_sentence(text: &str) -> &str {
+    let mut end = text.len();
+    for sep in [". ", "! ", "? "] {
+        if let Some(pos) = text.find(sep) {
+            end = end.min(pos);
+        }
+    }
+    &text[..end]
+}
+
+/// One law line: `- <id> (<subject>): <first sentence, 160 chars>`.
+fn stage_law_line(row: &Value) -> Option<String> {
+    let id = row.get("decision_id").and_then(Value::as_str)?;
+    let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
+    let decision = row.get("decision").and_then(Value::as_str).unwrap_or("");
+    Some(format!(
+        "- {id} ({subject}): {}",
+        one_line(first_sentence(decision), 160)
+    ))
+}
+
+/// The context block for a stage with laws: cap 2000 bytes, first law line
+/// always renders, overflow counted in one final line.
+fn render_stage_block(stage: &str, keywords: &[&str], index: &decision_index::Index) -> String {
+    let mut text = format!(
+        "## Law governing {stage}\n\nThese live operator rulings govern the {stage} you are starting. Act inside them. Do not re-derive them.\n"
+    );
+    let matching: Vec<String> = index
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
+            let decision = row.get("decision").and_then(Value::as_str).unwrap_or("");
+            let haystack = format!("{subject} {decision}").to_lowercase();
+            keywords
+                .iter()
+                .any(|k| haystack.contains(k))
+                .then(|| stage_law_line(row))
+                .flatten()
+        })
+        .collect();
+    let mut rendered = 0usize;
+    for line in &matching {
+        // The first law line always renders, cap or no cap.
+        if rendered > 0 && text.len() + line.len() + 1 > 2000 {
+            break;
+        }
+        text.push_str(line);
+        text.push('\n');
+        rendered += 1;
+    }
+    let remaining = matching.len() - rendered;
+    if remaining > 0 {
+        text.push_str(&format!(
+            "- and {remaining} more: fno backlog decisions --lane law --state live\n"
+        ));
+    }
+    if index.damaged > 0 {
+        text.push_str(&format!(
+            "{} index row(s) could not be parsed, so this list may be incomplete.\n",
+            index.damaged
+        ));
+    }
+    text
+}
+
+/// The stage answer. A readable index with zero matching laws renders
+/// nothing (`hook_output: null`), which is the correct answer for that
+/// input; a failed read is a report, never silence.
+fn stage_answer_with(req: StageRequest, path: Option<&std::path::Path>) -> Value {
+    let stage = classify_stage(&req.hook);
+    let mut hook_output = None;
+    if let Some(stage_name) = stage {
+        let keywords = STAGES
+            .iter()
+            .find(|(s, _)| *s == stage_name)
+            .map(|(_, k)| *k)
+            .unwrap_or(&[]);
+        let default_path = decision_index::default_state_path("decisions.jsonl");
+        let index_path = path.unwrap_or(&default_path);
+        match decision_index::live_laws(index_path) {
+            Ok(index) => {
+                if index.rows.iter().any(|row| {
+                    let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
+                    let decision = row.get("decision").and_then(Value::as_str).unwrap_or("");
+                    let haystack = format!("{subject} {decision}").to_lowercase();
+                    keywords.iter().any(|k| haystack.contains(k))
+                }) {
+                    hook_output = Some(json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": req.hook.get("hook_event_name").cloned().unwrap_or(Value::Null),
+                            "additionalContext": render_stage_block(stage_name, keywords, &index),
+                        }
+                    }));
+                }
+            }
+            Err(reason) => {
+                let text = format!(
+                    "## Law governing {stage_name}\n\nThe decision index could not be read ({reason}), so the rulings that govern this review are unknown. Run fno backlog decisions --lane law --state live before you act on review policy.\n"
+                );
+                hook_output = Some(json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": req.hook.get("hook_event_name").cloned().unwrap_or(Value::Null),
+                        "additionalContext": text,
+                    }
+                }));
+            }
+        }
+    }
+    json!({"ok": true, "stage": stage, "hook_output": hook_output})
+}
+
+/// The statement validator, a word-for-word port of
+/// `validate_durable_law` (`cli/src/fno/law.py`) plus the one rule that
+/// module cannot own: a bare node id or `pr-<n>` subject is refused, because
+/// a ruling found only by the id of the work that prompted it is unfindable.
+fn validate_answer(req: &ValidateRequest) -> Value {
+    let refusal = if req.subject.trim().is_empty() || req.decision.trim().is_empty() {
+        Some("subject and decision are required".to_string())
+    } else if req
+        .rationale
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        Some("rationale is required for durable law".to_string())
+    } else {
+        let lowered = req.decision.to_lowercase();
+        if COORDINATION_MARKERS.iter().any(|m| lowered.contains(m)) {
+            Some("the statement is coordination, not durable law".to_string())
+        } else if let Some(sup) = req.supersedes.as_deref() {
+            if !is_decision_id(sup) {
+                Some("supersedes must be a decision id".to_string())
+            } else if matches_node_id_shape(req.subject.trim().to_lowercase().as_str())
+                || is_pr_subject(req.subject.trim().to_lowercase().as_str())
+            {
+                Some(format!(
+                    "a node or PR id is not a law subject. Law is found by topic: name the topic, for example review-rounds, and cite {} in the decision text",
+                    req.subject.trim()
+                ))
+            } else {
+                None
+            }
+        } else if matches_node_id_shape(req.subject.trim().to_lowercase().as_str())
+            || is_pr_subject(req.subject.trim().to_lowercase().as_str())
+        {
+            Some(format!(
+                "a node or PR id is not a law subject. Law is found by topic: name the topic, for example review-rounds, and cite {} in the decision text",
+                req.subject.trim()
+            ))
+        } else {
+            None
+        }
+    };
+    json!({"ok": true, "refusal": refusal})
+}
+
+/// The coordination markers of `law.py:18-25`, moved with the validator.
+const COORDINATION_MARKERS: &[&str] = &[
+    "this pr",
+    "this node",
+    "this target",
+    "temporary",
+    "until merge",
+    "for this change",
+];
+
+/// `^d-[0-9a-f]{8}$`, the shape `law.py` enforced on `--supersedes`.
+fn is_decision_id(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("d-") else {
+        return false;
+    };
+    rest.len() == 8 && rest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// `^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$`, the node-id shape
+/// `parse-claims-arg.sh` uses. Measured 2026-09-14: the shape matches 3 of
+/// 59 live law subjects, and all 3 are real node ids.
+fn matches_node_id_shape(s: &str) -> bool {
+    let Some((prefix, suffix)) = s.split_once('-') else {
+        return false;
+    };
+    let p = prefix.as_bytes();
+    if p.is_empty() || p.len() > 8 || !p[0].is_ascii_lowercase() {
+        return false;
+    }
+    if !p[1..]
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return false;
+    }
+    let sfx = suffix.as_bytes();
+    (4..=8).contains(&sfx.len()) && sfx.iter().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `^pr-[0-9]+$`.
+fn is_pr_subject(s: &str) -> bool {
+    match s.strip_prefix("pr-") {
+        Some(rest) => !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// Near-law lines for a law being recorded: live laws on the same subject
+/// (casefold equality) or a nearby subject (shared `tokens()`), at most 5,
+/// newest first. A warning at record time, never a refusal.
+fn near_law_lines_from(index: &decision_index::Index, law: &LawRow) -> Vec<String> {
+    let new_id = law.decision_id.as_str();
+    let new_subject = law.subject.as_deref().unwrap_or("").trim();
+    let new_tokens = tokens(new_subject);
+    let mut lines: Vec<String> = Vec::new();
+    for row in &index.rows {
+        let id = row.get("decision_id").and_then(Value::as_str).unwrap_or("");
+        if id.is_empty() || id.eq_ignore_ascii_case(new_id) {
+            continue;
+        }
+        let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
+        let exact = subject.trim().eq_ignore_ascii_case(new_subject);
+        let shared: Vec<String> = tokens(subject).intersection(&new_tokens).cloned().collect();
+        if !exact && shared.is_empty() {
+            continue;
+        }
+        let decision = row.get("decision").and_then(Value::as_str).unwrap_or("");
+        lines.push(format!(
+            "law: {new_id} sits near live law {id} ({subject}): {}. If it repeats that ruling, retract it: fno backlog decide-retract {new_id} --reason \"repeats {id}\". If it replaces that ruling, record it again with --supersedes {id}.",
+            one_line(decision, 120)
+        ));
+    }
+    lines.truncate(5);
+    lines
+}
+
+/// The disk-reading variant: an unreadable index is a one-line report, so a
+/// recording against a damaged store still completes.
+fn near_law_lines(law: &LawRow) -> Vec<String> {
+    let path = decision_index::default_state_path("decisions.jsonl");
+    match decision_index::live_laws(&path) {
+        Ok(index) => near_law_lines_from(&index, law),
+        Err(reason) => vec![format!("law: near-law check skipped ({reason})")],
+    }
+}
+
 /// `fno-agents law-match`: the hidden binary-direct transport. One JSON
 /// request on stdin, one JSON answer on stdout, exit 0 whenever an answer
 /// was computed; exit 2 on malformed args or an unreadable request.
 pub fn run_law_match(args: &[String]) -> i32 {
     if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("usage: fno-agents law-match (one JSON request on stdin: mode=ask|law)");
+        println!(
+            "usage: fno-agents law-match (one JSON request on stdin: mode=ask|law|stage|validate)"
+        );
         return 0;
     }
     if !args.is_empty() {
@@ -379,7 +707,16 @@ pub fn run_law_match(args: &[String]) -> i32 {
     };
     let answer = match req {
         MatchRequest::Ask(r) => serde_json::to_string(&ask_answer(&r)).expect("serializes"),
-        MatchRequest::Law(r) => serde_json::to_string(&law_answer(&r)).expect("serializes"),
+        MatchRequest::Law(r) => {
+            let near = near_law_lines(&r.law);
+            serde_json::to_string(&law_answer_with(&r, near)).expect("serializes")
+        }
+        MatchRequest::Stage(r) => {
+            serde_json::to_string(&stage_answer_with(r, None)).expect("serializes")
+        }
+        MatchRequest::Validate(r) => {
+            serde_json::to_string(&validate_answer(&r)).expect("serializes")
+        }
     };
     println!("{answer}");
     0
@@ -564,7 +901,7 @@ mod tests {
                 ),
             ],
         };
-        let ans = law_answer(&req);
+        let ans = law_answer_with(&req, Vec::new());
         assert_eq!(ans.total, 1);
         assert_eq!(ans.candidates.len(), 1);
         let c = &ans.candidates[0];
@@ -600,7 +937,7 @@ mod tests {
             law: law_row,
             questions,
         };
-        let ans = law_answer(&req);
+        let ans = law_answer_with(&req, Vec::new());
         assert_eq!(ans.total, 12);
         assert_eq!(ans.lines.len(), 11, "10 candidate lines + 1 count line");
         assert!(ans.lines[10].starts_with("law: 2 more open question(s) may match"));
@@ -614,5 +951,316 @@ mod tests {
         assert_eq!(run_law_match(&extra), 2);
         let bad: Vec<String> = vec![];
         assert_eq!(run_law_match(&bad), 2, "unparsable stdin must exit 2");
+    }
+
+    #[test]
+    fn ac2_hp_skill_payload_surfaces_the_review_laws() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("decisions.jsonl");
+        let mut rows: Vec<String> = Vec::new();
+        for i in 0..11 {
+            rows.push(format!(
+                "{{\"type\":\"operator_decision\",\"ts\":\"2026-09-10T00:00:{i:02}Z\",\
+                 \"data\":{{\"decision_id\":\"d-rev{i:02}000\",\"subject\":\"review-rounds-sufficient\",\
+                 \"decision\":\"Review rounds are capped. Law {i}.\",\"text\":\"x\",\
+                 \"authority_source\":\"operator\"}}}}"
+            ));
+        }
+        // The three specimens the plan names: texts whose near-miss wording
+        // ("finding", "shrink round") must NOT match the keyword table.
+        for (id, text) in [
+            ("d-10a72d88", "finding a better place for the verb"),
+            ("d-5fff6924", "shrink round stands"),
+            ("d-7678146e", "shrink round stands"),
+        ] {
+            rows.push(format!(
+                "{{\"type\":\"operator_decision\",\"ts\":\"2026-09-11T00:00:00Z\",\
+                 \"data\":{{\"decision_id\":\"{id}\",\"subject\":\"file-budget-exception\",\
+                 \"decision\":\"{text}\",\"text\":\"x\",\"authority_source\":\"operator\"}}}}"
+            ));
+        }
+        std::fs::write(&path, rows.join("\n") + "\n").expect("writes");
+        let hook = serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Skill",
+            "tool_input": {
+                "skill": "fno:review",
+                "args": "high https://github.com/o/r/pull/1"
+            }
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path));
+        assert_eq!(answer["stage"], "review");
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context present");
+        assert_eq!(
+            answer["hook_output"]["hookSpecificOutput"]["hookEventName"],
+            "PostToolUse"
+        );
+        for i in 0..11 {
+            assert!(
+                ctx.contains(&format!("d-rev{i:02}000")),
+                "law {i} missing: {ctx}"
+            );
+        }
+        assert!(!ctx.contains("d-10a72d88"));
+        assert!(!ctx.contains("d-5fff6924"));
+        assert!(!ctx.contains("d-7678146e"));
+    }
+
+    #[test]
+    fn ac2_prompt_first_token_classifies_the_stage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("decisions.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"operator_decision\",\"ts\":\"2026-09-01T00:00:00Z\",\
+                 \"data\":{{\"decision_id\":\"d-0fa92eb9\",\"subject\":\"review-coverage\",\
+                 \"decision\":\"Two reviews maximum.\",\"text\":\"x\",\
+                 \"authority_source\":\"operator\"}}}}\n"
+            ),
+        )
+        .expect("writes");
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "$fno:review low"
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path));
+        assert_eq!(answer["stage"], "review");
+        assert_eq!(
+            answer["hook_output"]["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context present");
+        assert!(ctx.contains("d-0fa92eb9"), "{ctx}");
+    }
+
+    #[test]
+    fn ac2_err_unreadable_index_is_a_report_not_silence() {
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:review low"
+        });
+        let answer = stage_answer_with(
+            StageRequest { hook },
+            Some(std::path::Path::new("/nonexistent/fno/decisions.jsonl")),
+        );
+        assert_eq!(answer["stage"], "review");
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("a failed read still renders the block");
+        assert!(ctx.contains("could not be read"), "{ctx}");
+        assert!(
+            ctx.contains("fno backlog decisions --lane law --state live"),
+            "{ctx}"
+        );
+    }
+
+    #[test]
+    fn ac2_edge_non_review_actions_stay_silent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("decisions.png");
+        std::fs::write(&path, "").expect("writes");
+        for hook in [
+            serde_json::json!({
+                "hook_event_name": "PostToolUse",
+                "tool_name": "Skill",
+                "tool_input": { "skill": "code-review-attest" }
+            }),
+            serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "please review this PR"
+            }),
+            serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "/fno:reviewer"
+            }),
+        ] {
+            let answer = stage_answer_with(StageRequest { hook: hook.clone() }, Some(&path));
+            assert_eq!(answer["stage"], Value::Null, "{hook}");
+            assert_eq!(answer["hook_output"], Value::Null, "{hook}");
+        }
+    }
+
+    #[test]
+    fn ac2_edge_review_with_no_matching_law_renders_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("decisions.jsonl");
+        std::fs::write(&path, "").expect("writes");
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:review low"
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path));
+        assert_eq!(answer["stage"], "review");
+        assert_eq!(answer["hook_output"], Value::Null);
+    }
+
+    #[test]
+    fn ac2_cap_overflow_is_counted_not_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("decisions.jsonl");
+        let mut rows: Vec<String> = Vec::new();
+        for i in 0..40 {
+            rows.push(format!(
+                "{{\"type\":\"operator_decision\",\"ts\":\"2026-09-10T00:00:{i:02}Z\",\
+                 \"data\":{{\"decision_id\":\"d-cap{i:04}000\",\"subject\":\"review-cap-fixture\",\
+                 \"decision\":\"Ruling number {i} stands. {}\",\"text\":\"x\",\
+                 \"authority_source\":\"operator\"}}}}",
+                "x".repeat(90)
+            ));
+        }
+        std::fs::write(&path, rows.join("\n") + "\n").expect("writes");
+        let hook = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:review low"
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path));
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context present");
+        let overflow: Vec<&str> = ctx.lines().filter(|l| l.starts_with("- and ")).collect();
+        assert_eq!(overflow.len(), 1, "{ctx}");
+        let count: usize = overflow[0]
+            .trim_start_matches("- and ")
+            .split(' ')
+            .next()
+            .expect("count")
+            .parse()
+            .expect("count parses");
+        assert!(count > 0, "names the count left out: {ctx}");
+        // The rendered body under the cap, overflow line excluded.
+        let body_len: usize = ctx
+            .lines()
+            .filter(|l| !l.starts_with("- and "))
+            .map(|l| l.len() + 1)
+            .sum();
+        assert!(body_len <= 2000, "body {body_len} exceeds the cap");
+        assert_eq!(
+            answer["hook_output"]["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+    }
+
+    fn validate_req(
+        subject: &str,
+        decision: &str,
+        rationale: Option<&str>,
+        supersedes: Option<&str>,
+    ) -> ValidateRequest {
+        ValidateRequest {
+            subject: subject.to_owned(),
+            decision: decision.to_owned(),
+            rationale: rationale.map(str::to_owned),
+            supersedes: supersedes.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn ac4_hp_node_id_and_pr_subjects_are_refused() {
+        for subject in ["x-1df4", "pr-1157"] {
+            let req = validate_req(subject, "Two rounds.", Some("r"), None);
+            let answer = validate_answer(&req);
+            let refusal = answer["refusal"].as_str().expect("refusal");
+            assert!(
+                refusal.contains("a node or PR id is not a law subject"),
+                "{subject}: {refusal}"
+            );
+            assert!(refusal.contains(subject), "{subject}: {refusal}");
+        }
+    }
+
+    #[test]
+    fn ac4_topic_a_topic_subject_with_a_cited_node_id_passes() {
+        let req = validate_req("review-rounds-cap", "Cite x-1df4 in text.", Some("r"), None);
+        let answer = validate_answer(&req);
+        assert_eq!(answer["refusal"], Value::Null);
+    }
+
+    #[test]
+    fn ac4_port_rules_match_the_python_word_for_word() {
+        let cases: Vec<(ValidateRequest, &str)> = vec![
+            (
+                validate_req("", "Decision.", Some("r"), None),
+                "subject and decision are required",
+            ),
+            (
+                validate_req("subject", "", Some("r"), None),
+                "subject and decision are required",
+            ),
+            (
+                validate_req("subject", "Decision.", None, None),
+                "rationale is required for durable law",
+            ),
+            (
+                validate_req("subject", "Decision.", Some("  "), None),
+                "rationale is required for durable law",
+            ),
+            (
+                validate_req("subject", "This PR merges now.", Some("r"), None),
+                "the statement is coordination, not durable law",
+            ),
+            (
+                validate_req("subject", "Until merge it stands.", Some("r"), None),
+                "the statement is coordination, not durable law",
+            ),
+            (
+                validate_req("subject", "Decision.", Some("r"), Some("x-1234")),
+                "supersedes must be a decision id",
+            ),
+        ];
+        for (req, want) in cases {
+            let answer = validate_answer(&req);
+            let refusal = answer["refusal"].as_str().expect("refusal");
+            assert!(
+                refusal.starts_with(want.split(',').next().unwrap_or(want)),
+                "wanted {want}, got {refusal}"
+            );
+        }
+        // The happy shape records: no refusal at all.
+        let ok = validate_answer(&validate_req(
+            "review-rounds-cap",
+            "Two rounds.",
+            Some("r"),
+            Some("d-0ad0ad0a"),
+        ));
+        assert_eq!(ok["refusal"], Value::Null);
+    }
+
+    #[test]
+    fn ac4_near_law_lines_name_the_prior_ruling_and_both_remedies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("decisions.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"type\":\"operator_decision\",\"ts\":\"2026-09-01T00:00:00Z\",\
+                 \"data\":{{\"decision_id\":\"d-777e7d1f\",\"subject\":\"review-rounds-sufficient\",\
+                 \"decision\":\"Two rounds complete the review cap.\",\"text\":\"x\",\
+                 \"authority_source\":\"operator\"}}}}\n"
+            ),
+        )
+        .expect("writes");
+        let index = decision_index::live_laws(&path).expect("reads");
+        let new_law = LawRow {
+            decision_id: "d-00000001".to_owned(),
+            subject: Some("exhausted-rounds-disposition".to_owned()),
+            decision: Some("A fourth round is spent".to_owned()),
+            ts: None,
+        };
+        let lines = near_law_lines_from(&index, &new_law);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = &lines[0];
+        assert!(line.contains("d-777e7d1f"), "{line}");
+        assert!(line.contains("review-rounds-sufficient"), "{line}");
+        assert!(line.contains("decide-retract"), "{line}");
+        assert!(line.contains("--supersedes"), "{line}");
+        // The new law is named only as the subject of the line, never as a
+        // near hit of itself.
+        assert!(!line.contains("near live law d-00000001"), "{line}");
+        assert!(line.contains("sits near live law d-777e7d1f"), "{line}");
     }
 }
