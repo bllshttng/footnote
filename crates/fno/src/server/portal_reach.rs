@@ -14,9 +14,10 @@ use super::*;
 /// reverse (keyed by name, reached again by attach id) is the same row too,
 /// which is why the name comparison runs both directions.
 ///
-/// One function, two callers: the same-row focus arm for the REQUESTED portal,
-/// and the one-row-one-viewer check across every OTHER portal. Two copies of
-/// this comparison drifting apart is how a duplicate viewer gets minted.
+/// One function, three callers: the same-row focus arm for the REQUESTED
+/// portal, the held-seat default-reach arm, and the one-row-one-viewer check
+/// across every OTHER portal. Copies of this comparison drifting apart is
+/// how a duplicate viewer gets minted.
 pub(super) fn row_matches_portal_key(row: &RegistryAgent, key: &str, portal_key: &str) -> bool {
     portal_key == key || row.attach_id.as_deref() == Some(portal_key) || portal_key == row.name
 }
