@@ -8,6 +8,7 @@ CALL time: a module-level import would be a cycle (the package re-exports
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -17,6 +18,9 @@ from pydantic import ValidationError
 
 if TYPE_CHECKING:
     from fno.config import SettingsModel
+
+#: Unknown-key lines printed at load before the list truncates.
+_UNKNOWN_WARN_CAP = 3
 
 
 class SettingsRefused(click.ClickException, ValueError):
@@ -164,17 +168,27 @@ def _load_settings_at(key: _SettingsKey) -> "SettingsModel":
     # (the model is flat; a residual `config` key would look "unknown").
     raw = _unwrap_config_dict(raw)
 
-    # Warn about unknown top-level and nested keys BEFORE model construction
-    # so the message appears even if validation later raises. The recursive
-    # walker handles nested blocks, so no second explicit nested call.
+    # Unknown keys reach stderr on every load, not only under FNO_DEBUG or
+    # `fno config doctor`: an operator set a key no code reads and nothing
+    # ever said so. Lines are the doctor's own (key, file, nearest modeled
+    # spelling), capped so a wide unknown table cannot flood a hot path.
     #
     # Loaded by importlib, never a static import: an edge from this package to
-    # the walker puts fno.config in a mypy SCC where graph._constants' lazy
-    # __getattr__ re-exports degrade to Optional[Path] and fail two unrelated
-    # modules. Measured: three errors with the plain import, none with this.
+    # the readback module puts fno.config in a mypy SCC where graph._constants'
+    # lazy __getattr__ re-exports degrade to Optional[Path] and fail two
+    # unrelated modules. Measured: three errors with the plain import, none
+    # with this.
     import importlib
 
-    importlib.import_module("fno.config_readback").warn_unknown_keys(raw, SettingsModel)
+    problems = importlib.import_module("fno.config_readback").unknown_key_problems(layers)
+    for line in problems[:_UNKNOWN_WARN_CAP]:
+        print(f"fno config: {line}", file=sys.stderr)
+    if len(problems) > _UNKNOWN_WARN_CAP:
+        print(
+            f"fno config: ... and {len(problems) - _UNKNOWN_WARN_CAP} more unknown "
+            "config key(s); `fno config doctor` names them all",
+            file=sys.stderr,
+        )
 
     raw = _revoke_unbacked_optouts(raw)
     try:

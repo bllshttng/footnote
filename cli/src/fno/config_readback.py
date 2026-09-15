@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import difflib
 import importlib
-import logging
-import os
 import types
 import typing
 from pathlib import Path
@@ -26,8 +24,11 @@ _REFUSAL_ERROR_CAP = 5
 #: Top-level blocks the walker must not judge: another reader owns `kanban`,
 #: and `providers` is the pre-rename spelling the loader still aliases across.
 _UNMODELED_BLOCKS = frozenset({"kanban", "providers"})
-
-_LOG = logging.getLogger("fno.config")
+#: Legacy spellings the loader still honors (config/_watchdog.py: coerce_legacy
+#: lifts `watchdog_mail_to`, lift_retire_grace lifts `retire_grace_s`). The
+#: walker reads the raw tree, before coercion, so a key the loader would lift
+#: must not report as unknown: warning on a working key is cried wolf.
+_HONORED_LEGACY_KEYS = frozenset({"recovery.watchdog_mail_to", "recovery.retire_grace_s"})
 
 _Model = Optional[type[BaseModel]]
 
@@ -89,11 +90,10 @@ def warn_unknown_keys(
                     unknown.extend(warn_unknown_keys(entry, mapped, prefix=f"{qualified}.{name}"))
         elif nested is not None:
             unknown.extend(warn_unknown_keys(value, nested, prefix=qualified))
-    # Only the outermost call logs: a recursive call hands its keys up, so
-    # logging at every level repeats a nested key once per level above it.
-    if not prefix and os.environ.get("FNO_DEBUG"):
-        for qualified in unknown:
-            _LOG.warning("settings: unknown key %r (ignored for forward compatibility)", qualified)
+    # Only the outermost call returns: a recursive call hands its keys up, so
+    # filtering at every level would repeat work the level above redoes.
+    if not prefix:
+        return [k for k in unknown if k not in _HONORED_LEGACY_KEYS]
     return unknown
 
 
@@ -140,8 +140,14 @@ def _near_miss_keys(unknown: str) -> list[str]:
     return hits if len(hits) <= _NEAR_MISS_CAP else []
 
 
-def check_unknown_keys() -> list[str]:
-    """Keys the model ignores, each named with the file that holds it."""
+def unknown_key_problems(
+    layers: Optional[list[tuple[Path, dict[str, object]]]] = None,
+) -> list[str]:
+    """Keys the model ignores, each named with the file that holds it.
+
+    ``layers`` is the loader's own priority-ordered list when the caller
+    already holds it; None re-derives (the doctor's path).
+    """
     try:
         from fno.config_io import _unwrap_config_dict
 
@@ -150,7 +156,7 @@ def check_unknown_keys() -> list[str]:
         return []
 
     problems: list[str] = []
-    for path, parsed in _layers():
+    for path, parsed in (layers if layers is not None else _layers()):
         try:
             flat = _unwrap_config_dict(parsed)
             unknown = warn_unknown_keys(
@@ -163,6 +169,11 @@ def check_unknown_keys() -> list[str]:
             tail = f"did you mean {' or '.join(hints)}?" if hints else "ignored"
             problems.append(f"{key} (set in {path}) is not a modeled config key; {tail}")
     return problems
+
+
+def check_unknown_keys() -> list[str]:
+    """Keys the model ignores, each named with the file that holds it."""
+    return unknown_key_problems()
 
 
 _MISSING = object()
