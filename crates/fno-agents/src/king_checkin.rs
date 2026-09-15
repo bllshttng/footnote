@@ -31,8 +31,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-/// The eleven readings of the check-in body, in print order.
-const READING_NAMES: [&str; 11] = [
+/// The twelve readings of the check-in body, in print order.
+const READING_NAMES: [&str; 12] = [
     "user_notes",
     "board",
     "escalations",
@@ -44,6 +44,7 @@ const READING_NAMES: [&str; 11] = [
     "crown",
     "drain",
     "main_ci",
+    "control_plane",
 ];
 
 /// The numeric keys this verb owns and diffs versus the previous beat.
@@ -696,6 +697,37 @@ fn r_main_ci() -> Result<Value, String> {
     Ok(Value::String("pending".into()))
 }
 
+/// The control plane's own verdict: every arm failing past the notify
+/// threshold, then the stuck-work findings, as the lines a page would carry.
+/// Read in process - the same journals, predicate and threshold arm_watch
+/// ticks with - so a check-in line and a page can never disagree.
+fn r_control_plane(ctx: &Ctx) -> Result<Value, String> {
+    let home = crate::paths::AgentsHome::from_env();
+    let now_unix = SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let journals = crate::tick_ledger::journals(&home);
+    let mut rows = crate::tick_ledger::read_arms(&journals, now_unix);
+    let trace = crate::tick_ledger::read_tick_trace_live(&journals, &rows, now_unix);
+    crate::tick_ledger::explain_with_trace(
+        &mut rows,
+        &crate::tick_ledger::DaemonFacts::Up {
+            uptime_s: u64::MAX,
+            drifted: false,
+        },
+        &trace,
+    );
+    let threshold = crate::agents_config::notify_arm_failing_after_s(&ctx.cwd);
+    let mut attention: Vec<String> = crate::arm_watch::overdue_arms(&rows, threshold)
+        .iter()
+        .map(|row| crate::arm_watch::row_line(row))
+        .collect();
+    let findings = crate::stuck_work::collect(&ctx.cwd)?;
+    attention.extend(findings.iter().map(|f| f.line.clone()));
+    Ok(json!({ "attention": attention }))
+}
+
 /// One territory row per scope (x-e221): live against cap, the blueprinter
 /// handle, and the kingless mark, read from the same projection the spawn
 /// gate's cap enforces. An `membership: unknown` row is a failed reading, so
@@ -749,6 +781,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("crown", r_crown());
     take("drain", r_drain(ctx));
     take("main_ci", r_main_ci());
+    take("control_plane", r_control_plane(ctx));
     readings
 }
 
@@ -806,6 +839,12 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     if let Some(ci) = get("main_ci").filter(|r| r.ok) {
         data.insert("main_ci".into(), ci.value.clone());
     }
+    if let Some(cp) = get("control_plane").filter(|r| r.ok) {
+        data.insert(
+            "control_plane_attention".into(),
+            cp.value.get("attention").cloned().unwrap_or(json!([])),
+        );
+    }
     let failed: Vec<&Reading> = readings.iter().filter(|r| !r.ok).collect();
     data.insert("coverage".into(), json!(readings.len() - failed.len()));
     data.insert(
@@ -851,6 +890,21 @@ fn derive_change(
                 }
             }
         }
+    }
+    let attention: Vec<&str> = data
+        .get("control_plane_attention")
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    // Attention outranks silence: a control plane failing for 30 minutes is
+    // never journaled as "no change", whatever the counts did.
+    if !attention.is_empty() {
+        let moved_suffix = if moved.is_empty() {
+            String::new()
+        } else {
+            format!("; moved: {}", moved.join(", "))
+        };
+        return format!("attention: {}{moved_suffix}", attention.join("; "));
     }
     if !moved.is_empty() {
         return format!("moved: {}", moved.join(", "));
@@ -1136,6 +1190,24 @@ fn render_lines(
     match failed("main_ci") {
         Some(r) => lines.push(format!("READER FAILED main_ci: {}", r.error)),
         None => lines.push(format!("main ci: {}", dash(data.get("main_ci")))),
+    }
+    match failed("control_plane") {
+        Some(r) => lines.push(format!("READER FAILED control_plane: {}", r.error)),
+        None => {
+            let attention: Vec<&str> = data
+                .get("control_plane_attention")
+                .and_then(|a| a.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            if attention.is_empty() {
+                lines.push("control plane: ok".into());
+            } else {
+                lines.push("control plane:".into());
+                for entry in attention {
+                    lines.push(format!("  {entry}"));
+                }
+            }
+        }
     }
 
     let coverage = data.get("coverage").and_then(|c| c.as_i64()).unwrap_or(0);
@@ -1689,6 +1761,7 @@ mod tests {
         vec![
             Reading::took("user_notes", Value::Null),
             Reading::took("board", board),
+            Reading::took("escalations", json!({"open": 0, "overdue": 0})),
             Reading::took("blocked_child", json!([{"node": "x-1"}])),
             Reading::took("court", court),
             Reading::took("territory", json!([])),
@@ -1700,6 +1773,7 @@ mod tests {
             ),
             Reading::took("drain", json!(9)),
             Reading::took("main_ci", json!("green")),
+            Reading::took("control_plane", json!({"attention": []})),
         ]
     }
 
@@ -1738,7 +1812,7 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(10)));
+        assert_eq!(data.get("coverage"), Some(&json!(12)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
     }
 
@@ -1757,7 +1831,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 9 of 11 readings ok")));
+            .any(|l| l.starts_with("coverage: 11 of 12 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -1772,7 +1846,7 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[8] = Reading::failed("drain", "drain unreadable".into());
+        readings[9] = Reading::failed("drain", "drain unreadable".into());
         let data = build_data(&readings, "x-a792");
         assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
     }
@@ -1827,6 +1901,112 @@ mod tests {
             .find(|l| l.starts_with("vs last beat (2026-09-10T12:00:00Z)"))
             .unwrap();
         assert!(diff_line.contains("open_prs 9 -> 7"), "line: {diff_line}");
+    }
+
+    // AC6-HP: a 30-minute arm FAIL is attention, and a moved count still
+    // reports itself inside the attention change.
+    #[test]
+    fn an_overdue_arm_reads_attention_not_no_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = journal(dir.path(), &[prev_row()]);
+        let ctx = Ctx {
+            scope: "x-a792".into(),
+            level: Some(1),
+            events_paths: vec![path],
+            graph: PathBuf::from("nope.json"),
+            cwd: dir.path().to_path_buf(),
+            handoffs_dir: dir.path().to_path_buf(),
+            faqs_dir: None,
+            board_state: None,
+            emit_path: None,
+            emit: false,
+        };
+        let (previous, err) = previous_row(&ctx);
+        assert!(err.is_empty());
+        let mut readings = sample_readings(
+            json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        readings[11] = Reading::took(
+            "control_plane",
+            json!({"attention": ["pr_watch_merge FAIL timeout for 2000s"]}),
+        );
+        let data = build_data(&readings, "x-a792");
+        let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
+        assert!(
+            change.starts_with("attention: pr_watch_merge FAIL timeout for 2000s"),
+            "{change}"
+        );
+        let lines = render_lines("x-a792", &readings, &data, &previous, "", &change);
+        assert!(lines.iter().any(|l| l == "control plane:"), "{lines:?}");
+        assert!(lines
+            .iter()
+            .any(|l| l == "  pr_watch_merge FAIL timeout for 2000s"));
+        assert_eq!(
+            data.get("control_plane_attention"),
+            Some(&json!(["pr_watch_merge FAIL timeout for 2000s"]))
+        );
+
+        // A count that also moved still names itself, after the attention.
+        readings[1] = Reading::took(
+            "board",
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+        );
+        let data = build_data(&readings, "x-a792");
+        let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
+        assert_eq!(
+            change,
+            "attention: pr_watch_merge FAIL timeout for 2000s; moved: open_prs 9 -> 7"
+        );
+    }
+
+    // AC6-ERR: a failed control_plane reading prints its own line, counts
+    // against coverage, and blocks the "no change" verdict.
+    #[test]
+    fn a_failed_control_plane_reader_blocks_the_quiet_beat() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 9, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        readings[11] = Reading::failed("control_plane", "journals unreadable".into());
+        let data = build_data(&readings, "x-a792");
+        let change = derive_change(None, &data, "");
+        assert_eq!(
+            change,
+            "no numeric movement; readings failed: control_plane"
+        );
+        let lines = render_lines("x-a792", &readings, &data, &None, "", &change);
+        assert!(lines
+            .iter()
+            .any(|l| l == "READER FAILED control_plane: journals unreadable"));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("coverage: 11 of 12 readings ok")));
+    }
+
+    // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
+    #[test]
+    fn a_quiet_control_plane_reads_ok() {
+        let readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        let data = build_data(&readings, "x-a792");
+        assert_eq!(
+            data.get("control_plane_attention"),
+            Some(&json!([])),
+            "empty attention"
+        );
+        let change = derive_change(None, &data, "");
+        assert_eq!(change, "first canonical beat for this scope");
+        let lines = render_lines("x-a792", &readings, &data, &None, "", "no change");
+        assert!(lines.iter().any(|l| l == "control plane: ok"));
     }
 
     #[test]

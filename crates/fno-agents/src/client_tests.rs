@@ -2711,6 +2711,43 @@ fn status_payload_publishes_the_rust_owned_arms_attention() {
     assert!(attention.contains(&"a_failing"), "{attention:?}");
 }
 
+/// AC4: the degraded payload carries the stuck_work read beside
+/// arms_attention, whatever the machine answers - the two finding lists on a
+/// readable host, the error shape on a blind one.
+#[test]
+fn degraded_payload_carries_the_stuck_work_shape() {
+    let payload = degraded_status_payload(&[]);
+    let stuck = &payload["stuck_work"];
+    assert!(stuck.is_object(), "{stuck}");
+    if let Some(err) = stuck.get("error").and_then(|e| e.as_str()) {
+        let lines = fno_agents::stuck_work::render_lines(stuck);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("stuck work: unreadable"), "{err}");
+    } else {
+        assert!(stuck["hung_verbs"].is_array(), "{stuck}");
+        assert!(stuck["dead_holders"].is_array(), "{stuck}");
+    }
+}
+
+/// AC4-HP/EDGE at the render seam: findings print as a stuck work block,
+/// a clean read prints nothing, an error read prints its reason.
+#[test]
+fn stuck_work_render_lines_block_or_nothing() {
+    let value = serde_json::json!({
+        "hung_verbs": ["hung verb pid 7 1h fno backlog advance (over 1800s)"],
+        "dead_holders": ["dead holder flight:x holder h pid 9 absent held 10m"],
+    });
+    let lines = fno_agents::stuck_work::render_lines(&value);
+    assert_eq!(lines[0], "stuck work:");
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[1], "  hung verb pid 7 1h fno backlog advance (over 1800s)");
+    let clean = serde_json::json!({"hung_verbs": [], "dead_holders": []});
+    assert!(fno_agents::stuck_work::render_lines(&clean).is_empty());
+    let err = serde_json::json!({"error": "ps exited 1"});
+    let lines = fno_agents::stuck_work::render_lines(&err);
+    assert_eq!(lines, vec!["stuck work: unreadable (ps exited 1)"]);
+}
+
 // -----------------------------------------------------------------------
 // x-1961: `resume` inside the client runtime must not panic
 // -----------------------------------------------------------------------
