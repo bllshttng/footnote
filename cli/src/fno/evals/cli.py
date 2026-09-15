@@ -245,11 +245,16 @@ def report_command(
         raise typer.Exit(code=0)
 
     rows = load_rows(history_file, since=since)
-    # The default report's alarm reads the recent window (x-cf8f).
+    # The default report's alarm reads the recent window (x-cf8f). An
+    # unreadable config degrades to the all-rows fold instead of crashing.
+    try:
+        window_days: Optional[int] = int(load_settings().evals.stale_days)
+    except Exception:  # noqa: BLE001 - the report renders without config
+        window_days = None
     report = build_report(
         rows,
-        now=datetime.now(timezone.utc),
-        window_days=int(load_settings().evals.stale_days),
+        now=datetime.now(timezone.utc) if window_days is not None else None,
+        window_days=window_days,
     )
 
     if graduate:
