@@ -91,6 +91,18 @@ def test_config_sink_minimal_text_webhook_valid() -> None:
     assert s.enabled is True  # default on
 
 
+def test_config_sink_ntfy_raw_body_valid() -> None:
+    s = StatusSinkConfig(
+        name="phone",
+        type="text-webhook",
+        events=["operator_notice"],
+        url_env="FNO_STATUS_PHONE",
+        raw_body=True,
+        template="fno [{project}] {data.title} - {data.body}",
+    )
+    assert s.raw_body is True
+
+
 def test_config_empty_sinks_is_default_noop() -> None:
     assert ConfigBlock().status_sinks == []
 
@@ -697,6 +709,65 @@ def test_text_webhook_reuses_failure_classes(monkeypatch):
                             url="https://x", template="hi", field="content")
     status, detail = sf._dispatch_text_webhook(sink, _ev("t", "blocked"), StatusFanoutConfig())
     assert status == sf.DROPPED and "404" in detail
+
+
+def test_text_webhook_raw_body_posts_rendered_text_not_json(monkeypatch):
+    """ntfy: with the topic in the URL the body IS the raw message - a JSON
+    envelope lands on the phone as literal JSON (measured against ntfy 2.28.0:
+    even {"topic", "message"} is shown verbatim unless posted to the root URL).
+    raw_body=True posts the rendered template as plain text instead."""
+    from fno import status_fanout as sf
+
+    posted = {}
+    monkeypatch.setattr(sf, "_post_raw",
+                        lambda u, b, t: (posted.update(url=u, body=b) or sf._HttpResult(ok=True, status=200)))
+    sink = StatusSinkConfig(name="n", type="text-webhook", events=["blocked"],
+                            url="https://tailnet.ts.net:8443/fno-topic",
+                            template="fno [{project}] blocked", raw_body=True)
+    status, _ = sf._dispatch_text_webhook(sink, _ev("t", "blocked", project="t"), StatusFanoutConfig())
+    assert status == sf.DELIVERED
+    assert posted["body"] == "fno [t] blocked"  # a str, never a JSON envelope
+
+
+def test_text_webhook_raw_body_reuses_failure_classes(monkeypatch):
+    from fno import status_fanout as sf
+
+    monkeypatch.setattr(sf, "_post_raw", lambda u, b, t: sf._HttpResult(ok=False, status=404))
+    monkeypatch.setattr(sf, "_sleep", lambda s: None)
+    sink = StatusSinkConfig(name="n", type="text-webhook", events=["blocked"],
+                            url="https://x", template="hi", raw_body=True)
+    status, detail = sf._dispatch_text_webhook(sink, _ev("t", "blocked"), StatusFanoutConfig())
+    assert status == sf.DROPPED and "404" in detail
+
+
+def test_post_raw_sends_plain_text_with_explicit_user_agent(monkeypatch):
+    from fno import status_fanout as sf
+
+    captured = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def getcode(self):
+            return 200
+
+    def _fake_urlopen(req, timeout=None):
+        captured["ct"] = req.get_header("Content-type")
+        captured["ua"] = req.get_header("User-agent")
+        captured["data"] = req.data
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    result = sf._post_raw("https://example.test/fno-topic", "hello ntfy", 5.0)
+
+    assert result.ok
+    assert captured["ct"] == "text/plain"
+    assert captured["ua"] == sf._USER_AGENT
+    assert captured["data"] == b"hello ntfy"
 
 
 # ── integration: run_tick through the real adapter router (mocked HTTP) ──────

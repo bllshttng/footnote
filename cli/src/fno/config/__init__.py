@@ -3760,6 +3760,9 @@ class StatusSinkConfig(BaseModel):
     url_env: Optional[str] = None
     template: Optional[str] = None
     field: str = "content"
+    # text-webhook: POST the rendered template verbatim as text/plain (ntfy
+    # topic-URL shape) instead of a ``{field: rendered}`` JSON envelope.
+    raw_body: bool = False
     cloudevents: bool = False
     enabled: bool = True
 
