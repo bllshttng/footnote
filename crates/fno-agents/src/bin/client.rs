@@ -59,6 +59,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "host",
     "judge",
     "kill-check",
+    "surface-check",
     "king-checkin",
     "king-escalation-text",
     "king-history",
@@ -543,6 +544,14 @@ async fn run(args: Vec<String>) -> i32 {
     // kill_criteria.rs doc). Direct dispatch; no daemon RPC.
     if verb == "kill-check" {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
+    }
+
+    // `surface-check`: the plan surface: shape check plus the cross-language
+    // symbol walk (see surface_check.rs doc). Direct dispatch; no daemon RPC.
+    // scripts/validate-plan.sh shells HERE and reads the E/W/X/O/U lines back;
+    // binary-first, never an auto-routed `fno agents` surface.
+    if verb == "surface-check" {
+        return fno_agents::surface_check::run_surface_check(&args[1..]);
     }
 
     // `authorized-merge`: the one merge/arm authorization (see
