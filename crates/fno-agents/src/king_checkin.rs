@@ -55,6 +55,19 @@ const NUMERIC_DIFF_KEYS: [&str; 6] = [
     "undelivered",
 ];
 
+/// Diff keys absent from the previous beat's data: a hand-journaled baseline
+/// lacking any of them must read unmeasured, never "no change".
+fn missing_diff_keys(prev_data: Option<&Value>) -> Vec<&'static str> {
+    match prev_data {
+        Some(prev) => NUMERIC_DIFF_KEYS
+            .iter()
+            .copied()
+            .filter(|key| prev.get(*key).is_none())
+            .collect(),
+        None => NUMERIC_DIFF_KEYS.to_vec(),
+    }
+}
+
 /// Render cap for the per-node rows a court line prints (the count in the
 /// payload stays whole, only the rendered rows are cut, as the board does).
 const MAX_COURT_ROWS: usize = 25;
@@ -751,6 +764,10 @@ fn derive_change(
     }
     let mut moved: Vec<String> = Vec::new();
     if let Some(prev) = previous_data {
+        let missing = missing_diff_keys(Some(prev));
+        if !missing.is_empty() {
+            return format!("unmeasured: previous row lacks {}", missing.join(", "));
+        }
         for key in NUMERIC_DIFF_KEYS {
             let before = prev.get(key);
             let after = data.get(key);
@@ -1053,16 +1070,24 @@ fn render_lines(
             .and_then(|p| p.get("data"))
             .cloned()
             .unwrap_or(json!({}));
-        let parts: Vec<String> = NUMERIC_DIFF_KEYS
-            .iter()
-            .filter_map(|key| {
-                let before = prev_data.get(*key)?;
-                let after = data.get(*key)?;
-                Some(format!("{key} {before} -> {after}"))
-            })
-            .collect();
         let ts = previous.as_ref().and_then(|p| s_str(p, "ts")).unwrap_or("");
-        lines.push(format!("vs last beat ({ts}): {}", parts.join(", ")));
+        let missing = missing_diff_keys(Some(&prev_data));
+        if !missing.is_empty() {
+            lines.push(format!(
+                "vs last beat: unmeasured (previous row lacks {})",
+                missing.join(", ")
+            ));
+        } else {
+            let parts: Vec<String> = NUMERIC_DIFF_KEYS
+                .iter()
+                .filter_map(|key| {
+                    let before = prev_data.get(*key)?;
+                    let after = data.get(*key)?;
+                    Some(format!("{key} {before} -> {after}"))
+                })
+                .collect();
+            lines.push(format!("vs last beat ({ts}): {}", parts.join(", ")));
+        }
     }
     lines.push(format!("change: {change}"));
     lines
@@ -1573,6 +1598,34 @@ mod tests {
             .find(|l| l.starts_with("vs last beat (2026-09-10T12:00:00Z)"))
             .unwrap();
         assert!(diff_line.contains("open_prs 9 -> 7"), "line: {diff_line}");
+    }
+
+    #[test]
+    fn hand_row_baseline_reads_unmeasured_not_no_change() {
+        let readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        let data = build_data(&readings, "x-a792");
+        let hand = json!({"ts": "2026-09-15T13:40:38Z", "type": "reign_checkin", "source": "hand",
+            "data": {"scope": "x-a792", "change": "resumed the crown"}});
+        let change = derive_change(Some(hand.get("data").unwrap()), &data, "");
+        assert!(
+            change.starts_with("unmeasured: previous row lacks"),
+            "change: {change}"
+        );
+        assert!(!change.contains("no change"), "change: {change}");
+        let lines = render_lines("x-a792", &readings, &data, &Some(hand), "", &change);
+        let beat = lines
+            .iter()
+            .find(|l| l.starts_with("vs last beat"))
+            .unwrap();
+        assert!(
+            beat.contains("unmeasured (previous row lacks"),
+            "line: {beat}"
+        );
     }
 
     #[test]
