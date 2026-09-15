@@ -136,6 +136,83 @@ resolve_manifest_state() {
     return "$worst"
 }
 
+# ── 1b. Native ownership gate (x-09d2) ────────────────────────────────────────
+# One fno-agents process answers the only question an ordinary session's stop
+# has: does THIS session own a target manifest, a king manifest, or a pending
+# delivery retry? The legacy path below spent a python3 parse, sed spawns,
+# git discovery, and one Python `fno` king round trip to answer it (measured
+# p50 3.4s under load). NO-OWNER exits here; OWNER jumps straight to the
+# active-session code; BROKEN runs the same bounded-block counters the legacy
+# pre-state path uses (same counter file names, shared retry budget). A gate
+# that prints no verdict (old binary, crash, missing verb) falls through to
+# the full legacy path unchanged - the shim's own e2e tests pin that path.
+resolve_agents_bin() {
+    if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
+        printf '%s' "$FNO_AGENTS_BIN"
+    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
+        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
+    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
+        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
+    elif command -v fno-agents >/dev/null 2>&1; then
+        command -v fno-agents
+    fi
+}
+REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+gate_bounded_block() {
+    # $1 = which resolver (target|king), $2 = detail. Same counter file the
+    # legacy pre-state path uses, so gate and legacy share one retry budget.
+    local which="$1" detail="$2"
+    local counter="${SPACE_DIR}/.loop-check-unavail-${RESOLVE_HARNESS_ID:-anon}"
+    local count=0
+    [[ -f "$counter" ]] && count=$(tr -dc '0-9' < "$counter" 2>/dev/null)
+    [[ -z "$count" ]] && count=0
+    count=$((10#$count + 1))
+    echo "$count" > "$counter" 2>/dev/null || true
+    if (( count <= MAX_UNAVAIL_RETRIES )); then
+        emit_block_for_harness "${which} checker unavailable (${count}/${MAX_UNAVAIL_RETRIES}): ${detail}, keeping session running"
+    fi
+    echo "target stop-hook: ${which} resolver unavailable ${count} times; allowing visitor stop" >&2
+    exit 0
+}
+GATE_VERDICT=""
+SPACE_DIR="${REPO_ROOT}/.fno"
+STATE=""
+DRIVER=""
+CWD=""
+PENDING=""
+SPACE=""
+if BIN=$(resolve_agents_bin) && [[ -n "$BIN" ]] \
+    && GATE_OUT=$("$BIN" stop-gate --cwd "$PWD" 2>/dev/null <<<"$HOOK_INPUT"); then
+    while IFS= read -r GATE_LINE; do
+        case "$GATE_LINE" in
+            SID=*|HID=*|TPATH=*|HARNESS=*|IDS=*|RID=*|SPACE=*|STATE=*|DRIVER=*|CWD=*|PENDING=*)
+                eval "$GATE_LINE"
+                ;;
+            NO-OWNER)
+                # The gate already ran the visitor diagnostic + distress scan.
+                exit 0
+                ;;
+            OWNER)
+                GATE_VERDICT=owner
+                ;;
+            BROKEN*)
+                GATE_WHAT="${GATE_LINE%% *}"
+                GATE_WHAT="${GATE_WHAT#BROKEN }"
+                gate_bounded_block "$GATE_WHAT" "${GATE_LINE#* }"
+                ;;
+        esac
+    done <<< "$GATE_OUT"
+fi
+if [[ "$GATE_VERDICT" == "owner" ]]; then
+    LIVE_STATE_FILE="$STATE"
+    STATE_FILE="$STATE"
+    TARGET_CWD="${CWD:-$PWD}"
+    SPACE_DIR="${SPACE:-$SPACE_DIR}"
+    DELIVERY_PENDING_STATE="${PENDING:-}"
+fi
+
+if [[ "$GATE_VERDICT" != "owner" ]]; then
+
 # ── 2. State file: the active-session discriminator ───────────────────────────
 # No state file -> no target session here -> nothing to gate. This is the ONLY
 # safe silent allow, and it gates every error path below: with a state file
@@ -157,18 +234,6 @@ OTHER_WORKTREE_PRESENT=0
 # diagnostics live here, never in the checkout.
 SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
 [[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="${REPO_ROOT}/.fno"
-
-resolve_agents_bin() {
-    if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
-        printf '%s' "$FNO_AGENTS_BIN"
-    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
-        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
-    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
-        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
-    elif command -v fno-agents >/dev/null 2>&1; then
-        command -v fno-agents
-    fi
-}
 
 BIN=""
 TARGET_RESOLVE_BROKEN=0
@@ -411,6 +476,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
         exit 0
     fi
 fi
+fi  # end of the legacy-resolution guard (gate answered with no owner verdict)
 
 # Active session confirmed from here down. A king manifest carries fno_id and
 # no session_id, so read both; SESSION_ID only keys the unavailable-retry
@@ -557,28 +623,19 @@ fi
 # and the captured exit code is the binary's own. (Trailing newline added by
 # <<< is harmless: serde_json tolerates trailing whitespace.)
 mkdir -p "$SPACE_DIR" 2>/dev/null || true
-CANDIDATE_READY=0
-if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-    && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
-    CANDIDATE_READY=1
-fi
+# The manifest candidate copy moved into the DoneDelivery terminal branch
+# (x-09d2): only a delivery retry needs the preserved pre-finalize manifest,
+# and the routine copy cost a spawn on every ordinary fire.
 LOOP_CHECK_LOG="${SPACE_DIR}/loop-check.stderr.log"
 DECISION_JSON=""
 verb_rc=0
 if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
     DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
 else
-    # One settle sweep before the checker, TARGET loops only: a lost review
-    # invocation becomes a `lost` attestation row, so the gate's next read
-    # answers a named refusal instead of waiting on silence. A king driver
-    # owns no review invocations, and its manifest resolution must stay the
-    # hook's last `fno` call. Best-effort and quiet - a missing fno or a
-    # failed sweep must never hold the stop gate, and the doctor's report
-    # re-runs the sweep on its own schedule.
-    if [[ "$DRIVER" == "target" ]] && command -v fno >/dev/null 2>&1; then
-        (cd "$TARGET_CWD" 2>/dev/null \
-            && fno do review invocations settle >/dev/null 2>&1) || true
-    fi
+    # The pre-checker `fno do review invocations settle` sweep is gone
+    # (x-09d2): it exited 2 on every fire (the leaf takes no `settle`
+    # positional, measured p50 2,253ms for the refusal), and the review
+    # lifecycle now settles invocations where they are created and read.
     DECISION_JSON=$("$BIN" loop-check \
         --driver "$DRIVER" \
         --state "$STATE_FILE" \
@@ -688,9 +745,14 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
     esac
     FINALIZE_STATE="$STATE_FILE"
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
+        # Retry state is preserved only when a delivery transaction needs it
+        # (x-09d2): the candidate copy happens here, at the one terminal that
+        # consumes it, instead of on every fire.
+        DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
         if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-            && { [[ $CANDIDATE_READY -ne 1 ]] \
+            && { ! cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null \
                 || ! mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE"; }; then
+            rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true
             emit_block_for_harness "generic delivery state could not be preserved; will retry"
         fi
         FINALIZE_STATE="$DELIVERY_PENDING_STATE"
@@ -719,24 +781,11 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
     fi
 fi
 
-# ── 11. Live-tick: refresh this session's node claim so a long-running loop ──
-# never silently expires its TTL and frees the node for a twin (x-a7ab 1.4).
-# Best-effort, non-blocking: any failure (no claim, holder mismatch after a
-# supervisor respawn, stale manifest snapshot, fno absent) is logged and ignored
-# - it can never change the completion decision. Skipped on a TERMINAL allow: a
-# session that is done must not extend a claim it is about to release. --ttl is
-# always passed (default 2h) so refresh keeps the original window rather than
-# shrinking it to MIN_TTL_MS.
-if [[ -z "$TERMINATION_REASON" && -f "$STATE_FILE" ]]; then
-    _TC_KEY="$(sed -n 's/^target_claim_key:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
-    _TC_HOLDER="$(sed -n 's/^target_claim_holder:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
-    _TC_TTL="$(sed -n 's/^target_claim_ttl:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
-    if [[ "$_TC_KEY" == node:* && -n "$_TC_HOLDER" ]]; then
-        FNO_CLAIMS_ROOT="$HOME" fno agents claim refresh "$_TC_KEY" \
-            --holder "$_TC_HOLDER" --ttl "${_TC_TTL:-2h}" \
-            >/dev/null 2>>"${SPACE_DIR}/loop-check.stderr.log" || true
-    fi
-fi
+# ── 11. Live-tick claim refresh: DELETED (x-09d2) ────────────────────────────
+# The shell spent a python round trip per fire refreshing the node claim, but
+# loop-check's decide already renews the same lease natively on every
+# manifest-bearing stop (x-ba4b lease renewal in loopcheck.rs, same window
+# init acquired with). One owner; the duplicate arm never changed a decision.
 
 # allow (includes DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, etc.)
 echo "target stop-hook: $MESSAGE" >&2

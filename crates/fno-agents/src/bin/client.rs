@@ -147,6 +147,14 @@ fn main() {
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
     }
+    // `stop-gate` (x-09d2): the Stop hook's one-process ownership answer.
+    // Transport-only, dispatched in main like backlog-update: it is not an
+    // `fno agents` verb, so the verb-surface ratchet and the routable-verb
+    // parity guard never see it, and it must not pay the tokio runtime
+    // build every stop.
+    if args.first().map(String::as_str) == Some("stop-gate") {
+        std::process::exit(fno_agents::stop_gate::run_stop_gate(&args[1..]));
+    }
     // `surface-check`: the plan surface: shape check plus the cross-language
     // symbol walk (see surface_check.rs doc). Dispatched BEFORE `run` like
     // backlog-update: the action list is shrink-only (d-fe66560a), so this
