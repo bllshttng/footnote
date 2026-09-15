@@ -6817,7 +6817,7 @@ def cmd_pick(
     )
 
     # Tempfiles:
-    #   cands.tsv : the immutable snapshot of candidates the picker reads
+    #   cands.tsv: the immutable snapshot of candidates the picker reads
     #   pending.txt: empty file the keybinds append intents to
     #   awk.script: the renderer logic invoked by fzf reload
     fd_cand, cand_path = tempfile.mkstemp(prefix="fno-pick-", suffix=".cands.tsv")

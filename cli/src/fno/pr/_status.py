@@ -1,4 +1,4 @@
-"""`fno do pr status <n>` - one authoritative CI verdict for a PR (x-8b64 G).
+"""`fno do pr status <n>` - one authoritative CI verdict for a PR (G).
 
 Agents kept re-deriving CI-green from `statusCheckRollup` by hand (or trusting
 `gh pr checks`, which disagrees with the rollup). This computes a single
@@ -489,7 +489,7 @@ def _ready_blockers(
     docs/architecture/pr-status-verdict.md (`_ready_blockers`).
     """
     blockers: list[str] = []
-    # x-4271: `mergeable` is None only when the caller never asked (old test
+    # `mergeable` is None only when the caller never asked (old test
     # stubs, a degraded fetch that omitted the field) - never block on that,
     # only on a GitHub-supplied answer that isn't the positive "MERGEABLE".
     # `_map_mergeable` already turns a null (still computing) into the string
@@ -757,7 +757,7 @@ def run_status(
     verdict, code, counts = verdict_for(generic_rollup)
     green = verdict == "green"
 
-    # x-c124 / d-bdb035b6: a red verdict must name WHICH check failed and, so
+    # / d-bdb035b6: a red verdict must name WHICH check failed and, so
     # far as the job log tells, WHICH step and error - counts alone let a
     # reader generalize one `smoke` red onto an unrelated PR. Runs inside this
     # read (never on a second, per-watcher one), so the detail lands in the
@@ -822,7 +822,7 @@ def run_status(
             },
         )
     else:
-        # Additive review signal (x-705b): computed AFTER the authoritative CI
+        # Additive review signal : computed AFTER the authoritative CI
         # verdict so a slow/failed review read can never delay or corrupt it.
         # Any failure degrades to "unknown"/None and leaves the CI verdict +
         # exit code untouched.
@@ -838,10 +838,10 @@ def run_status(
         unresolved = reviews.get("optional_reviews_unresolved")
         resolved_unchanged = reviews.get("optional_reviews_resolved_unchanged")
 
-        # x-0eaf: coverage signal, same additive/fail-open discipline as the
+        # coverage signal, same additive/fail-open discipline as the
         # optional review read above. Read from the review_coverage event so a
         # human and the loop see one number (Ownership: Rust computes, Python
-        # reads). Recomputed once when no usable row exists (x-3a3f), so a
+        # reads). Recomputed once when no usable row exists, so a
         # human report and the merge gate act on the same number instead of
         # status saying "no coverage" for a PR merge would clear after one
         # recompute. The PR head rides in from _fetch: without it the verb
@@ -1046,7 +1046,7 @@ def run_status(
         # total > 0 is load bearing: an empty rollup and an all-green
         # one both have zero unsettled entries, and only one of them
         # is decided. Existence must be stated, not inherited.
-        # verdict != unknown too (x-4271): a zero-real-check-run
+        # verdict != unknown too : a zero-real-check-run
         # rollup can have zero unsettled entries (every StatusContext
         # already settled) while still being an undecided read.
         "settled": verdict != "unknown" and counts["total"] > 0 and counts["unsettled"] == 0,
@@ -1089,7 +1089,7 @@ def run_status(
             else _merge_execution_projection(cwd or os.getcwd(), pr)
         ),
         # The round budget, from the review_coverage row the gate wrote at
-        # this head - one producer per number (x-027b: a locally recomputed
+        # this head - one producer per number (: a locally recomputed
         # floor read 3 on PR 1380 where the gate said 1). A row with no
         # rounds at this head answers null with a note naming the producer
         # to run, never a locally computed floor.
@@ -1123,7 +1123,7 @@ def run_status(
         # The obvious "read this, not green": ready iff CI is green AND
         # no optional finding is unresolved AND review coverage is a
         # counted pass. Coverage joined the conjunction because `fno
-        # pr merge` already read it (x-e601): with it absent here, the
+        # pr merge` already read it : with it absent here, the
         # two verbs answered opposite ways from one payload and every
         # ready: true PR refused at the merge gate. The blockers list
         # names WHICH conjunct failed - a bare false has one
@@ -1338,7 +1338,7 @@ def main(argv: Sequence[str]) -> int:
         # library entry (run_status) stays uncached for programmatic callers
         # and tests.
         rc = cached_status(str(args[0]), refresh=refresh)
-        # x-4eac: the call counter. No agent could see its own spend, so the
+        # the call counter. No agent could see its own spend, so the
         # fleet's polls were invisible to the pollers. One stderr line on the
         # CLI path only - library callers read `_proc.GH_CALLS` directly.
         import sys

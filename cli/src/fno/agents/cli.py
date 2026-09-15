@@ -2178,7 +2178,7 @@ def cmd_spawn(
         )
         if guard.get("verdict") != "dispatchable":
             # `reason` FIRST, and detail as its own field. Both shell consumers
-            # read this line with `sed -n 's/.* reason=\([^ ;]*\).*/\1/p;q'`,
+            # read this line with `sed -n 's/.* reason=\([^;]*\).*/\1/p;q'`,
             # so whatever lands in `reason=` is the machine token they switch
             # on. `detail` is a prose sentence, and the acquire-race return sets
             # BOTH - so leading with detail put `node:<id>` in the slot, matched

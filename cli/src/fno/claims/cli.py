@@ -105,7 +105,7 @@ def _node_aware_root(key: str):
 
     Global-id kinds (``node:``/``dispatch:``/``reconcile:``/``session:``) route to
     the global ``~/.fno/claims`` so operator commands work without the env var
-  ; repo-local keys keep the cwd/env default. See
+; repo-local keys keep the cwd/env default. See
     :func:`fno.claims.io.claims_root_for` for the single source of truth.
     """
     from .io import claims_root_for

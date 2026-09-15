@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-deploy probe for the dispatch retask-first arm (x-3582).
+"""Post-deploy probe for the dispatch retask-first arm.
 
 Read-only. Reads the project events journal and the agents registry and
 verifies, inside the --since window, both halves of one reused dispatch:
