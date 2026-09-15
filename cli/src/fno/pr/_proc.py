@@ -64,8 +64,8 @@ def run(
     exit code rather than surfacing a Python traceback.
     """
     global GH_CALLS
-    # By basename, not raw argv[0]: the GraphQL broker spawns an absolute gh
-    # path (resolve_real_gh), and those spawns went uncounted (x-c770).
+    # By basename: the GraphQL broker spawns an absolute gh path, uncounted
+    # by a raw argv[0] match.
     if cmd and os.path.basename(str(cmd[0])) == "gh":
         GH_CALLS += 1
     try:

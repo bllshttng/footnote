@@ -208,9 +208,8 @@ def collect_failures(
     is the exact lie this module exists to stop. Capped at
     MAX_DETAILED_FAILURES with an explicit truncation entry.
 
-    `known` maps job id -> a prior entry for the SAME job (x-c770): a job id
-    is minted per attempt and a completed job's log never changes, so a known
-    id replays its entry and spends no log or job-object read.
+    `known` maps job id -> a prior entry for the SAME job, replayed with no
+    log or job-object read (a job id is minted per attempt).
     """
     out: list[dict] = []
     for check in list(failing)[:MAX_DETAILED_FAILURES]:

@@ -236,9 +236,8 @@ def _wait_review(
 def _spend_note(ticks: int, noun: str) -> str:
     """`note: N gh call(s) over T <noun> read(s) this invocation` + budget.
 
-    The tick count rides beside the call total (x-c770): `161 gh calls` over
-    27 ticks is a WHOLE WAIT, and a reader who took it for one status read
-    filed this node's title.
+    The tick count rides beside the call total: a whole wait never reads as
+    one read's spend.
     """
     from fno.pr import _proc, _quota
 

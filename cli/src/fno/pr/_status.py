@@ -720,16 +720,13 @@ def run_status(
     The exit code is always the CI verdict's code; review fields are additive
     and advisory, and `ready` conjoins them with `ready_blockers` naming the
     failed conjuncts (docs/architecture/pr-status-verdict.md, `run_status`).
-    `prior` is the same head's previous payload (the cache row being
-    refreshed): failure detail is reused by job id and rerun facts replay -
-    never across heads, since the key that carries the row includes the sha.
+    `prior` is the same head's previous payload; detail and rerun facts are
+    reused within one head only (docs, `Reuse across reads of one head`).
     """
     import sys
 
     prior_payload: dict = prior if isinstance(prior, dict) else {}
-    # Failure detail keyed by job id (x-c770): GitHub mints a new job id per
-    # attempt, so a reused entry always describes the job the rollup names
-    # now, and a completed job's log never changes.
+    # A job id is minted per attempt, so a known id is the same completed job.
     known: dict = {}
     for f in prior_payload.get("failures") or []:
         if isinstance(f, dict) and f.get("job_id"):
@@ -1005,12 +1002,8 @@ def run_status(
             coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
     owner_guidance = _review_owner_guidance(coverage, activity.worktree)
     # Rerun recovery, probed on every green read of a live PR (fail-open).
-    # Same-head reuse (x-c770): a recovery is history of one head - a new
-    # attempt cannot fail and then recover between two reads without the
-    # verdict or the check count changing first - so a prior green payload at
-    # this head and check count replays its rerun facts instead of re-reading
-    # attempts and jobs per run. `runs` hands over the listing `fetch_pr_rest`
-    # already read, so a miss reads it once, not twice.
+    # A recovery is history of one head (docs, `Reuse across reads of one
+    # head`); `runs` is the listing fetch_pr_rest already read.
     rerun = None
     if verdict == "green" and not is_terminal:
         head_sha = pr_json.get("headRefOid")

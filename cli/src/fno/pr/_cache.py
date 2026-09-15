@@ -214,9 +214,7 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
 
     slug_key = slug.replace("/", "--")
     if refresh:
-        # --refresh never asks the fleet ledger, so a budget note left by an
-        # earlier call in this process would describe a probe this read did
-        # not make.
+        # A budget note must never name a probe this read did not make.
         import fno.pr._quota as _quota
 
         _quota.LAST_BUDGET = None
@@ -276,10 +274,8 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
             real_stdout = sys.stdout
             sys.stdout = buf
             try:
-                # The row being refreshed is this HEAD's previous payload: its
-                # failure detail is reused by job id and its green rerun facts
-                # replay. The key carries the head sha, so a new head has no
-                # prior row and its first read fetches everything.
+                # This HEAD's previous payload: detail and rerun facts are
+                # reused within one head only (docs, `Reuse across reads`).
                 code = run_status(pr, cwd, prior=(row or {}).get("output"))
             finally:
                 sys.stdout = real_stdout
