@@ -97,6 +97,18 @@ def test_explicit_clear_keys_removes_the_doc_band(tmp_path):
     assert "difficulty" not in fields
 
 
+def test_repaint_keeps_the_doc_band(tmp_path):
+    """AC2-HP: the plan authors the band; a graph repaint never writes the
+    graph's band back over it."""
+    plan = _write_plan(tmp_path, _PLAN.replace("size: M", "size: M\ndifficulty: medium"))
+    node = {"difficulty": "low", "priority": "p1"}
+
+    assert project_node_to_plan(node, plan) is True  # priority mirrors, band does not
+    _, fields, _ = read_plan_file(plan)
+    assert fields["difficulty"] == "medium"
+    assert fields["priority"] == "p1"
+
+
 def test_missing_plan_path_warns_no_raise(tmp_path):
     node = {"priority": "p0"}
     assert project_node_to_plan(node, tmp_path / "does-not-exist.md") is False
@@ -308,7 +320,10 @@ def test_mirror_type_writes_an_operator_supplied_type(tmp_path):
     """
     plan = _write_plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
 
-    assert project_node_to_plan({"type": "epic"}, plan, mirror_type=True) is True
+    assert (
+        project_node_to_plan({"type": "epic"}, plan, mirror_keys=frozenset({"type"}))
+        is True
+    )
     _, fields, _ = read_plan_file(plan)
     assert fields["type"] == "epic"
 

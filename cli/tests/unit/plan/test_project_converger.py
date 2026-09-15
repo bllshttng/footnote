@@ -308,10 +308,66 @@ def test_mirror_type_is_scoped_to_the_named_node_not_the_fanout(tmp_path):
          "plan_path": str(sib), "blocked_by": [], "status": "ready"},
     ]
 
-    project_graph_nodes(entries, ["x-me"], root=str(tmp_path), mirror_type_for="x-me")
+    project_graph_nodes(
+        entries, ["x-me"], root=str(tmp_path), mirror_keys_for=("x-me", frozenset({"type"}))
+    )
 
     assert read_plan_file(me)[1]["type"] == "epic"  # the named node took it
     assert read_plan_file(sib)[1]["type"] == "bug"  # the sibling kept its own
+
+
+def test_sibling_repaint_keeps_the_doc_band(tmp_path):
+    """AC2-HP: any write under the parent repaints every sibling; difficulty is
+    authored by the plan, so the fan-out must never carry the graph band back."""
+    me = _plan(
+        tmp_path,
+        "me.md",
+        _CHILD.format(nid="me").replace("type: feature", "type: feature\ndifficulty: medium"),
+    )
+    sib = _plan(tmp_path, "sib.md", _CHILD.format(nid="sib"))
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": None, "status": "ready"},
+        {"id": "x-me", "slug": "me", "type": "feature", "parent": "x-epic",
+         "plan_path": str(me), "difficulty": "low", "blocked_by": [], "status": "ready"},
+        {"id": "x-sib", "slug": "sib", "type": "feature", "parent": "x-epic",
+         "plan_path": str(sib), "difficulty": "low", "blocked_by": [], "status": "ready"},
+    ]
+
+    project_graph_nodes(entries, ["x-sib"], root=str(tmp_path))  # the sibling's write
+
+    assert read_plan_file(me)[1]["difficulty"] == "medium"
+
+
+def test_difficulty_opt_in_is_scoped_to_the_named_node(tmp_path):
+    """AC2-ERR: `update <id> --difficulty` passes mirror_keys_for; the named
+    node's doc takes the band, a sibling keeps its own."""
+    me = _plan(
+        tmp_path,
+        "me.md",
+        _CHILD.format(nid="me").replace("type: feature", "type: feature\ndifficulty: high"),
+    )
+    sib = _plan(
+        tmp_path,
+        "sib.md",
+        _CHILD.format(nid="sib").replace("type: feature", "type: feature\ndifficulty: high"),
+    )
+    entries = [
+        {"id": "x-epic", "slug": "epic", "type": "epic", "plan_path": None, "status": "ready"},
+        {"id": "x-me", "slug": "me", "type": "feature", "parent": "x-epic",
+         "plan_path": str(me), "difficulty": "low", "blocked_by": [], "status": "ready"},
+        {"id": "x-sib", "slug": "sib", "type": "feature", "parent": "x-epic",
+         "plan_path": str(sib), "difficulty": "low", "blocked_by": [], "status": "ready"},
+    ]
+
+    project_graph_nodes(
+        entries,
+        ["x-me"],
+        root=str(tmp_path),
+        mirror_keys_for=("x-me", frozenset({"difficulty"})),
+    )
+
+    assert read_plan_file(me)[1]["difficulty"] == "low"  # the operator's band landed
+    assert read_plan_file(sib)[1]["difficulty"] == "high"  # the sibling kept its own
 
 
 def test_stale_scalar_waves_is_healed_on_an_epic(tmp_path):
