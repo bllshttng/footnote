@@ -7,22 +7,11 @@ docs/architecture/decision-record.md.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import typer
 
 from fno.decide import READ_HELP
-
-DECISION_ID_RE = re.compile(r"^d-[0-9a-f]{8}$")
-COORDINATION_MARKERS = (
-    "this pr",
-    "this node",
-    "this target",
-    "temporary",
-    "until merge",
-    "for this change",
-)
 
 
 class LawValidationError(RuntimeError):
@@ -41,17 +30,29 @@ def validate_durable_law(
     This is the classification the retired `prepare` step used to own. It stays
     because it is the one part of the ceremony that read the STATEMENT rather
     than the session: a coordination note recorded as law is a lie a later
-    reader cannot detect, and no amount of approval ritual fixes it.
+    reader cannot detect, and no amount of approval ritual fixes it. The four
+    statement rules and the node-id subject refusal live in the `law-match`
+    crate verb (mode validate); this wrapper is the fail-closed transport, and
+    an unavailable validator is a refusal, never a pass.
     """
-    if not subject.strip() or not decision.strip():
-        raise LawValidationError("subject and decision are required")
-    if not (rationale or "").strip():
-        raise LawValidationError("rationale is required for durable law")
-    lowered = decision.casefold()
-    if any(marker in lowered for marker in COORDINATION_MARKERS):
-        raise LawValidationError("the statement is coordination, not durable law")
-    if supersedes and not DECISION_ID_RE.fullmatch(supersedes):
-        raise LawValidationError("supersedes must be a decision id")
+    from fno.rust_binary import verb_call
+
+    try:
+        answer = verb_call(
+            "law-match",
+            {
+                "mode": "validate",
+                "subject": subject,
+                "decision": decision,
+                "rationale": rationale,
+                "supersedes": supersedes,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        raise LawValidationError(f"law validation is unavailable ({exc})") from exc
+    refusal = answer.get("refusal")
+    if refusal:
+        raise LawValidationError(refusal)
 
 
 law_app = typer.Typer(help="Record operator law in one call.")
