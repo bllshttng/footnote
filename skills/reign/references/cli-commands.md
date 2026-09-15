@@ -139,6 +139,8 @@ fno agents retask <blueprint-worker> --node <node>
 
 The retask receipt has separate `cleared`, `session_restamped`, `switch`, `switch_verified`, and `target_submit_confirmed` fields. `retasked` means the no-merge target submit was confirmed by the pane transport. `spawn_required` means the target coordinate cannot be switched in place. Any other refusal preserves the original pane for inspection, except where the receipt's `cleared` and `session_restamped` fields read true: a refusal that fires mid-transaction (after /clear, after rename, on a pane timeout) reports the pane's real state in those fields, and the pane it preserves is the cleared, renamed one.
 
+Autonomous dispatch runs this transaction first. `fno backlog advance` (the lane fill and the epic converge) retasks the earliest-finished blueprint worker on the same epic before it spawns a new planner. A refusal before /clear falls through to the cold spawn, and the `dispatch_spawned` event names it as `retask_fallthrough`.
+
 A receipt reading `queued (durable)` is NOT delivery. Verify by transcript content (`fno agents peek <handle>`), never by a roster field.
 
 Answer a message with `fno agents mail reply --to <msg-id>`. It threads the reply and resolves the sender itself. Never re-type a handle.
