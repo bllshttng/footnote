@@ -345,3 +345,170 @@ def test_grid_lane_for_pinned_model_without_a_row_declines(monkeypatch):
         None,
         "slot=operator-pin-override (a typed model/vendor/route outranks the lanes)",
     )
+
+
+# --- the blueprint reuse arm (x-3582) ---------------------------------------
+
+
+def _bp_settings(stage_harness: str = ""):
+    """The axis settings plus a blueprint profile: the resolver refuses a verb
+    its stage table cannot answer, and a blueprint dispatch resolves one."""
+    settings = _settings(stage_harness=stage_harness)
+    settings.agents.profiles["blueprint"] = SimpleNamespace(provider=stage_harness)
+    settings.dispatch.allowed_verbs = ["target", "blueprint"]
+    return settings
+
+
+def _reuse_seams(monkeypatch, *, candidate=None, receipt_row=None, verdict="dispatchable"):
+    """Stub every seam the reuse arm touches; record calls for the assertions."""
+    seen: dict = {"retask_calls": [], "releases": []}
+
+    def fake_planner(entries, **kw):
+        seen["planner_kw"] = kw
+        return candidate
+
+    def fake_guard(node_id, holder, **kw):
+        seen["guard"] = {"node_id": node_id, "holder": holder, **kw}
+        if verdict != "dispatchable":
+            return {"verdict": verdict, "reason": "reservation-held"}, 0
+        return {
+            "verdict": "dispatchable",
+            "reservation_key": f"dispatch:{node_id}",
+            "reservation_holder": holder,
+            "node_claim_key": f"node:{node_id}",
+            "node_claim_holder": kw["handover_holder"],
+        }, 0
+
+    def fake_release(*claims):
+        seen["releases"] = list(claims)
+
+    def fake_retask(worker, **kw):
+        seen["retask_calls"].append({"worker": worker, **kw})
+        return receipt_row
+
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [
+            {"id": "x-e1"},
+            {"id": "x-aaaa", "parent": "x-e1"},
+            {"id": "x-bbbb", "parent": "x-e1"},
+        ],
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+    monkeypatch.setattr("fno.agents.retask.finished_planner", fake_planner)
+    monkeypatch.setattr("fno.agents.cli._spawn_guard_decision", fake_guard)
+    monkeypatch.setattr("fno.agents.cli._release_dispatch_claims", fake_release)
+    monkeypatch.setattr("fno.agents.retask.run_retask", fake_retask)
+    return seen
+
+
+def test_blueprint_dispatch_retasks_a_finished_planner_and_spawns_nothing(
+    monkeypatch, tmp_path
+):
+    """AC1-HP: the reused planner's session id is the launch proof; the row
+    names the transaction, and no spawn subprocess runs."""
+    captured = _capture(monkeypatch, _bp_settings(stage_harness="codex"))
+    seen = _reuse_seams(
+        monkeypatch,
+        candidate=SimpleNamespace(name="ac-bp-x-aaaa-slug", substrate="thread"),
+        receipt_row={
+            "status": "retasked",
+            "cleared": True,
+            "current_session_id": "1a2b3c4d-1111-2222-3333-444455556666",
+            "registry_name": "bp-x-bbbb-renamed",
+        },
+    )
+    ev = tmp_path / "events.jsonl"
+    got = advance._spawn_worker(
+        "x-bbbb", None, "slug", verb="blueprint", caller="advance", events_path=ev
+    )
+    assert got == "1a2b3c4d-1111-2222-3333-444455556666"
+    assert "cmd" not in captured, "a reuse dispatch must not spawn"
+    rows = _rows(ev, "dispatch_spawned")
+    assert len(rows) == 1
+    data = rows[0]["data"]
+    assert data["retask"] == "retasked"
+    assert data["reused_worker"] == "ac-bp-x-aaaa-slug"
+    assert data["short_id"] == "1a2b3c4d-1111-2222-3333-444455556666"
+    assert data["agent_name"] == "bp-x-bbbb-renamed"
+    assert data["substrate"] == "thread"
+    assert data["caller"] == "advance"
+    assert seen["retask_calls"][0]["worker"] == "ac-bp-x-aaaa-slug"
+
+
+def test_retask_refused_before_clear_falls_through_to_one_cold_spawn(
+    monkeypatch, tmp_path
+):
+    """AC1-ERR: the pre-/clear refusal is named on the cold row, the guard's
+    claims are released, and exactly one cold spawn runs."""
+    captured = _capture(monkeypatch, _bp_settings())
+    seen = _reuse_seams(
+        monkeypatch,
+        candidate=SimpleNamespace(name="ac-bp-x-aaaa-slug", substrate="thread"),
+        receipt_row={
+            "status": "refused",
+            "cleared": False,
+            "reason": "thread_view_unavailable",
+        },
+    )
+    ev = tmp_path / "events.jsonl"
+    advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev)
+    assert "cmd" in captured, "the refusal falls through to one cold spawn"
+    data = _rows(ev, "dispatch_spawned")[0]["data"]
+    assert data["retask_fallthrough"] == "ac-bp-x-aaaa-slug: thread_view_unavailable"
+    assert "retask" not in data
+    keys = {pair[0] for pair in seen["releases"]}
+    assert keys == {"dispatch:x-bbbb", "node:x-bbbb"}
+
+
+def test_retask_refused_after_clear_raises_and_spawns_nothing(monkeypatch, tmp_path):
+    """AC1-EDGE: a refusal after /clear leaves a blank renamed row; the arm
+    raises instead of cold-spawning over it."""
+    captured = _capture(monkeypatch, _bp_settings())
+    _reuse_seams(
+        monkeypatch,
+        candidate=SimpleNamespace(name="ac-bp-x-aaaa-slug", substrate="thread"),
+        receipt_row={"status": "refused", "cleared": True, "reason": "rename_refused"},
+    )
+    ev = tmp_path / "events.jsonl"
+    with pytest.raises(advance.SpawnError) as exc:
+        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev)
+    assert "ac-bp-x-aaaa-slug" in str(exc.value)
+    assert "rename_refused" in str(exc.value)
+    assert "cmd" not in captured
+    assert _rows(ev, "dispatch_spawned") == []
+
+
+def test_guard_refusal_skips_as_already_running_without_retask(monkeypatch, tmp_path):
+    """AC2-ERR: a non-dispatchable guard verdict is the benign already-running
+    skip, before the retask transaction is ever tried."""
+    captured = _capture(monkeypatch, _bp_settings())
+    seen = _reuse_seams(
+        monkeypatch,
+        candidate=SimpleNamespace(name="ac-bp-x-aaaa-slug", substrate="thread"),
+        receipt_row={"status": "retasked", "current_session_id": "s", "registry_name": "r"},
+        verdict="already-running",
+    )
+    with pytest.raises(advance.SpawnAlreadyRunning) as exc:
+        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint")
+    assert "reservation-held" in str(exc.value)
+    assert not seen["retask_calls"]
+    assert "cmd" not in captured
+
+
+def test_target_dispatch_never_reads_the_registry_for_reuse(monkeypatch, tmp_path):
+    """AC3-HP: a target dispatch keeps today's shape; no reuse read, no
+    retask keys on the row."""
+    captured = _capture(monkeypatch, _settings())
+
+    def _boom(*_a, **_kw):
+        raise AssertionError("reuse read on a target dispatch")
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
+    monkeypatch.setattr("fno.agents.retask.finished_planner", _boom)
+    ev = tmp_path / "events.jsonl"
+    advance._spawn_worker("x-0000", None, "slug", events_path=ev)
+    assert "cmd" in captured
+    data = _rows(ev, "dispatch_spawned")[0]["data"]
+    assert "retask" not in data
+    assert "retask_fallthrough" not in data

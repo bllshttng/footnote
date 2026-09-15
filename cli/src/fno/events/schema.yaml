@@ -4219,7 +4219,7 @@ event_types:
           description: "The --dispatch-account argv value: the account RECORD id whose credentials the worker runs on, empty when no cutover pinned one. A fifth axis, distinct from harness, vendor and model. A record whose config points at the wrong login makes every other field name a lane it did not bill, and that is unreadable from the file unless the record id is here."
         substrate:
           type: string
-          description: "The resolved substrate: thread (persistent, attachable) or headless (one-shot). pane is not an autonomous lane."
+          description: "The resolved substrate: thread (persistent, attachable) or headless (one-shot) on a cold spawn; a retasked dispatch carries the reused worker's own lane (pane or thread)."
         command:
           type: string
           description: "The dispatched message exactly as sent, with {id} substituted and spelled for the resolved harness (`/target ...` on claude/opencode, `$fno:target ...` on codex)."
