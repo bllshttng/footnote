@@ -86,7 +86,7 @@ impl Scratch {
             )
             .env("FNO_E2E", "1")
             .env("FNO_PROCESS_ADMISSION_MAX", "512");
-        // x-7447: a server this command autospawns inherits the env and passes
+        // A server this command autospawns inherits the env and passes
         // it to every `fno-agents-worker` keeper it launches, so the keeper's
         // watchdog reaps it when this test binary exits. Applied after the
         // FNO_* strip above; a later explicit .env still overrides.
@@ -117,7 +117,7 @@ impl Scratch {
         );
         cmd.env("FNO_E2E", "1");
         cmd.env("FNO_PROCESS_ADMISSION_MAX", "512");
-        // x-7447, same contract as isolate_command: the autospawned server
+        // Same contract as isolate_command: the autospawned server
         // inherits this and its keepers reap on this test binary's exit.
         // CommandBuilder has no batch envs(); apply the pair one call each.
         for (k, v) in test_owner::self_owner_env() {
@@ -706,7 +706,7 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
         "FNO_GLOBAL_SETTINGS_PATH",
         iso.join("iso-cfg").join("settings.json"),
     );
-    // x-7447: the server launches `fno-agents-worker` keepers by inheriting
+    // The server launches `fno-agents-worker` keepers by inheriting
     // its env (launch_keeper does not filter), so the owner reaches the keeper
     // and its watchdog reaps the keeper when this test binary exits. The
     // `envs` slice below still overrides - the owner-death control test pins

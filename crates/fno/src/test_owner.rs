@@ -1,5 +1,5 @@
 //! The test-owner identity the fno-agents-worker watchdog reads from
-//! FNO_TEST_OWNER_PID/FNO_TEST_OWNER_BIRTH (x-7447): a test-spawned server
+//! FNO_TEST_OWNER_PID/FNO_TEST_OWNER_BIRTH: a test-spawned server
 //! passes it to every keeper it launches, so the keeper reaps when the test
 //! run ends instead of orphaning as a ppid-1 pane keeper for hours.
 //!

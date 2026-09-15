@@ -1,5 +1,5 @@
 //! A keeper-hosted pane spawned by this crate's tests must die with the test
-//! run (x-7447: fourteen `fno-agents-worker --pane` processes with ppid 1 and
+//! run (fourteen `fno-agents-worker --pane` processes with ppid 1 and
 //! `--session test` ran for hours on fno-mux-test-* sockets). The worker's
 //! watchdog already exists (FNO_TEST_OWNER_PID/BIRTH, the fno-agents crate's
 //! PR 1992); what was missing was the plumbing - this crate's test harness
