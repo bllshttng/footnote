@@ -208,11 +208,10 @@ def test_map_covers_current_surface_once():
     # declared-vs-measured sweep verb (refs 0): 628 -> 629.
     # x-cf8f allocates `evals trend` and `doctor evals trend`, the
     # windowed-trend readback (a zero-flag leaf: the Python flag surface
-    # never grows, so --trend on `report` was refused by the flag ratchet),
-    # plus `agents evals-arm`, the native scheduled writer's help entry the
-    # direct-dispatch registration projects (its client.rs action is
-    # transport-only under d-fe66560a and takes no ALL_CLIENT_ACTIONS entry):
-    # counted from the merged file, 624 -> 627.
+    # never grows, so --trend on `report` was refused by the flag ratchet).
+    # The native evals-arm scheduled writer takes NO row: it is
+    # transport-only under d-fe66560a and its surface is never advertised.
+    # Counted from the merged file, 624 -> 626.
     # x-f743 allocates `backlog notes`, the verbatim forwarder to the native
     # `backlog-notes` reader: 629 -> 630. The graph cutover's flip verb
     # allocates `doctor graph backend` (refs 0): counted from the merged
@@ -227,7 +226,7 @@ def test_map_covers_current_surface_once():
     # it allocates no row: counted from the merged file, 624. (The
     # backlog-update patch door is likewise transport-only and takes no
     # row.)
-    assert len(mapped) == 627, (
+    assert len(mapped) == 626, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
