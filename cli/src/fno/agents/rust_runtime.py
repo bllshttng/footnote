@@ -772,9 +772,11 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "Sequence[str]":
     from fno.agents.spawn_defaults import _seed_of, replace_seed
 
     node = _spawn_flag_value(args, "--node")
-    if not node:
-        return args
-    if _is_crown_bearing_spawn("spawn", args) or _is_resume_bearing_spawn("spawn", args):
+    if (
+        not node
+        or _is_crown_bearing_spawn("spawn", args)
+        or _is_resume_bearing_spawn("spawn", args)
+    ):
         return args
     seed = _seed_of(list(args[1:]))
     if not (seed or "").strip():
@@ -784,9 +786,7 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "Sequence[str]":
     except DispatchResolveError as exc:
         print(f"fno agents spawn: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    if new is None:
-        return args
-    return replace_seed(list(args), new)
+    return args if new is None else replace_seed(list(args), new)
 
 
 def _refuse_lost_verb_payload(args: "Sequence[str]") -> None:

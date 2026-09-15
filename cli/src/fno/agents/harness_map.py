@@ -699,13 +699,11 @@ def lost_verb_refusal(message: str) -> Optional[str]:
     """The refusal for a payload whose ``$fno:`` prefix the calling shell ate,
     or None when the payload is intact.
 
-    Inside double quotes a shell expands ``$fno`` to nothing before fno runs.
-    bash leaves ``:target``; zsh leaves ``arget``. The worker reads either as
-    prose, and the spawn still returns a live receipt, so the loss shows up
-    an hour later as a worker that did not run the verb.
-
-    The zsh shape is matched only for verbs longer than four letters: the
-    short remainders (``dd``, ``aw``) are ordinary words."""
+    Inside double quotes a shell expands ``$fno`` to nothing before fno runs:
+    bash leaves ``:target``, zsh leaves ``arget``. The worker reads either as
+    prose and the spawn still returns a live receipt, so the loss surfaces an
+    hour later as a worker that never ran the verb. The zsh shape matches only
+    verbs longer than four letters: the short remainders are ordinary words."""
     verbs = set(footnote_verbs()) | {v[1:] for v in _TARGET_FAMILY_VERBS}
     lost = {":" + v: v for v in verbs}
     lost.update({v[1:]: v for v in verbs if len(v) > 4 and v[0] in _ZSH_EATEN_LETTERS})
@@ -1346,13 +1344,11 @@ def resolve_effective_verb(
 ) -> tuple[Optional[str], str]:
     """The target/blueprint lifecycle conditional; full table:
     docs/architecture/backlog-graph-verb-contracts.md. Intake (rung "none"):
-    difficulty decides. Re-dispatch: the plan rung decides. The stored
+    difficulty decides; re-dispatch: the plan rung decides. The stored
     ``verb`` reconciles through the table; out-of-family abstains to declared
     precedence. Returns ``(canonical_verb, decision)``; ``None`` = abstain.
     Raises :class:`DispatchResolveError` on a refusal rung, or planless
-    without low/medium/high difficulty. ``plan_rung`` is a Rung value. The
-    refusal leads with ``node_id`` when the caller holds one, so the subject
-    of the failure is never read off a citation."""
+    without low/medium/high difficulty."""
     raw_verb = (verb or "").strip()
     if parse_verb_token(raw_verb):
         raw_verb = canonical_verb_key(raw_verb)
@@ -1408,14 +1404,13 @@ def node_seed(
         )
     from fno.graph.ladder import plan_rung as _node_plan_rung
 
-    stored = rec.get("dispatch_verb")
-    stored_verb = str(stored or "").strip() or None
+    stored_verb = str(rec.get("dispatch_verb") or "").strip() or None
     rung = _node_plan_rung(rec).value
     derived, note = resolve_effective_verb(
         verb=stored_verb, difficulty=rec.get("difficulty"), plan_rung=rung
     )
-    effective = derived or _canonical_verb(stored_verb or "")
     if lead is not None:
+        effective = derived or _canonical_verb(stored_verb or "")
         if effective is not None and lead != effective:
             raise DispatchResolveError(
                 f"payload verb {lead} disagrees with {node_id}'s verb "
@@ -1423,16 +1418,11 @@ def node_seed(
                 "--node supplies it"
             )
         return None
-    command = resolve_dispatch(
-        harness="claude",
-        node_id=node_id,
-        verb=stored_verb,
-        difficulty=rec.get("difficulty"),
-        plan_rung=rung,
-        merge_posture="from-config",
-        trigger="attended",
-    )["command"]
-    return f"{command}\n\n{text}" if text else command
+    return resolve_dispatch(
+        harness="claude", node_id=node_id, verb=stored_verb,
+        difficulty=rec.get("difficulty"), plan_rung=rung,
+        merge_posture="from-config", trigger="attended",
+    )["command"] + (f"\n\n{text}" if text else "")
 
 
 def resolve_dispatch(
