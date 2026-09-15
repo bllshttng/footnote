@@ -1,8 +1,9 @@
-"""Unit tests for ``fno doctor graph backend`` (task 10.1). The soak
-evidence read lives in Rust (``backlog::soak_gaps``, tested there); the
-source-tree gates run from scripts/ci/check-graph-flip-gates.sh. Here the
-flip verbs run against a real keeper on a temp graph with the gate seam
-stubbed, so the operator's live graph and config are never touched."""
+"""Unit tests for ``fno doctor graph backend``. The soak evidence read
+lives in Rust (``backlog::soak_gaps``, tested there); the negative control
+runs in-process and the tree checks (reader census, writer ratchet, table
+ownership) run in CI. Here the flip verbs run against a real keeper on a
+temp graph with the gate seam stubbed, so the operator's live graph and
+config are never touched."""
 
 from __future__ import annotations
 
@@ -69,7 +70,7 @@ def world(tmp_path, monkeypatch):
         lambda key, value, **k: config_sets.append((key, value)),
     )
     monkeypatch.setattr(
-        doctor_graph, "_gate_gaps", lambda client, root: list(gaps)
+        doctor_graph, "_gate_gaps", lambda client: list(gaps)
     )
     return {
         "graph": graph,
@@ -134,24 +135,32 @@ def test_status_prints_the_status_line(world, capsys):
     assert " days=0 keepers=" in out
 
 
-def test_gate_gaps_unions_keeper_and_script_gaps(tmp_path, monkeypatch):
-    """Keeper gap lines and the gate script's `flip-gate: FAIL:` lines both
-    land in the refusal list; a crashed script is a gap of its own."""
+def test_status_prints_one_gate_line_per_gap(world, capsys):
+    # AC15-HP: the status read prints one gate line per keeper gap and
+    # changes nothing; with no gap it reads `gate: soak clean`.
+    doctor_graph._flip("sqlite")
+    capsys.readouterr()
+    world["gaps"].append("soak clean since 2026-09-15 is 1 day(s) old; the soak needs 7")
+    doctor_graph.graph_backend("status")
+    out = capsys.readouterr().out
+    assert (
+        "gate: soak clean since 2026-09-15 is 1 day(s) old; the soak needs 7\n" in out
+    ), out
+    world["gaps"].clear()
+    doctor_graph.graph_backend("status")
+    out = capsys.readouterr().out
+    assert "gate: soak clean\n" in out, out
+
+
+def test_gate_gaps_unions_keeper_and_negative_control_gaps(monkeypatch):
+    """Keeper gap lines and a failed in-process negative control both land
+    in the refusal list."""
 
     class FakeClient:
         def request(self, method, params):
             assert method == "backend_gate"
             return {"gaps": ["keeper gap"]}
 
-    class FakeProc:
-        returncode = 1
-        stdout = "noise\nflip-gate: FAIL: reader census verbs failed\n"
-        stderr = ""
-
-    monkeypatch.setattr(
-        doctor_graph.subprocess,
-        "run",
-        lambda *a, **k: FakeProc(),
-    )
-    gaps = doctor_graph._gate_gaps(FakeClient(), tmp_path)
-    assert gaps == ["keeper gap", "reader census verbs failed"]
+    monkeypatch.setattr("fno.graph.parity.negative_control", lambda **k: 1)
+    gaps = doctor_graph._gate_gaps(FakeClient())
+    assert gaps == ["keeper gap", "negative control failed"]
