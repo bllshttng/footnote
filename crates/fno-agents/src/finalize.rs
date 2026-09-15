@@ -1857,7 +1857,7 @@ pub(crate) fn repo_identity_from_git_remote(cwd: &Path) -> Option<String> {
 /// `remote.origin.url` slug for `cwd` - stable across worktrees and clones.
 /// Best-effort: any git failure or missing remote returns None so the caller
 /// falls through to the basename.
-fn slug_from_git_remote(cwd: &Path) -> Option<String> {
+pub(crate) fn slug_from_git_remote(cwd: &Path) -> Option<String> {
     let url = git_capture(cwd, &["config", "--get", "remote.origin.url"])?;
     slug_from_remote_url(&url)
 }

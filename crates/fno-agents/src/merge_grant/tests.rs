@@ -1,0 +1,472 @@
+//! Pure tests over JSON entries, a claim closure and a `LiveConfig` literal.
+//! Ported from `cli/tests/unit/test_pr_merge_grant.py` (the resolver suite)
+//! under each test's name, without the `test_` prefix; the queue and op
+//! tests are new here.
+
+use super::*;
+use serde_json::json;
+use std::path::PathBuf;
+
+const NODE: &str = "ab-grantunit1";
+const PR: i64 = 42;
+
+fn receipt(approved: bool, source: &str, at: &str) -> Value {
+    json!({"approved": approved, "source": source, "recorded_by": "spawner", "recorded_at": at})
+}
+
+fn do_row(grant: Option<Value>, session: &str) -> Value {
+    let mut row = json!({
+        "phase": "do",
+        "harness": "claude",
+        "session_id": session,
+        "started_at": "2026-08-24T11:00:00Z",
+    });
+    if let Some(g) = grant {
+        row["merge_grant"] = g;
+    }
+    row
+}
+
+fn node_with(id: &str, pr: i64, sessions: Vec<Value>) -> Value {
+    json!({"id": id, "title": "t", "pr_number": pr, "sessions": sessions})
+}
+
+fn live() -> LiveConfig {
+    LiveConfig {
+        enabled: true,
+        grant_dispatch: true,
+        floor_block: None,
+    }
+}
+
+fn cfg_off() -> LiveConfig {
+    LiveConfig {
+        enabled: false,
+        grant_dispatch: true,
+        floor_block: None,
+    }
+}
+
+fn grant_not_dispatch() -> LiveConfig {
+    LiveConfig {
+        enabled: true,
+        grant_dispatch: false,
+        floor_block: None,
+    }
+}
+
+fn below_floor() -> LiveConfig {
+    LiveConfig {
+        enabled: true,
+        grant_dispatch: true,
+        floor_block: Some(
+            "auto-merge refused: review.posture resolves to no_review (rank 1), \
+below the merge floor self_review (rank 3)."
+                .to_string(),
+        ),
+    }
+}
+
+/// Everything else reads Stale: the Python fixture's default claim state.
+fn claims_of(pairs: Vec<(&str, ClaimState)>) -> impl Fn(&str) -> ClaimState + use<'_> {
+    move |k: &str| {
+        pairs
+            .iter()
+            .find(|(key, _)| *key == k)
+            .map(|(_, s)| *s)
+            .unwrap_or(Stale)
+    }
+}
+
+fn stale_claims() -> impl Fn(&str) -> ClaimState {
+    claims_of(vec![])
+}
+
+fn verdict(
+    entries: &[Value],
+    claim: &dyn Fn(&str) -> ClaimState,
+    cfg: &dyn Fn() -> LiveConfig,
+) -> Verdict {
+    verdict_for_pr(entries, PR, None, claim, cfg)
+}
+
+// --- AC10-HP: the granted path -------------------------------------------
+
+#[test]
+fn granted_when_receipt_unheld_and_config_dispatches() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![do_row(
+            Some(receipt(true, "config", "2026-08-24T12:00:00Z")),
+            "w1",
+        )],
+    )];
+    let v = verdict(&entries, &stale_claims(), &live);
+    assert_eq!(v.state, GRANTED);
+    assert_eq!(v.node_id.as_deref(), Some(NODE));
+    assert_eq!(v.claim_state.as_deref(), Some("stale"));
+    assert_eq!(
+        v.grant.expect("grant rides a granted verdict")["approved"],
+        json!(true)
+    );
+}
+
+#[test]
+fn free_claim_is_also_positively_not_live() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![do_row(
+            Some(receipt(true, "config", "2026-08-24T12:00:00Z")),
+            "w1",
+        )],
+    )];
+    assert_eq!(verdict(&entries, &stale_claims(), &live).state, GRANTED);
+}
+
+#[test]
+fn below_floor_posture_holds_even_a_valid_grant() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![do_row(
+            Some(receipt(true, "config", "2026-08-24T12:00:00Z")),
+            "w1",
+        )],
+    )];
+    let v = verdict(&entries, &stale_claims(), &below_floor);
+    assert_eq!(v.state, HELD);
+    assert!(v.reason.contains("below the merge floor"), "{}", v.reason);
+    assert!(v.reason.contains("no_review"), "{}", v.reason);
+}
+
+#[test]
+fn non_canonical_receipt_stamp_reads_unknown() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![do_row(
+            Some(receipt(true, "config", "2026-09-02T10:00:00+00:00")),
+            "w1",
+        )],
+    )];
+    let v = verdict(&entries, &stale_claims(), &live);
+    assert_eq!(v.state, UNKNOWN);
+    assert!(v.reason.contains("canonical"), "{}", v.reason);
+}
+
+// --- AC9-EDGE: newest explicit receipt wins, by recorded_at not row order -
+
+#[test]
+fn newer_refusal_outranks_older_grant() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![
+            do_row(Some(receipt(true, "config", "2026-08-24T10:00:00Z")), "w0"),
+            do_row(
+                Some(receipt(false, "no-merge-flag", "2026-08-24T12:00:00Z")),
+                "w1",
+            ),
+        ],
+    )];
+    let v = verdict(&entries, &stale_claims(), &live);
+    assert_eq!(v.state, REFUSED);
+    assert!(v.reason.contains("no-merge-flag"), "{}", v.reason);
+}
+
+#[test]
+fn newer_grant_outranks_older_refusal() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![
+            do_row(
+                Some(receipt(false, "no-merge-flag", "2026-08-24T10:00:00Z")),
+                "w0",
+            ),
+            do_row(Some(receipt(true, "config", "2026-08-24T12:00:00Z")), "w1"),
+        ],
+    )];
+    assert_eq!(verdict(&entries, &stale_claims(), &live).state, GRANTED);
+}
+
+#[test]
+fn row_order_never_decides() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![
+            do_row(
+                Some(receipt(false, "no-merge-flag", "2026-08-24T12:00:00Z")),
+                "w1",
+            ),
+            do_row(Some(receipt(true, "config", "2026-08-24T10:00:00Z")), "w0"),
+        ],
+    )];
+    assert_eq!(verdict(&entries, &stale_claims(), &live).state, REFUSED);
+}
+
+#[test]
+fn disagreeing_newest_receipts_at_one_instant_never_grant() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![
+            do_row(Some(receipt(true, "config", "2026-08-24T12:00:00Z")), "w0"),
+            do_row(Some(receipt(false, "config", "2026-08-24T12:00:00Z")), "w1"),
+        ],
+    )];
+    assert_eq!(verdict(&entries, &stale_claims(), &live).state, UNKNOWN);
+}
+
+// --- AC10-CON: liveness and standing config hold the merge ----------------
+
+#[test]
+fn live_or_suspect_claim_holds() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![do_row(
+            Some(receipt(true, "config", "2026-08-24T12:00:00Z")),
+            "w1",
+        )],
+    )];
+    for state in [Live, Suspect] {
+        let v = verdict(&entries, &claims_of(vec![(NODE, state)]), &live);
+        assert_eq!(v.state, HELD, "{state:?} must hold");
+        assert!(
+            v.reason
+                .contains(&format!("node claim is {}", state.as_str())),
+            "{}",
+            v.reason
+        );
+    }
+}
+
+#[test]
+fn corrupt_claim_is_unknown_not_held() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![do_row(
+            Some(receipt(true, "config", "2026-08-24T12:00:00Z")),
+            "w1",
+        )],
+    )];
+    assert_eq!(
+        verdict(&entries, &claims_of(vec![(NODE, Corrupted)]), &live).state,
+        UNKNOWN
+    );
+}
+
+#[test]
+fn config_switched_off_holds_even_with_receipt() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![do_row(
+            Some(receipt(true, "config", "2026-08-24T12:00:00Z")),
+            "w1",
+        )],
+    )];
+    assert_eq!(verdict(&entries, &stale_claims(), &cfg_off).state, HELD);
+}
+
+#[test]
+fn non_dispatch_grant_holds() {
+    let entries = vec![node_with(
+        NODE,
+        PR,
+        vec![do_row(
+            Some(receipt(true, "config", "2026-08-24T12:00:00Z")),
+            "w1",
+        )],
+    )];
+    assert_eq!(
+        verdict(&entries, &stale_claims(), &grant_not_dispatch).state,
+        HELD
+    );
+}
+
+// --- Absence and ambiguity never grant ------------------------------------
+
+#[test]
+fn no_graph_node_is_absent() {
+    assert_eq!(verdict(&[], &stale_claims(), &live).state, ABSENT);
+}
+
+#[test]
+fn node_without_receipts_is_absent() {
+    let entries = vec![node_with(NODE, PR, vec![do_row(None, "w1")])];
+    assert_eq!(verdict(&entries, &stale_claims(), &live).state, ABSENT);
+}
+
+#[test]
+fn two_nodes_on_one_pr_is_unknown() {
+    let entries = vec![
+        json!({"id": "ab-grantunit1", "title": "a", "pr_number": PR}),
+        json!({"id": "ab-grantunit2", "title": "b", "pr_number": PR}),
+    ];
+    assert_eq!(verdict(&entries, &stale_claims(), &live).state, UNKNOWN);
+}
+
+// --- AC12-ERR: malformed receipts are loud unknowns ------------------------
+
+#[test]
+fn malformed_receipt_is_unknown() {
+    let bads = [
+        json!({"approved": true, "source": "config", "recorded_by": "s"}),
+        json!({"approved": true, "source": "config", "recorded_by": "s",
+               "recorded_at": "2026-08-24T12:00:00Z", "extra": 1}),
+        json!({"approved": "yes", "source": "config", "recorded_by": "s",
+               "recorded_at": "2026-08-24T12:00:00Z"}),
+        json!({"approved": true, "source": "config", "recorded_by": "s",
+               "recorded_at": "yesterday"}),
+    ];
+    for bad in &bads {
+        let entries = vec![node_with(NODE, PR, vec![do_row(Some(bad.clone()), "w1")])];
+        let v = verdict(&entries, &stale_claims(), &live);
+        assert_eq!(v.state, UNKNOWN, "{bad}");
+    }
+}
+
+// --- The queue --------------------------------------------------------------
+
+fn queue_node(id: &str, pr: i64, extra: Value) -> Value {
+    let mut n = json!({
+        "id": id,
+        "title": "t",
+        "pr_number": pr,
+        "pr_url": format!("https://github.com/owner/repo/pull/{pr}"),
+        "cwd": "/checkouts/one",
+        "sessions": [do_row(Some(receipt(true, "config", "2026-08-24T12:00:00Z")), "w1")],
+    });
+    for (k, v) in extra.as_object().expect("extra is an object") {
+        n[k.as_str()] = v.clone();
+    }
+    n
+}
+
+fn root_from_cwd(entry: &Value) -> Option<PathBuf> {
+    entry.get("cwd").and_then(Value::as_str).map(PathBuf::from)
+}
+
+fn drain(entries: &[Value], claims: &dyn Fn(&str) -> ClaimState) -> Value {
+    queue_from_entries(entries, claims, &root_from_cwd, &|_p| live())
+}
+
+#[test]
+fn queue_holds_only_granted_rows_and_counts_every_verdict() {
+    let entries = vec![
+        queue_node("ab-grantone", 1, json!({})),
+        queue_node("ab-grantlive", 2, json!({})),
+        queue_node("ab-grantsup", 3, json!({"status": "superseded"})),
+        queue_node("ab-grantmerged", 4, json!({"merge_status": "merged"})),
+        json!({"id": "ab-grantless", "title": "t", "pr_number": 5,
+               "pr_url": "https://github.com/owner/repo/pull/5",
+               "cwd": "/checkouts/one", "sessions": [do_row(None, "w1")]}),
+    ];
+    let claims = claims_of(vec![("ab-grantone", Free), ("ab-grantlive", Live)]);
+    let out = drain(&entries, &claims);
+    assert_eq!(out["candidates"], json!(2), "{out}");
+    assert_eq!(out["verdicts"]["granted"], json!(1), "{out}");
+    assert_eq!(out["verdicts"]["held"], json!(1), "{out}");
+    let queue = out["queue"].as_array().expect("queue is an array");
+    assert_eq!(queue.len(), 1, "{out}");
+    let row = &queue[0];
+    assert_eq!(row["node_id"], json!("ab-grantone"));
+    assert_eq!(row["pr"], json!(1));
+    assert_eq!(row["repo_slug"], json!("owner/repo"));
+    assert_eq!(row["cwd"], json!("/checkouts/one"));
+    let grant = row["grant"].as_object().expect("grant is an object");
+    let mut keys: Vec<String> = grant.keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec![
+            "recorded_at".to_string(),
+            "recorded_by".to_string(),
+            "source".to_string()
+        ],
+        "grant carries exactly the three writer keys"
+    );
+}
+
+#[test]
+fn queue_skips_superseded_merged_closed_and_grantless_nodes() {
+    let entries = vec![
+        queue_node("ab-sup", 1, json!({"status": "superseded"})),
+        queue_node("ab-merged", 2, json!({"merge_status": "merged"})),
+        queue_node("ab-closed", 3, json!({"merge_status": "closed"})),
+        json!({"id": "ab-none", "title": "t", "pr_number": 4,
+               "pr_url": "https://github.com/owner/repo/pull/4",
+               "cwd": "/checkouts/one", "sessions": [do_row(None, "w1")]}),
+    ];
+    let out = drain(&entries, &stale_claims());
+    assert_eq!(out["candidates"], json!(0), "{out}");
+    assert_eq!(out["queue"], json!([]), "{out}");
+}
+
+#[test]
+fn queue_counts_a_missing_slug_or_checkout_as_unknown() {
+    let entries = vec![
+        json!({"id": "ab-noslug", "title": "t", "pr_number": 1, "cwd": "/checkouts/one",
+               "sessions": [do_row(Some(receipt(true, "config", "2026-08-24T12:00:00Z")), "w1")]}),
+        json!({"id": "ab-nocwd", "title": "t", "pr_number": 2,
+               "pr_url": "https://github.com/owner/repo/pull/2",
+               "sessions": [do_row(Some(receipt(true, "config", "2026-08-24T12:00:00Z")), "w1")]}),
+    ];
+    let out = drain(&entries, &stale_claims());
+    assert_eq!(out["candidates"], json!(2), "{out}");
+    assert_eq!(out["verdicts"]["unknown"], json!(2), "{out}");
+    assert_eq!(out["queue"], json!([]), "{out}");
+}
+
+#[test]
+fn repo_slug_from_pr_url_reads_owner_and_repo() {
+    assert_eq!(
+        repo_slug_from_pr_url("https://github.com/owner/repo/pull/7").as_deref(),
+        Some("owner/repo")
+    );
+    assert_eq!(
+        repo_slug_from_pr_url("https://github.com/owner/repo/pull/7#issuecomment-1").as_deref(),
+        Some("owner/repo")
+    );
+    assert_eq!(
+        repo_slug_from_pr_url("https://gitlab.com/o/r/-/merge_requests/1"),
+        None
+    );
+    assert_eq!(repo_slug_from_pr_url("nope"), None);
+}
+
+// --- The ops ----------------------------------------------------------------
+
+#[test]
+fn unreadable_graph_reads_unknown_and_the_queue_reads_error() {
+    let verdict = verdict_op(
+        Err("bad json".to_string()),
+        &json!({"pr": PR, "cwd": "/tmp"}),
+    );
+    let v: Value = serde_json::from_str(&verdict).expect("verdict is json");
+    assert_eq!(v["state"], json!(UNKNOWN));
+    assert!(
+        v["reason"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("graph unreadable"),
+        "{}",
+        v["reason"]
+    );
+    let queue = queue_op(Err("bad json".to_string()));
+    let q: Value = serde_json::from_str(&queue).expect("queue is json");
+    assert_eq!(q["error"], json!("graph unreadable: bad json"));
+}
+
+#[test]
+fn an_unknown_grant_op_returns_an_error_receipt() {
+    let out = run_op("grant-nope", &json!({"cwd": "/tmp"}));
+    let o: Value = serde_json::from_str(&out).expect("receipt is json");
+    assert_eq!(o["error"], json!("unknown op grant-nope"));
+}
