@@ -107,27 +107,24 @@ def test_load_settings_cache_hit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_unknown_key_emits_warning(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """AC1-FR: Unknown config key causes a startup WARNING when FNO_DEBUG=1, not an exception."""
+    """AC1-FR: Unknown config key warns on stderr at startup, FNO_DEBUG set or
+    not, never an exception."""
     monkeypatch.delenv("FNO_CONFIG", raising=False)
-    monkeypatch.setenv("FNO_DEBUG", "1")
+    monkeypatch.delenv("FNO_DEBUG", raising=False)
     settings_file = _write_settings(
         tmp_path, "schema_version: 1\nconfig:\n  future_thing: true\n"
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
-    from fno import config as config_mod
+    from fno.config import load_settings
 
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        from fno.config import load_settings
-
-        result = load_settings()
+    result = load_settings()
+    err = capsys.readouterr().err
 
     assert result is not None, "load_settings() should succeed on unknown keys"
-    assert any(
-        "future_thing" in record.message for record in caplog.records
-    ), "Expected warning mentioning the unknown key 'future_thing'"
+    assert "future_thing" in err, f"Expected the unknown key on stderr, got: {err!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -521,104 +518,29 @@ def test_env_var_takes_precedence(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
 
 # ---------------------------------------------------------------------------
-# Fix 3: unknown-key warnings behind FNO_DEBUG, no duplicate emission
+# Unknown-key warnings: stderr on every load, capped, no duplicate emission
 # ---------------------------------------------------------------------------
 
 
-def test_unknown_key_no_warning_without_fno_debug(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_unknown_key_warns_exactly_once_per_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    """Fix 3: unknown key emits NO warning when FNO_DEBUG is unset."""
+    """One load, one line per unknown key: the per-layer walk hands nested
+    keys up, so a key at any depth prints once, not once per level."""
     monkeypatch.delenv("FNO_CONFIG", raising=False)
-    monkeypatch.delenv("FNO_DEBUG", raising=False)
     settings_file = _write_settings(
-        tmp_path, "schema_version: 1\nconfig:\n  future_thing: true\n"
+        tmp_path,
+        "schema_version: 1\nconfig:\n  future_thing: true\n  target:\n    future_leaf: true\n",
     )
     monkeypatch.setenv("FNO_CONFIG", str(settings_file))
 
-    from fno import config as config_mod
+    from fno.config import load_settings
 
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        from fno.config import load_settings
-        result = load_settings()
+    load_settings()
+    err = capsys.readouterr().err
 
-    assert result is not None, "load_settings() should succeed"
-    future_warnings = [r for r in caplog.records if "future_thing" in r.message]
-    assert len(future_warnings) == 0, (
-        f"Expected NO warning for unknown key without FNO_DEBUG, got: {future_warnings}"
-    )
-
-
-def test_unknown_key_emits_warning_with_fno_debug(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Fix 3: unknown key DOES emit warning when FNO_DEBUG=1."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    monkeypatch.setenv("FNO_DEBUG", "1")
-    settings_file = _write_settings(
-        tmp_path, "schema_version: 1\nconfig:\n  future_thing: true\n"
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        from fno.config import load_settings
-        result = load_settings()
-
-    assert result is not None, "load_settings() should succeed"
-    future_warnings = [r for r in caplog.records if "future_thing" in r.message]
-    assert len(future_warnings) >= 1, (
-        f"Expected warning for unknown key with FNO_DEBUG=1, got: {[r.message for r in caplog.records]}"
-    )
-
-
-def test_unknown_key_not_emitted_twice(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Fix 3: unknown nested key must not be logged twice (no duplicate walk)."""
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    monkeypatch.setenv("FNO_DEBUG", "1")
-    settings_file = _write_settings(
-        tmp_path, "schema_version: 1\nconfig:\n  future_thing: true\n"
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    from fno import config as config_mod
-
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        from fno.config import load_settings
-        load_settings()
-
-    future_warnings = [r for r in caplog.records if "future_thing" in r.message]
-    assert len(future_warnings) == 1, (
-        f"Expected exactly 1 warning for the unknown key, got {len(future_warnings)}: "
-        f"{[r.message for r in future_warnings]}"
-    )
-
-
-def test_a_nested_unknown_key_is_not_emitted_once_per_level(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The walker recurses, and the outer call carries what the inner returned.
-
-    A top-level key never recurses, so the sibling test above stayed green
-    while a key one level down was logged twice.
-    """
-    monkeypatch.delenv("FNO_CONFIG", raising=False)
-    monkeypatch.setenv("FNO_DEBUG", "1")
-    settings_file = _write_settings(
-        tmp_path, "schema_version: 1\nconfig:\n  target:\n    future_leaf: true\n"
-    )
-    monkeypatch.setenv("FNO_CONFIG", str(settings_file))
-
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        from fno.config import load_settings
-
-        load_settings()
-
-    nested = [r for r in caplog.records if "target.future_leaf" in r.message]
-    assert len(nested) == 1, [r.message for r in nested]
+    assert err.count("future_thing") == 1, f"Expected exactly one line: {err!r}"
+    assert err.count("target.future_leaf") == 1, f"Expected exactly one line: {err!r}"
 
 
 # ---------------------------------------------------------------------------

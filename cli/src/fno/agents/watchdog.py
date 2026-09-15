@@ -650,31 +650,43 @@ def verdicts(
     return out
 
 
+def _gate_reason(settings: Any, mode: Optional[str]) -> Optional[str]:
+    """The lane's arming question, answered as its first false key=value, or
+    None when armed. `mode` None asks only whether the lane runs at all; a
+    mode asks for that exact depth. One spelling for the bool readers and the
+    skip readout, so they cannot drift apart as the gate grows."""
+    try:
+        watchdog = settings.recovery.watchdog
+        if not watchdog.enabled:
+            return "recovery.watchdog.enabled=false"
+        if mode is not None and watchdog.mode != mode:
+            return f"recovery.watchdog.mode={watchdog.mode!r} (wanted {mode})"
+        if not settings.recovery.enabled:
+            return "recovery.enabled=false"
+        if not settings.autonomy.enabled:
+            return "autonomy.enabled=false"
+    except Exception:  # noqa: BLE001 - a partial settings stub is not armed
+        return "watchdog keys unresolved (partial settings)"
+    return None
+
+
 def lane_armed(settings: Any) -> bool:
     """Will the tick actually sweep? One condition, every reader: a freshness
     reader that does not share the producer's own condition once printed
     FLEET WATCHDOG STALE for a cadence that was off on purpose."""
-    return _armed(settings, None)
+    return _gate_reason(settings, None) is None
+
+
+def lane_off_detail(settings: Any) -> str:
+    """Why `lane_armed` read false, as key=value: the watchdog_off skip token
+    names the lane, this names the key, so an operator holding a config that
+    says otherwise can join the two."""
+    return _gate_reason(settings, None) or "watchdog keys all read true (transient)"
 
 
 def wake_armed(settings: Any) -> bool:
     """Return true only for the level that may resume a stalled session."""
-    return _armed(settings, "wake")
-
-
-def _armed(settings: Any, mode: Optional[str]) -> bool:
-    """The lane's arming question, spelled once. `mode` None asks only whether
-    the lane runs at all; a mode asks for that exact depth."""
-    try:
-        watchdog = settings.recovery.watchdog
-        return bool(
-            watchdog.enabled
-            and (mode is None or watchdog.mode == mode)
-            and settings.recovery.enabled
-            and settings.autonomy.enabled
-        )
-    except Exception:  # noqa: BLE001 - a partial settings stub is not armed
-        return False
+    return _gate_reason(settings, "wake") is None
 
 
 def _unknown_provider_report(reason: str) -> dict[str, Any]:

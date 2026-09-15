@@ -339,8 +339,11 @@ def test_a_large_unknown_table_reports_once(tmp_path: Path) -> None:
     result = _doctor(f)
     assert result.exit_code == 1, result.output
     unknown = [ln for ln in result.output.splitlines() if "companions" in ln]
-    assert len(unknown) == 1, unknown
-    assert "companions (set in" in unknown[0]
+    # Two channels, one finding each: the loader's stderr warning (every
+    # load, "fno config:" prefix) and the doctor's own report line.
+    assert len(unknown) == 2, unknown
+    assert any(ln.startswith("fno config:") for ln in unknown), unknown
+    assert any("companions (set in" in ln and not ln.startswith("fno config:") for ln in unknown), unknown
 
 
 def test_a_leaf_name_shared_by_many_sections_gets_no_hint(tmp_path: Path) -> None:
@@ -410,8 +413,10 @@ def test_the_exemption_does_not_hide_a_typo_in_the_same_file(tmp_path: Path) -> 
     result = _doctor(f)
     assert result.exit_code == 1, result.output
     unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
-    assert len(unknown) == 1, unknown
-    assert "reveiw.cross_model" in unknown[0]
+    # Two channels, one finding each: the loader's stderr warning and the
+    # doctor's own report line.
+    assert len(unknown) == 2, unknown
+    assert sum("reveiw.cross_model" in ln for ln in unknown) == 2, unknown
 
 
 # --- an out-of-enum value refuses by name -----------------------------------
@@ -467,3 +472,36 @@ def test_a_clean_config_reports_no_value_findings(tmp_path: Path) -> None:
     result = _doctor(f)
     assert result.exit_code == 0, result.output
     assert "the schema refuses" not in result.output
+
+
+def test_dead_key_under_a_known_table_warns_at_load(tmp_path: Path) -> None:
+    """A key the operator set but no code reads names itself on every load,
+    not only under `fno config doctor` or FNO_DEBUG. Found as
+    recovery.watchdog_reap, set for months, read by nothing, silent."""
+    f = _write(tmp_path / "config.toml", 'schema_version = 1\n[recovery]\nwatchdog_reap = true\n')
+    result = runner.invoke(
+        app, ["config", "get", "recovery.enabled"], env={**_ENV, "FNO_CONFIG": str(f)}
+    )
+    assert "recovery.watchdog_reap" in result.output, result.output
+    assert "not a modeled config key" in result.output, result.output
+
+
+def test_honored_legacy_spelling_is_not_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`lift_retire_grace` lifts the moved retire_grace_s key, so the raw
+    spelling is honored, not ignored, and must never report as unknown: a
+    load-time warning that fires on a working key is cried wolf. A key the
+    repo has retired (the deleted mail_to leaf, per retired-config-leaves.txt)
+    is the opposite: dead means dead, and the walker must say so."""
+    from fno.config_readback import check_unknown_keys
+
+    honored = _write(tmp_path / "honored.toml", 'schema_version = 1\n[recovery]\nretire_grace_s = 60\n')
+    monkeypatch.setenv("FNO_CONFIG", str(honored))
+    assert check_unknown_keys() == []
+
+    retired = _write(tmp_path / "retired.toml", 'schema_version = 1\n[recovery]\nwatchdog_mail_to = "bp"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(retired))
+    assert any("recovery.watchdog_mail_to" in p for p in check_unknown_keys())
+
+    dead = _write(tmp_path / "dead.toml", 'schema_version = 1\n[recovery]\nwatchdog_reap = true\n')
+    monkeypatch.setenv("FNO_CONFIG", str(dead))
+    assert any("recovery.watchdog_reap" in p for p in check_unknown_keys())
