@@ -75,10 +75,15 @@ fn malformed_grant_reason(grant: &Value) -> Option<String> {
         names.sort();
         return Some(format!("merge_grant carries unknown keys: {names:?}"));
     }
-    for key in GRANT_KEYS {
-        if !map.contains_key(key) {
-            return Some(format!("merge_grant is missing keys: [\"{key}\"]"));
-        }
+    let missing: Vec<String> = GRANT_KEYS
+        .iter()
+        .filter(|key| !map.contains_key(**key))
+        .map(|key| key.to_string())
+        .collect();
+    if !missing.is_empty() {
+        let mut names = missing.clone();
+        names.sort();
+        return Some(format!("merge_grant is missing keys: {names:?}"));
     }
     if grant.get("approved").and_then(Value::as_bool).is_none() {
         return Some("merge_grant.approved is not a boolean".to_string());
