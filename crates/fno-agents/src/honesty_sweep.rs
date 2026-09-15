@@ -119,7 +119,7 @@ enum PopSpec {
     },
 }
 
-const USAGE: &str = "usage: fno-agents honesty-sweep [--json] \
+const USAGE: &str = "usage: fno-agents honesty-sweep [--json|-J] \
 [--population harness-capabilities|king-manifests] \
 [--rows-json <path|->] [--rows-key <key>] [--name <label>]
 populations repeat; each named population is swept in turn. \
@@ -669,7 +669,7 @@ pub fn run_honesty_sweep(args: &[String]) -> i32 {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--json" => json_output = true,
+            "--json" | "-J" => json_output = true,
             "--population" => {
                 i += 1;
                 match args.get(i).map(|s| s.as_str()) {

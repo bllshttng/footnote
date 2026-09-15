@@ -643,6 +643,7 @@ pub fn run_court_orphans(args: &[String]) -> i32 {
                 held.push(args[i + 1].clone());
                 i += 2;
             }
+            "--json" | "-J" => i += 1,
             other => {
                 eprintln!("fno-agents court-orphans: unknown flag {other}");
                 eprintln!("fno-agents court-orphans: --root PATH [--held SCOPE]...");
@@ -705,6 +706,7 @@ pub fn run_reign_state(args: &[String]) -> i32 {
                 registry = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
+            "--json" | "-J" => i += 1,
             other => {
                 eprintln!("fno-agents reign-state: unknown flag {other}");
                 eprintln!("{}", usage("reign-state"));
@@ -1320,5 +1322,25 @@ mod tests {
         assert!(set_manifest_shape(&root, "a/b", "court", None)
             .unwrap_err()
             .contains("unsafe king scope"));
+    }
+
+    /// Both JSON-only verbs accept the flag: -J parses (0), never "unknown
+    /// flag" (2), and the normal required-args validation still runs.
+    #[test]
+    fn json_only_verbs_accept_both_spellings() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        assert_eq!(
+            run_court_orphans(&["-J".into(), "--root".into(), root.clone()]),
+            0
+        );
+        assert_eq!(
+            run_court_orphans(&["--json".into(), "--root".into(), root]),
+            0
+        );
+        assert_eq!(run_court_orphans(&["--bogus".into()]), 2);
+        // reign-state: with the flag present, the missing-argument refusal
+        // names --scope/--session, not the flag.
+        assert_eq!(run_reign_state(&["-J".into()]), 2);
     }
 }

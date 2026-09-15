@@ -259,7 +259,7 @@ fn render(payload: &Value) -> String {
     lines.join("\n")
 }
 
-/// `king-history --scope SCOPE --events-path PATH [--events-path PATH ...] [--json]`
+/// `king-history --scope SCOPE --events-path PATH [--events-path PATH ...] [--json|-J]`
 ///
 /// rc 0 read (any match count), 1 a store that cannot be opened or synced
 /// (the message names the store path), 2 usage failure.
@@ -278,7 +278,7 @@ pub fn run_king_history(args: &[String]) -> i32 {
                 events_paths.push(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
-            "--json" => {
+            "--json" | "-J" => {
                 as_json = true;
                 i += 1;
             }
@@ -286,7 +286,7 @@ pub fn run_king_history(args: &[String]) -> i32 {
                 eprintln!("fno-agents king-history: unknown flag {other}");
                 eprintln!(
                     "fno-agents king-history: --scope SCOPE --events-path PATH \
-                     [--events-path PATH ...] [--json]"
+                     [--events-path PATH ...] [--json|-J]"
                 );
                 return 2;
             }
@@ -544,6 +544,25 @@ mod tests {
         assert_eq!(run_king_history(&args), 0);
         let text_args = args.clone();
         assert_eq!(run_king_history(&text_args), 0);
+    }
+
+    #[test]
+    fn the_short_json_spelling_parses_like_the_long_one() {
+        let (_dir, path) = journal(&[checkin(
+            "2026-09-10T12:00:00Z",
+            json!({"scope": "x-a792", "change": "did a thing", "open_prs_fleet": 3}),
+        )]);
+        let args = vec![
+            "-J".to_string(),
+            "--scope".to_string(),
+            "x-a792".to_string(),
+            "--events-path".to_string(),
+            path.display().to_string(),
+        ];
+        // -J is accepted, then the normal required-args validation runs.
+        assert_eq!(run_king_history(&args), 0);
+        // Missing required args refuse with usage (2), never "unknown flag".
+        assert_eq!(run_king_history(&["-J".to_string()]), 2);
     }
 
     #[test]

@@ -200,7 +200,7 @@ async fn run(args: Vec<String>) -> i32 {
     // directly). Matched here rather than as a dispatch arm so the routable-verb
     // parity guard (test_rust_client_verbs_match_client_rs) does not see it.
     if matches!(verb, "version" | "-V" | "--version") {
-        let json = args[1..].iter().any(|a| a == "--json");
+        let json = fno_agents::json_output::requested(&args[1..]);
         fno_agents::version::print_version(json);
         return 0;
     }

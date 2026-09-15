@@ -194,7 +194,7 @@ pub fn run_bash_census(args: &[String]) -> i32 {
                 }
             }
             "--allow" => allow = true,
-            "--json" => json = true,
+            "--json" | "-J" => json = true,
             "--cwd" => {
                 i += 1;
                 match args.get(i) {
@@ -406,6 +406,21 @@ mod tests {
         std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, dir.path());
         let args = vec!["--cwd".to_string(), "/nothing/here".to_string()];
         assert_eq!(run_bash_census(&args), 3);
+    }
+
+    #[test]
+    fn the_short_json_spelling_parses_like_the_long_one() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let fx = write_fixture(&["fno backlog get x-1"]);
+        let args = vec![
+            "--days".to_string(),
+            "365".to_string(),
+            "--cwd".to_string(),
+            fx.cwd.display().to_string(),
+            "-J".to_string(),
+        ];
+        // -J takes the JSON branch (0), not the unknown-flag refusal (2).
+        assert_eq!(run_bash_census(&args), 0);
     }
 
     #[test]

@@ -131,6 +131,7 @@ pub mod heal;
 pub mod honesty_sweep;
 mod identity;
 pub mod interrupt_classify;
+pub mod json_output;
 pub mod kill_criteria;
 pub mod king_board;
 pub mod king_checkin;

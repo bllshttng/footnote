@@ -92,7 +92,7 @@ pub fn run_graph_get(args: &[String]) -> i32 {
         match args[i].as_str() {
             // Accepted and ignored: the Python forwarder always appends
             // --json, and this verb's only output shape IS a JSON array.
-            "--json" => {}
+            "--json" | "-J" => {}
             "--graph" => {
                 i += 1;
                 match args.get(i) {
@@ -200,6 +200,19 @@ mod tests {
     fn no_ids_is_a_usage_error() {
         let args = vec!["--json".to_string()];
         assert_eq!(run_graph_get(&args), 2);
+    }
+
+    #[test]
+    fn the_short_json_spelling_parses_like_the_long_one() {
+        let dir = write_graph(&[node("x-997a", "fewer-gated")]);
+        let graph = dir.path().join("graph.json").display().to_string();
+        let args = vec![
+            "-J".to_string(),
+            "x-997a".to_string(),
+            "--graph".to_string(),
+            graph,
+        ];
+        assert_eq!(run_graph_get(&args), 0);
     }
 
     /// Serializes tests that set `FNO_TRACKER_BACKEND`: process-wide env, so a

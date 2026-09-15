@@ -23,7 +23,7 @@ fn main() {
         args.first().map(String::as_str),
         Some("version" | "-V" | "--version")
     ) {
-        fno_agents::version::print_version(args.iter().any(|a| a == "--json"));
+        fno_agents::version::print_version(fno_agents::json_output::requested(&args));
         return;
     }
 

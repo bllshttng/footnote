@@ -204,6 +204,8 @@ pub fn run_claim_long_holds(args: &[String]) -> i32 {
                     return 2;
                 }
             },
+            // stdout is only the payload JSON; the flag is accepted for parity.
+            "--json" | "-J" => {}
             other => {
                 eprintln!("fno-agents: claim long-holds: unknown flag {other}");
                 return 2;
@@ -496,5 +498,14 @@ mod tests {
         assert_eq!(code, 0);
         let code = run_claim_long_holds(&["--min-hold-s".into(), "720".into()]);
         assert_eq!(code, 2, "no --claims-dir is a usage error");
+        // -J rides the same path: accepted (0), never an unknown flag (2).
+        let code = run_claim_long_holds(&[
+            "--min-hold-s".into(),
+            "720".into(),
+            "--claims-dir".into(),
+            claims_dir.to_string_lossy().into_owned(),
+            "-J".into(),
+        ]);
+        assert_eq!(code, 0);
     }
 }

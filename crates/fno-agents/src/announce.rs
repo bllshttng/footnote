@@ -380,7 +380,7 @@ fn parse_send_args(args: &[String]) -> Result<SendArgs, String> {
             "--from-session" => {
                 out.from_session = Some(it.next().ok_or("--from-session needs a value")?.clone())
             }
-            "--json" => out.json_out = true,
+            "--json" | "-J" => out.json_out = true,
             other => return Err(format!("unknown announce send flag {other:?}")),
         }
     }
@@ -400,7 +400,7 @@ fn parse_send_args(args: &[String]) -> Result<SendArgs, String> {
 fn send_usage() -> &'static str {
     "usage: fno-agents announce send --scope <all|kings|<crown>|project:<p>> \
      [--subject S] [--expires 24h] [--urgent] --from <sender> \
-     --sender-kind <operator|agent> [--from-session <id>] [--json]  (body on stdin)"
+     --sender-kind <operator|agent> [--from-session <id>] [--json|-J]  (body on stdin)"
 }
 
 fn crown_holder(rows: &[Value], sender: &str) -> bool {
@@ -937,7 +937,7 @@ pub(crate) fn run_announce_status(args: &[String], paths: &AnnouncePaths) -> i32
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--json" => json_out = true,
+            "--json" | "-J" => json_out = true,
             other if id.is_empty() && !other.starts_with('-') => id = other.to_string(),
             other => {
                 eprintln!("announce status: unknown flag {other:?}");
@@ -946,7 +946,7 @@ pub(crate) fn run_announce_status(args: &[String], paths: &AnnouncePaths) -> i32
         }
     }
     if id.is_empty() {
-        eprintln!("usage: fno-agents announce status <id> [--json]");
+        eprintln!("usage: fno-agents announce status <id> [--json|-J]");
         return 2;
     }
 
@@ -1399,13 +1399,51 @@ mod tests {
     #[test]
     fn argv_surfaces_refuse_bad_and_missing_args() {
         // The hook scripts drive these exact flags; a rename here must fail
-        // loudly here, not degrade every boundary to silence.
+        // loudly here, not degrade every boundary to stderr refusal at the
+        // boundary the caller parses.
         let _guard = ENV_LOCK.lock().unwrap();
         let f = fixture("argv");
         assert_eq!(run_announce_read(&[], &f.paths), 2, "missing --session-id");
         assert_eq!(run_announce_read(&["--bogus".to_string()], &f.paths), 2);
         assert_eq!(run_announce_status(&[], &f.paths), 2, "missing <id>");
         assert_eq!(run_announce_status(&["--json".to_string()], &f.paths), 2);
+        std::fs::remove_dir_all(&f.root).ok();
+    }
+
+    #[test]
+    fn json_flag_accepts_both_spellings() {
+        // -J and --json reach the same field; a mistyped spelling still refuses.
+        let long = parse_send_args(&[
+            "--scope".to_string(),
+            "all".to_string(),
+            "--from".to_string(),
+            "op".to_string(),
+            "--sender-kind".to_string(),
+            "operator".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        let short = parse_send_args(&[
+            "--scope".to_string(),
+            "all".to_string(),
+            "--from".to_string(),
+            "op".to_string(),
+            "--sender-kind".to_string(),
+            "operator".to_string(),
+            "-J".to_string(),
+        ])
+        .unwrap();
+        assert!(long.json_out);
+        assert!(short.json_out);
+        assert!(parse_send_args(&["-j".to_string()]).is_err());
+
+        // status: -J is accepted (1 = id not on the bus), never "unknown flag" (2).
+        let _guard = ENV_LOCK.lock().unwrap();
+        let f = fixture("jsonflag");
+        assert_eq!(
+            run_announce_status(&["no-such-id".to_string(), "-J".to_string()], &f.paths),
+            1
+        );
         std::fs::remove_dir_all(&f.root).ok();
     }
 

@@ -316,7 +316,7 @@ fn compaction_mark(home: &AgentsHome, args: &[String]) -> i32 {
 }
 
 fn compaction_status(home: &AgentsHome, args: &[String]) -> i32 {
-    let json = args.iter().any(|a| a == "--json");
+    let json = crate::json_output::requested(args);
     let Some(session) = flag_value(args, "--session") else {
         eprintln!("compaction status: --session <id> is required");
         return 2;
