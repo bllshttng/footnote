@@ -653,12 +653,14 @@ _CROWN_VERBS = frozenset({"reign", "king-for-a-day", "fno-me"})
 SPAWN_PERMISSION_BUILTIN = "bypassPermissions"
 
 
-def _seed_of(toks: Sequence[str]) -> Optional[str]:
-    """The MESSAGE seed: the ``--message`` value, else the sole positional (the
-    name rides ``--name``). A bare ``--`` fence makes the first token after it
-    the seed - even when flag-shaped - ONLY in the legacy no-message idiom; a
-    positional message before the fence outranks the fenced tail (x-1caa).
-    Stops at the ``--argv`` payload boundary."""
+def _seed_slot(toks: Sequence[str]) -> Optional[Tuple[str, int]]:
+    """Where the MESSAGE seed lives in ``toks``: ``(kind, index)``.
+
+    ``kind`` is ``"message"`` (value at ``index + 1``), ``"message="``
+    (value inside the token), ``"fence"`` (the ``--`` index; value at
+    ``index + 1``), or ``"positional"``. One scan serves the reader
+    (:func:`_seed_of`) and the writer (:func:`replace_seed`), so they cannot
+    drift. Stops at the ``--argv`` payload boundary."""
     i = 0
     while i < len(toks):
         t = toks[i]
@@ -671,15 +673,60 @@ def _seed_of(toks: Sequence[str]) -> Optional[str]:
             # fenced token here silently dropped the profile layer.
             head_pos = _positional_indices(toks[:i])
             if head_pos:
-                return toks[head_pos[0]]
-            return toks[i + 1] if i + 1 < len(toks) else None
+                return ("positional", head_pos[0])
+            return ("fence", i)
         if t == "--message":
-            return toks[i + 1] if i + 1 < len(toks) else None
+            return ("message", i)
         if t.startswith("--message="):
-            return t.split("=", 1)[1]
+            return ("message=", i)
         i += 1
     pos = _positional_indices(toks)
-    return toks[pos[0]] if pos else None
+    return ("positional", pos[0]) if pos else None
+
+
+def _seed_of(toks: Sequence[str]) -> Optional[str]:
+    """The MESSAGE seed: the ``--message`` value, else the sole positional (the
+    name rides ``--name``). A bare ``--`` fence makes the first token after it
+    the seed - even when flag-shaped - ONLY in the legacy no-message idiom; a
+    positional message before the fence outranks the fenced tail (x-1caa).
+    Stops at the ``--argv`` payload boundary."""
+    slot = _seed_slot(toks)
+    if slot is None:
+        return None
+    kind, i = slot
+    if kind in ("message", "fence"):
+        return toks[i + 1] if i + 1 < len(toks) else None
+    if kind == "message=":
+        return toks[i].split("=", 1)[1]
+    return toks[i]
+
+
+def replace_seed(args: Sequence[str], new: str) -> List[str]:
+    """Rewrite the seed :func:`_seed_of` reads - ``args[0]`` is the verb - to
+    ``new``, through the ONE slot scan, so reader and writer cannot drift.
+    With no seed at all, ``new`` is inserted as a positional before any ``--``
+    fence or ``--argv`` boundary, so it can never land in a fenced prompt or
+    a provider payload."""
+    toks = list(args[1:])
+    slot = _seed_slot(toks)
+    if slot is None:
+        boundary = len(toks)
+        for i, t in enumerate(toks):
+            if t in ("--argv", "--"):
+                boundary = i
+                break
+        return [args[0], *toks[:boundary], new, *toks[boundary:]]
+    kind, i = slot
+    if kind in ("message", "fence"):
+        if i + 1 < len(toks):
+            toks[i + 1] = new
+        else:
+            toks.append(new)
+    elif kind == "message=":
+        toks[i] = f"--message={new}"
+    else:
+        toks[i] = new
+    return [args[0], *toks]
 
 
 def _role_of(toks: Sequence[str]) -> Optional[str]:
