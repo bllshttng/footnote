@@ -41,8 +41,8 @@ def test_harness_for_provider_preserves_known_and_unrecognized_nonblank():
 def test_open_tag_is_lowercase_quoted_attrs_from_first():
     # Lowercase tag, key="value" double-quoted attrs; `from` renders FIRST.
     assert (
-        fno_mail_open(from_="7d1f8bdc", node="x-26df")
-        == '<fno_mail from="7d1f8bdc" node="x-26df">'
+        fno_mail_open(from_="7d1f8bdc", node="x-synth")
+        == '<fno_mail from="7d1f8bdc" node="x-synth">'
     )
 
 
@@ -67,13 +67,13 @@ def test_open_tag_renders_ranks_after_their_side():
         fno_mail_open(
             from_="647b3a9c-6544-43fe-899e-704382f3d973",
             harness="claude",
-            from_rank="L2 x-37af",
+            from_rank="L2 epic-scope",
             to="278c9a89",
             to_rank="L1 fno",
             id="msg-5a760f",
         )
         == '<fno_mail from="647b3a9c-6544-43fe-899e-704382f3d973" '
-        'harness="claude-code" from_rank="L2 x-37af" to="278c9a89" '
+        'harness="claude-code" from_rank="L2 epic-scope" to="278c9a89" '
         'to_rank="L1 fno" id="msg-5a760f">'
     )
 
@@ -99,10 +99,10 @@ def test_open_tag_renders_origin_last_and_drops_peer():
 def test_absent_id_is_byte_identical_to_pre_change():
     # id=None adds nothing.
     assert fno_mail_open(
-        from_="7d1f8bdc", node="x-26df"
+        from_="7d1f8bdc", node="x-synth"
     ) == fno_mail_open(
         from_="7d1f8bdc",
-        node="x-26df",
+        node="x-synth",
         id=None,
     )
 
@@ -110,10 +110,10 @@ def test_absent_id_is_byte_identical_to_pre_change():
 def test_absent_reply_to_is_byte_identical_to_pre_change():
     # reply_to=None must add nothing.
     assert fno_mail_open(
-        from_="7d1f8bdc", node="x-26df"
+        from_="7d1f8bdc", node="x-synth"
     ) == fno_mail_open(
         from_="7d1f8bdc",
-        node="x-26df",
+        node="x-synth",
         reply_to=None,
     )
 
@@ -122,8 +122,8 @@ def test_wrap_is_three_lines_with_no_footer():
     # D4: open tag, body, close tag. Only fno writes the tag, so the
     # tag itself marks agent text; no `-- ` footer line renders of any kind.
     assert (
-        wrap_fno_mail("ship it", from_="7d1f8bdc", node="x-26df")
-        == '<fno_mail from="7d1f8bdc" node="x-26df">\nship it\n</fno_mail>'
+        wrap_fno_mail("ship it", from_="7d1f8bdc", node="x-synth")
+        == '<fno_mail from="7d1f8bdc" node="x-synth">\nship it\n</fno_mail>'
     )
 
 
@@ -145,7 +145,7 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch):
 
     def _crown(path, session):
         assert path == registry
-        return {"sender-session": "L2 x-37af", "reader-session": "L1 fno"}.get(session)
+        return {"sender-session": "L2 epic-scope", "reader-session": "L1 fno"}.get(session)
 
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
     monkeypatch.setattr(envelope, "crown_at", _crown)
@@ -161,7 +161,7 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch):
     )
     assert wrapped == (
         '<fno_mail from="sender-session" harness="claude-code" '
-        'from_rank="L2 x-37af" to="278c9a89" to_rank="L1 fno" id="msg-5a760f">\n'
+        'from_rank="L2 epic-scope" to="278c9a89" to_rank="L1 fno" id="msg-5a760f">\n'
         "hi\n"
         "</fno_mail>"
     )
@@ -199,7 +199,7 @@ def test_envelope_overhead_budget(monkeypatch):
     registry = Path("/tmp/nonexistent-registry.json")
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
     monkeypatch.setattr(
-        envelope, "crown_at", lambda _p, s: "L2 x-37af" if s == full_id else "L1 fno"
+        envelope, "crown_at", lambda _p, s: "L2 epic-scope" if s == full_id else "L1 fno"
     )
     monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
     wrapped = envelope.wrap_fno_mail(
@@ -212,7 +212,7 @@ def test_envelope_overhead_budget(monkeypatch):
         harness="claude",
         to_session="reader",
     )
-    assert 'from_rank="L2 x-37af"' in wrapped
+    assert 'from_rank="L2 epic-scope"' in wrapped
     assert 'to_rank="L1 fno"' in wrapped
     # Crowned overhead, measured 176 at the reshaping (537 before the compaction).
     assert len(wrapped) - len(body) <= 200
@@ -243,7 +243,7 @@ def test_wrap_is_three_lines_for_every_shape():
         dict(
             body="line one\nline two",
             from_="aaaa1111",
-            node="x-26df",
+            node="x-synth",
             to="claude-bbbb2222",
             id="msg-abc",
             reply_to="msg-xyz",

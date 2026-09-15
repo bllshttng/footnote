@@ -1887,7 +1887,7 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     import re
 
     framed = inject_calls[0]["text"]
-    # x-f1f0 D2: `from` holds the full session id when the sender resolved one.
+    # D2: `from` holds the full session id when the sender resolved one.
     assert re.match(r'^<fno_mail from="[0-9a-f-]{16,}"', framed), framed
     assert framed.rstrip().endswith("</fno_mail>"), framed
     assert "reach me on control" in framed

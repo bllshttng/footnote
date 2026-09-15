@@ -101,7 +101,7 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
     assert paste.startswith("<fno_mail from=")
     assert paste.rstrip().endswith("</fno_mail>")
     assert "status?" in paste
-    # x-f1f0: the wrapped pair itself is the point; the retired peer-mail
+    # The wrapped pair itself is the point; the retired peer-mail
     # footer no longer renders.
     assert "peer mail" not in paste
 
