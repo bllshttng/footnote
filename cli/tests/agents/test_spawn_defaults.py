@@ -522,11 +522,12 @@ def test_mint_node_name_is_the_source_less_manual_t_form(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A manual --node spawn carries NO source segment: provenance is stamped
-    only by the path that knows it. The model tag stays the discriminator."""
+    only by the path that knows it. The model rides as the mint's final
+    segment over the bare node hex (x-57fe)."""
     import fno.agents.spawn_defaults as sd
 
     monkeypatch.setattr(
         sd, "_node_slug_from_graph", lambda node: ("x-84b2", "Ab Names")
     )
     name = sd._mint_node_name("x-84b2", None, "glm-5.3-flash")
-    assert name == "t-x-84b2-ab-names-glm53flash"
+    assert name == "t-84b2-ab-names-glm"

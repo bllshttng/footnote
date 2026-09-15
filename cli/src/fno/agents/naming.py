@@ -141,15 +141,11 @@ def parse_many(names):
     return out
 
 
-@lru_cache(maxsize=1)
-def _graph_hex_map():
-    """hex suffix -> full node id, one graph read per process.
-
-    Node ids are immutable, so a snapshot cannot turn wrong; a node minted
-    after the cache only loses its enrichment (the hex stays bare), which is
-    the safe direction. Ambiguous hexes (two prefixes, same hex) map to ""
-    and stay bare.
-    """
+@lru_cache(maxsize=8)
+def _graph_hex_map(graph_path: str):
+    """hex suffix -> full node id for one graph file, keyed on the declared
+    state root. One read per file per process; a hex with no unique
+    `<prefix>-<hex>` id maps to "" and stays bare (never an invented id)."""
     try:
         from fno.graph.load import load_graph
 
@@ -185,7 +181,13 @@ def _enrich_hex_nodes(rows):
     }
     if not wanted:
         return
-    hex_map = _graph_hex_map()
+    try:
+        from fno import paths as _paths
+
+        key = str(_paths.graph_json())
+    except Exception:  # noqa: BLE001 - an unresolved graph path leaves hex bare
+        return
+    hex_map = _graph_hex_map(key)
     for i, row in enumerate(rows):
         if row is None or not row.node or row.node not in wanted:
             continue

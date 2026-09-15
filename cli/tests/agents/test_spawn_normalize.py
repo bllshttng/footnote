@@ -435,11 +435,11 @@ def test_implied_bg_substrate_splices_before_the_fence():
 
 def test_node_spawn_mints_provenance_name():
     # The registry row's NAME is the only node carrier, so the mint must put
-    # the node and slug there: t-x919-sentinel-arms-glm52.
+    # the node and slug there: t-x919-sentinel-glm.
     out = _norm(
         ["spawn", "--node", "x919", "--slug", "sentinel-arms", "--model", "glm-5.2", "go"]
     )
-    assert out[1:3] == ["--name", "t-x919-sentinel-arms-glm52"]
+    assert out[1:3] == ["--name", "t-x919-sentinel-glm"]
     assert out[3:] == ["--node", "x919", "--slug", "sentinel-arms", "--model", "glm-5.2", "go"]
 
 
@@ -448,7 +448,7 @@ def test_node_spawn_model_tag_comes_from_route_when_no_model():
     out = _norm(
         ["spawn", "--node", "x919", "--slug", "arms", "--route", "zai,glm-5.2", "go"]
     )
-    assert out[2] == "t-x919-arms-glm52"
+    assert out[2] == "t-x919-arms-glm"
 
 
 def test_node_spawn_route_slash_spelling_also_feeds_the_tag():
@@ -457,7 +457,7 @@ def test_node_spawn_route_slash_spelling_also_feeds_the_tag():
     out = _norm(
         ["spawn", "--node", "x919", "--slug", "arms", "--route", "zai/glm-5.2", "go"]
     )
-    assert out[2] == "t-x919-arms-glm52"
+    assert out[2] == "t-x919-arms-glm"
 
 
 def test_node_spawn_re_spawn_suffixes_the_taken_name():
@@ -466,11 +466,11 @@ def test_node_spawn_re_spawn_suffixes_the_taken_name():
     # is the two-worker implement+review shape).
     argv = ["spawn", "--node", "x919", "--slug", "arms", "--model", "glm-5.2", "go"]
     first = _norm(argv, existing_names=set())
-    assert first[2] == "t-x919-arms-glm52"
-    second = _norm(argv, existing_names={"t-x919-arms-glm52"})
-    assert second[2] == "t-x919-arms-glm52-2"
-    third = _norm(argv, existing_names={"t-x919-arms-glm52", "t-x919-arms-glm52-2"})
-    assert third[2] == "t-x919-arms-glm52-3"
+    assert first[2] == "t-x919-arms-glm"
+    second = _norm(argv, existing_names={"t-x919-arms-glm"})
+    assert second[2] == "t-x919-arms-glm-2"
+    third = _norm(argv, existing_names={"t-x919-arms-glm", "t-x919-arms-glm-2"})
+    assert third[2] == "t-x919-arms-glm-3"
 
 
 def test_node_spawn_without_model_omits_the_tag():
@@ -519,4 +519,4 @@ def test_graph_read_supplies_the_slug_when_flag_absent(monkeypatch):
         lambda: [{"id": "x-919abcd", "slug": "sentinel-arms", "plan_path": None}],
     )
     out = _norm(["spawn", "--node", "x-919abcd", "--model", "glm-5.2", "go"])
-    assert out[2] == "t-x-919abcd-sentinel-arms-glm52"
+    assert out[2] == "t-919abcd-sentinel-glm"

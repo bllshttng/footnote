@@ -2103,7 +2103,7 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
     # at init to prove it is the successor this dispatch claimed the node for.
     assert captured["provenance"] == {
         "FNO_NODE": "x-84a8", "FNO_SLUG": "s", "FNO_PLAN": "p.md",
-        "FNO_NODE_CLAIM_HOLDER": "spawn-handover:t-x-84a8-s",
+        "FNO_NODE_CLAIM_HOLDER": "spawn-handover:t-84a8-s",
     }
 
 
