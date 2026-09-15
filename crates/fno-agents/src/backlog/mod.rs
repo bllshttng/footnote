@@ -414,14 +414,18 @@ fn delete_aggregate(connection: &Connection, id: &str) -> Result<(), String> {
 /// Write only the changed nodes. The unit of change is the node: a row set
 /// (nodes row, its single-row mirrors, its child tables) is replaced for
 /// each id whose canonical JSON differs.
-fn write_changed(connection: &Connection, before: &[Value], after: &[Value]) -> Result<(), String> {
-    fn by_id(rows: &[Value]) -> std::collections::BTreeMap<String, String> {
+///
+/// Returns the number of ids acted on (saved or deleted), so a test can
+/// count what a sync moved.
+fn write_changed(
+    connection: &Connection,
+    before: &[Value],
+    after: &[Value],
+) -> Result<usize, String> {
+    fn by_id(rows: &[Value]) -> std::collections::BTreeMap<String, &Value> {
         rows.iter()
             .filter(|row| row.is_object())
-            .filter_map(|row| {
-                crate::graph_store::entry_id(row)
-                    .map(|id| (id.to_string(), crate::graph_store::to_python_json(row)))
-            })
+            .filter_map(|row| crate::graph_store::entry_id(row).map(|id| (id.to_string(), row)))
             .collect()
     }
     let before_map = by_id(before);
@@ -436,30 +440,47 @@ fn write_changed(connection: &Connection, before: &[Value], after: &[Value]) -> 
     let mut ids: Vec<String> = before_map.keys().chain(after_map.keys()).cloned().collect();
     ids.sort();
     ids.dedup();
+    let mut written = 0usize;
     for id in ids {
         let old = before_map.get(&id);
         let new = after_map.get(&id);
-        if old == new {
+        let unchanged = match (old, new) {
+            // Fast path: equal raw serializations are the same row, so only
+            // unequal raw strings pay for the canonical form. The canonical
+            // compare is the load-bearing one on the sqlite branch: its raw
+            // export omits nulls, so a plain string compare there would
+            // rewrite every row on every mutation.
+            // ponytail: whole-graph canonical compare, removed when
+            // single-row writes land.
+            (Some(b), Some(a)) => {
+                crate::graph_store::to_python_json(b) == crate::graph_store::to_python_json(a)
+                    || canonical_row(b) == canonical_row(a)
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if unchanged {
             continue;
         }
         match new {
             Some(body) => {
-                // Same best-effort rule as the import: a row the model cannot
-                // represent is skipped so the JSON publish never inherits a
-                // shadow failure.
-                let Ok(row) = serde_json::from_str::<Value>(body) else {
-                    continue;
-                };
-                let Ok(mut node) = Node::from_json(&row) else {
+                // Same best-effort rule as the write path: a row the model
+                // cannot represent is skipped so the JSON publish never
+                // inherits a shadow failure.
+                let Ok(mut node) = Node::from_json(body) else {
                     continue;
                 };
                 node.ordinal = ordinals.get(id.as_str()).copied().unwrap_or(0);
                 save_aggregate(connection, &node)?;
+                written += 1;
             }
-            None => delete_aggregate(connection, &id)?,
+            None => {
+                delete_aggregate(connection, &id)?;
+                written += 1;
+            }
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 /// Every stored node, in ordinal order, as its canonical JSON row. This is
@@ -812,6 +833,14 @@ fn sorted_value(value: &Value) -> Value {
     }
 }
 
+/// One row's canonical JSON: null-stripped, key-sorted, Python-spaced. The
+/// parity equality rule both `canonical_rows` and `write_changed` share.
+fn canonical_row(row: &Value) -> String {
+    crate::graph_store::to_python_json(&sorted_value(&crate::backlog::model::strip_nulls_value(
+        row,
+    )))
+}
+
 /// id -> canonical JSON for a row list, refusing duplicate ids loudly.
 fn canonical_rows(
     rows: &[Value],
@@ -825,12 +854,7 @@ fn canonical_rows(
         if out.contains_key(id) {
             return Err(format!("duplicate id in {label}: {id}"));
         }
-        out.insert(
-            id.to_string(),
-            crate::graph_store::to_python_json(&sorted_value(
-                &crate::backlog::model::strip_nulls_value(row),
-            )),
-        );
+        out.insert(id.to_string(), canonical_row(row));
     }
     Ok(out)
 }
@@ -1213,5 +1237,139 @@ mod tests {
                 .unwrap();
             assert_eq!(rows, 0, "{table} holds no rows for the deleted node");
         }
+    }
+
+    fn raw_rows(graph: &Path) -> Vec<Value> {
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(graph).unwrap()).unwrap();
+        doc.get("entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn flipgate_shadow_normalization_only_change_reaches_the_store() {
+        // AC1-HP: the file row lacks the default lists; a mutation on a
+        // DIFFERENT node publishes the defaulted form. The diff must see
+        // that change against the raw baseline and save the row.
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let raw = raw_rows(&graph);
+        // Seed the store from the raw file: the db now holds ab-one with no
+        // tags key, exactly what the last publish wrote.
+        shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        let mut after = raw.clone();
+        // The Python mutator sends defaulted rows: ab-one gains "tags": [].
+        after[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("tags".to_string(), Value::Array(vec![]));
+        // A change on the other node is what triggers the publish.
+        after[1]
+            .as_object_mut()
+            .unwrap()
+            .insert("title".to_string(), Value::String("Two changed".into()));
+        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&after)).unwrap();
+        let outcome = crate::graph_store::locked_mutate_with_hook(
+            &graph,
+            crate::graph_store::MutateInput {
+                entries: after.clone(),
+                canonical_path: None,
+                base_version: None,
+                plan_rungs: None,
+            },
+            std::time::Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+        assert!(
+            outcome.shadow_warning.is_none(),
+            "{:?}",
+            outcome.shadow_warning
+        );
+        let report = parity(&graph).unwrap();
+        assert_eq!(
+            report.divergent, 0,
+            "defaulted row reached the store: {report:?}"
+        );
+    }
+
+    #[test]
+    fn flipgate_shadow_superseded_settle_reaches_the_store() {
+        // AC2-HP: the raw row is blocked with superseded_by set; the
+        // mutation pipeline settles it to superseded. The settle must reach
+        // the store, not only graph.json.
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let mut raw = raw_rows(&graph);
+        // The pre-image: ab-two is blocked, superseded by ab-one.
+        raw[1]
+            .as_object_mut()
+            .unwrap()
+            .insert("superseded_by".to_string(), Value::String("ab-one".into()));
+        raw[1]
+            .as_object_mut()
+            .unwrap()
+            .insert("status".to_string(), Value::String("blocked".into()));
+        raw[1].as_object_mut().unwrap().insert(
+            "blocked_reason".to_string(),
+            Value::String("pending supersession".into()),
+        );
+        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&raw)).unwrap();
+        shadow_sync(&graph, &[], &raw, "sha256:seed").unwrap();
+        // Mutate the OTHER node; the pipeline settles ab-two itself.
+        let mut after = raw_rows(&graph);
+        after[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("title".to_string(), Value::String("One changed".into()));
+        let outcome = crate::graph_store::locked_mutate_with_hook(
+            &graph,
+            crate::graph_store::MutateInput {
+                entries: after.clone(),
+                canonical_path: None,
+                base_version: None,
+                plan_rungs: None,
+            },
+            std::time::Duration::from_secs(10),
+            None,
+        )
+        .unwrap();
+        assert!(
+            outcome.shadow_warning.is_none(),
+            "{:?}",
+            outcome.shadow_warning
+        );
+        let report = parity(&graph).unwrap();
+        assert_eq!(
+            report.divergent, 0,
+            "the settle reached the store: {report:?}"
+        );
+    }
+
+    #[test]
+    fn flipgate_shadow_write_changed_counts_only_canonical_changes() {
+        // AC3-EDGE: rows that differ only by explicit nulls write nothing.
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        let mut after = before.clone();
+        // One real change.
+        after[0]
+            .as_object_mut()
+            .unwrap()
+            .insert("title".to_string(), Value::String("One changed".into()));
+        // One null-only difference on the row that has no title key... the
+        // two-node fixture's ab-two HAS a title, so drop it on one side.
+        let mut before_with_null = before.clone();
+        before_with_null[1]
+            .as_object_mut()
+            .unwrap()
+            .insert("completion_note".to_string(), Value::Null);
+        let connection = open(&graph).unwrap();
+        let written = write_changed(&connection, &before_with_null, &after).unwrap();
+        assert_eq!(written, 1, "only the real change writes: {written}");
+        drop(connection);
+        drop(dir);
     }
 }
