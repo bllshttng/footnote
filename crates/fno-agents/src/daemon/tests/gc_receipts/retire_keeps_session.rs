@@ -18,6 +18,12 @@ struct FakeClaude {
 
 impl FakeClaude {
     fn install(worker: &str, session: &str) -> Self {
+        Self::install_as(worker, session, false)
+    }
+
+    /// `pre_stopped` answers `stopped` from the first read, as if the
+    /// harness finished the session on its own - no fno stop ever ran.
+    fn install_as(worker: &str, session: &str, pre_stopped: bool) -> Self {
         let env_dir = tempfile::tempdir().unwrap();
         let bin_dir = env_dir.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -40,7 +46,7 @@ case "$1" in
   agents)
     if [ -f "{flags}/rm_ran" ]; then
       printf '[]\n'
-    elif [ -f "{flags}/stop_ran" ]; then
+    elif [ -f "{flags}/stop_ran" ] || [ -f "{flags}/pre_stopped" ]; then
       printf '[{{"id":"{worker}","state":"stopped","session_id":"{session}"}}]\n'
     else
       printf '[{{"id":"{worker}","state":"running","session_id":"{session}"}}]\n'
@@ -65,6 +71,9 @@ esac
         std::fs::write(&bin, script).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if pre_stopped {
+            std::fs::write(flags.join("pre_stopped"), "").unwrap();
+        }
         Self { env_dir }
     }
 
@@ -335,7 +344,7 @@ fn an_update_registry_drop_stages_receipts_and_keeps_both_harnesses() {
     let _env = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (dir, home) = staged_graph_home();
+    let (_dir, home) = staged_graph_home();
     let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
     let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root(), None);
     let codex_home = tempfile::tempdir().unwrap();
@@ -679,4 +688,185 @@ fn a_transcript_gone_reads_no_transcript_even_with_a_receipt() {
     let event = reaped_event(&home, "abcd1234").expect("the retirement emits its event");
     assert_eq!(event["resumable"], false, "{event}");
     assert_eq!(event["resumable_basis"], "no-transcript", "{event}");
+}
+
+/// One open-work claude row whose harness already reads `stopped`, with or
+/// without fno's own stop record.
+fn stage_stopped_row(
+    dir: &std::path::Path,
+    home: &AgentsHome,
+    name: &str,
+    worker: &str,
+    session: &str,
+    node_status: &str,
+    phase: &str,
+    with_stop: bool,
+) {
+    stage_graph(
+        dir,
+        json!([{
+            "id": "n-open",
+            "status": node_status,
+            "sessions": [{
+                "phase": phase,
+                "harness": "claude",
+                "session_id": session,
+                "started_at": "2026-09-01T00:00:00Z",
+            }],
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = name.to_string();
+        e.short_id = worker.to_string();
+        e.origin = Some("spawn".into());
+        e.harness = Some("claude".into());
+        e.harness_session_id = Some(session.to_string());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        if with_stop {
+            e.stop = Some(state::StopRecord {
+                by: "stop-verb".into(),
+                at: "2026-09-15T00:00:00Z".into(),
+                reason: None,
+            });
+        }
+        r.entries.push(e);
+    })
+    .unwrap();
+}
+
+/// AC3-HP: a row fno stopped (a stop record on the row) whose harness state
+/// reads `stopped` keeps for open work - the record is fno's memory that IT
+/// ended the session, so `stopped` never reads as finished work.
+#[test]
+fn a_row_fno_stopped_keeps_for_open_work() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (dir, home) = staged_graph_home();
+    stage_stopped_row(
+        dir.path(),
+        &home,
+        "worker-stopped",
+        "abcd1234",
+        "abcd1234-1111-2222-3333-444444444444",
+        "in_progress",
+        "do",
+        true,
+    );
+    let fake = FakeClaude::install_as("abcd1234", "abcd1234-1111-2222-3333-444444444444", true);
+    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root(), None);
+    let store_dir = home.root().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let quiet = quiet_transcript(&store_dir, "q.jsonl", 2 * 3600);
+    let summary = production_sweep(&home, quiet);
+
+    assert!(
+        summary.retired.is_empty(),
+        "a stopped-by-fno row never retires: {:?}",
+        summary.retired
+    );
+    assert!(
+        summary
+            .kept_open_work
+            .iter()
+            .any(|(id, _, _, _)| id == "abcd1234"),
+        "the row keeps for open work: {:?}",
+        summary.kept_open_work
+    );
+    assert!(
+        !summary
+            .retired
+            .iter()
+            .any(|(_, basis)| basis.contains("session terminal")),
+        "no session-terminal basis: {:?}",
+        summary.retired
+    );
+}
+
+/// AC3-HP, planner half: a planner fno stopped holds as PlanningUnclosed
+/// (its node still needs its plan), never retires as halted-finished.
+#[test]
+fn a_planner_fno_stopped_holds_as_unclosed() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (dir, home) = staged_graph_home();
+    stage_stopped_row(
+        dir.path(),
+        &home,
+        "bp-stopped",
+        "bpabcd12",
+        "bbbb3333-1111-2222-3333-444444444444",
+        "ready",
+        "blueprint",
+        true,
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        if let Some(row) = r.entries.iter_mut().find(|e| e.short_id == "bpabcd12") {
+            row.inside_leg = Some(state::InsideLegReport {
+                state: state::InsideLegState::Done,
+                seq: 4,
+                reason: None,
+                received_at: "2026-09-01T00:00:00Z".into(),
+                ttl_ms: None,
+            });
+        }
+    })
+    .unwrap();
+    let fake = FakeClaude::install_as("bpabcd12", "bbbb3333-1111-2222-3333-444444444444", true);
+    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root(), None);
+    let store_dir = home.root().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let quiet = quiet_transcript(&store_dir, "q.jsonl", 2 * 3600);
+    let summary = production_sweep(&home, quiet);
+
+    assert!(
+        summary.retired.is_empty(),
+        "a stopped planner never retires: {:?}",
+        summary.retired
+    );
+    assert!(
+        summary
+            .kept_planning_unclosed
+            .iter()
+            .any(|(id, _)| id == "bpabcd12"),
+        "the planner holds as unclosed: {:?}",
+        summary.kept_planning_unclosed
+    );
+}
+
+/// AC3-EDGE: the same row with NO stop record - the harness stopped itself -
+/// still takes today's terminal release and retires.
+#[test]
+fn a_row_the_harness_stopped_itself_still_releases() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (dir, home) = staged_graph_home();
+    stage_stopped_row(
+        dir.path(),
+        &home,
+        "worker-selfstopped",
+        "abcd1234",
+        "abcd1234-1111-2222-3333-444444444444",
+        "in_progress",
+        "do",
+        false,
+    );
+    let fake = FakeClaude::install_as("abcd1234", "abcd1234-1111-2222-3333-444444444444", true);
+    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root(), None);
+    let store_dir = home.root().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let quiet = quiet_transcript(&store_dir, "q.jsonl", 2 * 3600);
+    let summary = production_sweep(&home, quiet);
+
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    assert!(
+        summary.retired[0]
+            .1
+            .contains("session terminal: harness state stopped"),
+        "{:?}",
+        summary.retired[0]
+    );
 }

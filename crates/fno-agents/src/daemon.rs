@@ -32,7 +32,7 @@ mod blocking_bound;
 mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod rm_teardown;
-mod roster_death;
+pub(crate) mod roster_death;
 mod stop_refusal_detail;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
@@ -934,95 +934,6 @@ impl CascadeOutcome {
     }
 }
 
-pub(crate) fn cascade_harness_session_result_with(
-    e: &state::RegistryEntry,
-    claude_agents: Option<&crate::claude_roster::ClaudeAgentsSnapshot>,
-    read_claude_agents: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
-    claude_rm: &dyn Fn(&str) -> Result<(), String>,
-) -> CascadeOutcome {
-    let row_id = claude_row_id(e).unwrap_or_else(|| e.name.clone());
-    match e.harness_name() {
-        "claude" => {
-            let Some(short_id) = claude_row_id(e) else {
-                return CascadeOutcome::Failed(
-                    "claude cascade has no short id and no session id".into(),
-                );
-            };
-            let snapshot = claude_agents.expect("Claude cascade requires an agent-list snapshot");
-            if claude_row_provably_absent(Some(snapshot), Some(&short_id)) {
-                return CascadeOutcome::AlreadyAbsent(format!(
-                    "claude row {short_id} already absent"
-                ));
-            }
-            if let Err(reason) = claude_rm(&short_id) {
-                return CascadeOutcome::Failed(reason);
-            }
-            let after = read_claude_agents();
-            if after.find(&short_id).is_some() {
-                return CascadeOutcome::Failed(format!(
-                    // retired-ok: reports a successful shellout that left the row behind.
-                    "claude row {short_id} survives successful claude rm"
-                ));
-            }
-            match &after {
-                crate::claude_roster::ClaudeAgentsSnapshot::Known { .. } => CascadeOutcome::Removed,
-                crate::claude_roster::ClaudeAgentsSnapshot::Unknown { .. } => {
-                    CascadeOutcome::Unverified(format!(
-                        "claude post-removal list unreadable: {}",
-                        after.warning_text()
-                    ))
-                }
-            }
-        }
-        "codex" => {
-            let Some(sid) = e.harness_session_id.as_deref() else {
-                return CascadeOutcome::NotApplicable;
-            };
-            // Resolve the codex home the way codex itself does: a CODEX_HOME
-            // redirect must move this removal, or the default index reads
-            // absent, absence reads as a confirmed effect, and the REAL index
-            // keeps the session alive after the row is dropped.
-            let Some(codex_dir) = crate::client_verbs::codex_home() else {
-                return CascadeOutcome::Failed(
-                    "no codex home: CODEX_HOME and HOME are both unset".into(),
-                );
-            };
-            let index = codex_dir.join("session_index.jsonl");
-            match cascade_codex_index(&index, sid, &row_id) {
-                Ok(true) => CascadeOutcome::Removed,
-                Ok(false) => CascadeOutcome::AlreadyAbsent("codex index row already absent".into()),
-                Err((_, reason)) => CascadeOutcome::Failed(reason),
-            }
-        }
-        "cursor-agent" => {
-            // rm runs after the liveness gate, so the owner pid is normally
-            // already gone and the census's ownership proof is unprovable by
-            // construction. Failed would brick every post-stop rm; the row
-            // goes and the leak, if any, is named. A reap that fails with
-            // handles in hand is different - servers are provably alive and
-            // surviving - and still fails the removal.
-            let handles =
-                match crate::cursor_agent::capture_detached_worker_servers(e.pid, e.pid_start_time)
-                {
-                    Ok(handles) => handles,
-                    Err(reason) => {
-                        return CascadeOutcome::Unverified(format!(
-                            "worker-server cleanup unverified: {reason}"
-                        ))
-                    }
-                };
-            match crate::cursor_agent::reap_detached_worker_servers(&handles) {
-                Ok(0) => CascadeOutcome::AlreadyAbsent(
-                    "cursor-agent worker-server was already absent".into(),
-                ),
-                Ok(_count) => CascadeOutcome::Removed,
-                Err(reason) => CascadeOutcome::Failed(reason),
-            }
-        }
-        _ => CascadeOutcome::NotApplicable,
-    }
-}
-
 pub(crate) fn run_claude_rm(short_id: &str) -> Result<(), String> {
     let dir = crate::claude_roster::removal_config_dir_for_short_id(short_id)?;
     run_claude_rm_in(dir.as_deref(), short_id)
@@ -1075,7 +986,7 @@ pub(crate) fn run_claude_rm_in(
 /// surgery is unit-testable against a temp index. `None` = nothing to do
 /// (missing index, or no matching entry); `Some((row_id, reason))` = refusal
 /// or failure to surface, never a swallowed error.
-fn cascade_codex_index(
+pub(crate) fn cascade_codex_index(
     index: &std::path::Path,
     sid: &str,
     row_id: &str,
@@ -1655,6 +1566,19 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                                 "reason": marker.reason,
                             }),
                         );
+                        // The row learns fno did this: the stamp keeps the
+                        // sweep from reading the harness `stopped` state as
+                        // finished work on a later tick.
+                        let sweep_home = home.clone();
+                        let stopped_session = marker.uuid.clone();
+                        let stopped_reason = marker.reason.clone();
+                        let _ = state::update_registry(&sweep_home.registry_json(), |r| {
+                            if let Some(entry) = r.entries.iter_mut().find(|e| {
+                                e.harness_session_id.as_deref() == Some(stopped_session.as_str())
+                            }) {
+                                state::record_stop(entry, "terminal-sweep", Some(stopped_reason));
+                            }
+                        });
                         crate::terminal_stop::remove_marker(home, &marker.uuid);
                     }
                     // Non-fatal: leave the marker so the next tick retries.
@@ -5674,6 +5598,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
             if let Some(entry) = registry.find_mut(&stop_name) {
                 entry.status = AgentStatus::Exited;
                 entry.exited_at = Some(now_rfc3339_like());
+                crate::state::record_stop(entry, "stop-verb", Some("codex-thread".into()));
             }
         })
         .await
@@ -5719,6 +5644,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
             if let Some(entry) = registry.find_mut(&stop_name) {
                 entry.status = AgentStatus::Exited;
                 entry.exited_at = Some(now_rfc3339_like());
+                crate::state::record_stop(entry, "stop-verb", Some("keeper-thread".into()));
             }
         })
         .await
@@ -5772,6 +5698,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
     if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
         if let Some(e) = r.find_mut(&stop_name) {
             e.status = AgentStatus::Exited;
+            crate::state::record_stop(e, "stop-verb", None);
         }
     })
     .await
@@ -6549,7 +6476,7 @@ async fn handle_rm_with(
     }
     let codex_index_capture = rm_codex_rollback::CodexIndexCapture::before_cascade(&entry);
     let harness_outcome = off_executor(|| {
-        cascade_harness_session_result_with(
+        crate::gc_native::cascade_harness_session_result_with(
             &entry,
             claude_agents.as_ref(),
             read_claude_agents,

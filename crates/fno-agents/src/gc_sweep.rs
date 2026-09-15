@@ -1836,9 +1836,16 @@ pub(crate) fn run_with_release(
         } else {
             None
         };
-        let session_terminal = roster_state
-            .clone()
-            .filter(|s| crate::claude_roster::is_terminal_roster_state(s));
+        // The terminal read is stop-aware: a `stopped` state is terminal only
+        // when fno never stopped the row (no stop record). `done` and `failed`
+        // stay terminal either way - they say the harness finished the work,
+        // not that fno ended the session. The live-descendant guard and the
+        // `session terminal` basis read this same variable, so a row fno
+        // stopped holds as unfinished instead of retiring as finished.
+        let session_terminal = roster_state.clone().filter(|s| {
+            !(s == "stopped" && e.stop.is_some())
+                && crate::claude_roster::is_terminal_roster_state(s)
+        });
         let superseded_by_live_peer = match &work {
             WorkState::Open { node, .. } => live_peer
                 .get(node)
@@ -1934,13 +1941,14 @@ pub(crate) fn run_with_release(
             planning_closed,
             planning_plan_written,
             planning_released: false,
-            // the latest inside-leg report reading `done` is the
-            // halted-planner fact - the turn ended, the session waits on
-            // nothing.
-            turn_ended: e
-                .inside_leg
-                .as_ref()
-                .is_some_and(|leg| leg.state == crate::state::InsideLegState::Done),
+            // The halted-planner fact: the latest inside-leg report reads
+            // `done` AND fno never stopped the row. A planner fno stopped
+            // holds as unfinished (its node still needs its plan), never as
+            // halted-finished.
+            turn_ended: e.stop.is_none()
+                && e.inside_leg
+                    .as_ref()
+                    .is_some_and(|leg| leg.state == crate::state::InsideLegState::Done),
             confirm_hold,
             session_terminal,
             superseded_by_live_peer,
