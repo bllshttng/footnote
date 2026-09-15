@@ -22,7 +22,7 @@ The AGENTS.md pitfall needs both words to say what it says. It reads: "`fno agen
 
 ## The senses of "operator"
 
-Measured 2026-09-11: 5408 hits across 1012 files. Measured 2026-09-15 for the authority rename (x-5e0a): 43 hits for the two patterns outside tests. Every one is either renamed to superuser or a retired form listed below. A future sweep starts here, not at sed.
+Measured 2026-09-11: 5408 hits across 1012 files. Measured 2026-09-15 for the authority rename: 43 hits for the two patterns outside tests. Every one is either renamed to superuser or a retired form listed below. A future sweep starts here, not at sed.
 
 | Sense | Where, with the count | Renamed? |
 |---|---|---|
@@ -35,7 +35,7 @@ Measured 2026-09-11: 5408 hits across 1012 files. Measured 2026-09-15 for the au
 
 ## Judged keep-list: authority-adjacent phrasings that stay
 
-Each phrasing below was weighed against the table during x-5e0a and keeps the word operator on purpose.
+Each phrasing below was weighed against the table during the authority rename and keeps the word operator on purpose.
 
 - **operator ruling** - a dated decision citation ("operator ruling 2026-08-13"). It records who ruled. It is history, not a live gate. New rulings say superuser in their prose.
 - **operator override** - config precedence the human set (`EVENTS_SCHEMA_PATH`, `FNO_AGENTS_BIN`). It names a setting, not the authority a gate checks.
