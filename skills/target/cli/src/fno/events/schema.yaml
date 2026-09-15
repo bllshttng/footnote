@@ -5345,6 +5345,31 @@ event_types:
           type: string
           description: "The refusal body excerpt, capped by the taxonomy at 256 chars."
 
+  - name: provider_quota_locked
+    description: "A provider quota wall was recorded even when no account owned it. Fires from the sweep when its refuse-to-guess guard declines to write an account lock for a route spawn (attributed false, no account field), and from any leg that resolves a lane reset from a transcript or runtime state. The 2026-09-15 zai wall ran on evidence emitted 29 times and silently dropped, because this entry was missing: absence of this event must never again read as absence of evidence."
+    sources: [daemon]
+    data:
+      required: [short_id, attributed, source]
+      properties:
+        short_id:
+          type: string
+          description: "The 8-hex jobId of the spawn that met the wall."
+        account:
+          type: string
+          description: "The account the lock was recorded under; absent when unattributed."
+        attributed:
+          type: boolean
+          description: "False when a route spawn reached the refuse-to-guess guard: the wall is real but no account owns the lock."
+        source:
+          type: string
+          description: "Where the wall evidence came from: transcript, runtime-state, or the refusing spawn gate itself."
+        resets_at:
+          type: number
+          description: "Epoch the window reopens, resolved or derived exactly as worker_refused derives its resets_at."
+        reset_is_derived:
+          type: boolean
+          description: "True when resets_at came from the named window plus the observation time rather than a resolved stamp."
+
   - name: worker_silent
     description: "A registered worker of ANY harness has produced no transcript activity for longer than its cadence deadline. A REPORT, never an action: nothing is stopped, spawned, or unclaimed on this signal, because an absence has two explanations and a component that acts on the wrong reading loses work. A worker whose transcript age is unknowable emits nothing at all."
     sources: [daemon]
