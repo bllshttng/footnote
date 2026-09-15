@@ -1145,7 +1145,7 @@ def tick() -> None:
                 # Durable grants, never the sweep's result: a cut sweep leaves
                 # no result, and a completed one reads few PRs under load.
                 out = verb_call("authorized-merge", {"op": "grant-queue",
-                                "cwd": str(roots[0] if roots else Path.cwd())}, timeout=60)
+                                "cwd": str(roots[0] if roots else Path.cwd())}, timeout=120)
                 if out.get("error"):
                     raise VerbUnavailable(str(out["error"]))
                 queue = [
