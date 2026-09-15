@@ -25,7 +25,6 @@ use sha2::{Digest, Sha256};
 use crate::bounded_spawn::{kill_process_group, spawn_bounded};
 
 const PRODUCER_BOUND_SECONDS: u64 = 45;
-const NATIVE_BOUND_ENV: &str = "FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS";
 const DEFAULT_NATIVE_BOUND_SECONDS: f64 = 3.0;
 const ENTRY_STATES: &[&str] = &["startup", "resume", "clear", "post_compact"];
 
@@ -122,7 +121,7 @@ pub fn run_context_run(args: &[String]) -> i32 {
 }
 
 fn native_bound() -> Duration {
-    let secs = std::env::var(NATIVE_BOUND_ENV)
+    let secs = std::env::var("FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS")
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|s| *s > 0.0 && s.is_finite())
