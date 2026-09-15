@@ -62,8 +62,8 @@ def _grant_fields():
 
 
 def _cand(tmp_path, pr, node_id):
-    return d.PrCandidate(node_id=node_id, pr_number=pr, pr_url=None,
-                         repo_dir=tmp_path, repo_slug="owner/repo")
+    return PrCandidate(node_id=node_id, pr_number=pr, pr_url=None,
+                       repo_dir=tmp_path, repo_slug="owner/repo")
 
 
 def _drain(queue, events, claim=None, store_path=None):
@@ -156,7 +156,8 @@ def test_an_already_closed_reply_stamps_not_open_and_the_next_drain_skips(
     cand = _cand(tmp_path, 2017, "x-drain3")
     counts = _drain([(cand, key, _grant_fields())], events, store_path=store_path)
     assert calls == [2017]
-    assert store.get(key)["last_seen_state"] == "NOT_OPEN"
+    # A fresh store reads the file the drain's own instance persisted.
+    assert _store(tmp_path).get(key)["last_seen_state"] == "NOT_OPEN"
     assert counts["held"] == 1
 
     events.clear()

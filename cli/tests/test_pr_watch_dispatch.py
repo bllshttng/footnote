@@ -4067,13 +4067,14 @@ class TestDurableGrantExecution:
         merge_calls: list[dict] = []
         self._merge_calls = merge_calls
 
-        def _merge(pr, cwd, timeout_s=300.0):
-            merge_calls.append({"pr": pr, "timeout_s": timeout_s})
+        def _merge(argv, cwd=None, *, authority="manifest", timeout_s=300.0):
+            assert authority == "durable_grant"
+            merge_calls.append({"pr": int(argv[0]), "timeout_s": timeout_s})
             if isinstance(rc, BaseException):
                 raise rc
             return rc
 
-        monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", _merge)
+        monkeypatch.setattr("fno.pr._merge.run_merge", _merge)
         return merge_calls
 
     def _queue(self, tmp_path):
@@ -4109,9 +4110,9 @@ class TestDurableGrantExecution:
         deps = _make_tick_deps(tmp_path, candidates=[])
         self._seed_entries(tmp_path, [1])
         self._fake_merge(monkeypatch, 0)
-        executed, skipped = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+        counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
-        assert (executed, skipped) == (1, 0)
+        assert counts == {"executed": 1, "held": 0, "failed": 0, "skipped": 0}
         reserved = self._grant_events(deps, "reserved")
         executed_events = self._grant_events(deps, "executed")
         assert len(reserved) == 1 and len(executed_events) == 1
@@ -4221,9 +4222,14 @@ class TestDurableGrantExecution:
         entry["merge_dispatched"] = True
         store.set("owner/repo#1", entry)
         self._fake_merge(monkeypatch, 0)
-        executed, skipped = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+        counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
-        assert (executed, skipped) == (0, 0)
+        assert counts["skipped"] == 1 and counts["executed"] == 0
+        merged = [
+            e for e in deps["events"]
+            if e["type"] == "pr_watch_skipped" and e["data"].get("reason") == "merged"
+        ]
+        assert [e["data"]["pr"] for e in merged] == [1]
         assert self._merge_calls == []
         assert not self._grant_events(deps, "reserved")
 
@@ -4239,9 +4245,14 @@ class TestDurableGrantExecution:
         entry["parked"] = "retries-exhausted"
         store.set("owner/repo#1", entry)
         self._fake_merge(monkeypatch, 0)
-        executed, skipped = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+        counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
 
-        assert (executed, skipped) == (0, 0)
+        assert counts["skipped"] == 1 and counts["executed"] == 0
+        parked_skips = [
+            e for e in deps["events"]
+            if e["type"] == "pr_watch_skipped" and e["data"].get("reason") == "parked"
+        ]
+        assert [e["data"]["pr"] for e in parked_skips] == [1]
         assert self._merge_calls == []
         assert not self._grant_events(deps, "reserved")
 
@@ -4292,12 +4303,12 @@ class TestDurableGrantExecution:
         deps = _make_tick_deps(tmp_path, candidates=[])
         self._seed_entries(tmp_path, [1])
         self._fake_merge(monkeypatch, 0)
-        executed, skipped = self._drain(
+        counts = self._drain(
             self._queue(tmp_path), deps, monkeypatch, tmp_path,
             budget_left=_time.monotonic() + 10.0,
         )
 
-        assert (executed, skipped) == (0, 1)
+        assert counts["skipped"] == 1 and counts["executed"] == 0
         assert self._merge_calls == []
         budget = [
             e for e in deps["events"]
@@ -4317,7 +4328,7 @@ class TestDurableGrantExecution:
         from fno.pr_watch._dispatch import tick
 
         deps = _make_tick_deps(tmp_path, candidates=[])
-        monkeypatch.setattr("fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd: 0)
+        monkeypatch.setattr("fno.pr._merge.run_merge", lambda argv, cwd=None, **_kw: 0)
         tick(
             graph_path=tmp_path / "graph.json",
             store_path=tmp_path / "state.json",
@@ -4427,7 +4438,7 @@ class TestScanResumesLeastRecentlyPolled:
         # The merge phase drains a granted row for PR 45 straight from the
         # Rust queue (the sweep no longer queues).
         monkeypatch.setattr(
-            "fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd, timeout_s=300.0: 0
+            "fno.pr._merge.run_merge", lambda argv, cwd=None, **_kw: 0
         )
         from fno.pr_watch._dispatch import run_execute_queue
 
@@ -4482,17 +4493,17 @@ class TestScanResumesLeastRecentlyPolled:
         # The merge phase drains a granted row for PR 11 straight from the
         # Rust queue (the sweep no longer queues).
         monkeypatch.setattr(
-            "fno.pr._merge.run_merge_for_durable_grant", lambda pr, cwd, timeout_s=300.0: 0
+            "fno.pr._merge.run_merge", lambda argv, cwd=None, **_kw: 0
         )
         from fno.pr_watch._dispatch import run_execute_queue
 
-        executed, _skipped = run_execute_queue(
+        counts = run_execute_queue(
             [(_make_candidate(pr_number=11, node_id="x-00000011", repo_dir=tmp_path),
               "owner/repo#11", TestDurableGrantExecution.GRANT)],
             store_path=store_path, emit=deps["emit"],
             notify=deps["notify"], max_retries=2, claim=deps["claim"],
         )
-        assert executed == 1
+        assert counts["executed"] == 1
         state = WatermarkStore(path=store_path).load()
         stamped = [k for k, v in state.items() if isinstance(v, dict) and v.get("last_polled_at")]
         assert len(stamped) == 11, "every rich read stamped its cursor"
