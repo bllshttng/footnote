@@ -1410,8 +1410,12 @@ def append_progress_note(
     if resolved is None:
         return False, None
     result = _run_op(Path(path), "append_progress_note", {"node_id": resolved, "note": note})
-    found = result["found"]
-    return bool(found), result.get("plan_path")
+    if not result.get("found"):
+        return False, result.get("plan_path")
+    # Same world-read gate as the wave append (x-6a2c): found=true from the op
+    # alone is the op's word, not the published file's.
+    landed, _ = _confirm_note_landed(Path(path), resolved, note)
+    return landed, result.get("plan_path")
 
 
 def append_encounter(
@@ -1440,7 +1444,68 @@ def append_wave_note(path: Path, node_id: str, note: dict) -> tuple[bool, str | 
     if resolved is None:
         return False, f"no node resolves to '{node_id}'"
     result = _run_op(Path(path), "append_wave_note", {"node_id": resolved, "note": note})
-    return bool(result.get("found")), result.get("error")
+    if not result.get("found"):
+        return False, result.get("error")
+    landed, error = _confirm_note_landed(Path(path), resolved, note)
+    if not landed:
+        return False, error or "wave append refused"
+    return True, None
+
+
+def _confirm_note_landed(
+    path: Path, node_id: str, note: dict
+) -> "tuple[bool, str | None]":
+    """Read the target back and confirm the appended note is in the row.
+
+    The op's word is not the world's: a layer that reports found=true and
+    loses the publish would let the verb print a fold receipt over a no-op
+    (x-6a2c). A read-back that cannot answer (store read failed) refuses
+    with the uncertainty named rather than asserting the note is absent.
+    """
+    row, answered = _readback_row(path, node_id)
+    if not answered:
+        return False, (
+            "wave append reported success but the read-back could not confirm it "
+            "(store read failed); verify the target before retrying"
+        )
+    if not _note_in_row(row, note):
+        return False, (
+            f"wave append reported success but the note is not in the published "
+            f"target ('{node_id}' read back without it); the write did not land"
+        )
+    return True, None
+
+
+def _note_in_row(row: "dict | None", note: dict) -> bool:
+    """True when the row's progress_notes contain the exact note dict sent."""
+    for n in (row or {}).get("progress_notes") or []:
+        if not isinstance(n, dict) or n.get("ts") != note.get("ts"):
+            continue
+        if all(n.get(k) == v for k, v in note.items()):
+            return True
+    return False
+
+
+def _readback_row(path: Path, node_id: str) -> "tuple[dict | None, bool]":
+    """One row by id for a note append's read-back: ``(row, True)`` answered,
+    ``(None, True)`` the row is genuinely absent, ``(None, False)`` the store
+    read failed and the answer is unknown.
+
+    ``read_nodes_by_ids`` is an optimization and can answer None without
+    answering the question; the gate must refuse only on a real absence, so
+    fall back to the strict full read before concluding the row is gone.
+    """
+    fast = read_nodes_by_ids(path, [node_id])
+    for row in (fast or {}).get("entries") or []:
+        if row.get("id") == node_id:
+            return row, True
+    try:
+        for row in read_graph_strict(path):
+            if row.get("id") == node_id:
+                return row, True
+    except Exception:  # noqa: BLE001 - an unreadable graph is an unanswered read
+        return None, False
+    return None, True
 
 
 def _run_op(path: Path, name: str, params: dict) -> dict:

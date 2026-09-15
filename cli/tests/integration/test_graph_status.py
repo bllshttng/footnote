@@ -779,6 +779,90 @@ def test_backlog_idea_wave_appends_without_minting(tmp_graph):
     assert note["difficulty"] == "high"
 
 
+def test_backlog_idea_wave_writes_on_claimed_in_progress_target(tmp_graph):
+    """x-6a2c AC1-HP: the reported scenario - wave-of into an in_progress
+    target carrying a live claim - lands the note (positive marker), exit 0."""
+    add = _invoke("--json", "backlog", "add", "Running work")
+    target_id = json.loads(add.stdout)["id"]
+    upd = _invoke(
+        "backlog", "update", target_id,
+        "--locked-by", "target-session:00847995-e0db-47c2-ab5b-24468ba1a4f5",
+    )
+    assert upd.exit_code == 0, upd.output
+
+    r = _invoke(
+        "--json", "backlog", "idea", "Claimed finding",
+        "--wave-of", target_id,
+        "--difficulty", "medium",
+        "--details", "payload X6A2C-TOKEN",
+    )
+    assert r.exit_code == 0, r.output
+    receipt = json.loads(r.stdout)
+    assert receipt["outcome"] == "wave"
+    assert receipt["minted_id"] is None
+
+    node = next(e for e in _read_entries(tmp_graph) if e["id"] == target_id)
+    assert node.get("status") == "in_progress", node.get("status")
+    notes = node.get("progress_notes") or []
+    assert notes and notes[-1]["kind"] == "wave"
+    assert "X6A2C-TOKEN" in (notes[-1].get("details") or "")
+
+
+def test_wave_append_refuses_when_write_does_not_land(tmp_graph, monkeypatch):
+    """x-6a2c AC2-ERR: a layer that reports found=true without persisting is
+    a refusal naming the no-op - never a folded-as-wave receipt."""
+    import fno.graph.store as gs
+
+    add = _invoke("--json", "backlog", "add", "Target work")
+    target_id = json.loads(add.stdout)["id"]
+
+    def lying_op(path, name, params):
+        assert name == "append_wave_note"
+        return {"found": True, "error": None}
+
+    monkeypatch.setattr(gs, "_run_op", lying_op)
+
+    r = _invoke(
+        "--json", "backlog", "idea", "Lost finding",
+        "--wave-of", target_id,
+        "--difficulty", "low",
+        "--details", "never persisted",
+    )
+    assert r.exit_code != 0, r.output
+    assert "outcome" not in (r.stdout or "")
+    assert "folded as wave" not in (r.stdout or "") + (r.stderr or "")
+    assert "did not land" in r.output
+
+    node = next(e for e in _read_entries(tmp_graph) if e["id"] == target_id)
+    assert not (node.get("progress_notes") or [])
+
+
+def test_wave_append_readback_read_failure_names_uncertainty(tmp_graph, monkeypatch):
+    """x-6a2c follow-up: a read-back that cannot answer refuses with the
+    uncertainty named - never asserting the note is (or is not) on disk."""
+    import fno.graph.store as gs
+
+    add = _invoke("--json", "backlog", "add", "Target work")
+    target_id = json.loads(add.stdout)["id"]
+
+    def unreadable(path):
+        raise gs.GraphUnreadableError("store read failed")
+
+    # Both reads must fail: the by-id fast path answers first when it works.
+    monkeypatch.setattr(gs, "read_nodes_by_ids", lambda path, tokens: None)
+    monkeypatch.setattr(gs, "read_graph_strict", unreadable)
+
+    found, error = gs.append_wave_note(
+        tmp_graph, target_id,
+        {"ts": "T1", "kind": "wave", "title": "t", "details": "d",
+         "difficulty": "low", "source": "s", "text": "d"},
+    )
+    assert found is False
+    assert error is not None
+    assert "could not confirm" in error
+    assert "did not land" not in error
+
+
 def test_backlog_idea_wave_rejects_terminal_target_and_topology_flags(tmp_graph):
     """AC6-ERR: invalid wave targets fail before any note or node mutation."""
     target = _invoke("--json", "backlog", "add", "Done work")
