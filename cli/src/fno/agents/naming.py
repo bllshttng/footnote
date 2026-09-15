@@ -141,40 +141,55 @@ def parse_many(names):
     return out
 
 
-def _enrich_hex_nodes(rows):
-    """Re-attach full node ids to bare-hex parse results (x-57fe).
+@lru_cache(maxsize=1)
+def _graph_hex_map():
+    """hex suffix -> full node id, one graph read per process.
 
-    The mint emits the node hex without its prefix; the graph is the only
-    place that knows the prefix. One load resolves the whole batch; a hex
-    with no unique `<prefix>-<hex>` id stays bare (never an invented id).
+    Node ids are immutable, so a snapshot cannot turn wrong; a node minted
+    after the cache only loses its enrichment (the hex stays bare), which is
+    the safe direction. Ambiguous hexes (two prefixes, same hex) map to ""
+    and stay bare.
     """
-    hexes = {}
-    for row in rows:
-        if row is None or not row.node or not re.fullmatch(r"[0-9a-f]+", row.node):
-            continue
-        hexes[row.node] = None
-    if not hexes:
-        return
     try:
         from fno.graph.load import load_graph
 
         rows_all = load_graph()
     except Exception:  # noqa: BLE001 - a graph read failure leaves hex bare
-        return
+        return {}
+    hex_map: dict = {}
     for entry in rows_all:
         node_id = entry.get("id") if isinstance(entry, dict) else None
         if not node_id or "-" not in node_id:
             continue
         prefix, _, hex_part = node_id.rpartition("-")
-        if hex_part in hexes and prefix:
-            if hexes[hex_part] is None:
-                hexes[hex_part] = node_id
-            elif hexes[hex_part] != node_id:
-                hexes[hex_part] = ""  # ambiguous: keep bare hex
-    for i, row in enumerate(rows):
-        if row is None or not row.node or row.node not in hexes:
+        if not prefix or not hex_part:
             continue
-        resolved = hexes[row.node]
+        if hex_part not in hex_map:
+            hex_map[hex_part] = node_id
+        elif hex_map[hex_part] != node_id:
+            hex_map[hex_part] = ""  # ambiguous: keep bare hex
+    return hex_map
+
+
+def _enrich_hex_nodes(rows):
+    """Re-attach full node ids to bare-hex parse results (x-57fe).
+
+    The mint emits the node hex without its prefix; the graph is the only
+    place that knows the prefix. A hex with no unique `<prefix>-<hex>` id
+    stays bare (never an invented id).
+    """
+    wanted = {
+        row.node
+        for row in rows
+        if row is not None and row.node and re.fullmatch(r"[0-9a-f]+", row.node)
+    }
+    if not wanted:
+        return
+    hex_map = _graph_hex_map()
+    for i, row in enumerate(rows):
+        if row is None or not row.node or row.node not in wanted:
+            continue
+        resolved = hex_map.get(row.node)
         if resolved:
             rows[i] = row._replace(node=resolved)
 

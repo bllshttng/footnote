@@ -370,15 +370,6 @@ def _head_flag_value(head: Sequence[str], flags: Tuple[str, ...]) -> Optional[st
     return None
 
 
-def _model_tag(model: Optional[str]) -> Optional[str]:
-    """The short per-model name tag: lowercase, every non-alphanumeric stripped
-    (``glm-5.2`` -> ``glm52``). Kept short by hand rather than via
-    ``slug_component`` so the tag never spends the name budget on hyphens."""
-    if not model:
-        return None
-    return re.sub(r"[^a-z0-9]", "", model.lower()) or None
-
-
 def _node_slug_from_graph(node: str) -> Tuple[Optional[str], Optional[str]]:
     """Best-effort graph read of a node's canonical id and slug.
 
