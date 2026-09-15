@@ -2914,6 +2914,7 @@ def test_stage_check_prefers_the_registry_install_location(tmp_path, monkeypatch
         lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
     )
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
     seen = {}
 
     def _probe(argv):
