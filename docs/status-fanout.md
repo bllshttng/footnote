@@ -70,7 +70,9 @@ template = "fno [{project}] {data.title} - {data.body} ({data.pointer})"
 enabled = true
 ```
 
-The arm notices ride this sink too: `arm_watch` (arms broken past `[notify] arm_failing_after_s`, plus hung verbs and dead flight holders), the `notify_watch` board and main-CI lanes, and the `provider_cap` notices all land as `operator_notice` rows. In the Rust callers `--pointer` LEADS the argv (`fno inbox notify --pointer P TITLE BODY`), because the Python group callback refuses an option after its positionals - the trailing form exits 2 and writes no row. `arm_watch` counts a notice sent only on exit 0: a notice that died at the gate leaves the dedupe token unwritten, so the next tick retries.
+The arm notices ride this sink too. `arm_watch`, the `notify_watch` board and main-CI lanes, and the `provider_cap` notices all land as `operator_notice` rows. `arm_watch` names arms broken past `[notify] arm_failing_after_s`, plus hung verbs and dead flight holders.
+
+In the Rust callers `--pointer` leads the argv: `fno inbox notify --pointer P TITLE BODY`. The Python group callback refuses an option after its positionals, so the trailing form exits 2 and writes no row. `arm_watch` counts a notice sent only on exit 0. A notice that died at the gate leaves the dedupe token unwritten, so the next tick retries.
 
 ### The ntfy recipe (self-hosted over Tailscale)
 
