@@ -422,6 +422,19 @@ verb_rc=0
 if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
     DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
 else
+    # x-3227 sibling: this adapter only ever gates target plans, so its
+    # done_probes get the session cargo build-dir env the same way the claude
+    # adapter exports it. The config surface's own answer, exported only when
+    # it reads as that answer; any failure leaves the env unset.
+    if [[ -z "${CARGO_BUILD_BUILD_DIR:-}" ]] && command -v fno >/dev/null 2>&1; then
+        _session_build_dir=$(fno config build-dir 2>/dev/null || true)
+        case "$_session_build_dir" in
+            */"{workspace-path-hash}")
+                export CARGO_BUILD_BUILD_DIR="$_session_build_dir"
+                ;;
+        esac
+        unset _session_build_dir
+    fi
     DECISION_JSON=$("$BIN" loop-check \
         --state "$STATE_FILE" \
         --transcript "$SYNTH" \

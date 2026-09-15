@@ -142,6 +142,38 @@ log_e4="E4: fno prints a non-build-dir answer -> nothing exported"
     cleanup
 }
 
+# ── E5: the agy adapter exports the same env ────────────────────────────────
+AGY_HOOK="${REPO_ROOT}/hooks/agy-target-stop-hook.sh"
+log_e5="E5: agy adapter exports the build-dir env for its loop-check child"
+if [[ -f "$AGY_HOOK" ]]; then
+    {
+        setup_env "/tmp/fake-cargo-base/{workspace-path-hash}"
+        AGY_DUMP="${TMP_DIR}/agy-child-env.txt"
+        STUB_AGY_AGENTS="${TMP_DIR}/fno-agents-agy-stub"
+        cat > "$STUB_AGY_AGENTS" <<STUB
+#!/usr/bin/env bash
+env > "$AGY_DUMP"
+printf '{"decision":"allow","termination_reason":"DonePRGreen","message":"ok"}\n'
+exit 0
+STUB
+        chmod +x "$STUB_AGY_AGENTS"
+        AGY_INPUT="{\"transcriptPath\":\"${TMP_DIR}/aaaa-0001.jsonl\",\"fullyIdle\":true,\"conversationId\":\"c-3227\"}"
+        HOOK_RC=0
+        (cd "$TMP_DIR" && env -u CARGO_BUILD_BUILD_DIR CLAUDECODE=0 HOME="$HOME_DIR" \
+            PATH="$FNO_PATH" FNO_AGENTS_BIN="$STUB_AGY_AGENTS" \
+            bash "$AGY_HOOK" <<< "$AGY_INPUT" >/dev/null 2>&1) || HOOK_RC=$?
+        ok=true
+        [[ "$HOOK_RC" -eq 0 ]] || { fail "$log_e5: hook rc $HOOK_RC"; ok=false; }
+        grep -q "^CARGO_BUILD_BUILD_DIR=/tmp/fake-cargo-base/{workspace-path-hash}\$" \
+            "$AGY_DUMP" 2>/dev/null \
+            || { fail "$log_e5: no CARGO_BUILD_BUILD_DIR in agy child env"; ok=false; }
+        [[ "$ok" == true ]] && pass "$log_e5"
+        cleanup
+    }
+else
+    skip "$log_e5: agy hook not present"
+fi
+
 printf '[probe-env] done: %d pass, %d fail, %d skip\n' "$PASS" "$FAIL" "$SKIP_COUNT"
 [[ "$FAIL" -eq 0 ]] || exit 1
 exit 0
