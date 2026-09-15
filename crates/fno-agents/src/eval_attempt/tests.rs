@@ -107,6 +107,142 @@ fn cli_cohorts_mode_still_enforces_single_mode() {
     assert_eq!(run_evals_attempt(&both), 2);
 }
 
+// --- the cohort door: aggregate fold, train export, yaml load --------------
+
+use super::{export_train, load_cohorts_yaml, qualify_aggregate};
+
+fn rows_text() -> String {
+    let graded = json!({
+        "task_id": "q1", "tier": "regression", "pass": true,
+        "bank_rev": "rev123",
+        "obs": {"fixture_prepared": true, "worker_required": false,
+                 "grader_ran": true, "grader_passed": true},
+    });
+    let infra = json!({
+        "task_id": "q1", "tier": "regression", "pass": false,
+        "obs": {"fixture_prepared": false},
+    });
+    let legacy = json!({"task_id": "q1", "tier": "regression", "pass": false});
+    let wrong_rev = json!({
+        "task_id": "q1", "tier": "regression", "pass": true,
+        "bank_rev": "other",
+        "obs": {"fixture_prepared": true, "worker_required": false,
+                 "grader_ran": true, "grader_passed": true},
+    });
+    format!("{graded}\n{infra}\n{legacy}\n{wrong_rev}\n")
+}
+
+fn qual_decl() -> serde_json::Value {
+    json!({
+        "bank_rev": "rev123",
+        "train": [],
+        "validation": [],
+        "qualification": ["q1"],
+    })
+}
+
+#[test]
+fn aggregate_folds_valid_grades_and_excludes_wrong_rev_and_legacy() {
+    let out = qualify_aggregate(&rows_text(), &qual_decl(), None, None, None);
+    assert_eq!(out["qualified"], true);
+    assert_eq!(out["valid_grades"], 1);
+    assert_eq!(out["passes"], 1);
+    assert_eq!(out["attempts"]["graded"], 1);
+    assert_eq!(out["attempts"]["infrastructure"], 1);
+    assert_eq!(out["excluded"]["wrong_rev"], 1);
+    assert_eq!(out["excluded"]["legacy"], 1);
+    assert_eq!(out["missing_tasks"], 0);
+}
+
+#[test]
+fn aggregate_reports_unqualified_on_door_refusal() {
+    let mut bad = qual_decl();
+    bad["train"] = json!(["q1"]);
+    let out = qualify_aggregate(&rows_text(), &bad, None, None, None);
+    assert_eq!(out["qualified"], false);
+    assert!(out["reason"].as_str().unwrap().contains("both"));
+}
+
+#[test]
+fn aggregate_reports_unqualified_without_a_qualification_cohort() {
+    let mut empty = qual_decl();
+    empty["qualification"] = json!([]);
+    let out = qualify_aggregate(&rows_text(), &empty, None, None, None);
+    assert_eq!(out["qualified"], false);
+    assert!(out["reason"]
+        .as_str()
+        .unwrap()
+        .contains("no declared qualification"));
+}
+
+#[test]
+fn aggregate_refuses_when_the_bank_changed_since_the_pin() {
+    // A repo dir with no git metadata: the rev check cannot certify, so it
+    // refuses (the same fail-closed shape as an unreadable pin).
+    let tmp = tempfile::TempDir::new().unwrap();
+    let out = qualify_aggregate(
+        &rows_text(),
+        &qual_decl(),
+        None,
+        Some(tmp.path().to_str().unwrap()),
+        None,
+    );
+    assert_eq!(out["qualified"], false);
+    assert!(out["reason"].as_str().unwrap().contains("bank changed"));
+}
+
+#[test]
+fn export_train_writes_only_train_rows() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let out_path = tmp.path().join("tuning.jsonl");
+    let decl = json!({
+        "bank_rev": "rev123",
+        "train": ["q1", "t9"],
+        "validation": [],
+        "qualification": ["q1"],
+    });
+    let out = export_train(&rows_text(), &decl, None, None, out_path.to_str().unwrap()).unwrap();
+    assert_eq!(out["exported"], 4); // every q1 row, including infra + legacy
+    let text = std::fs::read_to_string(&out_path).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 4);
+    assert!(lines.iter().all(|r| r["role"] == "train"));
+    assert!(lines.iter().all(|r| r["task_id"] == "q1"));
+}
+
+#[test]
+fn export_train_refuses_an_invalid_split_without_writing() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let out_path = tmp.path().join("tuning.jsonl");
+    let mut bad = qual_decl();
+    bad["train"] = json!(["q1"]);
+    let err = export_train(&rows_text(), &bad, None, None, out_path.to_str().unwrap()).unwrap_err();
+    assert!(err.contains("both"));
+    assert!(!out_path.exists());
+}
+
+#[test]
+fn cohorts_yaml_loads_shape_and_defaults_missing_roles() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("cohorts.yaml");
+    std::fs::write(&path, "bank_rev: abc123\ntrain: [t1]\n").unwrap();
+    let decl = load_cohorts_yaml(path.to_str().unwrap()).unwrap();
+    assert_eq!(decl["bank_rev"], "abc123");
+    assert_eq!(decl["train"], json!(["t1"]));
+    assert_eq!(decl["qualification"], json!([]));
+}
+
+#[test]
+fn cohorts_yaml_refuses_a_missing_bank_rev() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("cohorts.yaml");
+    std::fs::write(&path, "train: [t1]\n").unwrap();
+    assert!(load_cohorts_yaml(path.to_str().unwrap()).is_err());
+}
+
 fn obs(extra: serde_json::Value) -> serde_json::Value {
     json!({ "obs": extra })
 }

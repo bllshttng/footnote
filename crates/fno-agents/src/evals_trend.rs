@@ -626,11 +626,24 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
             .filter(|s| s.tier == "regression" && s.pass_at_1() < 1.0)
             .map(|s| s.task_id)
             .collect();
+        let fold = report_fold(&rows, stale_days, now, None, None);
+        let reg = fold.get("tiers").and_then(|t| t.get("regression"));
+        let pass_rate = reg
+            .and_then(|t| t.get("pass_rate"))
+            .cloned()
+            .unwrap_or(json!(null));
+        let flake_count = fold
+            .get("flakes")
+            .and_then(Value::as_array)
+            .map(|a| a.len())
+            .unwrap_or(0);
         println!(
             "{}",
             serde_json::to_string(&json!({
                 "regression_alarm": recent_alarm,
                 "regressed": regressed,
+                "regression_pass_rate": pass_rate,
+                "flake_count": flake_count,
             }))
             .unwrap_or_default()
         );
