@@ -125,6 +125,14 @@ pub(crate) fn build_codex_thread_entry(
         // v30: the effective positive Git grant carried by the bounded thread
         // policy. Outside a repository there is no grant to record.
         git_grant: git_grant_for_cwd(cwd),
+        // v33: this lane's replayable launch axis is the store root only -
+        // the thread/rollout paths are derived from CODEX_HOME, and the
+        // resume form carries the rest.
+        launch: Some(crate::launch_record::LaunchRecord {
+            store_root: std::env::var("CODEX_HOME").ok().filter(|v| !v.is_empty()),
+            source: Some("codex-thread".to_string()),
+            ..Default::default()
+        }),
         // The fenced tokens verbatim; startup recovery re-parses them into the
         // resume frame's config.
         harness_args: harness_args.to_vec(),

@@ -1352,6 +1352,10 @@ pub struct CreateResult {
     pub stdout: String,
     pub stderr: String,
     pub duration_ms: u128,
+    /// The composed `claude --bg` argv with the seed token removed, for the
+    /// row's launch record. The stdin path carries no seed token, so the tail
+    /// is the full argv there.
+    pub launch_argv: Vec<String>,
 }
 
 /// Outcome of scanning `claude --bg` stdout for its launch-confirmation line.
@@ -1616,6 +1620,7 @@ pub fn bg_create(
             stdout: consumed,
             stderr: String::new(),
             duration_ms,
+            launch_argv: crate::launch_record::argv_without_seed(&argv, message),
         }),
         ShortIdScan::NoId { consumed } => {
             // stdout closed before any confirmation: a genuine launch failure.
@@ -3052,6 +3057,13 @@ fn create(
         // session's env, so the exported FNO_NODE names the node THIS spawn
         // is for.
         node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
+        launch: Some(crate::launch_record::LaunchRecord {
+            argv: result.launch_argv.clone(),
+            env: crate::launch_record::allowlisted_env(std::env::vars()),
+            store_root: None,
+            cwd_current: Some(cwd.to_string_lossy().to_string()),
+            source: Some("bg".to_string()),
+        }),
         // The lane this row was spawned on: create's only production caller
         // is the claude --bg spawn lane, so the stamp is "thread" (the public
         // name; the client's local selector spells it "bg"). If create ever

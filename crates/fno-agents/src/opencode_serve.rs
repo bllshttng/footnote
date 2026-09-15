@@ -483,6 +483,15 @@ fn writer_argv(
     message: &str,
     model: Option<&str>,
 ) -> Vec<String> {
+    let mut argv = writer_argv_prefix(serve, session_id, model);
+    argv.extend(crate::provider::opencode_run_tail(message));
+    argv
+}
+
+/// The writer argv without the message tail - the launch record's argv. The
+/// seed rides only in the tail, so the seedless prefix is what a relaunch
+/// replays.
+fn writer_argv_prefix(serve: &ServeHandle, session_id: &str, model: Option<&str>) -> Vec<String> {
     let mut argv = vec![
         "opencode".to_string(),
         "run".to_string(),
@@ -496,7 +505,6 @@ fn writer_argv(
         argv.push("--model".to_string());
         argv.push(m.to_string());
     }
-    argv.extend(crate::provider::opencode_run_tail(message));
     argv
 }
 
@@ -807,6 +815,13 @@ fn dispatch_opencode_serve_inner(
         // v25: the route axes this lane actually used - opencode is both
         // harness and provider axis here, its auth is ambient, so "default".
         route_provider_id: Some("opencode".to_string()),
+        launch: Some(crate::launch_record::LaunchRecord {
+            argv: writer_argv_prefix(&serve, &session_id, model),
+            env: crate::launch_record::allowlisted_env(std::env::vars()),
+            store_root: None,
+            cwd_current: Some(cwd.to_string_lossy().to_string()),
+            source: Some("serve".to_string()),
+        }),
         model_name: model.filter(|m| !m.is_empty()).map(str::to_string),
         account_record_id: Some("default".to_string()),
         node: node.filter(|v| !v.is_empty()).map(str::to_string),

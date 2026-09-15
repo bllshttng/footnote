@@ -188,10 +188,7 @@ def _update_registry_if_recipient_unchanged(
     def _guarded(entries: list[AgentEntry]) -> list[AgentEntry]:
         nonlocal applied
         matches = [entry for entry in entries if entry.name == name]
-        if (
-            len(matches) != 1
-            or _recipient_identity_key(matches[0]) != expected_identity
-        ):
+        if len(matches) != 1 or _recipient_identity_key(matches[0]) != expected_identity:
             if decline_reason is not None:
                 if not matches:
                     decline_reason.append("row_removed")
@@ -1174,6 +1171,7 @@ def _lane_b_thread_spawn(
         _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
         _report_unlinked_parent(_cx_session)
         new_entry = mint_agent_entry(
+            launch={"argv": reply.get("argv")},
             harness_session_id=session_id,
             spawned_by_session=_cx_session,
             spawned_by_harness=_cx_harness,

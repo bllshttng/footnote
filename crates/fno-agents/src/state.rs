@@ -955,6 +955,14 @@ pub struct RegistryEntry {
     /// writer-protection rationale as the v16/v22 bumps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<StopRecord>,
+    /// The launch record stamped at every mint (schema v33): the replayable
+    /// argv (seed removed), the allowlisted env, the store root and the
+    /// current cwd. The one spelling of a launch axis; model, effort and
+    /// posture ride inside `argv` as harness-native tokens. Skip-when-`None`
+    /// keeps rows slim; the bump turns a pre-v33 writer's silent erasure of
+    /// the record into a loud refusal, the v16/v22/v32 rationale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<crate::launch_record::LaunchRecord>,
     /// The mux hosting ref for a pane-substrate agent (4a-G2): `Some` means
     /// this row's PTY is a pane in `mux.session`, and pane-exit facts /
     /// live-inject / sideline badges all key on it. `None` for every daemon

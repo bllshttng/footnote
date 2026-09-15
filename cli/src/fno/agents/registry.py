@@ -553,6 +553,8 @@ class AgentEntry:
     exited_at: Optional[str] = None
     # fno's own stop (v32): ``{"by", "at", "reason"?}``; Rust stamps, Python custodies (X3).
     stop: Optional[dict] = None
+    # v33 launch record: Rust stamps, Python custodies (X3), like ``stop``.
+    launch: Optional[dict] = None
     # Mux hosting ref (4a-G2): ``{"session": <mux session>, "pane_id": <u64>}``
     # for an agent whose PTY is a mux pane (``fno agents spawn --substrate
     # pane``); ``None`` for daemon-worker, bg-thread, and headless rows. The

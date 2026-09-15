@@ -18,6 +18,7 @@
 //! defeats the ~1h idle auto-suspend window -- is the Phase-0 spike's job, not a
 //! code-shape concern. Nothing in this module asserts it.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -588,6 +589,23 @@ pub struct RosterWorker {
     /// Linked-worktree path, when the worker runs in one (0/14 live, but modeled).
     #[serde(default)]
     pub worktree_path: Option<String>,
+    /// The CLI's own launch record for the worker: the flags a respawn must
+    /// re-apply, the launch env and the cwd. Adopted rows replay it verbatim.
+    #[serde(default)]
+    pub dispatch: Option<RosterDispatch>,
+}
+
+/// The per-worker `dispatch` object of the claude roster (v33 launch record
+/// source for adopted rows). `respawnFlags` is the harness-native flag tail;
+/// `env` and `cwd` round out the launch. All fields tolerate absence.
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct RosterDispatch {
+    #[serde(default, rename = "respawnFlags")]
+    pub respawn_flags: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Lenient `Option<u64>` deserializer for the drifting `procStart` field (see
@@ -935,6 +953,7 @@ mod tests {
             cli_version: None,
             cwd: String::new(),
             worktree_path: None,
+            dispatch: None,
         };
         assert_eq!(w.resolve_control_sock().unwrap(), ctrl);
         std::fs::remove_dir_all(&base).ok();
@@ -963,6 +982,7 @@ mod tests {
             cli_version: None,
             cwd: String::new(),
             worktree_path: None,
+            dispatch: None,
         };
         assert!(w.resolve_control_sock().is_none());
         std::fs::remove_dir_all(&base).ok();

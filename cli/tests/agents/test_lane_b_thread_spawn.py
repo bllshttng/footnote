@@ -276,6 +276,21 @@ def test_lane_b_spawn_renders_grok_argv_and_registers_the_row(
     assert row.mux is None, "a thread row is pane-less: no mux ref"
 
 
+def test_lane_b_spawn_stamps_the_launch_record_from_the_identify_reply(
+    lane_b_home, monkeypatch
+) -> None:
+    """AC4-KEEPER: the launch record replays the Identify reply's argv - the
+    argv the keeper actually runs - so the resume door holds the real launch,
+    never a second rendering."""
+    recorded = _fake_keeper(monkeypatch, lane_b_home)
+    _lane_b_thread_spawn(name="wk-launch", harness="pi", cwd=lane_b_home)
+
+    full = list(recorded["argv"])  # type: ignore[arg-type]
+    reply_argv = full[full.index("--") + 1 :]
+    (row,) = load_registry()
+    assert row.launch == {"argv": reply_argv}
+
+
 def test_grok_is_a_keeper_lane_harness() -> None:
     """The row's resume forms make grok a keeper-lane harness (interactive
     attach unsupported, resume supported), the same lane pi and cursor-agent

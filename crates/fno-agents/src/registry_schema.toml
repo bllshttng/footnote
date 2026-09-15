@@ -33,7 +33,12 @@
 # v32: additive `stop` - fno's own stop of a worker (the stop verb and the
 # terminal-stop sweep), so the harness `stopped` state it leaves behind is
 # never read as finished work by the retirement sweep. The bump is
-# writer-protection, the same reason v16/v22 bumped: a pre-v32 writer would
-# accept the unknown key and erase the stamp on its next read-modify-write,
-# after which a worker fno stopped retires as finished.
-version = 32
+# writer-protection, the same reason v16/v22 bumped: a pre-v33 writer would
+# accept the unknown key and erase the stamp on its next read-modify-write.
+#
+# v33: additive `launch` - the launch record stamped at every mint (argv
+# without the seed, allowlisted env, store root, current cwd), the one
+# spelling of a launch axis the resume door replays. Same writer-protection
+# bump as v32: a pre-v33 writer erases the record on its next
+# read-modify-write.
+version = 33

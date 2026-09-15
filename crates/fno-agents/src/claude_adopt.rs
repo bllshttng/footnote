@@ -244,6 +244,23 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         };
     RegistryEntry {
         name: adopted_name(&short),
+        // The roster's own launch record, replayed onto the row while the
+        // worker is listed (v33): the CLI's respawn flags, the allowlisted
+        // env and the listed cwd. A worker the CLI listed without a dispatch
+        // block carries no record - the resume door then falls back to the
+        // bare resume form.
+        launch: w
+            .dispatch
+            .as_ref()
+            .map(|d| crate::launch_record::LaunchRecord {
+                argv: d.respawn_flags.clone(),
+                env: crate::launch_record::allowlisted_env(
+                    d.env.iter().map(|(k, v)| (k.clone(), v.clone())),
+                ),
+                store_root: None,
+                cwd_current: d.cwd.clone().or_else(|| Some(w.cwd.clone())),
+                source: Some("adopt".to_string()),
+            }),
         // Birth marker: a claude worker found in the roster, not one footnote
         // started. "adopted" is the honest answer and neither other stamp
         // would be: adopt takes in BOTH a session a human started by hand and
@@ -482,7 +499,53 @@ mod tests {
             cli_version: Some("2.1.195".into()),
             cwd: "/Users/x/code/proj".into(),
             worktree_path: None,
+            dispatch: None,
         }
+    }
+
+    /// AC4-ADOPT: the roster's own launch record replays onto the row - the
+    /// CLI's respawn flags, the allowlisted env, the listed cwd. A worker
+    /// listed without a dispatch block carries no record.
+    #[test]
+    fn the_roster_dispatch_becomes_the_launch_record() {
+        let _root = crate::paths::DeclaredRoot::declare("roster_dispatch_launch");
+        let mut w = worker();
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("CLAUDE_CONFIG_DIR".to_string(), "/tmp/cc".to_string());
+        env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), "sk-secret".to_string());
+        w.dispatch = Some(crate::claude_roster::RosterDispatch {
+            respawn_flags: vec![
+                "--settings".to_string(),
+                "/tmp/s.json".to_string(),
+                "--permission-mode".to_string(),
+                "bypassPermissions".to_string(),
+            ],
+            env,
+            cwd: None,
+        });
+        let e = mint_adopted_entry(&w, "2026-09-15T12:00:00Z");
+        let launch = e
+            .launch
+            .expect("a listed dispatch block becomes the record");
+        assert_eq!(
+            launch.argv,
+            vec![
+                "--settings".to_string(),
+                "/tmp/s.json".to_string(),
+                "--permission-mode".to_string(),
+                "bypassPermissions".to_string(),
+            ]
+        );
+        assert_eq!(launch.env.len(), 1, "secrets drop at the stamp");
+        assert_eq!(
+            launch.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/tmp/cc")
+        );
+        assert_eq!(launch.cwd_current.as_deref(), Some("/Users/x/code/proj"));
+        assert_eq!(launch.source.as_deref(), Some("adopt"));
+
+        let bare = mint_adopted_entry(&worker(), "2026-09-15T12:00:00Z");
+        assert!(bare.launch.is_none(), "no dispatch block, no record");
     }
 
     #[test]

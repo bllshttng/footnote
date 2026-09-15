@@ -3644,14 +3644,13 @@ def dispatch_spawn_pane(
     # unpeekable and its registry row id-less whether it is healthy or a corpse.
     # resolved_monitor was settled above, before the route guard.
     pin_session = provider == "claude" and resolved_monitor != "happy"
-    # (x-c198) pi's id is CALLER-ASSIGNED and fno must never let pi mint one.
-    # pi's own default is a UUIDv7, whose head-8 is the same ~65s clock bucket
-    # that collides two codex short ids, and its capability row declares
-    # `session_binding.required = true`. Dropping the flag here would leave the
-    # row id-less AND hand pi the id, which is both halves of the hazard at
-    # once. The `happy` monitor caveat is claude's alone: it strips a pinned
-    # `--session-id` out of the argv it forwards, and it never wraps pi.
-    pin_session = pin_session or provider == "pi"
+    # pi's id is CALLER-ASSIGNED and fno must never let pi mint one: pi's own
+    # default is a UUIDv7 whose head-8 lands in the same ~65s clock bucket as a
+    # codex short id, so dropping the flag leaves the row id-less AND hands pi
+    # the id. grok pins for the same reason (its create form takes the uuid,
+    # so the row's id and its argv agree). `happy` never wraps pi, and only it
+    # strips a pinned `--session-id` out of the argv it forwards.
+    pin_session = pin_session or provider in ("pi", "grok")
     session_uuid = str(_uuid.uuid4()) if pin_session else None
     # One pairs computation feeds both the codex splice and the wrapper.
     seed_prov = _seed_provenance_env(message, provenance)
@@ -4566,6 +4565,7 @@ def dispatch_spawn_pane(
                 touched_log_path = _touch_log_path(name)
                 final_log_path = str(touched_log_path) if touched_log_path is not None else ""
             entry = mint_agent_entry(
+                    launch={"argv": [t for t in argv if t not in (message, f"--prompt={message}")]},
                     harness_session_id=stored_session_uuid,
                     spawned_by_session=spawned_by_session,
                     spawned_by_harness=spawned_by_harness,
