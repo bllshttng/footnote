@@ -746,7 +746,7 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
         raise SystemExit(2)
 
 
-def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[List[str], Optional[str]]":
+def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]]":
     """Project the seam's facts to ``fno-agents node-seed`` and apply the
     answer before any lane is chosen. Only an explicit ``--node`` triggers
     the call; a refusal exits 2 before ``inject_spawn_defaults`` runs.

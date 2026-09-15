@@ -69,7 +69,6 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from fno import _subprocess_util
 from fno.adapters.providers.error_taxonomy import ErrorClass
-from fno.agents.harnesses.claude import ProviderSocketError
 
 # The error the real send seam raises; aliased so callers/tests have one name.
 
