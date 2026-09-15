@@ -65,6 +65,7 @@ fn cfg_for(tmp: &Path, fno_bin: PathBuf, mission: &str) -> DrainConfig {
         failure_limit: 3,
         interval_seconds: 300,
         rotation: None,
+        advance_timeout_s: 30,
     }
 }
 
