@@ -192,7 +192,7 @@ def _entries(path: Path) -> list[dict]:
 
 
 def test_dry_run_previews_without_writing():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         before_ledger = fx["ledger"].read_text()
@@ -210,7 +210,7 @@ def test_dry_run_previews_without_writing():
 
 
 def test_apply_recomputes_from_transcript():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         result = _run(home, fx, "--apply")
@@ -226,7 +226,7 @@ def test_apply_recomputes_from_transcript():
 
 
 def test_apply_patches_graph_cost_sessions():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         result = _run(home, fx, "--apply")
@@ -250,7 +250,7 @@ def test_apply_patches_graph_cost_sessions():
 
 
 def test_opus48_without_transcript_gets_pricing_only_third():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         _run(home, fx, "--apply")
@@ -260,7 +260,7 @@ def test_opus48_without_transcript_gets_pricing_only_third():
 
 
 def test_non_opus48_without_transcript_skipped_with_marker():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         _run(home, fx, "--apply")
@@ -277,7 +277,7 @@ def test_non_opus48_without_transcript_skipped_with_marker():
 
 
 def test_rerun_after_apply_patches_zero_entries():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         _run(home, fx, "--apply")
@@ -295,7 +295,7 @@ def test_rerun_after_apply_patches_zero_entries():
 
 
 def test_files_parse_as_valid_json_after_apply():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         _run(home, fx, "--apply")
@@ -307,7 +307,7 @@ def test_files_parse_as_valid_json_after_apply():
 
 
 def test_apply_refused_while_live_claims_exist():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home, live_claim=True)
         before = fx["ledger"].read_text()
@@ -318,7 +318,7 @@ def test_apply_refused_while_live_claims_exist():
 
 
 def test_force_overrides_claims_guard():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home, live_claim=True)
         result = _run(home, fx, "--apply", "--force")
@@ -327,7 +327,7 @@ def test_force_overrides_claims_guard():
 
 
 def test_dry_run_allowed_despite_live_claims():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home, live_claim=True)
         result = _run(home, fx)
@@ -337,7 +337,7 @@ def test_dry_run_allowed_despite_live_claims():
 def test_apply_refused_for_pid_liveness_claim_with_live_process():
     # The default claim shape target sessions write carries NO expires_at;
     # liveness is the holder pid existing. The guard must see it.
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home, pid_claim="live")
         before = fx["ledger"].read_text()
@@ -348,7 +348,7 @@ def test_apply_refused_for_pid_liveness_claim_with_live_process():
 
 
 def test_apply_proceeds_when_pid_liveness_claim_is_dead():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home, pid_claim="dead")
         result = _run(home, fx, "--apply")
@@ -365,7 +365,7 @@ def test_eperm_pid_claim_is_not_ours():
     if os.geteuid() == 0:
         print("  SKIP test_eperm_pid_claim_is_not_ours (running as root)")
         return
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         (fx["claims"] / "node%3Aab-eperm.lock").write_text(
@@ -381,7 +381,7 @@ def test_interrupted_apply_graph_leg_repairable_on_rerun():
     # after the ledger commit but before the graph write, then verify a
     # rerun rebuilds the correction map from the marked entries and repairs
     # the graph (codex P2 on PR #443).
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         pre_graph = fx["graph"].read_text()
@@ -402,7 +402,7 @@ def test_interrupted_apply_graph_leg_repairable_on_rerun():
 
 
 def test_session_id_fields_never_rewritten():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         before = [
@@ -421,7 +421,7 @@ def test_session_id_fields_never_rewritten():
 
 
 def test_empty_ledger_clean_skip():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         fx["ledger"].write_text(json.dumps({"entries": []}))
@@ -431,7 +431,7 @@ def test_empty_ledger_clean_skip():
 
 
 def test_corrupt_ledger_errors_without_write():
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         fx["ledger"].write_text("{not json")
@@ -473,7 +473,7 @@ def test_alias_pair_recomputes_from_the_alias_that_has_a_transcript():
     uuid only, so requiring every alias to resolve skipped any row carrying its
     own run id - almost all of them.
     """
-    with tempfile.TemporaryDirectory() as td:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         home = Path(td)
         fx = _make_fixture(home)
         result = _run(home, fx, "--apply")

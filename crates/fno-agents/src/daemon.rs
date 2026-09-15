@@ -2567,7 +2567,10 @@ use crate::codex_thread::InterruptOutcome;
 mod codex_thread_lane;
 mod thread_row_status;
 use codex_thread_lane::spawn_codex_thread_lane;
-use thread_row_status::{codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row};
+pub(crate) use thread_row_status::notify_transition;
+use thread_row_status::{
+    codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row, notify_badge,
+};
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
@@ -8156,30 +8159,13 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
         }
     });
     if let Some((title, body, is_done)) = notify {
-        let want = if is_done {
-            ctx.opts.notify_on_done
-        } else {
-            ctx.opts.notify_on_blocked
-        };
-        if want {
-            notify_transition(title, body);
-        }
+        let o = &ctx.opts;
+        notify_badge(title, body, is_done, o.notify_on_blocked, o.notify_on_done);
     }
     let _ = ctx.emitter.emit(
         "inside_leg_buffer_flushed",
         &json!({"name": name, "session_id": session_uuid, "state": state_str, "seq": seq}),
     );
-}
-
-/// Fire a fire-and-forget OS notification for a badge transition (x-dd84).
-///
-/// Detached inside `operator_notice::notify_operator` so a missing or slow
-/// `fno inbox notify` can never stall the registry write that observed the
-/// transition - the same bounded/fail-open discipline as the external
-/// claim-status writer that once froze admit. A spawn failure is logged and
-/// dropped; the registry write that called this has already succeeded.
-pub(crate) fn notify_transition(title: String, body: String) {
-    crate::operator_notice::notify_operator(&title, &body, None);
 }
 
 /// Which null-uuid row (if any) should adopt a full session uuid seen on an
@@ -8410,14 +8396,8 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                 );
             }
             if let Some((title, body, is_done)) = notify {
-                let want = if is_done {
-                    ctx.opts.notify_on_done
-                } else {
-                    ctx.opts.notify_on_blocked
-                };
-                if want {
-                    notify_transition(title, body);
-                }
+                let o = &ctx.opts;
+                notify_badge(title, body, is_done, o.notify_on_blocked, o.notify_on_done);
             }
             Response::ok(req.id, json!({"stored": true, "seq": seq}))
         }
