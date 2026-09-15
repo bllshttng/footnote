@@ -403,7 +403,13 @@ fn row_for(
 fn load_rulings() -> Vec<Value> {
     let path = decision_index::default_state_path("decisions.jsonl");
     match decision_index::read_live(&path) {
-        Ok(index) => index.rows,
+        Ok(index) => index
+            .rows
+            .into_iter()
+            // Only a row whose `text` can name a report path retires a FAIL.
+            // Law rows carry `decision` and no `text`, and never reach here.
+            .filter(|row| row.get("text").and_then(Value::as_str).is_some())
+            .collect(),
         Err(_) => Vec::new(),
     }
 }
@@ -414,7 +420,11 @@ fn load_rulings() -> Vec<Value> {
 /// module's tests already call.
 #[cfg(test)]
 fn derive_live_rulings(text: &str) -> Vec<Value> {
-    decision_index::derive_live(text).rows
+    decision_index::derive_live(text)
+        .rows
+        .into_iter()
+        .filter(|row| row.get("text").and_then(Value::as_str).is_some())
+        .collect()
 }
 
 /// A ruling retires the FAIL when its `text` names the report path.

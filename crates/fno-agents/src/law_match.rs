@@ -290,7 +290,18 @@ fn ask_answer(req: &AskRequest) -> AskAnswer {
 /// subject's tokens, or the exact tier's text rule holds (every `-` part of
 /// a law subject with two or more parts is in the question words). Order is
 /// shared-token count, then newest question.
+/// The pure core: existing tests pin `lines` exactly, so the near-law read
+/// rides in as a parameter and the verb-level wrapper below does the disk
+/// read.
+/// The verb-level entry: the near-law read rides the disk here, so the body
+/// below stays the pure function the existing tests pin.
 fn law_answer(req: &LawRequest) -> LawAnswer {
+    let near = near_law_lines(&req.law);
+    law_answer_with(req, near)
+}
+
+/// The pure body: near-law lines arrive as a parameter.
+fn law_answer_with(req: &LawRequest, near: Vec<String>) -> LawAnswer {
     let law_tokens = tokens(req.law.subject.as_deref().unwrap_or(""));
     let mut cands: Vec<(usize, &OpenQuestion, Vec<String>)> = Vec::new();
     for q in &req.questions {
@@ -319,7 +330,7 @@ fn law_answer(req: &LawRequest) -> LawAnswer {
     // Near-law warnings ride at the FRONT of lines (x-b7f6): the recording
     // session reads them before the open-question sweep, because the point
     // is to stop a duplicate BEFORE it is repeated, not to route it after.
-    let mut lines: Vec<String> = near_law_lines(&req.law);
+    let mut lines: Vec<String> = near;
     for (_, q, _) in cands.iter().take(10) {
         let law_id = &req.law.decision_id;
         let mut ident: Vec<String> = Vec::new();
@@ -707,7 +718,10 @@ pub fn run_law_match(args: &[String]) -> i32 {
     };
     let answer = match req {
         MatchRequest::Ask(r) => serde_json::to_string(&ask_answer(&r)).expect("serializes"),
-        MatchRequest::Law(r) => serde_json::to_string(&law_answer(&r)).expect("serializes"),
+        MatchRequest::Law(r) => {
+            let near = near_law_lines(&r.law);
+            serde_json::to_string(&law_answer_with(&r, near)).expect("serializes")
+        }
         MatchRequest::Stage(r) => {
             serde_json::to_string(&stage_answer_with(r, None)).expect("serializes")
         }
@@ -898,7 +912,7 @@ mod tests {
                 ),
             ],
         };
-        let ans = law_answer(&req);
+        let ans = law_answer_with(&req, Vec::new());
         assert_eq!(ans.total, 1);
         assert_eq!(ans.candidates.len(), 1);
         let c = &ans.candidates[0];
@@ -934,7 +948,7 @@ mod tests {
             law: law_row,
             questions,
         };
-        let ans = law_answer(&req);
+        let ans = law_answer_with(&req, Vec::new());
         assert_eq!(ans.total, 12);
         assert_eq!(ans.lines.len(), 11, "10 candidate lines + 1 count line");
         assert!(ans.lines[10].starts_with("law: 2 more open question(s) may match"));

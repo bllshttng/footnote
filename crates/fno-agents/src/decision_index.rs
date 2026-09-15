@@ -44,7 +44,9 @@ pub fn default_state_path(name: &str) -> PathBuf {
 /// `supersedes` names another retires that one (newest `(ts, decision_id)`
 /// wins). ids compare casefolded, the Python reader's own rule. A line that
 /// does not parse, or a decision/retraction envelope whose required id field
-/// is empty, counts in `damaged`.
+/// is empty, counts in `damaged`. Rows carry whatever fields the row carried;
+/// the `text`-present rule is prove_it's, applied at its call site, because
+/// law rows carry `decision` and no `text` at all.
 pub fn derive_live(text: &str) -> Index {
     let mut rows: Vec<Value> = Vec::new();
     let mut damaged: usize = 0;
@@ -142,7 +144,6 @@ pub fn derive_live(text: &str) -> Index {
     let rows = rows
         .into_iter()
         .filter(is_decision)
-        .filter(|row| row.get("text").and_then(Value::as_str).is_some())
         .filter(|row| {
             let id = row
                 .get("decision_id")
