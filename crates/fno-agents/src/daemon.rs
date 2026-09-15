@@ -2132,11 +2132,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut last_orphan_sweep = Instant::now();
     let liveness_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_liveness_sweep = Instant::now();
-    // Machine watch: the arm owns its cadence, gate and memory.
+    // The periodic arms: each module owns its cadence, gate and memory.
     let machine_watch = crate::machine_watch::Arm::default();
-    // Merge close: the arm owns its cadence and gate; the sweep runs the
-    // bare reconcile that closes a merged PR's node with no session alive.
     let merge_close = crate::merge_close::Arm::default();
+    let crown_ledger = crate::king_ledger::Arm::default();
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence: the throttle stamp beside the gate,
@@ -2309,8 +2308,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 );
                 // The machine gets an arm: bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
-                // Merged nodes close even when no session is alive.
                 crate::merge_close::maybe_tick(&merge_close, ctx.home.clone());
+                // reign.html renders on a beat even with no crown live.
+                crate::king_ledger::maybe_tick(&crown_ledger, ctx.home.clone());
                 crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
                 crate::provider_cap_verbs::maybe_tick(&provider_cap, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's measurement,
