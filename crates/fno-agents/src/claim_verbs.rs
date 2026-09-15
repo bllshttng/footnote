@@ -228,9 +228,12 @@ fn run_claim_list(args: &[String]) -> i32 {
     };
     let (witness, witness_answer) = session_witness_primed_for(rows.iter());
     let witness: crate::claims::SessionWitness = &witness;
+    let session_index = std::cell::RefCell::new(None);
     let rows: Vec<Value> = rows
         .iter()
-        .map(|rec| claim_status_value_with_witness(rec, Some(witness), &witness_answer))
+        .map(|rec| {
+            claim_status_value_with_witness(rec, Some(witness), &witness_answer, &session_index)
+        })
         .collect();
     println!("{}", Value::Array(rows));
     0
@@ -239,7 +242,12 @@ fn run_claim_list(args: &[String]) -> i32 {
 fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
     let (witness, witness_answer) = default_session_witness();
     let witness: crate::claims::SessionWitness = &witness;
-    claim_status_value_with_witness(rec, Some(witness), &witness_answer)
+    claim_status_value_with_witness(
+        rec,
+        Some(witness),
+        &witness_answer,
+        &std::cell::RefCell::new(None),
+    )
 }
 
 /// `fno-agents claim release-stopped --name <n> [--session <sid>] --claims-dir <dir>`
@@ -324,9 +332,9 @@ fn claim_status_value_with_witness(
     rec: &crate::claims::ClaimRecord,
     witness: Option<crate::claims::SessionWitness<'_>>,
     witness_answer: &std::cell::RefCell<Option<&'static str>>,
+    session_index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
 ) -> Value {
-    let session_index = std::cell::RefCell::new(None);
-    let (holder_session, dispatched_by) = holder_session_fields(rec, &session_index);
+    let (holder_session, dispatched_by) = holder_session_fields(rec, session_index);
     let (state, basis) = match witness {
         Some(witness) => crate::claims::classify_with_basis_and_exclusivity(
             rec,
@@ -1639,8 +1647,9 @@ mod tests {
                 let old_path = std::env::var("PATH").unwrap_or_default();
                 std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
                 let cell = std::cell::RefCell::new(None);
+                let index_cell = std::cell::RefCell::new(None);
                 let rec = witness_rec("spawn-handover:w-worker", "s-king");
-                let out = claim_status_value_with_witness(&rec, None, &cell);
+                let out = claim_status_value_with_witness(&rec, None, &cell, &index_cell);
                 assert_eq!(out["session_id"], "s-worker");
                 assert_eq!(out["metadata"]["dispatched_by_session"], "s-king");
 
@@ -1665,13 +1674,14 @@ mod tests {
         // shape: session_id is the stored session, no dispatched_by_session.
         with_registry(serde_json::json!([]), || {
             let cell = std::cell::RefCell::new(None);
+            let index_cell = std::cell::RefCell::new(None);
             let handover = witness_rec("spawn-handover:ghost", "s-king");
-            let out = claim_status_value_with_witness(&handover, None, &cell);
+            let out = claim_status_value_with_witness(&handover, None, &cell, &index_cell);
             assert!(out.get("session_id").is_none());
             assert_eq!(out["metadata"]["dispatched_by_session"], "s-king");
 
             let plain = witness_rec("target-session:s1", "s1");
-            let out = claim_status_value_with_witness(&plain, None, &cell);
+            let out = claim_status_value_with_witness(&plain, None, &cell, &index_cell);
             assert_eq!(out["session_id"], "s1");
             assert!(out.get("metadata").is_none());
         });
