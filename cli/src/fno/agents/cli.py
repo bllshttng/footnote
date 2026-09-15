@@ -3976,10 +3976,13 @@ def cmd_truth(
         names = [h.strip() for h in handles.split(",") if h.strip()]
         falsifiers = _registry_falsifiers(names)
         resolver = _batch_resolver()
-        answers = [
-            (name, resolve_session_truth(name, resolve=resolver), falsifiers[name])
-            for name in names
-        ]
+        from fno.provenance.resolver import transcript_listing
+
+        with transcript_listing():
+            answers = [
+                (name, resolve_session_truth(name, resolve=resolver), falsifiers[name])
+                for name in names
+            ]
         if json_out:
             sys.stdout.write(
                 _json.dumps(

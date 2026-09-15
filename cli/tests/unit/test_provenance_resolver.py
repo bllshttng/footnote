@@ -471,3 +471,112 @@ def test_ac4_opencode_missing_db(tmp_path):
     )
     assert result.resolved is False
     assert result.reason == "not-found"
+
+
+# ---------------------------------------------------------------------------
+# x-baa2: transcript_listing scope
+# ---------------------------------------------------------------------------
+
+_FULL = "abcdef12-1234-5678-9abc-def012345678"
+
+
+def _slug(cwd: str) -> str:
+    return cwd.replace("/", "-").replace(".", "-")
+
+
+def _write(root: Path, cwd: str, name: str, text: str) -> Path:
+    d = root / _slug(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text(text)
+    return p
+
+
+def test_ac2_hp_scope_resolutions_match_globs_with_one_listing(tmp_path, monkeypatch):
+    """AC2-HP (x-baa2): every resolution inside transcript_listing() equals the
+    resolution outside it, and Path.glob runs once for the shared `*/*.jsonl`
+    listing plus once for the missing session's re-glob -- nothing else."""
+    from fno.provenance.resolver import resolve_transcript, transcript_listing
+
+    # 50 project dirs.
+    cwds = [f"/Users/bb16/code/proj{i}" for i in range(50)]
+    for cwd in cwds:
+        (tmp_path / _slug(cwd)).mkdir(parents=True)
+
+    real_cwd, stub_cwd = cwds[0], cwds[1]
+    _write(tmp_path, real_cwd, f"{_FULL}.jsonl", _conv("real") + "\n")
+    # The second-dir copy is a metadata-only stub (no user/assistant record).
+    _write(tmp_path, stub_cwd, f"{_FULL}.jsonl", '{"type":"summary"}\n')
+
+    prefix_unique_full = "12345678-1111-2222-3333-444444444444"
+    _write(tmp_path, cwds[2], f"{prefix_unique_full}.jsonl", _conv("u") + "\n")
+
+    ambiguous_a = "aaaaaaaa-1111-2222-3333-444444444444"
+    ambiguous_b = "aaaaaaaa-9999-8888-7777-666666666666"
+    _write(tmp_path, cwds[3], f"{ambiguous_a}.jsonl", _conv("a") + "\n")
+    _write(tmp_path, cwds[4], f"{ambiguous_b}.jsonl", _conv("b") + "\n")
+
+    plain = [f"dddddddd-{i:04d}-2222-3333-444444444444" for i in range(5)]
+    for i, sid in enumerate(plain):
+        _write(tmp_path, cwds[5 + i], f"{sid}.jsonl", _conv(f"p{i}") + "\n")
+
+    sessions = {
+        "full": (_FULL, real_cwd),
+        "prefix-unique": ("12345678", cwds[2]),
+        "prefix-ambiguous": ("aaaaaaaa", cwds[3]),
+        "missing": ("99999999", cwds[9]),
+    }
+    sessions.update({f"plain{i}": (sid, cwds[5 + i]) for i, sid in enumerate(plain)})
+
+    def resolve_all():
+        out = {}
+        for key, (sid, cwd) in sessions.items():
+            out[key] = resolve_transcript(
+                "claude", sid, cwd, projects_root=tmp_path
+            )
+        return out
+
+    outside = resolve_all()
+
+    calls: list[str] = []
+    real_glob = Path.glob
+
+    def counting_glob(self, pattern):
+        calls.append(pattern)
+        return real_glob(self, pattern)
+
+    monkeypatch.setattr(Path, "glob", counting_glob)
+    with transcript_listing(projects_root=tmp_path):
+        inside = resolve_all()
+    monkeypatch.undo()
+
+    assert inside == outside
+    per_session = [c for c in calls if c != "*/*.jsonl"]
+    assert calls.count("*/*.jsonl") == 1
+    # Only the missing session pays a re-glob inside the scope.
+    assert len(per_session) == 1
+    assert "99999999" in per_session[0]
+
+    # Spot-check the tricky verdicts both ways.
+    assert outside["full"].resolved is True
+    assert Path(outside["full"].transcript_path).parent.name == _slug(real_cwd)
+    assert outside["prefix-ambiguous"].ambiguous is True
+    assert outside["prefix-unique"].resolved is True
+    assert outside["missing"].resolved is False
+
+
+def test_ac2_edge_transcript_written_after_entry_is_found(tmp_path):
+    """AC2-EDGE (x-baa2): a transcript written after the scope opened still
+    resolves (resolved=True) inside the scope -- the miss re-globs."""
+    from fno.provenance.resolver import resolve_transcript, transcript_listing
+
+    cwd = "/Users/bb16/code/late"
+    late = "eeeeeeee-1234-5678-9abc-def012345678"
+
+    with transcript_listing(projects_root=tmp_path):
+        _write(tmp_path, cwd, f"{late}.jsonl", _conv("late") + "\n")
+        result = resolve_transcript("claude", late, cwd, projects_root=tmp_path)
+
+    assert result.resolved is True
+    assert result.transcript_path is not None
+    assert Path(result.transcript_path).name == f"{late}.jsonl"
