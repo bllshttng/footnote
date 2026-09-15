@@ -3766,7 +3766,7 @@ event_types:
           description: "Mail surface classified before delivery: raw, inbox, reply, project, or peer."
         presumed_human:
           type: boolean
-          description: "Positive marker for an origin still presumed operator-authored."
+          description: "Positive marker for an origin still presumed superuser-authored."
         sender:
           type: string
           description: "Optional sender handle or project label."
@@ -5434,7 +5434,7 @@ event_types:
       properties:
         action_type:
           type: string
-          description: "Specific operator-authored action that completed, such as backlog_done_operator_initiated."
+          description: "Specific superuser-authored action that completed, such as backlog_done_operator_initiated."
         task_id:
           type: string
           description: "Backlog node affected by the action, when applicable."
