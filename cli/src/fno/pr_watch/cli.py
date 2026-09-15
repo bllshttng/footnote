@@ -236,6 +236,70 @@ def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
                        skip_reason="notify_failed", detail=str(exc)[:200])
 
 
+def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
+    """The eval bank's demand leg (x-cf8f): the native ``evals-arm``.
+
+    The whole body lives in the binary - the due read, the spawn gate, the
+    detached run and the journal - so this phase is only the guards, the path
+    resolution and the receipt parse. ``evals.schedule_days <= 0`` and the
+    autonomy master switch gate here like every scheduled leg; the binary is
+    never called unarmed. A missing binary, a non-zero exit and an
+    unparseable receipt all land as ``arm_failed`` - a dead arm never raises
+    out of the tick, and the bank never runs inside the tick: the arm holds
+    the ``evals:scheduled-run`` claim across ticks instead.
+    """
+    evals_cfg = getattr(settings, "evals", None)
+    schedule_days = int(getattr(evals_cfg, "schedule_days", 0) or 0)
+    if schedule_days <= 0:
+        _emit_tick_row("evals", interval_s=0, skip_reason="evals_off",
+                       detail="evals.schedule_days 0")
+        return
+    try:
+        from fno.config import autonomy_master_enabled
+
+        if not autonomy_master_enabled():
+            _emit_tick_row("evals", interval_s=schedule_days * 86400,
+                           skip_reason="autonomy_off",
+                           detail="config.autonomy.enabled is false")
+            return
+    except Exception:  # noqa: BLE001 - an unreadable master switch reads off
+        _emit_tick_row("evals", interval_s=schedule_days * 86400,
+                       skip_reason="autonomy_off", detail="autonomy master unreadable")
+        return
+    try:
+        import subprocess
+
+        from fno.evals.report import evals_health_summary
+        from fno.paths import evals_history, state_dir
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            raise RuntimeError("fno-agents binary not found")
+        argv = [
+            str(binary), "evals-arm",
+            "--history", str(evals_history()),
+            "--events", str(state_dir() / "events.jsonl"),
+            "--fno-bin", _resolve_fno_binary(),
+            "--schedule-days", str(schedule_days),
+            "--stale-days", str(int(getattr(evals_cfg, "stale_days", 7) or 7)),
+            "--summary-json", json.dumps(evals_health_summary(evals_history())),
+        ]
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False,
+                              timeout=max(1.0, seconds_left_fn() or 30.0))
+        if proc.returncode != 0:
+            raise RuntimeError(f"evals-arm exited {proc.returncode}: {proc.stderr[:160]}")
+        answer = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.stdout.strip() else {}
+        _emit_tick_row("evals", interval_s=schedule_days * 86400,
+                       acted=int(answer.get("acted") or 0),
+                       skip_reason=answer.get("skip_reason"),
+                       detail=str(answer.get("detail") or "")[:400])
+    except Exception as exc:  # noqa: BLE001 - never let the arm break the tick
+        _emit_tick_row("evals", interval_s=schedule_days * 86400,
+                       skip_reason="arm_failed",
+                       detail=f"{type(exc).__name__}: {exc}"[:400])
+
+
 def _watchdog_recovery_roots() -> list[Path]:
     """Resolve every distinct project scope for the launchd watchdog scan.
 
@@ -366,6 +430,7 @@ _PHASE_CAP_S: dict[str, float] = {
     "king_wake": 100,
     "notify_watch": 30,
     "heal": 30,
+    "evals": 30,
     "stranded": 60,
     "recovery": 120,
 }
@@ -1201,6 +1266,15 @@ def tick() -> None:
                 except Exception as exc:  # noqa: BLE001 - never let heal break the tick
                     log.warning("pr-watch: heal phase failed: %s", exc)
 
+        # The eval bank's demand leg (x-cf8f), back after 2cf4d6297 stripped
+        # the inline run for the tree budget: the whole body now lives in the
+        # native evals-arm (module-level _run_evals_arm_phase), so this phase
+        # never runs the bank inside the tick - the arm launches the run
+        # detached and holds the evals:scheduled-run claim across ticks.
+        def _phase_evals(_slice_s: float) -> None:
+            set_tick_phase("evals")
+            _run_evals_arm_phase(settings, seconds_left_fn=phase_seconds_left)
+
         def _phase_stranded(slice_s: float) -> None:
             assert settings is not None and cfg is not None
             # The watchdog def imports these for its own lanes; the stranded
@@ -1279,6 +1353,7 @@ def tick() -> None:
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
         _run_phase("heal", _phase_heal)
+        _run_phase("evals", _phase_evals)
         _run_phase("stranded", _phase_stranded)
         _run_phase("recovery", _phase_recovery)
         _run_phase("watchdog", _phase_watchdog, arm="watchdog")
