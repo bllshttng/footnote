@@ -714,7 +714,7 @@ fn review_start_audit_fields_with_origin_and_self(
 }
 
 fn fit_review_start_audit_fields(fields: &mut serde_json::Map<String, serde_json::Value>) {
-    if review_start_audit_payload_len(fields) <= crate::events::MAX_EVENT_PAYLOAD_BYTES {
+    if review_start_audit_payload_len(fields) <= crate::events_limits::max_data_bytes() {
         return;
     }
     for key in [
@@ -726,7 +726,7 @@ fn fit_review_start_audit_fields(fields: &mut serde_json::Map<String, serde_json
         "target_session",
     ] {
         shrink_review_start_audit_field(fields, key);
-        if review_start_audit_payload_len(fields) <= crate::events::MAX_EVENT_PAYLOAD_BYTES {
+        if review_start_audit_payload_len(fields) <= crate::events_limits::max_data_bytes() {
             return;
         }
     }
@@ -754,7 +754,7 @@ fn shrink_review_start_audit_field(
     while low < high {
         let middle = (low + high + 1) / 2;
         fields.insert(key.to_string(), value[..boundaries[middle]].into());
-        if review_start_audit_payload_len(fields) <= crate::events::MAX_EVENT_PAYLOAD_BYTES {
+        if review_start_audit_payload_len(fields) <= crate::events_limits::max_data_bytes() {
             low = middle;
         } else {
             high = middle - 1;
@@ -2107,7 +2107,7 @@ mod tests {
     fn review_start_audit_truncates_long_reason_without_losing_event() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("events.jsonl");
-        let long_reason = "x".repeat(340);
+        let long_reason = "x".repeat(crate::events_limits::max_data_bytes());
         let fields = review_start_audit_fields(
             "thread-1",
             "baseBranch:origin/main",
@@ -2135,7 +2135,7 @@ mod tests {
     fn review_start_audit_budgets_all_variable_fields() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("events.jsonl");
-        let large = "x".repeat(512);
+        let large = "x".repeat(crate::events_limits::max_data_bytes() + 1);
         let fields = review_start_audit_fields_with_origin(
             &large,
             "baseBranch:origin/main",

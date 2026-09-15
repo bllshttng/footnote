@@ -368,9 +368,10 @@ fn prior_finalize_ship(project_events: &Path, session_id: &str) -> Option<bool> 
 
 // ── a2a status-breakpoint run_summary (x-dbaf) ──────────────────────────────
 
-/// Payload cap for the run_summary `data` object (mirrors events.rs
-/// MAX_EVENT_PAYLOAD_BYTES). run_summary is lean by construction, but honoring
-/// the cap keeps the Rust path's behavior identical to the daemon EventEmitter.
+/// Payload cap for the run_summary `data` object (the schema's
+/// `limits.max_data_bytes`, which the daemon EventEmitter also enforces).
+/// run_summary is lean by construction, but honoring the cap keeps the Rust
+/// path's behavior identical to the emitter.
 const RUN_SUMMARY_DATA_CAP: usize = 500;
 
 /// Count the run's task ticks in events.jsonl. Correlates on the envelope-level

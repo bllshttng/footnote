@@ -15,7 +15,7 @@ W7 was **document-and-guard**, not **unify**: it pinned the then-current reality
 | event-name field | `type` | `kind` |
 | payload | nested under `data: {}` | flattened at top level |
 | `source` values | `target`, `megawalk`, `hook`, ... (fixed enum) | `daemon`, `worker:<id>` (pattern) |
-| size cap | 64KB (legacy YAML) | 500 bytes (`MAX_EVENT_PAYLOAD_BYTES`) |
+| size cap | 64KB (`limits.max_data_bytes`) | 64KB (`events_limits::max_data_bytes()`, generated from the same YAML) |
 
 Both were live at the time, and the contract accepted both rather than breaking either.
 

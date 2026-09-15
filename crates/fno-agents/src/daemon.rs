@@ -6769,7 +6769,7 @@ async fn handle_rm_with(
         .unwrap_or(usize::MAX);
     let event_error = match ctx.emitter.emit("agent_removed", &event) {
         Err(error) => Some(error.to_string()),
-        Ok(()) if event_payload_len > crate::events::MAX_EVENT_PAYLOAD_BYTES => Some(format!(
+        Ok(()) if event_payload_len > crate::events_limits::max_data_bytes() => Some(format!(
             "agent_removed event replaced by event_payload_too_large ({event_payload_len} bytes)"
         )),
         Ok(()) => None,

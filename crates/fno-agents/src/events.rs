@@ -7,15 +7,20 @@
 //!
 //! Two invariants are load-bearing and tested here:
 //!
-//! - **500B payload cap** (Silent-Failure-Hunter finding): a payload whose
-//!   serialized JSON object exceeds [`MAX_EVENT_PAYLOAD_BYTES`] is REJECTED at
-//!   the write boundary and replaced by a small `event_payload_too_large`
-//!   meta-event. An oversized event must never silently truncate or vanish.
+//! - **Payload cap**: a payload whose serialized JSON object exceeds the
+//!   schema's `limits.max_data_bytes` (65536, from `events_limits`) is
+//!   REJECTED at the write boundary and replaced by a small
+//!   `event_payload_too_large` meta-event. An oversized event must never
+//!   silently truncate or vanish. (Measured 2026-09-15: the richest real
+//!   check-in carries 646 characters in its `change` field alone, so the old
+//!   500-byte literal dropped the most valuable rows, not noise.)
 //! - **FIFO per-emitter ordering**: each emission is open-`O_APPEND`-write-close.
-//!   A single event line stays well under `PIPE_BUF` (4096B; the cap keeps it
-//!   under 600B with the `ts`/`type`/`data` framing), so the append is atomic at
-//!   the kernel level. Cross-emitter ordering (Python <-> Rust interleaving) is
-//!   unspecified by design; consumers filter by `source` when ordering matters.
+//!   A single event line is written atomically line-at-a-time; cross-emitter
+//!   ordering (Python <-> Rust interleaving) is unspecified by design;
+//!   consumers filter by `source` when ordering matters.
+//! - **No rotation destroys ingested history**: a durable journal past
+//!   [`ROTATE_AT_BYTES`] is ingested into its `events.db` (`events_store`)
+//!   BEFORE the rename, so one generation on disk still means no lost rows.
 //!
 //! Envelope (x-2901): the unified line is `{ts, type, source, data:{...}}` -
 //! the same shape the Python/fno emitter and the Rust loop runtime already
@@ -28,14 +33,10 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Maximum serialized size (bytes) of an event's payload object. Payloads over
-/// this are rejected and replaced by a meta-event. Chosen per the design's
-/// Silent-Failure-Hunter table; keeps the final line under `PIPE_BUF`.
-pub const MAX_EVENT_PAYLOAD_BYTES: usize = 500;
-
 /// Rotate `events.jsonl` once it exceeds this many bytes. The active file is
-/// renamed to `events.jsonl.1` (single generation; older history is the
-/// operator's archive concern, not the daemon's).
+/// renamed to `events.jsonl.1` and one generation stays on disk; every
+/// durable row of the renamed file is already ingested into its `events.db`
+/// first, so the rename never destroys history.
 pub const ROTATE_AT_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Sibling journal suffix for ephemeral-class rows (x-add3). The Python
@@ -122,7 +123,7 @@ impl EventEmitter {
         // substitute a small meta-event that records the intent and size, so an
         // auditor sees that an event was dropped and why, never silence.
         let payload_len = serde_json::to_string(&obj).map(|s| s.len()).unwrap_or(0);
-        if payload_len > MAX_EVENT_PAYLOAD_BYTES {
+        if payload_len > crate::events_limits::max_data_bytes() {
             let mut meta = Map::new();
             meta.insert("intended_kind".into(), Value::String(kind.to_string()));
             meta.insert("size".into(), Value::Number(payload_len.into()));
@@ -136,7 +137,7 @@ impl EventEmitter {
     /// for call sites that assemble fields inline rather than via a struct.
     pub fn emit_fields(&self, kind: &str, fields: Map<String, Value>) -> Result<(), EmitError> {
         let payload_len = serde_json::to_string(&fields).map(|s| s.len()).unwrap_or(0);
-        if payload_len > MAX_EVENT_PAYLOAD_BYTES {
+        if payload_len > crate::events_limits::max_data_bytes() {
             let mut meta = Map::new();
             meta.insert("intended_kind".into(), Value::String(kind.to_string()));
             meta.insert("size".into(), Value::Number(payload_len.into()));
@@ -147,9 +148,9 @@ impl EventEmitter {
 
     fn write_line(&self, event_type: &str, payload: Map<String, Value>) -> Result<(), EmitError> {
         // Unified envelope (x-2901): the payload nests under `data`, the kind is
-        // stamped as `type`. The 500B cap is measured on `payload` before this
-        // framing (in emit/emit_fields), so nesting never changes which events
-        // are dropped.
+        // stamped as `type`. The schema cap is measured on `payload` before
+        // this framing (in emit/emit_fields), so nesting never changes which
+        // events are dropped.
         let mut obj = Map::new();
         obj.insert("ts".into(), Value::String(now_rfc3339()));
         obj.insert("type".into(), Value::String(event_type.to_string()));
@@ -175,7 +176,10 @@ impl EventEmitter {
         });
         let target: &Path = ephemeral_target.as_deref().unwrap_or(&self.path);
 
-        self.maybe_rotate(target)?;
+        // The retention class is also the durability boundary: a durable
+        // target's rotation must ingest first (x-1e71); an ephemeral target's
+        // rotation stays ingest-free, those rows are disposable by design.
+        self.maybe_rotate(target, ephemeral_target.is_none())?;
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -190,13 +194,33 @@ impl EventEmitter {
     /// Best-effort: a rotation race (two emitters both seeing the file large)
     /// is harmless because the rename is idempotent at the path level and the
     /// next `open(..., append)` recreates the active file.
-    fn maybe_rotate(&self, path: &Path) -> Result<(), EmitError> {
+    ///
+    /// A durable target syncs its store FIRST: a rename whose rows the store
+    /// does not hold would destroy history, so a failed ingest leaves the
+    /// journal growing past the threshold instead (the sync retries on the
+    /// next emit past 8 MiB). After a successful sync the file is re-stat'd,
+    /// so a second emitter that raced the ingest is not stripped of a fresh
+    /// file it just recreated.
+    fn maybe_rotate(&self, path: &Path, durable: bool) -> Result<(), EmitError> {
         let size = match std::fs::metadata(path) {
             Ok(m) => m.len(),
             Err(_) => return Ok(()), // not yet created; nothing to rotate
         };
         if size <= ROTATE_AT_BYTES {
             return Ok(());
+        }
+        if durable {
+            if let Err(e) = crate::events_store::sync(path) {
+                eprintln!(
+                    "events: rotation deferred, store ingest failed ({}: {e})",
+                    crate::events_store::store_path(path).display()
+                );
+                return Ok(());
+            }
+            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            if size <= ROTATE_AT_BYTES {
+                return Ok(());
+            }
         }
         let rotated = rotated_path(path);
         // Ignore a rename failure (another emitter already rotated): the goal is
@@ -315,7 +339,7 @@ mod tests {
     fn oversized_payload_becomes_meta_event_not_silence() {
         let path = temp_events_path("oversize");
         let em = EventEmitter::new(&path, "daemon");
-        let huge = "x".repeat(2000);
+        let huge = "x".repeat(crate::events_limits::max_data_bytes() + 1);
         em.emit("agent_spawned", &json!({"blob": huge})).unwrap();
 
         let lines = read_lines(&path);
@@ -323,7 +347,9 @@ mod tests {
         let l = &lines[0];
         assert_eq!(l["type"], "event_payload_too_large");
         assert_eq!(l["data"]["intended_kind"], "agent_spawned");
-        assert!(l["data"]["size"].as_u64().unwrap() > MAX_EVENT_PAYLOAD_BYTES as u64);
+        assert!(
+            l["data"]["size"].as_u64().unwrap() > crate::events_limits::max_data_bytes() as u64
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -404,5 +430,79 @@ mod tests {
             "non-ephemeral emit created the sibling"
         );
         std::fs::remove_file(&path).ok();
+    }
+
+    /// Fill a journal past [`ROTATE_AT_BYTES`] with generation-marked rows.
+    fn fill_past_threshold(path: &Path, gen: u64) {
+        let mut fh = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        let blob = "x".repeat(4096);
+        for n in 0..2100 {
+            writeln!(
+                fh,
+                "{}",
+                json!({"ts": "2026-09-10T00:00:00Z", "type": "generation_marker",
+                       "source": "test", "data": {"gen": gen, "n": n, "blob": blob}})
+            )
+            .unwrap();
+        }
+    }
+
+    fn store_count(store: &Path, event_type: &str) -> u64 {
+        crate::events_store::open_read(store)
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM events WHERE type = ?1",
+                [&event_type],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap() as u64
+    }
+
+    #[test]
+    fn durable_rotation_ingests_before_rename() {
+        // AC2-HP: two rotations later, the store answers for every
+        // generation, not just the one still on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        fill_past_threshold(&path, 1);
+        let em = EventEmitter::new(&path, "daemon");
+        em.emit("operator_decision", &json!({"decision_id": "d-1"}))
+            .unwrap();
+        assert!(
+            path.metadata().unwrap().len() < super::ROTATE_AT_BYTES,
+            "the emitter rotated the full journal"
+        );
+        fill_past_threshold(&path, 2);
+        em.emit("operator_decision", &json!({"decision_id": "d-2"}))
+            .unwrap();
+        let store = crate::events_store::store_path(&path);
+        assert_eq!(store_count(&store, "generation_marker"), 4200);
+        // The tail row of the live file ingests lazily: it is IN the next
+        // sync (rotation or history read), never after. d-1 was ingested by
+        // the second rotation; d-2 is the live tail.
+        assert_eq!(store_count(&store, "operator_decision"), 1);
+    }
+
+    #[test]
+    fn blocked_store_defers_the_rotation() {
+        // AC2-ERR: a store that cannot be created stops the rename; the
+        // journal keeps every row rather than dropping them unstored.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        fill_past_threshold(&path, 1);
+        std::fs::create_dir(dir.path().join("events.db")).unwrap();
+        let em = EventEmitter::new(&path, "daemon");
+        em.emit("operator_decision", &json!({"decision_id": "d-1"}))
+            .unwrap();
+        let lines = std::fs::read_to_string(&path).unwrap().lines().count();
+        assert!(lines > 2100, "the journal kept its rows (got {lines})");
+        assert!(
+            !dir.path().join("events.jsonl.1").exists(),
+            "no rotation happened"
+        );
     }
 }
