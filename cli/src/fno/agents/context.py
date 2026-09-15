@@ -10,6 +10,8 @@ See spec: 2026-05-22-fno-agents-observability.md.
 
 Caller-kind decision tree (locked):
 
+0. ``FNO_SPAWN_TRIGGER`` env set -> ``dispatcher`` (a machine dispatch no
+   session asked for; the value names the source, e.g. ``dispatch:ac``)
 1. ``FNO_AGENT_SELF`` env set -> ``nested_agent`` (parent injected it)
 2. ``MCP_CHANNEL_INBOUND_POKE`` env set -> ``mcp_channel``
 3. ``.fno/target-state.md`` exists at cwd with ``status: IN_PROGRESS``
@@ -58,7 +60,7 @@ class EventContext:
     from_session_id: Optional[str]
     from_cwd: str
     from_pid: int
-    caller_kind: str  # one of: human_cli | nested_agent | target_session | mcp_channel | cron
+    caller_kind: str  # one of: dispatcher | human_cli | nested_agent | target_session | mcp_channel | cron
 
     # Recipient (populated at dispatch time)
     to_name: str
@@ -83,10 +85,12 @@ def caller_kind_from_env() -> str:
     Used by ``build_context()`` and also exposed for callers that want
     the env-only signal without paying the target-state file read.
 
-    Returns one of: ``nested_agent | mcp_channel | cron | human_cli``.
+    Returns one of: ``dispatcher | nested_agent | mcp_channel | cron | human_cli``.
     The ``target_session`` discriminator is layered on top by
     ``build_context()`` via ``parse_target_session()`` (Task 2.3).
     """
+    if os.environ.get("FNO_SPAWN_TRIGGER"):
+        return "dispatcher"
     if os.environ.get("FNO_AGENT_SELF"):
         return "nested_agent"
     if os.environ.get("MCP_CHANNEL_INBOUND_POKE"):
@@ -200,24 +204,13 @@ def build_context(
     Returns:
         A frozen ``EventContext`` ready to pass to ``emit_with_context``.
     """
-    # Full caller_kind decision tree (Task 2.3 wires target-state into
-    # build_context with priority 3 per the locked spec):
-    #
-    #   1. FNO_AGENT_SELF env  -> nested_agent
-    #   2. MCP_CHANNEL_INBOUND_POKE  -> mcp_channel
-    #   3. target-state.md live       -> target_session  (NEW in 2.3)
-    #   4. CRON_JOB / INVOCATION_ID  -> cron
-    #   5. default                   -> human_cli
-    #
-    # nested_agent and mcp_channel short-circuit BEFORE the target-state
-    # read; an explicit env attribution outranks a same-cwd target-state.
-    # cron is checked AFTER target-state per the locked priority order;
-    # caller_kind_from_env() returns "cron" first but this function
-    # promotes "cron" to "target_session" when the state file is live.
+    # The priority order lives in the module docstring tree; the one fact it
+    # lacks: an explicit env attribution short-circuits before the
+    # target-state read, so a live state file cannot relabel it.
     env_kind = caller_kind_from_env()
 
     target_sid: Optional[str]
-    if env_kind in ("nested_agent", "mcp_channel"):
+    if env_kind in ("nested_agent", "mcp_channel", "dispatcher"):
         kind = env_kind
         target_sid = None
     else:
@@ -231,7 +224,11 @@ def build_context(
     from_name: Optional[str]
     from_provider: Optional[str]
     from_session_id: Optional[str]
-    if kind == "nested_agent":
+    if kind == "dispatcher":
+        from_name = os.environ.get("FNO_SPAWN_TRIGGER")
+        from_provider = None
+        from_session_id = None
+    elif kind == "nested_agent":
         from_name = os.environ.get("FNO_AGENT_SELF")
         from_provider = harness_from_env(os.environ)
         from_session_id = os.environ.get("FNO_AGENT_SESSION")

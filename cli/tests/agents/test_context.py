@@ -71,6 +71,7 @@ def test_event_context_has_all_13_fields() -> None:
 def _clear_caller_env(monkeypatch) -> None:
     """Strip every env var the caller-kind tree reads."""
     for k in (
+        "FNO_SPAWN_TRIGGER",
         "FNO_AGENT_SELF",
         "FNO_AGENT_HARNESS",
         "FNO_AGENT_SESSION",
@@ -143,6 +144,46 @@ def test_caller_kind_priority_mcp_beats_cron(monkeypatch) -> None:
     monkeypatch.setenv("MCP_CHANNEL_INBOUND_POKE", "1")
     monkeypatch.setenv("CRON_JOB", "1")
     assert caller_kind_from_env() == "mcp_channel"
+
+
+# ---------------------------------------------------------------------------
+# dispatcher — a machine dispatch no session asked for (x-eab2)
+# ---------------------------------------------------------------------------
+
+
+def test_caller_kind_from_env_dispatch_trigger(monkeypatch) -> None:
+    """FNO_SPAWN_TRIGGER set => dispatcher (priority 0)."""
+    from fno.agents.context import caller_kind_from_env
+
+    _clear_caller_env(monkeypatch)
+    monkeypatch.setenv("FNO_SPAWN_TRIGGER", "dispatch:ac")
+    assert caller_kind_from_env() == "dispatcher"
+
+
+def test_caller_kind_dispatcher_outranks_nested_agent(monkeypatch) -> None:
+    """A worker merging its own PR runs the same ritual; the dispatcher chose
+    the node, not the worker, so the trigger outranks FNO_AGENT_SELF."""
+    from fno.agents.context import caller_kind_from_env
+
+    _clear_caller_env(monkeypatch)
+    monkeypatch.setenv("FNO_SPAWN_TRIGGER", "dispatch:ac")
+    monkeypatch.setenv("FNO_AGENT_SELF", "worker-1")
+    assert caller_kind_from_env() == "dispatcher"
+
+
+def test_build_context_session_marker_alone_stays_human_cli(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A harness session marker with no trigger is a session that asked:
+    caller_kind stays human_cli."""
+    from fno.agents.context import build_context
+
+    _clear_caller_env(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-session-1")
+    monkeypatch.chdir(tmp_path)
+    ctx = build_context(to_name="w", to_provider="claude")
+    assert ctx.caller_kind == "human_cli"
+    assert ctx.from_name == "fno"
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +327,22 @@ def test_build_context_nested_agent_from_env(monkeypatch) -> None:
     assert ctx.from_name == "parent-agent"
     assert ctx.from_provider == "claude"
     assert ctx.from_session_id == "session-xyz"
+
+
+def test_build_context_dispatcher_from_env(monkeypatch, tmp_path: Path) -> None:
+    """A dispatch:<source> trigger stamps caller_kind=dispatcher and the
+    trigger value as from_name, with no session on the ask event."""
+    from fno.agents.context import build_context
+
+    _clear_caller_env(monkeypatch)
+    monkeypatch.setenv("FNO_SPAWN_TRIGGER", "dispatch:ac")
+    monkeypatch.chdir(tmp_path)
+    ctx = build_context(to_name="w", to_provider="claude")
+    assert ctx.caller_kind == "dispatcher"
+    assert ctx.from_name == "dispatch:ac"
+    assert ctx.from_provider is None
+    assert ctx.from_session_id is None
+    assert ctx.target_session_id is None
 
 
 def test_build_context_from_name_override_in_human_cli(monkeypatch) -> None:
