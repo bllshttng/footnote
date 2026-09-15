@@ -1012,7 +1012,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
             print(
                 f"fno do pr merge: could not resolve a repo for PR #{pr_number} - "
                 "refusing to reconcile without repo scoping (post-merge node "
-                "close skipped; a later full sweep still catches it)",
+                "close skipped; the daemon's merge_close arm closes it within 15 minutes)",
                 file=sys.stderr,
             )
             return []
@@ -1032,7 +1032,8 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
         except subprocess.TimeoutExpired:
             print(
                 f"fno do pr merge: reconcile for PR #{pr_number} timed out after "
-                f"{int(POST_MERGE_RECONCILE_TIMEOUT_S)}s; a later sweep closes the merged nodes",
+                f"{int(POST_MERGE_RECONCILE_TIMEOUT_S)}s; the daemon's merge_close arm"
+                " closes the merged nodes within 15 minutes",
                 file=sys.stderr,
             )
             return []
@@ -1069,7 +1070,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
             print(
                 f"fno do pr merge: reconcile for PR #{pr_number} held "
                 f"(a sweep is already in flight, requests={obj.get('requests')}); "
-                "a later sweep closes the merged nodes",
+                "the daemon's merge_close arm closes the merged nodes within 15 minutes",
                 file=sys.stderr,
             )
         # `closed` = what the scan closed this run; `closure_bound`/`claims`
