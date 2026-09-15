@@ -1747,7 +1747,7 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         MutateInput {
             entries,
             canonical_path: state.canonical.then(|| state.graph.clone()),
-            base_version: Some(version.to_string()),
+            base_version: version.to_string(),
             plan_rungs: plan_rung_map(params),
         },
         state.lock_timeout,
@@ -1939,7 +1939,7 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         MutateInput {
             entries: merged,
             canonical_path: state.canonical.then(|| state.graph.clone()),
-            base_version: Some(current_version),
+            base_version: current_version,
             plan_rungs: plan_rung_map(params),
         },
         state.lock_timeout,
@@ -2967,7 +2967,7 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
         MutateInput {
             entries,
             canonical_path: state.canonical.then(|| state.graph.clone()),
-            base_version: Some(base),
+            base_version: base,
             // The Python client sends the begin snapshot's map with every op
             // (a session op that opens or closes a do row re-derives
             // in_progress like any full write); a caller that sends none
@@ -4080,7 +4080,7 @@ mod tests {
                     "created_at": "2026-09-11T00:00:00+00:00"
                 })],
                 canonical_path: None,
-                base_version: None,
+                base_version: graph_store::base_version(graph).unwrap(),
                 plan_rungs: None,
             },
             Duration::from_secs(2),

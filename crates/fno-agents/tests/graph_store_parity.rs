@@ -132,7 +132,7 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
             MutateInput {
                 entries,
                 canonical_path: None,
-                base_version: Some(base),
+                base_version: base,
                 plan_rungs: Some(rungs),
             },
             std::time::Duration::from_secs(5),
@@ -628,7 +628,7 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
                     MutateInput {
                         entries,
                         canonical_path: None,
-                        base_version: Some(base),
+                        base_version: base,
                         plan_rungs: None, // concurrent-writer probe: statuses stay stored
                     },
                     std::time::Duration::from_secs(10),

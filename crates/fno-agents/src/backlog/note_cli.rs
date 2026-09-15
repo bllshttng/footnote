@@ -248,6 +248,9 @@ fn run_machine(
 
 /// Set the bounded `state_needs_refresh` marker in the row extras.
 fn set_refresh_marker(graph: &std::path::Path, node_id: &str) {
+    // x-385e: stamp the base BEFORE the read, so an interleaved writer makes
+    // the publish Conflict instead of blessing stale rows.
+    let base = graph_store::base_version(graph).unwrap_or_default();
     let Ok(rows) = graph_store::read_defaulted(graph, false) else {
         return;
     };
@@ -265,7 +268,7 @@ fn set_refresh_marker(graph: &std::path::Path, node_id: &str) {
         graph_store::MutateInput {
             entries: working,
             canonical_path: None,
-            base_version: None,
+            base_version: base,
             plan_rungs: None,
         },
         std::time::Duration::from_secs(5),

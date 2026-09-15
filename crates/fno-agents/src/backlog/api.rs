@@ -509,7 +509,7 @@ fn mutate(
             crate::graph_store::MutateInput {
                 entries: working,
                 canonical_path: None,
-                base_version: Some(base),
+                base_version: base,
                 plan_rungs: None,
             },
             MUTATE_TIMEOUT,

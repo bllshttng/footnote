@@ -495,12 +495,20 @@ fn run_migrate(
             entry.as_ref(),
             matches!(verdict, RowVerdict::TerminalVerbatim),
         );
+        // x-385e: publish only over the snapshot this cycle read.
+        let base = match graph_store::base_version(graph) {
+            Ok(b) => b,
+            Err(e) => {
+                unresolved.push((id.clone(), format!("base version read failed: {e}")));
+                continue;
+            }
+        };
         let published = graph_store::locked_mutate_with_hook(
             graph,
             MutateInput {
                 entries: candidate,
                 canonical_path: None,
-                base_version: None,
+                base_version: base,
                 plan_rungs: None,
             },
             std::time::Duration::from_secs(30),

@@ -209,6 +209,9 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
     if body.is_empty() {
         return Err(StateError::EmptyBody);
     }
+    // x-385e: stamp the base BEFORE the read, so a writer that lands between
+    // the two makes the publish Conflict instead of blessing stale rows.
+    let base = graph_store::base_version(graph)?;
     let rows = read_rows_for(graph)?;
     let node_id = input.node_id.as_str();
     let row = rows
@@ -329,7 +332,7 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
         MutateInput {
             entries: working,
             canonical_path: None,
-            base_version: None,
+            base_version: base,
             plan_rungs: None,
         },
         std::time::Duration::from_secs(5),
@@ -351,6 +354,8 @@ pub fn clear_state(
     node_id: &str,
     if_revision: Option<u64>,
 ) -> Result<(), StateError> {
+    // x-385e: stamp the base BEFORE the read (see replace_state).
+    let base = graph_store::base_version(graph)?;
     let rows = read_rows_for(graph)?;
     let row = rows
         .iter()
@@ -416,7 +421,7 @@ pub fn clear_state(
         MutateInput {
             entries: working,
             canonical_path: None,
-            base_version: None,
+            base_version: base,
             plan_rungs: None,
         },
         std::time::Duration::from_secs(5),

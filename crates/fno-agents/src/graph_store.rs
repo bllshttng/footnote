@@ -2125,13 +2125,14 @@ pub struct MutateInput {
     /// Configured canonical graph path, when the caller knows it; the
     /// closure-release and board-render gates key on it.
     pub canonical_path: Option<PathBuf>,
-    /// The snapshot version (the file-content digest at begin time). The
-    /// cycle refuses to publish over a changed file, so a caller whose read
-    /// ran outside the lock retries on [`StoreError::Conflict`] instead of
-    /// silently clobbering an interleaved writer. `None` only for callers
-    /// that already serialized the whole read-apply-publish cycle under one
-    /// gate (the keeper's own ops).
-    pub base_version: Option<String>,
+    /// The snapshot version ([`base_version`] at the caller's read time).
+    /// Required, never optional: a whole-file publish is only safe when the
+    /// bytes it replaces are the bytes the caller read. The cycle refuses to
+    /// publish over a changed file, so a caller whose read ran outside the
+    /// lock retries on [`StoreError::Conflict`] instead of silently
+    /// clobbering an interleaved writer (x-385e: `None` let four writers
+    /// publish stale snapshots that dropped every row landed in between).
+    pub base_version: String,
     /// Node id -> the rung of the node's linked plan, as the client computed
     /// it with the Python rung table (`ladder.plan_rung`). Repo law keeps
     /// plan-document reading on the Python side, so the store derives
@@ -2254,15 +2255,13 @@ pub fn locked_mutate_with_hook(
     // under the lock, so every caller (keeper, daemon settle, direct) agrees
     // by construction and a mid-flight flip lands on the next mutation.
     let sqlite_backend = crate::backlog::backend(path) == crate::backlog::Backend::Sqlite;
-    if let Some(expected) = &input.base_version {
-        let current = if sqlite_backend {
-            crate::backlog::version(path).map_err(StoreError::Sqlite)?
-        } else {
-            file_content_version(path)
-        };
-        if current != *expected {
-            return Err(StoreError::Conflict);
-        }
+    let current = if sqlite_backend {
+        crate::backlog::version(path).map_err(StoreError::Sqlite)?
+    } else {
+        file_content_version(path)
+    };
+    if current != input.base_version {
+        return Err(StoreError::Conflict);
     }
     let raw_read = if sqlite_backend {
         RawRead::Entries(crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?)
@@ -2893,7 +2892,7 @@ mod tests {
             MutateInput {
                 entries: vec![json!({"id": "ab-1", "title": "t", "details": ""})],
                 canonical_path: None,
-                base_version: None,
+                base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             Duration::from_secs(2),
@@ -2906,7 +2905,7 @@ mod tests {
             MutateInput {
                 entries: vec![json!({"id": "ab-1", "completion_note": "   "})],
                 canonical_path: None,
-                base_version: None,
+                base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             Duration::from_secs(2),
@@ -2919,7 +2918,7 @@ mod tests {
             MutateInput {
                 entries: vec![json!({"id": "ab-1", "title": "t"})],
                 canonical_path: None,
-                base_version: None,
+                base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             Duration::from_secs(2),
@@ -3194,7 +3193,7 @@ mod tests {
             MutateInput {
                 entries,
                 canonical_path: None,
-                base_version: None,
+                base_version: base_version(&graph).unwrap(),
                 plan_rungs: None,
             },
             Duration::from_secs(2),

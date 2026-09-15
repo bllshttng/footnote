@@ -72,7 +72,7 @@ fn raw_mutate(graph: &PathBuf, rows: Vec<serde_json::Value>) {
         fno_agents::graph_store::MutateInput {
             entries: rows,
             canonical_path: None,
-            base_version: None,
+            base_version: fno_agents::graph_store::base_version(graph).unwrap(),
             plan_rungs: None,
         },
         std::time::Duration::from_secs(5),
