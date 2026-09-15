@@ -1536,6 +1536,7 @@ pub use crate::review_freshness::{
 mod async_wait;
 mod authorship;
 mod coverage_receipt;
+mod review_count;
 mod review_state;
 mod watch_lease;
 use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason};
@@ -7092,8 +7093,12 @@ fn coverage_event_data_full(
     if let Some(review_state) = rep.review_state_at(tiling.is_some_and(|t| t.rounds_exhausted)) {
         data["review_state"] = serde_json::json!(review_state);
     }
-    if let Coverage::Covered(n) = &rep.coverage {
-        data["reviewed_count"] = serde_json::json!(n);
+    // One counting rule for every row: a round is a review whatever it
+    // concluded, so the count never reads below the rounds the chain already
+    // spent (review_count). The coverage word and the count answer different
+    // questions; a fail round moves the count while the word stays red.
+    data["reviewed_count"] = serde_json::json!(review_count::reviewed_count(rep, tiling));
+    if let Coverage::Covered(_) = &rep.coverage {
         // How much of that count is the author reviewing its own diff. Nothing
         // gates on it: self-review is the DEFAULT path (`self_review_required`
         // floors `/code-review` onto the author's own head), so refusing a
@@ -7119,12 +7124,6 @@ fn coverage_event_data_full(
         if author_session.is_some() {
             data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
         }
-    } else {
-        // Unknown rows keep the honest measured count rather than omitting
-        // it: the coverage word is unmeasured, the review count is not - the
-        // GitHub read can fail after two attestations landed, and silence
-        // there reads downstream as "nobody reviewed".
-        data["reviewed_count"] = serde_json::json!(rep.coverage_count().unwrap_or(0));
     }
     data["passed_count"] = serde_json::json!(rep.passed_count());
     if let Some(author_session_id) = author_session {
