@@ -829,7 +829,7 @@ pub fn classify_with_basis(
 /// Classify with optional sweep-time sibling evidence. `None` is the honest
 /// value for single-key reads; a full scan passes the PID exclusivity map's
 /// result for the record being classified. `session_witness` is the
-/// session-keyed liveness reader ; `None` keeps the pid-only
+/// session-keyed liveness reader; `None` keeps the pid-only
 /// verdicts legacy records were characterized under.
 /// The pid verdict for a claim whose holder is one short-lived process, at
 /// TTL expiry. Live keeps the claim; any pid cause except a refused probe
@@ -968,7 +968,7 @@ pub fn classify_with_basis_and_exclusivity(
     }
     // TTL claim, still inside its window: live pid => Live, dead/replaced pid
     // => Suspect (TTL-protected, not stealable) - unless the session witness
-    // proves the holder : a resumed session's recorded pid is
+    // proves the holder: a resumed session's recorded pid is
     // permanently dead, so without this heal the claim sits Suspect until the
     // heartbeat lapses and the dead pid decides at expiry.
     let witnessed = session_witness.and_then(|witness| {
@@ -1685,7 +1685,7 @@ pub(crate) fn append_event_line(
 ) -> Result<(), String> {
     let mut line = serde_json::to_vec(event).map_err(|e| e.to_string())?;
     line.push(b'\n');
-    // Honor the declared retention class : ephemeral rows (the claim
+    // Honor the declared retention class: ephemeral rows (the claim
     // lifecycle, single_flight_gate) go to the sibling journal - the same
     // routing EventEmitter::write_line and the Python append_event apply - so
     // an event lands in one store whichever language emitted it.
@@ -2611,7 +2611,7 @@ pub fn parse_ttl_ms(s: &str) -> Option<i64> {
         .filter(|v| *v > 0)
 }
 
-/// Best-effort lease renewal : reset a live TTL claim's `expires_at` to
+/// Best-effort lease renewal: reset a live TTL claim's `expires_at` to
 /// `now + ttl_ms`, but ONLY if the on-disk holder still matches `holder`.
 /// `fno-agents loop-check` calls this on every stop with the manifest's own
 /// TTL, so a respawned worker (whose supervisor pid died) keeps its claim fresh
@@ -2677,7 +2677,7 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
     let path = claim_path(key, root)?;
     // Cheap pre-check outside the mutex: skip the lock for the common
     // not-ours/absent/PID-liveness cases so idle stops stay lock-free. The
-    // status verdict is computed HERE for the same reason : the
+    // status verdict is computed HERE for the same reason: the
     // session witness may read transcripts, and slow I/O under the recovery
     // mutex makes a successor's `target init --handover-from` refuse as
     // mutex-busy.
@@ -2858,7 +2858,7 @@ fn renew_locked(
     if existing.expires_at.is_none() {
         return Ok(false); // PID-liveness claim: no TTL to extend
     }
-    // No TTL-expiry refusal here : the caller refuses a STALE verdict
+    // No TTL-expiry refusal here: the caller refuses a STALE verdict
     // before the lock; an expired claim whose status verdict reads Live or
     // Suspect extends.
     let now = now_ms();
@@ -3459,7 +3459,7 @@ mod tests {
             Ok(false)
         );
         // An expired claim is refused only when its status verdict reads
-        // STALE : dead pid, no session id for a witness to heal.
+        // STALE: dead pid, no session id for a witness to heal.
         // A live-pid expired fixture now RENEWS (see
         // renew_extends_an_expired_claim_the_status_verdict_calls_live).
         let mut o = opts_in(&td);
@@ -4018,7 +4018,7 @@ mod tests {
             classify(&record(me, now, Some(now + 60_000), &host), Some(now)),
             ClaimState::Live
         );
-        // SUSPECT arm : unexpired TTL + dead/replaced pid -> SUSPECT
+        // SUSPECT arm: unexpired TTL + dead/replaced pid -> SUSPECT
         // (was LIVE). A respawned worker's slot stays TTL-protected, but the
         // distinct state lets init/dispatch refuse-and-skip rather than steal.
         assert_eq!(

@@ -86,7 +86,7 @@ pub struct DaemonOptions {
     /// (tests point this at the cargo-built binary).
     pub worker_bin: PathBuf,
     /// Run one bounded reconcile sweep on daemon startup, CONCURRENTLY with the
-    /// accept loop (Architecture B, plan ; concurrency per).
+    /// accept loop (Architecture B, plan; concurrency per).
     /// It used to complete before the daemon served anything, which on a large
     /// roster left a cold daemon silent for tens of seconds and had every client
     /// that timed out against that silence lazy-start another one. Default
@@ -1468,7 +1468,7 @@ pub(crate) fn restore_unaccounted_row(
     }
 }
 
-/// The shared liveness ladder as production runs it : the reader
+/// The shared liveness ladder as production runs it: the reader
 /// extracted from `claude_resume_argv_with_truth`, now called by the reaper
 /// instead of a per-caller derivation. The sessions-dir index and the truth
 /// answers are both computed ONCE per closure (one sweep), however many rows
@@ -1493,7 +1493,7 @@ pub(crate) fn live_liveness_prober(
     }
 }
 
-/// Terminal-stop sweep : `claude stop` any fire-and-forget `claude --bg`
+/// Terminal-stop sweep: `claude stop` any fire-and-forget `claude --bg`
 /// worker that `finalize` marked terminal. finalize (running as the worker's own
 /// child) cannot self-exit it, so this daemon sweep — external to every worker —
 /// runs the shipped stop on its behalf. A clean stop settles the session `(done)`
@@ -1777,7 +1777,7 @@ pub async fn bind_supervisor_socket(
         return Err(DaemonError::AlreadyRunning(home.supervisor_sock()));
     }
 
-    // Record the holder in the lockfile CONTENT : pid plus start time,
+    // Record the holder in the lockfile CONTENT: pid plus start time,
     // so `restart --force` has a SIGKILL target that survives "which daemon
     // owns this". The start time is written alongside because a bare pid is a
     // reuse hazard -- `pid_is_ours` guards the eventual signal with it. A write
@@ -1973,7 +1973,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         let home_sweep = home.clone();
         let emitter_sweep = EventEmitter::new(home.events_jsonl(), "daemon");
         tokio::task::spawn_blocking(move || {
-            // Test seam : hold the sweep open so a test can prove the
+            // Test seam: hold the sweep open so a test can prove the
             // daemon answers DURING it, not merely after it. Without a seam that
             // assertion is a race against however fast the machine probes, and a
             // flaky proof of the one property this fix exists to give. Never set
@@ -1996,7 +1996,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     )
                 } else {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        // Registry-side keeper sweep FIRST : re-bind
+                        // Registry-side keeper sweep FIRST: re-bind
                         // surviving lane-B thread rows BEFORE the settle pass
                         // below reads them - the daemon-side twin of the pane
                         // sweep's re-adopt-before-restore ordering. Non-fatal
@@ -2059,7 +2059,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // State: serving. daemon_started is emitted AFTER recovery (step 7 ordering:
     // events.jsonl reflects reality from the first served request).
     let started_at = Instant::now();
-    // Drift signal : fingerprint the executable we are running so a
+    // Drift signal: fingerprint the executable we are running so a
     // later client can tell whether the on-disk binary has been replaced since.
     // Also record our own pid start time so `restart` can pid-reuse-guard the
     // SIGTERM, reusing the same check the daemon already applies to workers.
@@ -2122,7 +2122,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // Screen-manifest scrape gate: at most one sweep in flight (a slow mux
     // stalls its own sweep, never the loop or a pile-up of sweeps).
     let scrape_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Terminal-stop sweep gate : same one-in-flight discipline; a large
+    // Terminal-stop sweep gate: same one-in-flight discipline; a large
     // marker set must never serialize inline and starve accept()/SIGTERM.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2132,19 +2132,19 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut last_orphan_sweep = Instant::now();
     let liveness_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_liveness_sweep = Instant::now();
-    // Machine watch : the arm owns its cadence, gate and memory.
+    // Machine watch: the arm owns its cadence, gate and memory.
     let machine_watch = crate::machine_watch::Arm::default();
     // Merge close: the arm owns its cadence and gate; the sweep runs the
     // bare reconcile that closes a merged PR's node with no session alive.
     let merge_close = crate::merge_close::Arm::default();
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
-    // Retirement-sweep cadence : the throttle stamp beside the gate,
+    // Retirement-sweep cadence: the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
     let mut last_gc_sweep = Instant::now();
     let retire_interval_next = crate::gc::seed_retire_interval_cell(&ctx.opts.agents_config_cwd);
-    // Dead-row GC gate : its dormant check shells out to the truth
+    // Dead-row GC gate: its dormant check shells out to the truth
     // probe, so it gets the same one-in-flight discipline as its neighbors.
     let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Idle-exit liveness probe gate + verdict handoff: the probe is blocking
@@ -2164,7 +2164,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
 
-    // THE RULE FOR THIS LOOP : nothing that shells out, walks the
+    // THE RULE FOR THIS LOOP: nothing that shells out, walks the
     // registry row by row, or otherwise blocks may run INLINE in a select arm.
     // Every arm shares one thread with `accept()` and with the SIGTERM arm, so
     // an inline sweep makes the daemon both unreachable and unstoppable at the
@@ -2195,7 +2195,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 break "sigterm";
             }
             _ = idle_check.tick() => {
-                // Bound-inode self-check : if the socket path no
+                // Bound-inode self-check: if the socket path no
                 // longer resolves to the inode we bound, something else now
                 // owns it (an operator `rm`, or a bug elsewhere) -- retire
                 // rather than keep serving unreachable forever.
@@ -2229,11 +2229,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::scrape::scrape_sweep(&home, &emitter, notify_on_blocked);
                     });
                 }
-                // Retirement sweep : a row leaves when its work is done
+                // Retirement sweep: a row leaves when its work is done
                 // (reverse join) and its transcript is quiet past
                 // `agents.retire_grace_s`; held process stopped first, receipt
                 // written before the drop, clean worktree pruned. Throttled to
-                // `agents.retire_interval_s` ; off-loop.
+                // `agents.retire_interval_s`; off-loop.
                 let retire_interval = crate::gc::retire_interval_snapshot(&retire_interval_next);
                 crate::gc::maybe_retirement_sweep(
                     &mut last_gc_sweep,
@@ -2248,7 +2248,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     // opt-in via the manual verb (Locked Decision 6).
                     || crate::gc::mux_tab_sweep(false, false),
                 );
-                // Worktree sweep + merge reaper : the sweep backstops
+                // Worktree sweep + merge reaper: the sweep backstops
                 // what the reaper cannot reach; the reaper is the merge-triggered
                 // consumer of `merge_cleanup_requested` (60s floor). Both
                 // off-loop; grace and stop order live in merge_reap.rs.
@@ -2307,7 +2307,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     &orphan_sweep_in_flight,
                     ctx.home.events_jsonl(),
                 );
-                // The machine gets an arm : bands the box, escalates, gates nothing.
+                // The machine gets an arm: bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
                 // Merged nodes close even when no session is alive.
                 crate::merge_close::maybe_tick(&merge_close, ctx.home.clone());
@@ -2330,7 +2330,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         }
                     }),
                 );
-                // Terminal-stop sweep : exit fire-and-forget `claude --bg`
+                // Terminal-stop sweep: exit fire-and-forget `claude --bg`
                 // workers finalize marked terminal, so a shipped bg /target frees
                 // its slot instead of parking at an idle prompt forever. Spawned
                 // off the select arm behind a one-in-flight gate (mirrors the
@@ -2794,7 +2794,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             fallback
         }
     };
-    // Post-G4 : the daemon hosts no agent PTYs, so the only spawns it
+    // Post-G4: the daemon hosts no agent PTYs, so the only spawns it
     // still serves are the claude stream-json ADOPTION lane -- host_mode=interactive
     // + mode=stream_json resumes an idle session as a held stream thread
     // (`claude -p --resume <uuid>`) for chat/switchboard/ask to drive -- and
@@ -3020,7 +3020,7 @@ fn claude_stream_worker_args(
 /// settling it `exited` like a one-shot) + the FULL `claude_session_uuid` (the
 /// resume key, finally populated here -- the field G1 added is set by the front
 /// door). Pure so the row shape is asserted without a live spawn.
-/// The agent-list row's substitution marker : the object naming BOTH
+/// The agent-list row's substitution marker: the object naming BOTH
 /// values on a substituted verdict, null on match-or-unknown. Null is the
 /// unknown shape too - a row whose probe has not answered must never read as
 /// clean. Mirrors `format._model_substitution_marker` in the Python emitter.
@@ -3076,7 +3076,7 @@ fn build_claude_stream_entry(
         model: None,
         model_basis: None,
         effort: None,
-        // v23 : adoption - the daemon observed no spawn request, so
+        // v23: adoption - the daemon observed no spawn request, so
         // the requested axis stays unknown rather than a guess.
         requested_model: None,
         requested_provider: None,
@@ -3275,7 +3275,7 @@ async fn spawn_claude_stream_lane(
 
     // 2. Lock-free pre-checks for clean messages (the authoritative re-checks run
     //    atomically under the registry lock at registration). A read failure is
-    //    fatal to the spawn : an empty-roster default here would read
+    //    fatal to the spawn: an empty-roster default here would read
     //    every existing name as free.
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(r) => r,
@@ -4673,7 +4673,7 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         );
     }
 
-    // A codex hosted thread is driven through its actor : submit the
+    // A codex hosted thread is driven through its actor: submit the
     // body and answer delivered on ACCEPTANCE - the protocol's own receipt
     // (turn/start ack when idle, steer ack when driving) - never a whole-turn
     // wait. The claude stream lane below waits out the turn because it mirrors
@@ -5002,7 +5002,7 @@ where
             .collect()
     };
     let (truths, batch_outcome) = truth_fn(&handles);
-    // The instrument's own receipt : a page where the probe answered
+    // The instrument's own receipt: a page where the probe answered
     // nothing must be readable AS that, not as 43 rows confidently `unknown`.
     // The rendered status word cannot carry the distinction (the vocabulary is
     // frozen by the --status filter), so the envelope does.
@@ -5270,7 +5270,7 @@ where
                     // never grows a second transcript reader that could disagree
                     // with the truth verb about the same session.
                     "observed_model": observed_model,
-                    // v23 : the stored REQUEST beside the observation,
+                    // v23: the stored REQUEST beside the observation,
                     // plus the substitution marker derived from the payload
                     // above - the same two keys, computed the same way, as
                     // Python's serialize_entry. Null marker is match-or-
@@ -5411,7 +5411,7 @@ where
 async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     // load_registry does blocking flock I/O; offload it from the async worker
     // thread (Gemini review). The drive-table read below stays async. A read
-    // failure is an RPC error : `unwrap_or_default()` here published
+    // failure is an RPC error: `unwrap_or_default()` here published
     // zero-agent status counts over a broken registry.
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(reg) => reg,
@@ -5628,7 +5628,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
             }),
         );
     }
-    // A lane-B keeper thread : fno's own keeper hosts the child and
+    // A lane-B keeper thread: fno's own keeper hosts the child and
     // the row's short_id is empty, so without this arm the no-op arm below
     // reports a stop that stopped nothing (PR 1332 review finding). Kill is
     // delivered over the row's own socket and CONFIRMED before the row goes
@@ -7371,7 +7371,7 @@ fn apply_keeper_sweep_changes(
 }
 
 /// Re-bind surviving lane-B keeper threads to their registry rows at daemon
-/// start : the registry-side consumer of the keeper discovery, keyed
+/// start: the registry-side consumer of the keeper discovery, keyed
 /// on the row rather than on a mux member (a lane-B thread has no tab, so
 /// the mux server's re-adopt sweep never sees its socket).
 ///
@@ -8227,7 +8227,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         Unknown,
     }
     let mut outcome = Outcome::Unknown;
-    // Badge-transition notify intent : (title, body, is_done). Captured
+    // Badge-transition notify intent: (title, body, is_done). Captured
     // UNDER the flock from prev-vs-new state; fired AFTER the write so a slow
     // notifier can never stall ingestion.
     let mut notify: Option<(String, String, bool)> = None;

@@ -728,7 +728,7 @@ fn r_control_plane(ctx: &Ctx) -> Result<Value, String> {
     Ok(json!({ "attention": attention }))
 }
 
-/// One territory row per scope (x-e221): live against cap, the blueprinter
+/// One territory row per scope : live against cap, the blueprinter
 /// handle, and the kingless mark, read from the same projection the spawn
 /// gate's cap enforces. An `membership: unknown` row is a failed reading, so
 /// a blind spot prints `READER FAILED territory` instead of an empty table.
@@ -1541,7 +1541,7 @@ mod tests {
 
     #[test]
     fn scope_key_sanitizes_like_the_writer() {
-        assert_eq!(sanitize_scope_key("fno-x-6b7b epic"), "fno-x-6b7b-epic");
+        assert_eq!(sanitize_scope_key("fno-x-aaaa epic"), "fno-x-aaaa-epic");
         assert_eq!(sanitize_scope_key("  --x--  "), "x");
         assert_eq!(sanitize_scope_key("///"), "");
     }
@@ -1805,8 +1805,8 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        let data = build_data(&readings, "x-a792");
-        let lines = render_lines("x-a792", &readings, &data, &None, "", "no change");
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         let board_line = lines.iter().find(|l| l.starts_with("board:")).unwrap();
         assert!(board_line.contains("open_prs 7"), "line: {board_line}");
         assert!(board_line.contains("blocked 2"));
@@ -1825,9 +1825,9 @@ mod tests {
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
         readings[1] = Reading::failed("board", "board payload names no undriven_pr queue".into());
-        let data = build_data(&readings, "x-a792");
+        let data = build_data(&readings, "x-bbbb");
         let change = derive_change(None, &data, "");
-        let lines = render_lines("x-a792", &readings, &data, &None, "", &change);
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
@@ -1847,7 +1847,7 @@ mod tests {
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
         readings[9] = Reading::failed("drain", "drain unreadable".into());
-        let data = build_data(&readings, "x-a792");
+        let data = build_data(&readings, "x-bbbb");
         assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
     }
 
@@ -1862,7 +1862,7 @@ mod tests {
 
     fn prev_row() -> Value {
         json!({"ts": "2026-09-10T12:00:00Z", "type": "reign_checkin", "source": "loop",
-            "data": {"scope": "x-a792", "change": "no change", "open_prs": 9,
+            "data": {"scope": "x-bbbb", "change": "no change", "open_prs": 9,
                      "free_claim_no_driver": 1, "blocked": 2,
                      "escalations_open": 0, "escalations_overdue": 0,
                      "active_nodes": 4, "live_workers": 3, "undelivered": 9}})
@@ -1873,7 +1873,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = journal(dir.path(), &[prev_row()]);
         let ctx = Ctx {
-            scope: "x-a792".into(),
+            scope: "x-bbbb".into(),
             level: Some(1),
             events_paths: vec![path],
             graph: PathBuf::from("nope.json"),
@@ -1892,10 +1892,10 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        let data = build_data(&readings, "x-a792");
+        let data = build_data(&readings, "x-bbbb");
         let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
         assert_eq!(change, "moved: open_prs 9 -> 7");
-        let lines = render_lines("x-a792", &readings, &data, &previous, "", &change);
+        let lines = render_lines("x-bbbb", &readings, &data, &previous, "", &change);
         let diff_line = lines
             .iter()
             .find(|l| l.starts_with("vs last beat (2026-09-10T12:00:00Z)"))
@@ -1910,7 +1910,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = journal(dir.path(), &[prev_row()]);
         let ctx = Ctx {
-            scope: "x-a792".into(),
+            scope: "x-bbbb".into(),
             level: Some(1),
             events_paths: vec![path],
             graph: PathBuf::from("nope.json"),
@@ -1933,13 +1933,13 @@ mod tests {
             "control_plane",
             json!({"attention": ["pr_watch_merge FAIL timeout for 2000s"]}),
         );
-        let data = build_data(&readings, "x-a792");
+        let data = build_data(&readings, "x-bbbb");
         let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
         assert!(
             change.starts_with("attention: pr_watch_merge FAIL timeout for 2000s"),
             "{change}"
         );
-        let lines = render_lines("x-a792", &readings, &data, &previous, "", &change);
+        let lines = render_lines("x-bbbb", &readings, &data, &previous, "", &change);
         assert!(lines.iter().any(|l| l == "control plane:"), "{lines:?}");
         assert!(lines
             .iter()
@@ -1954,7 +1954,7 @@ mod tests {
             "board",
             json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
         );
-        let data = build_data(&readings, "x-a792");
+        let data = build_data(&readings, "x-bbbb");
         let change = derive_change(previous.as_ref().and_then(|p| p.get("data")), &data, "");
         assert_eq!(
             change,
@@ -1973,13 +1973,13 @@ mod tests {
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
         readings[11] = Reading::failed("control_plane", "journals unreadable".into());
-        let data = build_data(&readings, "x-a792");
+        let data = build_data(&readings, "x-bbbb");
         let change = derive_change(None, &data, "");
         assert_eq!(
             change,
             "no numeric movement; readings failed: control_plane"
         );
-        let lines = render_lines("x-a792", &readings, &data, &None, "", &change);
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", &change);
         assert!(lines
             .iter()
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
@@ -1997,7 +1997,7 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        let data = build_data(&readings, "x-a792");
+        let data = build_data(&readings, "x-bbbb");
         assert_eq!(
             data.get("control_plane_attention"),
             Some(&json!([])),
@@ -2005,7 +2005,7 @@ mod tests {
         );
         let change = derive_change(None, &data, "");
         assert_eq!(change, "first canonical beat for this scope");
-        let lines = render_lines("x-a792", &readings, &data, &None, "", "no change");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(lines.iter().any(|l| l == "control plane: ok"));
     }
 
@@ -2017,16 +2017,16 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        let data = build_data(&readings, "x-a792");
+        let data = build_data(&readings, "x-bbbb");
         let hand = json!({"ts": "2026-09-15T13:40:38Z", "type": "reign_checkin", "source": "hand",
-            "data": {"scope": "x-a792", "change": "resumed the crown"}});
+            "data": {"scope": "x-bbbb", "change": "resumed the crown"}});
         let change = derive_change(Some(hand.get("data").unwrap()), &data, "");
         assert!(
             change.starts_with("unmeasured: previous row lacks"),
             "change: {change}"
         );
         assert!(!change.contains("no change"), "change: {change}");
-        let lines = render_lines("x-a792", &readings, &data, &Some(hand), "", &change);
+        let lines = render_lines("x-bbbb", &readings, &data, &Some(hand), "", &change);
         let beat = lines
             .iter()
             .find(|l| l.starts_with("vs last beat"))
@@ -2041,9 +2041,9 @@ mod tests {
     fn faq_scope_line_matches() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("king-s-1234.md");
-        std::fs::write(&path, "---\ncreated: t\nscope: x-a792\n---\n\n# q\n").unwrap();
+        std::fs::write(&path, "---\ncreated: t\nscope: x-bbbb\n---\n\n# q\n").unwrap();
         std::fs::write(dir.path().join("king-other.md"), "---\nscope: other\n---\n").unwrap();
-        let entries = faq_entries_for_scope(dir.path(), "x-a792");
+        let entries = faq_entries_for_scope(dir.path(), "x-bbbb");
         assert_eq!(entries.len(), 1);
         assert!(entries[0].starts_with("---"));
     }
@@ -2070,8 +2070,8 @@ mod tests {
     #[test]
     fn canonical_scope_row_is_emitted() {
         let dir = tempfile::tempdir().unwrap();
-        let (ctx, path) = emit_ctx(&dir, "x-a792");
-        let data = json!({"scope": "x-a792", "change": "beat"});
+        let (ctx, path) = emit_ctx(&dir, "x-bbbb");
+        let data = json!({"scope": "x-bbbb", "change": "beat"});
         assert!(emit_row(&ctx, data.as_object().unwrap()));
         let rows = std::fs::read_to_string(&path).unwrap();
         assert_eq!(rows.lines().count(), 1);
@@ -2081,8 +2081,8 @@ mod tests {
     #[test]
     fn non_canonical_scope_refuses_the_row() {
         let dir = tempfile::tempdir().unwrap();
-        let (ctx, path) = emit_ctx(&dir, "x-0c60 ready no build, x-8984 idea");
-        let data = json!({"scope": "x-0c60 ready no build, x-8984 idea", "change": "beat"});
+        let (ctx, path) = emit_ctx(&dir, "x-cccc ready no build, idea");
+        let data = json!({"scope": "x-cccc ready no build, idea", "change": "beat"});
         assert!(!emit_row(&ctx, data.as_object().unwrap()));
         assert!(
             !path.exists() || std::fs::read_to_string(&path).unwrap().trim().is_empty(),
