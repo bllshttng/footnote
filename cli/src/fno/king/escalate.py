@@ -51,29 +51,20 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
              unknown_reason: "str | None" = None) -> "tuple[str, str]":
     """Record one operator question for this stalled set.
 
-    Returns ``(outcome, question_id)`` where outcome is ``recorded``,
-    ``duplicate``, ``answered`` or ``closed``. Raises on a store failure or a
-    renderer refusal; a quiet failure here would put the king back in the
-    silence this verb exists to break. ``live`` and ``unknown_reason`` come
-    from :func:`fno.king.state.reign_state`; the dedupe key is unchanged
-    either way.
+    Returns ``(outcome, question_id)``; raises on a store failure or a
+    renderer refusal. A quiet failure would put the king back in the
+    silence this verb exists to break.
     """
     from fno.agents.stale_escalate import dedupe_key, reconcile_channel
     from fno.harness_identity import canonical_handle
 
     ids = sorted(set(stalled_ids))
     key = dedupe_key(ids)
-    # The channel is keyed by the escalating king: the marker the fold sweeps
-    # and the needle the text carries must name this king, or two reigning
-    # kings take turns closing each other's question. The scope rides
-    # the key handed to the renderer, which formats it opaquely, so the crate
-    # stays untouched.
-    scope = _escalation_scope(session_id)
-    marker = f"{MARKER}:{scope}" if scope else MARKER
+    marker, render_key = _escalation_channel(session_id, key)
     # Render BEFORE the fold: a refusal must raise while the channel is still
     # untouched. The channel's empty branch closes open asks, so reaching it
     # with a refused set would read as a clean board.
-    answer = _render(ids, f"{scope}:{key}" if scope else key, reason, live=live,
+    answer = _render(ids, render_key, reason, live=live,
                      unknown_reason=unknown_reason)
     if not answer.get("ok"):
         raise ValueError(answer.get("message", "king escalation refused"))
@@ -98,28 +89,23 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     return ("recorded", qid) if outcome == "asked" else (outcome, qid)
 
 
-def _escalation_scope(session_id: "str | None") -> "str | None":
-    """The escalating king's crown scope, else None.
-
-    The channel is keyed by the king as well as the marker: two reigning
-    kings measure different stuck sets on their own beats, and a marker-only
-    channel lets each one's ask close the other's question. The registry
-    read lives in the fno-agents crate (`king-escalation-scope`); an
-    unreadable answer never blocks the ask and falls back to the legacy
-    shared channel.
-    """
+def _escalation_channel(session_id: "str | None", key: str) -> "tuple[str, str]":
+    """The ask's marker and render key, scoped by the crate to the king's
+    crown scope; any unreadable answer keeps the legacy shared channel."""
     if not session_id:
-        return None
+        return MARKER, key
     try:
         from fno.rust_binary import verb_call
 
-        answer = verb_call("king-escalation-scope", {"session_id": session_id})
+        answer = verb_call(
+            "king-escalation-scope", {"session_id": session_id, "key": key}
+        )
     except Exception:  # noqa: BLE001 - an unreadable crate answer never blocks the ask
-        return None
-    if not answer.get("ok"):
-        return None
-    scope = answer.get("scope")
-    return scope if isinstance(scope, str) and scope.strip() else None
+        return MARKER, key
+    marker, out_key = answer.get("marker"), answer.get("key")
+    if isinstance(marker, str) and marker and isinstance(out_key, str) and out_key:
+        return marker, out_key
+    return MARKER, key
 
 
 def resolve_presiding_king(session_id: "str | None") -> "dict | None":

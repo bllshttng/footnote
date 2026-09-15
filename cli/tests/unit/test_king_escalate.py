@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from fno.agents.stale_escalate import dedupe_key
-from fno.king.escalate import escalate
+from fno.king.escalate import MARKER, escalate
 from fno.outstanding.core import read_open_questions, read_question_events
 
 STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
@@ -55,17 +55,22 @@ def crate_render_stub(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture(autouse=True)
 def crate_scope_stub(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The scope read lives in the fno-agents crate (`king-escalation-scope`);
+    """The channel read lives in the fno-agents crate (`king-escalation-scope`);
     tests stub the seam, as crate_render_stub stubs the renderer, and the
     scope tests install their own channel map."""
-    monkeypatch.setattr("fno.king.escalate._escalation_scope", lambda sid: None)
+    monkeypatch.setattr(
+        "fno.king.escalate._escalation_channel", lambda sid, key: (MARKER, key)
+    )
 
 
 def _channel_map(monkeypatch, scopes: "dict[str, str | None]") -> None:
-    monkeypatch.setattr(
-        "fno.king.escalate._escalation_scope",
-        lambda sid: scopes.get(sid),
-    )
+    def channel(session_id: "str | None", key: str) -> "tuple[str, str]":
+        scope = scopes.get(session_id)
+        if not scope:
+            return MARKER, key
+        return f"{MARKER}:{scope}", f"{scope}:{key}"
+
+    monkeypatch.setattr("fno.king.escalate._escalation_channel", channel)
 
 
 def _run(root: Path, ids: list[str], reason: str = "NoProgress") -> tuple[str, str]:

@@ -91,18 +91,6 @@ _MECHANICAL_CLOSERS = frozenset({
     "king-escalation-escalate",
 })
 
-#: Families whose key is a SNAPSHOT of a measured set, so the newest reading
-#: supersedes every older one. A family whose key is an IDENTITY is not here:
-#: session-transition-branch keys on name:predecessor:successor and king-wake
-#: keys on the crown scope, where two open rows are two different questions.
-SNAPSHOT_MARKERS = frozenset({
-    "king-escalation",
-    "watchdog-unfinished-work",
-    "watchdog-stale",
-    "reap-hold",
-})
-
-
 def _is_answer_close(rec: dict, qids: "set[str]") -> bool:
     from fno.outstanding.core import QUESTION_CLOSED_EVENT
 
