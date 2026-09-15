@@ -694,14 +694,6 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "evals-macro" {
         return fno_agents::evals_macro::run_evals_macro(&args[1..]);
     }
-    // `evals-arm` (x-cf8f): the eval bank's scheduled writer for the pr-watch
-    // tick. Daemon-free like evals-macro, `==` dispatch: Python resolves the
-    // history, journal and binary paths and passes them as flags; the native
-    // side owns the claim, the detached run, the attribution and the journal
-    // outcome, so the tick budget never bounds a 50-minute bank run.
-    if verb == "evals-arm" {
-        return fno_agents::evals_arm::run_evals_arm(&args[1..]);
-    }
     // `reign-ledger`: the reign ledger page for `fno agents king ledger`.
     // Same split as king-history: Python resolves the court and the paths,
     // the native side owns the page assembly, and the fold's scope_nodes ride
