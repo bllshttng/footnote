@@ -95,7 +95,7 @@ A failed PROJECTION does not fail the command at all. Both durable stores alread
 
 ## A ruling an agent makes about another node
 
-The decide verb refuses agent sessions. An agent that rules out another node's work records the verdict where that node's readers already look.
+Agents answer by default (ruling of 2026-09-14): an agent session records coordination decisions with `fno backlog decide` or `fno inbox outstanding clear <qid> --answer "..." --authority crown|agent`. Only the `operator` authority refuses an agent session, because the superuser lane is not an agent's to claim. An agent that rules out another node's work records the verdict where that node's readers already look.
 
 The plan frontmatter carries it. The blueprinter writes the rejected node and its reason under `consolidation.rejected`, beside the outcome. That key is the one store an agent session can still write a cross-node ruling into.
 
@@ -150,6 +150,10 @@ The index remains append-only. A retraction is a new `decision_retracted` event,
 Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retracted`, or `unscoped`. Human output leads with that marker, and JSON includes `lifecycle`, reason, and any positive closure evidence. `--state live|expired|superseded|retracted|unscoped|all` filters the same projection. If a coord row is stamped to a node, it expires only after that node's graph entry has positive closure evidence. If a repository-scoped PR row exists, it expires only after its exact graph binding is marked merged. Missing, ambiguous, or unreadable closure evidence is `unscoped`, never live. Law does not expire because a node or PR closes.
 
 The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. JSON adds the canonical subject and a `current_law.status` of `single`, `conflict`, or `none`. Human output prints `CURRENT LAW`, `LAW CONFLICT`, or `NO CURRENT LAW`. Only `single` is an actionable current answer. Conflict never chooses the newest, and a damaged index is a nonzero read failure rather than `none`. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
+
+## Where law reaches a session
+
+No session loads law in bulk. The SessionStart law read is deleted (ruling of 2026-09-14): it read every live row, blew the hook's ten-second bound, and delivered nothing. A law reaches a session two ways, and neither loads all law. A law the superuser confirms graduates, through the `graduation` field every law row carries: `enforced` with `doc:<rules file>=>marker:<text>` points at a rule file the harness loads whole, and `enforced` with `gate:<cmd>=>marker:<text>` points at a refusal at the moment the law applies. And `ask` keeps reading law for one subject at ask time, so the law-match refusal still fires where the question is asked.
 
 ## Gates that consume current law
 
