@@ -76,7 +76,7 @@ pub struct ReignState {
 /// Same unsafe-scope refusal as `king_manifest_path`: scope becomes a filename
 /// here, so two spellings of one scope must never select two files and no
 /// scope may escape the state root.
-fn manifest_path(root: &Path, scope: &str) -> Result<PathBuf, String> {
+pub(crate) fn manifest_path(root: &Path, scope: &str) -> Result<PathBuf, String> {
     let scope = scope.trim();
     if scope.is_empty()
         || scope.contains("..")
@@ -106,7 +106,7 @@ fn row_session(row: &RegistryEntry) -> Option<String> {
 /// prefix (a 32-bit jobId is a prefix of a claude session uuid). Without the
 /// scoping, a non-claude caller's uuid could fall through to an unrelated
 /// claude row's short_id prefix.
-fn find_by_session<'a>(
+pub(crate) fn find_by_session<'a>(
     rows: &'a [RegistryEntry],
     sid: &str,
     harness: Option<&str>,

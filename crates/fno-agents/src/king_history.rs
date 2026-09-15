@@ -21,6 +21,15 @@
 //! zero-match answer still names every store and its counts, so an empty
 //! history is a measurement, not an absence. A store that cannot be opened
 //! is an error (rc 1), never an empty history.
+//!
+//! `king-history --verdict` reads the same journals as a tenure verdict: the bounds
+//! declared on the crown manifest (iterations, respawns, compactions, the
+//! recorded block cap) plus the inherited-scope delivery trend, judged as
+//! ONE set. Each bound alone looked correctly configured while a reign sat
+//! outside all of them; the verdict exists so something reads the set, and
+//! so an absent bound never prints as a satisfied one. Its scan is still
+//! the direct file walk the store syncs from; one indexed reader for both
+//! is the follow-up port.
 
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -315,6 +324,910 @@ pub fn run_king_history(args: &[String]) -> i32 {
     }
 }
 
+// ---- the --verdict mode: the tenure bounds read as one set ----
+
+const KING_LOOP_CHECK: &str = "king_loop_check";
+const TERMINATION: &str = "termination";
+const CONTEXT_SNAPSHOT: &str = "context_snapshot";
+const LOOP_CHECK_CONFIG: &str = "loop_check_config";
+const KING_CONTEXT_NUDGE: &str = "king_context_nudge";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum BoundState {
+    Exceeded,
+    Within,
+    Absent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Verdict {
+    Converging,
+    Stalled,
+    Degraded,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct BlockCapReading {
+    value: u64,
+    source: String,
+}
+
+/// Everything the verdict reads, gathered. The manifest numbers ride here
+/// too so `verdict` stays pure: tests need no journal and no manifest file.
+#[derive(Debug, Default)]
+pub(crate) struct VerdictReadings {
+    pub fires: u64,
+    /// The last `king_loop_check` row's `actionable`, newest by ts. `None`
+    /// when the reign never fired or the last row named no board at all -
+    /// a blind board must not read as a quiet one.
+    pub last_actionable: Option<i64>,
+    pub max_iterations: u64,
+    pub respawn_count: u64,
+    pub respawn_ceiling: u64,
+    pub compactions: u64,
+    /// `None` when no `--compaction-ceiling` was passed: an unset ceiling is
+    /// an absence, and the verdict names it absent rather than satisfied.
+    pub compaction_ceiling: Option<u64>,
+    pub block_cap: Option<BlockCapReading>,
+    /// Compaction count is only measurable against the manifest's harness
+    /// session; without one the bound is unmeasurable, not zero.
+    pub compactions_measurable: bool,
+    /// `king_context_nudge` rows for this scope. Context pressure is a
+    /// reading the payload carries; the verdict itself keys on none of it.
+    pub nudges: u64,
+    /// Termination rows for this fno_id with `driver: king`, counted by reason.
+    pub terminations: Vec<(String, u64)>,
+    pub inherited_undelivered: u64,
+    pub inherited_closed_in_window: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct BoundRow {
+    name: &'static str,
+    /// `None` when the bound is absent or its value unmeasurable.
+    value: Option<u64>,
+    ceiling: Option<u64>,
+    state: BoundState,
+}
+
+fn bound_row(name: &'static str, value: Option<u64>, ceiling: Option<u64>) -> BoundRow {
+    match (value, ceiling) {
+        (Some(v), Some(c)) if c > 0 => BoundRow {
+            name,
+            value: Some(v),
+            ceiling: Some(c),
+            state: if v > c {
+                BoundState::Exceeded
+            } else {
+                BoundState::Within
+            },
+        },
+        _ => BoundRow {
+            name,
+            value,
+            ceiling,
+            state: BoundState::Absent,
+        },
+    }
+}
+
+/// True when an event timestamp falls at or after the crown's start. Both
+/// spellings of UTC (Z and +00:00) must compare equal, so the Z form is
+/// normalized before the string compare; the fractional part is dropped so a
+/// manifest stamp without one and an event stamp with one order as the same
+/// second instead of the fraction sorting before its own second. An
+/// unreadable crown start reads as in-tenure, the conservative direction for
+/// an alarm.
+fn in_tenure(ts: &str, crown_start: &str) -> bool {
+    if crown_start.is_empty() {
+        return true;
+    }
+    let norm = |s: &str| {
+        s.strip_suffix('Z')
+            .unwrap_or(s)
+            .split('.')
+            .next()
+            .unwrap_or(s)
+            .to_string()
+    };
+    norm(ts) >= norm(crown_start)
+}
+
+/// The one decision, pure so tests need no journal.
+///
+/// Degraded: any declared bound exceeded. Stalled: nothing degraded, the
+/// last fire read a quiet board, and the scope the reign INHERITED shows no
+/// closure in the window. Filed nodes are deliberately excluded from the
+/// stalled test: a king that files real work into its own scope raises the
+/// raw undelivered count by working well, and filing must never read as
+/// divergence. Converging: everything else.
+pub(crate) fn verdict(r: &VerdictReadings) -> (Verdict, Vec<BoundRow>) {
+    // The iteration bound reads the stopping semantics, not a raw count:
+    // bound_breached terminates on `total + 1 >= max_iterations` BEFORE the
+    // breaching fire is appended, so a spent ceiling can sit at ceiling - 1
+    // recorded fires and must still read exceeded.
+    let iterations_exceeded = r.max_iterations > 0 && r.fires + 1 >= r.max_iterations;
+    let bounds = vec![
+        BoundRow {
+            name: "iterations",
+            value: Some(r.fires),
+            ceiling: (r.max_iterations > 0).then_some(r.max_iterations),
+            state: match (r.max_iterations > 0, iterations_exceeded) {
+                (true, true) => BoundState::Exceeded,
+                (true, false) => BoundState::Within,
+                (false, _) => BoundState::Absent,
+            },
+        },
+        bound_row(
+            "respawns",
+            Some(r.respawn_count),
+            (r.respawn_ceiling > 0).then_some(r.respawn_ceiling),
+        ),
+        bound_row(
+            "compactions",
+            r.compactions_measurable.then_some(r.compactions),
+            r.compaction_ceiling.filter(|c| *c > 0),
+        ),
+        // The block cap is a recording, not a ceiling: the bound is whether
+        // the cap is KNOWN. Absent with no loop_check_config row, within
+        // with the recorded value.
+        BoundRow {
+            name: "block_cap",
+            value: r.block_cap.as_ref().map(|b| b.value),
+            ceiling: None,
+            state: if r.block_cap.is_some() {
+                BoundState::Within
+            } else {
+                BoundState::Absent
+            },
+        },
+    ];
+    let degraded = bounds.iter().any(|b| b.state == BoundState::Exceeded);
+    let v = if degraded {
+        Verdict::Degraded
+    } else if r.last_actionable == Some(0)
+        && r.inherited_undelivered > 0
+        && r.inherited_closed_in_window == 0
+    {
+        Verdict::Stalled
+    } else {
+        Verdict::Converging
+    };
+    (v, bounds)
+}
+
+/// One journal walk over the five verdict row kinds, with the same mirror
+/// dedupe `scan` applies. `fno_id` keys the loop rows, `harness_session_id`
+/// the compaction snapshots, `scope` the context nudges. `crown_start`
+/// bounds the compaction count to THIS reign: a harness session that
+/// compacted before it was crowned must not hand the new crown a spent
+/// bound.
+fn scan_readings(
+    events_paths: &[PathBuf],
+    fno_id: &str,
+    harness_session_id: &str,
+    scope: &str,
+    crown_start: &str,
+) -> Result<(VerdictReadings, u64, u64, Vec<(String, u64)>), String> {
+    let mut r = VerdictReadings::default();
+    let mut scanned: u64 = 0;
+    let mut duplicates: u64 = 0;
+    let mut journals: Vec<(String, u64)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    // (ts, actionable) pairs for the newest-board read; ts sorted at the end.
+    // Every fire for this crown is recorded, even one that names no board,
+    // so the LAST row answers and an older quiet row never speaks for it.
+    let mut fires_ts: Vec<(String, Option<i64>)> = Vec::new();
+    let mut terminations: Vec<String> = Vec::new();
+    for path in events_paths {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            if !path.exists() {
+                journals.push((path.display().to_string(), 0));
+                continue;
+            }
+            return Err(format!("{}: unreadable journal", path.display()));
+        };
+        let mut file_scanned: u64 = 0;
+        for raw in content.lines() {
+            let line = raw.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let event: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Err(format!("{}: corrupt JSON line: {e}", path.display()));
+                }
+            };
+            if !event.is_object() {
+                return Err(format!("{}: line is not a JSON object", path.display()));
+            }
+            file_scanned += 1;
+            let kind = s_str(&event, "type").unwrap_or("");
+            if !matches!(
+                kind,
+                KING_LOOP_CHECK
+                    | TERMINATION
+                    | CONTEXT_SNAPSHOT
+                    | LOOP_CHECK_CONFIG
+                    | KING_CONTEXT_NUDGE
+            ) {
+                continue;
+            }
+            let key = serde_json::to_string(&event).unwrap_or_default();
+            if !seen.insert(key) {
+                duplicates += 1;
+                continue;
+            }
+            let data = event.get("data").cloned().unwrap_or_else(|| json!({}));
+            let row_session = s_str(&data, "session_id").unwrap_or("");
+            match kind {
+                KING_LOOP_CHECK if row_session == fno_id => {
+                    r.fires += 1;
+                    if let Some(ts) = s_str(&event, "ts") {
+                        fires_ts.push((
+                            ts.to_string(),
+                            data.get("actionable").and_then(|x| x.as_i64()),
+                        ));
+                    }
+                }
+                TERMINATION if row_session == fno_id && s_str(&data, "driver") == Some("king") => {
+                    terminations.push(s_str(&data, "reason").unwrap_or("unknown").to_string());
+                }
+                CONTEXT_SNAPSHOT
+                    if !harness_session_id.is_empty()
+                        && row_session == harness_session_id
+                        && s_str(&data, "entry_state") == Some("post_compact")
+                        && in_tenure(s_str(&event, "ts").unwrap_or(""), crown_start) =>
+                {
+                    r.compactions += 1;
+                }
+                LOOP_CHECK_CONFIG
+                    if row_session == fno_id
+                        || (!harness_session_id.is_empty()
+                            && row_session == harness_session_id) =>
+                {
+                    if let Some(v) = data.get("block_cap").and_then(|x| x.as_u64()) {
+                        r.block_cap = Some(BlockCapReading {
+                            value: v,
+                            source: s_str(&data, "block_cap_source").unwrap_or("").to_string(),
+                        });
+                    }
+                }
+                KING_CONTEXT_NUDGE if s_str(&data, "crown_scope") == Some(scope) => {
+                    r.nudges += 1;
+                }
+                _ => {}
+            }
+        }
+        journals.push((path.display().to_string(), file_scanned));
+        scanned += file_scanned;
+    }
+    fires_ts.sort_by(|a, b| a.0.cmp(&b.0));
+    r.last_actionable = fires_ts.last().and_then(|(_, a)| *a);
+    let mut by_reason: Vec<(String, u64)> = Vec::new();
+    for reason in &terminations {
+        if let Some(row) = by_reason.iter_mut().find(|(k, _)| k == reason) {
+            row.1 += 1;
+        } else {
+            by_reason.push((reason.clone(), 1));
+        }
+    }
+    by_reason.sort();
+    r.terminations = by_reason;
+    Ok((r, scanned, duplicates, journals))
+}
+
+/// `king-history --verdict [--scope SCOPE] [--manifest PATH] --cwd DIR
+/// --events-path PATH [--events-path ...] [--json]`
+///
+/// rc 0 verdict read (any verdict), 1 refused or unreadable input (the
+/// message names the failed reading), 2 usage failure. The read assembles
+/// its own inputs (x-5952): crown, manifest, config, graph scope, window,
+/// and delivery split come from `king_verdict_inputs`; accepting
+/// precomputed facts on the argv would keep the split owner this port
+/// removes. `--verdict` selects this mode of the king-history action (law
+/// d-fe66560a: an argument of an existing action, never a new action).
+pub fn run_king_verdict(args: &[String]) -> i32 {
+    let mut scope: Option<String> = None;
+    let mut manifest_path: Option<PathBuf> = None;
+    let mut cwd: Option<PathBuf> = None;
+    let mut events_paths: Vec<PathBuf> = Vec::new();
+    let mut as_json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--verdict" => {
+                i += 1;
+            }
+            "--scope" if i + 1 < args.len() => {
+                scope = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--manifest" if i + 1 < args.len() => {
+                manifest_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--events-path" if i + 1 < args.len() => {
+                events_paths.push(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--cwd" if i + 1 < args.len() => {
+                cwd = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--json" | "-J" => {
+                as_json = true;
+                i += 1;
+            }
+            other => {
+                eprintln!("fno-agents king-history --verdict: unknown flag {other}");
+                eprintln!(
+                    "fno-agents king-history --verdict: [--scope SCOPE] [--manifest PATH] \
+                     --cwd DIR --events-path PATH [--events-path ...] [--json]"
+                );
+                return 2;
+            }
+        }
+    }
+    let Some(cwd) = cwd else {
+        eprintln!("fno-agents king-history --verdict: --cwd and --events-path are required");
+        return 2;
+    };
+    if events_paths.is_empty() {
+        eprintln!("fno-agents king-history --verdict: --cwd and --events-path are required");
+        return 2;
+    }
+    let registry = crate::paths::AgentsHome::from_env().registry_json();
+    let inputs = match crate::king_verdict_inputs::resolve_verdict_inputs(
+        &cwd,
+        scope.as_deref(),
+        manifest_path.as_deref(),
+        &registry,
+        || chrono::Utc::now(),
+    ) {
+        Ok(inputs) => inputs,
+        Err(msg) => {
+            eprintln!("fno-agents king-history --verdict: {msg}");
+            return 1;
+        }
+    };
+    let manifest = inputs.manifest;
+    let harness_session_id = manifest.harness_session_id.clone().unwrap_or_default();
+    let crown_start = manifest.created_at.clone().unwrap_or_default();
+    let (mut readings, scanned, duplicates, journals) = match scan_readings(
+        &events_paths,
+        &manifest.fno_id,
+        &harness_session_id,
+        &inputs.scope,
+        &crown_start,
+    ) {
+        Ok(x) => x,
+        Err(msg) => {
+            eprintln!("fno-agents king-history --verdict: {msg}");
+            return 1;
+        }
+    };
+    readings.max_iterations = manifest.max_iterations;
+    readings.respawn_count = manifest.respawn_count;
+    readings.respawn_ceiling = manifest.respawn_ceiling;
+    readings.compaction_ceiling = Some(inputs.compaction_ceiling);
+    readings.compactions_measurable = !harness_session_id.is_empty();
+    readings.inherited_undelivered = inputs.inherited_undelivered;
+    readings.inherited_closed_in_window = inputs.inherited_closed_in_window;
+    let (v, bounds) = verdict(&readings);
+    let summary = bound_summary(v, &bounds);
+    let payload = json!({
+        "scope": inputs.scope,
+        "verdict": v,
+        "summary": summary,
+        "bounds": bounds,
+        "inherited_undelivered": inputs.inherited_undelivered,
+        "filed_undelivered": inputs.filed_undelivered,
+        "inherited_closed_in_window": inputs.inherited_closed_in_window,
+        "window": inputs.window,
+        "fires": readings.fires,
+        "last_actionable": readings.last_actionable,
+        "compactions": readings.compactions,
+        "nudges": readings.nudges,
+        "terminations": readings.terminations.iter().map(|(reason, n)| json!({
+            "reason": reason,
+            "count": n,
+        })).collect::<Vec<_>>(),
+        "block_cap": readings.block_cap.as_ref().map(|b| json!({
+            "value": b.value,
+            "source": b.source,
+        })),
+        "manifest": {
+            "fno_id": manifest.fno_id,
+            "created_at": manifest.created_at,
+            "max_iterations": manifest.max_iterations,
+            "respawn_count": manifest.respawn_count,
+            "respawn_ceiling": manifest.respawn_ceiling,
+        },
+        "scanned": scanned,
+        "duplicates": duplicates,
+        "journals": journals.iter().map(|(p, n)| json!({
+            "path": p,
+            "scanned": n,
+        })).collect::<Vec<_>>(),
+    });
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+    } else {
+        println!("{}", render_verdict(&payload));
+    }
+    0
+}
+
+/// The one-line verdict the escalation question embeds: the verdict word,
+/// then the exceeded bounds with their numbers, then the absent names. The
+/// first word is always the verdict name.
+pub(crate) fn bound_summary(v: Verdict, bounds: &[BoundRow]) -> String {
+    let name = format!("{v:?}").to_lowercase();
+    let exceeded: Vec<String> = bounds
+        .iter()
+        .filter(|b| b.state == BoundState::Exceeded)
+        .map(|b| match (b.value, b.ceiling) {
+            (Some(v), Some(c)) => format!("{} {} of {}", b.name, v, c),
+            (Some(v), None) => format!("{} {}", b.name, v),
+            _ => format!("{} ?", b.name),
+        })
+        .collect();
+    let absent: Vec<&str> = bounds
+        .iter()
+        .filter(|b| b.state == BoundState::Absent)
+        .map(|b| b.name)
+        .collect();
+    let mut parts: Vec<String> = Vec::new();
+    if !exceeded.is_empty() {
+        parts.push(format!("exceeded: {}", exceeded.join(", ")));
+    }
+    if !absent.is_empty() {
+        parts.push(format!("absent: {}", absent.join(", ")));
+    }
+    if parts.is_empty() {
+        name
+    } else {
+        format!("{} ({})", name, parts.join("; "))
+    }
+}
+
+fn render_verdict(payload: &Value) -> String {
+    let mut lines = vec![format!(
+        "verdict: {}",
+        payload["verdict"].as_str().unwrap_or("")
+    )];
+    for b in payload["bounds"].as_array().unwrap() {
+        let state = b["state"].as_str().unwrap_or("");
+        let body = match (b["value"].as_u64(), b["ceiling"].as_u64(), state) {
+            (Some(v), Some(c), _) => format!("{v} of {c} ({state})"),
+            (Some(v), None, "within") => format!("{v} recorded (no ceiling)"),
+            _ => state.to_string(),
+        };
+        lines.push(format!("  {}: {}", b["name"].as_str().unwrap_or(""), body));
+    }
+    lines.push(format!(
+        "readings: {} fire(s), compactions {}, inherited undelivered {}, closed in window {}, scanned {} rows across {} journal(s)",
+        payload["fires"],
+        payload["compactions"],
+        payload["inherited_undelivered"],
+        payload["inherited_closed_in_window"],
+        payload["scanned"],
+        payload["journals"].as_array().map(|a| a.len()).unwrap_or(0),
+    ));
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::*;
+    use std::io::Write;
+    use std::path::Path;
+
+    fn readings() -> VerdictReadings {
+        VerdictReadings {
+            fires: 0,
+            last_actionable: None,
+            max_iterations: 40,
+            respawn_count: 0,
+            respawn_ceiling: 4,
+            compactions: 0,
+            compaction_ceiling: Some(3),
+            block_cap: None,
+            compactions_measurable: true,
+            nudges: 0,
+            terminations: Vec::new(),
+            inherited_undelivered: 0,
+            inherited_closed_in_window: 0,
+        }
+    }
+
+    #[test]
+    fn ac1_iterations_exceeded_reads_degraded() {
+        let mut r = readings();
+        r.fires = 87;
+        let (v, bounds) = verdict(&r);
+        assert_eq!(v, Verdict::Degraded);
+        let it = bounds.iter().find(|b| b.name == "iterations").unwrap();
+        assert_eq!(it.value, Some(87));
+        assert_eq!(it.ceiling, Some(40));
+        assert_eq!(it.state, BoundState::Exceeded);
+    }
+
+    #[test]
+    fn the_fire_before_the_ceiling_reads_exceeded() {
+        // bound_breached terminates on total + 1 >= max BEFORE appending the
+        // breaching fire, so 39 recorded fires against a ceiling of 40 is a
+        // spent bound, not a within one.
+        let mut r = readings();
+        r.fires = 39;
+        let (v, bounds) = verdict(&r);
+        assert_eq!(v, Verdict::Degraded);
+        let it = bounds.iter().find(|b| b.name == "iterations").unwrap();
+        assert_eq!(it.state, BoundState::Exceeded);
+    }
+
+    #[test]
+    fn compactions_before_the_crown_start_do_not_count() {
+        // A harness session that compacted before it was crowned must not
+        // hand the new reign a spent bound.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut fh = std::fs::File::create(&path).unwrap();
+        writeln!(
+            fh,
+            "{}",
+            json!({"ts": "2026-09-01T00:00:00Z", "type": "context_snapshot", "source": "hook",
+                   "data": {"session_id": "hs1", "harness": "claude", "entry_state": "post_compact",
+                            "context_bytes": 1, "estimated_tokens": 1, "source_hashes": [],
+                            "source_manifest": [], "measurement_complete": true}})
+        )
+        .unwrap();
+        writeln!(
+            fh,
+            "{}",
+            json!({"ts": "2026-09-12T00:00:00Z", "type": "context_snapshot", "source": "hook",
+                   "data": {"session_id": "hs1", "harness": "claude", "entry_state": "post_compact",
+                            "context_bytes": 1, "estimated_tokens": 1, "source_hashes": [],
+                            "source_manifest": [], "measurement_complete": true}})
+        )
+        .unwrap();
+        drop(fh);
+        let (r, _, _, _) = scan_readings(
+            std::slice::from_ref(&path),
+            "kg1",
+            "hs1",
+            "x-a792",
+            "2026-09-10T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(r.compactions, 1);
+    }
+
+    #[test]
+    fn ac2_absent_bounds_never_read_within() {
+        let mut r = readings();
+        r.respawn_ceiling = 0;
+        r.block_cap = None;
+        r.compactions_measurable = false;
+        let (v, bounds) = verdict(&r);
+        assert_eq!(v, Verdict::Converging);
+        for name in ["respawns", "block_cap", "compactions"] {
+            let b = bounds.iter().find(|b| b.name == name).unwrap();
+            assert_eq!(b.state, BoundState::Absent, "{name}");
+            assert_ne!(b.state, BoundState::Within, "{name}");
+        }
+    }
+
+    #[test]
+    fn ac3_quiet_board_with_inherited_backlog_and_no_closure_reads_stalled() {
+        let mut r = readings();
+        r.last_actionable = Some(0);
+        r.inherited_undelivered = 5;
+        r.inherited_closed_in_window = 0;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Stalled);
+    }
+
+    #[test]
+    fn ac4_filed_nodes_never_make_a_reign_read_stalled() {
+        let mut r = readings();
+        r.last_actionable = Some(0);
+        r.inherited_undelivered = 5;
+        r.inherited_closed_in_window = 1;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Converging);
+    }
+
+    #[test]
+    fn filed_undelivered_alone_never_stalls() {
+        let mut r = readings();
+        r.last_actionable = Some(0);
+        r.inherited_undelivered = 0;
+        r.inherited_closed_in_window = 0;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Converging);
+    }
+
+    #[test]
+    fn blind_board_never_reads_quiet() {
+        let mut r = readings();
+        r.last_actionable = None;
+        r.inherited_undelivered = 5;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Converging);
+    }
+
+    #[test]
+    fn recorded_block_cap_reads_within_with_its_value() {
+        let mut r = readings();
+        r.block_cap = Some(BlockCapReading {
+            value: 9,
+            source: "default".to_string(),
+        });
+        let (v, bounds) = verdict(&r);
+        assert_eq!(v, Verdict::Converging);
+        let bc = bounds.iter().find(|b| b.name == "block_cap").unwrap();
+        assert_eq!(bc.state, BoundState::Within);
+        assert_eq!(bc.value, Some(9));
+    }
+
+    #[test]
+    fn scan_counts_kinds_for_the_right_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut fh = std::fs::File::create(&path).unwrap();
+        let rows = [
+            json!({"ts": "2026-09-10T08:00:00Z", "type": "king_loop_check", "source": "loop",
+                   "data": {"session_id": "kg1", "actionable": 2}}),
+            json!({"ts": "2026-09-10T09:00:00Z", "type": "king_loop_check", "source": "loop",
+                   "data": {"session_id": "kg1", "actionable": 0}}),
+            json!({"ts": "2026-09-10T09:30:00Z", "type": "king_loop_check", "source": "loop",
+                   "data": {"session_id": "other", "actionable": 0}}),
+            json!({"ts": "2026-09-10T10:00:00Z", "type": "termination", "source": "loop",
+                   "data": {"session_id": "kg1", "driver": "king", "reason": "Budget"}}),
+            json!({"ts": "2026-09-10T10:01:00Z", "type": "termination", "source": "loop",
+                   "data": {"session_id": "kg1", "driver": "king", "reason": "NoProgress"}}),
+            json!({"ts": "2026-09-10T10:02:00Z", "type": "termination", "source": "loop",
+                   "data": {"session_id": "kg1", "driver": "target", "reason": "DonePRGreen"}}),
+            json!({"ts": "2026-09-10T10:03:00Z", "type": "context_snapshot", "source": "hook",
+                   "data": {"session_id": "hs1", "harness": "claude", "entry_state": "post_compact",
+                            "context_bytes": 1, "estimated_tokens": 1, "source_hashes": [],
+                            "source_manifest": [], "measurement_complete": true}}),
+            json!({"ts": "2026-09-10T10:04:00Z", "type": "context_snapshot", "source": "hook",
+                   "data": {"session_id": "hs1", "harness": "claude", "entry_state": "startup",
+                            "context_bytes": 1, "estimated_tokens": 1, "source_hashes": [],
+                            "source_manifest": [], "measurement_complete": true}}),
+            json!({"ts": "2026-09-10T10:05:00Z", "type": "loop_check_config", "source": "loop",
+                   "data": {"session_id": "kg1", "block_cap": 9, "block_cap_source": "default"}}),
+            json!({"ts": "2026-09-10T10:06:00Z", "type": "king_context_nudge", "source": "hook",
+                   "data": {"used_pct": 60, "trigger": 40, "crown_level": 0, "crown_scope": "x-a792"}}),
+        ];
+        for row in rows {
+            writeln!(fh, "{row}").unwrap();
+        }
+        drop(fh);
+        let (r, scanned, duplicates, journals) = scan_readings(
+            std::slice::from_ref(&path),
+            "kg1",
+            "hs1",
+            "x-a792",
+            "2026-09-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(scanned, 10);
+        assert_eq!(duplicates, 0);
+        assert_eq!(r.fires, 2);
+        assert_eq!(r.last_actionable, Some(0));
+        assert_eq!(
+            r.terminations,
+            vec![("Budget".to_string(), 1), ("NoProgress".to_string(), 1)]
+        );
+        assert_eq!(r.compactions, 1);
+        assert_eq!(r.block_cap.as_ref().unwrap().value, 9);
+        assert_eq!(r.block_cap.as_ref().unwrap().source, "default");
+        assert_eq!(r.nudges, 1);
+        assert_eq!(journals.len(), 1);
+    }
+
+    #[test]
+    fn the_last_fire_answers_even_when_it_names_no_board() {
+        // A board_error row carries no actionable; the newest row must still
+        // be the one that answers, never an older quiet one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut fh = std::fs::File::create(&path).unwrap();
+        writeln!(
+            fh,
+            "{}",
+            json!({"ts": "2026-09-10T08:00:00Z", "type": "king_loop_check", "source": "loop",
+                   "data": {"session_id": "kg1", "actionable": 0}})
+        )
+        .unwrap();
+        writeln!(
+            fh,
+            "{}",
+            json!({"ts": "2026-09-10T09:00:00Z", "type": "king_loop_check", "source": "loop",
+                   "data": {"session_id": "kg1", "board_error": "timeout"}})
+        )
+        .unwrap();
+        drop(fh);
+        let (r, _, _, _) = scan_readings(
+            std::slice::from_ref(&path),
+            "kg1",
+            "hs1",
+            "x-a792",
+            "2026-09-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(r.fires, 2);
+        assert_eq!(r.last_actionable, None);
+    }
+
+    #[test]
+    fn a_config_row_never_ingests_through_an_empty_harness_id() {
+        // An identity-less manifest reads block_cap absent; it must not
+        // inherit another session's row that also lacks a session id.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let mut fh = std::fs::File::create(&path).unwrap();
+        writeln!(
+            fh,
+            "{}",
+            json!({"ts": "2026-09-10T08:00:00Z", "type": "loop_check_config", "source": "loop",
+                   "data": {"session_id": "", "block_cap": 9, "block_cap_source": "default"}})
+        )
+        .unwrap();
+        drop(fh);
+        let (r, _, _, _) = scan_readings(
+            std::slice::from_ref(&path),
+            "kg1",
+            "",
+            "x-a792",
+            "2026-09-01T00:00:00Z",
+        )
+        .unwrap();
+        assert!(r.block_cap.is_none());
+    }
+
+    #[test]
+    fn the_question_summary_is_rendered_natively() {
+        // The escalation question embeds this line verbatim; its first word
+        // is always the verdict name, then exceeded with numbers, then absent.
+        let mut r = readings();
+        r.fires = 87;
+        r.block_cap = None;
+        r.compactions_measurable = false;
+        let (v, bounds) = verdict(&r);
+        let summary = bound_summary(v, &bounds);
+        assert_eq!(
+            summary,
+            "degraded (exceeded: iterations 87 of 40; absent: compactions, block_cap)"
+        );
+        let (v2, b2) = verdict(&readings());
+        assert_eq!(bound_summary(v2, &b2), "converging (absent: block_cap)");
+    }
+
+    /// The input tree the self-assembling verb reads: config, graph, manifest,
+    /// journal. Spaces and the agents home resolve through a `DeclaredRoot`
+    /// pin, the config anchors on `--cwd`, and the graph path rides that
+    /// config - no ambient resolution, so a parallel test's pins never race.
+    fn input_tree(king_config: &str) -> (crate::paths::DeclaredRoot, PathBuf, PathBuf, PathBuf) {
+        let root_pin = crate::paths::DeclaredRoot::declare("kvh");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let graph = root.join("home/graph.json");
+        std::fs::create_dir_all(graph.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join(".fno")).unwrap();
+        let config = root.join(".fno/config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[paths]\ngraph_json = {:?}\n[[work.workspaces.t.projects]]\nname = \"fno\"\n{king_config}",
+                graph.display()
+            ),
+        )
+        .unwrap();
+        // The explicit pin beats cwd anchoring AND an ambient FNO_CONFIG a
+        // concurrent unlocked test may have left behind (the crate's env
+        // locks are fragmented; see the note on the backlog node).
+        std::env::set_var("FNO_CONFIG", &config);
+        std::fs::write(
+            &graph,
+            json!({"entries": [
+                {"id": "x-a792", "type": "epic", "project": "fno", "created_at": "2026-09-01T00:00:00Z"},
+                {"id": "x-old", "parent": "x-a792", "created_at": "2026-09-05T00:00:00Z"},
+                {"id": "x-new", "parent": "x-a792", "created_at": "2026-09-12T00:00:00Z"}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let manifest = root.join("kings/x-a792.md");
+        std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        std::fs::write(
+            &manifest,
+            "---\nfno_id: kg1\nscope: x-a792\nharness_session_id: hs1\ncreated_at: 2026-09-10T00:00:00Z\nbudget_max_iterations: 2\nrespawn_count: 0\nrespawn_ceiling: 4\n---\nbody\n",
+        )
+        .unwrap();
+        let journal = root.join("events.jsonl");
+        let mut fh = std::fs::File::create(&journal).unwrap();
+        for i in 0..3 {
+            writeln!(
+                fh,
+                "{}",
+                json!({"ts": format!("2026-09-10T0{i}:00:00Z"), "type": "king_loop_check",
+                       "source": "loop", "data": {"session_id": "kg1", "actionable": 0}})
+            )
+            .unwrap();
+        }
+        drop(fh);
+        // Leak the tempdir: the config pin points inside it, so the tree must
+        // outlive the test (a few KB per run, bounded by test count).
+        let root = dir.keep();
+        (root_pin, root, manifest, journal)
+    }
+
+    fn verdict_args(root: &Path, manifest: &Path, journal: &Path) -> Vec<String> {
+        vec![
+            "--cwd".to_string(),
+            root.display().to_string(),
+            "--scope".to_string(),
+            "x-a792".to_string(),
+            "--manifest".to_string(),
+            manifest.display().to_string(),
+            "--events-path".to_string(),
+            journal.display().to_string(),
+            "--json".to_string(),
+        ]
+    }
+
+    #[test]
+    fn run_end_to_end_degraded_from_inputs() {
+        let (_pin, root, manifest, journal) =
+            input_tree("[king]\ncheckin_interval = \"30m\"\ncompaction_ceiling = 3\n");
+        assert_eq!(
+            run_king_verdict(&verdict_args(&root, &manifest, &journal)),
+            0
+        );
+    }
+
+    #[test]
+    fn a_garbage_ceiling_config_refuses_the_read_instead_of_reading_absent() {
+        // Same posture the count flags had: a mistyped ceiling must not
+        // degrade into an absent bound that prints as a clean reading. The
+        // refusal is a config refusal now, exit 1 naming the key.
+        let (_pin, root, manifest, journal) = input_tree("[king]\ncompaction_ceiling = \"1O\"\n");
+        assert_eq!(
+            run_king_verdict(&verdict_args(&root, &manifest, &journal)),
+            1
+        );
+    }
+
+    #[test]
+    fn usage_failure_exit_two() {
+        assert_eq!(run_king_verdict(&[]), 2);
+        assert_eq!(run_king_verdict(&["--cwd".into(), "/tmp".into()]), 2);
+        assert_eq!(run_king_verdict(&["--nope".into()]), 2);
+        // The precomputed facts are gone on purpose: passing one is a usage
+        // failure, never a silently accepted input (x-5952).
+        assert_eq!(
+            run_king_verdict(&["--inherited-undelivered".into(), "5".into()]),
+            2
+        );
+        assert_eq!(
+            run_king_verdict(&["--compaction-ceiling".into(), "3".into()]),
+            2
+        );
+        assert_eq!(run_king_verdict(&["--window".into(), "90m".into()]), 2);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +1486,25 @@ mod tests {
             2
         );
         assert_eq!(run_king_history(&["--nope".to_string()]), 2);
+    }
+
+    #[test]
+    fn in_tenure_reads_a_fractional_event_as_its_own_second() {
+        // The manifest stamp carries no fraction; the snapshot does. After
+        // normalization both land on the same second, so a compaction AT the
+        // crowning second stays in tenure instead of sorting before it.
+        assert!(in_tenure(
+            "2026-09-10T12:00:00.500Z",
+            "2026-09-10T12:00:00Z"
+        ));
+        assert!(in_tenure(
+            "2026-09-10T12:00:00.500+00:00",
+            "2026-09-10T12:00:00Z"
+        ));
+        assert!(in_tenure("2026-09-10T12:00:01Z", "2026-09-10T12:00:00Z"));
+        assert!(!in_tenure(
+            "2026-09-10T11:59:59.999Z",
+            "2026-09-10T12:00:00Z"
+        ));
     }
 }

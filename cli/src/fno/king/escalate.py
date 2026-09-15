@@ -24,10 +24,13 @@ def _render(
     *,
     live: "bool | None" = None,
     unknown_reason: "str | None" = None,
+    verdict: "str | None" = None,
+    scope: "str | None" = None,
 ) -> dict:
     """One round-trip with the crate renderer (d-b6cc1a2a: new code in
     ``crates/``). ``ok: false`` is a REFUSAL, not a failure: the caller must
     raise, never fall back to Python text - the fallback is the defect.
+    ``verdict`` (first word = verdict name, x-4d4f) and ``scope`` ride along.
     """
     from fno.rust_binary import verb_call
 
@@ -39,13 +42,17 @@ def _render(
             "reason": reason,
             "live": live,
             "unknown_reason": unknown_reason,
+            "verdict": verdict,
+            "scope": scope,
         },
     )
 
 
 def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str | None",
              cwd: Path, *, live: "bool | None" = None,
-             unknown_reason: "str | None" = None) -> "tuple[str, str]":
+             unknown_reason: "str | None" = None,
+             verdict: "str | None" = None,
+             scope: "str | None" = None) -> "tuple[str, str]":
     """Record one operator question for this stalled set.
 
     Returns ``(outcome, question_id)``; raises rather than failing quiet.
@@ -59,8 +66,10 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     # Render BEFORE the fold: a refusal must raise while the channel is still
     # untouched. The channel's empty branch closes open asks, so reaching it
     # with a refused set would read as a clean board.
-    answer = _render(ids, render_key, reason, live=live,
-                     unknown_reason=unknown_reason)
+    answer = _render(
+        ids, render_key, reason, live=live, unknown_reason=unknown_reason,
+        verdict=verdict, scope=scope,
+    )
     if not answer.get("ok"):
         raise ValueError(answer.get("message", "king escalation refused"))
     outcome, qid = reconcile_channel(

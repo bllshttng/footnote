@@ -107,6 +107,8 @@ The verb journals `reign_checkin` itself, so the row carries the readings the ve
 
 Read the reign back with `fno agents king history` (bare from the crowned session, or `--scope <scope>` elsewhere): it prints this crown's recorded check-ins newest first, verbatim, with the legacy pre-contract rows counted as rejected evidence rather than silently accepted. It never generates a summary. `fno agents court -n` stays a snapshot of who rules NOW; the history verb is the chronological record.
 
+Then read the tenure verdict with `fno agents king verdict` and print its first line: it judges the crown's bounds (iterations, respawns, compactions, block cap) and the inherited-scope delivery trend as one set, naming `converging`, `stalled`, or `degraded` (an absent bound is named absent, never satisfied). Journal the verdict word as the extra key `verdict` on the same `reign_checkin` row. On `stalled` or `degraded`, run `fno agents king escalate <scope> --reason Verdict`: it records one deduplicated operator question naming the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor; the handoff is the operator's call.
+
 ## Recording a ruling
 
 A crowned king is not an operator, and `fno backlog decide` refuses every agent session, crowned included: operator authority is never inherited by an agent. Do not spend three calls discovering the door is shut. The king's channels:

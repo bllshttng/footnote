@@ -61,3 +61,22 @@ def run_native(events_paths: list[Path], scope: str, as_json: bool) -> tuple[int
         argv.append("--json")
     proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     return proc.returncode, proc.stdout, proc.stderr
+
+
+def verdict_read(events_paths: "list[Path]", scope: "str | None", as_json: bool) -> "tuple[int, str, str]":
+    """Relay to the native ``king-history --verdict`` read; ``(code, stdout, stderr)``."""
+    from fno.agents.rust_runtime import refuse_without_binary
+    from fno.rust_binary import resolve_binary
+
+    argv = [
+        str(resolve_binary() or refuse_without_binary("king verdict")),
+        "king-history",
+        "--verdict",
+        "--cwd",
+        str(Path.cwd()),
+        *(["--scope", scope] if scope else []),
+        *[x for p in events_paths for x in ("--events-path", str(p))],
+        *(["--json"] if as_json else []),
+    ]
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
+    return proc.returncode, proc.stdout, proc.stderr

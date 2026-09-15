@@ -47,6 +47,14 @@ pub struct EscalationRequest {
     pub live: Option<bool>,
     #[serde(default)]
     pub unknown_reason: Option<String>,
+    /// The reign verdict summary whose FIRST word is the verdict name
+    /// (`stalled ...`, `degraded ...`). Anything else is a failed read and
+    /// is recorded as `verdict unreadable` - never silent (x-4d4f).
+    #[serde(default)]
+    pub verdict: Option<String>,
+    /// The scope the verdict was read for; names the handoff offer's crown.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -138,6 +146,41 @@ fn closing_for(live: Option<bool>, unknown_reason: Option<&str>, rows: bool) -> 
     closing
 }
 
+/// x-4d4f: the reign verdict rides the question. `stalled`/`degraded` append
+/// the spawn `--succeed` handoff offer; `unreadable` is a failed verdict
+/// read, and it is named - escalation never goes silent on it. Any other
+/// verdict (a converging reign stops on an actionable-board escalation)
+/// rides truthfully as `Verdict ...`. The handoff scope is the explicit one,
+/// else the quiet-board reading's scope (`+` minted back to `,`), else the
+/// `<scope>` placeholder.
+fn append_verdict(closing: &mut String, verdict: &str, scope: Option<&str>, readings: &[String]) {
+    let name = verdict.split(' ').next().unwrap_or("");
+    if name == "stalled" || name == "degraded" {
+        let handoff = scope
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                readings.iter().find_map(|r| {
+                    r.strip_prefix("reading:undelivered:")
+                        .map(|s| s.replace('+', ","))
+                })
+            })
+            .unwrap_or_else(|| "<scope>".to_owned());
+        closing.push_str(&format!(
+            " Verdict {verdict}. To hand this crown to a fresh-context \
+             successor, run fno agents spawn --crown {handoff} --succeed."
+        ));
+    } else if name == "unreadable" {
+        let detail = verdict
+            .split_once(' ')
+            .map(|(_, rest)| rest)
+            .unwrap_or("read failed");
+        closing.push_str(&format!(" verdict unreadable: {detail}."));
+    } else {
+        closing.push_str(&format!(" Verdict {verdict}."));
+    }
+}
+
 /// The one entry point both branches fold through: the marker leads because
 /// the recorded text is capped and `already_asked` must keep matching.
 pub fn render(req: &EscalationRequest) -> EscalationAnswer {
@@ -183,7 +226,10 @@ pub fn render(req: &EscalationRequest) -> EscalationAnswer {
         (subject_for_rows(&rows), true)
     };
 
-    let closing = closing_for(req.live, req.unknown_reason.as_deref(), rows_branch);
+    let mut closing = closing_for(req.live, req.unknown_reason.as_deref(), rows_branch);
+    if let Some(verdict) = req.verdict.as_deref() {
+        append_verdict(&mut closing, verdict, req.scope.as_deref(), &readings);
+    }
     let question = format!(
         "[{MARKER}:{key}] The king stopped on {subject}. Reason given: {reason}. {closing}",
         key = req.key,
@@ -322,6 +368,8 @@ mod tests {
             reason: REASON.to_owned(),
             live,
             unknown_reason: None,
+            verdict: None,
+            scope: None,
         }
     }
 
@@ -444,6 +492,8 @@ mod tests {
             reason: "NoProgress".to_owned(),
             live: Some(true),
             unknown_reason: None,
+            verdict: None,
+            scope: None,
         };
         let text = question(&r);
         assert!(text.starts_with("[king-escalation:87c620d35067]"));
@@ -497,6 +547,84 @@ mod tests {
         assert!(!live.contains("these rows"));
         let dead = question(&req(vec!["reading:board-unreadable"], Some(false)));
         assert!(dead.contains("act on this reading or crown a new king"));
+    }
+
+    // --- AC4: the verdict rides the question, never silent (x-4d4f) ---
+
+    fn with_verdict(
+        mut r: EscalationRequest,
+        verdict: &str,
+        scope: Option<&str>,
+    ) -> EscalationRequest {
+        r.verdict = Some(verdict.to_owned());
+        r.scope = scope.map(str::to_owned);
+        r
+    }
+
+    #[test]
+    fn a_stalled_verdict_carries_the_handoff_offer() {
+        let text = question(&with_verdict(
+            req(IDS.to_vec(), Some(true)),
+            "stalled 16, 13, 10: undelivered is not falling",
+            Some("x-a792"),
+        ));
+        assert!(text.starts_with(&format!("[{MARKER}:{KEY}]")));
+        assert!(text.contains("Verdict stalled 16, 13, 10: undelivered is not falling."));
+        assert!(text.contains("run fno agents spawn --crown x-a792 --succeed"));
+    }
+
+    #[test]
+    fn a_degraded_verdict_offers_the_same_handoff() {
+        let text = question(&with_verdict(
+            req(IDS.to_vec(), Some(false)),
+            "degraded 2 bounds breached",
+            Some("x-a792"),
+        ));
+        assert!(text.contains("Verdict degraded 2 bounds breached."));
+        assert!(text.contains("--crown x-a792 --succeed"));
+    }
+
+    #[test]
+    fn the_quiet_reading_names_the_handoff_scope_when_none_is_explicit() {
+        let text = question(&with_verdict(
+            req(vec!["reading:undelivered:x-a792+x-1111"], Some(true)),
+            "stalled undelivered 9",
+            None,
+        ));
+        assert!(text.contains("--crown x-a792,x-1111 --succeed"));
+    }
+
+    #[test]
+    fn no_scope_anywhere_leaves_the_placeholder() {
+        let text = question(&with_verdict(
+            req(IDS.to_vec(), Some(true)),
+            "stalled undelivered 9",
+            None,
+        ));
+        assert!(text.contains("--crown <scope> --succeed"));
+    }
+
+    #[test]
+    fn a_failed_verdict_read_is_named_not_silent() {
+        let text = question(&with_verdict(
+            req(IDS.to_vec(), Some(true)),
+            "unreadable registry unreadable: disk",
+            Some("x-a792"),
+        ));
+        assert!(text.contains("verdict unreadable: registry unreadable: disk."));
+        assert!(!text.contains("--succeed"));
+    }
+
+    #[test]
+    fn a_converging_verdict_rides_truthfully_not_as_a_failed_read() {
+        let text = question(&with_verdict(
+            req(IDS.to_vec(), Some(true)),
+            "converging undelivered 16, 13, 10, 8, 7",
+            Some("x-a792"),
+        ));
+        assert!(text.contains("Verdict converging undelivered 16, 13, 10, 8, 7."));
+        assert!(!text.contains("--succeed"));
+        assert!(!text.contains("verdict unreadable"));
     }
 
     // --- AC5-ERR: refusals are data ---
