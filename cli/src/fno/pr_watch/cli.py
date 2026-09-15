@@ -1445,6 +1445,20 @@ def heal() -> None:
         typer.echo("pr-watch heal: disabled; nothing to heal")
         return
 
+    # A bounce that has not had its first tick yet is not a wedge to cure:
+    # bouncing again re-arms the healthy-pending grace over the same fault
+    # and hides it for another 2x interval.
+    try:
+        report = m.liveness_report_live()
+    except Exception:  # noqa: BLE001 - a probe that cannot read never blocks a cure
+        report = {}
+    if report.get("bounce_pending") is True:
+        typer.echo(
+            f"pr-watch heal: a bounce is pending its first tick ({report.get('detail')}); "
+            "skipped. Run fno do pr watch refresh to bounce anyway."
+        )
+        return
+
     holder = f"pr-watch-heal:{os.getpid()}"
     heal_root = global_claims_root()
     try:

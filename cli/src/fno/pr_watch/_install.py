@@ -455,7 +455,8 @@ def refresh_watcher(
     Unlike :func:`heal_watcher` (bounce the existing plist), this REWRITES the
     plist first so the daemon picks up the freshly-installed binary path, a
     fresh captured PATH, and a new mtime (so doctor's ``healthy-pending`` grace
-    applies until the next tick instead of a transient false ``dead``). Called
+    applies until the next tick instead of a transient false ``dead`` - unless
+    the recent ends are a broken streak, which reads ``wedged``). Called
     by ``fno do pr watch refresh`` at the tail of ``fno doctor update`` so an update
     leaves an enabled watcher running the new binary and un-wedges a job a
     mid-tick reinstall may have broken. Returns ``(message, exit_code)``.
@@ -635,7 +636,8 @@ def ensure_activated(
     # rewriting is safe and (a) picks up config drift - a changed
     # interval_seconds / fno_binary / PATH since the last write - and (b)
     # refreshes the plist mtime so doctor's healthy-pending grace applies until
-    # the first fresh tick instead of a transient false "dead".
+    # the first fresh tick instead of a transient false "dead" (unless the
+    # recent ends are a broken streak, which reads wedged).
     try:
         plist_text = render_plist(
             launch_agents_dir=launch_agents_dir,
@@ -1055,7 +1057,9 @@ def liveness_report(
     (locked decision #4).  A freshly-installed agent with no tick yet reads
     ``healthy-pending``, not ``dead`` (AC1-UI boundary); enabled-but-not-
     loaded, or a stale/absent tick past 2x the interval, reads ``dead`` with
-    a fix command.
+    a fix command. That grace does not cover a bounce over a broken streak:
+    when the ends already tail a ``wedged_after_ticks`` broken streak, the
+    verdict reads ``wedged`` - a bounce is not evidence of a cure.
     A post-install tick that ended broken (``last_end``, outcome timeout or
     error, newer than the plist) defeats that grace: the watcher HAD its tick
     and it died, so the verdict reads ``dead`` naming ``fno agents status``.
@@ -1084,7 +1088,12 @@ def liveness_report(
             f"({', '.join(tick_end_bits(end))}) without completing"
         )
 
-    def verdict(v: str, detail: str, fix: Optional[str] = None) -> dict:
+    def verdict(
+        v: str,
+        detail: str,
+        fix: Optional[str] = None,
+        bounce_pending: bool = False,
+    ) -> dict:
         return {
             "enabled": enabled,
             "verdict": v,
@@ -1093,6 +1102,7 @@ def liveness_report(
             "loaded": loaded,
             "last_tick": last_tick_ts,
             "interval_seconds": interval_seconds,
+            "bounce_pending": bounce_pending,
         }
 
     if not enabled:
@@ -1106,13 +1116,38 @@ def liveness_report(
     # first post-install tick (RunAtLoad=false, so up to one interval passes
     # before it fires). Grace it regardless of whether an OLD tick predates the
     # (re)install - otherwise a re-enabled watcher reads a transient false
-    # "dead" until the next tick.
-    if broke is None and plist_mtime is not None and (now - plist_mtime) < threshold:
-        tick_epoch = _parse_ts(last_tick_ts)
-        if tick_epoch is None or plist_mtime > tick_epoch:
-            return verdict("healthy-pending", "installed recently; awaiting first tick")
-
+    # "dead" until the next tick. The grace does not cover a bounce over a
+    # broken streak: a bounce is not evidence of a cure; only a tick that ends
+    # ok is.
     tick_epoch = _parse_ts(last_tick_ts)
+    bounce_pending = (
+        broke is None
+        and plist_mtime is not None
+        and (now - plist_mtime) < threshold
+        and (tick_epoch is None or plist_mtime > tick_epoch)
+    )
+    if bounce_pending:
+        assert plist_mtime is not None  # implied by the bounce_pending test
+        streak = _broken_streak(recent_ends)
+        if streak >= max(wedged_after_ticks, 1):
+            last = (
+                f"last completed tick {int(now - tick_epoch)}s ago"
+                if tick_epoch is not None
+                else "no completed tick recorded"
+            )
+            return verdict(
+                "wedged",
+                f"bounced {int(now - plist_mtime)}s ago over {streak} consecutive "
+                f"broken ticks; {last}; no tick has ended since the bounce, "
+                "so it is not yet a cure",
+                "fno agents status",
+                bounce_pending=True,
+            )
+        return verdict(
+            "healthy-pending",
+            "installed recently; awaiting first tick",
+            bounce_pending=True,
+        )
     if tick_epoch is None:
         if broke is not None:
             assert plist_mtime is not None
