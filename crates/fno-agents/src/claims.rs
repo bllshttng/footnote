@@ -149,9 +149,9 @@ pub struct ClaimRecord {
     /// "session-prover" = provably the acquiring session's own process (the
     /// process-tree prover's answer, or the claimant itself when the pid
     /// defaults to this process); "ambient" = caller-supplied, unverifiable
-    /// here. The expired-TTL hybrid arm in `classify` reads it: only a
-    /// prover-proven pid keeps an expired claim Live, so a long-lived foreign
-    /// process can never make a lease permanent. Additive: absent on
+    /// here; "holder-process" = the pid is the process that holds the lease
+    /// for the whole hold, so an expired lease reads that pid as its verdict
+    /// and a dead process never outlives its own lease. Additive: absent on
     /// pre-change records (reads as `None` == ambient).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_provenance: Option<String>,
@@ -880,12 +880,15 @@ pub fn classify_with_basis_and_exclusivity(
         if rec.key.starts_with("review:branch:") {
             return (ClaimState::Stale, basis::TTL_EXPIRED);
         }
-        // A key whose holder is ONE SHORT-LIVED PROCESS reads its recorded
-        // pid as the verdict: `dispatch:` reservations (x-41f7) and the
-        // `gate:` spawn mutex (x-dead direction three). The session witness
-        // asks about the SPAWNING session, which outlives the process and
-        // used to heal both past their process's death.
-        if rec.key.starts_with("dispatch:") || rec.key.starts_with("gate:") {
+        // A lease whose holder is ONE SHORT-LIVED PROCESS reads its recorded
+        // pid as the verdict: `dispatch:` reservations, the `gate:` spawn
+        // mutex, and any lease its writer stamped `holder-process`. The
+        // session witness asks about the session that wrote the record, which
+        // outlives the process and must not heal its lease.
+        if rec.key.starts_with("dispatch:")
+            || rec.key.starts_with("gate:")
+            || rec.pid_provenance.as_deref() == Some("holder-process")
+        {
             if let Some(verdict) = pid_verdict_on_expiry(rec, probe) {
                 return verdict;
             }

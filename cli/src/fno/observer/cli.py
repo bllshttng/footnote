@@ -1070,6 +1070,7 @@ def _replay(
         typer.echo(f"tool-fault: recorded input for {corpus_item} unresolvable; emitted tool-fault finding.")
         raise typer.Exit(1)
 
+    from fno.claims import HOLDER_PROCESS
     from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim
     from fno.observer import isolation
 
@@ -1091,6 +1092,7 @@ def _replay(
             claim = acquire_claim(
                 key=claim_key, holder=holder,
                 reason=f"observer replay {run_id}", ttl_ms=30 * 60 * 1000,
+                pid_provenance=HOLDER_PROCESS,
             )
         except ClaimHeldByOther as exc:
             typer.echo(f"another replay holds {corpus_item}; exiting without touching its worktree ({exc}).")

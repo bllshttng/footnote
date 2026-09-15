@@ -199,11 +199,23 @@ def run_sync_canonical(
         claims.acquire_claim(
             lock_key, holder, ttl_ms=_SYNC_CLAIM_TTL_MS,
             reason="post-merge canonical sync", root=canonical,
+            # This subprocess IS the hold: stamp it so a dead sync process
+            # never outlives its lease through the writer session's witness.
+            pid_provenance=claims.HOLDER_PROCESS,
         )
     except claims.CLAIM_UNAVAILABLE:
         # Someone else has this lock right now, not a reason to break this
         # function's fail-open contract with an uncaught traceback.
-        typer.echo(f"post-merge sync: in progress elsewhere for {sha[:12]}; skipping")
+        held = claims.claim_status(lock_key, root=canonical)
+        by = ""
+        if held.get("holder"):
+            exp = held.get("expires_at")
+            until = (
+                datetime.fromtimestamp(exp / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if exp else "no expiry"
+            )
+            by = f" (held by {held['holder']}, {held.get('state')}/{held.get('basis')}, expires {until})"
+        typer.echo(f"post-merge sync: in progress elsewhere for {sha[:12]}{by}; skipping")
         return 0
 
     try:

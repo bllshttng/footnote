@@ -1526,6 +1526,7 @@ def heal() -> None:
         claims.acquire_claim(
             "pr-watch:heal", holder, ttl_ms=_HEAL_TTL_MS,
             reason="pr-watch SessionStart self-heal", root=heal_root,
+            pid_provenance=claims.HOLDER_PROCESS,
         )
     except claims.CLAIM_UNAVAILABLE:
         # Someone else is on it, not a reason to abort this SessionStart
