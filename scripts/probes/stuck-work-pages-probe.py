@@ -135,9 +135,16 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
     started_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     sleeper = subprocess.Popen(
-        # The sleeper must outlive the poll: once it dies its finding
-        # leaves the set, and the required row names its pid.
-        ["bash", "-c", 'exec -a fno-py python3 -c "import time; time.sleep(3600)" --timeout 20s'],
+        # The shape hung_verb classifies: a python interpreter whose argv1
+        # ends in /fno-py. macOS ps ignores exec -a (argv0 reads as the
+        # interpreter path), so the fake script file carries the name; and
+        # the sleeper must outlive the poll, or its pid leaves the finding
+        # set before the row lands.
+        ["bash", "-c",
+         'mkdir -p "$0/stuck-probe-bin" '
+         '&& printf "import time\\ntime.sleep(3600)\\n" > "$0/stuck-probe-bin/fno-py" '
+         '&& exec python3 "$0/stuck-probe-bin/fno-py" --timeout 20s',
+         str(cwd)],
         cwd=cwd,
     )
     holder_pid: int | None = None
