@@ -2568,10 +2568,9 @@ mod codex_thread_lane;
 mod codex_thread_resume;
 mod thread_row_status;
 use codex_thread_lane::spawn_codex_thread_lane;
-use codex_thread_resume::{
-    codex_thread_recovery_candidate, ensure_codex_thread_handle, recover_codex_threads,
-    schedule_codex_thread_recovery,
-};
+#[cfg(test)]
+use codex_thread_resume::{codex_thread_recovery_candidate, recover_codex_threads};
+use codex_thread_resume::{ensure_codex_thread_handle, schedule_codex_thread_recovery};
 pub(crate) use thread_row_status::notify_transition;
 use thread_row_status::{
     codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row, notify_badge,
