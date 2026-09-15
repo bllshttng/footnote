@@ -1044,6 +1044,97 @@ fn thread_pane_ctl_new_portal_lands_in_its_own_tab_and_leaves_portal_0_alone() {
 }
 
 #[test]
+fn thread_pane_ctl_new_portal_joins_the_portal_already_showing_the_row() {
+    // A `portal new --tab new` reach for a row a portal already shows must
+    // join that portal, not refuse: the focus is the landing, and the
+    // caller's resolved index stays empty by design. Before the fix this
+    // reach answered Err with the joined "already showing" text.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let agents = || vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl("deadbee1", 0, PanePlacement::default(), Some(agents()), tx);
+    let _ = rx.blocking_recv().expect("seed reply");
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    let panes_before = core.panes.len();
+
+    // Same row, control door, portal new + tab new.
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl(
+        "target-a",
+        0,
+        PanePlacement {
+            portal_new: true,
+            tab: Some(TabSel::New),
+            ..Default::default()
+        },
+        Some(agents()),
+        tx,
+    );
+    match rx.blocking_recv().expect("a reply") {
+        ServerMsg::Notice { text } => assert!(
+            text.contains("portal 0: already showing target-a"),
+            "the reply names the portal that already shows the row: {text}"
+        ),
+        other => panic!("expected a Notice landing, got {other:?}"),
+    }
+    assert_eq!(core.portals.len(), 1, "only portal 0 exists");
+    assert_eq!(
+        core.portals.get(&0).map(|e| e.seat),
+        Some(a_seat),
+        "portal 0 keeps its seat"
+    );
+    assert_eq!(
+        core.panes.len(),
+        panes_before,
+        "no second viewer pane was spawned"
+    );
+    assert!(
+        core.portal_landed("target-a", 1),
+        "the focus counts as a landing for the caller's resolved index"
+    );
+    core.reap_pane(a_seat);
+}
+
+#[test]
+fn portal_landed_check_does_not_count_a_stand_in_seat() {
+    // The landed check reads a focus of the row's live viewer as a landing,
+    // but a stand-in shell shows the row to nobody: it must never count.
+    set_attach_program(&["/bin/cat"]);
+    let (mut core, _client_id, _p1, _rx) = thread_core();
+    let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+    core.portal_ctl(
+        "deadbee1",
+        0,
+        PanePlacement::default(),
+        Some(vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))]),
+        tx,
+    );
+    let _ = rx.blocking_recv().expect("seed reply");
+    let a_seat = core.portals.get(&0).expect("portal 0 open").seat;
+    assert!(
+        core.portal_landed("target-a", 1),
+        "fixture: a live viewer elsewhere is a landing"
+    );
+
+    core.close_pane(a_seat);
+    let stand_in = core
+        .portals
+        .get(&0)
+        .expect("portal 0 holds a stand-in")
+        .seat;
+    assert!(
+        core.panes.get(&stand_in).is_some_and(|e| e.cmd.is_none()),
+        "fixture: the seat now holds an idle shell, not a viewer"
+    );
+    assert!(
+        !core.portal_landed("target-a", 1),
+        "a stand-in seat is not a landing"
+    );
+    core.reap_pane(stand_in);
+}
+
+#[test]
 fn thread_pane_ctl_new_portal_refuses_when_no_index_is_free() {
     // AC2-ERR (x-3ea6): a `new` reach on a full portal space replies Err
     // naming the ceiling and spawns nothing - it never repoints an index.
