@@ -149,6 +149,11 @@ pub struct DrainConfig {
     pub failure_limit: u32,
     /// The mission's poll interval, for the control-plane tick row's staleness.
     pub interval_seconds: u64,
+    /// The wall clock on one member's `backlog advance` child, in seconds.
+    /// The lease the child's own single-flight lock carries is
+    /// `flight_gate::FLIGHT_TTL_MS`; a child outliving its lease is the hung
+    /// shape the stuck-work read pages about, so the drain kills it here.
+    pub advance_timeout_s: u64,
     /// 1-based position and population of this mission in the drain rotation
     /// (epic-id order), `None` when it is the only drainable mission. Readout-only:
     /// the arms-table detail prints `mission=x (1 of 4 draining)` so one row sampled
@@ -930,21 +935,33 @@ fn dispatch_member(
     // mission, so an operator `--stop` between drain ticks is not undone.
     let target_args = advance_member_args(member);
     let out = match retry_etxtbsy(|| {
-        fno_cmd(&cfg.fno_bin)
-            .args([
+        // A fresh Command per attempt: retry_etxtbsy re-spawns on ETXTBSY,
+        // and the bounded call consumes what it is handed.
+        let mut cmd = fno_cmd(&cfg.fno_bin);
+        cmd.args([
                 // The `backlog advance` argv literal at this indentation is the
                 // seam marker the autonomous-dispatch census greps. Keep the
                 // elements multi-line; `--json` stays last.
                 "backlog",
                 "advance",
             ])
-            .args(target_args.clone())
-            .args(["--source", "ab"])
-            .arg("--json")
-            .current_dir(&cfg.cwd)
-            .output()
+        .args(target_args.clone())
+        .args(["--source", "ab"])
+        .arg("--json")
+        .current_dir(&cfg.cwd);
+        crate::bounded_cmd::output_with_timeout_result(cmd, cfg.advance_timeout_s)
     }) {
         Ok(o) if o.status.success() => o,
+        // A signal death is the wall clock's kill: the child outlived the
+        // lease its own lock carries, so the skip names the bound.
+        Ok(o) if o.status.code().is_none() => {
+            let _ = journal.append(
+                "active_backlog_skip",
+                json!({"reason": "advance-timeout", "mission": cfg.mission,
+                       "detail": format!("killed after {}s wall clock", cfg.advance_timeout_s)}),
+            );
+            return (MissionDispatch::Continue, DispatchFacts::default());
+        }
         Ok(o) => {
             let detail = String::from_utf8_lossy(&o.stderr).trim().to_string();
             let _ = journal.append(
@@ -1800,6 +1817,7 @@ fn drain_config_for(
         failure_limit: target.failure_limit,
         interval_seconds: target.interval_seconds,
         rotation,
+        advance_timeout_s: crate::flight_gate::FLIGHT_TTL_MS as u64 / 1000,
     })
 }
 
@@ -2449,7 +2467,40 @@ mod tests {
             failure_limit,
             interval_seconds: 300,
             rotation: None,
+            advance_timeout_s: 30,
         }
+    }
+
+    // AC7-HP: an advance child sleeping past its bound is killed and the
+    // skip names the wall clock it outlived.
+    #[test]
+    fn a_hung_advance_child_is_killed_at_the_wall_clock() {
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let p = tmp.path().join("bin").join("fno");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        // exec: the kill hits the sleeper itself, not a shell wrapper.
+        std::fs::write(&p, "#!/bin/bash\nexec sleep 10\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cfg = test_cfg(tmp.path(), p.display().to_string(), 3);
+        cfg.advance_timeout_s = 1;
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(3);
+        let mut pending = Vec::new();
+        let member = DrainMember {
+            id: "proj".to_string(),
+            epic: false,
+        };
+        let (dispatch, _facts) =
+            dispatch_member(&cfg, &mut breaker, &member, &mut pending, &journal);
+        assert!(matches!(dispatch, MissionDispatch::Continue));
+        let lines = journal_lines(&project_journal);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("advance-timeout") && l.contains("killed after 1s wall clock")),
+            "lines: {lines:?}"
+        );
     }
 
     fn test_journal(tmp: &std::path::Path) -> (Journal, PathBuf) {
