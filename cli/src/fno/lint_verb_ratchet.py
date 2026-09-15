@@ -96,6 +96,8 @@ COLLAPSE_FLAGS_ROW_HELP = (
 RUST_SOURCES = (
     Path("crates") / "fno" / "src" / "main.rs",
     Path("crates") / "fno" / "src" / "mux_cli.rs",
+    Path("crates") / "fno" / "src" / "mux_cli" / "pane_args.rs",
+    Path("crates") / "fno" / "src" / "cli_args.rs",
 )
 FNO_AGENTS_SOURCE = Path("crates") / "fno-agents" / "src" / "bin" / "client.rs"
 
@@ -565,58 +567,68 @@ def _enclosing_fn_start(lines: list[str], idx: int) -> int:
 def scan_rust_source(repo_root: Optional[Path] = None) -> tuple[set[str], dict[str, set[str]]]:
     """``(top-level mux verbs, {family: verbs})``, read from the dispatchers.
 
-    Top-level verbs come from ``decide_role``'s ``Some(Some("mux")) => match``
-    block; families come from every catch-all arm in ``mux_cli.rs`` that refuses
-    an unknown verb, scanned back to the match that owns it. A family with more
-    than one refusal site (``block`` has two) unions them.
+    Top-level verbs come from two dispatchers: ``mux_carry_role``'s match in
+    ``main.rs`` for the carry families, and the typed ``Some(("ls", _))`` arms in
+    ``cli_args::map_matches`` for the clap-claimed verbs; ``version`` stays the
+    outer top. Families come from every catch-all arm in ``mux_cli.rs`` and
+    ``mux_cli/pane_args.rs`` that refuses an unknown verb, scanned back to the
+    match that owns it. A family with more than one refusal site (``block`` has
+    two) unions them.
     """
     root = repo_root or _repo_root()
     main_lines = _strip_line_comments((root / RUST_SOURCES[0]).read_text(encoding="utf-8"))
     mux_lines = _strip_line_comments((root / RUST_SOURCES[1]).read_text(encoding="utf-8"))
 
     main_text = "\n".join(main_lines)
-    start = main_text.find('Some(Some("mux")) => match')
-    if start < 0:
+    carry_start = main_text.find("fn mux_carry_role")
+    if carry_start < 0:
         raise VerbRatchetError(
             "verb-ratchet: could not find the `mux` dispatch in "
             f"{RUST_SOURCES[0]}. The scan reads real source, so a refactor of "
             "decide_role must be reflected here rather than worked around: a "
             "scan that silently finds nothing is the tautology this replaced."
         )
-    end = main_text.find('Some(Some("version"))', start)
+    carry_end = main_text.find("\nfn ", carry_start + 1)
+    carry_text = main_text[carry_start : carry_end if carry_end > carry_start else len(main_text)]
     tops: set[str] = set()
     for m in re.finditer(
         r'Some\("([a-z][a-z0-9-]*)"((?:\s*\|\s*"[a-z][a-z0-9-]*")*)\)',
-        main_text[start : end if end > start else len(main_text)],
+        carry_text,
     ):
         tops.add(m.group(1))
         tops.update(re.findall(r'"([a-z][a-z0-9-]*)"', m.group(2) or ""))
     tops.discard("mux")
 
-    # Non-mux top-level verbs (`version`), same dispatcher, outer level.
-    outer = {m.group(1) for m in re.finditer(r'Some\(Some\("([a-z][a-z0-9-]*)"\)\)', main_text)} - {
-        "mux"
-    }
+    # The typed simple verbs: the clap-backed arms in cli_args::map_matches
+    # (`Some(("ls", s)) =>`), one arm per verb the front door claims. The
+    # `version` arm is the non-mux top and keeps the outer level.
+    args_text = "\n".join(_strip_line_comments((root / RUST_SOURCES[3]).read_text(encoding="utf-8")))
+    typed = {m.group(1) for m in re.finditer(r'Some\(\("([a-z][a-z0-9-]*)"', args_text)}
+    typed.discard("mux")
+    outer = typed & {"version"}
+    tops |= typed - outer
 
+    pane_lines = _strip_line_comments((root / RUST_SOURCES[2]).read_text(encoding="utf-8"))
     families: dict[str, set[str]] = {}
-    for i, line in enumerate(mux_lines):
-        # Not `m`: that name is already bound to a Match by the top-level loop
-        # above, and rebinding it to an Optional is a type error rather than a
-        # style nit.
-        unknown = _UNKNOWN_VERB_RE.search(line)
-        if not unknown:
-            continue
-        fam = unknown.group(1) or ""
-        fm = _FAMILY_RE.search(line)
-        if fm:
-            fam = fm.group(1)
-        if not fam:
-            continue
-        match_block = _enclosing_match_start(mux_lines, i)
-        verbs = _arms_at_top_level(mux_lines, match_block, i)
-        fn_start = _enclosing_fn_start(mux_lines, i)
-        verbs |= set(_EQ_RE.findall("\n".join(mux_lines[fn_start:i])))
-        families.setdefault(fam, set()).update(verbs)
+    for src_lines in (mux_lines, pane_lines):
+        for i, line in enumerate(src_lines):
+            # Not `m`: that name is already bound to a Match by the top-level loop
+            # above, and rebinding it to an Optional is a type error rather than a
+            # style nit.
+            unknown = _UNKNOWN_VERB_RE.search(line)
+            if not unknown:
+                continue
+            fam = unknown.group(1) or ""
+            fm = _FAMILY_RE.search(line)
+            if fm:
+                fam = fm.group(1)
+            if not fam:
+                continue
+            match_block = _enclosing_match_start(src_lines, i)
+            verbs = _arms_at_top_level(src_lines, match_block, i)
+            fn_start = _enclosing_fn_start(src_lines, i)
+            verbs |= set(_EQ_RE.findall("\n".join(src_lines[fn_start:i])))
+            families.setdefault(fam, set()).update(verbs)
 
     # Emit FULL leaf paths rather than bare names fused from two levels: a mux
     # top is `mux ls`, an outer top is `version`. Returning bare names forced the
