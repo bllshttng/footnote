@@ -939,12 +939,12 @@ fn dispatch_member(
         // and the bounded call consumes what it is handed.
         let mut cmd = fno_cmd(&cfg.fno_bin);
         cmd.args([
-            // The `backlog advance` argv literal at this indentation is the
-            // seam marker the autonomous-dispatch census greps. Keep the
-            // elements multi-line; `--json` stays last.
-            "backlog",
-            "advance",
-        ])
+                // The `backlog advance` argv literal at this indentation is the
+                // seam marker the autonomous-dispatch census greps. Keep the
+                // elements multi-line; `--json` stays last.
+                "backlog",
+                "advance",
+            ])
         .args(target_args.clone())
         .args(["--source", "ab"])
         .arg("--json")

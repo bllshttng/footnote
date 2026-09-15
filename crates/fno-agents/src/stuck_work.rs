@@ -210,15 +210,19 @@ pub(crate) fn dead_holders(dirs: &[PathBuf]) -> Result<Vec<Finding>, String> {
 /// dir's claims), the order the Python claims io resolves.
 pub fn claims_dirs(cwd: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(global) = crate::claims::global_claims_dir() {
-        dirs.push(global);
+    let root = std::env::var_os("FNO_CLAIMS_ROOT")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    // The claims crate owns the `<root>/.fno/claims` layout; the space
+    // dir's claims is the fallback the Python io takes with no root set.
+    if let Some(resolved) = crate::claims::claims_dir_for(root.as_deref()) {
+        dirs.push(resolved);
     }
-    let project = match std::env::var_os("FNO_CLAIMS_ROOT").filter(|v| !v.is_empty()) {
-        Some(root) => PathBuf::from(root).join(".fno").join("claims"),
-        None => crate::paths::space_dir(cwd).join("claims"),
-    };
-    if !dirs.contains(&project) {
-        dirs.push(project);
+    if root.is_none() {
+        let space = crate::paths::space_dir(cwd).join("claims");
+        if !dirs.contains(&space) {
+            dirs.push(space);
+        }
     }
     dirs
 }

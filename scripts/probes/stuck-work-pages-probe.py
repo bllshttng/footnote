@@ -44,9 +44,11 @@ def journal_path() -> pathlib.Path:
     return pathlib.Path(out.strip().splitlines()[-1])
 
 
-def phone_cursor(cwd: pathlib.Path) -> pathlib.Path:
-    munged = str(cwd).replace("/", "-")
-    return pathlib.Path.home() / ".fno" / "spaces" / munged / "status-sinks" / "phone.cursor"
+def phone_cursor() -> pathlib.Path:
+    code, out, err = run(["fno-agents", "state", "path", "status-sinks"])
+    if code != 0 or not out.strip():
+        raise RuntimeError(f"state path status-sinks failed: {err.strip()}")
+    return pathlib.Path(out.strip().splitlines()[-1]) / "phone.cursor"
 
 
 def find_notice(journal: pathlib.Path, pid: int, since_ts: str) -> tuple[str, str] | None:
@@ -113,7 +115,7 @@ def checkin_attends(scope: str, pid: int, cwd: pathlib.Path) -> tuple[bool, str]
 
 def run_live(scope: str, cwd: pathlib.Path) -> int:
     journal = journal_path()
-    cursor_path = phone_cursor(cwd)
+    cursor_path = phone_cursor()
     started_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     sleeper = subprocess.Popen(
