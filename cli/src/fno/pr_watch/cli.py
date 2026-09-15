@@ -589,7 +589,6 @@ def tick() -> None:
             body: Callable[[float], None],
             *,
             arm: Optional[str] = None,
-            on_end: Optional[Callable[[bool, float], None]] = None,
         ) -> bool:
             left: Optional[float] = None
             if ceiling_box["v"] is not None:
@@ -602,8 +601,6 @@ def tick() -> None:
                     _emit_tick_row(arm, interval_s=arm_interval.get(arm, 600),
                                    skip_reason="timeout",
                                    detail=f"deadline exceeded before phase {name}")
-                if on_end is not None:
-                    on_end(True, 0.0)
                 return False
             if ceiling_box["v"] is None:
                 # The settings phase runs before a ceiling exists: its slice is
@@ -652,8 +649,6 @@ def tick() -> None:
                         pass
                 set_phase_deadline(None)
                 phase_s[name] = round(time.monotonic() - phase_start, 1)
-            if on_end is not None:
-                on_end(body_cut, phase_s[name])
             return True
 
         def _phase_settings(_slice_s: float) -> None:
@@ -1133,36 +1128,49 @@ def tick() -> None:
                         f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
                     )
 
-        def _sweep_ended(cut_here: bool, elapsed: float) -> None:
-            """The merge arm row, written when the sweep phase ends (x-c79d):
-            a later cut or a catchup self-bootout can no longer erase it."""
-            outcome = _tick_outcome(result, tick_failed, cut_here)
-            end_bits: dict[str, Any] = {"duration_s": round(elapsed, 3)}
-            if result is not None:
-                end_bits["sweep_failures"] = getattr(result, "sweep_failures", 0)
-            if cut_here:
-                end_bits["phase"] = "sweep"
-            bits = tick_end_bits(end_bits)
-            cfg_interval = int(getattr(cfg, "interval_seconds", 600)) if cfg is not None else 600
-            _emit_tick_row("pr_watch_merge", interval_s=cfg_interval,
-                           acted=int(getattr(result, "acted", 0) or 0),
-                           skip_reason=outcome if outcome in
-                           ("disabled", "lock_held", "quota_skip", "error", "timeout") else None,
-                           detail=f"outcome={outcome}" + (f" ({', '.join(bits)})" if bits else ""))
-
         def _phase_merge(_slice_s: float) -> None:
-            if result is None or not result.execute_queue:
-                return
             assert cfg is not None
+            set_tick_phase("merge")
+            interval = int(getattr(cfg, "interval_seconds", 600))
+            head = f"merge sweep={'cut' if 'sweep' in cut else 'ok'}"
+            if not tick_enabled:
+                _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="disabled",
+                               detail=f"{head} pr_watch disabled")
+                return
+            from fno.pr_watch._discover import PrCandidate
             from fno.pr_watch._dispatch import run_execute_queue
+            from fno.pr_watch._state import make_watermark_key
+            from fno.rust_binary import VerbUnavailable, verb_call
+
+            roots = _tick_roots()
+            try:
+                # Durable grants, never the sweep's result: a cut sweep leaves
+                # no result, and a completed one reads few PRs under load.
+                out = verb_call("authorized-merge", {"op": "grant-queue",
+                                "cwd": str(roots[0] if roots else Path.cwd())}, timeout=60)
+                if out.get("error"):
+                    raise VerbUnavailable(str(out["error"]))
+                queue = [
+                    (PrCandidate(node_id=r["node_id"], pr_number=int(r["pr"]), pr_url=None,
+                                 repo_dir=Path(r["cwd"]), repo_slug=r["repo_slug"]),
+                     make_watermark_key(repo_slug=r["repo_slug"], pr_number=int(r["pr"])),
+                     r.get("grant") or {})
+                    for r in out.get("queue") or []
+                ]
+            except (VerbUnavailable, KeyError, TypeError, ValueError) as exc:
+                _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="error",
+                               detail=f"{head} grant queue unreadable ({exc})")
+                return
             executed, skipped = run_execute_queue(
-                result,
-                emit=_emit_event,
+                queue, emit=_emit_event,
                 notify=lambda message, **_kw: _notify_parked(message),
-                max_retries=cfg.retries,
-                claim=ClaimAdapter(),
+                max_retries=cfg.retries, claim=ClaimAdapter(),
             )
-            typer.echo(f"pr-watch merge phase: executed={executed} skipped={skipped}")
+            verdicts = out.get("verdicts") or {}
+            detail = (f"{head} candidates={out.get('candidates', 0)} "
+                      f"granted={verdicts.get('granted', 0)} executed={executed} skipped={skipped}")
+            typer.echo(f"pr-watch merge phase: {detail}")
+            _emit_tick_row("pr_watch_merge", interval_s=interval, acted=executed, detail=detail)
 
 
         # Stranded-worktree recovery, same arming gate as the fleet
@@ -1334,7 +1342,7 @@ def tick() -> None:
         # where ticks died. Reconcile owns the outcome-keyed leg and surfaces
         # a proven-stale canonical through its SessionStart hook.
         sweep_started = True
-        _run_phase("sweep", _phase_sweep, on_end=_sweep_ended)
+        _run_phase("sweep", _phase_sweep)
         _run_phase("merge", _phase_merge, arm="pr_watch_merge")
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")

@@ -2390,7 +2390,8 @@ class TestTickRecordsAndDeadline:
     that outlives its deadline writes a timeout record and exits 75 instead of
     suppressing its launchd successors."""
 
-    def _invoke_tick(self, monkeypatch, dispatch_tick):
+    def _invoke_tick(self, monkeypatch, dispatch_tick, grant_queue=None,
+                     pr_watch_enabled=True, verb_error=None):
         import typer
         from typer.testing import CliRunner
         from unittest.mock import MagicMock
@@ -2398,6 +2399,19 @@ class TestTickRecordsAndDeadline:
         from fno.pr_watch import cli as prcli
 
         monkeypatch.setattr("fno.pr_watch._dispatch.tick", dispatch_tick, raising=True)
+        # The merge phase asks Rust for its queue, never the sweep's result.
+        verb_calls: list = []
+        self._verb_calls = verb_calls
+
+        def _verb(verb, payload, **kw):
+            verb_calls.append(payload)
+            if verb_error is not None:
+                from fno.rust_binary import VerbUnavailable
+
+                raise VerbUnavailable(verb_error)
+            return grant_queue or {"candidates": 0, "verdicts": {}, "queue": []}
+
+        monkeypatch.setattr("fno.rust_binary.verb_call", _verb, raising=True)
 
         # A MagicMock interval int()s to 1, so the derived deadline is ONE
         # SECOND and the real catch-up leg races it. Give the harness a
@@ -2409,6 +2423,7 @@ class TestTickRecordsAndDeadline:
         settings = MagicMock()
         settings.pr_watch.max_age_days = 30
         settings.pr_watch.retries = 3
+        settings.pr_watch.enabled = pr_watch_enabled
         settings.recovery.enabled = False
         monkeypatch.setattr(prcli, "load_settings", lambda: settings, raising=True)
 
@@ -2606,7 +2621,8 @@ class TestTickRecordsAndDeadline:
         assert king_rows, "king_wake wrote no row after the sweep was cut"
         assert notify_rows, "notify_watch wrote no row after the sweep was cut"
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
-        assert merge_rows and merge_rows[-1].get("skip_reason") == "timeout"
+        assert merge_rows and merge_rows[-1].get("skip_reason") is None
+        assert merge_rows[-1]["detail"].startswith("merge sweep=cut candidates=0")
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends and ends[-1].get("cut") == ["sweep"]
         # x-d211: the 1s cap is below the 30s wall, so this cut is slice
@@ -2617,6 +2633,118 @@ class TestTickRecordsAndDeadline:
         # Saturated = the phase spent its whole slice: the cut sweep did,
         # king_wake finished early and reads as quiet, not saturated.
         assert ends[-1].get("saturated") == ["sweep"]
+
+    def _cut_sweep_world(self, monkeypatch, tmp_path):
+        """The shared cheapness stubs behind a deliberately cut sweep: the
+        phases after it must be cheap or the tick reads as a different cut."""
+        from fno.pr_watch import cli as prcli
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "30")
+        monkeypatch.setitem(prcli._PHASE_CAP_S, "sweep", 1)
+        monkeypatch.setattr(
+            "fno.pr_watch._king_wake.run_king_wake",
+            lambda _settings, emit, **_kw: {"woke": [], "crowns": 0},
+            raising=True,
+        )
+        monkeypatch.setattr(prcli, "_run_notify_watch_phase", lambda _roots=None: None,
+                            raising=True)
+        monkeypatch.setattr(prcli, "_catchup_roots", lambda: [tmp_path], raising=True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path],
+                            raising=True)
+        monkeypatch.setattr(prcli, "_STRANDED_FLOOR_S", 10_000.0, raising=True)
+        monkeypatch.setattr(prcli, "_ROSTER_FLOOR_S", 10_000.0, raising=True)
+
+    def test_merge_phase_runs_its_own_queue_after_a_cut_sweep(
+        self, monkeypatch, tmp_path
+    ):
+        """AC6-HP: the sweep cut leaves no TickResult, and the merge phase
+        still drains the Rust grant queue and names its own outcome."""
+        import time as _time
+
+        def _stall(**_kw):
+            _time.sleep(2)
+            raise AssertionError("deadline did not interrupt the stalled sweep")
+
+        self._cut_sweep_world(monkeypatch, tmp_path)
+        drained: list = []
+
+        def _record_queue(queue, **_kw):
+            drained.append(list(queue))
+            return (1, 0)
+
+        monkeypatch.setattr("fno.pr_watch._dispatch.run_execute_queue", _record_queue,
+                            raising=True)
+        grant_queue = {
+            "candidates": 2,
+            "verdicts": {"granted": 1, "held": 1},
+            "queue": [{
+                "node_id": "x-abc12345", "pr": 1, "repo_slug": "owner/repo",
+                "cwd": str(tmp_path),
+                "grant": {"source": "config", "recorded_by": "spawner-session",
+                          "recorded_at": "2026-08-24T10:00:00Z"},
+            }],
+        }
+        res, events = self._invoke_tick(monkeypatch, _stall, grant_queue=grant_queue)
+
+        assert res.exit_code == 75, res.output
+        assert len(drained) == 1 and len(drained[0]) == 1
+        cand, key, grant = drained[0][0]
+        assert cand.pr_number == 1
+        assert key == "owner/repo#1"
+        assert grant["recorded_by"] == "spawner-session"
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
+        assert merge_rows and merge_rows[-1].get("acted") == 1
+        assert merge_rows[-1].get("skip_reason") is None
+        assert merge_rows[-1]["detail"] == (
+            "merge sweep=cut candidates=2 granted=1 executed=1 skipped=0"
+        )
+        ends = [d for t, d in events if t == "pr_watch_tick_end"]
+        assert ends and ends[-1].get("cut") == ["sweep"]
+
+    def test_an_unreadable_grant_queue_writes_an_error_row_and_the_tick_continues(
+        self, monkeypatch, tmp_path
+    ):
+        """AC6-ERR: an unreachable grant queue is an error row in the merge
+        phase's own grammar, and the phases after it still run."""
+        import time as _time
+
+        def _stall(**_kw):
+            _time.sleep(2)
+            raise AssertionError("deadline did not interrupt the stalled sweep")
+
+        self._cut_sweep_world(monkeypatch, tmp_path)
+        res, events = self._invoke_tick(
+            monkeypatch, _stall, grant_queue=None, verb_error="boom"
+        )
+
+        assert res.exit_code == 75, res.output
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
+        assert merge_rows and merge_rows[-1].get("skip_reason") == "error"
+        assert merge_rows[-1]["detail"].startswith("merge sweep=")
+        king_rows = [d for d in rows if d.get("arm") == "king_wake"]
+        assert king_rows, "king_wake still wrote its row"
+
+    def test_a_disabled_watcher_merge_row_reads_disabled(self, monkeypatch, tmp_path):
+        """AC6-EDGE: with the tick disabled the merge row says so in its own
+        grammar and the grant-queue verb is never called."""
+        import time as _time
+
+        def _stall(**_kw):
+            _time.sleep(2)
+            raise AssertionError("deadline did not interrupt the stalled sweep")
+
+        self._cut_sweep_world(monkeypatch, tmp_path)
+        res, events = self._invoke_tick(
+            monkeypatch, _stall, grant_queue=None, pr_watch_enabled=False
+        )
+
+        assert self._verb_calls == [], "a disabled tick must not call the grant queue"
+        rows = [d for t, d in events if t == "control_plane_tick"]
+        merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
+        assert merge_rows and merge_rows[-1].get("skip_reason") == "disabled"
+        assert merge_rows[-1]["detail"].startswith("merge sweep=")
 
     def test_a_cut_inside_a_step_names_the_step_in_the_row_detail(self, monkeypatch, tmp_path):
         """AC2-ERR: the alarm catching the pass mid-truth-read names
@@ -3486,6 +3614,10 @@ class TestFleetLegRunsAfterACutPRLeg:
         import fno.recovery as rec
 
         monkeypatch.setattr("fno.pr_watch._dispatch.tick", dispatch_tick, raising=True)
+        monkeypatch.setattr(
+            "fno.rust_binary.verb_call",
+            lambda verb, payload, **kw: {"candidates": 0, "verdicts": {}, "queue": []},
+        )
         monkeypatch.setattr(rec, "run_recovery_sweep", sweep_fn, raising=True)
         # The silence backstop reads the real registry and resolves every
         # worker's transcript; that is seconds of work these tests do not want.
