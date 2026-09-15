@@ -164,7 +164,7 @@ transcript marker, then runs
 carries claim heartbeat/context monitoring, compact handoff hooks, subagent
 guards, and the PreToolUse state/git protection guards.
 
-Every Codex `Stop` handler must exit 0 with empty stdout or one Stop JSON object, or exit 2 with stderr; plain text fails the hook, and `cli/tests/hooks/test_codex_stop_output_contract.py` enforces it.
+Every Codex `Stop` handler must exit 0 with empty stdout or one Stop JSON object. Exit 2 with non-empty stderr is a block. Plain text fails the hook, and `cli/tests/hooks/test_codex_stop_output_contract.py` enforces it.
 
 Do not copy the full Claude hook manifest into Codex. Codex does not support every
 Claude lifecycle event in `hooks/hooks.json`; `WorktreeCreate`, `CwdChanged`,
