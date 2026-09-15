@@ -4873,7 +4873,7 @@ event_types:
           description: "Number of bounded exact-detail events emitted before this summary; omitted when the full receipt is inline."
         merge_scan:
           type: object
-          description: "The durable-grant scan's positive receipt: completed=true (always, on this completed sweep), plus integer eligible (OPEN candidates whose durable verdict granted) and attempted (executions reserved) counts. Zero counts are valid and prove the scan ran; a quota-skipped tick emits no receipt at all, so no scan receipt either."
+          description: "The scan's positive receipt: completed=true (always, on this completed sweep) plus integer scanned (rich reads completed). Zero counts are valid and prove the scan ran; a quota-skipped tick emits no receipt at all, so no scan receipt either. Durable-grant verdict and execution counts ride the pr_watch_merge control_plane_tick row."
 
   - name: pr_watch_sweep_chunk
     description: "Bounded exact identities for an oversized pr_watch_tick receipt. All chunks precede the summary carrying the same receipt_id."

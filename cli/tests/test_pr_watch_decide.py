@@ -515,65 +515,37 @@ def test_null_watermark_fires_on_any_activity():
 
 
 # ---------------------------------------------------------------------------
-# The OPEN granted dispatch executes (durable-grant arm)
+# The execute kind is gone: the Rust grant queue feeds the merge phase
 # ---------------------------------------------------------------------------
 
-def test_open_with_durable_grant_executes():
-    """An OPEN PR whose newest recorded dispatch is a positive grant on a
-    positively not-live worker executes through the watcher."""
-    obs = _obs(state="OPEN")
-    d = decide(
-        obs, watermark={"last_review_ts": None, "merge_dispatched": False},
-        reviewers=[], merge_ready=False, now_iso=NOW,
-        durable_grant_eligible=True,
-    )
-    assert d.kind == "execute"
-    assert d.reason == "durable-grant"
+def test_decide_has_no_execute_kind():
+    """The sweep stops deciding executions: the merge phase drains the Rust
+    grant queue, so decide() carries no execute kind to guess with."""
+    import typing
+
+    from fno.pr_watch import DecisionKind
+
+    assert "execute" not in typing.get_args(DecisionKind)
 
 
-def test_open_without_durable_grant_does_not_execute():
-    """Eligibility comes only from the resolver's True: without it the OPEN
-    flow is unchanged (noop here), never a guessed execute."""
-    obs = _obs(state="OPEN")
-    d = decide(
-        obs, watermark={"last_review_ts": None, "merge_dispatched": False},
-        reviewers=[], merge_ready=False, now_iso=NOW,
-    )
-    assert d.kind == "noop"
-
-
-def test_merged_state_ignores_the_execute_arm():
-    """A MERGED PR keeps the post-merge path; execute is for OPEN PRs only."""
+def test_merged_state_takes_the_post_merge_arm():
+    """A MERGED PR keeps the post-merge path."""
     obs = _obs(state="MERGED")
     d = decide(
         obs, watermark={"merge_dispatched": False},
         reviewers=[], merge_ready=True, now_iso=NOW,
-        durable_grant_eligible=True,
     )
     assert d.kind == "merge"
 
 
-def test_max_age_parks_before_execute():
-    """A stale PR parks even with an eligible grant: the age gate is the
-    watcher's own judgment and outranks a recorded dispatch grant."""
-    obs = _obs(state="OPEN", opened_at="2026-01-01T00:00:00Z")
-    d = decide(
-        obs, watermark={"last_review_ts": None, "merge_dispatched": False},
-        reviewers=[], merge_ready=False, now_iso=NOW,
-        durable_grant_eligible=True,
-    )
-    assert d.kind == "park"
-    assert d.reason == "max-age"
-
-
-def test_execute_outranks_reviewer_activity():
-    """An eligible grant decides before the review-dispatch step: the merge
-    core's in-flight review guard, not this precedence list, holds execution
-    while a review is mid-flight."""
-    obs = _obs(state="OPEN", latest_review_ts="2026-06-14T11:00:00Z")
+def test_max_age_parks_before_review():
+    """A stale PR parks even with fresh reviewer activity: the age gate is
+    the watcher's own judgment and outranks a dispatch."""
+    obs = _obs(state="OPEN", opened_at="2026-01-01T00:00:00Z",
+               latest_review_ts="2026-06-14T11:00:00Z")
     d = decide(
         obs, watermark={"last_review_ts": None, "merge_dispatched": False},
         reviewers=["codex"], merge_ready=False, now_iso=NOW,
-        durable_grant_eligible=True,
     )
-    assert d.kind == "execute"
+    assert d.kind == "park"
+    assert d.reason == "max-age"
