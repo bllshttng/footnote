@@ -816,10 +816,6 @@ def test_rust_client_verbs_match_client_rs() -> None:
             # client action list is shrink-only (d-fe66560a), so this arm is
             # never registered and never routed.
             "backlog-update",
-            # `surface-check`: scripts/validate-plan.sh shells the binary
-            # directly and reads the E/W/X/O/U line protocol back;
-            # binary-first, never an auto-routed `fno agents` surface.
-            "surface-check",
         }
     )
 
