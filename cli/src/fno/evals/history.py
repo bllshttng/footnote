@@ -30,6 +30,21 @@ def append_row(path: Path, row: dict[str, object]) -> None:
         os.close(fd)
 
 
+def append_attempt(path: Path, row: dict[str, object]) -> None:
+    """Append one ATTEMPT row: the write path the runner uses.
+
+    An attempt row must carry a unique attempt identity and its structured
+    observations - the evidence the native verdict (and every later re-read)
+    classifies from. A row without them is refused here rather than persisted
+    as unattributable evidence.
+    """
+    missing = [k for k in ("attempt_id", "run_id", "obs")
+               if not isinstance(row.get(k), (str, dict)) or row.get(k) in ("", None)]
+    if missing:
+        raise ValueError(f"attempt row is missing required identity/evidence: {missing}")
+    append_row(path, row)
+
+
 def iter_rows_tolerant(path: Path) -> Iterator[tuple[int, dict[str, object]]]:
     """Yield ``(lineno, row)`` from *path*, skipping corrupt lines with a warning.
 
