@@ -3,7 +3,6 @@ mod blocking_bound_tests;
 #[path = "daemon/tests/store_socket_sweep_tests.rs"]
 mod store_socket_sweep_tests;
 use super::blocking_bound::directory_bytes_within;
-use super::codex_thread_resume::{codex_thread_recovery_candidate, recover_codex_threads};
 use super::*;
 use crate::client_verbs::RowLiveness;
 use crate::codex_thread_entry::build_codex_thread_entry;

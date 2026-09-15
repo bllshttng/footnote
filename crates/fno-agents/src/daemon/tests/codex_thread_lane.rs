@@ -6,6 +6,7 @@
 //! dispatch family. Shared helpers (`tmp_home`, `rentry`, `test_ctx`, ...)
 //! stay in the parent tests module and resolve through the glob.
 use super::*;
+use crate::daemon::codex_thread_resume::recover_codex_threads;
 
 // `thread_entry` stays in the parent tests module (used by the plan_reconcile
 // liveness family too, not only this one) and reaches here through the glob.
