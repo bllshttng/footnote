@@ -695,6 +695,70 @@ def _plugin_registry_path() -> Path:
     return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
 
 
+def _known_marketplaces_path() -> Path:
+    """Claude's marketplace registry (module-level so tests can stub it)."""
+    return Path.home() / ".claude" / "plugins" / "known_marketplaces.json"
+
+
+def _run_stage_check(argv: list[str]) -> tuple[int, str, str]:
+    """One ``plugin-install --check`` probe (module-level so tests stub it).
+    Transport failures come back as exit -1 with the reason, never raise."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        return proc.returncode, proc.stdout, proc.stderr
+    except (OSError, subprocess.SubprocessError) as exc:
+        return -1, "", str(exc)
+
+
+def _stage_check_report(install_location: str = "") -> Optional[dict[str, Any]]:
+    """Stage-drift verdict when Claude runs the plugin from the fno stage.
+
+    A directory marketplace never mints a ``gitCommitSha``, so for that
+    install shape freshness is a byte comparison of the stage against source
+    HEAD. Returns None when this install is not a directory marketplace; any
+    transport failure maps to ``unknown`` in ``detail``, never ``fresh``.
+    ``install_location`` (where Claude actually execs) wins over the
+    marketplace path when both exist.
+    """
+    try:
+        data = json.loads(_known_marketplaces_path().read_text(encoding="utf-8"))
+        source = data["footnote"]["source"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not isinstance(source, dict) or source.get("source") != "directory":
+        return None
+    stage_path = install_location or str(source.get("path") or "")
+    if not stage_path:
+        return None
+
+    def unknown(detail: str) -> dict[str, Any]:
+        return {"status": "unknown", "sha": None, "installed_at": None, "detail": detail, "kind": "stage", "stage": stage_path}
+
+    binary = _cargo_bin_path()
+    src = _resolve_source(None)
+    if not binary:
+        return unknown("no cargo fno-agents binary to run the stage check")
+    if src is None:
+        return unknown("no source checkout to compare against")
+    code, out, err = _run_stage_check(
+        [binary, "plugin-install", "--check", "--json",
+         "--stage", stage_path, "--source", str(src)]
+    )
+    if code not in (0, 3):
+        return unknown(f"plugin-install --check exited {code}: {(err or out).strip()}")
+    try:
+        verdict = json.loads(out)
+    except ValueError:
+        return unknown("plugin-install --check printed no JSON")
+    if not isinstance(verdict, dict):
+        return unknown("plugin-install --check printed a non-object")
+    verdict["kind"] = "stage"
+    verdict.setdefault("stage", stage_path)
+    verdict["sha"] = verdict.pop("source_head", None)
+    verdict.setdefault("remedy", f"cd {verdict.get('source') or src} && fno config plugin install claude")
+    return verdict
+
+
 def _plugin_cache_report() -> dict[str, Any]:
     """Freshness of the deployed CLAUDE plugin cache the hooks run from.
 
@@ -742,8 +806,10 @@ def _plugin_cache_report() -> dict[str, Any]:
         return report
     sha = entry.get("gitCommitSha")
     if not sha:
-        report["detail"] = "installed_plugins.json carries no gitCommitSha"
-        return report
+        # The stage is the artifact; Claude execs from the registry path.
+        return _stage_check_report(str(entry.get("installLocation") or "")) or report | {
+            "detail": "installed_plugins.json carries no gitCommitSha"
+        }
     report["sha"] = sha
     report["installed_at"] = entry.get("installedAt")
 
@@ -1534,7 +1600,9 @@ def _silent_switch_report(
         # fresh cache stays a bare unknown (never guess an origin).
         if armed.get("unknown"):
             cache = plugin_cache if plugin_cache is not None else _plugin_cache_report()
-            if cache.get("status") == "stale":
+            # A stale STAGE is a different artifact with its own fix; this
+            # cause line is about the git-cached claude plugin only.
+            if cache.get("status") == "stale" and cache.get("kind") != "stage":
                 sha = str(cache.get("sha") or "")[:12]
                 when = str(cache.get("installed_at") or "")[:10] or "?"
                 finding["cause"] = (
@@ -1973,7 +2041,14 @@ def _blockers(result: dict[str, Any]) -> list[str]:
         blockers.append(f"{plugin_hooks['failed']} plugin hook(s) cannot launch.")
 
     plugin_cache = result.get("plugin_cache") or {}
-    if plugin_cache.get("status") == "stale":
+    if plugin_cache.get("kind") == "stage" and plugin_cache.get("status") == "stale":
+        sample = plugin_cache.get("sample") or []
+        drift = plugin_cache.get("differing_count", 0) + plugin_cache.get("missing_count", 0)
+        blockers.append(
+            f"plugin stage {plugin_cache.get('stage')} differs from source HEAD in {drift} "
+            f"file(s) (e.g. {sample[0] if sample else '?'}). Fix: {plugin_cache.get('remedy')}"
+        )
+    elif plugin_cache.get("status") == "stale":
         deleted = plugin_cache.get("deleted_hook_scripts") or []
         if deleted:
             blockers.append(
@@ -2658,7 +2733,14 @@ def _emit_human(
     # Deployed claude plugin cache (x-4be1): the hooks actually executed by
     # Claude sessions. Advisory, same vocabulary as the wheel/rust legs.
     pc = result.get("plugin_cache") or {}
-    if pc.get("status") == "stale":
+    if pc.get("kind") == "stage" and pc.get("status") == "stale":
+        sample = pc.get("sample") or []
+        out(
+            f"fno doctor: plugin stage STALE ({pc.get('differing_count', 0)} differing, "
+            f"{pc.get('missing_count', 0)} missing; e.g. {sample[0] if sample else '?'}). "
+            f"Fix: {pc.get('remedy')}, then restart sessions to pick up new hook text."
+        )
+    elif pc.get("status") == "stale":
         sha = str(pc.get("sha") or "")[:12]
         when = str(pc.get("installed_at") or "")[:10] or "?"
         # `fno update` cannot refresh this: installed_plugins.json is claude's
@@ -4579,11 +4661,16 @@ def doctor_command(
         (result.get("archive_id_collisions") or {}).get("count")
         or (result.get("archive_id_collisions") or {}).get("unreadable")
     )
+    # A stale stage runs its hooks byte for byte; drift there is a blocker,
+    # not the after-every-merge advisory the git cache kind stays as.
+    pc = result.get("plugin_cache") or {}
+    stage_stale = pc.get("kind") == "stage" and pc.get("status") == "stale"
     raise typer.Exit(
         1
         if result["status"] == "stale"
         or source_checkout_blocked
         or dead_agents
         or id_collisions
+        or stage_stale
         else 0
     )
