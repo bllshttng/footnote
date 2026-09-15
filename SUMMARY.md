@@ -7,6 +7,11 @@
 - The AC7a semantic fixture gained an `at:` symbol token (`_semantic_validate`) so the new no-symbol warning does not fire on it; the walk's same-language drop makes the fixture walk-clean.
 - `git grep -o` prints no line numbers, so the hit parser splits `sha:path:match` (two fields), not `sha:path:line:match`.
 
+## Fixes found by the differential run
+
+- `is_test_path` compiled its regex per grep hit line; a plan whose symbols hit thousands of lines spun the walk for minutes. The three walk regexes are now `OnceLock`-hoisted.
+- The `at:` second token skipped the six-char underscore keep-rule, so a wordy note (`run and collect`) turned the prose word `and` into a grep target over the whole tree. `at_symbol` now applies the same keep-rule as `reads_calls`.
+
 ## Measured facts for the PR body
 
 - Differential over /Users/bb16/c3po/internal/fno/plans (origin/main heredoc vs surface-check): E/O/U lines identical except U-line YAML-error WORDING on malformed frontmatter (PyYAML vs serde_yaml_ng describe the same failure differently; both are U, both NOT CHECKED). Counts recorded by the differential run (logged in the session).
