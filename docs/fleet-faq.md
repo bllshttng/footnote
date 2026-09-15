@@ -128,7 +128,7 @@ Refusals seen in practice, all correct:
 
 - `fno backlog rank <id> --top` is operator-only. "The graph records no writer for a rank, so nothing downstream could tell yours from the operator's."
 - The spawn gate refuses on `fleet_full` or missing attribution. Hold and report.
-- `fno backlog decide --authority operator` refuses an agent session. Agents record coordination with decide by default; law stays superuser tier.
+- `fno backlog decide --authority operator` refuses an agent session. Agents record coordination with decide by default. Law stays superuser tier.
 
 A refusal message can name the wrong cause while still being right to refuse. Fix the message in the project, obey the refusal now.
 

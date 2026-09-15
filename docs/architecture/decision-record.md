@@ -153,7 +153,7 @@ The standing query is law-only and lifecycle-filtered: `fno backlog decisions <t
 
 ## Where law reaches a session
 
-No session loads law in bulk. The SessionStart law read is deleted (ruling of 2026-09-14): it read every live row, blew the hook's ten-second bound, and delivered nothing. A law reaches a session two ways, and neither loads all law. A law the superuser confirms graduates, through the `graduation` field every law row carries: `enforced` with `doc:<rules file>=>marker:<text>` points at a rule file the harness loads whole, and `enforced` with `gate:<cmd>=>marker:<text>` points at a refusal at the moment the law applies. And `ask` keeps reading law for one subject at ask time, so the law-match refusal still fires where the question is asked.
+No session loads law in bulk. The SessionStart law read is deleted (ruling of 2026-09-14): it read every live row, blew the hook's ten-second bound, and delivered nothing. A law reaches a session two ways, and neither loads all law. First, a law the superuser confirms graduates through the `graduation` field every law row carries. `enforced` with `doc:<rules file>=>marker:<text>` points at a rule file the harness loads whole. `enforced` with `gate:<cmd>=>marker:<text>` points at a refusal at the moment the law applies. Second, `ask` keeps reading law for one subject at ask time, so the law-match refusal still fires where the question is asked.
 
 ## Gates that consume current law
 
