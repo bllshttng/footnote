@@ -286,6 +286,11 @@ impl ClaudeHome {
         Self { home: home.into() }
     }
 
+    /// The HOME-style root this resolver reads `.claude` under.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
     pub fn sessions_dir(&self) -> PathBuf {
         self.home.join(".claude").join("sessions")
     }
