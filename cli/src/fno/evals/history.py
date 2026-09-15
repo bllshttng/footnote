@@ -30,20 +30,6 @@ def append_row(path: Path, row: dict[str, object]) -> None:
         os.close(fd)
 
 
-def iter_rows(path: Path) -> Iterator[dict[str, object]]:
-    """Yield parsed dicts from *path*, one per non-empty line.
-
-    Raises ``json.JSONDecodeError`` on malformed lines; use
-    :func:`iter_rows_tolerant` for corruption-safe reads.
-    """
-    if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            yield json.loads(line)
-
-
 def iter_rows_tolerant(path: Path) -> Iterator[tuple[int, dict[str, object]]]:
     """Yield ``(lineno, row)`` from *path*, skipping corrupt lines with a warning.
 

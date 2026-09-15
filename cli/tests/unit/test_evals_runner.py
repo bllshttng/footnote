@@ -118,7 +118,7 @@ def test_run_grade_only_task_appends_history_and_removes_worktree(tmp_path: Path
     results = run_task(task, repeat=1, repo_root=root, history_path=hp,
                        spawn=_never_called_spawn)
     assert results[0].passed
-    rows = list(_history.iter_rows(hp))
+    rows = [r for _, r in _history.iter_rows_tolerant(hp)]
     assert len(rows) == 1
     assert rows[0]["pass"] is True and rows[0]["tier"] == "regression"
     assert rows[0]["variant"] == "baseline"  # default run records the round
@@ -198,7 +198,7 @@ def test_spawn_failure_is_graded_fail_not_crash(tmp_path: Path) -> None:
     assert len(results) == 3
     assert all(not r.passed for r in results)
     assert all("provider down" in r.reason for r in results)
-    assert len(list(_history.iter_rows(hp))) == 3  # every run recorded
+    assert len([r for _, r in _history.iter_rows_tolerant(hp)]) == 3  # every run recorded
 
 
 def test_repeat_k_runs_k_times(tmp_path: Path) -> None:
@@ -243,7 +243,7 @@ def test_variant_run_checks_out_variant_ref_and_records_row(tmp_path: Path) -> N
                        spawn=_never_called_spawn, variant="v1", variant_ref="v1-work")
     assert results[0].passed
     assert results[0].variant == "v1"
-    rows = list(_history.iter_rows(hp))
+    rows = [r for _, r in _history.iter_rows_tolerant(hp)]
     assert rows[0]["variant"] == "v1"
     assert rows[0]["bank_rev"] == _git_sha(root, "v1-work")
     assert _worktree_count(root) == before  # worktree removed after grading
@@ -260,7 +260,7 @@ def test_variant_bad_name_refuses_before_any_worktree(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="baseline"):
         run_task(_task(), repeat=1, repo_root=root, history_path=hp,
                  spawn=_never_called_spawn, variant="baseline", variant_ref="x")
-    assert len(list(_history.iter_rows(hp))) == 0  # nothing recorded
+    assert len([r for _, r in _history.iter_rows_tolerant(hp)]) == 0  # nothing recorded
     assert _worktree_count(root) == before          # no worktree made
 
 
@@ -329,7 +329,7 @@ def test_lane_hp_records_requested_and_observed_configuration(tmp_path: Path) ->
     task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
     run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
              lane=_LANE, experiment_id="cohort-a", observe=observe)
-    row = list(_history.iter_rows(hp))[0]
+    row = [r for _, r in _history.iter_rows_tolerant(hp)][0]
     assert row["requested_lane"] == "astra-high"
     assert row["requested_harness"] == "codex"
     assert row["requested_model"] == "gpt-6-astra"
@@ -357,7 +357,7 @@ def test_lane_edge_substitution_is_labeled_and_excluded(tmp_path: Path) -> None:
     task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
     run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
              lane=_LANE, observe=observe)
-    row = list(_history.iter_rows(hp))[0]
+    row = [r for _, r in _history.iter_rows_tolerant(hp)][0]
     assert row["substituted"] is True
     assert row["lane_status"] == "substituted"
     assert row["requested_harness"] == "codex"
@@ -380,7 +380,7 @@ def test_lane_err_unavailable_never_grades_a_substitute_as_requested(tmp_path: P
     results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
                        lane=_LANE, observe=_boom)
     assert not results[0].passed
-    row = list(_history.iter_rows(hp))[0]
+    row = [r for _, r in _history.iter_rows_tolerant(hp)][0]
     assert row["lane_status"] == "unavailable"
     assert "observed_model" not in row
     assert row["requested_model"] == "gpt-6-astra"
@@ -396,7 +396,7 @@ def test_lane_grade_only_task_records_not_applicable_never_unavailable(tmp_path:
     results = run_task(task, repeat=1, repo_root=root, history_path=hp,
                        spawn=_never_called_spawn, lane=_LANE)
     assert results[0].passed
-    row = list(_history.iter_rows(hp))[0]
+    row = [r for _, r in _history.iter_rows_tolerant(hp)][0]
     assert row["lane_status"] == "not-applicable"
     assert row["requested_lane"] == "astra-high"
     assert "observed_model" not in row
@@ -421,7 +421,7 @@ def test_lane_successful_headless_spawn_with_no_observable_identity_is_unverifie
     results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
                        lane=_LANE, observe=observe)
     assert results[0].passed
-    row = list(_history.iter_rows(hp))[0]
+    row = [r for _, r in _history.iter_rows_tolerant(hp)][0]
     assert row["lane_status"] == "unverified"
     assert row["requested_lane"] == "astra-high"
     assert "observed_model" not in row
