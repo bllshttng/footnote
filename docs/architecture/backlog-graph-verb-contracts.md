@@ -866,6 +866,8 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
     acquires planning eligibility from plan absence (the ``_grid_lane_for``
     role floor and the ``spawn_defaults.grid_role`` split are gone).
 
+    The same derivation now owns the manual door too: ``fno agents spawn --node`` runs ``harness_map.node_seed`` at the make_context seam before defaults are injected, so a ``/target`` or ``/blueprint`` payload verb that disagrees with the node's derived verb refuses before any route, a payload with no verb gets the node's resolved command composed in front of it (the work profile follows the derived verb instead of the crown fallback), a matching family verb or an out-of-family verb or a ``--reconcile`` seed passes unchanged, crown and resume spawns skip the check, the explicit ``--node`` flag is the only trigger (inherited ``FNO_NODE`` is provenance, never a dispatch), and an unreadable node row refuses - unknown is not evidence of a verb, the same posture the spawn gate takes for unreadable capacity.
+
     Merge posture stays a launcher decision, never baked into a node verb:
     a derived ``/target`` renders through the same rungs as the builtin (the
     default bakes ``no-merge``; ``config.auto_merge.grant`` omits the flag);

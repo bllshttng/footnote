@@ -416,7 +416,7 @@ only when normalize emitted a non-empty `substrate` (`thread` -> a persistent
 thread; the deprecated `bg` alias canonicalizes to `thread`; `headless` -> a
 one-shot `claude -p` / `codex --exec` / `agy -p`);
 an empty `substrate` is the built-in default: `thread` where the harness seats one (else `pane`), injected explicitly by the spawn seam; pass `--portal N` to open the view with the spawn.
-Pass `--node` whenever `node` is non-empty. Choose the `--cwd` source in this priority order, so launch cwd
+Pass `--node` whenever `node` is non-empty; the spawn composes or checks the verb from the node, so a build message need not name it, and a /target message on a node that derives /blueprint is refused. Choose the `--cwd` source in this priority order, so launch cwd
 follows the work-map root:
 
 1. normalize's `resolved_cwd` when non-empty (a `-C`/`--project` target, including
