@@ -143,7 +143,7 @@ The gate reads the plan's `surface:` frontmatter block. The schema is [quick-tem
 - a changed answerer with no `reads` or `emits`
 - a `count_after` above `count`
 - a `control:` naming a path no listed answerer sits at
-- a changed answerer's symbol read in another language tree at a file no answerer names (plans created after the tree gate date; quick and older plans warn, and a symbol with more than 10 such files warns as vocabulary)
+- a changed answerer's symbol read in another tree at a file no answerer names. Post-gate plans only: the tree gate date is 2026-09-14. Quick and older plans warn. A symbol with more than 10 unlisted files warns as vocabulary.
 
 ### Satisfaction
 
