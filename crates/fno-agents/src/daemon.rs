@@ -8159,13 +8159,8 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
         }
     });
     if let Some((title, body, is_done)) = notify {
-        notify_badge(
-            title,
-            body,
-            is_done,
-            ctx.opts.notify_on_blocked,
-            ctx.opts.notify_on_done,
-        );
+        let o = &ctx.opts;
+        notify_badge(title, body, is_done, o.notify_on_blocked, o.notify_on_done);
     }
     let _ = ctx.emitter.emit(
         "inside_leg_buffer_flushed",
@@ -8401,13 +8396,8 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
                 );
             }
             if let Some((title, body, is_done)) = notify {
-                notify_badge(
-                    title,
-                    body,
-                    is_done,
-                    ctx.opts.notify_on_blocked,
-                    ctx.opts.notify_on_done,
-                );
+                let o = &ctx.opts;
+                notify_badge(title, body, is_done, o.notify_on_blocked, o.notify_on_done);
             }
             Response::ok(req.id, json!({"stored": true, "seq": seq}))
         }

@@ -60,7 +60,7 @@ pub(super) fn codex_thread_on_done(
     })
 }
 
-/// The codex thread driver's inside-leg write (x-fd66): the daemon maps the
+/// The codex thread driver's inside-leg write: the daemon maps the
 /// actor's turn phases onto reports and lands them on the row that holds the
 /// thread's session id, through the same seq-gated core the claude hook's
 /// flush uses, so the Done transition notifies exactly as a claude Stop hook
@@ -113,7 +113,7 @@ pub(super) fn codex_thread_on_status(
     })
 }
 
-/// Land one thread-driver report (x-fd66): off the actor task, through the
+/// Land one thread-driver report: off the actor task, through the
 /// shared seq gate, notifying on the done/blocked episode edge exactly as the
 /// claude hook's flush does, and emitting one event per accepted write.
 async fn write_thread_inside_leg(
@@ -155,9 +155,9 @@ async fn write_thread_inside_leg(
 /// The ONE seq-gated inside-leg writer core: find the row holding
 /// `session_uuid`, apply `rep` only when its seq is newer, clear the scrape
 /// verdict on the flip (hook beats scrape), and return the transition notify
-/// intent `(body, is_done)` when the report ENTERED blocked/done (x-dd84).
+/// intent `(body, is_done)` when the report ENTERED blocked/done.
 /// Both writers route through here - the claude hook's buffered flush and the
-/// codex thread driver's direct write (x-fd66) - so the gate, the capability
+/// codex thread driver's direct write - so the gate, the capability
 /// clear, and the episode edge cannot drift apart. A crowned row's done is a
 /// turn end under its reign, so it carries no intent. `None` on a stale-seq
 /// drop or a row that holds no such session.
