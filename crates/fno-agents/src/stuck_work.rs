@@ -72,7 +72,10 @@ fn hung_verb(pid: u32, age_s: u64, args: &str, now_unix: u64) -> Option<Finding>
         return None;
     }
     let timeout = declared_timeout(&tokens);
-    let floor = 3 * timeout.as_ref().map(|(_, s)| *s).unwrap_or(DEFAULT_HUNG_FLOOR_S);
+    let floor = 3 * timeout
+        .as_ref()
+        .map(|(_, s)| *s)
+        .unwrap_or(DEFAULT_HUNG_FLOOR_S);
     if age_s <= floor {
         return None;
     }

@@ -2740,7 +2740,10 @@ fn stuck_work_render_lines_block_or_nothing() {
     let lines = fno_agents::stuck_work::render_lines(&value);
     assert_eq!(lines[0], "stuck work:");
     assert_eq!(lines.len(), 3);
-    assert_eq!(lines[1], "  hung verb pid 7 1h fno backlog advance (over 1800s)");
+    assert_eq!(
+        lines[1],
+        "  hung verb pid 7 1h fno backlog advance (over 1800s)"
+    );
     let clean = serde_json::json!({"hung_verbs": [], "dead_holders": []});
     assert!(fno_agents::stuck_work::render_lines(&clean).is_empty());
     let err = serde_json::json!({"error": "ps exited 1"});
