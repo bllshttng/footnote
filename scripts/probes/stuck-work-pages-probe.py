@@ -22,6 +22,11 @@ import subprocess
 import sys
 import time
 
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "cli" / "src"))
+
+from fno import paths  # noqa: E402
+
 SLEEPER_KEY = "flight:probe-stuck-work"
 POLL_BUDGET_S = 12 * 60
 FANOUT_GRACE_S = 90
@@ -37,29 +42,23 @@ def fail(step: str, detail: str) -> int:
     return 1
 
 
-def journal_path() -> pathlib.Path:
-    code, out, err = run(["fno-agents", "state", "path", "events"])
-    if code != 0 or not out.strip():
-        raise RuntimeError(f"fno-agents state path events failed: {err.strip()}")
-    return pathlib.Path(out.strip().splitlines()[-1])
+def journals() -> list[pathlib.Path]:
+    """Every event journal and rotation, oldest first, from the one resolver."""
+    return paths.event_journals()
 
 
-def phone_cursor() -> pathlib.Path:
-    code, out, err = run(["fno-agents", "state", "path", "status-sinks"])
-    if code != 0 or not out.strip():
-        raise RuntimeError(f"state path status-sinks failed: {err.strip()}")
-    return pathlib.Path(out.strip().splitlines()[-1]) / "phone.cursor"
+def phone_cursor(project_root: pathlib.Path) -> pathlib.Path:
+    return paths.status_sinks_dir(project_root) / "phone.cursor"
 
 
-def find_notice(journal: pathlib.Path, pid: int, since_ts: str) -> tuple[str, str] | None:
+def find_notice(journal_list: list[pathlib.Path], pid: int, since_ts: str) -> tuple[str, str] | None:
     """The newest operator_notice row naming the pid and the probe key.
 
-    Returns (row_ts, cursor_floor) once found. Reads the journal and its .1
-    rotation, newest last.
+    Returns (row_ts, body) once found. The resolver hands over the journals
+    and their rotations, oldest first; the last match is the newest row.
     """
-    paths = [journal, journal.with_name(journal.name + ".1")]
     best: tuple[str, str] | None = None
-    for path in paths:
+    for path in journal_list:
         if not path.exists():
             continue
         try:
@@ -79,7 +78,7 @@ def find_notice(journal: pathlib.Path, pid: int, since_ts: str) -> tuple[str, st
             ts = str(row.get("ts", ""))
             if since_ts and ts < since_ts:
                 continue
-            best = best or (ts, body)
+            best = (ts, body)
     return best
 
 
@@ -114,8 +113,8 @@ def checkin_attends(scope: str, pid: int, cwd: pathlib.Path) -> tuple[bool, str]
 
 
 def run_live(scope: str, cwd: pathlib.Path) -> int:
-    journal = journal_path()
-    cursor_path = phone_cursor()
+    journal_list = journals()
+    cursor_path = phone_cursor(cwd)
     started_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     sleeper = subprocess.Popen(
@@ -141,7 +140,7 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
         budget = POLL_BUDGET_S
         found = None
         while budget > 0:
-            found = find_notice(journal, sleeper.pid, started_ts)
+            found = find_notice(journal_list, sleeper.pid, started_ts)
             if found:
                 break
             time.sleep(15)
@@ -177,7 +176,7 @@ def run_self_test() -> int:
             "ts": "2026-09-15T10:00:00Z",
             "type": "operator_notice",
             "data": {
-                "title": "control plane: needs attention",
+                "title": "fixture: needs attention",
                 "body": "hung verb pid 4242 2m fno-py -c sleep --timeout 20s (over 3x --timeout 20s)"
                 f"\ndead holder {SLEEPER_KEY} holder probe pid 99 absent held 5m",
                 "pointer": "fno agents status",
@@ -188,15 +187,16 @@ def run_self_test() -> int:
     tmp.mkdir(parents=True, exist_ok=True)
     journal = tmp / "events.jsonl"
     journal.write_text(fixture + "\n")
-    found = find_notice(journal, 4242, "2026-09-15T09:00:00Z")
+    journal_list = [journal]
+    found = find_notice(journal_list, 4242, "2026-09-15T09:00:00Z")
     if not found:
         return fail("self-test finder", "the fixture row was not matched")
     if found[0] != "2026-09-15T10:00:00Z":
         return fail("self-test finder", f"wrong ts: {found[0]}")
-    missed = find_notice(journal, 4242, "2026-09-15T11:00:00Z")
+    missed = find_notice(journal_list, 4242, "2026-09-15T11:00:00Z")
     if missed:
         return fail("self-test finder", "a pre-episode row passed the since filter")
-    wrong = find_notice(journal, 7777, "")
+    wrong = find_notice(journal_list, 7777, "")
     if wrong:
         return fail("self-test finder", "an unrelated pid matched")
 
