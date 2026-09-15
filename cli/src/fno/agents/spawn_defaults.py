@@ -700,10 +700,9 @@ def _seed_of(toks: Sequence[str]) -> Optional[str]:
 
 
 def replace_seed(args: Sequence[str], new: str) -> List[str]:
-    """Rewrite the seed :func:`_seed_of` reads - ``args[0]`` is the verb - to
-    ``new``, through the ONE slot scan. With no seed, ``new`` is inserted as a
-    positional before any ``--`` fence or ``--argv`` boundary, so it can never
-    land in a fenced prompt or a provider payload."""
+    """Rewrite the seed :func:`_seed_of` reads (``args[0]`` is the verb) to
+    ``new``. With no seed, ``new`` is inserted as a positional before any
+    ``--`` fence or ``--argv`` boundary, never inside a payload."""
     toks = list(args[1:])
     slot = _seed_slot(toks)
     if slot is None:

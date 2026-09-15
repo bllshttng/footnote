@@ -720,14 +720,10 @@ def lost_verb_refusal(message: str) -> Optional[str]:
 
 
 def cannot_fire_refusal(message: str, harness: str) -> Optional[str]:
-    """The refusal for a verb-shaped seed whose verb cannot expand, or None.
-
-    An intact ``$fno:verb`` seed still lands as prose when the footnote plugin
-    is not enabled in the codex home this machine resolves. ``missing`` and
-    ``wrong-channel`` are the measured-absent states and refuse; an unreadable
-    state (no codex CLI on PATH) fails open, because the spawn fails on its
-    own there.
-    """
+    """The refusal for a verb-shaped seed whose verb cannot expand, or None:
+    the plugin is not enabled in the resolved codex home. ``missing`` and
+    ``wrong-channel`` refuse; an unreadable state fails open (the spawn fails
+    on its own there)."""
     if harness != "codex" or not is_verb_seed(message):
         return None
     from fno.setup.codex_plugin import CodexPluginError, inspect_freshness
@@ -1380,14 +1376,11 @@ def node_seed(
 ) -> Optional[str]:
     """The seed a ``--node`` spawn should launch, or None to pass it through.
 
-    The authority is :func:`resolve_effective_verb` over the node's stored
-    ``dispatch_verb``, difficulty and plan rung - the same derivation
-    ``backlog advance`` runs. Out-of-family leads, ``--reconcile`` seeds, and
-    a family verb that already agrees return None; a family verb that
-    DISAGREES refuses (an unknown verb is not evidence of ``/target``, the
-    spawn_gate posture). A verbless seed composes the node's resolved command
-    in front of the prose. Raises :class:`DispatchResolveError` for an
-    unreadable row or an unanswerable derivation. Full contract:
+    The authority is the same ``backlog advance`` derivation: out-of-family
+    leads, ``--reconcile`` seeds, and an agreeing family verb return None; a
+    DISAGREEING family verb refuses (an unknown verb is not evidence of
+    ``/target``); a verbless seed composes the node's resolved command in
+    front of the prose. Full contract:
     docs/architecture/backlog-graph-verb-contracts.md. The spawn seam skips
     empty seeds so the door's node-seed render keeps the brief env and the
     worktree ensure."""

@@ -777,13 +777,9 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "Sequence[str]":
 
 
 def _refuse_lost_verb_payload(args: "Sequence[str]") -> None:
-    """Refuse a seed whose ``$fno:`` verb the calling shell ate, before any route.
-
-    Sits at the make_context seam beside the other pre-route refusals: a check
-    inside ``cmd_spawn`` never sees a spawn the Rust client execs (auto mode
-    with an installed binary), and the fleet's default ``--substrate thread``
-    spawn is exactly that shape.
-    """
+    """Refuse a seed whose ``$fno:`` verb the calling shell ate, before any
+    route - a check inside ``cmd_spawn`` never sees a spawn the Rust client
+    execs, and the fleet's default thread spawn is exactly that shape."""
     from fno.agents.harness_map import lost_verb_refusal
     from fno.agents.spawn_defaults import _seed_of
 
@@ -795,11 +791,9 @@ def _refuse_lost_verb_payload(args: "Sequence[str]") -> None:
 
 
 def _refuse_unfireable_seed(args: "Sequence[str]") -> None:
-    """Refuse a verb-shaped seed the codex session cannot expand, pre-route.
-
-    Beside ``_refuse_lost_verb_payload``: the Rust client execs the fleet's
-    default thread spawn, so a check inside ``cmd_spawn`` never sees it.
-    """
+    """Refuse a verb-shaped seed the codex session cannot expand, pre-route
+    (beside ``_refuse_lost_verb_payload``, for the same exec-before-cmd_spawn
+    reason)."""
     from fno.agents.harness_map import cannot_fire_refusal
     from fno.agents.spawn_defaults import _seed_of
     from fno.config._dispatch_verbs import is_verb_seed
@@ -1069,25 +1063,12 @@ def _gate_rm_at_seam(args: Sequence[str]) -> bool:
 def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--crown`` (bestow-at-spawn).
 
-    ``--crown``/``-k`` is implemented only in the Python spawn path (``cmd_spawn``
-    derives the rung from the scope and stamps the crown onto the spawned row).
-    The Rust client parses neither spelling, so a crown-bearing spawn that
-    auto-routed to the binary would exit with ``unknown flag`` - the documented
-    grammar reachable only from the path the default route never reaches. Same
-    shape and reason as ``--role`` above. Detected here so the call falls through
-    to the Python runtime that owns the implementation.
-
-    BOTH spellings must be listed. The short form is not cosmetic: it is the one
-    the docs teach for a portfolio (``-k etl -k web``), so a detector that knew
-    only the long form would route exactly the multi-scope case into a binary
-    that cannot parse it. The attached short-option form (``-kVAL``, no space -
-    Click accepts it and parses it as ``-k VAL``) must be listed too, or a spawn
-    spelled that way falls through to the Rust binary that exits ``unknown flag``.
-
-    Load-bearing on ``--substrate bg``, where it is what makes the crown land at
-    all: bg spawns otherwise exec the binary. The pane substrate diverts on its
-    own via ``_is_pane_substrate_spawn``.
-    """
+    ``--crown``/``-k`` is parsed only by the Python spawn path; every Click
+    spelling must be listed here (the attached ``-kVAL`` included) or that
+    spawn falls through to the Rust binary and exits ``unknown flag``. This
+    predicate is what makes a crown land on ``--substrate bg`` at all: bg
+    spawns otherwise exec the binary, and the pane substrate diverts on its
+    own via ``_is_pane_substrate_spawn``."""
     if verb != "spawn":
         return False
     return _has_flag(args, "-k", ("--crown",))
@@ -1116,14 +1097,9 @@ def _is_dispatch_account_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
 
 
 def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
-    """True for a ``spawn`` carrying ``--resume`` / ``-r`` (x-f76e / x-9844).
-
-    The front-door normalizer rewrites ``-r <id>`` into ``--resume <full-uuid>``,
-    and the Rust spawn parser does not (yet) know ``--resume``, so a resume-bearing
-    spawn that auto-routed to the binary would exit ``unknown flag: --resume``.
-    Keeping it Python routes it to ``cmd_spawn``, which owns the bg-thread revival
-    lane. (``-r`` is matched too for a pre-normalization raw argv.)
-    """
+    """True for a ``spawn`` carrying ``--resume`` / ``-r`` (x-f76e / x-9844):
+    the Rust spawn parser knows neither spelling, so keeping it Python routes
+    it to ``cmd_spawn``, which owns the bg-thread revival lane."""
     if verb != "spawn":
         return False
     return _has_flag(args, "-r", ("--resume",))
