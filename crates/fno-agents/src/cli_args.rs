@@ -28,6 +28,9 @@ pub struct RestartArgs {
     /// Break-glass: SIGKILL the lockfile holder before any probe; plain restart drains gracefully
     #[arg(long)]
     pub force: bool,
+    /// Chain-only: swap only when the running daemon measures drifted; quiet exit 0 on fresh, down, or unknown
+    #[arg(long)]
+    pub if_drifted: bool,
     #[command(flatten)]
     pub json: JsonOnly,
 }
@@ -294,6 +297,9 @@ mod tests {
         let a = RestartArgs::try_parse_from(["--force"]).expect("--force parses");
         assert!(a.force);
         assert!(!a.json.json);
+        let a = RestartArgs::try_parse_from(["--if-drifted"]).expect("--if-drifted parses");
+        assert!(a.if_drifted);
+        assert!(!a.force);
         let a = RestartArgs::try_parse_from(["-J"]).expect("-J is the json alias");
         assert!(a.json.json);
     }

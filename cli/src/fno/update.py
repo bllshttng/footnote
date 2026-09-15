@@ -948,16 +948,16 @@ def _sync_triad(cargo_bin_dir: Path, *, dry_run: bool = False) -> None:
         typer.echo(f"fno doctor update: synced fno-agents triad -> {dest}")
 
 
-def _report_daemon_drift() -> None:
-    """Relay the doctor-owned Rust drift signal after a triad refresh."""
-    try:
-        from fno.doctor import _daemon_drift_warning
-
-        warning = _daemon_drift_warning()
-    except Exception:
+def _chained_restart_if_drifted(binary: Path, *, dry_run: bool = False) -> None:
+    """Chain the crate's drift-gated daemon swap; the verb is quiet on fresh or down."""
+    cmd = [str(binary), "restart", "--if-drifted"]
+    if dry_run:
+        typer.echo(f"Would run: {shlex.join(cmd)}")
         return
-    if warning:
-        typer.echo(f"fno doctor update: note: {warning}", err=True)
+    try:
+        subprocess.run(cmd, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = False) -> RefreshOutcome:
@@ -1032,7 +1032,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         # other install locations behind (AC2-FR). The gate's fresh verdict must
         # NOT short-circuit convergence.
         _sync_triad(installed_bin.parent, dry_run=dry_run)
-        _report_daemon_drift()
+        _chained_restart_if_drifted(installed_bin, dry_run=dry_run)
         return "fresh" if converged else "partial"
 
     # Derive the install root from the detected binary so the refresh lands in the
@@ -1131,7 +1131,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # client/daemon/worker stay a coherent set (the same-dir sibling contract).
     # After a successful cargo install the triad lives at <install_root>/bin.
     _sync_triad(install_root / "bin", dry_run=False)
-    _report_daemon_drift()
+    _chained_restart_if_drifted(install_root / "bin" / "fno-agents", dry_run=False)
 
     # Final proof: re-probe as finally deployed; an attempted build alone is
     # never freshness (an unproven component downgrades to partial).
@@ -1410,7 +1410,9 @@ def update_command(
 
     Picks up local CLI source changes by running ``uv tool install
     --reinstall-package fno`` (or ``pip install --user --force-reinstall`` if
-    uv is unavailable).
+    uv is unavailable). When the running agents daemon is an older build than
+    the installed one, it chains the crate's drift-gated restart (never a mux
+    server).
     """
     # Normalize to plain bool: when called directly (not via CLI), Typer Option
     # defaults are OptionInfo objects, not False. Guard against both.

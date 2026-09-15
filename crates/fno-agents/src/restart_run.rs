@@ -4,8 +4,18 @@
 
 use serde_json::json;
 
-use crate::client::{resolve_daemon_bin, restart_daemon, RestartError, RestartOutcome};
+use crate::client::{
+    check_daemon_drift, resolve_daemon_bin, restart_daemon, RestartError, RestartOutcome,
+};
+use crate::drift::DriftState;
 use crate::paths::AgentsHome;
+
+/// The `--if-drifted` gate: only a measured `Drifted` daemon earns a swap. A
+/// down daemon runs no old build, and `Unknown` never swaps on a guess; the
+/// plain restart stays the remedy when a caller really wants one.
+fn restart_gate(state: &DriftState) -> bool {
+    matches!(state, DriftState::Drifted { .. })
+}
 
 /// Render a restart outcome into (stdout line, optional stderr line, exit code).
 /// Pure so the observable states (swapped / forced / was-down / failed) are unit
@@ -71,8 +81,11 @@ pub fn render_restart(
 /// `force`, SIGKILL the lockfile holder first and lazy-start fresh (x-3498).
 /// With `json`, stdout carries ONE machine line (the keepers summary the
 /// Python adapter parses); every human receipt moves to stderr.
-pub async fn run_restart(force: bool, json: bool) -> i32 {
+pub async fn run_restart(force: bool, json: bool, if_drifted: bool) -> i32 {
     let home = AgentsHome::from_env();
+    if if_drifted && !restart_gate(&check_daemon_drift(&home).await) {
+        return 0;
+    }
     let daemon_bin = resolve_daemon_bin();
     let outcome = restart_daemon(&home, &daemon_bin, force).await;
     let (out, err, code) = render_restart(&outcome);
@@ -156,4 +169,30 @@ pub async fn run_restart(force: bool, json: bool) -> i32 {
         })).collect::<Vec<_>>(), "pane_keepers_stale": stale_panes});
     println!("fno agents restart: keepers {summary}");
     u8::from(cycled.iter().any(|c| c.result != "cycled")) as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::restart_gate;
+    use crate::drift::{classify, ExeFingerprint};
+    use std::path::PathBuf;
+
+    #[test]
+    fn gate_swaps_only_on_measured_drift() {
+        let fp = ExeFingerprint {
+            path: PathBuf::from("/x"),
+            mtime_nanos: 1,
+            size: 1,
+        };
+        let drifted = classify(
+            Some(&fp),
+            Some(&ExeFingerprint {
+                size: 2,
+                ..fp.clone()
+            }),
+        );
+        assert!(restart_gate(&drifted));
+        assert!(!restart_gate(&classify(Some(&fp), Some(&fp))));
+        assert!(!restart_gate(&classify(None, Some(&fp))));
+    }
 }

@@ -994,7 +994,12 @@ async fn run(args: Vec<String>) -> i32 {
                 return 2;
             }
         };
-        return fno_agents::restart_run::run_restart(parsed.force, parsed.json.json).await;
+        return fno_agents::restart_run::run_restart(
+            parsed.force,
+            parsed.json.json,
+            parsed.if_drifted,
+        )
+        .await;
     }
 
     // `reap` is the manual dead-row GC (x-b1aa): the SAME sweep the daemon runs
