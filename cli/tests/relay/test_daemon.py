@@ -116,7 +116,7 @@ def test_ac5_claude_hop_carries_peer_stamp(bus, events):
     daemon.route_message(e, deliver=rec, index=_idx(), events_path=events, seen=set())
     _, framed = rec.calls[0]
     parsed = env.parse(framed)
-    # node x-1f23: the relay tag converged to <fno_mail>. x-f1f0: the tag
+    # The relay tag converged to <fno_mail>. The v2 tag
     # carries the harness again, spelled through harness_for_provider; the
     # model stays on the bus row only.
     assert parsed["from_session"] == "A" and parsed["body"] == "ping"

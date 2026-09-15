@@ -1,7 +1,7 @@
 """`fno agents mail drain` prints the stored body verbatim and labels a
 non-peer origin.
 
-x-f1f0: the drain re-stamp is gone -- the envelope carries its authority
+The drain re-stamp is gone -- the envelope carries its authority
 boundary in header attributes, so the render has nothing to add. The one
 provenance the reader cannot read off the body is the record's own origin
 (gated at write time by classify_origin), so a non-peer origin surfaces as a

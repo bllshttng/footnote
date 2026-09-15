@@ -40,7 +40,7 @@ def test_two_v7_siblings_collide_on_the_display_handle():
 
 
 def test_the_envelope_carries_the_full_session_when_given_one():
-    # x-f1f0 D2: `from` IS the full session id; one attribute, one address.
+    # D2: `from` IS the full session id; one attribute, one address.
     tag = fno_mail_open(from_=V7_A)
     assert f'from="{V7_A}"' in tag
     assert "from_session" not in tag

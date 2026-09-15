@@ -1796,7 +1796,7 @@ def test_from_self_resolves_a_pane_codex_worker(runner, mailbox, monkeypatch):
     assert res.exit_code == 0, res.output + (res.stderr or "")
     assert injected, "send never reached the claude transport"
     # The wrapped envelope carries the sender inside its fno_mail header; the
-    # transport's sender kwarg is the raw lane's. x-f1f0: `from` holds the
+    # transport's sender kwarg is the raw lane's. `from` holds the
     # full session id when one is proven.
     assert f'from="{SID_CODEX}"' in injected[0][1]
 

@@ -151,7 +151,8 @@ def resolve_self_harness(
 
     The envelope producers stamp it verbatim: a None omits the ``harness``
     attribute, never renders a guess (``cli``/``unknown`` never hit the wire,
-    x-7e16). The same owned resolution every self_* resolver here uses.
+    A recorded ruling bars the guesses. The same owned resolution every
+    self_* resolver here uses.
     """
     try:
         ident = resolve_self_identity(env)

@@ -10,7 +10,7 @@ claude ``control.sock`` inject (``fno-agents mail-inject``), the codex/gemini
 daemon deliver, and the relay PTY hop (which uses the single-line transport
 variant built from :func:`fno_mail_open`).
 
-Field rule (from G1, reshaped by x-f1f0): a field is a TAG attribute only if
+Field rule (from G1, reshaped in the v2 envelope): a field is a TAG attribute only if
 the recipient needs it AT MESSAGE TIME and cannot cheaply look it up by
 ``from``. The envelope is the paired form ``open tag / body / close tag`` --
 no footer lines of any kind. ``from`` holds the sender's FULL session id when
@@ -82,7 +82,7 @@ def fno_mail_open(
     origin: Optional[str] = None,
 ) -> str:
     """Render the ``<fno_mail ...>`` OPEN tag with double-quoted attributes in
-    x-f1f0 order: ``from``, ``harness``, ``from_rank``, ``to``, ``to_rank``,
+    Render order: ``from``, ``harness``, ``from_rank``, ``to``, ``to_rank``,
     ``id``, ``reply_to``, ``node``, ``origin``. Every attribute after ``from``
     renders only when set, and no reader assumes order (``reply_resolve.py``,
     ``drain_dedup.py`` and the Rust ``split`` reads are all order-free).
@@ -288,7 +288,7 @@ def wrap_fno_mail(
         {body}
         </fno_mail>
 
-    Three lines, no footer lines of any kind (x-f1f0: only fno writes the
+    Three lines, no footer lines of any kind (only fno writes the
     tag, so the tag itself marks agent text, and the crowns ride the header
     where ``from_rank`` is verified by the Rust door). ``from_session`` is the
     SENDER's full session id: when it resolves, it IS the ``from`` value and
@@ -297,7 +297,7 @@ def wrap_fno_mail(
 
     ``harness`` is the raw sender harness (``claude``, ``codex``); it renders
     through :func:`harness_for_provider`. An unresolvable harness is omitted,
-    never spelled ``cli`` or ``unknown`` on the wire (x-7e16).
+    never spelled ``cli`` or ``unknown`` on the wire.
 
     This is the form injected over the ``control.sock`` (claude) and stored in
     the durable bus body, so a delivered message is self-recording -- ``grep

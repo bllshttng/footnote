@@ -7298,7 +7298,7 @@ def _deliver_live(
         # otherwise leave that side raw rather than emit <fno_mail from=""> (codex
         # peer P2). mail.to is the recipient short resolved in dispatch_send.
         if mail.to:
-            # x-3dcc: this ctx wraps B's replies, injected into A, so the
+            # The recipient ctx wraps B's replies, injected into A, so the
             # reader rank reads A's session (mail.from_session).
             relay_ctxs[entry.name] = _MailCtx(
                 from_=mail.to,

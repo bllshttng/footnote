@@ -1196,7 +1196,7 @@ def test_ac3_hp_envelope_carries_real_from_and_the_model_rides_the_bus(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
     drained = runner.invoke(app, ["agents", "mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
-    # x-f1f0 D2: `from` IS the full session id; the model never renders, but
+    # D2: `from` IS the full session id; the model never renders, but
     # the harness does (spelled through harness_for_provider). The model
     # survives in the bus record, where audit reads it.
     assert f'from="{sender_sid}"' in body

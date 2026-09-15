@@ -5092,7 +5092,7 @@ def cmd_drain_self(
     job_to_print = [m for m in job_msgs if not _already_landed(m)]
     job_skipped = [m for m in job_msgs if _already_landed(m)]
 
-    # x-f1f0: the body prints exactly as stored -- the envelope carries the
+    # The body prints exactly as stored -- the envelope carries the
     # authority boundary in its header attributes, so the drain re-stamp is
     # gone. A non-peer origin surfaces as a label on the header line (the
     # record's own origin, gated at write time by classify_origin), so the

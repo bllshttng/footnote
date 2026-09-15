@@ -47,7 +47,7 @@ def test_open_tag_is_lowercase_quoted_attrs_from_first():
 
 
 def test_open_tag_renders_harness_through_the_wire_vocabulary():
-    # x-f1f0 D1/D6: the raw harness rides the tag spelled through
+    # D1/D6: the raw harness rides the tag spelled through
     # harness_for_provider, and renders only when set.
     assert (
         fno_mail_open(from_="7d1f8bdc", harness="claude")
@@ -61,7 +61,7 @@ def test_open_tag_renders_harness_through_the_wire_vocabulary():
 
 
 def test_open_tag_renders_ranks_after_their_side():
-    # x-f1f0 D1 order: from, harness, from_rank, to, to_rank, id, reply_to,
+    # D1 order: from, harness, from_rank, to, to_rank, id, reply_to,
     # node, origin. Sender facts, then reader facts, then threading.
     assert (
         fno_mail_open(
@@ -79,7 +79,7 @@ def test_open_tag_renders_ranks_after_their_side():
 
 
 def test_open_tag_holds_one_full_id_address():
-    # x-f1f0 D2: `from` IS the full session id when the caller resolved one;
+    # D2: `from` IS the full session id when the caller resolved one;
     # the retired from_session attribute renders nowhere.
     full = "0199a1b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
     tag = fno_mail_open(from_=full, id="msg-fea270", to="08e8c104", origin="peer")
@@ -119,7 +119,7 @@ def test_absent_reply_to_is_byte_identical_to_pre_change():
 
 
 def test_wrap_is_three_lines_with_no_footer():
-    # x-f1f0 D4: open tag, body, close tag. Only fno writes the tag, so the
+    # D4: open tag, body, close tag. Only fno writes the tag, so the
     # tag itself marks agent text; no `-- ` footer line renders of any kind.
     assert (
         wrap_fno_mail("ship it", from_="7d1f8bdc", node="x-26df")
@@ -141,7 +141,7 @@ def test_wrap_renders_crowned_shapes_as_header_attributes(monkeypatch):
     import fno.mail.envelope as envelope
     from pathlib import Path
 
-    registry = Path("/tmp/nonexistent-registry-x-f1f0.json")
+    registry = Path("/tmp/nonexistent-registry.json")
 
     def _crown(path, session):
         assert path == registry
@@ -173,7 +173,7 @@ def test_wrap_from_holds_the_full_session_id_and_from_rank(monkeypatch):
     import fno.mail.envelope as envelope
     from pathlib import Path
 
-    registry = Path("/tmp/nonexistent-registry-x-f1f0.json")
+    registry = Path("/tmp/nonexistent-registry.json")
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
     monkeypatch.setattr(
         envelope, "crown_at", lambda _p, s: "L1 fno" if s == "session-king" else None
@@ -189,14 +189,14 @@ def test_wrap_from_holds_the_full_session_id_and_from_rank(monkeypatch):
 
 
 def test_envelope_overhead_budget(monkeypatch):
-    # x-f1f0: the v2 header carries what the footers did, cheaper. Raising
+    # The v2 header carries what the footers did, cheaper. Raising
     # either bound is a decision a PR must argue, not a test fix.
     import fno.mail.envelope as envelope
     from pathlib import Path
 
     body = "ship the compact envelope"
     full_id = "0199a1b2-3c4d-7e8f-9a0b-1c2d3e4f5a6b"
-    registry = Path("/tmp/nonexistent-registry-x-f1f0.json")
+    registry = Path("/tmp/nonexistent-registry.json")
     monkeypatch.setattr(envelope, "agents_registry_path", lambda: registry)
     monkeypatch.setattr(
         envelope, "crown_at", lambda _p, s: "L2 x-37af" if s == full_id else "L1 fno"
@@ -214,7 +214,7 @@ def test_envelope_overhead_budget(monkeypatch):
     )
     assert 'from_rank="L2 x-37af"' in wrapped
     assert 'to_rank="L1 fno"' in wrapped
-    # Crowned overhead, measured 176 at the reshaping (537 before x-d7cf).
+    # Crowned overhead, measured 176 at the reshaping (537 before the compaction).
     assert len(wrapped) - len(body) <= 200
 
     monkeypatch.setattr(envelope, "crown_at", lambda _p, _s: None)
@@ -230,7 +230,7 @@ def test_envelope_overhead_budget(monkeypatch):
     )
     assert "from_rank" not in peer_wrapped
     assert "to_rank" not in peer_wrapped
-    # Peer overhead, measured 128 at the reshaping (311 after x-d7cf).
+    # Peer overhead, measured 128 at the reshaping (311 after the compaction).
     assert len(peer_wrapped) - len(body) <= 160
 
 

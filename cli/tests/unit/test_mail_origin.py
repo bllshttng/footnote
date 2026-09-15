@@ -264,7 +264,7 @@ def test_peer_envelope_is_footerless_without_a_crown(tmp_path, monkeypatch):
 
 
 def test_crowned_sender_renders_from_rank_not_a_footer(tmp_path, monkeypatch):
-    # x-f1f0 D3: the sender crown moved INTO the header as from_rank, read
+    # D3: the sender crown moved INTO the header as from_rank, read
     # from the live registry at render time, never passed by a caller.
     import fno.mail.envelope as envelope
 
@@ -416,7 +416,7 @@ def test_recipient_crown_is_read_from_the_live_matching_registry_row(tmp_path):
 def test_abdicated_recipient_reads_its_own_lost_crown_in_the_header(
     tmp_path, monkeypatch
 ):
-    """x-6346 AC3, x-f1f0 shape: an uncrowned recipient sees its state in what
+    """An uncrowned recipient sees its state in what
     it READS, without remembering to run `fno agents court` -- now as
     `to_rank="none"`, a positive attribute instead of a footer line."""
     import fno.mail.envelope as envelope

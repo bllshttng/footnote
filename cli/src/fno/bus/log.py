@@ -81,7 +81,7 @@ class Envelope:
     ``from`` and ``to`` are the addresses (registry names, or a project name in
     ``--to-project`` durable mode). ``from_harness``/``to_harness`` are
     metadata-only tags for transport selection and audit, never for addressing
-    (they hold a harness name, not a provider; x-f1f0 renamed them from
+    (they hold a harness name, not a provider; the v2 reshape renamed them from
     ``provider_from``/``provider_to``).
     Reply correlation uses ``request_id``/``in_reply_to`` exclusively.
     ``meta`` carries inbox-specific passthrough (refs, persist_to_memory) so the
@@ -249,7 +249,7 @@ def from_json_line(line: str) -> Envelope:
         body=str(obj.get("body", "")),
         ts=str(obj.get("ts", "")),
         v=int(obj.get("v", ENVELOPE_VERSION)),
-        # x-f1f0 rename: stored rows carry the old provider_* key, so the read
+        # v2 rename: stored rows carry the old provider_* key, so the read
         # accepts both, following the legacy fallback `origin` uses below.
         from_harness=obj.get("from_harness") or obj.get("provider_from"),
         to_harness=obj.get("to_harness") or obj.get("provider_to"),

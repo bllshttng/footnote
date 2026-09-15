@@ -54,7 +54,7 @@ def test_envelope_round_trips_with_version_and_from_key(bus):
 
 
 def test_from_harness_to_harness_rename_with_legacy_read(bus):
-    # x-f1f0 AC5: new rows carry from_harness/to_harness and never the
+    # AC5: new rows carry from_harness/to_harness and never the
     # provider_* keys; stored rows with the old keys still read back.
     from fno.bus.log import Envelope, to_json_line, from_json_line
 
