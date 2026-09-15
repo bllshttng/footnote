@@ -36,6 +36,11 @@ fn parked_id_listed_live_renders_as_a_lineage_child_ac3_hp() {
         Some(parent),
         "the child indents under its primary"
     );
+    assert_eq!(
+        child.lineage_kind.as_deref(),
+        Some("child"),
+        "the synthesized parked child is a CHILD edge"
+    );
     assert!(!child.external, "the child is drivable, not dim external");
     assert_eq!(child.liveness, Liveness::Alive);
     assert_eq!(

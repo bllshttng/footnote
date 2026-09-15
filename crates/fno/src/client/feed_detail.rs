@@ -187,8 +187,17 @@ pub(crate) fn detail_fields(
         ("pane", pane_value(item, dest)),
         (
             "parent",
-            match row.and_then(|a| a.spawned_by_session.as_deref()) {
-                Some(p) => p.to_string(),
+            match row.and_then(|a| {
+                a.spawned_by_session
+                    .as_deref()
+                    .map(|p| (a.lineage_kind.as_deref(), p))
+            }) {
+                // A CHILD names its parent session; a PEER names it as the
+                // handoff it is, so the pane shows the relation un-nested.
+                // A pre-v32 edge (no word yet) reads plain, like the child
+                // record it is.
+                Some((Some("peer"), p)) => format!("{p} (handoff)"),
+                Some((_, p)) => p.to_string(),
                 None => NOT_RECORDED.to_string(),
             },
         ),

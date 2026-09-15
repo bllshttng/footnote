@@ -26,7 +26,7 @@ use crossterm::style::Color as CtColor;
 use crossterm::{cursor, queue, style, terminal};
 use tokio::sync::mpsc;
 
-use crate::agents_view::lineage_layout;
+use crate::agents_view::{lineage_layout, lineage_parent};
 use crate::chrome;
 
 mod rename_overlay;
@@ -7412,7 +7412,7 @@ impl View {
                 let (order, _) = lineage_layout(
                     &squad_agents,
                     |a| a.harness_session_id.as_deref(),
-                    |a| a.spawned_by_session.as_deref(),
+                    |a| lineage_parent(a),
                 );
                 squad_agents = order.into_iter().map(|i| squad_agents[i]).collect();
                 // Top-K idle cap: attention rows (live, non-idle) always
@@ -7447,7 +7447,7 @@ impl View {
                 let (_, emitted_depths) = lineage_layout(
                     &emitted,
                     |a| a.harness_session_id.as_deref(),
-                    |a| a.spawned_by_session.as_deref(),
+                    |a| lineage_parent(a),
                 );
                 for (a, depth) in emitted.iter().zip(emitted_depths) {
                     agent_depth_at.insert(out.len(), depth);
@@ -7551,7 +7551,7 @@ impl View {
                 let (order, depths) = lineage_layout(
                     &visible,
                     |a| a.harness_session_id.as_deref(),
-                    |a| a.spawned_by_session.as_deref(),
+                    |a| lineage_parent(a),
                 );
                 for &i in &order {
                     agent_depth_at.insert(out.len(), depths[i]);

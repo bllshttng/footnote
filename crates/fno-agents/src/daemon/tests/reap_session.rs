@@ -156,8 +156,11 @@ fn xb7f8_a_terminal_parent_is_not_held_by_its_descendants() {
         }]),
     );
     state::update_registry(&home.registry_json(), |r| {
-        let mut child = x2774_spawn("row-child", "t-child", "s-child");
+        let mut child = x2774_spawn("jn-t-row-child", "t-child", "s-child");
         child.spawned_by_session = Some("s-parent".into());
+        // The child holds only while it can hold a process: a live CHILD
+        // edge, not an exited row.
+        child.status = crate::AgentStatus::Busy;
         r.entries
             .push(x2774_spawn("row-parent", "t-parent", "s-parent"));
         r.entries.push(child);
@@ -180,7 +183,7 @@ fn xb7f8_a_terminal_parent_is_not_held_by_its_descendants() {
     assert!(summary.kept_live_descendants.is_empty(), "{summary:?}");
     let registry = crate::state::load_registry(&home.registry_json()).unwrap();
     assert!(
-        registry.entries.iter().any(|e| e.name == "row-child"),
+        registry.entries.iter().any(|e| e.name == "jn-t-row-child"),
         "the live child stays in the registry"
     );
 
