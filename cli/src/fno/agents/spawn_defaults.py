@@ -15,6 +15,8 @@ import re
 import sys
 from typing import IO, Callable, List, Mapping, Optional, Sequence, Set, Tuple
 
+from fno.config._dispatch_verbs import is_verb_seed, parse_verb_token
+
 # Flags that consume the FOLLOWING token. Scanning for our three flags skips a
 # value flag's value so a value that looks like `--model` / `--effort` can never
 # masquerade as one of ours. Mirrors client.rs VALUE_FLAGS + the short aliases
@@ -648,7 +650,6 @@ def _default_resolver(short_id: str) -> Optional[str]:
 # No content-based inference of any kind - only an explicit leading slash-verb.
 # --------------------------------------------------------------------------- #
 
-_PROFILE_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 # Keep the old spelling on the canonical profile key for one release.
 _VERB_ALIASES = {"do": "execute"}
 # King work walks the crown slot whichever verb opens its seed.
@@ -716,46 +717,6 @@ def _role_resolves(role: str, settings: object, env: Optional[Mapping[str, str]]
         return False
 
 
-def _verb_shape_ok(tok: str) -> bool:
-    """The verb-token shape shared by every reader: a leading ``/`` or ``$``
-    sigil, no second ``/`` inside the token (an absolute path never matches),
-    an optional ``fno:`` namespace, and a lowercase-word remainder."""
-    if len(tok) < 2 or tok[0] not in "/$":
-        return False
-    body = tok[1:]
-    if "/" in body:
-        return False
-    if body.startswith("fno:"):
-        body = body[len("fno:"):]
-    return bool(_PROFILE_KEY_RE.match(body))
-
-
-def _verb_body(tok: str) -> str:
-    """``tok`` (already shape-checked) minus its sigil and ``fno:`` namespace."""
-    body = tok[1:]
-    if body.startswith("fno:"):
-        body = body[len("fno:"):]
-    return body
-
-
-def is_verb_seed(seed: Optional[str]) -> bool:
-    """Whether ``seed``'s FIRST token is a verb-shaped command: a leading
-    ``/`` or ``$`` sigil, no further ``/`` (an absolute path never matches),
-    an optional ``fno:`` namespace, remainder lowercase ``^[a-z0-9][a-z0-9_-]*$``.
-
-    This is the FIRE test, and index 0 is load-bearing: only a position-0
-    command may be rewritten or run unattended (permission-mode rung x-7198,
-    the payload-normalization gates). A verb inside prose must not pass; the
-    routing question is :func:`_verb_token`. Attended/unattended stays
-    DECLARED, never inferred (fno mail injects as user-shaped text)."""
-    if not seed:
-        return False
-    parts = seed.split()
-    if not parts:
-        return False
-    return _verb_shape_ok(parts[0])
-
-
 def _verb_token(seed: Optional[str]) -> Optional[str]:
     """The first verb-shaped token ANYWHERE in ``seed``, sigil and namespace
     stripped to the bare verb word; None when none. Routing never executes,
@@ -763,8 +724,8 @@ def _verb_token(seed: Optional[str]) -> Optional[str]:
     if not seed:
         return None
     for tok in seed.split():
-        if _verb_shape_ok(tok):
-            return _verb_body(tok)
+        if parsed := parse_verb_token(tok):
+            return parsed[0]
     return None
 
 
@@ -804,7 +765,7 @@ def _carries_fno_namespace(seed: Optional[str], tok: str) -> bool:
     if not seed:
         return False
     for t in seed.split():
-        if _verb_shape_ok(t) and _verb_body(t) == tok and t[1:].startswith("fno:"):
+        if (parsed := parse_verb_token(t)) and parsed[0] == tok and parsed[1]:
             return True
     return False
 

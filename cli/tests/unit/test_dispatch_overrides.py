@@ -25,3 +25,23 @@ def test_null_clears_and_returns_none():
     node = {"dispatch_brief": "old"}
     assert apply(node, None, "null") is None
     assert node["dispatch_brief"] is None
+
+
+def test_a_dollar_namespaced_verb_is_accepted_and_stored_namespaced():
+    """x-c976: `$fno:blueprint` stores as `/fno:blueprint`, the spelling the
+    resolver canonicalizes."""
+    node = {}
+    assert apply(node, "$fno:blueprint", None) is None
+    assert node["dispatch_verb"] == "/fno:blueprint"
+
+
+def test_an_unknown_dollar_verb_is_refused_at_write(capsys):
+    import pytest
+    import typer
+
+    node = {}
+    with pytest.raises(typer.Exit) as exc:
+        apply(node, "$fno:nope", None)
+    assert exc.value.exit_code == 2
+    assert "unknown dispatch verb" in capsys.readouterr().err
+    assert "dispatch_verb" not in node

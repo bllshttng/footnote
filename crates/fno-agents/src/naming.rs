@@ -211,17 +211,21 @@ pub fn agent_name(
     Ok(name)
 }
 
+/// Whether `verb` names a footnote work verb (a `word_codes` key): the same
+/// vocabulary the name mint resolves.
+pub fn is_word_code_verb(verb: &str) -> bool {
+    codes().word_codes.contains_key(verb)
+}
+
 /// The verb code for a work-verb word (`/target`, `$fno:blueprint`, ...).
 /// Unknown words raise: nothing defaults to `t`.
 pub fn verb_code_for(word: Option<&str>) -> Result<String, NameError> {
-    let mut v = word.unwrap_or("").trim();
-    if let Some(rest) = v.strip_prefix("/fno:") {
-        v = rest;
-    } else if let Some(rest) = v.strip_prefix("$fno:") {
-        v = rest;
-    }
-    let v = v.trim_start_matches('/');
-    let v = if v.is_empty() { "target" } else { v };
+    let w = word.unwrap_or("").trim();
+    let v = match crate::provider::parse_verb_token(w) {
+        Some((verb, _)) => verb,
+        None if w.is_empty() => "target",
+        None => w,
+    };
     codes().word_codes.get(v).cloned().ok_or_else(|| {
         NameError::refused(format!("unknown dispatch verb '{}'", word.unwrap_or("")))
     })
@@ -539,6 +543,15 @@ mod tests {
         assert_eq!(verb_code_for(Some("/fno:target")).unwrap(), "t");
         assert_eq!(verb_code_for(Some("$fno:blueprint")).unwrap(), "bp");
         assert_eq!(verb_code_for(Some("builtin")).unwrap(), "t");
+    }
+
+    /// x-c976: the name mint strips either sigil through the parse owner.
+    #[test]
+    fn verb_code_reads_both_sigils() {
+        assert_eq!(verb_code_for(Some("$target")).unwrap(), "t");
+        assert_eq!(verb_code_for(Some("/target")).unwrap(), "t");
+        let err = verb_code_for(Some("$fno:nope")).unwrap_err();
+        assert!(err.message.contains("unknown dispatch verb"), "{err}");
     }
 
     #[test]

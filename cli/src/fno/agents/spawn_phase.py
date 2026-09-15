@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from functools import cache
 
+from fno.config._dispatch_verbs import parse_verb_token
+
 
 @cache
 def _verb_phases() -> dict[str, str]:
@@ -35,13 +37,9 @@ def _verb_phases() -> dict[str, str]:
 def infer_phase(message: str | None) -> str:
     """do | review | blueprint | think | ship | "" when unlabelable.
 
-    First whitespace token of the message; it must open with one slash or
-    dollar, an optional fno: prefix is stripped, and the rest looks up in the
-    table. Anything else (prose, unmapped verbs, empty) answers ""."""
+    First whitespace token, parsed through the one verb-token owner; the
+    verb word looks up in the table. Anything else (prose, unmapped verbs,
+    empty) answers ""."""
     verb = (message or "").lstrip().split(maxsplit=1)[0] if message else ""
-    if not verb.startswith(("/", "$")):
-        return ""
-    bare = verb[1:]
-    if bare.startswith("fno:"):
-        bare = bare[len("fno:"):]
-    return _verb_phases().get(bare, "")
+    parsed = parse_verb_token(verb) if verb else None
+    return _verb_phases().get(parsed[0], "") if parsed else ""

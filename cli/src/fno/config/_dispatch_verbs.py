@@ -2,8 +2,9 @@
 bare string. Mirrors ``ReviewerDescriptor``; lookup drops shipped spellings."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Literal, Mapping, Optional, Sequence
+from typing import Literal, Mapping, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -30,9 +31,48 @@ class DispatchVerbDescriptor:
 #: The built-in dispatch verbs (harness_map mirrors this tuple; cycle-free).
 DEFAULT_DISPATCH_VERBS = ("/target", "/think", "/blueprint")
 
+_VERB_BODY_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
+
+def parse_verb_token(tok: str) -> Optional[Tuple[str, bool]]:
+    """Parse one verb-seed token: `(verb, namespaced)` or None.
+
+    The shape rule every reader shares: a leading ``/`` or ``$`` sigil, no
+    second ``/`` inside the token (an absolute path never matches), an
+    optional ``fno:`` namespace, and a lowercase-word remainder. Both sigils
+    parse - ``/fno:target``, ``$fno:target``, ``/target`` and ``$target``
+    all yield ``("target", ...)``."""
+    if len(tok) < 2 or tok[0] not in "/$":
+        return None
+    body = tok[1:]
+    if "/" in body:
+        return None
+    namespaced = body.startswith("fno:")
+    if namespaced:
+        body = body[len("fno:"):]
+    if not _VERB_BODY_RE.match(body):
+        return None
+    return body, namespaced
+
+
+def is_verb_seed(seed: Optional[str]) -> bool:
+    """Whether ``seed``'s FIRST token is a verb-shaped command token.
+
+    Index 0 is load-bearing: only a position-0 command may be rewritten or
+    run unattended. A verb inside prose must not pass."""
+    if not seed:
+        return False
+    parts = seed.split()
+    if not parts:
+        return False
+    return parse_verb_token(parts[0]) is not None
+
 
 def canonical_verb_key(key: str) -> str:
-    """Leading `/`, `/fno:x` -> `/x`: the resolver's canonical spelling."""
+    """Leading `/`, `/fno:x`, `$fno:x` and `$x` -> `/x`: the resolver's
+    canonical spelling. Keys the parser rejects keep the legacy strip."""
+    if parsed := parse_verb_token(key.strip()):
+        return "/" + parsed[0]
     k = key.strip().removeprefix("/")
     k = k.removeprefix("fno:")
     return "/" + k if k else k

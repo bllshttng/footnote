@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 import yaml as _yaml
 
+from ..config._dispatch_verbs import is_verb_seed
 from ..mutex import acquire_dir_mutex, release_dir_mutex
 from ..paths import EPHEMERAL_EVENTS_SUFFIX as EPHEMERAL_SUFFIX
 from .verify_child_promise import FanInTally, tally_fan_in, verify_child_promise
@@ -1307,7 +1308,7 @@ def agent_raw_inject(
     after the send, and its ``False`` covers both a clean refusal and a landed
     payload the confirm budget missed.
     """
-    if verb is None and payload.startswith("/"):
+    if verb is None and is_verb_seed(payload):
         verb = payload.split(maxsplit=1)[0]
     if not isinstance(self_send, bool):
         raise ValidationError("agent_raw_inject self_send must be a boolean")

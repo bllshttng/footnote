@@ -1326,7 +1326,7 @@ pub fn bg_create(
     // so a codex-authored `$fno:verb` reaches claude as `/fno:verb`. Bound
     // here (not in `build_argv`) so the stdin path on argv overflow carries
     // the same normalized text as the argv value.
-    let message = crate::provider::normalize_claude_command(message);
+    let message = crate::provider::render_verb_seed(message, "claude");
     let message = message.as_str();
     let use_stdin = use_stdin_for(message);
     let mut argv = build_argv(

@@ -2978,15 +2978,14 @@ def test_update_dispatch_verb_with_argument_refused(tmp_graph):
     assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
 
 
-def test_update_dispatch_verb_dollar_prefix_refused(tmp_graph):
-    """'$fno:' passes the name mint but the dispatch resolver canonicalizes
-    only '/fno:', so the value would still fail at drain. Refused here."""
+def test_update_dispatch_verb_dollar_prefix_stores_namespaced(tmp_graph):
+    """x-c976: `$fno:think` is the same verb as `/fno:think`; the write
+    accepts it and stores the canonical `/fno:` spelling."""
     r = _invoke("backlog", "add", "Dollar node")
     nid = json.loads(r.output)["id"]
     r2 = _invoke("backlog", "update", nid, "--dispatch-verb", "$fno:think")
-    assert r2.exit_code == 2, r2.output
-    assert "canonicalizes only '/fno:'" in r2.output
-    assert _read_graph(tmp_graph)[0].get("dispatch_verb") is None
+    assert r2.exit_code == 0, r2.output
+    assert _read_graph(tmp_graph)[0].get("dispatch_verb") == "/fno:think"
 
 
 def test_update_dispatch_verb_configured_allowlist_verb_writes(tmp_graph):

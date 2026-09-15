@@ -43,3 +43,26 @@ def test_harness_qualified_review_spellings_all_stamp_review():
     assert infer_phase("/fno:triage deep") == ""
     assert infer_phase("/fno:think deep") == "think"
     assert infer_phase("$fno:blueprint doc.md") == "blueprint"
+
+
+def test_infer_phase_reads_both_sigils_and_rejects_paths():
+    """x-c976: the phase label comes from the parse owner, so `$fno:` and
+    path prose answer exactly what `/fno:` and prose answer."""
+    assert infer_phase("$fno:blueprint x") == "blueprint"
+    assert infer_phase("/Users/x") == ""
+    assert infer_phase("$target x-1") == "do"
+
+
+def test_stage_profile_resolves_the_dollar_namespaced_verb():
+    """x-c976: the stage table reads the canonical key, never the raw sigil."""
+    from fno.dispatch_flags import _stage_profile
+
+    class _Agents:
+        profiles = {"think": "row"}
+
+    class _Settings:
+        agents = _Agents()
+
+    row, name = _stage_profile(_Settings(), "$fno:think")
+    assert row == "row"
+    assert name == "think"

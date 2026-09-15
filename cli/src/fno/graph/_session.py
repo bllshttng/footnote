@@ -13,6 +13,7 @@ import typer
 
 # The constant lives in claims beside the other two holder prefixes.
 from fno.claims.core import BLUEPRINT_HOLDER_PREFIX, HANDOVER_HOLDER_PREFIX
+from fno.config._dispatch_verbs import parse_verb_token
 
 
 def _graph_path():
@@ -595,9 +596,10 @@ def cmd_session_close(
     # dispatchers, and one must never resolve the blueprint slot just ended.
     launch_verb = launch.split()[0]
     stored_verb = launch_verb
-    if launch_verb.startswith("$fno:"):
-        stored_verb = "/fno:" + launch_verb[len("$fno:"):]
-    if launch_verb.startswith(("/fno:", "$fno:")):
+    parsed_launch = parse_verb_token(launch_verb)
+    if parsed_launch and parsed_launch[1]:
+        stored_verb = f"/fno:{parsed_launch[0]}"
+    if parsed_launch and parsed_launch[1]:
 
         def _write_dispatch_verb(entries):
             for entry in entries:

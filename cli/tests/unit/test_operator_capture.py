@@ -433,3 +433,12 @@ def test_status_human_path_names_skips_even_at_depth_zero(tmp_path, tmp_ledger, 
     assert "skipped 2 machine turn(s)" in result.output
     assert "interrupt_marker=1" in result.output
     assert "task_notification=1" in result.output
+
+
+def test_bare_command_reads_both_sigils_and_rejects_paths():
+    """x-c976: `$target x-1` is a bare command; a path is never one."""
+    from fno.inbox.operator_turns import _is_bare_command
+
+    assert _is_bare_command("$target x-1") is True
+    assert _is_bare_command("/fno:target x-1") is True
+    assert _is_bare_command("/Users/bb16/plan.md") is False

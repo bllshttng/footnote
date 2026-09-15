@@ -43,6 +43,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Mapping, Optional
 
+from fno.config._dispatch_verbs import canonical_verb_key, is_verb_seed, parse_verb_token
 from fno.config_io import _global_settings_path
 from fno.harness_names import KNOWN_HARNESSES
 
@@ -620,22 +621,28 @@ def normalize_command(command: str, harness: str) -> str:
     The plugin-qualified ``/fno:verb`` spelling is unambiguous by namespace and
     always rewrites. Pure string transform; no config or IO."""
     caps = capabilities(harness)  # loud on an unknown harness, before anything
-    cmd = command.strip()
-    first_word = cmd.split(maxsplit=1)[0] if cmd else ""
-    if first_word.startswith("/") and "/" in first_word[1:]:
-        return cmd
     surface = caps["command_surface"]
     if surface == _REFUSED:
+        # The deprecation tripwire stays ahead of the parse gate: a refused
+        # harness has no dispatch lane, so every command is refused loudly,
+        # whatever its first token shapes as.
         raise DispatchResolveError(_refused_reason(harness))
-    if surface == _CODEX_SKILL and cmd.startswith("/"):
-        # Operators use both the portable ``/target`` spelling and the
-        # advertised plugin-qualified ``/fno:target`` spelling. Codex's native
-        # skill surface is ``$fno:target`` in both cases. Strip the optional
-        # slash namespace before swapping the surface marker so repeated
-        # normalization at independent dispatch choke points is idempotent.
-        if cmd.startswith("/fno:"):
-            return "$fno:" + cmd[len("/fno:") :]
-        verb = first_word[1:]
+    cmd = command.strip()
+    first_word = cmd.split(maxsplit=1)[0] if cmd else ""
+    seed = parse_verb_token(first_word) if first_word else None
+    if seed is None:
+        return cmd
+    verb, namespaced = seed
+    tail = cmd[len(first_word):]
+    slash_sigil = first_word.startswith("/")
+    if surface == _CODEX_SKILL:
+        if not slash_sigil:
+            return cmd
+        # The namespaced spelling is unambiguous by namespace: it always
+        # rewrites, native or not (``/fno:review`` names the fno lane even
+        # though bare ``/review`` is codex's native verb).
+        if namespaced:
+            return "$fno:" + verb + tail
         # A bare ``/verb`` is rewritten only when it names a shipped footnote
         # verb that is not also a declared native verb of this harness: an
         # unknown or native verb stays literal instead of being captured into
@@ -651,39 +658,34 @@ def normalize_command(command: str, harness: str) -> str:
         # `/target` for a codex worker as an ordinary pass-through. Not caching
         # that empty answer stops it freezing; this bypass makes it impossible.
         if first_word in _TARGET_FAMILY:
-            return "$fno:" + verb + cmd[len(first_word):]
+            return "$fno:" + verb + tail
         if verb not in footnote_verbs():
             return cmd
-        return "$fno:" + verb + cmd[len(first_word):]
-    if surface == _SLASH and cmd.startswith("$fno:"):
-        # Reverse rewrite (x-413d): the sigil says who WROTE the seed, never
-        # which harness runs it. Swap the sigil, keep the namespace, and let
-        # the /fno: handling below render it per surface.
-        cmd = "/fno:" + cmd[len("$fno:"):]
-    if surface == _SLASH and cmd.startswith("/"):
+        return "$fno:" + verb + tail
+    if surface == _SLASH:
         # Plugin-namespace prefix swap only (never re-tokenize): claude/agy inject
         # the skill natively (""), opencode's fno plugin exposes it as `/fno:verb`.
         # The single rule renders every verb - no per-verb allowlist (AC4-EDGE).
         prefix = caps.get("slash_prefix", "")
-        verb = (
-            cmd[len("/fno:") :]
-            if harness == "agy" and cmd.startswith("/fno:")
-            else cmd[1:]
-        )
-        # Idempotent over the builtin rung: the resolve seam re-normalizes the
-        # already-namespaced `/fno:verb`, so re-applying would double it.
-        if prefix and cmd.startswith("/" + prefix):
-            return cmd
         # A native verb of the harness stays literal: `/undo` on opencode is
         # opencode's own palette verb, and namespacing it would mint a phantom
         # `/fno:undo` plugin skill. Same `native_verbs` roster the codex-skill
         # branch reads; the claude/agy rows are inert here only because their
-        # prefix is empty. The roster names verbs, so the guard reads the
-        # first token of the remainder, never the message tail.
+        # prefix is empty.
         native = {v for v in caps.get("native_verbs") or () if isinstance(v, str)}
-        if "/" + verb.split(maxsplit=1)[0] in native:
+        if not namespaced and not slash_sigil:
             return cmd
-        return "/" + prefix + verb
+        if not namespaced and "/" + verb in native:
+            return cmd
+        # Idempotent over the builtin rung: the resolve seam re-normalizes the
+        # already-namespaced `/fno:verb`, so re-applying would double it.
+        if namespaced and prefix and first_word.startswith("/" + prefix):
+            return cmd
+        if namespaced and harness == "agy":
+            return "/" + verb + tail
+        if namespaced:
+            return "/fno:" + verb + tail
+        return "/" + prefix + verb + tail
     return cmd
 
 
@@ -728,7 +730,7 @@ def cannot_fire_refusal(message: str, harness: str) -> Optional[str]:
     state (no codex CLI on PATH) fails open, because the spawn fails on its
     own there.
     """
-    if harness != "codex" or not message.strip().startswith(("/", "$fno:")):
+    if harness != "codex" or not is_verb_seed(message):
         return None
     from fno.setup.codex_plugin import CodexPluginError, inspect_freshness
 
@@ -754,7 +756,7 @@ def verb_fired_marker(message: str) -> Optional[str]:
     first = message.strip().splitlines()[0].split()
     if len(first) < 2 or first[1].startswith(("-", "/", "$")):
         return None
-    if first[0].lstrip("/$") != "fno:target":
+    if parse_verb_token(first[0]) != ("target", True):
         return None
     return f"fno agents claim status node:{first[1]}"
 
@@ -1342,8 +1344,8 @@ def resolve_effective_verb(
     refusal leads with ``node_id`` when the caller holds one, so the subject
     of the failure is never read off a citation."""
     raw_verb = (verb or "").strip()
-    if raw_verb.startswith("/fno:"):
-        raw_verb = "/" + raw_verb[len("/fno:"):]
+    if parse_verb_token(raw_verb):
+        raw_verb = canonical_verb_key(raw_verb)
     if raw_verb and raw_verb not in _TARGET_FAMILY_VERBS:
         return None, f"verb=lifecycle(out-of-family {raw_verb}; declared precedence holds)"
     if plan_rung is None:
@@ -1542,8 +1544,8 @@ def resolve_dispatch(
         # court that follows the "every dispatched verb is plugin-qualified"
         # contract can set `--dispatch-verb /fno:target` without tripping the
         # bare-only allowlist and breaking the encode-before-exit tail (US7 review).
-        if chosen_verb.startswith("/fno:"):
-            chosen_verb = "/" + chosen_verb[len("/fno:"):]
+        if parse_verb_token(chosen_verb):
+            chosen_verb = canonical_verb_key(chosen_verb)
         _av = cfg.get("allowed_verbs")
         allowed = list(_av) if isinstance(_av, list) else list(_DEFAULT_ALLOWED_VERBS)
         from fno.config import resolvable_verbs

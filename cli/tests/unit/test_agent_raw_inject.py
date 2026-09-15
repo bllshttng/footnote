@@ -66,3 +66,21 @@ def test_agent_raw_inject_records_the_transport_answer():
         target_session="ses-9", payload="/compact", harness="claude", lane="mux-pane"
     )
     assert "confirmed" not in silent["data"]
+
+
+def test_raw_inject_records_the_dollar_verb_token():
+    """x-c976: a `$fno:` payload records its verb; prose records none."""
+    event = agent_raw_inject(
+        target_session="ses-9",
+        payload="$fno:review medium",
+        harness="codex",
+        lane="mux-pane",
+    )
+    assert event["data"]["verb"] == "$fno:review"
+    prose = agent_raw_inject(
+        target_session="ses-9",
+        payload="fix the login bug",
+        harness="codex",
+        lane="mux-pane",
+    )
+    assert prose["data"]["verb"] is None

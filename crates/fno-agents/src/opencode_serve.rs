@@ -658,12 +658,11 @@ fn dispatch_opencode_serve_inner(
     };
 
     // Session minted on the shared serve, bound to the worker cwd.
-    let effective_message = if message.is_empty() { "hello" } else { message };
-    let full_prompt = if effective_message.starts_with('/') {
-        effective_message.to_string()
-    } else {
-        format!("[from: {from_name}]\n\n{effective_message}")
-    };
+    let effective_message = crate::provider::render_verb_seed(
+        if message.is_empty() { "hello" } else { message },
+        "opencode",
+    );
+    let full_prompt = crate::opencode_ask::opencode_envelope(&effective_message, from_name);
     let create_path = format!(
         "/session?directory={}",
         encode_query_path(&cwd.to_string_lossy())
@@ -1227,11 +1226,8 @@ pub fn ask_registered_session(
             13,
         );
     }
-    let full_prompt = if message.starts_with('/') {
-        message.to_string()
-    } else {
-        format!("[from: {from_name}]\n\n{message}")
-    };
+    let rendered = crate::provider::render_verb_seed(message, "opencode");
+    let full_prompt = crate::opencode_ask::opencode_envelope(&rendered, from_name);
     let serve = match ensure_serve(home) {
         Ok(serve) => serve,
         Err(error) => return AskOutcome::err(error, 13),

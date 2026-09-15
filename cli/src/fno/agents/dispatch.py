@@ -64,6 +64,7 @@ from fno.agents.sender_provenance import (
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, render_seed
+from fno.config._dispatch_verbs import is_verb_seed
 from fno.agents.lane_heal import lane_heal as _lane_heal
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
@@ -2559,7 +2560,7 @@ def dispatch_spawn(
     _check_spawn_harness(harness, headless=headless)
 
     effective_message: Optional[str] = None
-    if message.strip().startswith(("/", "$fno:")):
+    if is_verb_seed(message):
         try:
             message = render_seed(message, harness)
         except DispatchResolveError as exc:
@@ -3481,8 +3482,7 @@ def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
     process still running. Nothing about that population lacks a transport id,
     which is why the old scoping of this function -- "the last resort after
     ``stop_agent`` finds no ``short_id``" -- meant it never ran for the exact
-    workers it saves. A docstring that scopes a capability out of its real
-    population is a capability nobody has.
+    workers it saves.
 
     It is also still the arm for a row carrying a live process and no transport
     id at all, which the spawn receipt sometimes never yields; refusing there

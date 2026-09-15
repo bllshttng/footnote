@@ -38,6 +38,8 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+from fno.config._dispatch_verbs import is_verb_seed
 from typing import Optional
 
 import typer
@@ -196,7 +198,7 @@ def _is_bare_command(text: str) -> bool:
     prose may carry a ruling. A filename dot is fine (the safe direction is
     over-counting); ``x-1.`` is not.
     """
-    if "\n" in text or not (text.startswith("/") or text.startswith("$fno:")):
+    if "\n" in text or not is_verb_seed(text):
         return False
     return all(
         _ARG_TOKEN_RE.fullmatch(t) and not t.endswith(_SENTENCE_TAILS)
