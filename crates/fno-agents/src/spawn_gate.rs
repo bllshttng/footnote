@@ -188,20 +188,24 @@ pub(crate) fn status_is_liveish(s: &AgentStatus) -> bool {
 // Layer 2: available-RAM readers (pure parsers + platform dispatch)
 // ---------------------------------------------------------------------------
 
-/// Parse `vm_stat` output (macOS) to available bytes: (free + inactive +
-/// speculative + purgeable) pages × page size. `None` on any shape surprise
-/// so the guard fails open.
-pub fn parse_vm_stat(text: &str) -> Option<u64> {
-    // "Mach Virtual Memory Statistics: (page size of 16384 bytes)"
-    let page_size: u64 = text
-        .lines()
+/// Page size from a `vm_stat` header
+/// ("Mach Virtual Memory Statistics: (page size of 16384 bytes)").
+fn vm_stat_page_size(text: &str) -> Option<u64> {
+    text.lines()
         .next()?
         .split("page size of")
         .nth(1)?
         .split_whitespace()
         .next()?
         .parse()
-        .ok()?;
+        .ok()
+}
+
+/// Parse `vm_stat` output (macOS) to available bytes: (free + inactive +
+/// speculative + purgeable) pages × page size. `None` on any shape surprise
+/// so the guard fails open.
+pub fn parse_vm_stat(text: &str) -> Option<u64> {
+    let page_size: u64 = vm_stat_page_size(text)?;
     let mut counted: u64 = 0;
     let mut found_free = false;
     for line in text.lines().skip(1) {
@@ -294,10 +298,10 @@ pub fn parse_swapusage(text: &str) -> Option<f64> {
     Some(used / total * 100.0)
 }
 
-/// Swap percent used beside [`available_ram_gb`] (x-8c8c): available counts
-/// reclaimable pages and has no swap term, so a machine paging at 93% swap can
-/// read six times its RAM floor. `None` = unreadable or no swap configured
-/// (the guard skips, fail open like the RAM floor).
+/// Swap percent used beside [`available_ram_gb`]: available counts reclaimable
+/// pages and has no swap term, so a machine paging at 93% swap can read six
+/// times its RAM floor. `None` = unreadable or no swap configured (the guard
+/// skips, fail open like the RAM floor).
 #[cfg(target_os = "macos")]
 pub fn swap_used_pct() -> Option<f64> {
     sysctl_swapusage_pct()
@@ -346,6 +350,72 @@ fn meminfo_swap_pct() -> Option<f64> {
         return None;
     }
     Some((total - free) as f64 / total as f64 * 100.0)
+}
+
+/// Parse `vm_stat` output (macOS) for the cumulative `Swapins:` counter:
+/// `(pages, page_size)`. `None` without the line or the header.
+pub(crate) fn parse_vm_stat_swapins(text: &str) -> Option<(u64, u64)> {
+    let page_size = vm_stat_page_size(text)?;
+    let line = text.lines().find(|l| l.starts_with("Swapins:"))?;
+    let pages: u64 = line
+        .split_once(':')?
+        .1
+        .trim()
+        .trim_end_matches('.')
+        .parse()
+        .ok()?;
+    Some((pages, page_size))
+}
+
+/// Parse Linux `/proc/vmstat` for the cumulative `pswpin` page count. `None`
+/// without the line.
+pub(crate) fn parse_proc_vmstat_pswpin(text: &str) -> Option<u64> {
+    let line = text.lines().find(|l| l.starts_with("pswpin "))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Sample window for the swap-in rate.
+const SWAPIN_WINDOW: Duration = Duration::from_secs(1);
+/// Swap-in rate at or above this refuses beside an over-cap allocation. A
+/// calibration choice, not a derived number: idle windows on machines at 94.7%
+/// and 64.8% swap allocation read 0 swap-ins, and 1 MiB/s sits above stray
+/// single-page touches.
+pub(crate) const SWAPIN_REFUSE_BYTES_PER_S: f64 = 1024.0 * 1024.0;
+
+/// Cumulative swap-in pages plus the page size: macOS runs `vm_stat`
+/// (`Swapins:`), Linux reads `/proc/vmstat` (`pswpin`, page size from
+/// sysconf). `None` = unreadable or unsupported platform.
+#[cfg(target_os = "macos")]
+fn swapin_pages() -> Option<(u64, u64)> {
+    let out = std::process::Command::new("vm_stat").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_vm_stat_swapins(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(target_os = "linux")]
+fn swapin_pages() -> Option<(u64, u64)> {
+    let pages = parse_proc_vmstat_pswpin(&std::fs::read_to_string("/proc/vmstat").ok()?)?;
+    // SAFETY: sysconf with a constant identifier has no preconditions.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    Some((pages, page_size.max(1) as u64))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn swapin_pages() -> Option<(u64, u64)> {
+    None
+}
+
+/// Swap-in rate in bytes/second over `window`: counter delta times the page
+/// size. `None` when either read fails or the counter went down (a counter
+/// reset must never read as a negative rate).
+pub fn swapin_bytes_per_sec(window: Duration) -> Option<f64> {
+    let (a, page_size) = swapin_pages()?;
+    std::thread::sleep(window);
+    let (b, _) = swapin_pages()?;
+    let pages = b.checked_sub(a)?;
+    Some(pages as f64 * page_size as f64 / window.as_secs_f64())
 }
 
 // ---------------------------------------------------------------------------
@@ -1712,14 +1782,45 @@ pub fn run_gate(
     }
 }
 
+/// One shared memory reading: what the gate refuses on and what the probe
+/// reports. `avail` is read only when the floor is enabled, `swap` only when
+/// the cap is enabled, and the swap-in rate only when swap sits at or above
+/// the cap (the sample costs a 1 s window; a normal spawn pays no wait).
+pub(crate) struct MemoryReading {
+    pub(crate) avail: Option<f64>,
+    pub(crate) swap: Option<f64>,
+    pub(crate) swapin_bps: Option<f64>,
+}
+
+/// Read [`MemoryReading`] once so the gate and the probe answer from the same
+/// instrument calls.
+pub(crate) fn read_memory(floor_gb: f64, max_swap_pct: f64) -> MemoryReading {
+    let avail = (floor_gb > 0.0).then(available_ram_gb).flatten();
+    let swap = (max_swap_pct > 0.0).then(swap_used_pct).flatten();
+    let swapin_bps = if swap.is_some_and(|s| s >= max_swap_pct) {
+        swapin_bytes_per_sec(SWAPIN_WINDOW)
+    } else {
+        None
+    };
+    MemoryReading {
+        avail,
+        swap,
+        swapin_bps,
+    }
+}
+
 /// The decision core of the memory check, pure so both terms are testable
 /// without the machine happening to sit in a given state. Available is named
 /// first: under BOTH terms failing, the receipt names the floor an operator
-/// tunes first.
-fn ram_floor_term(
+/// tunes first. The swap term fires only while the machine is ALSO swapping
+/// in: macOS keeps swap allocated after pressure ends (an idle app can hold
+/// tens of GB until it exits), so allocation alone refused every spawn on a
+/// box with no paging at all.
+pub(crate) fn ram_floor_term(
     avail: Option<f64>,
     floor_gb: f64,
     swap: Option<f64>,
+    swapin_bps: Option<f64>,
     max_swap_pct: f64,
 ) -> Option<(&'static str, String)> {
     if floor_gb > 0.0 && avail.is_some_and(|a| a < floor_gb) {
@@ -1731,39 +1832,51 @@ fn ram_floor_term(
             ),
         ));
     }
-    if max_swap_pct > 0.0 && swap.is_some_and(|s| s >= max_swap_pct) {
+    if max_swap_pct > 0.0
+        && swap.is_some_and(|s| s >= max_swap_pct)
+        && swapin_bps.is_some_and(|r| r >= SWAPIN_REFUSE_BYTES_PER_S)
+    {
         return Some((
             "swap_pressure",
             format!(
-                "swap {:.1}% used is at or above the max_swap_pct cap {max_swap_pct:.0}%",
-                swap.unwrap()
+                "swap {:.1}% used is at or above the max_swap_pct cap {max_swap_pct:.0}% and \
+                 swap-in is {:.1} MiB/s",
+                swap.unwrap(),
+                swapin_bps.unwrap() / (1024.0 * 1024.0),
             ),
         ));
     }
     None
 }
 
-/// Memory check (Layer 2), two terms (x-8c8c): refuse below the `floor_gb`
-/// available-RAM floor OR at/above the `max_swap_pct` swap ceiling - available
-/// has no swap term, so a machine paging at 93% swap can read six times its
-/// floor. Never queues: low RAM means something ELSE is eating the machine.
-/// `<= 0` disables a term; an unreadable term skips (fail open, as before).
-/// Both readings ride every verdict: a floor that only speaks on refusal
-/// cannot be audited, and a passing gate must not look like a healthy box.
+/// Memory check (Layer 2), two terms: refuse below the `floor_gb` available-
+/// RAM floor, or at/above the `max_swap_pct` swap ceiling WHILE the machine
+/// swaps in at [`SWAPIN_REFUSE_BYTES_PER_S`] or more. Never queues: low RAM
+/// means something ELSE is eating the machine. `<= 0` disables a term; an
+/// unreadable term skips (fail open, as before). Both readings ride every
+/// verdict: a floor that only speaks on refusal cannot be audited, and a
+/// passing gate must not look like a healthy box.
 fn check_ram_floor(floor_gb: f64, max_swap_pct: f64) -> Result<(), Refusal> {
-    let avail = (floor_gb > 0.0).then(available_ram_gb).flatten();
-    let swap = (max_swap_pct > 0.0).then(swap_used_pct).flatten();
+    let m = read_memory(floor_gb, max_swap_pct);
     if floor_gb > 0.0 || max_swap_pct > 0.0 {
+        let swapin_word: String = if m.swap.is_none_or(|s| s < max_swap_pct) {
+            "not sampled (under cap)".into()
+        } else {
+            m.swapin_bps
+                .map(|r| format!("{:.1} MiB/s", r / (1024.0 * 1024.0)))
+                .unwrap_or_else(|| "unreadable".into())
+        };
         eprintln!(
-            "spawn-gate: ram readings: available {} (floor {floor_gb:.1}GB), swap {} (cap {max_swap_pct:.0}%)",
-            avail
+            "spawn-gate: ram readings: available {} (floor {floor_gb:.1}GB), swap {} (cap {max_swap_pct:.0}%), swap-in {swapin_word}",
+            m.avail
                 .map(|v| format!("{v:.1}GB"))
                 .unwrap_or_else(|| "unreadable".into()),
-            swap.map(|v| format!("{v:.1}%"))
+            m.swap
+                .map(|v| format!("{v:.1}%"))
                 .unwrap_or_else(|| "unreadable".into()),
         );
     }
-    match ram_floor_term(avail, floor_gb, swap, max_swap_pct) {
+    match ram_floor_term(m.avail, floor_gb, m.swap, m.swapin_bps, max_swap_pct) {
         Some((reason, term)) => {
             eprintln!("spawn-gate: {term}; refusing to spawn (--force to bypass)");
             Err(Refusal::with_receipt(
@@ -1771,10 +1884,11 @@ fn check_ram_floor(floor_gb: f64, max_swap_pct: f64) -> Result<(), Refusal> {
                 serde_json::json!({
                     "status": "refused",
                     "reason": reason,
-                    "available_gb": avail,
+                    "available_gb": m.avail,
                     "min_free_gb": floor_gb,
-                    "swap_used_pct": swap,
+                    "swap_used_pct": m.swap,
                     "max_swap_pct": max_swap_pct,
+                    "swapin_mib_per_s": m.swapin_bps.map(|r| r / (1024.0 * 1024.0)),
                 }),
             ))
         }
@@ -2469,48 +2583,129 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
 mod tests {
     use super::*;
 
-    /// x-8c8c: the receipt names swap when the ceiling fires.
+    /// The receipt names swap when the ceiling fires beside live swap-ins.
     #[test]
     fn ram_floor_term_names_swap_at_the_ceiling() {
-        let term = ram_floor_term(Some(24.0), 4.0, Some(92.6), 90.0);
-        assert_eq!(term.as_ref().map(|(r, _)| *r), Some("swap_pressure"));
-        assert!(
-            term.unwrap().1.contains("swap"),
-            "the failing term must be named"
+        let term = ram_floor_term(
+            Some(24.0),
+            4.0,
+            Some(92.6),
+            Some(SWAPIN_REFUSE_BYTES_PER_S),
+            90.0,
         );
+        assert_eq!(term.as_ref().map(|(r, _)| *r), Some("swap_pressure"));
+        let msg = term.unwrap().1;
+        assert!(msg.contains("swap"), "the failing term must be named");
+        assert!(msg.contains("MiB/s"), "the message names the swap-in rate");
     }
 
-    /// x-8c8c: under BOTH terms failing, available is named (the floor an
-    /// operator tunes first).
+    /// Under BOTH terms failing, available is named (the floor an operator
+    /// tunes first).
     #[test]
     fn ram_floor_term_names_available_under_both_terms() {
-        let term = ram_floor_term(Some(1.0), 4.0, Some(95.0), 90.0);
+        let term = ram_floor_term(
+            Some(1.0),
+            4.0,
+            Some(95.0),
+            Some(SWAPIN_REFUSE_BYTES_PER_S),
+            90.0,
+        );
         assert_eq!(term.as_ref().map(|(r, _)| *r), Some("ram_floor"));
         assert!(term.unwrap().1.contains("available"));
     }
 
-    /// x-8c8c: plenty of RAM, low swap: no term.
+    /// Plenty of RAM, low swap: no term.
     #[test]
     fn ram_floor_term_passes_with_headroom() {
-        assert_eq!(ram_floor_term(Some(24.0), 4.0, Some(30.0), 90.0), None);
+        assert_eq!(
+            ram_floor_term(
+                Some(24.0),
+                4.0,
+                Some(30.0),
+                Some(SWAPIN_REFUSE_BYTES_PER_S),
+                90.0
+            ),
+            None
+        );
     }
 
-    /// x-8c8c: an unreadable swap read skips its term (fail open), while a
-    /// failing available term still refuses.
+    /// An unreadable swap read skips its term (fail open), while a failing
+    /// available term still refuses.
     #[test]
     fn ram_floor_term_skips_unreadable_swap() {
-        assert_eq!(ram_floor_term(Some(24.0), 4.0, None, 90.0), None);
+        assert_eq!(ram_floor_term(Some(24.0), 4.0, None, None, 90.0), None);
         assert_eq!(
-            ram_floor_term(Some(1.0), 4.0, None, 90.0).map(|(r, _)| r),
+            ram_floor_term(Some(1.0), 4.0, None, None, 90.0).map(|(r, _)| r),
             Some("ram_floor")
         );
     }
 
-    /// x-8c8c: the swap ceiling disabled (`<= 0`) never fires, whatever the
-    /// machine reads.
+    /// The swap ceiling disabled (`<= 0`) never fires, whatever the machine
+    /// reads.
     #[test]
     fn ram_floor_term_disabled_swap_cap_never_fires() {
-        assert_eq!(ram_floor_term(Some(24.0), 4.0, Some(100.0), 0.0), None);
+        assert_eq!(
+            ram_floor_term(Some(24.0), 4.0, Some(100.0), Some(f64::MAX), 0.0),
+            None
+        );
+    }
+
+    /// Allocation alone never refuses: 94.7% against a cap of 90 with no
+    /// swap-ins admits, because macOS holds swap allocated after pressure
+    /// ends.
+    #[test]
+    fn ram_floor_term_admits_allocated_swap_with_no_swapins() {
+        assert_eq!(
+            ram_floor_term(Some(24.0), 4.0, Some(94.7), Some(0.0), 90.0),
+            None
+        );
+    }
+
+    /// The thrash shape stays refused: over-cap swap WITH live swap-ins, and
+    /// the message names both the percent and the rate.
+    #[test]
+    fn ram_floor_term_refuses_allocated_swap_with_live_swapins() {
+        let term = ram_floor_term(
+            Some(24.11),
+            4.0,
+            Some(92.6),
+            Some(8.0 * 1024.0 * 1024.0),
+            90.0,
+        );
+        assert_eq!(term.as_ref().map(|(r, _)| *r), Some("swap_pressure"));
+        let msg = term.unwrap().1;
+        assert!(msg.contains("92.6"), "names the swap percent");
+        assert!(msg.contains("MiB/s"), "names the swap-in rate");
+    }
+
+    /// An unreadable swap-in rate fails open even with swap over the cap.
+    #[test]
+    fn ram_floor_term_skips_unreadable_swapin_rate() {
+        assert_eq!(
+            ram_floor_term(Some(24.0), 4.0, Some(94.7), None, 90.0),
+            None
+        );
+    }
+
+    /// One byte per second under the floor admits; at the floor refuses.
+    #[test]
+    fn ram_floor_term_swapin_floor_boundary() {
+        let under = SWAPIN_REFUSE_BYTES_PER_S - 1.0;
+        assert_eq!(
+            ram_floor_term(Some(24.0), 4.0, Some(94.7), Some(under), 90.0),
+            None
+        );
+        assert_eq!(
+            ram_floor_term(
+                Some(24.0),
+                4.0,
+                Some(94.7),
+                Some(SWAPIN_REFUSE_BYTES_PER_S),
+                90.0
+            )
+            .map(|(r, _)| r),
+            Some("swap_pressure")
+        );
     }
 
     /// x-8c8c: the macOS swapusage line parses to percent used; a malformed
@@ -2696,7 +2891,9 @@ Pages inactive:                          200000.\n\
 Pages speculative:                        50000.\n\
 Pages throttled:                              0.\n\
 Pages wired down:                        300000.\n\
-Pages purgeable:                          25000.\n";
+Pages purgeable:                          25000.\n\
+Swapins: 19235608.\n\
+Swapouts: 3444531.\n";
 
     #[test]
     fn vm_stat_counts_free_inactive_speculative_purgeable() {
@@ -2726,6 +2923,28 @@ MemAvailable:    8000000 kB\n";
         assert_eq!(parse_meminfo(text), Some(8_000_000 * 1024));
         assert_eq!(parse_meminfo("MemTotal: 1 kB\n"), None);
         assert_eq!(parse_meminfo("MemAvailable: banana kB\n"), None);
+    }
+
+    #[test]
+    fn vm_stat_swapins_reads_the_swapins_line() {
+        let (pages, size) = parse_vm_stat_swapins(VM_STAT).unwrap();
+        assert_eq!(pages, 19_235_608);
+        assert_eq!(size, 16_384);
+        // Header but no Swapins line: not a swap-in reading, refuse to guess.
+        assert_eq!(
+            parse_vm_stat_swapins("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"),
+            None
+        );
+        assert_eq!(parse_vm_stat_swapins("Swapins: banana.\n"), None);
+    }
+
+    #[test]
+    fn proc_vmstat_pswpin_reads_the_pswpin_line() {
+        assert_eq!(
+            parse_proc_vmstat_pswpin("pgfault 123\npswpin 456\npswpout 789\n"),
+            Some(456)
+        );
+        assert_eq!(parse_proc_vmstat_pswpin("pgfault 123\n"), None);
     }
 
     /// The `fno agents status` machine line: the busy fraction against the
