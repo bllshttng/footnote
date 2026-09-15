@@ -30,7 +30,7 @@ One JSON object per line (`fno.bus.log.Envelope`):
 {"v":1,"id":"msg-3f8f96","ts":"2026-06-07T19:51:32Z","thread":"msg-3f8f96","from":"alice","to":"bob","kind":"send","from_harness":"claude","to_harness":"codex","in_reply_to":"...","delivery":"hosted","word_count":17,"meta":{...},"body":"..."}
 ```
 
-`from` and `to` are canonical registry names, session handles, or project names. `from_harness` and `to_harness` are audit tags, never addresses (x-f1f0 renamed them from `provider_from`/`provider_to`, and the reader still accepts the old keys on stored rows). Reply correlation uses `request_id` and `in_reply_to` independently of harness tags.
+`from` and `to` are canonical registry names, session handles, or project names. `from_harness` and `to_harness` are audit tags, never addresses (renamed from `provider_from`/`provider_to`, and the reader still accepts the old keys on stored rows). Reply correlation uses `request_id` and `in_reply_to` independently of harness tags.
 
 `word_count` stores the authored body's send-time count under the pure Rule 7 masking rules. It is never recomputed from a stored `<fno_mail>` wrapper.
 
