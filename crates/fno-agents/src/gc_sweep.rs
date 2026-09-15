@@ -1788,7 +1788,7 @@ pub(crate) fn run_with_release(
             .phases
             .get(&sid.to_ascii_lowercase())
             .is_some_and(|phases| phases.iter().any(|p| p == "blueprint" || p == "think"))
-            || e.name.starts_with("bp-");
+            || crate::naming::is_blueprint_name(&e.name);
         let planning = if is_planning {
             Some(
                 graph
@@ -1934,6 +1934,13 @@ pub(crate) fn run_with_release(
             planning_closed,
             planning_plan_written,
             planning_released: false,
+            // x-d8bc: the latest inside-leg report reading `done` is the
+            // halted-planner fact - the turn ended, the session waits on
+            // nothing.
+            turn_ended: e
+                .inside_leg
+                .as_ref()
+                .is_some_and(|leg| leg.state == crate::state::InsideLegState::Done),
             confirm_hold,
             session_terminal,
             superseded_by_live_peer,
@@ -2457,7 +2464,11 @@ pub(crate) fn run_with_release(
                 // and it is never anonymous. The arm order mirrors the
                 // release precedence in gc_decide: terminal state, then live
                 // peer, then inactive status, then recorded merge.
-                if let Some(assignments) = &probed.planning {
+                // x-d8bc: the planner arms answer only for a row the graph
+                // gave an assignment set - an empty set falls to the session
+                // arms below, so a released bp row never borrows the
+                // planning wording.
+                if let Some(assignments) = probed.planning.as_ref().filter(|a| !a.is_empty()) {
                     if assignments
                         .iter()
                         .any(|(n, _)| probed.planning_closed.contains(n))
@@ -2468,6 +2479,15 @@ pub(crate) fn run_with_release(
                         .any(|(n, _)| probed.planning_plan_written.contains(n))
                     {
                         format!("planning finished on {node}: plan written")
+                    } else if let Some((_, moved_status)) = assignments
+                        .iter()
+                        .find(|(_, s)| crate::gc::PLANNING_MOVED_ON_STATUSES.contains(&s.as_str()))
+                    {
+                        format!("planning finished on {node}: node {moved_status}")
+                    } else if probed.planning_released {
+                        format!("planning finished on {node}: released")
+                    } else if probed.turn_ended {
+                        format!("planning halted on {node}: turn ended with no plan")
                     } else {
                         format!("planning finished on {node}: released")
                     }

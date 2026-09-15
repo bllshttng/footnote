@@ -1716,6 +1716,71 @@ fn a_row_with_no_inside_leg_holds_on_an_unanswered_re_read() {
     assert!(summary.holds.iter().any(|h| h.id == "worker-x-u1"));
 }
 
+/// x-d8bc AC4-EDGE: a `bp-` row whose planning set is EMPTY retires through
+/// the session release - the basis uses the session arm, never the planning
+/// wording. The `released` spelling is reserved for planning_released.
+#[test]
+fn a_bp_row_with_an_empty_planning_set_retires_on_the_session_basis() {
+    use crate::daemon::CascadeOutcome;
+
+    let (dir, home) = staged_graph_home();
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    // The node exists but names no sessions row for s-rel, so the reverse
+    // join gives the bp row an EMPTY assignment set; the name route still
+    // resolves the node.
+    stage_graph(
+        dir.path(),
+        json!([{
+            "id": "x-a75f",
+            "status": "idea",
+            "project": "p",
+        }]),
+    );
+    crate::state::update_registry(&home.registry_json(), |r| {
+        let mut e = state::RegistryEntry::default();
+        e.name = "bp-x-a75f-repro".into();
+        e.short_id = "bp-x-a75f-repro".into();
+        e.origin = Some("spawn".into());
+        e.harness = Some("codex".into());
+        e.harness_session_id = Some("s-rel".into());
+        e.created_at = "2026-09-01T00:00:00Z".into();
+        r.entries.push(e);
+    })
+    .unwrap();
+    let store = home.root().join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    let quiet = quiet_transcript(&store, "q.jsonl", 2 * 3600);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        false,
+        7,
+        &crate::gc_sweep::read_graph_entries,
+        &move |_| Some(vec![quiet.clone()]),
+        &uniform_ages(2 * 3600),
+        &|_| true,
+        &|_| CascadeOutcome::Removed,
+        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (Some(true), Some(true)),
+        &|_| None,
+    );
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    assert!(
+        summary.retired[0]
+            .1
+            .contains("node x-a75f is idea, not active work"),
+        "{:?}",
+        summary.retired[0].1
+    );
+    assert!(
+        !summary.retired[0].1.contains("released"),
+        "the planning wording stays reserved: {:?}",
+        summary.retired[0].1
+    );
+}
+
 /// The x-d8bc AC1 fixture: one claude thread row (`pid` null is the
 /// default), `inside_leg` present, staged on a done node so classification
 /// answers would-retire on its quiet age.

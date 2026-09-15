@@ -81,6 +81,12 @@ pub struct GcRow {
     /// marker question is answered (the operator ruled the assignment
     /// over), so only the 1200 s quiet gate remains.
     pub planning_released: bool,
+    /// The row's latest inside-leg report reads `done` (x-d8bc): the turn
+    /// ended and the session is not waiting. A halted planner - one whose
+    /// turn ended with no plan on the node - counts as finished, never as
+    /// an assignment in flight. `blocked` (waiting on input) and `working`
+    /// keep the planner hold.
+    pub turn_ended: bool,
     /// A hold computed beside the work verdict (x-5a62): the cascade's
     /// conflict between witnesses, or the PR-state confirm contradicting a
     /// done node. Decided in the sweep where the route and the graph read
@@ -143,6 +149,12 @@ impl GcRow {
 /// revision assignment stays outstanding).
 pub const PLANNING_COMPLETE_STATUSES: [&str; 5] =
     ["done", "ready", "in_progress", "in_review", "shipped"];
+
+/// Statuses that finish a planning assignment with NO marker (x-d8bc): a
+/// node that moved to `deferred` or `superseded` has nothing left to plan.
+/// The assignment is over even though this session wrote no close and no
+/// plan - waiting forever on a moved-on node is the hold it cures.
+pub const PLANNING_MOVED_ON_STATUSES: [&str; 2] = ["deferred", "superseded"];
 
 /// The idle grace for a PLANNER row whose planning assignment is finished
 /// (law d-81c6da7e): 20 quiet minutes, not the 900 s every other row takes.
@@ -307,10 +319,17 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                 // vacuous all() would retire a row the graph could not
                 // describe. It falls through to the open-work gate below.
                 if !assignments.is_empty() {
+                    // x-d8bc: three facts finish an assignment beside the
+                    // markers - the node moved on (deferred or superseded,
+                    // nothing left to plan), and the planner halted (its
+                    // last inside-leg report reads done: the turn ended
+                    // with no plan, and it is not waiting on anything).
                     let unfinished = assignments.iter().find(|(n, s)| {
-                        !PLANNING_COMPLETE_STATUSES.contains(&s.as_str())
-                            || !(row.planning_closed.contains(n)
-                                || row.planning_plan_written.contains(n))
+                        let moved_on = PLANNING_MOVED_ON_STATUSES.contains(&s.as_str());
+                        let marked = row.planning_closed.contains(n)
+                            || row.planning_plan_written.contains(n);
+                        let complete = PLANNING_COMPLETE_STATUSES.contains(&s.as_str()) && marked;
+                        !(moved_on || complete || row.turn_ended)
                     });
                     return match unfinished {
                         None => grace_gate(row, PLANNING_IDLE_RETIRE_SECS),
@@ -1764,6 +1783,7 @@ mod tests {
             planning_closed: Vec::new(),
             planning_plan_written: Vec::new(),
             planning_released: false,
+            turn_ended: false,
             confirm_hold: None,
             session_terminal: None,
             superseded_by_live_peer: None,
@@ -1971,6 +1991,82 @@ mod tests {
             ..retiring()
         };
         assert_eq!(gc_decide(&planner, GRACE), (GcAction::Retire, None));
+    }
+
+    /// x-d8bc AC3-HP: a planner whose only assignment is a moved-on node -
+    /// `deferred` or `superseded` - retires with no close and no plan:
+    /// there is nothing left to plan.
+    #[test]
+    fn a_planner_on_a_moved_on_node_retires_without_a_marker() {
+        for status in ["deferred", "superseded"] {
+            let planner = GcRow {
+                work: WorkState::Open {
+                    node: "x-m1".into(),
+                    status: status.into(),
+                },
+                planning: Some(vec![("x-m1".to_string(), status.to_string())]),
+                transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
+                ..retiring()
+            };
+            assert_eq!(
+                gc_decide(&planner, GRACE),
+                (GcAction::Retire, None),
+                "{status}"
+            );
+        }
+    }
+
+    /// x-d8bc AC3-ERR: a planner whose assignment is unfinished keeps as
+    /// `PlanningUnclosed`. The sweep maps `blocked`, `working`, and an
+    /// absent inside-leg report to the same fact: the turn has not ended.
+    #[test]
+    fn a_planner_whose_turn_has_not_ended_keeps() {
+        let planner = GcRow {
+            work: WorkState::Open {
+                node: "x-m2".into(),
+                status: "idea".into(),
+            },
+            planning: Some(vec![("x-m2".to_string(), "idea".to_string())]),
+            turn_ended: false,
+            transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
+            ..retiring()
+        };
+        assert_eq!(
+            gc_decide(&planner, GRACE),
+            (
+                GcAction::Keep,
+                Some(KeepReason::PlanningUnclosed {
+                    node: "x-m2".into(),
+                    status: "idea".into(),
+                })
+            )
+        );
+    }
+
+    /// x-d8bc AC3-EDGE: a halted planner (latest inside-leg report `done`)
+    /// on an unfinished node retires past the planner grace, and keeps as
+    /// Active inside it.
+    #[test]
+    fn a_halted_planner_retires_past_the_grace_and_keeps_inside_it() {
+        let halted = GcRow {
+            work: WorkState::Open {
+                node: "x-m3".into(),
+                status: "idea".into(),
+            },
+            planning: Some(vec![("x-m3".to_string(), "idea".to_string())]),
+            turn_ended: true,
+            transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
+            ..retiring()
+        };
+        assert_eq!(gc_decide(&halted, GRACE), (GcAction::Retire, None));
+        let young = GcRow {
+            transcript_age_s: Some(1100),
+            ..halted
+        };
+        assert_eq!(
+            gc_decide(&young, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 1100 }))
+        );
     }
 
     #[test]
@@ -2675,6 +2771,7 @@ mod tests {
             planning_closed: Vec::new(),
             planning_plan_written: Vec::new(),
             planning_released: false,
+            turn_ended: false,
             confirm_hold: None,
             session_terminal: None,
             superseded_by_live_peer: None,
@@ -2705,6 +2802,7 @@ mod tests {
             planning_closed: Vec::new(),
             planning_plan_written: Vec::new(),
             planning_released: false,
+            turn_ended: false,
             confirm_hold: None,
             session_terminal: None,
             superseded_by_live_peer: None,
