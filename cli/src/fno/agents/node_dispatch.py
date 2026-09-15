@@ -280,6 +280,11 @@ def resolve_node_spawn(
     # resolver just granted allow-merge (review round 5).
     base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
     run_env = {**base_env, **merged_env} if merged_env else (base_env or None)
+    if source in ("ac", "rd", "ab"):
+        from fno.harness_identity import scrub_ambient_identity
+
+        run_env = {**(run_env or {}), "FNO_SPAWN_TRIGGER": f"dispatch:{source}"}
+        scrub_ambient_identity(run_env)
 
     return NodeSpawnArgs(
         node_id=node_id,

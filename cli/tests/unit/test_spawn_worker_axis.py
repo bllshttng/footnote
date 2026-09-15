@@ -148,6 +148,45 @@ def test_launch_harness_disagreeing_with_the_surface_refuses(monkeypatch):
     assert "cmd" not in captured, "refused before spawning"
 
 
+# --- the machine-dispatch spawn env ------------------------------------------
+
+
+def _resolve(monkeypatch, source):
+    monkeypatch.setattr("fno.config.load_settings", lambda: _settings())
+    monkeypatch.setattr(
+        advance, "_grid_lane_for", lambda node, **kw: (None, None, None, None, None)
+    )
+    from fno.agents.node_dispatch import resolve_node_spawn
+
+    return resolve_node_spawn("x-0000", None, "slug", source=source)
+
+
+def test_machine_source_dispatch_carries_trigger_and_no_identity(monkeypatch):
+    """A merge-triggered dispatch is asked for by no session: the spawn env
+    carries the dispatcher trigger and no ambient identity marker."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dispatcher-session-1")
+    args = _resolve(monkeypatch, source="ac")
+    assert "CLAUDE_CODE_SESSION_ID" not in args.env
+    assert args.env["FNO_SPAWN_TRIGGER"] == "dispatch:ac"
+
+
+def test_reconcile_source_names_rd_in_the_trigger(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dispatcher-session-1")
+    args = _resolve(monkeypatch, source="rd")
+    assert args.env["FNO_SPAWN_TRIGGER"] == "dispatch:rd"
+    assert "CLAUDE_CODE_SESSION_ID" not in args.env
+
+
+def test_human_and_blueprint_sources_keep_the_ambient_edge(monkeypatch):
+    """A blueprint's closing advance and a source-less spawn were asked for by
+    a session: the env keeps the parent edge and carries no trigger."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dispatcher-session-1")
+    for source in ("sob", None):
+        args = _resolve(monkeypatch, source=source)
+        assert args.env.get("CLAUDE_CODE_SESSION_ID") == "dispatcher-session-1"
+        assert "FNO_SPAWN_TRIGGER" not in args.env
+
+
 # --- the receipt ------------------------------------------------------------
 
 
