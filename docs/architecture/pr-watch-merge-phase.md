@@ -13,19 +13,24 @@ headed every later tick. Completed ticks read `scanned` 13-23 before such an
 outage and 1-2 during it, and the tick verdict read `dead` with `cut:
 ['sweep']`.
 
-The split: the sweep's execute decision only queues `(candidate, key, grant
-fields)` on `TickResult.execute_queue`, stamps the poll cursor, and mints its
-receipt. `_run_phase("merge", ...)` then drains the queue under a fresh 150s
-slice (`arm="pr_watch_merge"`), so the scan always completes and the merge
-call may occupy the whole merge slice.
+The split: the merge phase asks the `authorized-merge` verb's `grant-queue`
+op for the durable-grant queue and drains it under a fresh 150s slice
+(`arm="pr_watch_merge"`), so a sweep the alarm cut leaves the queue intact
+(x-7aaf). The sweep itself resolves no grants; its `merge_scan` receipt
+names only `scanned`. At its own end the merge phase stamps the
+`pr_watch_merge` row in the grammar `merge sweep=<cut|ok> candidates=<n>
+granted=<g> executed=<e> skipped=<s>` - a later cut can no longer erase the
+merge record, and the row names whether it ran after a cut or a completed
+sweep.
 
 `run_execute_queue` owns the per-attempt discipline:
 
 - It re-loads the entry under the per-PR lock and skips when
-  `merge_dispatched` is already set: the tick lock releases when `tick()`
-  returns, so an overlapping tick may have merged the queued PR already.
+  `merge_dispatched` is already set or the row is `parked`: the tick lock
+  releases when `tick()` returns, so an overlapping tick may have merged the
+  queued PR already, and a retries-exhausted row never retries from the queue.
 - Under `_FIRE_FLOOR_S` of slice left it emits `execute-budget` and leaves
-  the entry untouched; the next tick's sweep rebuilds the queue.
+  the entry untouched; the next tick's merge phase rebuilds the queue.
 - It persists `retries + 1` BEFORE the merge call. `WatermarkStore.set`
   persists per write, so an alarm cut mid-call counts as one failed attempt
   and parks the PR at `max_retries` instead of replaying it at the head of
