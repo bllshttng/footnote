@@ -288,16 +288,27 @@ def macro_command(ctx: typer.Context) -> None:
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
-@evals_app.command("export")
-def export_command(
-    out: Path = typer.Option(..., "--out", help="Output JSONL path for the train-only rows."),
-    bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
-    history: Optional[Path] = typer.Option(None, "--history", help="History JSONL (default: the evals history)."),
-) -> None:
+def _argv_opt(args: list[str], name: str) -> Optional[str]:
+    """Read one ``--name value`` / ``--name=value`` token from a raw argv tail
+    (the x-72fc forwarder shape: transport leaves declare no typer.Options)."""
+    for i, a in enumerate(args):
+        if a == name and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(name + "="):
+            return a[len(name) + 1:]
+    return None
+
+
+@evals_app.command(
+    "export",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def export_command(ctx: typer.Context) -> None:
     """Export train-cohort history for prompt tuning.
 
-    Refuses without a declared, natively valid, bank-current split; writes
-    ONLY train rows, so held-out trajectories never enter a tuning view.
+    Argv: export --out FILE [--bank DIR] [--history FILE]. Refuses without a
+    declared, natively valid, bank-current split; writes ONLY train rows, so
+    held-out trajectories never enter a tuning view.
     Exit 0 exported / 1 no declared split / 2 split refused."""
     import json as _json
 
@@ -312,6 +323,15 @@ def export_command(
     )
     from fno.evals.report import load_rows
     from fno.paths import evals_history, resolve_canonical_repo_root
+
+    argv = list(ctx.args)
+    out_val = _argv_opt(argv, "--out")
+    if not out_val:
+        typer.echo("Error: export requires --out FILE", err=True)
+        raise typer.Exit(code=2)
+    out = Path(out_val)
+    bank = Path(bank_val) if (bank_val := _argv_opt(argv, "--bank")) else None
+    history = Path(history_val) if (history_val := _argv_opt(argv, "--history")) else None
 
     bank_dir = _resolve_bank_dir(bank)
     try:
@@ -362,16 +382,17 @@ def export_command(
     typer.echo(f"exported {count} train row(s) across {len(train)} declared task(s) -> {out}")
 
 
-@evals_app.command("qualify")
-def qualify_command(
-    bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
-    history: Optional[Path] = typer.Option(None, "--history", help="History JSONL (default: the evals history)."),
-) -> None:
+@evals_app.command(
+    "qualify",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def qualify_command(ctx: typer.Context) -> None:
     """Aggregate held-out qualification results.
 
-    Counts and coverage only, never a held-out prompt or trace. Reports
-    `{"qualified": false, "reason": ...}` (exit 0) when the split is absent,
-    refused, stale, or has an empty qualification list. Exit 2 = setup error."""
+    Argv: qualify [--bank DIR] [--history FILE]. Counts and coverage only,
+    never a held-out prompt or trace. Reports `{"qualified": false,
+    "reason": ...}` (exit 0) when the split is absent, refused, stale, or has
+    an empty qualification list. Exit 2 = setup error."""
     import json as _json
 
     from fno.evals import history as _history
@@ -385,6 +406,10 @@ def qualify_command(
         load_cohorts,
     )
     from fno.paths import evals_history, resolve_canonical_repo_root
+
+    argv = list(ctx.args)
+    bank = Path(bank_val) if (bank_val := _argv_opt(argv, "--bank")) else None
+    history = Path(history_val) if (history_val := _argv_opt(argv, "--history")) else None
 
     bank_dir = _resolve_bank_dir(bank)
     try:
