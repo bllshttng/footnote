@@ -654,15 +654,11 @@ SPAWN_PERMISSION_BUILTIN = "bypassPermissions"
 
 
 def _seed_slot(toks: Sequence[str]) -> Optional[tuple[int, str]]:
-    """Where the MESSAGE seed lives: ``(index, form)`` into ``toks``, or None.
-
-    One scan so the reader (:func:`_seed_of`) and the x-2c0d seam rewrite
-    agree on the slot: a composed seed goes back exactly where the seed was
-    read. ``form`` is ``positional`` | ``message`` | ``message_eq`` |
-    ``fenced``. Same scan rules as the reader: the ``--argv`` boundary ends
-    the fno-arg head, and a bare ``--`` fence makes the first token after it
-    the seed ONLY in the legacy no-message idiom (x-1caa: a positional
-    message before the fence outranks the fenced tail)."""
+    """Where the MESSAGE seed lives: ``(index, form)`` into ``toks``, or
+    None. One scan so the reader and the seam rewrite agree on the slot.
+    Same rules as :func:`_seed_of`: the ``--argv`` boundary ends the head,
+    and a bare ``--`` fence wins only in the legacy no-message idiom
+    (x-1caa: a positional message outranks the fenced tail)."""
     i = 0
     while i < len(toks):
         t = toks[i]
@@ -689,12 +685,9 @@ def _seed_slot(toks: Sequence[str]) -> Optional[tuple[int, str]]:
 
 
 def _seed_of(toks: Sequence[str]) -> Optional[str]:
-    """The MESSAGE seed: the ``--message`` value, else the sole positional (the
-    name rides ``--name``). A bare ``--`` fence makes the first token after it
-    the seed - even when flag-shaped - ONLY in the legacy no-message idiom; a
-    positional message before the fence outranks the fenced tail (x-1caa).
-    Stops at the ``--argv`` payload boundary. A thin reader over
-    :func:`_seed_slot`, so reading and rewriting share one scan."""
+    """The MESSAGE seed: the ``--message`` value, else the sole positional
+    (the name rides ``--name``); a thin reader over :func:`_seed_slot`, so
+    reading and rewriting share one scan."""
     slot = _seed_slot(toks)
     if slot is None:
         return None
@@ -1147,12 +1140,10 @@ def inject_spawn_defaults(
             return out
     agents = settings.agents  # type: ignore[attr-defined]
     defaults = agents.defaults
-    # Per-verb profile (x-3d5b): the seed's leading slash-verb selects a profile
-    # layered OVER defaults, resolved field-wise into one effective view BEFORE
-    # the injection below - so the provider-scoped model rule, effort degrade, and
-    # unknown-provider refusal all run once, on the merged fields. x-2c0d: a
-    # verbless `--node` spawn routes by the node's derived verb, which the seam
-    # passes as ``node_verb``; the journal keeps the real (still empty) seed.
+    # Per-verb profile (x-3d5b): the seed's leading slash-verb selects a
+    # profile layered OVER defaults, resolved field-wise into one view. A
+    # verbless `--node` spawn routes by the node's derived verb, which the
+    # seam passes as ``node_verb``; the journal keeps the real seed.
     seed = _seed_of(out[1:])
     profiles = getattr(agents, "profiles", None) or {}
     known, roster_ok = _known_verb_keys(profiles, settings)

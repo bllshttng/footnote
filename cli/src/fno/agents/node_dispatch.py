@@ -99,13 +99,12 @@ def resolve_node_spawn(
             )
         source = "rd"
     node_verb = (verb or "").strip() or None
-    # x-0961/x-2c0d: the node dict IS the verb evidence. A missing dict or a
-    # dict without the key is a lossy projection: REFUSE before anything is
-    # spent.
+    # The node dict IS the verb evidence. A missing dict or a dict without
+    # the key is a lossy projection: REFUSE before anything is spent.
     if not isinstance(node, dict):
         raise SpawnError(
             f"refusing to dispatch {node_id}: {caller} passed no node dict; "
-            "the builtin path has no verb evidence (x-2c0d)."
+            "the builtin path has no verb evidence."
         )
     if "dispatch_verb" not in node:
         raise SpawnError(
@@ -463,7 +462,7 @@ class NodeSeed:
 
 def find_node_row(node: str) -> Optional[dict]:
     """The graph row for a node id or slug, or None on an unreadable graph.
-    One lookup so the door, the seam and retask read the SAME row (x-2c0d)."""
+    One lookup so the door, the seam and retask read the SAME row."""
     try:
         from fno.graph.load import load_graph
 
@@ -478,10 +477,9 @@ def find_node_row(node: str) -> Optional[dict]:
 def node_effective_verb(
     row: Optional[dict], *, node_id: Optional[str] = None
 ) -> Optional[str]:
-    """The effective workflow verb for a node row, or None when the
-    lifecycle table abstains: one answer per node, shared by every door.
-    Accepts a None row and raises DispatchResolveError on an unanswerable
-    node; the caller's spawn-failure path owns it."""
+    """The lifecycle table's answer for a node row, or None on abstain:
+    one answer per node, shared by every door. Accepts a None row; raises
+    DispatchResolveError on an unanswerable node."""
     from fno.agents import harness_map
     from fno.graph.ladder import plan_rung
 

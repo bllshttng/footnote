@@ -291,7 +291,7 @@ def resolve_target_coordinate(
 ) -> RetaskCoordinate:
     # The node's next lifecycle verb; an abstain (None) means ``target``.
     # The table answers canonical "/blueprint"; probe and rename take the
-    # bare word (x-2c0d: one lookup and one wrapper, shared with the door).
+    # bare word. One lookup and one wrapper, shared with the door.
     from fno.agents.node_dispatch import find_node_row, node_effective_verb
 
     verb = (node_effective_verb(find_node_row(node), node_id=node) or "target").lstrip(
