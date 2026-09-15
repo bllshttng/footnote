@@ -54,6 +54,9 @@ class KingBlock(BaseModel):
     checkin_interval: str = "30m"
     checkin_text: str = KING_CHECKIN_TEXT
     goal_text: str = KING_GOAL_TEXT
+    # The verdict's compaction bound; default 3 because one crown
+    # produced two compaction-caused retractions in one evening.
+    compaction_ceiling: int = 3
 
     @field_validator("checkin_interval", mode="before")
     @classmethod

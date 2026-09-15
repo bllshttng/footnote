@@ -664,14 +664,23 @@ fn live_crown_holder_in_with_projects(
 /// Tell the presiding crown - or the operator when nothing outranks this
 /// king - that it stopped with work still pending.
 ///
-/// Called from every `NoProgress` terminal in `king_decide`, via that
-/// function's shared `terminate` closure, so a terminal added later is covered
-/// without anyone remembering to wire it. Returns the one-line outcome to
-/// record, never an error: a failed escalation is named and moves on, since
-/// blocking the terminal on it leaves the king stopped with nobody told either
-/// way. Stdout carries `king:<holder>` or `operator:<qid>` (x-3ecf, AC4-HP) -
-/// the CLI resolves which target the receipt names, this fn only renders it.
-pub(crate) fn escalate_stalled(fno_bin: &str, cwd: &Path, ids: &[String], reason: &str) -> String {
+/// Called from every `NoProgress` or `Budget` terminal in `king_decide`, via
+/// that function's shared `terminate` closure, so a terminal added later is
+/// covered without anyone remembering to wire it. `scope` rides along as the
+/// positional argument when non-empty, so the CLI can read the reign verdict
+/// and name the handoff; escalation never goes silent on a failed verdict
+/// read. Returns the one-line outcome to record, never an error: a
+/// failed escalation is named and moves on, since blocking the terminal on it
+/// leaves the king stopped with nobody told either way. Stdout carries
+/// `king:<holder>` or `operator:<qid>` (x-3ecf, AC4-HP) - the CLI resolves
+/// which target the receipt names, this fn only renders it.
+pub(crate) fn escalate_stalled(
+    fno_bin: &str,
+    cwd: &Path,
+    ids: &[String],
+    reason: &str,
+    scope: &str,
+) -> String {
     let output = Command::new(fno_bin)
         .args([
             "agents",
@@ -682,6 +691,11 @@ pub(crate) fn escalate_stalled(fno_bin: &str, cwd: &Path, ids: &[String], reason
             "--reason",
             reason,
         ])
+        .args(if scope.is_empty() {
+            Vec::<&str>::new()
+        } else {
+            vec![scope]
+        })
         .current_dir(cwd)
         .stdin(Stdio::null())
         .output();
@@ -878,6 +892,7 @@ mod tests {
             dir.path(),
             &["undispatched:x-1234".to_string()],
             "NoProgress",
+            "x-a792",
         );
         assert_eq!(out, "escalated to the presiding king l1-king");
     }
@@ -891,6 +906,7 @@ mod tests {
             dir.path(),
             &["undispatched:x-1234".to_string()],
             "NoProgress",
+            "",
         );
         assert_eq!(out, "escalated to the operator as q-abcd1234");
     }
@@ -906,8 +922,34 @@ mod tests {
             dir.path(),
             &["undispatched:x-1234".to_string()],
             "NoProgress",
+            "",
         );
         assert_eq!(out, "escalated to the operator as q-legacy");
+    }
+
+    #[test]
+    fn escalate_stalled_passes_scope_when_the_king_manifest_names_one() {
+        // The verdict read keys on the scope; without it the question carries
+        // no verdict sentence and no handoff offer.
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("fno-stub");
+        std::fs::write(&stub_path, "#!/bin/sh\nprintf '%s\\n' \"$@\" > args.txt\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let out = escalate_stalled(
+            stub_path.to_str().unwrap(),
+            dir.path(),
+            &[crate::king_escalation::reading_undelivered("x-a792")],
+            "Budget",
+            "x-a792",
+        );
+        assert!(out.contains("escalated to the operator"), "{out}");
+        let recorded = std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
+        assert!(recorded.contains("x-a792"), "args: {recorded}");
+        assert!(!recorded.contains("--scope"), "args: {recorded}");
     }
 
     #[test]

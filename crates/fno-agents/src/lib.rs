@@ -139,6 +139,7 @@ pub mod king_escalation;
 pub mod king_history;
 pub mod king_ledger;
 pub mod king_termination;
+pub mod king_verdict_inputs;
 pub mod lane_heal;
 pub mod law_match;
 mod lifecycle_child;

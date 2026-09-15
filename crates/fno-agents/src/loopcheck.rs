@@ -11499,7 +11499,7 @@ fn king_output(
 fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     // A missing manifest is the only safe silent allow, exactly as on the
     // target path: a session nobody crowned is not a king, and blocking one
-    // would trap every ordinary session in the canonical checkout.
+    // would trap every ordinary session here.
     let Ok(content) = std::fs::read_to_string(&parsed.state_path) else {
         return (
             0,
@@ -11526,29 +11526,31 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| manifest.fno_id.clone());
-    // A walk-spawned pass tags its terminal with the per-invocation key so the
-    // walk's resume guard can never see a PRIOR reign's terminal, while every
-    // other reader (freshness probe, fire history) still filters on the
-    // driver tag rather than the id, so both spellings read the same.
+    // A walk-spawned pass tags its terminal with the per-invocation key so
+    // the walk's resume guard never sees a PRIOR reign's terminal; every
+    // other reader still filters on the driver tag, so both spellings agree.
     let emit = |event_type: &str, data: serde_json::Value| {
         emit_to_both(&project_events, &global_events, event_type, data);
     };
-    // Every NoProgress terminal escalates, which is why the escalation lives in
-    // the shared closure rather than at one call site: a king that gives up
-    // with work still pending is this feature's own failure arriving through a
-    // different door, and a guard on one of several terminals is decorative.
+    // Every NoProgress or Budget terminal escalates, in the shared closure: a
+    // king that quits with work pending is this feature's own failure, and
+    // 15 Budget ceiling hits once told nobody because only one terminal did.
     let terminate = |reason: TerminationReason,
                      message: &str,
                      actionable: i64,
                      fires: u64,
                      stalled: &[String]| {
         let mut message = message.to_string();
-        if reason == TerminationReason::NoProgress {
+        if matches!(
+            reason,
+            TerminationReason::NoProgress | TerminationReason::Budget
+        ) {
             let outcome = crate::loop_king::escalate_stalled(
                 &parsed.fno_bin,
                 &parsed.cwd,
                 stalled,
-                "NoProgress",
+                &format!("{reason:?}"),
+                &manifest.scope,
             );
             message = format!("{message}; {outcome}");
         }
@@ -11584,8 +11586,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 
     let history = crate::loop_king::king_fire_history(&project_events, &session_id);
     let dry = history.dry;
-    // The bounds every block below owes, in one place so a branch can no
-    // longer grow its own copy of either and sit above them.
+    // The bounds every block below owes, in one place, so no branch grows its own.
     let bounded = |dry: u64, waiting: &str| {
         bound_breached(history.total, dry, manifest.max_iterations, waiting)
     };
@@ -11602,10 +11603,9 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
         Ok(b) => b,
         Err(e) => {
-            // Blind is not clean. Block on exit 2, but bounded: a board that
-            // never answers still reaches a ceiling and terminates. The exit
-            // code marks the degraded path; the shim keys on the decision
-            // field, never the code.
+            // Blind is not clean. Block on exit 2, but bounded: a board
+            // that never answers still reaches a ceiling. The exit code
+            // marks the degraded path; the shim keys on the decision field.
             if let Some(b) = bounded(dry, &format!("king board unreadable: {e}")) {
                 let reading = crate::king_escalation::reading_board_unreadable();
                 return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
@@ -11632,8 +11632,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 
     if board.actionable == 0 {
         if board.operator_questions_unreadable {
-            // Bounded, and each blocking fire emits its row so the counters
-            // advance; the old return left both frozen and blocked forever.
+            // Bounded, and each blocking fire emits its row so the counters advance.
             return blind_block(
                 &crate::king_escalation::reading_questions_unreadable(),
                 "board clean but outstanding operator questions are unreadable; blocking completion",
@@ -11658,13 +11657,10 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             );
         }
         // The goal keys completion on the crown draining, not on any queue
-        // (2026-09-06 ruling): a board reading clean while nodes sit driven
-        // but unshipped is a quiet beat, never a finish line. An unreadable
-        // drain read must not certify the scope drained, so it skips this
-        // exit and the dry-fire ceiling below bounds the wait. The error
-        // rides with the sentinel: a timeout and a failed command demand
-        // opposite operator responses, and flattening both to "unreadable"
-        // is how a hang reads as a blip forever.
+        // (2026-09-06 ruling): a board clean while driven-but-unshipped rows
+        // sit is a quiet beat, never a finish line. An unreadable drain read
+        // must not certify drained; the dry-fire ceiling bounds the wait.
+        // Timeout and command failure demand opposite responses: both named.
         let (undelivered, drain_error) = if manifest.scope.is_empty() {
             (0, None)
         } else {
@@ -11716,16 +11712,14 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     }
 
     // A row the previous fire called actionable and this one does not is work
-    // the king cleared. That is the progress signal, read back off the board
-    // rather than self-reported, so it needs no producer to exist. Applied
-    // BEFORE the bound: a clearing fire must be judged on its post-reset
-    // streak, never killed by the stale one.
+    // the king cleared - the progress signal, read off the board; applied
+    // BEFORE the bound, so a clearing fire is judged on its post-reset streak.
     let cleared = crate::loop_king::king_cleared_a_row(&history.last_ids, &board.actionable_ids);
     let dry = if cleared { 0 } else { dry };
 
     // The bounds `--max-iterations` advertises, checked after NoWork so a
-    // clean board still exits clean. Budget is reported before NoProgress, so
-    // an exhausted king names the reason that actually stopped it.
+    // clean board still exits clean; Budget before NoProgress names what
+    // actually stopped it.
     let waiting = format!("{} rows still actionable", board.actionable);
     if let Some(b) = bounded(dry, &waiting) {
         // An actionable floor with no readable rows is the partially-blind

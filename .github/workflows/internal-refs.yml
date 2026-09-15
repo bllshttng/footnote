@@ -9,6 +9,7 @@ name: internal-refs
 # deliberately unconditional rather than path-filtered. cli-ci still avoids
 # the full matrix on docs-only edits; this job is the cheap always-on net.
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:

@@ -44,6 +44,7 @@ name: guards
 # a structural guard, and stays its own workflow.
 
 on:
+  workflow_dispatch:
   # `edited` is load-bearing for guards-pr: oos-tracked.yml triggered on
   # [opened, synchronize, reopened, edited] on purpose, because its fix path
   # IS a PR-body edit that cites a tracked node, with no

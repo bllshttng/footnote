@@ -648,6 +648,19 @@ def checkin_cmd(ctx: typer.Context) -> None:
     raise typer.Exit(code=propagate_returncode(proc.returncode))
 
 
+def verdict_cmd(
+    scope: str = typer.Argument("", help="Crown scope. Default: this session's own."),
+) -> None:
+    """Read the reign tenure verdict; the native renderer's words pass through."""
+    from fno.king.history import verdict_read
+    from fno.paths import event_journals
+
+    code, out, err = verdict_read(event_journals(), scope or None, as_json=False)
+    typer.echo(out, nl=False)
+    if code != 0:
+        _refuse(f"king verdict unreadable: {err.strip()}")
+
+
 def ledger_cmd(
     out: Optional[Path] = typer.Option(
         None, "--out", help="Write the page here instead of <state_dir>/reign.html."
@@ -773,6 +786,7 @@ def board_cmd(
 
 @king_app.command("escalate")
 def escalate_cmd(
+    scope_arg: str = typer.Argument("", help="Crown scope for the verdict read."),
     stalled: str = typer.Option(
         "", "--stalled", help="Comma-separated board rows nothing is clearing."
     ),
@@ -798,6 +812,21 @@ def escalate_cmd(
         live, unknown_reason = state.live, state.unknown_reason
     except Exception as exc:  # noqa: BLE001 - escalation must still fire
         live, unknown_reason = None, f"reign_state unreadable: {exc}"
+    # The reign verdict (x-4d4f): the native owner resolves everything; a
+    # failed read still records, "verdict unreadable".
+    summary = None
+    verdict_scope = None
+    try:
+        from fno.king.history import HistoryUnreadable, verdict_read
+        from fno.paths import event_journals
+
+        code, out, err = verdict_read(event_journals(), scope_arg or None, as_json=True)
+        if code != 0:
+            raise HistoryUnreadable(f"native exit {code}: {(err or out).strip()[:200]}")
+        payload = json.loads(out or "{}")
+        summary, verdict_scope = payload.get("summary"), payload.get("scope")
+    except Exception as exc:  # noqa: BLE001 - escalation never goes silent
+        summary = f"unreadable {exc}"
     presiding = resolve_presiding_king(session_id)
     try:
         outcome, qid = escalate(
@@ -808,6 +837,8 @@ def escalate_cmd(
             cwd=Path.cwd(),
             live=live,
             unknown_reason=unknown_reason,
+            verdict=summary,
+            scope=verdict_scope or None,
         )
     except Exception as exc:  # noqa: BLE001 - named, never swallowed
         typer.echo(f"king: escalation failed: {exc}", err=True)
@@ -906,6 +937,7 @@ agents_king_app.command(
     "checkin",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )(checkin_cmd)
+agents_king_app.command("verdict")(verdict_cmd)
 agents_king_app.command("ledger")(ledger_cmd)
 agents_king_app.add_typer(faq_app, name="faq")
 
