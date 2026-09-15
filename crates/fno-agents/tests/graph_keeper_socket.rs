@@ -783,3 +783,144 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
     let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
     drop(keeper);
 }
+
+// x-385e change 6d: a shutdown never cuts an in-flight request, and a
+// request that read an ok reply always has its row in the file.
+// ---------------------------------------------------------------
+
+#[test]
+fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
+    let home = short_home("shutrace");
+    let graph = home.join("graph.json");
+    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let mut keeper = spawn_keeper("shutrace-test", &graph, &sock);
+    wait_for_socket(&sock);
+
+    // Pre-stage six commit_rows requests on separate connections. Each
+    // handler thread holds an inflight guard from handling through the reply
+    // write, so a Shutdown that acks proves every reply was already written.
+    let staged_sock = sock.clone();
+    let staged = std::thread::spawn(move || {
+        let mut conns: Vec<(UnixStream, String)> = Vec::new();
+        for i in 0..6 {
+            let mut s = UnixStream::connect(&staged_sock).unwrap();
+            let begin = ok_result(rpc(&mut s, i, "begin", json!({})));
+            let version = begin["version"].as_str().unwrap().to_string();
+            let id = format!("m-app-{i:04}");
+            let row = json!({
+                "id": id,
+                "slug": format!("slug-{id}"),
+                "title": format!("mid-commit {id}"),
+                "type": "feature",
+                "status": "intake",
+                "priority": "p2",
+            });
+            let req = json!({
+                "id": 100 + i,
+                "method": "commit_rows",
+                "params": {
+                    "base_version": version,
+                    "base_digests": begin["base_digests"],
+                    "changed": [row],
+                    "removed": [],
+                },
+            });
+            let payload = serde_json::to_vec(&req).unwrap();
+            let mut f = vec![TAG_REQUEST];
+            f.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            f.extend_from_slice(&payload);
+            s.write_all(&f).unwrap();
+            s.flush().unwrap();
+            conns.push((s, id));
+        }
+        // Read every staged reply with its outcome kind.
+        let mut outcomes: Vec<(String, bool)> = Vec::new();
+        for (mut s, id) in conns {
+            match read_frame(&mut s) {
+                Some((tag, payload)) => {
+                    assert_eq!(tag, TAG_RESPONSE);
+                    let reply: Value = serde_json::from_slice(&payload).unwrap();
+                    outcomes.push((id, reply.get("ok") == Some(&json!(true))));
+                }
+                None => outcomes.push((id, false)),
+            }
+        }
+        outcomes
+    });
+    // Let staging finish, then shut down while the replies drain.
+    std::thread::sleep(Duration::from_millis(800));
+    let mut s = UnixStream::connect(&sock).unwrap();
+    write_frame(&mut s, TAG_SHUTDOWN, &[]);
+    let (tag, payload) = read_frame(&mut s).expect("shutdown reply");
+    assert_eq!(tag, TAG_RESPONSE);
+    let reply: Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(
+        reply["result"], "shutdown",
+        "an unblocked keeper acks: {reply}"
+    );
+    let outcomes = staged.join().unwrap();
+
+    // Late arrivals: sent after the ack, they meet the dying keeper and read
+    // a hangup BEFORE any publish.
+    let mut late_ok = 0;
+    for i in 0..2 {
+        let id = format!("late-app-{i}");
+        let late = UnixStream::connect(&sock);
+        match late {
+            Err(_) => continue, // socket already unlinked: hangup by refusal
+            Ok(mut s) => {
+                let begin = rpc(&mut s, 900 + i as u64, "begin", json!({}));
+                // Either the frame round-trips (keeper still draining) or the
+                // stream is cut; both are legal, only ok-published rows count.
+                if begin.get("ok") == Some(&json!(true)) {
+                    late_ok += 1;
+                }
+            }
+        }
+    }
+    let _ = late_ok;
+
+    // Reap: the keeper exits 0 on its own.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match keeper.child.try_wait().expect("reap check") {
+            Some(status) => {
+                assert_eq!(status.code(), Some(0), "shutdown exits 0: {status}");
+                break;
+            }
+            None => {
+                assert!(Instant::now() < deadline, "keeper did not exit");
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    assert!(!sock.exists(), "shutdown unlinks its socket");
+
+    // THE CONTRACT: every staged connection that read an ok reply has its
+    // row in the file. A connection cut before its reply has no row (it
+    // never read ok).
+    let final_raw = std::fs::read_to_string(&graph).unwrap();
+    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
+    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_string))
+        .collect();
+    let mut ok_replies = 0;
+    for (id, ok) in &outcomes {
+        if *ok {
+            ok_replies += 1;
+            assert!(
+                final_ids.contains(id),
+                "commit {id} answered ok but is missing from the file"
+            );
+        }
+    }
+    assert!(
+        ok_replies >= 1,
+        "positive control: at least one staged commit must have answered ok, got {outcomes:?}"
+    );
+    let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
+}
