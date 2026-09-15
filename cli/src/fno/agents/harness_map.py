@@ -1316,6 +1316,19 @@ _BRIEF_MAX_BYTES = 8192
 
 #: The verbs the x-ebd2 lifecycle table owns; anything else abstains.
 _TARGET_FAMILY_VERBS = ("/target", "/blueprint")
+
+
+def _canonical_verb(token: str) -> Optional[str]:
+    """The leading verb token's canonical ``/verb`` spelling, or None.
+
+    ``/x``, ``/fno:x`` and ``$fno:x`` all mean ``/x``; the shape rule is the
+    one parser every reader shares (:func:`parse_verb_token`), so a path
+    (``/usr/bin/script``) never parses as a verb."""
+    if parsed := parse_verb_token(token):
+        return "/" + parsed[0]
+    return None
+
+
 #: Intake keys on difficulty (law d-834b6ff1); re-dispatch on the plan's rung.
 _DIFFICULTY_ANSWERS = {"low": "/target", "medium": "/blueprint", "high": "/blueprint"}
 _RUNG_ANSWERS = {
@@ -1367,6 +1380,66 @@ def resolve_effective_verb(
     if raw_verb and raw_verb != answer:
         note += f"; stored dispatch_verb {raw_verb} reconciled"
     return answer, note + ")"
+
+
+def node_seed(
+    seed: Optional[str], node_id: str, rec: Optional[Mapping[str, object]]
+) -> Optional[str]:
+    """The seed a ``--node`` spawn should launch: unchanged, composed, or a
+    refusal (x-2c0d).
+
+    The authority is :func:`resolve_effective_verb` over the node's stored
+    ``dispatch_verb``, difficulty and plan rung - the same derivation
+    ``backlog advance`` runs. Returns the seed to launch, or ``None`` to pass
+    it through untouched: a seed led by a verb outside the target family
+    (``/pr``, ``/think`` - declared precedence holds, like the resolver's
+    abstain), one carrying ``--reconcile`` (an explicit template bypasses the
+    table), and a family verb that already agrees with the derivation. A
+    family verb that DISAGREES refuses: every dispatch naming the verb twice
+    is evidence nobody trusts ``--node``, and an unknown verb is not evidence
+    of ``/target``. Raises :class:`DispatchResolveError` for an unreadable
+    node row or an unanswerable derivation. A verbless seed (prose or empty)
+    is composed: the node's resolved command, then the prose. The spawn seam
+    skips empty seeds so the door's node-seed render (the brief env and the
+    worktree ensure) keeps owning that shape."""
+    text = (seed or "").strip()
+    lead = _canonical_verb(text.split(maxsplit=1)[0]) if text else None
+    if lead is not None and lead not in _TARGET_FAMILY_VERBS:
+        return None
+    if "--reconcile" in text.split():
+        return None
+    if rec is None:
+        raise DispatchResolveError(
+            f"--node {node_id} names no readable backlog row; an unknown "
+            "node is not evidence of a verb"
+        )
+    from fno.graph.ladder import plan_rung as _node_plan_rung
+
+    stored = rec.get("dispatch_verb")
+    stored_verb = str(stored or "").strip() or None
+    rung = _node_plan_rung(rec).value
+    derived, note = resolve_effective_verb(
+        verb=stored_verb, difficulty=rec.get("difficulty"), plan_rung=rung
+    )
+    effective = derived or _canonical_verb(stored_verb or "")
+    if lead is not None:
+        if effective is not None and lead != effective:
+            raise DispatchResolveError(
+                f"payload verb {lead} disagrees with {node_id}'s verb "
+                f"{effective} ({note}); drop the verb from the payload, "
+                "--node supplies it"
+            )
+        return None
+    command = resolve_dispatch(
+        harness="claude",
+        node_id=node_id,
+        verb=stored_verb,
+        difficulty=rec.get("difficulty"),
+        plan_rung=rung,
+        merge_posture="from-config",
+        trigger="attended",
+    )["command"]
+    return f"{command}\n\n{text}" if text else command
 
 
 def resolve_dispatch(
