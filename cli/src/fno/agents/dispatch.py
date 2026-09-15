@@ -1110,8 +1110,7 @@ def _lane_b_thread_spawn(
             "--",
             *argv,
         ]
-        # The spawn cause is captured BEFORE this env snapshot, so the
-        # keeper child never inherits it (the pane and bg lanes do the same).
+        # The spawn cause is captured BEFORE this env snapshot, so the keeper child never inherits it.
         spawn_trigger = _capture_spawn_trigger()
         env = dict(os.environ)
         # A spawned child inherits its parent's ROUTE but never its

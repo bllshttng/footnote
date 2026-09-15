@@ -205,8 +205,7 @@ def build_context(
         A frozen ``EventContext`` ready to pass to ``emit_with_context``.
     """
     # The priority order lives in the module docstring tree; the one fact it
-    # lacks: an explicit env attribution short-circuits before the
-    # target-state read, so a live state file cannot relabel it.
+    # lacks: an explicit env attribution short-circuits before the target-state read.
     env_kind = caller_kind_from_env()
 
     target_sid: Optional[str]
