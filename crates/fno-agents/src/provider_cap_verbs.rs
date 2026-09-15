@@ -34,7 +34,7 @@ pub fn run_provider_cap(args: &[String]) -> i32 {
 }
 
 fn cap_status(args: &[String]) -> i32 {
-    let json = args.iter().any(|a| a == "--json");
+    let json = crate::json_output::requested(args);
     let max_age = flag_value(args, "--max-age-s")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(1800);

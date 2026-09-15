@@ -254,7 +254,7 @@ pub fn reap_sweep_once(apply: bool, min_elapsed: u64) -> Vec<ReapRow> {
 /// default; prints one line per confirmed orphan and its disposition.
 pub fn run_orphan_reap(args: &[String]) -> i32 {
     let apply = args.iter().any(|a| a == "--apply");
-    let json = args.iter().any(|a| a == "--json");
+    let json = crate::json_output::requested(args);
     let min_elapsed =
         min_elapsed_secs(&std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf()));
     let Some(ps) = read_ps() else {
