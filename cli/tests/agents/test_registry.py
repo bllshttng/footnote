@@ -885,7 +885,7 @@ def test_us2_schema_version_is_three() -> None:
     # a bounded Codex thread.
     # v31: additive `harness_args` - the fenced codex thread tokens a daemon
     # restart re-parses onto thread/resume.
-    assert SCHEMA_VERSION == 31
+    assert SCHEMA_VERSION == 32
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -1309,6 +1309,62 @@ def test_screen_state_round_trips_across_registry_boundary(
 
     # (c) Absent defaults to None (pre-bump rows need no migration).
     assert AgentEntry(name="x", harness="claude", cwd="/t", log_path="/t/x.log").screen_state is None
+
+
+def test_stop_record_round_trips_across_registry_boundary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """v32: fno's own stop record round-trips losslessly.
+
+    Same X3 passthrough contract as screen_state: the Rust stop handler and
+    terminal-stop sweep are the sole writers; Python custodies the opaque
+    blob so a row fno stopped keeps its stamp on a Python read-modify-write.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _as_deployed(monkeypatch)
+    from fno.agents.registry import (
+        AgentEntry,
+        load_registry,
+        write_registry,
+    )
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+    stop = {"by": "stop-verb", "at": "2026-09-15T00:00:00Z", "reason": None}
+
+    # (a) A Rust-written row carrying stop loads as an opaque dict. The file
+    # stages the pre-bump version on purpose: the reader accepts 1..=current.
+    registry_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 31,
+                "agents": [
+                    {
+                        "name": "pane",
+                        "harness": "claude",
+                        "cwd": "/tmp",
+                        "log_path": "/tmp/pane.log",
+                        "created_at": "2026-07-02T00:00:00Z",
+                        "status": "live",
+                        "stop": stop,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_registry(path=registry_path)
+    assert len(loaded) == 1
+    assert loaded[0].stop == stop
+
+    # (b) write -> load preserves the blob byte-for-value.
+    write_registry(loaded, path=registry_path)
+    reloaded = load_registry(path=registry_path)
+    assert reloaded[0].stop == stop
+
+    # (c) Absent defaults to None (pre-bump rows need no migration).
+    assert AgentEntry(name="x", harness="claude", cwd="/t", log_path="/t/x.log").stop is None
 
 
 def test_us2_v1_entries_synthesized_at_read(tmp_path: Path, monkeypatch) -> None:
@@ -2322,7 +2378,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 31
+    assert SCHEMA_VERSION == 32
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2388,7 +2444,7 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 31
+    assert SCHEMA_VERSION == 32
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",

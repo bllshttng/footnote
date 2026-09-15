@@ -784,7 +784,7 @@ pub(crate) fn consume_merge_cleanup_requests(
                     let agents = memo.get_or_insert_with(crate::claude_roster::read_all_agents);
                     stop_harness_confirmed(home, entry, agents)
                 },
-                surface_removal: &crate::gc_native::apply_active_surface_removal,
+                surface_removal: &crate::gc_native::apply_retire_surface,
                 mux_member: &crate::gc_native::apply_mux_member_retirement,
                 tree_holds: &tree_unreachable_from_origin_main,
                 take_tree: &remove_tree,

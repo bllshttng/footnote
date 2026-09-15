@@ -51,6 +51,7 @@ fn entry(name: &str, harness: &str, sid: Option<&str>) -> RegistryEntry {
         last_reconciled_at: None,
         inside_leg: None,
         exited_at: None,
+        stop: None,
         mux: None,
         screen_state: None,
         crown_level: None,
