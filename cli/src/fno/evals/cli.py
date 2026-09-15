@@ -206,9 +206,7 @@ def report_command(
         if json_output:
             typer.echo(_json.dumps(view, indent=2))
         else:
-            typer.echo(f"Eval trend (window {view['window_days']}d):")
-            typer.echo(f"  prior  since {view['prior_start']}")
-            typer.echo(f"  recent since {view['recent_start']}")
+            typer.echo(f"Eval trend: prior since {view['prior_start']}, recent since {view['recent_start']}")
             for tid, t in view["tasks"].items():
                 p, r = t["prior"], t["recent"]
                 typer.echo(
@@ -247,8 +245,7 @@ def report_command(
         raise typer.Exit(code=0)
 
     rows = load_rows(history_file, since=since)
-    # The default report's alarm reads the recent window (x-cf8f): a
-    # long-since-fixed flake outside the window no longer holds exit 4 open.
+    # The default report's alarm reads the recent window (x-cf8f).
     report = build_report(
         rows,
         now=datetime.now(timezone.utc),

@@ -237,34 +237,29 @@ def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
 
 
 def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
-    """The eval bank's demand leg (x-cf8f): the native ``evals-arm``.
-
-    The whole body lives in the binary - the due read, the spawn gate, the
-    detached run and the journal - so this phase is only the guards, the path
-    resolution and the receipt parse. ``evals.schedule_days <= 0`` and the
-    autonomy master switch gate here like every scheduled leg; the binary is
-    never called unarmed. A missing binary, a non-zero exit and an
-    unparseable receipt all land as ``arm_failed`` - a dead arm never raises
-    out of the tick, and the bank never runs inside the tick: the arm holds
-    the ``evals:scheduled-run`` claim across ticks instead.
+    """The eval bank's demand leg (x-cf8f): guards and the receipt parse here;
+    the due read, the gate, the detached run and the journal live in the
+    native ``evals-arm``, which holds the ``evals:scheduled-run`` claim across
+    ticks. Every failure shape lands as ``arm_failed``, never out of the tick.
     """
     evals_cfg = getattr(settings, "evals", None)
-    schedule_days = int(getattr(evals_cfg, "schedule_days", 0) or 0)
-    if schedule_days <= 0:
-        _emit_tick_row("evals", interval_s=0, skip_reason="evals_off",
-                       detail="evals.schedule_days 0")
+    days = int(getattr(evals_cfg, "schedule_days", 0) or 0)
+    interval_s = days * 86400
+
+    def row(skip: Optional[str], detail: str, acted: int = 0) -> None:
+        _emit_tick_row("evals", interval_s=interval_s, acted=acted,
+                       skip_reason=skip, detail=detail[:400])
+
+    if days <= 0:
+        row("evals_off", "evals.schedule_days 0")
         return
     try:
         from fno.config import autonomy_master_enabled
-
-        if not autonomy_master_enabled():
-            _emit_tick_row("evals", interval_s=schedule_days * 86400,
-                           skip_reason="autonomy_off",
-                           detail="config.autonomy.enabled is false")
-            return
+        armed = autonomy_master_enabled()
     except Exception:  # noqa: BLE001 - an unreadable master switch reads off
-        _emit_tick_row("evals", interval_s=schedule_days * 86400,
-                       skip_reason="autonomy_off", detail="autonomy master unreadable")
+        armed = False
+    if not armed:
+        row("autonomy_off", "config.autonomy.enabled is false")
         return
     try:
         import subprocess
@@ -281,7 +276,7 @@ def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
             "--history", str(evals_history()),
             "--events", str(state_dir() / "events.jsonl"),
             "--fno-bin", _resolve_fno_binary(),
-            "--schedule-days", str(schedule_days),
+            "--schedule-days", str(days),
             "--stale-days", str(int(getattr(evals_cfg, "stale_days", 7) or 7)),
             "--summary-json", json.dumps(evals_health_summary(evals_history())),
         ]
@@ -290,14 +285,9 @@ def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
         if proc.returncode != 0:
             raise RuntimeError(f"evals-arm exited {proc.returncode}: {proc.stderr[:160]}")
         answer = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.stdout.strip() else {}
-        _emit_tick_row("evals", interval_s=schedule_days * 86400,
-                       acted=int(answer.get("acted") or 0),
-                       skip_reason=answer.get("skip_reason"),
-                       detail=str(answer.get("detail") or "")[:400])
+        row(answer.get("skip_reason"), str(answer.get("detail") or ""), int(answer.get("acted") or 0))
     except Exception as exc:  # noqa: BLE001 - never let the arm break the tick
-        _emit_tick_row("evals", interval_s=schedule_days * 86400,
-                       skip_reason="arm_failed",
-                       detail=f"{type(exc).__name__}: {exc}"[:400])
+        row("arm_failed", f"{type(exc).__name__}: {exc}")
 
 
 def _watchdog_recovery_roots() -> list[Path]:
@@ -1266,11 +1256,8 @@ def tick() -> None:
                 except Exception as exc:  # noqa: BLE001 - never let heal break the tick
                     log.warning("pr-watch: heal phase failed: %s", exc)
 
-        # The eval bank's demand leg (x-cf8f), back after 2cf4d6297 stripped
-        # the inline run for the tree budget: the whole body now lives in the
-        # native evals-arm (module-level _run_evals_arm_phase), so this phase
-        # never runs the bank inside the tick - the arm launches the run
-        # detached and holds the evals:scheduled-run claim across ticks.
+        # The eval bank's demand leg (x-cf8f): the body is the native
+        # evals-arm; the tick never runs the bank inline.
         def _phase_evals(_slice_s: float) -> None:
             set_tick_phase("evals")
             _run_evals_arm_phase(settings, seconds_left_fn=phase_seconds_left)
