@@ -55,6 +55,22 @@ else
 fi
 STUB
 chmod +x "$TMP/bin/fno"
+
+# Stub `fno-agents`: the escalations path resolver. KGD_ESCALATIONS unset or
+# empty -> exit 1, the unresolved-directory shape.
+cat > "$TMP/bin/fno-agents" <<'STUB'
+#!/usr/bin/env bash
+if [ "$1" = "state" ] && [ "$2" = "path" ] && [ "$3" = "escalations" ]; then
+  if [ -n "$KGD_ESCALATIONS" ]; then
+    echo "$KGD_ESCALATIONS"
+  else
+    exit 1
+  fi
+else
+  exit 1
+fi
+STUB
+chmod +x "$TMP/bin/fno-agents"
 export PATH="$TMP/bin:$PATH"
 export KGD_REG_FIXTURE="$TMP/registry.json"
 export KGD_KNOB="$TMP/knob.txt"
@@ -67,6 +83,7 @@ mkdir -p "$KGD_PLANS"
 
 SID="sess-king"
 SRC_FILE="$TMP/repo/src/main.py"
+mkdir -p "$TMP/repo"  # the payload cwd must exist: the escalations resolver cds there
 
 # registry_fixture <row-json>; manifest_fixture <shape> [sid]
 registry_fixture() { printf '{"agents":[%s]}\n' "$1" > "$KGD_REG_FIXTURE"; }
@@ -381,6 +398,38 @@ OUT="$(run_guard "$(edit_payload "$HOME/.claude/projects/stray.md")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && pass "memory: stray directly under projects root denied" \
   || fail "memory stray rc=$RC out=${OUT:0:300}"
+
+# ── Escalations carve-out: an escalation note is the superuser-tier lane a
+# king files. The dir resolves through the fno-agents stub; an unresolved
+# directory leaves the carve-out off, never a blanket allow.
+export KGD_ESCALATIONS="$TMP/internal/fno/escalations"
+mkdir -p "$KGD_ESCALATIONS"
+OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"note"}}' "$SID" "$TMP/repo" "$KGD_ESCALATIONS/20260915-0900-token.md")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "escalations: court Write of an escalation note allowed" \
+  || fail "escalations Write rc=$RC out=$OUT"
+
+OUT="$(run_guard "$(bash_payload "echo question >> $KGD_ESCALATIONS/20260915-0900-token.md")")"; RC=$?
+[[ $RC -eq 0 && "$OUT" == "{}" ]] \
+  && pass "escalations: Bash append into an escalation note allowed" \
+  || fail "escalations append rc=$RC out=$OUT"
+
+# A write in the vault's internal/ tree but outside escalations/ stays
+# implementation surface: denied, with the escalations directory named among
+# the allowed roots.
+OUT="$(run_guard "$(edit_payload "$TMP/internal/fno/decisions/x.md")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && echo "$OUT" | grep -q 'escalations directory' \
+  && pass "escalations: write outside the dir denied, refusal names it" \
+  || fail "escalations outside rc=$RC out=${OUT:0:300}"
+
+# The unresolved-directory shape: no escalation write is specially allowed,
+# and the guard stays fail-closed.
+export KGD_ESCALATIONS=""
+OUT="$(run_guard "$(edit_payload "$TMP/internal/fno/escalations/escape.md")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "escalations: unresolved resolver keeps the guard fail-closed" \
+  || fail "escalations unresolved rc=$RC out=${OUT:0:300}"
 
 # ── Third limb signature: the live claude payload carries no agent_id and its
 # transcript_path names the parent MAIN transcript (the refusal of 2026-09-14).
