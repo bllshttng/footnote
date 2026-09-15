@@ -979,6 +979,15 @@ def test_spawn_opencode_bg_delegates_to_serve_lane(workdir, monkeypatch) -> None
         return "ses_deleg1"
 
     monkeypatch.setattr(dispatch_mod, "_opencode_serve_spawn", _fake_serve)
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{"id": "x-abcd", "slug": "serve", "dispatch_verb": "/target", "difficulty": "low"}],
+    )
+    # The composed node seed is target-family; this machine may lack the
+    # opencode loop extension. The gate has its own test file.
+    monkeypatch.setattr(
+        "fno.agents.harness_map.check_loop_participation", lambda *a, **k: None
+    )
 
     runner = _make_runner()
     result = runner.invoke(
