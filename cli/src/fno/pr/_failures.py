@@ -135,16 +135,29 @@ def unreached_runner_steps(log: str) -> Optional[list[str]]:
     return [name for name in planned if name not in done]
 
 
-def unreached_job_steps(steps: Sequence[dict]) -> list[str]:
-    """GitHub-job steps after the failed one, minus cleanup bookkeeping.
+def _failed_job_step(steps: Sequence[dict]) -> Optional[str]:
+    """The name of the step whose conclusion is `failure`, or None."""
+    return next(
+        (
+            str(s.get("name"))
+            for s in steps
+            if str(s.get("conclusion") or "").lower() == "failure"
+        ),
+        None,
+    )
 
-    Measured on a real failed job: steps after the failure record
-    `conclusion: "skipped"`, byte-identical to a condition-skip, so position
-    after the failure is the only discriminator. `Post *` and `Complete job`
-    are GitHub's own cleanup phases and always trail the failure; they are
-    never work that fail-fast hid. No failed step (a cancelled or
-    startup-failure job) yields `[]`: with no failure point, position says
-    nothing.
+
+def unreached_job_steps(steps: Sequence[dict]) -> list[str]:
+    """GitHub-job steps after the failed one whose own conclusion is skipped.
+
+    Position alone was the old discriminator, and it lied on PR 1823:
+    `.github/workflows/guards.yml` carries `if: ${{ !cancelled() }}` on its
+    steps, so steps after a failure can RUN and read `success` - thirteen
+    guard steps were reported as unreached work that had passed. Only a later
+    step whose OWN conclusion is `skipped` is work fail-fast never reached;
+    `Post *` and `Complete job` are GitHub's own cleanup phases and never
+    count. No failed step (a cancelled or startup-failure job) yields `[]`:
+    with no failure point, position says nothing.
     """
     failed_at = next(
         (i for i, s in enumerate(steps) if str(s.get("conclusion") or "").lower() == "failure"),
@@ -156,6 +169,8 @@ def unreached_job_steps(steps: Sequence[dict]) -> list[str]:
     for s in steps[failed_at + 1 :]:
         name = str(s.get("name") or "")
         if not name or name.startswith("Post ") or name == "Complete job":
+            continue
+        if str(s.get("conclusion") or "").lower() != "skipped":
             continue
         out.append(name)
     return out
@@ -179,6 +194,7 @@ def collect_failures(
     failing: Sequence[dict],
     cwd: Optional[str] = None,
     runner: Callable = run,
+    known: Optional[dict] = None,
 ) -> list[dict]:
     """Detail entries for the failing rollup rows, loudest facts first.
 
@@ -191,6 +207,9 @@ def collect_failures(
     its class rather than vanishing - an omitted check reads as passed, which
     is the exact lie this module exists to stop. Capped at
     MAX_DETAILED_FAILURES with an explicit truncation entry.
+
+    `known` maps job id -> a prior entry for the SAME job, replayed with no
+    log or job-object read (a job id is minted per attempt).
     """
     out: list[dict] = []
     for check in list(failing)[:MAX_DETAILED_FAILURES]:
@@ -202,6 +221,10 @@ def collect_failures(
             continue
         owner, repo, job_id = ref
         entry["job_id"] = job_id
+        prior = (known or {}).get(job_id)
+        if prior is not None:
+            out.append(prior)
+            continue
         log_res = fetch_job_log(owner, repo, job_id, cwd, runner)
         log_text = log_res.stdout if log_res.ok else ""
         if not log_res.ok:
@@ -228,14 +251,7 @@ def collect_failures(
                     job_unreached = unreached_job_steps(steps)
                     if job_unreached:
                         entry["unreached_steps"] = job_unreached
-                    failed_job_step = next(
-                        (
-                            str(s.get("name"))
-                            for s in steps
-                            if str(s.get("conclusion") or "").lower() == "failure"
-                        ),
-                        None,
-                    )
+                    failed_job_step = _failed_job_step(steps)
                     if failed_job_step:
                         entry.setdefault("step", failed_job_step)
                         if "first_error" not in entry:
@@ -246,10 +262,16 @@ def collect_failures(
                             if err:
                                 entry["first_error"] = err
         else:
+            # No log text (a fetch failure or an empty log): the job object
+            # still names WHICH step failed beside the consequence
+            # the unreached steps spell out.
             steps = _fetch_job_steps(owner, repo, job_id, cwd, runner)
             job_unreached = unreached_job_steps(steps)
             if job_unreached:
                 entry["unreached_steps"] = job_unreached
+            failed_job_step = _failed_job_step(steps)
+            if failed_job_step:
+                entry.setdefault("step", failed_job_step)
         out.append(entry)
     if len(failing) > MAX_DETAILED_FAILURES:
         out.append(

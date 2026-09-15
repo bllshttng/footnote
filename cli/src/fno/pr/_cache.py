@@ -1,25 +1,12 @@
 """TTL coalescing cache for `fno do pr status` (load-bearing).
 
-The GraphQL quota is per-USER, and the REST SECONDARY limit counts request
-rate, so N sessions polling one PR trip it no matter which transport they
-use. Only collapsing those N reads into one helps. This module is that
-collapse: one shared row per (repo, PR, HEAD) in a flock-protected file under
-the fno do state dir, refreshed at most once per TTL by whichever session missed.
-The head is part of the key because a verdict is a fact about one commit: a
-row cached for head A must never answer for head B, whose check set may not
-exist yet (the operator's court zero-checks fail-open).
+One shared row per (repo, PR, head), flock-protected, refreshed at most once
+per TTL, served degraded inside a fleet backoff. The full narrative lives in
+docs/architecture/pr-status-verdict.md (`cached_status: the coalescing
+chokepoint`).
 
-Whether GitHub is refusing the machine right now is the fleet budget
-ledger's question, not this cache's: a live backoff in
-`~/.fno/locks/github-request-budget.json` (read through
-`_quota.backoff_live`) short-circuits the pre-check to the newest cached
-row, degraded once stale - never a green verdict, never a fresh-looking
-row, and never a silent retry that sustains the very refusal it is waiting
-out. Transient (non-secondary) failures are NOT cached: a loud error must
-reach every caller, not be replayed from disk.
-
-Code default, deliberately not operator config: TTL 60s. Env overrides
-exist for tests and one-off tuning: FNO_PR_STATUS_TTL, FNO_PR_STATUS_CACHE_DIR.
+Code default, deliberately not operator config: TTL 60s. Env overrides exist
+for tests and one-off tuning: FNO_PR_STATUS_TTL, FNO_PR_STATUS_CACHE_DIR.
 """
 
 from __future__ import annotations
@@ -99,11 +86,7 @@ def read_row(key: str) -> Optional[dict]:
 
 
 def _row_paths_newest(slug_key: str, pr: str) -> list[Path]:
-    """Every row file for (slug_key, pr), newest mtime first. No network.
-
-    A racing prune loses a candidate, not a crash. `_rows_newest_first` reads
-    through this.
-    """
+    """Every row file for (slug_key, pr), newest mtime first. No network."""
     candidates = []
     for candidate in cache_dir().glob(f"{slug_key}-{pr}-*.json"):
         try:
@@ -114,12 +97,7 @@ def _row_paths_newest(slug_key: str, pr: str) -> list[Path]:
 
 
 def _rows_newest_first(slug_key: str, pr: str):
-    """Every cached row for (slug_key, pr), newest mtime first. No network.
-
-    Shared by `newest_row_offline` (wants the first readable row) and
-    `cached_status`'s head-unreadable arm (wants the first servable row) so
-    the candidate-collection-and-sort logic lives in exactly one place.
-    """
+    """Every cached row for (slug_key, pr), newest mtime first. No network."""
     for candidate in _row_paths_newest(slug_key, pr):
         row = read_row(candidate.stem)
         if row is not None:
@@ -129,9 +107,8 @@ def _rows_newest_first(slug_key: str, pr: str):
 def newest_row_offline(slug_key: str, pr: str) -> Optional[dict]:
     """The newest cached row for this PR, by mtime. No network, ever.
 
-    Deliberately head-agnostic: the caller has no head and must not fetch
-    one. The row may describe a head the PR has since moved past, so every
-    caller must render it as "as of <ts>", never as the current verdict.
+    Deliberately head-agnostic: render it as "as of <ts>", never as the
+    current verdict (docs/architecture/pr-status-verdict.md).
     """
     return next(_rows_newest_first(slug_key, pr), None)
 
@@ -147,14 +124,8 @@ def _write_row_locked(p: Path, row: dict) -> None:
 def finite_or_zero(value: object) -> float:
     """`value` as a finite float, 0.0 when absent, unparseable or not finite.
 
-    Public because a cache row is read on more than one path and the guard has
-    to travel with it. `fno.graph.board` reads the same row's `ts` through
-    `newest_row_offline`, and while this lived as a private row-keyed helper
-    that path kept a bare `float()` and crashed on the same values - a guard
-    on one of two reachable paths, under a docstring claiming it covered both.
-
-    `json.loads` accepts a bare `NaN` / `Infinity` by default, so a row
-    carrying `"ts": Infinity` parses cleanly and survives `float()`.
+    Public because a cache row is read on more than one path and the guard
+    has to travel with it (docs/architecture/pr-status-verdict.md).
     """
     try:
         v = float(value or 0)  # type: ignore[arg-type]
@@ -164,65 +135,33 @@ def finite_or_zero(value: object) -> float:
 
 
 def _num(row: dict, key: str) -> float:
-    """A numeric field of a cache ROW, guarded by `finite_or_zero`.
-
-    A row written by a different schema (a concurrent fno install polling the
-    same PR) must read as a miss, never crash a caller - the same discipline
-    `_serve` already applies to a corrupt exit code.
-
-    Finite is necessary and NOT sufficient, which is why callers that hand the
-    result to `time` still guard the conversion. `1e18` is perfectly finite
-    and still raises out of `time.gmtime`, so a value passing here can fail
-    one caller and satisfy another.
-    """
+    """A numeric field of a cache ROW, guarded by `finite_or_zero`."""
     return finite_or_zero(row.get(key))
 
 
 def _serve(row: dict, *, stale: bool) -> int:
     """Print one cached row and return its exit code (-1 = not servable).
 
-    The served line says WHEN and at WHAT HEAD it was computed, not merely
-    that it came from a cache. `cached: true` alone is decorative: it tells a
-    reader the answer is second-hand but gives no way to judge whether the
-    staleness matters for their question, so every consumer ignored it. The
-    row's own `head` is the head the verdict was computed at; on the
-    head-unreadable path that can be a head the PR has since moved past, and
-    `cached_age_seconds` is the number that says how far past.
-
-    Deliberately NO `cached_head`: it was a verbatim copy of `head` under a
-    second name, which adds no fact a reader did not have and gives the one
-    fact two places to drift apart. `head` already documents itself as the
-    commit this verdict describes.
+    Serves verbatim or, when `stale` or the head is unverified, degraded to
+    unknown/unsettled. The WHEN and AT-WHAT-HEAD contract and the guards are
+    in docs/architecture/pr-status-verdict.md (`cached_status`).
     """
     out = dict(row.get("output") or {})
     if not out:
-        # Nothing servable ever landed in the row (a first-read secondary
-        # failure). Fall through to a live read rather than fabricate one.
-        return -1
+        return -1  # nothing servable landed: fall through to a live read
     exit_raw = row.get("exit")
     try:
         code = 4 if exit_raw is None else int(exit_raw)
     except (TypeError, ValueError):
-        # A row written by a different schema (a concurrent fno install
-        # polling the same PR) is corrupt, same as an unparseable file:
-        # a miss, never a crash. Checked BEFORE the stdout write below, so
-        # a corrupt exit code falls through to one clean live read rather
-        # than a served line followed by a second, live-read line.
-        return -1
+        return -1  # a foreign-schema row is a miss, checked BEFORE any write
     if stale or row.get("head_unverified"):
-        # Fail-closed stale serve (operator's court): inside a backoff window
-        # the fresh check set is UNREADABLE, so the row's green is a fact
-        # about a past read, not about the head now. Degrade the served line
-        # to unknown/unsettled/not-ready - a watcher grepping settled:true
-        # waits out the window instead of waking on unverifiable green.
+        # Fail-closed stale serve (operator's court): unverifiable green is
+        # degraded, and the failure diagnosis goes with it.
         out["stale_verdict"] = out.get("verdict")
         out["verdict"] = "unknown"
         out["green"] = False
         out["settled"] = False
         out["ready"] = False
-        # The failure diagnosis goes with it: a payload that declares the
-        # check set unreadable must not also print `failing:` slots and
-        # per-check notes asserting a diagnosis it just called unverifiable.
         out.pop("failures", None)
         out["stale_reason"] = (
             "secondary rate limit backoff - the check set is unreadable, so "
@@ -231,24 +170,15 @@ def _serve(row: dict, *, stale: bool) -> int:
         code = 3
     out["cached"] = True
     ts = _num(row, "ts")
-    # A finite `ts` can still be outside the platform's time_t range: 1e18
-    # raises OSError and 1e300 raises OverflowError out of `gmtime`. Finite is
-    # what the row guard can promise, and it is not what `time` requires, so
-    # the conversion is guarded where it happens rather than by widening
-    # `finite_or_zero` into a timestamp validator it is not.
     try:
         out["cached_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts)) if ts else None
     except (OSError, OverflowError, ValueError):
         out["cached_at"] = None
         ts = 0.0
     out["cached_age_seconds"] = int(max(0.0, time.time() - ts)) if ts else None
-    # The serve is the second path a reader arrives on, so it prints the
-    # same human line the live read does, from the served payload: the
-    # degraded arm above rewrote the row in place, and a payload-keyed
-    # renderer tells that degraded truth with no second implementation.
-    # A degraded-coverage note must survive the coalescing this module
-    # exists to do: without this, the note reaches only the one session
-    # whose live read produced the row and none of the serves that follow.
+    # Payload-keyed renderers: the degraded arm rewrote the row in place, so
+    # the serve tells that degraded truth with no second implementation, and
+    # a degraded-coverage note survives the coalescing.
     from fno.pr._status import (
         coverage_recompute_note,
         failures_note,
@@ -267,24 +197,9 @@ def _serve(row: dict, *, stale: bool) -> int:
 def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) -> int:
     """`fno do pr status` through the coalescing cache: the CLI chokepoint.
 
-    `refresh=True` (`fno do pr status --refresh`) is the sanctioned escape: no row
-    is served, the live read runs, and the fresh row replaces whatever was
-    there - WHEN the head is readable. With no readable head there is no head
-    to key a row on, so the live read still runs and no row is written at all;
-    that arm also sits outside the per-key flock, so it is the one --refresh
-    shape that does not coalesce. Before it existed a caller who distrusted a
-    cached verdict had no option at all - `--help` listed none - and had to drop to raw `gh api`,
-    which is what a king did on PR 994 after the cache reported red on a PR
-    GitHub called clean. It is a MANUAL verb: it defeats the coalescing this
-    module exists to do, so never put it in a watcher loop.
-
-    Rows are keyed by (repo, PR, head): a verdict is a fact about ONE commit,
-    and serving a green row cached for head A after a push moved the PR to
-    head B answered "settled" for a head whose check set was still empty (the
-    operator's court zero-checks finding). One cheap REST read buys the
-    current head on every call; the expensive reads (check-runs, status,
-    reviews, coverage) still collapse to one per TTL. Backoff-window callers
-    get the last row DEGRADED to unknown (see `_serve`), never its verdict.
+    Head-keyed rows, one read per TTL, backoff degradation, and the `--refresh`
+    escape are documented in docs/architecture/pr-status-verdict.md
+    (`cached_status: the coalescing chokepoint`).
     """
     from fno.pr._quota import backoff_live
     from fno.pr._rest import _repo_slug, fetch_pr_info_rest
@@ -292,25 +207,20 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
 
     slug = _repo_slug(cwd)
     if not slug or not str(pr).strip().isdigit():
-        # No local repo context (nothing to key the row on), or a non-numeric
-        # PR argument (the REST reader's own contract; letting it through would
-        # make the raw string a filesystem path component under cache_dir()).
-        # Serve uncached rather than key every caller onto one global row.
+        # No repo context or a non-numeric PR: serve uncached rather than key
+        # every caller onto one global row (the raw string would become a
+        # filesystem path component under cache_dir()).
         return run_status(pr, cwd)
 
     slug_key = slug.replace("/", "--")
-    # Backoff pre-check, zero network: when the fleet budget ledger holds a
-    # live refusal backoff, the HEAD read itself would be a held call, so
-    # every waiter's tick short-circuits to the newest cached row instead of
-    # re-attempting it - a fixed-interval retry is exactly what sustains a
-    # refusal. The row serves in the mode the normal path would have chosen:
-    # VERBATIM while fresh (a loud first-read error row keeps its exit 4 -
-    # degrading it would soften a refusal into an "unknown" nobody asked
-    # for), degraded once stale. An unservable newest row (no output /
-    # corrupt exit) falls through to the live read: a row that cannot answer
-    # cannot stand in for the read the window is trying to avoid. Outside a
-    # live backoff the head read fires on every call exactly as before, so a
-    # push is still noticed on the very next tick.
+    if refresh:
+        # A budget note must never name a probe this read did not make.
+        import fno.pr._quota as _quota
+
+        _quota.LAST_BUDGET = None
+    # Backoff pre-check, zero network: inside a live refusal every waiter's
+    # tick short-circuits to the newest cached row (verbatim fresh, degraded
+    # stale) instead of re-attempting the held head read.
     if not refresh and backoff_live():
         for row in _rows_newest_first(slug_key, pr):
             code = _serve(row, stale=time.time() - _num(row, "ts") >= _ttl())
@@ -320,17 +230,10 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
     info, _head_reason = fetch_pr_info_rest(pr, cwd=cwd)
     if info is None:
         if refresh:
-            # The caller asked for truth, not a row. With no readable head
-            # there is no fresher answer than the loud live read - serving a
-            # degraded row here would answer the question --refresh was
-            # raised to refuse.
+            # The caller asked for truth, not a row: the loud live read.
             return run_status(pr, cwd)
-        # The head read's refusal, when GitHub's own, was already recorded in
-        # the fleet ledger by the REST classifier (_rest.py's secondary arm).
-        # Head unreadable (refusal, network): fail CLOSED. Serve the PR's
-        # newest existing row degraded (unknown, unsettled - keeps the
-        # zero-network collapse without ever answering green off data nobody
-        # can verify); with no row at all, the loud live read decides.
+        # Head unreadable (refusal, network): fail CLOSED - the newest row
+        # degraded, or the loud live read when there is no row at all.
         for row in _rows_newest_first(slug_key, pr):
             code = _serve(row, stale=True)
             if code >= 0:
@@ -353,12 +256,8 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
     if code >= 0:
         return code
 
-    # Miss: run the verb ONCE under the per-key lock. Synchronized pollers
-    # (the watcher fleet sleeps 60s in near-lockstep, TTL is 60s, so they all
-    # miss together) queue here: the winner refreshes while the losers wait,
-    # then re-read the now-fresh row and serve it - the collapse the module
-    # exists to deliver. Without the lock every one of them would run the
-    # full read (REST + the GraphQL review reads inside run_status).
+    # Miss: run the verb ONCE under the per-key lock; the queued pollers
+    # re-read the fresh row after (docs/architecture/pr-status-verdict.md).
     lock_path = cache_dir() / (key + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     p = cache_dir() / (key + ".json")
@@ -370,13 +269,14 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 return code
 
             # Capture the one JSON line the verb prints so the row holds
-            # exactly what a caller saw (verdict, checks, coverage - all of
-            # it; partial caching would let a hit serve a mixed row).
+            # exactly what a caller saw.
             buf = io.StringIO()
             real_stdout = sys.stdout
             sys.stdout = buf
             try:
-                code = run_status(pr, cwd)
+                # This HEAD's previous payload: detail and rerun facts are
+                # reused within one head only (docs, `Reuse across reads`).
+                code = run_status(pr, cwd, prior=(row or {}).get("output"))
             finally:
                 sys.stdout = real_stdout
             line = buf.getvalue()
@@ -387,16 +287,9 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                 output = None
 
             now = time.time()
-            # A secondary refusal from the LIVE read was already recorded in
-            # the fleet ledger (the REST classifier's secondary arm), so this
-            # cache keeps no refusal memory of its own. A refused read writes
-            # NOTHING: the loud error must reach every caller, never be
-            # replayed from disk.
             if code != 4 and output is not None:
-                # Success only: the row is replaced wholesale - a new head sha
-                # never merges into an old verdict. A TRANSIENT failure writes
-                # nothing, so the next caller re-reads immediately instead of
-                # replaying an error from disk.
+                # Success only, replaced wholesale: a transient failure writes
+                # nothing, and a new head sha never merges into an old verdict.
                 _write_row_locked(
                     p,
                     {
@@ -405,9 +298,7 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
                         "output": output,
                     },
                 )
-                # One row per PR: a served verdict must describe the current
-                # head, so superseded heads' rows (and locks) go now, not on
-                # a periodic sweep nobody would write.
+                # One row per PR: superseded heads' rows (and locks) go now.
                 for old in p.parent.glob(f"{slug_key}-{pr}-*"):
                     if old not in (p, lock_path):
                         old.unlink(missing_ok=True)
