@@ -2,7 +2,7 @@
 
 The template an epic king runs as a **standard post-epic court step** - epic complete (every wave merged), before final abdication. Load it from [Post-epic: interview the court](../SKILL.md#post-epic-interview-the-court).
 
-This is the ceremony the x-304c synthesis marked `ADD`: the retro interviews were the best-performing ritual of that evening, yet they were not a ceremony at all - the maintainer hand-asked the Director to interview each builder and had to prod with follow-ups carrying the dogfooding lens. The lens is now baked in, so the interview fires without human prodding. The output turns one epic's chaos into filed, mechanism-bearing graph items instead of folklore.
+This is the ceremony the synthesis marked `ADD`: the retro interviews were the best-performing ritual of that evening, yet they were not a ceremony at all - the maintainer hand-asked the Director to interview each builder and had to prod with follow-ups carrying the dogfooding lens. The lens is now baked in, so the interview fires without human prodding. The output turns one epic's chaos into filed, mechanism-bearing graph items instead of folklore.
 
 ## When it fires and who it targets
 
@@ -47,11 +47,11 @@ The maintainer's manual step was prodding thin answers with the lens. Do it your
 
 ## Where the account lands
 
-Write each builder's account as `<date>-<session-short>-<node>.md`, with frontmatter pinning `node`, `session`, `prs`, `epic`, `date`. footnote has no dedicated retro-path config, so retros follow the plan artifact store deterministically. `fno do plan path --slug <x>` returns a file path of the form `<plans-dir>/<name>.md`; take its directory (`dirname`) to get the configured plans dir (the maintainer instance is the vault's `internal/fno/plans/`), and write retros to that dir's `retros/` sibling - `../retros/` relative to the plans dir. Resolve it that way rather than hard-coding a path - `internal/` itself is a gitignored vault symlink absent on a fresh checkout, and the plan-path resolver is what honors each project's config. These accounts are the sources a later synthesis pass folds (the x-304c synthesis pinned six such files in its `sources:` frontmatter). The interview produces the raw accounts; synthesis is a separate pass.
+Write each builder's account as `<date>-<session-short>-<node>.md`, with frontmatter pinning `node`, `session`, `prs`, `epic`, `date`. footnote has no dedicated retro-path config, so retros follow the plan artifact store deterministically. `fno do plan path --slug <x>` returns a file path of the form `<plans-dir>/<name>.md`; take its directory (`dirname`) to get the configured plans dir (the maintainer instance is the vault's `internal/fno/plans/`), and write retros to that dir's `retros/` sibling - `../retros/` relative to the plans dir. Resolve it that way rather than hard-coding a path - `internal/` itself is a gitignored vault symlink absent on a fresh checkout, and the plan-path resolver is what honors each project's config. These accounts are the sources a later synthesis pass folds (the synthesis pinned six such files in its `sources:` frontmatter). The interview produces the raw accounts; synthesis is a separate pass.
 
 ## Retro epistemics (how much to trust what comes back)
 
-A retro is three kinds of claim, and they are not equally reliable (doctrine #5 from the x-304c synthesis):
+A retro is three kinds of claim, and they are not equally reliable (doctrine #5 from the synthesis):
 
 - **Substrate-checkable facts** (a receipt said X, a claim read Y) - trustworthy *after* you check them against the graph / transcript / `gh`, not before. A builder can misremember an id.
 - **Experience reports** (this fought me, that felt clean) - primary UX data, the thing the interview exists to capture. They are real signal about friction even when the builder misattributes the cause.

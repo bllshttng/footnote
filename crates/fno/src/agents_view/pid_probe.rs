@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn probe_is_live_refused_reads_live_absent_dead() {
-        // x-3735: inspection-refused is not pid-absent. A refusal proves the
+        // inspection-refused is not pid-absent. A refusal proves the
         // pid EXISTS, so it must never read as death; only a real pid-reuse
         // (started after acquired_at) or a genuine absence reads dead. Driven
         // through the pure seam because no portable test pid refuses

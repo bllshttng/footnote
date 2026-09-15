@@ -82,7 +82,7 @@ if [[ -z "$WORKTREE_PATH" ]]; then
     # No .path from CC is normal (the contract lists only `name`). $(pwd) is a
     # safe fallback only in a linked worktree; on the canonical checkout emitting
     # it would defeat isolation - edits land on main while every signal says
-    # isolated (x-ab78 WAVE 1). Refuse via exit 0 + empty stdout (the supported
+    # isolated (WAVE 1). Refuse via exit 0 + empty stdout (the supported
     # abort: non-zero falls back to CC's default flow and creates the very
     # worktree refused). Detection mirrors the shared location verdict
     # (hooks/helpers/check-impl-location.sh): equal absolute
@@ -129,7 +129,7 @@ MAIN_REPO=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | 
 [[ -n "$MAIN_REPO" ]] || exit 1
 
 # Read config from settings.yaml if available
-# Source paths.sh for typed path vars; the global tier is the per-user file, never CONFIG_FILE (ab-5d6c3d47).
+# Source paths.sh for typed path vars; the global tier is the per-user file, never CONFIG_FILE.
 if command -v fno >/dev/null 2>&1; then
     _PATHS_SH="$(fno config paths shell-stub 2>/dev/null || true)"
     [[ -f "$_PATHS_SH" ]] && source "$_PATHS_SH" 2>/dev/null || true

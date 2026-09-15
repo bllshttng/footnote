@@ -154,7 +154,7 @@ state = "native"
 
 # Reachability, not verb inventory: the form field above answers "ships a
 # native attach subcommand"; this answers "can fno attach". They happen to
-# agree on claude and disagree on codex (x-a3e8).
+# agree on claude and disagree on codex.
 [harness.claude.features.attach]
 state = "native"
 
@@ -197,7 +197,7 @@ manifest_rules = [
   { id = "idle_prompt", state = "idle" },
   { id = "approval_prompt", state = "blocked" },
 ]
-# Measured 2026-08-23 on a live mux pane (x-4b0b): floor 0. Every D in
+# Measured 2026-08-23 on a live mux pane: floor 0. Every D in
 # {0,100,200,400,800} ms, 3 trials each, submitted both idle and mid-turn,
 # payloads 0.7-2.0 KB, codex-cli 0.148.0; confirmed by probe token in the
 # rollout transcript. The operator pile-up (six queued envelopes, table read
@@ -441,7 +441,7 @@ native_verbs = ["/add-dir", "/agents", "/artifact", "/btw", "/clear", "/config",
 ready_marker = "unsupported"
 ready_rule_ids = []
 manifest_rules = []
-# Measured 2026-08-23 on a live mux pane (x-4b0b): floor 0. Every D in
+# Measured 2026-08-23 on a live mux pane: floor 0. Every D in
 # {0,100,200,400,800} ms, 3 trials each, submitted at idle, payloads 0.7 and
 # 1.2 KB, agy 1.1.19; judged by the model's ACK answer appearing after the
 # probe token (agy keeps no local transcript store). 800 is a margin, not a
@@ -523,7 +523,7 @@ status_pattern = ""
 # FEATURES. spawn reads native: the harness-side surface was already measured
 # (agy's resume primitive, quoted-token recall from a fresh process,
 # 2026-08-26) and the thread arm now exists behind its own journey
-# (cli/tests/agents/test_agy_spawn_journey.py, journey wk-x-d145). Measured
+# (cli/tests/agents/test_agy_spawn_journey.py). Measured
 # 2026-09-03 on agy 1.1.24: one `agy -p --output-format json` turn returned a
 # conversation_id in 1.5s, the id named a real db under
 # ~/.gemini/antigravity-cli/conversations, and a FRESH process resumed that
@@ -712,7 +712,7 @@ resume = "native-session"
 # child pid, same socket, same session id), ~/.pi/agent/sessions gained no
 # file across the restart, and a second prompt answered from the first turn's
 # memory. The bit covers the lane dispatch resolves onto, which the lane-B
-# driver spawns and a keeper process hosts. The spawn arm shipped (x-43bd):
+# driver spawns and a keeper process hosts. The spawn arm shipped:
 # pi is in SPAWN_HARNESSES, dispatch_spawn has a pi branch, and the public
 # surface brings its own journey (cli/tests/agents/test_pi_spawn_journey.py).
 autonomous_pane = false
@@ -724,7 +724,7 @@ route_on_pane = false
 # them cleanly but as code - the stop gate onto `pi.on("agent_settled")`, whose
 # own definition is no retry, compaction or follow-up left, which is both the
 # right semantics and a positive marker rather than an absence. So pi's answer is
-# "extension", the same member opencode carries. The extension shipped (x-43bd,
+# "extension", the same member opencode carries. The extension shipped (
 # a port of opencode's plugin: loop-check stays the sole completion authority
 # and the extension never fabricates a termination), so `loop_extension` names
 # the shipped artifact and a looping dispatch at pi resolves.
@@ -752,7 +752,7 @@ ready_rule_ids = ["idle_status_bar"]
 # happens. pi declares no blocked rule because it has no approval screen.
 manifest_rules = [{ id = "idle_status_bar", state = "idle" }]
 # Measured 2026-08-28 in a live tmux pane against pi 0.84.2, testing the exact
-# shape that broke codex in x-4b0b: a large multi-line paste followed
+# shape that broke codex in: a large multi-line paste followed
 # immediately by a return, with no settle time. Payload 6,155 bytes / 42 lines,
 # the size of a real fno_mail envelope; delay 0 ms; three trials, all three
 # SUBMITTED with the composer cleared and the model replying; plus one short
@@ -789,7 +789,7 @@ session_binding = { strategy = "caller-assigned-cwd-scoped", required = true, ti
 # process is as ordinary and unsandboxed as a pane child. headless stays
 # `unmeasured` - nothing has run pi headless yet, so no claim write has ever
 # been observed there, and a lane nothing dispatches must not inherit a stance
-# from the lanes that do. The spawn arm shipped (x-43bd) and enforces that
+# from the lanes that do. The spawn arm shipped and enforces that
 # stance in code: `_check_spawn_harness` refuses the unmeasured substrate by
 # name, and the lane opens only when its own journey lands.
 pane = "unsandboxed"
@@ -889,7 +889,7 @@ resume = "native-session"
 # TRUE, and the live journey is the evidence
 # (cli/scripts/smoke/cursor-agent-keeper-journey.py, journey wk-cursor, first
 # green 2026-09-01 on cursor-agent v2026.08.31-4057e58): fno's keeper hosts
-# the TUI's pty on x-61bc's generic keeper lane, the child survived SIGKILL
+# the TUI's pty on generic keeper lane, the child survived SIGKILL
 # of BOTH the mux server and the daemon with pid, cwd and session id
 # unchanged, the restart sweep re-bound the same row, the chat id appeared in
 # no file under ~/.cursor (the store is remote), and a fresh turn recalled a
@@ -998,7 +998,7 @@ status_pattern = ""
 [harness.cursor-agent.features.spawn]
 state = "native"
 
-# HOW EACH FIELD CAN BE SETTLED (x-244c). A capability question is one of two
+# HOW EACH FIELD CAN BE SETTLED. A capability question is one of two
 # kinds. A DECLARED fact - does this flag exist, what values does it take - is
 # the vendor's own statement about its own interface, so its authority is a
 # help or version command and reading it is not inference. A BEHAVIORAL fact -
@@ -1034,7 +1034,7 @@ marker = "the resumed conversation's store record gains the token planted in the
 kind = "unprobeable"
 reason = "measured over 5 delays x 3 trials on a live pane; no one-shot probe recovers it"
 
-# THE FEATURES DIMENSION (x-a3e8). A row may carry [harness.<name>.features.<key>]
+# THE FEATURES DIMENSION. A row may carry [harness.<name>.features.<key>]
 # stanzas answering WHAT A HARNESS CAN DO, beside the keystroke mechanics above
 # and never instead of them. Eleven keys, closed so a typo is a parse error:
 # review spawn attach rpc server plugins hooks skills_dir subagent_dispatch mcp
@@ -1103,7 +1103,7 @@ kind = "declared"
 authority = "{bin} --help"
 pattern = '(?i)\bacp\b'
 
-# grok joins on the same keeper lane pi and cursor-agent use (x-fd31). Its
+# grok joins on the same keeper lane pi and cursor-agent use. Its
 # drive transports (leader daemon on a unix socket, WebSocket listener, ACP
 # stdio) are built and unit-tested in the Python driver
 # (fno.agents.harnesses.grok), but the lane dispatch resolves onto is the
@@ -1156,7 +1156,7 @@ ready_marker = "idle_status_bar"
 ready_rule_ids = ["idle_status_bar"]
 manifest_rules = [{ id = "idle_status_bar", state = "idle" }]
 # Measured 2026-09-02 against live grok 1.0.13, the exact shape that broke
-# codex in x-4b0b: a 9,340-byte / 42-line paste followed immediately by
+# codex in: a 9,340-byte / 42-line paste followed immediately by
 # Enter, no settle time, landed (submitted, marker reply painted); the
 # single-line control landed in the same session family. This 0 is MEASURED.
 send_keys_enter_delay_ms = 0

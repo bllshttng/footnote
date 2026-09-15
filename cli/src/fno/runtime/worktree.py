@@ -1,7 +1,7 @@
 """Worktree management: create, list, remove git worktrees with .fno symlink.
 
 Path convention: ``~/.fno/worktrees/{project_id}-{name}/`` (Plan
-ab-3180b3f4). The legacy ``.claude/worktrees/{name}/`` shape is still
+). The legacy ``.claude/worktrees/{name}/`` shape is still
 detected by ``list`` and ``remove`` so existing in-flight worktrees on
 operator machines keep working through the transition (Option A from
 the plan: leave old worktrees alone; only new ones use the new path).

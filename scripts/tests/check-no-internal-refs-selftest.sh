@@ -101,5 +101,7 @@ assert_accepted "node id in a test path is exempt" \
     "scripts/tests/_selftest_probe.py" 'NODE = "x-1b88"  # fixture data'
 assert_accepted "node id in an inline test module name" \
     "crates/fno/src/_selftest_probe_tests.rs" 'const NODE: &str = "x-1b88";'
+assert_accepted "node id in a python _test.py suffix fixture" \
+    "cli/src/fno/_selftest_probe_test.py" 'NODE = "x-1b88"  # fixture data'
 
 echo "PASS: check-no-internal-refs catches planted leaks and passes sanctioned forms"

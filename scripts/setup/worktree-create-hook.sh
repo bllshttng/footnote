@@ -65,7 +65,7 @@ REPO_NAME="$(basename "$MAIN_REPO")"
 # Policy gate before any path decision: `never` means this project's working
 # tree IS the product, so the answer is no worktree at all. The SAME resolver
 # call also yields the base, so this hook and `worktree ensure` can never
-# disagree on where a worktree lives (x-f96e).
+# disagree on where a worktree lives.
 #
 # Refusal shape matters: a NON-ZERO exit makes Claude Code fall back to its
 # default worktree flow, which creates the worktree we are refusing. The
@@ -89,7 +89,7 @@ fi
 
 # Location comes from the RESOLVED policy, never a raw config read: external
 # relocates to the resolved base (an explicit config.paths.worktrees_base is
-# sufficient on its own, x-f96e), anything else stays at Claude Code's own
+# sufficient on its own), anything else stays at Claude Code's own
 # gitignored location. The base is already expanded by the resolver.
 if [ "$WT_POLICY" = "external" ] && [ -n "$WT_BASE" ]; then
     WORKTREE_PATH="$WT_BASE/$REPO_NAME/$NAME"

@@ -1,4 +1,4 @@
-//! The single bounded node-state owner (x-920a wave 1).
+//! The single bounded node-state owner (wave 1).
 //!
 //! A node carries ONE `current_state` object in its extras: `{body, revision,
 //! updated_at, source_session_id, source_harness}`. A note REPLACES it under

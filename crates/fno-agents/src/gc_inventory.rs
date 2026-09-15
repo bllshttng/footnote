@@ -1,4 +1,4 @@
-//! The retirement census (x-70e1 task 1): every applicable session, joined
+//! The retirement census (task 1): every applicable session, joined
 //! to one identity, from every source that can see it.
 //!
 //! The sweep's row population is the registry, and the registry is not a

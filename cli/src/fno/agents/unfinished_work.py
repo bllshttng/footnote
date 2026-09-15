@@ -120,7 +120,7 @@ def owner_verdict(
     probe: OwnerProbe, *, live_activity_s: float = DEFAULT_LIVE_ACTIVITY_S
 ) -> str:
     """``live`` | ``gone`` | ``unknown``, through the ONE shared predicate
-    (``classify_reachability``), never a private vocabulary (x-dead).
+    (``classify_reachability``), never a private vocabulary.
 
     Falsifiers first (dead pid, exit stamp - never while the transcript is
     fresh: a harness resume kills the pid while the session keeps writing),

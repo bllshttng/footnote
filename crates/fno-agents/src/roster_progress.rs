@@ -1,4 +1,4 @@
-//! Roster-progress sidecar (x-cdc7 SECOND HALF): durable per-row git evidence
+//! Roster-progress sidecar (SECOND HALF): durable per-row git evidence
 //! beside process liveness, so a live-looking worker with zero commits no
 //! longer renders the same as a healthy one.
 //!

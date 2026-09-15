@@ -148,7 +148,7 @@ def _source_preflight(entry: AgentEntry) -> dict:
 
 
 def _transition_receipt(value: object, predecessor: str) -> Optional[dict]:
-    """Normalize x-dfe7's structured transition receipt at the consumer seam."""
+    """Normalize structured transition receipt at the consumer seam."""
     if isinstance(value, str):
         if value == predecessor:
             return None
@@ -301,7 +301,7 @@ def resolve_target_coordinate(
     if effort is not None:
         args += ["--effort", effort]
     args.append(f"/fno:{verb} {node}")
-    # x-7198: a probe, not a real dispatch - the builtin rung would otherwise
+    # a probe, not a real dispatch - the builtin rung would otherwise
     # read as an explicit override and force every retask to respawn.
     resolved = inject_spawn_defaults(
         args,

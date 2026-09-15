@@ -29,7 +29,7 @@ roles:
   - fno.roles.cli:roles_app
   - Inspect bounded business-role definitions and resolutions.
   - hidden: true
-# x-6233 (d-cf2d6fe1): worktree lifecycle folds under agents, which also
+# (d-cf2d6fe1): worktree lifecycle folds under agents, which also
 # resolves the Python/Rust `workspace` collision - root `workspace` then
 # unambiguously means the mux one. Old spellings stay one-release shims.
 workspace:

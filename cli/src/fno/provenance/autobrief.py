@@ -1,4 +1,4 @@
-"""Auto-brief resolution for backlog dispatch (x-d1f4).
+"""Auto-brief resolution for backlog dispatch.
 
 ``resolve_dispatch_brief(node)`` is the single entry point the advance-layer
 dispatch call sites use in place of a bare ``node.get("dispatch_brief")``. It is

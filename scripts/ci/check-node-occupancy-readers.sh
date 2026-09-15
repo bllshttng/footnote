@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-node-occupancy-readers.sh - gate the node-claim reader census (x-74aa).
+# check-node-occupancy-readers.sh - gate the node-claim reader census.
 #
 # The self-test plants a known-bad site and proves the detector detects it
 # before this gate reports clean; then every node-claim occupancy read under

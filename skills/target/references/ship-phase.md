@@ -86,7 +86,7 @@ This link is the linchpin of the promise-to-merge window: `pr-watch` discovery,
 `fno backlog reconcile`, and merge-triggered auto-continue all find the PR via
 `node.pr_number`. A dropped link blinds the whole chain for exactly that window,
 so the step is **verified, not fire-and-forget**: write, read back, retry once,
-and **refuse to promise** if it still did not stick (x-e106). Do this BEFORE the
+and **refuse to promise** if it still did not stick. Do this BEFORE the
 optional rebase/merge step below, so the link lands even when no merge happens:
 
 ```bash

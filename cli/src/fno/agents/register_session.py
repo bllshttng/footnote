@@ -125,8 +125,8 @@ def _predecessor_observation(
 
 
 def _heal_own_mux_ref(agent_self: str, harness: str, session_id: str) -> None:
-    """x-0345 W2: heal this worker's row to its pane. Pair from FNO_SERVER/FNO_SESSION
-    (FNO_SERVER first, x-f209) with FNO_PANE (pane-only; non-numeric/negative
+    """x-aaaa W2: heal this worker's row to its pane. Pair from FNO_SERVER/FNO_SESSION
+    (FNO_SERVER first) with FNO_PANE (pane-only; non-numeric/negative
     ignored). Failure emits session_pane_rebound_failed, success emits only on
     a verified write. Silent resolver: a session-start hook never prints.
     """
@@ -237,7 +237,7 @@ def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -
                         outcome,
                         reading,
                     )
-                    # x-0345 W2: heal post-observation so a branched session heals its own row.
+                    # x-aaaa W2: heal post-observation so a branched session heals its own row.
                     _heal_own_mux_ref(agent_self, harness, session_id)
                     return 0
             else:
@@ -291,7 +291,7 @@ def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -
             f"register_session: restamped {entry.name} -> {session_id}",
             file=sys.stderr,
         )
-    # x-0345 W2: the non-claude lineage path heals after its restamp too.
+    # x-aaaa W2: the non-claude lineage path heals after its restamp too.
     _heal_own_mux_ref(agent_self, harness, session_id)
     return 0
 
@@ -573,7 +573,7 @@ def _report_observation(
 
 
 def _heal_row_cwd(*, agent_self: str, harness: str, cwd: str) -> None:
-    """x-dead task 0.1: the worker stamps the cwd it actually runs in."""
+    """x-bbbb task 0.1: the worker stamps the cwd it actually runs in."""
     from fno.agents.registry import heal_own_cwd
 
     try:
@@ -589,7 +589,7 @@ def _heal_row_cwd(*, agent_self: str, harness: str, cwd: str) -> None:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="register_session")
-    # --harness is canonical; --provider is the axis-rename alias (x-bab1), kept
+    # --harness is canonical; --provider is the axis-rename alias, kept
     # so the fail-soft SessionStart hook keeps working across the cutover.
     parser.add_argument("--harness", dest="harness",
                         help="Harness/CLI identity to register (claude | codex | gemini).")
@@ -638,7 +638,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             name=args.name or None,
             log_path=args.log_path,
             origin="operator",
-            # x-98ab: the row describes THIS session, so its own exported
+            # the row describes THIS session, so its own exported
             # FNO_NODE (a node-driven pane carries one) is the right source.
             node=(os.environ.get("FNO_NODE") or "").strip() or None,
         )

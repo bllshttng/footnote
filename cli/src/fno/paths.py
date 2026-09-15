@@ -46,7 +46,7 @@ def _warn_if_foreign_fno_repo_root(resolved: Path, cwd: Path) -> None:
     (``resolve_repo_root_at`` is cached), and only when the pinned root is
     the fno PLUGIN root (by its
     marker file, not its directory basename - a clone/worktree can be named
-    anything) AND the cwd resolves to a different git repo. (ab-fe825805 change 4)
+    anything) AND the cwd resolves to a different git repo. (change 4)
     """
     try:
         if not _is_plugin_root(resolved):
@@ -361,7 +361,7 @@ def migrate_from_checkout(old: Path, new: Path) -> bool:
     (``config.paths.spaces_dir`` or the default state root - never a
     per-process ``FNO_SPACES_DIR`` pin): a move into a sandbox root strands
     the only copy where the repo's own readers never look again, behind a
-    MOVED-TO pointer they do not follow (x-d2e9). A source outside any
+    MOVED-TO pointer they do not follow. A source outside any
     checkout has no durable space to check against and keeps the old
     behavior.
     """
@@ -549,7 +549,7 @@ def _resolve(
             # Returning the raw relative value would leave the assembled
             # path relative, anchoring it at project_root/CWD - in a
             # worktree that lands handoffs at a junk worktree-local path
-            # (ab-347f6482).
+            #.
             vroot = vault_root(settings=active_settings)
             if vroot is None:  # unreachable: enabled + vault guarded above
                 raise ValueError(
@@ -611,7 +611,7 @@ def _guard_state_path(path: Path) -> Path:
 # The state-file table: one resolver per state file
 # ---------------------------------------------------------------------------
 #
-# Epic x-3d21 R4 rules that every fno state access resolves against a DECLARED
+# Epic R4 rules that every fno state access resolves against a DECLARED
 # root, and that ambient position (cwd, `git rev-parse --show-toplevel`, $HOME
 # read at call time, a hand-built `<root>/.fno/<file>`) may never select one.
 # A hand-built path consults nothing, so `FNO_EVENTS_PATH`, a guard, or a
@@ -624,9 +624,9 @@ def _guard_state_path(path: Path) -> Path:
 #   `fno config doctor`            needs `root_class` and `selector`.
 #   `fno.state_fence`              needs `resolver`.
 #
-# It is also the ONE point this node shares with x-6f9f, and the two reasons
-# are different on purpose: x-6f9f wants a single named owner per state file
-# because N implementations of one operation drift, and x-3d21 R4 wants one
+# It is also the ONE point this node shares with, and the two reasons
+# are different on purpose: wants a single named owner per state file
+# because N implementations of one operation drift, and R4 wants one
 # because a resolver is the only thing a root selector can be attached to.
 # One table, both reasons, written once.
 
@@ -906,7 +906,7 @@ def project_events_json() -> Path:
     return _guard_state_path(space)
 
 
-# Sibling journal suffix for ephemeral-class rows (x-add3). Declared here, the
+# Sibling journal suffix for ephemeral-class rows. Declared here, the
 # dependency-free module, so both `fno.events` (which aliases it as
 # EPHEMERAL_SUFFIX) and `event_journals` share one definition; the Rust
 # EventEmitter states the same string and a parity test holds all of them
@@ -941,7 +941,7 @@ def event_journals() -> list[Path]:
     ``events.jsonl`` rotation convention. Resolve and de-duplicate after
     expansion because a worktree journal may be a symlink to the project log.
     Each resolved journal also contributes its ``.ephemeral`` sibling (retention
-    routing, x-add3) plus that sibling's own numeric rotations, listed only
+    routing) plus that sibling's own numeric rotations, listed only
     when they exist - the sibling is derived from the RESOLVED journal so a
     symlinked worktree journal points at its space's sibling, the same file
     the writers route to.
@@ -1132,7 +1132,7 @@ def observer_reports_dir(
     project_root: Optional[Path] = None, project_id: Optional[str] = None
 ) -> Path:
     """Return the directory where the observer harness writes its
-    human-readable digests (x-57a5, ``<skill>-<date>.md``).
+    human-readable digests (``<skill>-<date>.md``).
 
     Resolution order mirrors :func:`handoffs_dir`:
       1. ``config.paths.observer_reports_dir`` explicit override.
@@ -1229,7 +1229,7 @@ def plans_dir(project_root: Optional[Path] = None) -> Path:
 
 
 def plans_content_dir(project_root: Optional[Path] = None) -> Path:
-    """Resolve where plan DOCS actually live (x-ff83).
+    """Resolve where plan DOCS actually live.
 
     Same lookup ``/blueprint`` and interactive ``/think`` use (mirrors the
     ``scripts/lib/config.sh`` resolution order):
@@ -1260,7 +1260,7 @@ def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -
 
     An empty slug or node collapses its dangling separator, so the default
     template degrades cleanly: no node -> ``20260711-slug.md``, no slug ->
-    ``20260711-x-8af8.md``, never ``--`` or ``-.md``.
+    ``20260711-x-aaaa.md``, never ``--`` or ``-.md``.
     """
     import datetime as _dt
     import re as _re
@@ -1482,7 +1482,7 @@ def project_log(name: str, project_root: Optional[Path] = None) -> Path:
 
 
 def status_sinks_dir(project_root: Optional[Path] = None) -> Path:
-    """Per-sink cursors + error logs for the status fanout (x-2057)."""
+    """Per-sink cursors + error logs for the status fanout."""
     return project_log("status-sinks", project_root=project_root)
 
 

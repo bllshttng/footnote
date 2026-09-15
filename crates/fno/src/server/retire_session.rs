@@ -1,4 +1,4 @@
-//! The v75 exact-session retirement (x-7649): the mux server's half of a
+//! The v75 exact-session retirement : the mux server's half of a
 //! deliberate session retirement. PR 1599 shipped the store-level
 //! `squad_store::retire_session_members` with no caller; this module is the
 //! server call site the PR named as not switched.
@@ -29,7 +29,7 @@ impl Core {
         // pane-to-member join every worker close walks. A pane carries a
         // member's identity only while it IS that member's pane: portal
         // viewers are titled after the row they watch, so the join also
-        // requires `member_pane` to agree (x-9b37).
+        // requires `member_pane` to agree.
         let candidates: Vec<u64> = self.panes.keys().copied().collect();
         let mut targets = Vec::new();
         for pid in candidates {
@@ -41,7 +41,7 @@ impl Core {
                 targets.push(pid);
             }
         }
-        // (x-9b37) The receipt names what closed instead of only counting:
+        // The receipt names what closed instead of only counting:
         // "closed the worker" and "closed the worker and the operator's
         // viewer" must not read the same.
         let closed_panes: Vec<String> = targets
@@ -127,7 +127,7 @@ impl Core {
                 .iter()
                 .find(|member| member.worker.as_deref() == Some(name.as_str()))
         }) {
-            // (x-9b37) The name alone is a lie a portal can tell. A
+            // The name alone is a lie a portal can tell. A
             // member's identity moves only with its own pane, so the
             // inverse join must agree before this pane carries it.
             if self.member_pane(member) == Some(pane) {
@@ -173,7 +173,7 @@ impl Core {
                 .find(|member| detached.matches_member(member))
             {
                 member.tombstone = true;
-                // (x-8b51) A pane death is a real observed event, so the
+                // A pane death is a real observed event, so the
                 // churn arm keeps tombstoning - it just names why now.
                 member.tombstone_reason = Some("worker pane died".into());
                 member.detached = false;

@@ -414,7 +414,7 @@ def compute_per_turn_attribution(
 ) -> dict[str, dict[str, int]]:
     """Read the per-turn attribution sidecar and return a per-provider rollup.
 
-    Phase 02 of provider rotation failover (ab-9728b70b). Cost callers
+    Phase 02 of provider rotation failover. Cost callers
     that previously assumed one provider per session can now ask "how
     many turns did each provider produce in this session?" without
     importing turn_attribution directly.

@@ -176,7 +176,7 @@ pub fn fno_bin() -> std::ffi::OsString {
 }
 
 /// The `fno-py` Python CLI console script, resolved without relying on PATH
-/// (x-cf15): `FNO_PY` overrides for tests and nonstandard installs, then the
+/// `FNO_PY` overrides for tests and nonstandard installs, then the
 /// script packaged beside this binary (every complete install - uv tool venv,
 /// pip/uv venv, wheel scripts dir, Homebrew keg - ships `fno` and `fno-py` in
 /// one bin dir, the same sibling resolution crates/fno/src/bootstrap.rs
@@ -320,7 +320,7 @@ fn write_disposition(e: &state::RegistryEntry, expect_ref: &(String, u64)) -> Wr
 /// IO + subprocesses); the daemon runs it under `spawn_blocking` off the
 /// idle tick, gated so at most one sweep is in flight.
 ///
-/// `notify_on_blocked` (config.mux.notify_on_blocked, x-dd84) fires one OS
+/// `notify_on_blocked` (config.mux.notify_on_blocked) fires one OS
 /// notification when a scraped verdict ENTERS `blocked`; the manifest path has
 /// no `done`, so notify_on_done is not plumbed here.
 pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter, notify_on_blocked: bool) {
@@ -414,7 +414,7 @@ pub fn scrape_sweep(home: &AgentsHome, emitter: &EventEmitter, notify_on_blocked
     if changes.is_empty() {
         return;
     }
-    // Badge-transition notify intents (x-dd84): (agent name, matched rule).
+    // Badge-transition notify intents: (agent name, matched rule).
     // Captured under the flock from prev-vs-new screen_state; fired after the
     // write so a slow notifier can never stall the sweep.
     let mut blocked_notifs: Vec<(String, String)> = Vec::new();
@@ -865,7 +865,7 @@ mod tests {
         std::env::set_var("FNO_AGENTS_HOME", &dir);
         let home = AgentsHome::from_env();
         let mut scraped = entry("scrapee", "codex");
-        scraped.log_path = Some("/tmp/scrapee.log".into()); // x-7bcd: resolvable handle
+        scraped.log_path = Some("/tmp/scrapee.log".into()); // resolvable handle
         scraped.screen_state = Some(rep("idle", "2026-07-02T00:00:00Z", 1));
         state::update_registry(&home.registry_json(), |r| r.entries.push(scraped)).unwrap();
 
@@ -897,7 +897,7 @@ mod tests {
 
         // One hook-less codex pane in session "main".
         let mut row = entry("scrapee", "codex");
-        row.log_path = Some("/tmp/scrapee.log".into()); // x-7bcd: resolvable handle
+        row.log_path = Some("/tmp/scrapee.log".into()); // resolvable handle
         row.mux = Some(state::MuxRef {
             session: "main".into(),
             pane_id: 7,
@@ -1014,7 +1014,7 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
-    // x-cf15: the fallback must resolve with the wheel bin absent from PATH.
+    // the fallback must resolve with the wheel bin absent from PATH.
     // Neither leg consults PATH at all; the temp dir stands in for the uv
     // tools bin the measured failure could not reach.
     #[test]

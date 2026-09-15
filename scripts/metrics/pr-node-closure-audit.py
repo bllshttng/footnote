@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""pr-node-closure-audit.py - corrected mention classifier (x-59a6 task 1.1).
+"""pr-node-closure-audit.py - corrected mention classifier (x-cccc task 1.1).
 
-The 2026-08-15 sweep (x-59a6's own `details`) counted every backlog node
+The 2026-08-15 sweep (x-cccc's own `details`) counted every backlog node
 mentioned in a merged PR body AFTER the first as a "secondary" and reported
 61 as "not done" - a MENTION count, not a defect count. A king correction the
 next day showed most of those were dependency notes, follow-up filings, or
@@ -34,8 +34,8 @@ if _CLI_SRC.is_dir() and str(_CLI_SRC) not in sys.path:
     sys.path.insert(0, str(_CLI_SRC))
 
 # Dependency/follow-up/collision language ALWAYS wins over a close verb in the
-# same sentence (x-59a6 king correction): "closes both nodes" (PR 836) is a
-# claim, but "x-3a91 is blocked_by this" or "branch x-3a91 ... untouched" is
+# same sentence (x-cccc king correction): "closes both nodes" (PR 836) is a
+# claim, but "x-aaaa is blocked_by this" or "branch x-aaaa ... untouched" is
 # not, even though a naive scanner sees a plausible-looking verb nearby.
 _DEPENDENCY_RE = re.compile(
     r"\b(blocked[_ -]by|depends?[ _]on|dependenc(?:y|ies))\b", re.IGNORECASE
@@ -119,8 +119,8 @@ def scan_pr(pr_number: int, body: str, node_ids: set[str]) -> list[Mention]:
     trailer_matches = _TRAILER_RE.findall(body)
     # `.replace(",", " ")` before splitting, mirroring the runtime parser
     # (fno.pr.closure.parse_closure_trailer) - a comma-separated trailer with
-    # no space ("Backlog-Closure: x-cdef,x-59a6") binds both ids at merge
-    # time, but a bare `.split()` here treated "x-cdef,x-59a6" as one token
+    # no space ("Backlog-Closure: x-bbbb,x-cccc") binds both ids at merge
+    # time, but a bare `.split()` here treated "x-bbbb,x-cccc" as one token
     # (not in node_ids) and undercounted the audit's own close_claim bucket
     # (round-10 review fix: reproduced live pre-fix).
     trailer_ids = (
@@ -138,10 +138,10 @@ def scan_pr(pr_number: int, body: str, node_ids: set[str]) -> list[Mention]:
                 f"Backlog-Closure: {' '.join(sorted(trailer_ids))}",
             ))
             continue
-        # Word-boundary match, not substring containment: "x-1234" is a
+        # Word-boundary match, not substring containment: "x-dddd" is a
         # literal substring of the unrelated "x-12345", so a plain `nid in u`
         # would classify the sentence about x-12345 as if it were about
-        # x-1234 (or vice versa) whenever one happens to embed the other.
+        # x-dddd (or vice versa) whenever one happens to embed the other.
         nid_re = re.compile(rf"\b{re.escape(nid)}\b")
         hit = next((u for u in units if nid_re.search(u)), "")
         mentions.append(Mention(pr_number, nid, classify_mention(hit), hit))
@@ -205,7 +205,7 @@ def run_audit(prs: list[dict], node_ids: set[str]) -> AuditResult:
                 result.counts[m.classification] += 1
 
     x_b28b_prs = {m.pr_number: m.classification for m in result.mentions
-                  if m.node_id == "x-b28b" and m.pr_number in (620, 740)}
+                  if m.node_id == "x-eeee" and m.pr_number in (620, 740)}
     if x_b28b_prs:
         result.x_b28b_check = x_b28b_prs
 
@@ -270,7 +270,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         for c in CLASSIFICATIONS:
             print(f"  {c}: {payload['counts'][c]}")
         if "x_b28b_check" in payload:
-            print(f"  x-b28b check: {payload['x_b28b_check']}")
+            print(f"  x-eeee check: {payload['x_b28b_check']}")
         print(f"defect population (close_claim only): {payload['counts']['close_claim']}")
 
     return 0

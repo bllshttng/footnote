@@ -1,4 +1,4 @@
-"""Migration for the retired `agents.spawn_permission_mode` key (x-7198); split
+"""Migration for the retired `agents.spawn_permission_mode` key ; split
 out of `config/__init__.py` to stay inside its shrink-only file budget."""
 
 from __future__ import annotations
@@ -6,7 +6,7 @@ from __future__ import annotations
 
 def accept_legacy_spawn_permission_mode(data: object) -> object:
     """Migrate `agents.spawn_permission_mode` onto `defaults.permission_mode`
-    (x-7198): copy it over when unset there, keep the surviving value and warn
+    : copy it over when unset there, keep the surviving value and warn
     when both are set, and always drop the legacy field afterward.
     """
     if not isinstance(data, dict) or "spawn_permission_mode" not in data:
@@ -48,7 +48,7 @@ def accept_legacy_spawn_permission_mode(data: object) -> object:
             "agents.spawn_permission_mode",
             "fno config: agents.spawn_permission_mode is renamed "
             "agents.defaults.permission_mode; the legacy spelling still "
-            "parses (x-7198)",
+            "parses ",
         )
     data = {k: v for k, v in data.items() if k != "spawn_permission_mode"}
     data["defaults"] = defaults_dict

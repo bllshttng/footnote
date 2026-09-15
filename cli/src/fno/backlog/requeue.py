@@ -84,7 +84,7 @@ def _release_node_lockfile(node_id: str) -> str:
             typer.echo(f"warning: lockfile {key} is corrupted; graph claim cleared but lockfile left intact. Use `fno agents claim release {key} --force -R <why>` to repair.", err=True)
             return "lockfile left (corrupted)"
 
-        # live or suspect (x-ba4b): only release when it is ours; a suspect claim (TTL-unexpired, dead pid) is still owned.
+        # live or suspect: only release when it is ours; a suspect claim (TTL-unexpired, dead pid) is still owned.
         holder = status.get("holder") or ""
         if holder == _invoking_claim_holder():
             release_claim(key, holder=holder, root=root)
@@ -229,7 +229,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         typer.echo(f"requeue: {node_id} reads status {status_before!r}, not in_progress; only an in_progress node can be returned to the queue.", err=True)
         raise typer.Exit(code=2)
 
-    # The lockfile reader, never `fno agents claim status`: requeue wants the claim record, and the composite verdict still reads unknown when an unresolved roster row's worktree names this node (x-36c3).
+    # The lockfile reader, never `fno agents claim status`: requeue wants the claim record, and the composite verdict still reads unknown when an unresolved roster row's worktree names this node.
     key = f"node:{node_id}"
     claim = claim_status(key, root=claims_root_for(key))
     state = claim.get("state")

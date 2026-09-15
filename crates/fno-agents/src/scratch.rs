@@ -1,4 +1,4 @@
-//! Scratch-shape sweep (x-caf8): notice a recurring job-tmp script shape and
+//! Scratch-shape sweep : notice a recurring job-tmp script shape and
 //! file ONE p1 node for it.
 //!
 //! Agents author throwaway scripts under `<jobs>/<job>/tmp/` to answer
@@ -276,7 +276,7 @@ fn verb_hint(shape: &str) -> (&'static str, &'static str, &'static str) {
 /// leaves; `fno <group> --help` does not), so a node never claims a verb is
 /// missing when it ships hidden - two of the census brief's four flag ranks
 /// were already built when the detector was written (2026-09-11 correction
-/// from the x-0e24 plan). If the probe cannot confirm the leaf, the fallback
+/// from the plan). If the probe cannot confirm the leaf, the fallback
 /// line below is filed instead and the difficulty rises to medium.
 const HIDDEN_PROBES: &[(&str, &str, &str, &str)] = &[
     (

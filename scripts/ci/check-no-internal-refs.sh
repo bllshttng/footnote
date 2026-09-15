@@ -47,7 +47,7 @@
 #   session-url scan: a node id inside a test fixture string is data, not a
 #   shipped breadcrumb (the same convention cli/tests/ and tests/ already
 #   had by omission). A test path is one containing /tests/ or /test/, or a
-#   basename starting test_ or ending _tests.rs.
+#   basename starting test_ or ending _tests.rs or _test.py.
 #   Also never scanned: tests/, cli/tests/, .claude/.
 #
 # Allowlist (scanned-but-exempt)
@@ -182,7 +182,7 @@ is_test_path() {
         */tests/*|*/test/*) return 0 ;;
     esac
     case "$base" in
-        test_*|*_tests.rs) return 0 ;;
+        test_*|*_tests.rs|*_test.py) return 0 ;;
     esac
     return 1
 }

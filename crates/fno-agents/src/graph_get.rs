@@ -168,32 +168,32 @@ mod tests {
     #[test]
     fn two_known_ids_return_a_two_element_array_in_argument_order() {
         let entries = [
-            node("x-997a", "fewer-gated"),
-            node("x-374b", "dispatch-two-axes"),
+            node("x-aaaa", "fewer-gated"),
+            node("x-bbbb", "dispatch-two-axes"),
         ];
-        let (rows, missing) = get_rows(&entries, &["x-374b".to_string(), "x-997a".to_string()]);
+        let (rows, missing) = get_rows(&entries, &["x-bbbb".to_string(), "x-aaaa".to_string()]);
         assert!(!missing);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["id"], "x-374b");
-        assert_eq!(rows[1]["id"], "x-997a");
+        assert_eq!(rows[0]["id"], "x-bbbb");
+        assert_eq!(rows[1]["id"], "x-aaaa");
     }
 
     #[test]
     fn one_unknown_id_among_two_carries_an_error_row_and_flags_missing() {
-        let entries = [node("x-997a", "fewer-gated")];
-        let (rows, missing) = get_rows(&entries, &["x-997a".to_string(), "x-0000".to_string()]);
+        let entries = [node("x-aaaa", "fewer-gated")];
+        let (rows, missing) = get_rows(&entries, &["x-aaaa".to_string(), "x-0000".to_string()]);
         assert!(missing);
-        assert_eq!(rows[0]["id"], "x-997a");
+        assert_eq!(rows[0]["id"], "x-aaaa");
         assert_eq!(rows[1]["id"], "x-0000");
         assert_eq!(rows[1]["error"], "not found");
     }
 
     #[test]
     fn a_slug_resolves_when_the_id_does_not_match() {
-        let entries = [node("x-997a", "fewer-gated-bash-calls")];
+        let entries = [node("x-aaaa", "fewer-gated-bash-calls")];
         let (rows, missing) = get_rows(&entries, &["fewer-gated-bash-calls".to_string()]);
         assert!(!missing);
-        assert_eq!(rows[0]["id"], "x-997a");
+        assert_eq!(rows[0]["id"], "x-aaaa");
     }
 
     #[test]
@@ -222,10 +222,10 @@ mod tests {
         // locks would let this flip land mid-read there.
         let _guard = crate::claims::test_env_lock();
         std::env::set_var("FNO_TRACKER_BACKEND", "github");
-        let refused = run_graph_get(&["x-997a".to_string()]);
-        let dir = write_graph(&[node("x-997a", "fewer-gated")]);
+        let refused = run_graph_get(&["x-aaaa".to_string()]);
+        let dir = write_graph(&[node("x-aaaa", "fewer-gated")]);
         let graph = dir.path().join("graph.json").display().to_string();
-        let overridden = run_graph_get(&["x-997a".to_string(), "--graph".to_string(), graph]);
+        let overridden = run_graph_get(&["x-aaaa".to_string(), "--graph".to_string(), graph]);
         std::env::remove_var("FNO_TRACKER_BACKEND");
         assert_eq!(refused, 1);
         assert_eq!(overridden, 0);
@@ -234,13 +234,13 @@ mod tests {
     #[test]
     fn a_fixture_graph_file_round_trips_through_the_binary_entry_point() {
         let dir = write_graph(&[
-            node("x-997a", "fewer-gated"),
-            node("x-374b", "dispatch-two-axes"),
+            node("x-aaaa", "fewer-gated"),
+            node("x-bbbb", "dispatch-two-axes"),
         ]);
         let graph = dir.path().join("graph.json").display().to_string();
         let args = vec![
-            "x-997a".to_string(),
-            "x-374b".to_string(),
+            "x-aaaa".to_string(),
+            "x-bbbb".to_string(),
             "--graph".to_string(),
             graph,
         ];
@@ -252,9 +252,9 @@ mod tests {
     /// is covered in backlog::api::tests.
     #[test]
     fn readers_follow_store_run_reads_the_store() {
-        let dir = write_graph(&[node("x-997a", "fewer-gated")]);
+        let dir = write_graph(&[node("x-aaaa", "fewer-gated")]);
         let graph = dir.path().join("graph.json").display().to_string();
-        let found = vec!["x-997a".to_string(), "--graph".to_string(), graph.clone()];
+        let found = vec!["x-aaaa".to_string(), "--graph".to_string(), graph.clone()];
         assert_eq!(run_graph_get(&found), 0);
         let missing = vec!["x-0000".to_string(), "--graph".to_string(), graph];
         assert_eq!(run_graph_get(&missing), 1);

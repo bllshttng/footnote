@@ -1,5 +1,5 @@
 //! Client side of `fno agents logs <name> --follow` for codex/gemini
-//! (Category C / ab-d82655d7).
+//! (Category C /).
 //!
 //! The caller has already printed the initial `--tail` block (client-side file
 //! read). This connects to the daemon, sends the `agent.logs` RPC, upgrades the
@@ -50,7 +50,7 @@ pub async fn follow(
         eprintln!("fno agents logs: follow request failed: {e}");
         return 1;
     }
-    // The ACK is bounded like every other client read (x-3498 review): a
+    // The ACK is bounded like every other client read (review): a
     // wedged daemon accepts into the backlog and never answers, and this verb
     // must fail inside the window rather than hang - the STREAM below the ack
     // stays unbounded by design, it is the follow itself.

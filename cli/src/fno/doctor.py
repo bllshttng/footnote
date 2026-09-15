@@ -1,7 +1,7 @@
 """fno doctor: detect skew between the installed fno and its source checkout.
 
 The ``fno`` on a developer's PATH is a snapshot, not a live view of the repo
-(ab-5a1fc285). When a new gate-bearing verb ships (e.g. ``backlog inbox`` in
+. When a new gate-bearing verb ships (e.g. ``backlog inbox`` in
 PR #329), an install that predates it silently fails the documented path. This
 command makes that skew detectable and self-explaining, **network-free**.
 
@@ -24,13 +24,13 @@ Python-side signals, each degrading to ``unknown`` rather than crying wolf:
 Plus a Rust-side report: which ``fno-agents`` binary ``auto`` mode would use,
 and whether the cargo-installed bins are stale relative to the crates/ subtree
 rev. The installed rev now comes from the binary itself -- ``fno-agents version
---json`` reports the crates/ subtree rev baked in by build.rs (ab-716cd330) --
+--json`` reports the crates/ subtree rev baked in by build.rs --
 not the ``installed-rust-rev`` marker, so a bare ``cargo install`` (no marker)
 is judged correctly. Rust staleness is proven only when full evidence is present
 (cargo binary exists, the binary self-reports a crates/ rev, crates/ subtree rev
 known); any gap degrades to unknown rather than crying wolf.
 
---fix now repairs the Rust side directly (ab-a78c9731): a rust-only stale
+--fix now repairs the Rust side directly : a rust-only stale
 verdict calls ``update._refresh_rust_bins`` without triggering a full Python
 reinstall.
 
@@ -61,7 +61,7 @@ if TYPE_CHECKING:
 # The verb the narrow capability probe checks for: the newest gate-bearing
 # verb. A missing `backlog inbox` (PR #329 gate) was the failure that
 # motivated this command; the probe now targets the renamed `backlog capture`
-# spelling, which also catches installs that predate the rename (ab-bf7cc0d8).
+# spelling, which also catches installs that predate the rename.
 _PROBE_VERB = ("backlog", "capture")
 _PROBE_VERB_LABEL = "backlog capture"
 
@@ -516,7 +516,7 @@ def _clean_rev(rev: object) -> Optional[str]:
 def _binary_self_rev(binary: Optional[str]) -> Optional[str]:
     """The full HEAD rev (``git_rev``) the fno-agents binary self-reports, or None.
 
-    Baked in by build.rs (ab-24a59d50); surfaced informationally as an identity
+    Baked in by build.rs ; surfaced informationally as an identity
     signal. See ``_binary_version_json`` for the failure contract.
     """
     return _clean_rev(_binary_version_json(binary).get("git_rev"))
@@ -526,7 +526,7 @@ def _binary_crates_rev(binary: Optional[str]) -> Optional[str]:
     """The crates/ subtree rev (``crates_rev``) the binary self-reports, or None.
 
     The last commit touching crates/ at the HEAD the binary was built from, baked
-    in by build.rs (ab-716cd330). This is the marker-free staleness signal the
+    in by build.rs. This is the marker-free staleness signal the
     rust verdict keys on: unlike ``installed-rust-rev`` (written only by ``fno
     update``), it is true for ANY install path, including a bare ``cargo
     install``. Its semantics MATCH ``_rust_source_rev`` (both are the crates/
@@ -608,14 +608,14 @@ def _rust_report() -> dict[str, Optional[str]]:
     """Report which fno-agents binary ``auto`` mode resolves.
 
     The ``revision`` key carries the verdict-driving rust rev: the crates/
-    subtree rev of the CARGO-installed binary (ab-716cd330). It is sourced from
+    subtree rev of the CARGO-installed binary. It is sourced from
     the cargo binary -- not ``resolve_installed_binary()`` -- because the rust
     gate (``_cargo_bin_present``) and ``--fix`` both target the cargo binary;
     reading the rev from a bundled sibling would misjudge or misrepair (codex
     PR #491). It replaces the old ``installed-rust-rev`` marker, which only
     tracked ``fno doctor update`` cargo installs and missed a bare ``cargo install``.
     ``binary``/``binary_rev`` describe the binary ``auto`` actually runs (display
-    + HEAD identity, ab-24a59d50). A probe error degrades to None rather than
+    + HEAD identity). A probe error degrades to None rather than
     aborting the verdict.
     """
     binary: Optional[Path] = None
@@ -765,7 +765,7 @@ def _plugin_cache_report() -> dict[str, Any]:
     actually executes in every Claude session. A cache pinned to a pre-feature
     sha ships hooks that predate provenance writers while every Python-side
     check reads green - the exact gap that left armed manifests reporting
-    ``auto_merge_source: unknown`` after x-9d11.
+    ``auto_merge_source: unknown`` after.
 
     Uses the module's staleness vocabulary: ``fresh`` when the pinned sha IS
     the source HEAD, ``stale`` when the sha is a proven ancestor of HEAD (and
@@ -861,7 +861,7 @@ def _plugin_cache_report() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Cost cross-check (--cost-check, opt-in - ab-c0f92987)
+# Cost cross-check (--cost-check, opt-in -)
 # ---------------------------------------------------------------------------
 #
 # Compares our session-cost.py math against the community reference cost CLI
@@ -1025,7 +1025,7 @@ def _cost_check() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Mux front door health (x-c267)
+# Mux front door health
 # ---------------------------------------------------------------------------
 
 
@@ -1097,7 +1097,7 @@ def _mux_front_door_report() -> dict[str, Any]:
 
 # Runtime files no code writes anymore (Group 3 GC wave: convo-signals
 # capture, tasks.json/md migration, metrics.jsonl analytics). evals-history
-# left this list at x-ab72: the eval bank's runner appends it on every
+# left this list at: the eval bank's runner appends it on every
 # scheduled run, and the evals staleness row reads the same file.
 # Purely informational - never changes doctor's status or exit code.
 _ORPHAN_BASENAMES = (
@@ -1134,7 +1134,7 @@ def _orphan_report() -> list[str]:
 
 
 def _pr_watch_liveness() -> dict[str, Any]:
-    """Ground-truth liveness verdict for the global PR-watch agent (x-e106).
+    """Ground-truth liveness verdict for the global PR-watch agent.
 
     Advisory: never changes doctor's status/exit. Degrades to ``unknown``
     (silent) rather than crying wolf when the check itself can't run.
@@ -1237,7 +1237,7 @@ def _groom_health() -> dict[str, Any]:
 
 
 def _archive_id_collisions() -> dict[str, Any]:
-    """Ids present in BOTH the working graph and the archive (x-f69b).
+    """Ids present in BOTH the working graph and the archive.
 
     Each is a real collision, not a duplicate: the id generator only checked
     the working graph, so a freed id gets reminted while the archive still
@@ -1376,7 +1376,7 @@ def _launch_agent_failures() -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# Silent-switch legibility (x-8cd5 Wave 6). Fail-safe defaults compose to
+# Silent-switch legibility (Wave 6). Fail-safe defaults compose to
 # inertness, and inertness is invisible because every component behaves as
 # designed: a disabled drain with missions queued looks identical to a clean
 # queue with nothing to do. The symmetric risk is a default-on/armed switch
@@ -1414,7 +1414,7 @@ def _mission_active_count() -> int:
 
 def _auto_merge_armed_manifests() -> dict[str, int]:
     """Worktree manifests whose resolved ``auto_merge_approved`` is true,
-    counted by ``auto_merge_source`` (x-9d11).
+    counted by ``auto_merge_source``.
 
     Each is one run's standing merge authority; the count is the legibility
     point (an armed manifest set against an operator who expects to review),
@@ -1515,7 +1515,7 @@ def _silent_switch_report(
     ab = _leaf(getattr(s, "active_backlog", None), "enabled")
     ts = _leaf(getattr(s, "think_spawn", None), "enabled")
     am = _leaf(getattr(s, "auto_merge", None), "enabled")
-    # Actor scope (x-4be1): the grant key replaces the dispatch.auto_merge
+    # Actor scope: the grant key replaces the dispatch.auto_merge
     # bool. Read through getattr so a stub settings object in tests degrades
     # to None (not armed) rather than raising.
     grant = "dispatch" if auto_merge_grant(s) else None
@@ -1575,7 +1575,7 @@ def _silent_switch_report(
     )
     if armed and am is True:
         total = sum(armed.values())
-        # Name WHICH layer set each posture (x-9d11): "24 manifests" hides that
+        # Name WHICH layer set each posture: "24 manifests" hides that
         # 12 came from config and 12 from an env grant; the breakdown is the
         # actionable half of the count.
         breakdown = ", ".join(
@@ -1588,7 +1588,7 @@ def _silent_switch_report(
             "count_label": f"manifest(s): {breakdown}",
             "command": "fno config set auto_merge.enabled false",
         }
-        # An ``unknown`` count is answerable, not fated (x-4be1): a proven-stale
+        # An ``unknown`` count is answerable, not fated: a proven-stale
         # deployed plugin cache is a LIKELY cause (a cache pinned before the
         # provenance writer cannot stamp manifests), and ``fno doctor update`` is the
         # fix for that cause. Only speak when the plugin-cache signal PROVES
@@ -1614,7 +1614,7 @@ def _silent_switch_report(
 def _auto_merge_review_gap(
     armed_manifests: Optional[dict[str, int]] = None,
 ) -> Optional[dict[str, Any]]:
-    """The x-0888 pair check: auto_merge armed while the merge gate's own lane
+    """The pair check: auto_merge armed while the merge gate's own lane
     predicate requires no review for a code payload.
 
     Doctor already prints the armed half (the silent-switch lines) and stays
@@ -1630,7 +1630,7 @@ def _auto_merge_review_gap(
     config the predicate cannot read fail-closes to True inside it, so a
     broken config never warns here.
 
-    ``unknown`` in the armed breakdown is its own answer (x-9d11), never
+    ``unknown`` in the armed breakdown is its own answer, never
     folded into a default origin. Zero armed manifests still reports: the
     enabled switch alone means the next run can be approved.
     """
@@ -1807,7 +1807,7 @@ def _preamble_budget_line(
 
 
 def _session_start_bytes_line(preamble_line: Optional[str]) -> Optional[str]:
-    """Advisory TOTAL session-start byte count (x-997a), rest via `fno-agents session-start-bytes`. Best-effort: None on any failure."""
+    """Advisory TOTAL session-start byte count, rest via `fno-agents session-start-bytes`. Best-effort: None on any failure."""
     match = re.match(r"preamble:\s*(\d+)\s*/", preamble_line or "")
     if not match:
         return None
@@ -2341,7 +2341,7 @@ def _emit_human(
             out(f"fno doctor: rust fno-agents binary: {bin_label} rust revision unknown.")
 
     # Build provenance ONLY: the HEAD (git_rev) the binary was built at
-    # (ab-24a59d50). This is a DIFFERENT quantity from the crates/ subtree rev the
+    #. This is a DIFFERENT quantity from the crates/ subtree rev the
     # freshness verdict compares, so it must never be framed as a source mismatch:
     # a python-only commit advancing HEAD past the last crates/ change would
     # otherwise print a bogus "(source crates/ rev ...)" line beside a "rust bins
@@ -2381,7 +2381,7 @@ def _emit_human(
     if daemon_drift:
         out(f"fno doctor: note: {daemon_drift}")
 
-    # Mux front-door health (x-c267): does bare `fno` launch the mux? Advisory.
+    # Mux front-door health: does bare `fno` launch the mux? Advisory.
     fd_state = result.get("mux_front_door")
     if fd_state == "active":
         out(f"fno doctor: mux front door: `fno` -> {result.get('mux_binary')} (active).")
@@ -2398,8 +2398,8 @@ def _emit_human(
             "precedes any Python `fno` on PATH."
         )
 
-    # Wire-floor freshness (x-e6dd): the WIRE verdict, not the build one
-    # (x-f188); build staleness is the census below. Advisory only.
+    # Wire-floor freshness: the WIRE verdict, not the build one
+    #; build staleness is the census below. Advisory only.
     for sess in result.get("mux_server_stale") or []:
         out(
             f"fno doctor: mux server '{sess}' is below the wire compatibility floor; "
@@ -2407,7 +2407,7 @@ def _emit_human(
             "add `--mux` to also end servers with live panes)."
         )
 
-    # Running-process census (x-f188): one line per stale row.
+    # Running-process census: one line per stale row.
     for row in result.get("running_components") or []:
         if isinstance(row, dict) and row.get("verdict") == "stale":
             pid = f" pid {row['pid']}" if row.get("pid") else ""
@@ -2422,7 +2422,7 @@ def _emit_human(
             f"capture paths (safe to delete): {', '.join(orphans)}"
         )
 
-    # PR-watch liveness (x-e106). Advisory: only speak up when the enabled
+    # PR-watch liveness. Advisory: only speak up when the enabled
     # watcher is not actually running, or is freshly installed and pending.
     pw = result.get("pr_watch") or {}
     pw_verdict = pw.get("verdict")
@@ -2441,7 +2441,7 @@ def _emit_human(
     elif pw_verdict == "healthy-pending":
         out(f"fno doctor: pr-watch installed, awaiting first tick ({pw.get('detail')}).")
 
-    # Control-plane arms (x-1b88), advisory: name every red (stale or
+    # Control-plane arms, advisory: name every red (stale or
     # failing) arm with the reader's own line; an unreadable readout never
     # reads as green.
     cpa = result.get("control_plane_arms") or {}
@@ -2587,7 +2587,7 @@ def _emit_human(
             f"fno doctor: codex plugin: {str(plugin_status).upper()} "
             f"({detail}; enabled={enabled}); run `{plugin.get('remedy')}`."
         )
-    # Agent health (x-1c7b). Grooming freshness is advisory - a fresh install has
+    # Agent health. Grooming freshness is advisory - a fresh install has
     # legitimately never groomed - but a nonzero-exit agent reddens the exit code
     # below, because "installed" has repeatedly not meant "running".
     gr = result.get("groom") or {}
@@ -2677,7 +2677,7 @@ def _emit_human(
             f"(it is installed but failing); check its log under ~/.fno/ and {remedy}."
         )
 
-    # Silent-switch legibility (x-8cd5 Wave 6): the applied posture, then both
+    # Silent-switch legibility (Wave 6): the applied posture, then both
     # directions of the rule. Advisory; never changes the exit code.
     ss = result.get("silent_switches") or {}
     stamp = ss.get("posture") or {}
@@ -2706,7 +2706,7 @@ def _emit_human(
         if f.get("cause"):
             out(f"  cause: {f['cause']}")
 
-    # The pair the ARMED lines above never made (x-0888): armed with ZERO
+    # The pair the ARMED lines above never made: armed with ZERO
     # lanes merges a code PR unreviewed. Advisory, never changes the exit code.
     gap = result.get("auto_merge_review_gap")
     if gap:
@@ -2733,7 +2733,7 @@ def _emit_human(
             f"run `{finding['command']}` or let the reaper restore it."
         )
 
-    # Deployed claude plugin cache (x-4be1): the hooks actually executed by
+    # Deployed claude plugin cache: the hooks actually executed by
     # Claude sessions. Advisory, same vocabulary as the wheel/rust legs.
     pc = result.get("plugin_cache") or {}
     if pc.get("kind") == "stage" and pc.get("status") == "stale":
@@ -2778,7 +2778,7 @@ def _emit_human(
             "to replace it (the old file is backed up)."
         )
 
-    # Plugin hook launch probe (x-d991): a hook command that cannot start fails
+    # Plugin hook launch probe: a hook command that cannot start fails
     # open in Codex with zero signal; each row is one guard that was absent.
     ph: dict[str, Any] = result.get("plugin_hooks") or {}
     if ph.get("applicable"):
@@ -2803,7 +2803,7 @@ def _emit_human(
     elif ph.get("reason"):
         out(f"fno doctor: plugin hook probe skipped ({ph['reason']}).")
 
-    # Codex hook layer split (x-d991): a foreign hook in ~/.codex/hooks.json is
+    # Codex hook layer split: a foreign hook in ~/.codex/hooks.json is
     # not footnote's to remove, but the split itself is the diagnostic gap.
     foreign = surf.get("codex_hooks_foreign_json") or []
     if foreign:
@@ -3432,7 +3432,7 @@ def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
 
 
 # --------------------------------------------------------------------------
-# Dead-letter visibility (US7, x-605c): the durable floor is silent quicksand
+# Dead-letter visibility (US7): the durable floor is silent quicksand
 # if a recipient's drain is unwired -- senders see `queued (durable)` + exit 0
 # forever. Two advisory findings, never blocking: (a) a claude env whose
 # `drain-self` SessionStart hook is not wired, (b) unread bus mail past a
@@ -3671,7 +3671,7 @@ def _managed_block_report() -> dict:
 
 
 # --------------------------------------------------------------------------
-# Per-harness surface freshness (x-3248 Change 5): `fno doctor update` refreshes only
+# Per-harness surface freshness (Change 5): `fno doctor update` refreshes only
 # the shared CLI/wheel; the codex marketplace plugin and the opencode local
 # plugin are separate surfaces with their own refresh verbs. Report-and-point
 # only (no auto-fix): the refresh action differs per harness and stays manual.
@@ -3748,7 +3748,7 @@ def _harness_surface_report() -> dict[str, Any]:
         # A foreign hook in ~/.codex/hooks.json is informational only - footnote
         # owns config.toml and must not remove another tool's hook - but a layer
         # split is exactly the unanswerable "which hook ran, from where?" this
-        # node exists to close, so surface it rather than stay silent (x-d991).
+        # node exists to close, so surface it rather than stay silent.
         if codex.get("foreign_json_hooks"):
             report["codex_hooks_foreign_json"] = codex["foreign_json_hooks"]
     except Exception:
@@ -3778,7 +3778,7 @@ def _harness_surface_report() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Plugin hook launch probe: the live fail-open detector (x-d991)
+# Plugin hook launch probe: the live fail-open detector
 # ---------------------------------------------------------------------------
 #
 # A hook whose command cannot resolve (PLUGIN_ROOT unset/empty, or a script
@@ -4166,7 +4166,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     advisory report. The one place that reads the machine, so `fno doctor`
     and the setup wizard (`report_machine_blockers` in `setup_cli.py`) stay
     two callers of one authority instead of two implementations that drift
-    (x-75dc)."""
+."""
     from fno import update as _update
 
     src = _resolve_source(source)
@@ -4202,26 +4202,26 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
         ],
     )
     result["components"] = components
-    # Advisory front-door fields (x-c267); never change status/exit.
+    # Advisory front-door fields; never change status/exit.
     result.update(_mux_front_door_report())
     result["daemon_drift"] = _daemon_drift_warning()
-    # Advisory process-freshness (x-e6dd): a long-running mux server still on the
+    # Advisory process-freshness: a long-running mux server still on the
     # OLD proto after an upgrade. Binary staleness is above; this is the running
     # PROCESS. Never changes status/exit.
     result["mux_server_stale"] = _update.stale_mux_servers()
 
-    # Advisory running-process census (x-f188); never changes status/exit.
+    # Advisory running-process census; never changes status/exit.
     result["running_components"] = _update.running_components() or []
 
     # Advisory orphan-file check (Group 3 GC); never changes status/exit.
     result["orphan_files"] = _orphan_report()
 
-    # Advisory PR-watch liveness (x-e106): enabled-but-dead ran silently for
+    # Advisory PR-watch liveness: enabled-but-dead ran silently for
     # weeks with zero signal; the verdict derives from tick recency (ground
     # truth), never from config alone. Never changes status/exit.
     result["pr_watch"] = _pr_watch_liveness()
 
-    # Advisory control-plane arms readout (x-1b88); never changes status/exit.
+    # Advisory control-plane arms readout; never changes status/exit.
     result["control_plane_arms"] = _control_plane_arms_report()
 
     # Advisory open-file limit visibility: a launchd child starves at 256 while
@@ -4245,11 +4245,11 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     # block older than the current template. Never changes status/exit.
     result["managed_block"] = _managed_block_report()
 
-    # Advisory per-harness surface freshness (x-3248): codex/opencode plugin
+    # Advisory per-harness surface freshness: codex/opencode plugin
     # surfaces `fno doctor update` does not cover. Never changes status/exit.
     result["harness_surface"] = _harness_surface_report()
 
-    # Advisory plugin hook launch probe (x-d991): a hook command that cannot
+    # Advisory plugin hook launch probe: a hook command that cannot
     # resolve fails open in Codex with no signal. This launches every configured
     # hook through the real ``$SHELL -lc`` path and reports any that cannot
     # start. Loud on failure; never changes the staleness exit code.
@@ -4275,7 +4275,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["source_checkout_sync"] = _source_checkout_sync(src)
     result["launch_agents"] = _launch_agent_failures()
 
-    # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
+    # Advisory silent-switch legibility (Wave 6): default-off switches
     # silently producing inaction + default-on/armed switches silently merging.
     # Never changes status/exit. The plugin-cache report is computed ONCE and
     # shared with the silent-switch pass (its unknown-manifest cause reads it):
@@ -4284,7 +4284,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     plugin_cache = _plugin_cache_report()
     # The armed-manifest scan is likewise computed ONCE and shared: the
     # silent-switch lines and the review-gap pair check must quote the same
-    # count (see _auto_merge_review_gap, x-0888).
+    # count (see _auto_merge_review_gap).
     armed_manifests = _auto_merge_armed_manifests()
     result["silent_switches"] = _silent_switch_report(
         plugin_cache=plugin_cache, armed_manifests=armed_manifests
@@ -4294,7 +4294,7 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     )
     result["merge_gating_optouts"] = _merge_gating_optout_report()
 
-    # Advisory deployed-plugin-cache freshness (x-4be1): the hooks Claude
+    # Advisory deployed-plugin-cache freshness: the hooks Claude
     # sessions actually run. Never changes status/exit.
     result["plugin_cache"] = plugin_cache
 
@@ -4493,7 +4493,7 @@ def doctor_command(
     # _emit_human/--fix below only need `src` and the rust binary path, not
     # the full advisory assembly build_report already did - recompute the
     # cheap pieces rather than thread extra return values through build_report's
-    # `-> dict[str, Any]` contract (the wizard's caller shape, x-75dc).
+    # `-> dict[str, Any]` contract (the wizard's caller shape, x-aaaa).
     src = _resolve_source(source)
     rust = {"binary": result.get("rust_binary")}
     cargo_bin_present = _cargo_bin_present()
@@ -4642,7 +4642,7 @@ def doctor_command(
                 )
                 raise typer.Exit(0)
             elif outcome == "refreshed-no-marker":
-                # Bins rebuilt, but no marker landed (ab-703f2ed2): the
+                # Bins rebuilt, but no marker landed: the
                 # stale verdict will not converge - the next doctor run
                 # still reports rust stale. Exit nonzero so loop callers
                 # don't believe the repair worked.

@@ -10,7 +10,7 @@ helpers they share with the rest of the backlog surface are injected at
 registration, so this module never imports graph.cli (the cycle would be
 unimportable).
 
-x-665f: these verbs are TRANSPORTS over the native patch door
+: these verbs are TRANSPORTS over the native patch door
 (`fno-agents backlog-update`). They keep only what is not store logic: the
 batch atomicity pre-check, the dependents WARN, the boundary events, the
 plan-ruling lines, and the plan projection. Every field write rides the
@@ -78,7 +78,7 @@ def refuse_stray_update_flags(door_args: List[str]) -> None:
 def forward_update_door(
     task_id: str, door_args: List[str], graph_path: Path, values: dict
 ) -> None:
-    """`cmd_update`'s forwarding half (x-665f): relay the door flags to the
+    """`cmd_update`'s forwarding half : relay the door flags to the
     native backlog-update action, refusing a mixed call. `values` is the
     caller's `locals()` - the legacy flags' parsed values, screened here
     against :data:`_LEGACY_UPDATE_PARAMS` so the over-budget cli.py only
@@ -212,7 +212,7 @@ def register_lifecycle_commands(
         Atomic across the batch: if any ID is unknown, none are cleared.
         A node still superseded refuses and names the door route - clearing
         its park would print Undeferred while the node stays superseded
-        (x-e3c4). Each node that WAS deferred gets its own streak-reset
+. Each node that WAS deferred gets its own streak-reset
         event. The verb prints the reason it clears and any plan ruling
         against the node.
         """
@@ -318,7 +318,7 @@ def register_lifecycle_commands(
         blueprint consolidation gate reads, so planning against it stops too.
         Forwards to ``cmd_defer`` with the kind forced; batch atomicity and
         the blank-reason refusal are inherited. The reason rides a positional,
-        not a flag: the Python flag surface is shrink-only (x-72fc).
+        not a flag: the Python flag surface is shrink-only.
         """
         cmd_defer(task_ids=task_ids, reason=reason, kind="retracted")
 

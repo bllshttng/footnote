@@ -2,7 +2,7 @@
 
 The canonical implementation is the bundled ``fno-agents`` binary's
 ``verify-evidence child-promise`` verb (folded out of the deleted
-``scripts/lib/verify-event-evidence.sh`` in US1, ab-58645f63). This
+``scripts/lib/verify-event-evidence.sh`` in US1). This
 module mirrors its semantics so a CLI consumer (e.g. when megawalk
 promotes off the bash hooks) can verify a child target session's
 ``child_promise`` event using the same diagnostic vocabulary, without

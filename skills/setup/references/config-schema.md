@@ -13,7 +13,7 @@ project:
                                          #   2. basename of `git remote get-url origin`
                                          #   3. basename of repo_root
                                          # Validated against ^[A-Za-z0-9][A-Za-z0-9._-]*$.
-                                         # Never reused across projects (ab-3180b3f4).
+                                         # Never reused across projects.
 
 config:
   # Plan paths (prefer plansDirectory in .claude/settings.json)
@@ -68,7 +68,7 @@ work:
   worktree:
     base: ~/.fno/worktrees         # canonical flat layout; full path is
                                          # ~/.fno/worktrees/{project.id}-{slug}/
-                                         # (Plan ab-3180b3f4). Old projects may still
+                                         # (Plan). Old projects may still
                                          # carry base: .claude/worktrees for the
                                          # transition window.
     shared_branch_name: true

@@ -1,4 +1,4 @@
-"""Group 2 of the cross-session agent relay (x-908b / x-e4ac): the address
+"""Group 2 of the cross-session agent relay (/): the address
 router. A ``parseAddress`` clone (the design's Router layer) that resolves a
 relay address to a concrete ``session_id`` + ``provider`` + ``inject_handle``
 from the persistent :mod:`fno.relay.registry`.

@@ -6,7 +6,7 @@ the label comes from the verb table (spawn_phase.toml, authored in the Rust
 tree, shipped here as package data), never from a mangled prefix chain.
 Explicit --session-phase wins before this helper runs; when the inference
 answers "" on a --node spawn, cmd_spawn refuses with exit 2 and no worker
-launches (x-007c).
+launches.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from fno.config._dispatch_verbs import parse_verb_token
 @cache
 def _verb_phases() -> dict[str, str]:
     """The verb-to-phase vocabulary from the ONE canonical spawn_phase table
-    (x-007c): authored in the Rust tree, shipped here as generated package
+    : authored in the Rust tree, shipped here as generated package
     data. The Python reader and any future Rust reader cannot drift."""
     import tomllib
     from importlib.resources import files

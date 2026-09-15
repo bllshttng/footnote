@@ -15,7 +15,7 @@ from pathlib import Path
 from fno.agents.stale_escalate import reconcile_channel
 
 STALE_MARKER = "watchdog-stale"
-#: The reaper-hold lane (x-e3cc): escalated holds ask on the same durable
+#: The reaper-hold lane : escalated holds ask on the same durable
 #: question channel the stale lane uses.
 HOLD_MARKER = "reap-hold"
 
@@ -121,7 +121,7 @@ def run(*, json_out: bool) -> None:
         session_id = None
     cwd = Path.cwd()
 
-    # The hold channel (x-e3cc) runs even when the watchdog sweep refused:
+    # The hold channel runs even when the watchdog sweep refused:
     # the reaper's clock is a different instrument, and its question must
     # not vanish behind the watchdog's own refusal.
     holds = escalated_holds()

@@ -188,7 +188,7 @@ def _attest_from_record(
     ``branch_override`` replaces the row's ``branch`` field only: the caller
     (the shell producer) resolved the PR branch with its upstream rewrite,
     which this verb must not re-derive from cwd. Hold join and release keep
-    the cwd-resolved local name the hook keyed the hold under (x-a8a1).
+    the cwd-resolved local name the hook keyed the hold under.
     classify sources it from ``FNO_ATTEST_BRANCH`` - the flag-surface ratchet
     (scripts/ci/check_flag_registry.py) refuses a new typer.Option here, so
     the producer passes the branch through the environment instead.

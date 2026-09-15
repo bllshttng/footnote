@@ -1,4 +1,4 @@
-//! The king-escalation question renderer (x-ff27): one pure function set
+//! The king-escalation question renderer : one pure function set
 //! behind a hidden JSON verb, reached as `fno-agents king-escalation-text`.
 //! Python keeps the question fold (`reconcile_channel`) and the liveness
 //! read; this side only renders text from the reading the producer passed.
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn undelivered_reading_states_a_quiet_board_not_a_blind_one() {
-        let text = question(&req(vec!["reading:undelivered:x-a792"], Some(true)));
+        let text = question(&req(vec!["reading:undelivered:x-aaaa"], Some(true)));
         assert!(text.starts_with(&format!("[{MARKER}:{KEY}]")));
         assert!(text.contains("quiet board"));
         assert!(!text.contains("could not read"));
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn specimen_question_replays_q_f347e7bc_without_the_false_assertion() {
         let r = EscalationRequest {
-            stalled: vec!["reading:undelivered:x-a792".to_owned()],
+            stalled: vec!["reading:undelivered:x-aaaa".to_owned()],
             key: "87c620d35067".to_owned(),
             reason: "NoProgress".to_owned(),
             live: Some(true),
@@ -476,7 +476,7 @@ mod tests {
         let text = question(&r);
         assert!(text.starts_with("[king-escalation:87c620d35067]"));
         assert!(text.contains("quiet board"));
-        assert!(text.contains("scope x-a792 still has undelivered nodes"));
+        assert!(text.contains("scope x-aaaa still has undelivered nodes"));
         assert!(!text.contains("could not read"));
         assert!(!text.contains("these rows"));
     }
@@ -504,12 +504,12 @@ mod tests {
                 "a quiet board with queues it could not read",
             ),
             (
-                reading_undelivered("x-a792"),
-                "a quiet board: no row is actionable, but scope x-a792 still has undelivered nodes",
+                reading_undelivered("x-aaaa"),
+                "a quiet board: no row is actionable, but scope x-aaaa still has undelivered nodes",
             ),
             (
-                reading_delivery_unreadable("x-a792"),
-                "a quiet board whose delivery count for scope x-a792 it could not read",
+                reading_delivery_unreadable("x-aaaa"),
+                "a quiet board whose delivery count for scope x-aaaa it could not read",
             ),
         ];
         for (id, subject) in cases {
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn mail_names_the_subject_and_reason() {
-        let ans = render(&req(vec!["reading:undelivered:x-a792"], Some(true)));
+        let ans = render(&req(vec!["reading:undelivered:x-aaaa"], Some(true)));
         let mail = ans.mail.expect("ok case carries mail");
         assert!(mail.contains("A crown under yours stopped on a quiet board:"));
         assert!(mail.contains("Reason given: NoProgress"));

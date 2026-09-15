@@ -90,7 +90,7 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     env = dict(base)
     # The identity scrub lives HERE, at the floor every adapter's child env
     # already crosses, not in each adapter: a per-adapter scrub is one the
-    # next adapter declines to call (x-b57a - claude's adapter scrubbed,
+    # next adapter declines to call (- claude's adapter scrubbed,
     # codex's never did, so a codex worker inherited its claude parent's
     # CLAUDE_CODE_SESSION_ID and stamped harness="claude-code" on every mail).
     # Before the no-gh early return: identity is not conditional on gh
@@ -105,7 +105,7 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     # A child never inherits its parent's spawn cause.
     env.pop("FNO_SPAWN_TRIGGER", None)
     # Seed provenance is inherited the same way and for the same reason it must
-    # not be (node x-3a64): these fields name WHO SENT THIS CHILD ITS SEED, so a
+    # not be (node): these fields name WHO SENT THIS CHILD ITS SEED, so a
     # child that inherits them attributes its own first message to whoever
     # seeded its parent - an envelope naming the wrong peer, which is worse than
     # none. Scrubbed at the floor rather than per adapter, so a launcher that

@@ -154,7 +154,7 @@ def _print_settled_children(scope: str) -> None:
     A crown lands on an epic whose history predates the session, and every
     board read a king makes filters to open rows, so the done children that
     record what the epic already established are invisible exactly when they
-    matter most (x-ada6). Titles only: no search over details, no similarity
+    matter most. Titles only: no search over details, no similarity
     score. One local graph read; nothing prints when none exist or the graph
     cannot be read.
     """
@@ -709,7 +709,7 @@ def board_cmd(
 ) -> None:
     """Report every queue that would keep a king working.
 
-    The collector is the Rust runtime (x-25b8, d-e11b2b3e): this command is a
+    The collector is the Rust runtime (d-e11b2b3e): this command is a
     shell over `fno-agents board` - it resolves the binary, passes the whole
     budget and the manifest through, and renders or emits the returned payload.
     A bare call from a crowned session defaults to that crown's manifest (the
@@ -794,7 +794,7 @@ def escalate_cmd(
         "NoProgress", "--reason", "-R", help="The terminal reason that triggered this."
     ),
 ) -> None:
-    """Escalate to the presiding crown or operator with work pending (x-3ecf AC4-HP)."""
+    """Escalate to the presiding crown or operator with work pending (AC4-HP)."""
     from fno.carveout.core import resolve_carveout_root, resolve_session_id
     from fno.king.escalate import escalate, mail_presiding_king, resolve_presiding_king
     from fno.king.state import reign_state

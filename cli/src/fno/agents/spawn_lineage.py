@@ -16,17 +16,17 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     Returns ``(session_id, harness, cwd)`` — all three are strings or None.
     Precedence applies within one harness family; markers from two families
     attribute NOTHING (a foreign inherited marker must not be laundered into
-    the parent record, x-b57a). Never raises; always returns a triple
+    the parent record). Never raises; always returns a triple
     (missing fields degrade to None).
 
-    Harness detection order (Task 2.2, x-30f6):
+    Harness detection order (Task 2.2):
       CODEX_THREAD_ID        -> harness="codex"
       CLAUDE_CODE_SESSION_ID -> harness="claude"
       CODEX_SESSION_ID       -> harness="codex"
       GEMINI_SESSION_ID      -> harness="gemini"
       OPENCODE_SESSION_ID    -> harness="opencode"
     """
-    # OWNED, not precedence (x-20f1): this triple is stamped onto the SPAWNED
+    # OWNED, not precedence: this triple is stamped onto the SPAWNED
     # row as its `spawned_by_*` edge, so an inherited marker records a stranger
     # as the parent for the life of that row. An ambiguous resolve records no
     # lineage rather than a wrong one.
@@ -39,10 +39,10 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     # spawning session's cwd (inherited), so the parent cwd is always captured.
     parent_cwd: Optional[str] = (os.environ.get("PWD") or os.getcwd()).strip() or None
 
-    # x-5c25: with NO marker the walk still names the family, and an ANCESTOR
+    # with NO marker the walk still names the family, and an ANCESTOR
     # cannot be the stranger an inherited MARKER can. Gated on an empty marker
     # set, never a missing harness: a present marker that resolved to nothing
-    # is a contradiction, and x-b57a / x-0992 rule that attributes nothing.
+    # is a contradiction, and / rule that attributes nothing.
     harness = identity.harness
     if not harness and not identity.markers_present:
         from fno.claims.session_pid import resolve_session_harness
@@ -57,7 +57,7 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
 
 def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
     """Name an unrecorded parent edge in the spawn output, and return the
-    reason so the spawn event can carry it (x-5283): the event holds either
+    reason so the spawn event can carry it : the event holds either
     a session id or this reason, never both empty. A null can be CORRECT
     (a foreign inherited marker would record a stranger as parent); the
     defect was its silence, so say it with the identity resolution's reason.
@@ -78,7 +78,7 @@ def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
 
 
 # The prompt lane opens a row only for a message whose verb labels review
-# (infer_phase, the spawn_phase.toml table): the x-4342 complaint shape is a
+# (infer_phase, the spawn_phase.toml table): the complaint shape is a
 # review worker spawned with the node id in its prompt. A do worker whose
 # prompt mentions a SIBLING id must not get a reviewer row stamped on that
 # sibling, so prose and other verbs arm nothing.
@@ -131,7 +131,7 @@ def _stamp_spawned_session_row(
     worker_session_uuid: "str | None",
     worker_effort: "str | None" = None,
 ) -> None:
-    """Open the node's sessions row for a spawned contributor (x-4342).
+    """Open the node's sessions row for a spawned contributor.
 
     A spawned reviewer never holds the claim, so it crosses none of the
     mechanical stamping chokepoints (claim acquire/release, plan-bind, PR-link)
@@ -232,7 +232,7 @@ def _stamp_spawned_session_row(
 
 
 def _stamp_launch_edge(node: "str | None") -> None:
-    """Record WHO LAUNCHED this node's worker, on the node itself (x-5c25).
+    """Record WHO LAUNCHED this node's worker, on the node itself.
 
     The sibling of :func:`_stamp_spawned_session_row`, which records who WORKED
     it. Refuses rather than half-writes: no node, no write; no proven parent

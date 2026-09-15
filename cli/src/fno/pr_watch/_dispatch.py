@@ -68,7 +68,7 @@ class TickResult:
     # five days, so it gets its own state instead of a zero count.
     lock_held: bool = False
     lock_holder: str = ""
-    # x-aaaf wave 2: config.pr_watch.enabled was declared in the schema but
+    # wave 2: config.pr_watch.enabled was declared in the schema but
     # never actually READ by tick() - the watcher's dispatch could be slowed
     # (interval_seconds) but never stopped once launchd had it installed.
     # A disabled tick takes no lock (mirrors an introspection read, never a
@@ -284,7 +284,7 @@ _ENV_SEAM = "PR_WATCH_FIRE_CMD"
 _DEFAULT_MODEL = "claude-haiku-4-5"
 
 # Per-verb wall-clock ceiling for the headless review fire. A launchd tick never
-# overlaps, so an unbounded child call wedges every future tick forever (x-97d8);
+# overlaps, so an unbounded child call wedges every future tick forever;
 # this bound turns a hung fire into a normal failed dispatch the retry/park
 # machinery already handles. The post-merge ritual no longer fires here: pr-watch
 # runs ``fno do pr ritual`` directly, and that verb owns its own judgment leg.
@@ -320,7 +320,7 @@ def fire_skill(
     with an arbitrary command string for unit tests; when set, the command is
     built as ``["<seam>"]`` and the runner receives it like any other call.
 
-    ``node_id`` (x-84b2) names the worker ``pw-r-<node>-pr-<n>``; a PR whose
+    ``node_id`` names the worker ``pw-r-<node>-pr-<n>``; a PR whose
     candidate binds no graph node REFUSES the autonomous spawn rather than
     substituting the PR number as a fake node (the tick's retry/park machinery
     owns the refusal).
@@ -332,7 +332,7 @@ def fire_skill(
     prompt (AC1-HP, AC10-EDGE).
 
     ``timeout_s`` bounds the spawned worker so a hung claude cannot wedge the
-    launchd tick forever (x-97d8); when None it defaults via
+    launchd tick forever ; when None it defaults via
     ``_TIMEOUT_FOR_VERB``. The wrapper deadline includes grace so the canonical
     spawn can reap its child before this process reports failure. A timeout
     surfaces as a normal failed dispatch.
@@ -342,7 +342,7 @@ def fire_skill(
     """
     if not node_id:
         log.warning(
-            "pr-watch: PR #%d binds no graph node; refusing the %s fire (x-84b2)",
+            "pr-watch: PR #%d binds no graph node; refusing the %s fire ",
             pr_number, verb,
         )
         return DispatchResult(ok=False, rc=-1, is_error=False, raw="")
@@ -501,7 +501,7 @@ def _ritual_timeout() -> float:
     """Cold-ritual subprocess timeout: the sweep slice minus a 10s reserve so
     the verb times out as an ordinary recorded failure BEFORE the phase alarm
     fires - an alarm cut mid-subprocess would skip the caller's persist and
-    replay the same ritual every tick (x-c79d AC6)."""
+    replay the same ritual every tick (AC6)."""
     left = phase_seconds_left()
     if left is None:
         return 300.0
@@ -531,13 +531,13 @@ def tick(
     max_age_days: int = 14,
     # Retry cap (default matches _MAX_RETRIES; override with config.pr_watch.retries)
     max_retries: Optional[int] = None,
-    # GraphQL budget preflight (x-c12c): the dispatch pass spends gh pr view,
+    # GraphQL budget preflight: the dispatch pass spends gh pr view,
     # which bills the shared per-user GraphQL pool by point cost.
     graphql_remaining_fn: Optional[Callable] = None,
     graphql_min_remaining: int = 200,
     dispatch_deadline: Optional[float] = None,
-    # x-aaaf wave 2: config.pr_watch.enabled was declared but never actually
-    # consulted here - the launchd activation coupling (x-e106: "enabled means
+    # wave 2: config.pr_watch.enabled was declared but never actually
+    # consulted here - the launchd activation coupling (: "enabled means
     # running") stops a NEWLY-toggled watcher at install time, but a config
     # edited by hand (bypassing `fno config set`) left an already-installed
     # launchd job dispatching forever. Plain DI default (True), matching every
@@ -894,7 +894,7 @@ def _run_tick(
             skipped += 1
             continue
 
-        # x-d211: only a candidate owing the rich read may break the tick.
+        # only a candidate owing the rich read may break the tick.
         if (
             dispatch_deadline is not None
             and dispatch_deadline - time.monotonic() < _READ_FLOOR_S
@@ -947,7 +947,7 @@ def _run_tick(
                 )
                 entry = None
 
-            # x-d211: stamp the cursor; the final persist carries it forward.
+            # stamp the cursor; the final persist carries it forward.
             if isinstance(entry, dict):
                 entry["last_polled_at"] = now_iso
 

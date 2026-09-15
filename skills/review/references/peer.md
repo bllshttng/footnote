@@ -224,7 +224,7 @@ fno agents spawn --harness "$PROVIDER" --headless -t 300 --name "peer-$TARGET" "
 - `--name peer-$TARGET` is a throwaway handle (`--headless` tears the agent down); derive it
   from the target, e.g. `peer-pr657` or `peer-fix-ratios`.
 
-### 3b. GENERATE (routed claude -> GLM) - claude CLI as transport (x-ef41)
+### 3b. GENERATE (routed claude -> GLM) - claude CLI as transport
 
 For a `config.review.peers` entry `{provider: claude, model: "<rprov>,<rmodel>"}` (e.g. `zai,glm-5.3`), do NOT `fno agents spawn`. The claude CLI is only the transport. The review model is the routed one (GLM via z.ai).
 
@@ -375,7 +375,7 @@ review, or whose post to GitHub failed, must be reported, not papered over.
    guard honors a route for claude only.
    Layered defense: the loader rejects a bare/anthropic-routed `claude` peer at
    load (fail-early for the dominant claude author) and loop-check's gate-time
-   guard (x-c2e7) holds the gate for any same-model author - this RESOLVE refusal
+   guard holds the gate for any same-model author - this RESOLVE refusal
    is the earliest, advisory layer.
 4. **Advisory by default; explicit evidence carrier for gating.** Bare `/review peer` is advisory.
    `--attest` gates identity-free peers through a strictly validated, head-pinned local verdict and requires no GitHub identity.

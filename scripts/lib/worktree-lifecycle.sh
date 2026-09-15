@@ -56,7 +56,7 @@ else
     wt_refresh_remote_refs() { git -C "${1:-.}" fetch origin main >/dev/null 2>&1; }
 fi
 
-# The per-hit occupancy classifier over _wt_pids output (x-0396). A partial
+# The per-hit occupancy classifier over _wt_pids output. A partial
 # deploy that dropped the lib degrades to all-holds: every tree with a
 # process is kept, never killed.
 if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-occupancy.sh" ]]; then
@@ -386,7 +386,7 @@ PY
 # Best-effort retire the dead job records for a selector. Never fails the sweep
 # (claude rm is now unblocked by the fixed WorktreeRemove hook); logs one line
 # per reap. A missing `claude` binary is a silent no-op. Optional extra args
-# are job ids named by the occupancy classifier's retire rows (x-0396): the
+# are job ids named by the occupancy classifier's retire rows: the
 # sweep retires the job whose session process it released, not just ones the
 # cwd-keyed candidate query can see (that field is the spawn directory).
 _reap_jobs() {
@@ -1081,7 +1081,7 @@ case "${1:-status}" in
                 --merged) MERGED="true"; shift ;;
                 --apply) APPLY="true"; shift ;;
                 --kill-orphans)
-                    # Retired (x-0396): the ppid-1 leg released trees by
+                    # Retired: the ppid-1 leg released trees by
                     # parentage, which a real pane keeper reads as safe to
                     # kill. Classified processes release a tree now; every
                     # unclassified one always keeps it.
@@ -1231,7 +1231,7 @@ case "${1:-status}" in
                 if _wt_live "$wt"; then
                     printf '%-18s %-34s %s\n' "kept (live-session)" "$branch" "$wt"; N_LIVE=$((N_LIVE + 1)); continue
                 fi
-                # 4. rooted processes, each named and classified (x-0396). A
+                # 4. rooted processes, each named and classified. A
                 #    hit the classifier cannot positively place is a holder;
                 #    absence of a recognised holder is never proof the tree
                 #    is free.
@@ -1273,7 +1273,7 @@ case "${1:-status}" in
                 # cached one). Exit 5 = salvage kept the worktree. The caller env
                 # names this path in the worktree_removed event row it emits. No
                 # --yes is passed: the removal-time classification re-reads the
-                # tree and only inert rows are signalled (x-0396).
+                # tree and only inert rows are signalled.
                 FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$wt" $YES >&2
                 rc=$?
                 case "$rc" in
@@ -1373,7 +1373,7 @@ case "${1:-status}" in
                 # below would destroy any commit no remote carries - the exact
                 # loss the merged sweep's wt_unpushed_count guard prevents.
                 # The refresh must run in THIS shell: the count below runs in
-                # a $( ) subshell that cannot carry the freshness flag back,
+                # a $() subshell that cannot carry the freshness flag back,
                 # so refreshing only inside it re-fetches per detached tree.
                 if [[ -z "$BRANCH" ]]; then
                     wt_refresh_remote_refs "$wt" >/dev/null 2>&1 || true

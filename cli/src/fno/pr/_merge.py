@@ -1,4 +1,4 @@
-"""In-package port of ``scripts/lib/pr-merge.sh`` (ab-d4c98550, US1).
+"""In-package port of ``scripts/lib/pr-merge.sh`` (US1).
 
 Skill-agnostic PR merge wrapper. Shells to ``gh``/``git`` and preserves the
 caller-facing contract verbatim:
@@ -19,7 +19,7 @@ caller-facing contract verbatim:
 - The footnote-canonical merge guard (config.auto_merge ``enabled`` + the
   CI-green / external-review / stub-manifest guards) and the worktree
   server-side-recovery fallback are preserved. The who-may-merge gate
-  (``--invoker`` + ``auto_merge.allowed_invokers``) was removed (x-04ab): the
+  (``--invoker`` + ``auto_merge.allowed_invokers``) was removed : the
   caller context is derivable and megawalk is deprecated, so the flag was
   redundant ceremony. A legacy ``--invoker=...`` arg is silently accepted and
   ignored so old callers never break.
@@ -49,13 +49,13 @@ _PR_RE = re.compile(r"^[1-9][0-9]*$")
 # above reconcile's own 240s close-probe budget (graph/_reconcile.py).
 POST_MERGE_RECONCILE_TIMEOUT_S = 300.0
 
-# Merge serialization (parallel mode, epic x-42d5 G4, Locked Decision #9):
+# Merge serialization (parallel mode, epic G4, Locked Decision #9):
 # builds run parallel, merges run ONE AT A TIME. The lock is held across the
 # gh merge call and its post-merge followups (typically seconds), so the wait
 # is short and bounded - a peer still holding it past the window is reported
 # as "held" (exit 2) for the caller to retry, never an indefinite block.
 # Scope: the lock + freshness hold cover the IMMEDIATE merge path. There is no
-# queued lane anymore (x-9d11 dropped --auto): require_checks_pass is enforced
+# queued lane anymore (dropped --auto): require_checks_pass is enforced
 # by reading the checks under the lock and merging only on green, so every
 # merge this verb performs is serialized here.
 _MERGE_LOCK_WAIT_S = 120
@@ -233,9 +233,9 @@ def _review_coverage_for_pr(
     """The ``review_coverage`` event data for ``pr_number``, recomputed once
     when there is no usable row, or ``(None, note)``.
 
-    loop-check emits one every gate eval (x-0eaf); a session with no manifest
+    loop-check emits one every gate eval ; a session with no manifest
     never does, which made the gate unsatisfiable for that shape - so a missing
-    or head-mismatched row now fires the standalone producer once (x-3a3f).
+    or head-mismatched row now fires the standalone producer once.
     Python still consumes the event rather than recomputing coverage itself
     (Ownership: Rust computes, Python reads). Any failure degrades to the
     original row (or None) plus a note naming the recompute's outcome, which
@@ -368,11 +368,11 @@ def _coverage_refused_reason(
         # Name WHERE it looked, not just that it found nothing. The absence is
         # the one refusal a reader cannot diagnose from a count, and two workers
         # read the bare count as a policy problem and set about designing around
-        # a gate that was already green somewhere else (x-f43c).
+        # a gate that was already green somewhere else.
         where = f" (searched: {', '.join(sources)})" if sources else ""
         return f"no review_coverage event for this PR{where}"
     cov_word = str(cov.get("coverage"))
-    # `uncovered` (x-5b99) is a real known zero - the exact case that used to
+    # `uncovered` is a real known zero - the exact case that used to
     # serialize as `covered` with `reviewed_count: 0`. It has to reach the
     # naming branches below: short-circuiting on it here would send every
     # zero-coverage refusal - the most common one there is - back to the bare
@@ -576,7 +576,7 @@ def _ambient_harness() -> Optional[str]:
 
 
 def _harness_can_self_review(repo: str) -> bool:
-    """Whether the self-review floor engages for this run (x-129b).
+    """Whether the self-review floor engages for this run.
 
     The run's harness decides, alone: the target manifest's `harness:` field
     when it carries one, else the single-family ambient resolve (the merging
@@ -590,7 +590,7 @@ def _harness_can_self_review(repo: str) -> bool:
     demand an attestation no native verb there produces.
     Unattributable - no manifest, ambiguous or absent markers, or an
     unrecognized spelling - floors: ambiguity about who authored the change
-    is not permission to skip its review. The pre-x-129b shape read ONLY
+    is not permission to skip its review. The pre-change shape read ONLY
     ambient markers and treated multi-family ambiguity as 'no floor', which
     silently disengaged review on any claude session started from a codex
     shell. Mirrors self_review_floor_applies in loopcheck.rs: the two gates
@@ -649,7 +649,7 @@ def _review_lane_configured(
     unreviewed (lane), wedging the pipeline on the same config.
 
     code_payload=True answers a HYPOTHETICAL code payload (no PR to probe, no
-    pr_number): the doctor pair check (x-0888) asks this gate whether auto_merge
+    pr_number): the doctor pair check asks this gate whether auto_merge
     is armed with zero lanes, instead of a second lane implementation that can
     drift from this one. The lane logic is untouched, so the loopcheck.rs
     mirror still holds; the stop gate always has a real PR and never passes it.
@@ -787,7 +787,7 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
 
         def _mut(entries: List[dict]) -> List[dict]:
             # The merged PR may be the node's PRIMARY ref or one of its
-            # additional refs (x-2774 change 7): stamp whichever it is, so a
+            # additional refs (change 7): stamp whichever it is, so a
             # merged additional PR is recorded merged and the reaper's
             # recorded-openness test can settle its do rows. Unrecorded stays
             # open everywhere - this is the recorder, never the assertion.
@@ -901,7 +901,7 @@ def _repo_scoped_number_matches(
 
 
 def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
-    """Close every node the just-merged PR closes, synchronously (x-59a6).
+    """Close every node the just-merged PR closes, synchronously.
 
     ``_run_post_merge_followups`` only drops a ``.triage-pending`` sentinel for a
     later stop-hook / ritual to consume; a standalone ``fno do pr merge`` from a
@@ -960,7 +960,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
 
         if external:
             # External selection has no Backlog-Closure trailer concept of its
-            # own yet (that is graph-only, x-59a6) - resolve the ONE node this
+            # own yet (that is graph-only) - resolve the ONE node this
             # PR's ref matches via the tracker-agnostic sidecar projection,
             # backfill its primary link, and close through the shared
             # external terminal: same gates, sidecar rollups, one close.
@@ -1020,7 +1020,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
         from fno import _subprocess_util
 
         # Bounded above the 240s probe budget; parent-bound so a killed merge
-        # cannot orphan the child (x-626f).
+        # cannot orphan the child.
         try:
             res = run(
                 [*_subprocess_util.fno_py_cmd(), "backlog", "reconcile",
@@ -1051,7 +1051,7 @@ def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> List[str]:
         # bound (only an unresolvable PR query exits non-zero) - the same
         # closure_refused field leg_stamp checks via this identical --json
         # call. Without this, a refused bind read as a clean, silent
-        # success (round-11 review fix, x-59a6).
+        # success (round-11 review fix).
         try:
             obj = json.loads(res.stdout or "{}")
         except json.JSONDecodeError:
@@ -1108,7 +1108,7 @@ def _on_confirmed_merge(pr_number: int, cwd: str = "") -> List[str]:
 
 
 def _post_merge_remote_delete(pr_number: int, repo: str, auto_merge) -> str:
-    """Delete the REMOTE branch after a confirmed merge; warn-only (x-9d11).
+    """Delete the REMOTE branch after a confirmed merge; warn-only.
 
     Branch cleanup is a separate operation from the merge and must never be
     able to fail it. `gh pr merge --delete-branch` also deletes the LOCAL
@@ -1398,7 +1398,7 @@ def _emit_merge_cleanup_request(
         session_id=_read_state_field(state_file, "session_id") or None,
         harness=_read_state_field(state_file, "harness") or None,
         merged_at=meta.get("mergedAt") or None,
-        # x-84b2: always emit the exact candidates - name-matched rows count
+        # always emit the exact candidates - name-matched rows count
         # even when the merge ran outside a linked worktree.
         candidate_row_names=rows_for_cleanup(worktree, bound_node_ids),
     )
@@ -1514,7 +1514,7 @@ def _finish_confirmed_merge(
 ) -> int:
     """Emit and finalize one confirmed merge, including remote cleanup truth."""
     # The race the lock closes ended at the merged receipt; release first so
-    # a peer never queues behind the post-merge work (x-626f).
+    # a peer never queues behind the post-merge work.
     if release_lock is not None:
         release_lock()
     cleanup_parts = [prior_cleanup_failure] if prior_cleanup_failure else []
@@ -1828,7 +1828,7 @@ def run_merge(
     pr_raw = ""
     accept_flake = False
     for arg in argv:
-        # A legacy ``--invoker=...`` is silently accepted and ignored (x-04ab
+        # A legacy ``--invoker=...`` is silently accepted and ignored (
         # removed the flag + its gate). Never break a merge command on a stray
         # flag an un-updated caller still passes.
         if arg.startswith("--invoker="):
@@ -1857,7 +1857,7 @@ def run_merge(
     # either of them, so a queue armed at the terminal could ship the code a
     # review was still fixing. Asked once, by one owner, for both paths.
 
-    # (-1) Incarnation fence (x-eea5 1.3): a losing incarnation - a forked or
+    # (-1) Incarnation fence (1.3): a losing incarnation - a forked or
     # supervisor-restarted session whose session:<uuid> single-writer claim
     # another incarnation now holds - must not merge by construction. Read-only,
     # fail-closed; no resolvable identity -> invisible (proceed). Same outcome
@@ -1919,10 +1919,10 @@ def run_merge(
         )
         return 2
 
-    # (1) One authoritative posture (x-3855, x-01b9), resolved in the same
+    # (1) One authoritative posture, resolved in the same
     # order init folds it: granted = (live `auto_merge.enabled` OR an explicit
     # per-run env grant) AND NOT a per-run refusal. The who-may-merge gate
-    # (--invoker + allowed_invokers) was removed (x-04ab): auto-merge is gated
+    # (--invoker + allowed_invokers) was removed: auto-merge is gated
     # by posture plus the CI-green / external-review / stub-manifest guards.
     # The manifest's `auto_merge_approved` is init's fold of the documented
     # chain (hooks/helpers/init-target-state.sh, references/auto-merge.md). A
@@ -1935,16 +1935,16 @@ def run_merge(
     # satisfies the standing arm on its own - the sanctioned path the docs
     # promise and that a config-first order made unreachable: consulting
     # `enabled` before the manifest let the config leaf refuse a run init had
-    # granted (x-01b9: two workers read this seam the same night).
+    # granted (: two workers read this seam the same night).
     # `enabled` is still re-read LIVE, so a manifest whose `true` merely
     # mirrored config (source: config) does not outlive an operator flipping
-    # the switch off mid-flight (x-2270: the manifest is a snapshot; the live
+    # the switch off mid-flight (: the manifest is a snapshot; the live
     # switch wins). Absent manifest or absent field -> live config decides: a
     # manual `fno do pr merge` outside a target session is legitimate and must
     # not start refusing. TARGET_AUTO_MERGE is never read HERE - a grant is
     # folded at spawn where it is attributable, never exported on a merge
     # command line by the very worker that wants the merge.
-    # Every refusal names the sanctioned override in its own text (x-3855): a
+    # Every refusal names the sanctioned override in its own text: a
     # refusal that closes a door without pointing at the key is the one that
     # had two workers improvising config mutations inside sixty seconds.
     auto_merge = _load_auto_merge(repo)
@@ -2020,11 +2020,11 @@ def run_merge(
         )
         return 2
 
-    # (2a) Coverage guard (x-0eaf): the sanctioned merge must not land a PR
+    # (2a) Coverage guard: the sanctioned merge must not land a PR
     # nothing reviewed. The predicate lives in _coverage_gate - one copy,
     # shared with the hook-facing `fno do pr coverage-check` verb - and this path
     # passes recompute=True, firing the standalone producer once when no row
-    # describes the head (x-3a3f). Consume the review_coverage event loop-check
+    # describes the head. Consume the review_coverage event loop-check
     # emits (Ownership: Rust computes, Python reads); missing/stale/zero/
     # unknown refuses (fail closed), and so does UNANSWERED: a merge that
     # cannot read its own coverage has not been reviewed. The recompute cannot
@@ -2092,11 +2092,11 @@ def run_merge(
             )
 
     # covered_head (from the gate) pins the merge so a racing push after the
-    # coverage check cannot land an unreviewed head (x-0eaf TOCTOU). The
+    # coverage check cannot land an unreviewed head (TOCTOU). The
     # staleness check inside the gate already refused a current mismatch; this
     # makes gh itself refuse if the head moves between here and the merge.
 
-    # (2c) Plan fidelity guard (x-cbab): the inverse of the coverage guard on the
+    # (2c) Plan fidelity guard: the inverse of the coverage guard on the
     # ownership axis - review_coverage is Rust-computed/Python-read; plan fidelity
     # is Python-computed (fno.plan.fidelity)/read here. A plan whose declared
     # deliverables did not all ship refuses the merge unless each shortfall

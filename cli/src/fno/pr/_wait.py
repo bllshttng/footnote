@@ -1,4 +1,4 @@
-"""`fno do pr wait <n>` - the one sanctioned watcher loop (x-4eac).
+"""`fno do pr wait <n>` - the one sanctioned watcher loop.
 
 Kings and workers hand-rolled `while ...; do fno do pr status <n> |
 grep '"settled": true'; sleep 60; done` - one loop per session per PR against

@@ -1,7 +1,7 @@
 //! The rm live-row refusal text, one builder for every roster verdict.
 //!
 //! Named by the question it answers: why `fno agents rm` refuses a stored-live
-//! row. Since x-a33f only a claude background thread can be refused: rm ends
+//! row. Since only a claude background thread can be refused: rm ends
 //! every other live row's process itself. The file-budget gate holds
 //! daemon.rs at shrink-only, so message construction lives here instead of
 //! growing the handler.

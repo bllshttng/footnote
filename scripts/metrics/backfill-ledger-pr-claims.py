@@ -15,7 +15,7 @@ unclaimed PR it appends a minimal execution row::
     {type, project, pr_number, pr_url, merged_at, status, backfilled: true,
      graph_node_id?, session_id?}
 
-Node id: the source branch's node-id token (``feature/x-9608`` -> ``x-9608``),
+Node id: the source branch's node-id token (``feature/x-aaaa`` -> ``x-aaaa``),
 kept only when it resolves to EXACTLY ONE existing graph node (read-only against
 graph.json - the existence check is the disambiguation guard, never a guess).
 Session provenance is copied from that node's ``sessions``/``session_id`` when
@@ -322,19 +322,19 @@ def backfill(ledger_path: Path, merges: list[dict], node_ids: set[str],
 
 def _self_test() -> int:
     log = [
-        "2026-07-18T14:11:52-07:00\tMerge pull request #460 from bllshttng/feature/x-9608",
-        "2026-07-18T14:11:02-07:00\tMerge pull request #458 from bllshttng/feature/spawn-x-9c5f",
+        "2026-07-18T14:11:52-07:00\tMerge pull request #460 from bllshttng/feature/x-aaaa",
+        "2026-07-18T14:11:02-07:00\tMerge pull request #458 from bllshttng/feature/spawn-x-bbbb",
         "2026-07-17T00:00:00-07:00\tMerge pull request #300 from bllshttng/fix/register-doc",
         "2026-07-16T00:00:00-07:00\tnot a merge subject",
-        "2026-07-18T14:11:52-07:00\tMerge pull request #460 from bllshttng/feature/x-9608",  # dup
+        "2026-07-18T14:11:52-07:00\tMerge pull request #460 from bllshttng/feature/x-aaaa",  # dup
     ]
     merges = parse_merges(log)
     assert [m["pr"] for m in merges] == [460, 458, 300], merges  # deduped, non-merge dropped
-    assert merges[0]["branch"] == "feature/x-9608"
+    assert merges[0]["branch"] == "feature/x-aaaa"
 
-    node_ids = {"x-9608", "x-9c5f", "x-dead"}
-    assert resolve_node("feature/x-9608", node_ids) == "x-9608"
-    assert resolve_node("feature/spawn-x-9c5f", node_ids) == "x-9c5f"  # token, not "spawn-x"
+    node_ids = {"x-aaaa", "x-bbbb", "x-cccc"}
+    assert resolve_node("feature/x-aaaa", node_ids) == "x-aaaa"
+    assert resolve_node("feature/spawn-x-bbbb", node_ids) == "x-bbbb"  # token, not "spawn-x"
     assert resolve_node("fix/register-doc", node_ids) is None          # no token
     assert resolve_node("feature/x-ffff", node_ids) is None            # token not a real node
 
@@ -347,11 +347,11 @@ def _self_test() -> int:
     claimed = claimed_prs(rows)
     assert claimed == {460, 300}, claimed  # 458 belongs to other repos, not claimed here
 
-    nodes_by_id = {"x-9c5f": {"session_id": "sess-abc"}}
+    nodes_by_id = {"x-bbbb": {"session_id": "sess-abc"}}
     new = build_rows(merges, claimed, node_ids, nodes_by_id, "bllshttng/footnote", "footnote")
     assert [r["pr_number"] for r in new] == [458], new  # 460 & 300 claimed; only 458 remains
     r = new[0]
-    assert r["graph_node_id"] == "x-9c5f" and r["session_id"] == "sess-abc"
+    assert r["graph_node_id"] == "x-bbbb" and r["session_id"] == "sess-abc"
     assert r["backfilled"] is True and r["status"] == "merged"
     assert r["pr_url"] == "https://github.com/bllshttng/footnote/pull/458"
     # scoreboard-visible: windows on `completed`, ships on `termination_reason`.

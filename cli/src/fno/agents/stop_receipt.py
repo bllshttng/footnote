@@ -1,4 +1,4 @@
-"""The stop verb verifies its own receipt (x-dead task 3.1).
+"""The stop verb verifies its own receipt (task 3.1).
 
 Measured: `claude stop` exited 0 over a row that never left the wake set,
 `stopped:` printed beside it; the refusal carries the citizen-vs-teammate

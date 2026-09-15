@@ -1,4 +1,4 @@
-//! The two read leaves the dispatch-verb retirement left behind (x-3873
+//! The two read leaves the dispatch-verb retirement left behind (
 //! change 2): `capabilities` reads the packaged harness capability table and
 //! `target-family` classifies a message against the merge-posture family
 //! table. Both answer a question scripts ask through the Python router, which
@@ -10,7 +10,7 @@ use serde_json::Value;
 
 /// `capabilities <harness> [--json|-J]`: one harness's config-independent
 /// capability contract, read straight from the packaged table. The successor
-/// to the retired dispatch capabilities query leaf (x-3873, d-496680aa): the
+/// to the retired dispatch capabilities query leaf (d-496680aa): the
 /// JSON shape
 /// (map_version, harness, then the harness's table) matches what the Python
 /// leaf printed. An unknown harness exits 2 naming the harness and the
@@ -83,7 +83,7 @@ fn capabilities_json(harness: &str) -> Result<Value, String> {
 
 /// `target-family --message <m>`: print `family` when the message's first
 /// token is a /target-family spelling, `other` otherwise, exit 0 either way.
-/// The successor to the retired dispatch family query leaf (x-3873); the
+/// The successor to the retired dispatch family query leaf; the
 /// merge_posture
 /// table is the same one the Rust merge-posture reads use.
 pub fn run_target_family(args: &[String]) -> i32 {

@@ -132,7 +132,7 @@ CLAIM_UNAVAILABLE = (
 
 
 class RebindRefused(Exception):
-    """``compare_and_rebind`` refused to move the claim (fail-closed, x-2ccd).
+    """``compare_and_rebind`` refused to move the claim (fail-closed).
 
     Native resume never silently believes it owns a claim: every path that is
     not an affirmative same-holder local rebind raises this with a named
@@ -298,7 +298,7 @@ def _make_claim(
         # hostname readers would trust as authoritative.
         machine_id=machine_id() or None,
         reason=reason,
-        # x-3e70: tag the claim with the acquiring harness so the dispatch guard
+        # tag the claim with the acquiring harness so the dispatch guard
         # can read a foreign owner off the claim. This is the PRODUCTION writer
         # (`fno agents claim` forwards to this Python CLI), kept in lockstep with the
         # Rust make_claim resolver via the shared harness_identity markers.
@@ -307,7 +307,7 @@ def _make_claim(
         #
         # Resolution happens in the CALLER, before the recovery mutex, never
         # here: the owned path walks the process tree, and this function runs
-        # inside the critical section every other acquirer waits on (x-20f1).
+        # inside the critical section every other acquirer waits on.
         harness=harness,
         session_id=session_id,
         metadata=metadata or {},
@@ -400,7 +400,7 @@ def acquire_claim(
             acquired_lock = False
         return _retry()
 
-    # Resolve the harness ONCE, outside every mutex below (x-20f1: the owned
+    # Resolve the harness ONCE, outside every mutex below (: the owned
     # path walks the process tree inside the critical section). ONE walk for
     # both halves: session_id and harness tag share one identity answer.
     identity = resolve_self_identity()
@@ -410,7 +410,7 @@ def acquire_claim(
         harness_session_id = identity.session_id
 
     # Provenance resolves ONCE, here, beside the harness and outside every
-    # mutex below, for the same reason (x-20f1): the earning path walks the
+    # mutex below, for the same reason: the earning path walks the
     # process tree. An explicit stamp from a caller that already did its own
     # proving is accepted verbatim; everything else earns the field against
     # the prover or stays ambient - a writer that cannot reach the prover
@@ -511,7 +511,7 @@ def acquire_claim(
         # which says nothing about liveness. Re-read and re-dispatch like
         # the other transient races on this path instead of leaking a
         # verdict-instrument error out of acquire's return-or-ClaimHeldByOther
-        # contract (same disposition the create collision got, x-88cc).
+        # contract (same disposition the create collision got).
         return _retry()
     if not existing_is_live:
         recovery_lock = path.with_name(path.name + RECOVERY_LOCK_SUFFIX)
@@ -714,7 +714,7 @@ def compare_and_rebind(
 ) -> tuple[Claim, str]:
     """Atomically rebind a same-holder LOCAL claim whose prior PID is dead.
 
-    The native-resume primitive (x-2ccd). A resumed durable session proves it
+    The native-resume primitive. A resumed durable session proves it
     owns a target claim by matching the symbolic holder AND showing the
     recorded PID is dead on THIS machine, then takes a fresh PID + lease.
     Distinct from ``acquire_claim``, which overwrites a same-holder claim even
@@ -735,7 +735,7 @@ def compare_and_rebind(
     raises ``RebindRefused`` on any refusal.
 
     ``new_holder`` moves the claim to a DIFFERENT holder on proof of the prior
-    one (x-cd1e). The dispatch handover needs it: ``fno agents spawn --node``
+    one. The dispatch handover needs it: ``fno agents spawn --node``
     takes the node claim before the worker exists, and the worker's own
     ``fno do target init`` must then take it over rather than find it held and
     abort. ``acquire_claim`` cannot do this - it raises ``ClaimHeldByOther`` for
@@ -766,7 +766,7 @@ def compare_and_rebind(
     npid_unavailable = new_pid_unavailable or (new_pid is None and ttl_ms is not None)
     # Resolved BEFORE the recovery mutex below, for the same reason as
     # `acquire_claim`: the owned path walks the process tree, and everything
-    # after the lock runs while other callers poll on it (x-20f1).
+    # after the lock runs while other callers poll on it.
     # ONE walk for both halves (see acquire_claim).
     identity = resolve_self_identity()
     resolved_harness = new_harness if new_harness is not None else identity.harness
@@ -1088,12 +1088,12 @@ def _existing_is_live(existing: Claim, *, root: Optional[Path] = None) -> bool:
     """Authoritative acquire/recovery liveness predicate.
 
     Delegates to ``classify`` so the mutex honors the SAME hybrid TTL-or-pid
-    liveness as the selection/status reads (ab-cc5553f2): an expired TTL claim
+    liveness as the selection/status reads : an expired TTL claim
     whose recorded pid is alive on this host is LIVE and must NOT be reclaimed
     by a peer (otherwise a suspended-but-alive session's node is stolen). One
     predicate means acquire and ``status``/``list`` can never diverge.
 
-    SUSPECT (x-ba4b) counts as live here: a TTL-unexpired claim with a dead pid
+    SUSPECT counts as live here: a TTL-unexpired claim with a dead pid
     is a respawned worker's protected slot, so acquire must refuse it exactly
     like LIVE (never steal). Only TTL expiry (-> STALE) makes it reclaimable.
     """
@@ -1251,7 +1251,7 @@ def _reanchor_pid_for(
     respawned worker renewing under a new pid left a claim byte-identical to a
     dead worker's, so nothing on disk separated a live session from a corpse and
     every reader that must not steal from the first was forced to protect the
-    second (x-05be).
+    second.
 
     Returns None - meaning leave the anchor alone - in four cases, each for its
     own reason:
@@ -1409,7 +1409,7 @@ def refresh_claim(
         if existing.expires_at is None:
             return None
         verdict = _claim_verdict(existing, root=root)
-        # STALE is the only refused verdict (x-b445), matching Rust renew: an
+        # STALE is the only refused verdict, matching Rust renew: an
         # expired claim whose holder still reads live extends.
         if verdict.get("state") == "stale":
             raise ClaimValidationError(
@@ -1575,7 +1575,7 @@ def _list_claims_impl(
         if state in counts:
             counts[state] += 1
             states_by_key[key] = state
-        # SUSPECT (x-ba4b) is an active, TTL-protected claim - it must count
+        # SUSPECT is an active, TTL-protected claim - it must count
         # alongside LIVE so lane accounting (advance._live_lane_domains) does not
         # under-count a slot held by a respawned worker and over-dispatch.
         if state in {ClaimState.LIVE.value, ClaimState.SUSPECT.value}:
@@ -1743,7 +1743,7 @@ def sweep_verdict(
     row resolves to a DIFFERENT node, is positive evidence of abandonment -
     measured on the live 2026-08-21 specimen where a session that finished
     one node and moved to the next kept a LIVE claim on the dead one for 16
-    hours, because "holder alive" was the only question asked (x-94f8).
+    hours, because "holder alive" was the only question asked.
     ``True`` settles (reapable); anything else falls through to liveness,
     which stays the authority for every unsettled shape.
 
@@ -1849,7 +1849,7 @@ def reap_dead_claims(
     override a live claim, and never for a key family with no roster to consult.
 
     SUSPECT is also where an expired claim whose prover-proven pid is shared
-    across distinct holders lands (ab-6d5afbde): the sweep derives
+    across distinct holders lands : the sweep derives
     PID-exclusivity from the records it scans, and a pid answering for more
     than one holder corroborates neither the lease nor the holder's death, so
     the probe - not the daemon both holders point at - decides reap vs keep.
@@ -1862,7 +1862,7 @@ def reap_dead_claims(
 
     ``None`` KEEPS. Reaping because a probe returned nothing is the exact
     inversion of this fix: an instrument that did not run must never be read as
-    a finding, and archiving a live worker's claim is x-ba4b's disaster from the
+    a finding, and archiving a live worker's claim is disaster from the
     other side.
 
     Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
@@ -1886,7 +1886,7 @@ def reap_dead_claims(
     native_verdicts: dict[str, dict[str, Any]] = {}
     for cdir in use_dirs:
         # Verbatim: root=cdir.parent.parent re-resolved one level down, so
-        # space-root claims got no verdict (x-9c91).
+        # space-root claims got no verdict.
         native_verdicts.update(claim_verdicts(claims_dir_path=cdir))
 
     ts = now_ms()
@@ -1961,7 +1961,7 @@ def reap_dead_claims(
             return None
 
     # PID-exclusivity evidence for the sweep: which (machine, pid) pairs name
-    # more than one distinct holder (ab-6d5afbde). A prover-proven pid shared
+    # more than one distinct holder. A prover-proven pid shared
     # across distinct holders cannot corroborate an expired lease, so those
     # claims read SUSPECT here and the secondary instruments settle them.
     for cdir in use_dirs:
@@ -2123,7 +2123,7 @@ def reap_dead_claims(
 
     # The graph lock mirror for reaped node claims, cleared OUTSIDE the
     # per-key recovery mutex (after the sweep loop) so the process's only
-    # lock ordering stays graph-then-claims (x-94f8). Without this, a reaped
+    # lock ordering stays graph-then-claims. Without this, a reaped
     # worker's node keeps `locked_by` until LOCK_TTL_HOURS staleness clears
     # it lazily, reading `claimed` - held out of dispatch - for hours after
     # the reap. Dry runs never write, so they never reach this either.

@@ -1,7 +1,7 @@
 """Provider combos: named ordered lists with rotation strategies.
 
 Provider-rotation Plan B. Composes on top of Plan A
-(ab-6534a78a)'s ProviderHealth + cooldown substrate.
+ ProviderHealth + cooldown substrate.
 
 A Combo is a named ordered list of provider IDs with a strategy:
 
@@ -168,11 +168,11 @@ def next_healthy_provider(
 ) -> str | None:
     """First combo member whose live headroom is not EXHAUSTED, in combo order.
 
-    The x-0676 exhaustion-failover primitive. Reuses the SAME live ``headroom()``
-    read as the x-5d3e dispatch ordering (never a stale snapshot), skipping any id
+    The exhaustion-failover primitive. Reuses the SAME live ``headroom()``
+    read as the dispatch ordering (never a stale snapshot), skipping any id
     in ``exclude`` (the already-known-exhausted provider) and any member reading
     EXHAUSTED. OK / LOW / UNKNOWN all count as healthy TARGETS - fail-open, since
-    UNKNOWN never means exhausted (x-6bcf), so a GLM/gemini record with no headroom
+    UNKNOWN never means exhausted, so a GLM/gemini record with no headroom
     signal is a valid failover destination. Returns ``None`` when every member is
     excluded or exhausted (the caller defers - defer is the floor).
 
@@ -265,12 +265,12 @@ def dispatch_with_combo(
         providers_hash = None
         providers = list(combo.providers)
 
-    # Quota-aware ordering (x-5d3e): read each member's cached headroom once
+    # Quota-aware ordering: read each member's cached headroom once
     # (no probe - dispatch never adds HTTP latency), then stably demote LOW
     # members below OK/UNKNOWN. UNKNOWN orders WITH OK (Locked Decision 9: no
     # probe is not evidence of trouble). EXHAUSTED members are skipped in the
     # loop below like a cooldown. With no usage snapshots seeded every member
-    # is UNKNOWN, so the order and behavior are byte-identical to pre-x-5d3e.
+    # is UNKNOWN, so the order and behavior are byte-identical to pre-change.
     quota = load_quota_config()
     hr = {
         pid: headroom(

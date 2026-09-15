@@ -1,4 +1,4 @@
-//! The `fit` placement (v80, x-ae47): the server picks the pane's tab -
+//! The `fit` placement (v80): the server picks the pane's tab -
 //! moved out of server.rs (file budget shrink). Parent helpers resolve
 //! through the glob.
 use super::*;

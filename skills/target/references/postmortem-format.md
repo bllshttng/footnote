@@ -1,4 +1,4 @@
-> **SUPERSEDED (2026-06-05, ab-d0337fbc):** the machinery this file describes was deleted by the control-plane collapse wedge. Kept for historical context; see docs/architecture/control-plane-loop.md.
+> **SUPERSEDED (2026-06-05):** the machinery this file describes was deleted by the control-plane collapse wedge. Kept for historical context; see docs/architecture/control-plane-loop.md.
 
 # Postmortem format
 
@@ -21,7 +21,7 @@ A complete postmortem has YAML frontmatter (machine-readable) followed by three 
 type: target-postmortem
 session_id: 20260427T153200Z-12345-a1b2c3
 generated_at: 2026-04-27T15:32:04Z
-target_invocation: "/target M ab-a5e142a2"
+target_invocation: "/target M x-aaaa"
 plan_path: ~/code/fno/internal/fno/plans/2026-04-27-postmortem-and-verifiers/
 mode: medium
 blocked_phase: validate

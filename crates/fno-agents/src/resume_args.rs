@@ -58,7 +58,7 @@ pub fn parse_resume_args(
                 });
             }
             "--account" => {
-                // x-5cef: the spawn seam's account picker rides the shared
+                // the spawn seam's account picker rides the shared
                 // worker-dir seam, so a wake arrives with `--account` appended.
                 // The spawn arm parses the flag; this arm refused it at parse,
                 // which exited 2 before the name ever resolved and broke the

@@ -15,7 +15,7 @@ from typing import Optional
 # are pulled independently within the tag).
 _OPEN_TAG_RE = re.compile(r"<fno_mail\b[^>]*>")
 _FROM_RE = re.compile(r'from="([^"]+)"')
-# The FULL sender session id (node x-3a64). Preferred over `from` whenever the
+# The FULL sender session id (node). Preferred over `from` whenever the
 # tag carries it: `from` is a head-8 display handle, and under UUIDv7 that is a
 # ~65.536-second clock bucket rather than 32 random bits, so two workers started
 # in one minute share it and a threaded reply to either refuses as ambiguous.
@@ -123,7 +123,7 @@ def resolve_live_sender(msg_id: str) -> Optional[str]:
     """Find ``msg_id``'s sender address by scanning this session's own transcript.
 
     Returns the envelope's full ``from_session`` when it carries one, else its
-    ``from`` handle (node x-3a64).
+    ``from`` handle (node).
 
     Searches every candidate store and accepts the one holding a RECEIPT: an
     envelope carrying both ``id="<msg_id>"`` and a ``to=`` equal to that store's

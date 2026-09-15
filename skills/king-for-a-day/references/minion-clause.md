@@ -3,7 +3,7 @@
 
 The single source for the clause a king appends to **every** spawn payload. Load it when you [spawn a teammate](../SKILL.md#the-minion-contract-rides-every-spawn-payload) and paste the block below verbatim, filling the `<...>` slots.
 
-There is exactly one copy-paste clause in this skill, and it is here. The x-304c Director composed it freehand three times and drifted each time; the worst drift dropped the delivery doctrine, so reports landed `queued (durable)` on the bus and half were read via drain nags instead of live injection. Do not restate it from memory - paste this.
+There is exactly one copy-paste clause in this skill, and it is here. The Director composed it freehand three times and drifted each time; the worst drift dropped the delivery doctrine, so reports landed `queued (durable)` on the bus and half were read via drain nags instead of live injection. Do not restate it from memory - paste this.
 
 ## The clause
 
@@ -44,4 +44,4 @@ The `<<'CLAUSE'` delimiter is quoted, so no backtick, `$`, or quote inside expan
 
 ## Reporting is push
 
-The completion mail live-injects into the king's pane and wakes it that turn. It is the piece a live king's teammates never received in the x-304c epic, which is why a worker once shipped a PR in silence. The clause exists so that never happens by default.
+The completion mail live-injects into the king's pane and wakes it that turn. It is the piece a live king's teammates never received in the epic, which is why a worker once shipped a PR in silence. The clause exists so that never happens by default.

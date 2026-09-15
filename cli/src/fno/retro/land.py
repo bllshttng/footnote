@@ -40,7 +40,7 @@ class LandResult:
     candidate: Candidate
     node_id: Optional[str] = None
     error: Optional[str] = None
-    reason: Optional[str] = None  # skip reason, e.g. "fixed-on-main" (x-a7ab 1.1)
+    reason: Optional[str] = None  # skip reason, e.g. "fixed-on-main" (1.1)
 
 
 def resolve_mode(sentinel: Optional[dict]) -> str:
@@ -176,7 +176,7 @@ def land_candidates(
             continue
 
         details = f"{c.body}\n\n{trailer(c.source_pr, c.content_hash)}"
-        # Filing-time anchor check (x-a7ab 1.1): a finding already addressed on
+        # Filing-time anchor check (1.1): a finding already addressed on
         # its source PR (fixed-on-main) is never minted. An unresolvable scan
         # fails toward filing with an anchor-unverified note (AC5-EDGE).
         if anchor_scan_fn is not None:
@@ -231,7 +231,7 @@ def land_candidates(
                 print(f"dedup net failed for {node_id}: {exc}", file=sys.stderr)
 
         # Born-with-why (v2 A1): the retro-harvest birth path is the exact gap
-        # this epic fixes (x-7c38 / x-6e23 filed follow-ups with no /think). Route
+        # this epic fixes (/ filed follow-ups with no /think). Route
         # each created node through the shared hook so its why travels forward.
         # One shared RunState bounds the whole batch's blast radius; strictly
         # non-fatal + opt-in (gate OFF => complete no-op). The hook re-reads the

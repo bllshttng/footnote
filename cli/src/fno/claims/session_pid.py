@@ -1,4 +1,4 @@
-"""Resolve a durable session pid for the hybrid liveness pid-arm (ab-cc5553f2).
+"""Resolve a durable session pid for the hybrid liveness pid-arm.
 
 The ``node:<id>`` claim is acquired with ``--ttl`` AND ``--pid <durable>``. The
 durable pid must be the process that lives as long as the *session*, not the
@@ -41,7 +41,7 @@ _MAX_DEPTH = 25
 # registry.
 _HARNESS_TOKENS = ("claude", "codex", "gemini", "opencode", "agy", "cursor-agent")
 # `claude` keeps its proven substring rule (unchanged: its versioned binary
-# hides the name in the exe path, and the shipped x-616b lane depends on it).
+# hides the name in the exe path, and the shipped lane depends on it).
 # The rest match by exact path SEGMENT only, never substring: `agy` is a
 # substring of `legacy`, and the ChatGPT desktop app's process tree is full of
 # `Codex Framework.framework` exe paths whose segments are not `codex`.
@@ -213,7 +213,7 @@ def resolve_session_harness(from_pid: Optional[int] = None) -> Optional[str]:
     - the `fno do target init` CLI - whose own ppid read was still permitted;
     under the codex sandbox every deeper fork reads PermissionError on its
     parent's ppid, so the script and the verb it spawns cannot walk at all
-    (x-a0cd, measured: only self's ppid is readable). The pid must be alive,
+    (measured: only self's ppid is readable). The pid must be alive,
     and the name must be a known harness, or the stamp is ignored and the walk
     decides - a stale or forged pair fails closed to the walk's own answer.
 

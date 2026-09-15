@@ -1,6 +1,6 @@
 """fno do plan migrate-keys - collapse synonym frontmatter keys to the canonical set.
 
-Line-level, byte-preserving key rename over the plans dir (x-f34f US7). The
+Line-level, byte-preserving key rename over the plans dir (US7). The
 plan==PR==node schema declares one canonical key per axis; historical plans
 carry synonyms that lie to a single-schema reader:
 

@@ -1,4 +1,4 @@
-"""Decision commands: canonical at ``fno inbox decide`` (x-6233), silent
+"""Decision commands: canonical at ``fno inbox decide``, silent
 alias at ``fno backlog decide``.
 
 That is the case that loses today: the operator states a ruling in chat, it
@@ -23,7 +23,7 @@ from fno.decide.graduation import REFERENCE_HELP as grad_reference_help
 
 shim_app = typer.Typer(
     help=(
-        "One-release root registration for `decide` (x-6233). Unreachable "
+        "One-release root registration for `decide`. Unreachable "
         "via the CLI - VERB_MOVES intercepts the old spelling and prints "
         "its own notice - kept only so the registry holds a hidden, not a "
         "phantom, root until the release clock expires."
@@ -778,8 +778,8 @@ def _list_decisions(
     decisions = found[:limit] if limit > 0 else found
     truncated = len(decisions) < len(found)
     # Computed for EVERY subject read, not only an empty one. The specimen this
-    # exists for returns one row: `--subject x-f7b9` matched a wave plan and hid
-    # four rulings filed under `x-f7b9 scope`. A near-miss scan that only runs
+    # exists for returns one row: `--subject ` matched a wave plan and hid
+    # four rulings filed under ` scope`. A near-miss scan that only runs
     # when the answer is empty would have stayed silent on exactly that case,
     # and a partial answer reads as a whole one.
     near = near_miss_subjects(subject, entries=entries) if subject else []
@@ -857,7 +857,7 @@ def _list_decisions(
         else:
             # Scoped because this line is the one a reader quotes. `NO CURRENT
             # LAW` alone reads as "no rule exists", and a worker acted on that
-            # reading (x-0413): the verdict covers the law lane only, and the
+            # reading: the verdict covers the law lane only, and the
             # ruling that governs can sit in another lane or on the node
             # itself, outside every decision record.
             typer.echo(
@@ -950,7 +950,7 @@ def _list_decisions(
         else:
             # A subject that names a graph node carries authority this store
             # structurally cannot hold: a king's ruling or an operator note on
-            # the node itself (x-0413's third condition). Naming that surface
+            # the node itself (third condition). Naming that surface
             # is the difference between an honest empty and "no rule exists".
             node_surface = ""
             if subject:
@@ -1026,8 +1026,8 @@ def _list_decisions(
 
     if near:
         # An answer that arrived is not an answer that is whole. `--subject
-        # x-f7b9` returned one wave plan while four rulings sat under
-        # `x-f7b9 scope`, and nothing said so.
+        # ` returned one wave plan while four rulings sat under
+        # ` scope`, and nothing said so.
         #
         # It states the near misses and nothing else. `len(found)` is already
         # lane-filtered, so calling it the count for this subject under-reports

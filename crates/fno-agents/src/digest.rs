@@ -1,4 +1,4 @@
-//! `fno-agents digest` — the "while you were gone" fold (x-4e2d).
+//! `fno-agents digest` — the "while you were gone" fold.
 //!
 //! A pure read-time fold: given a session and a `--since` timestamp, summarize
 //! what happened by reading events.jsonl (gate/loop signal) and ledger.json
@@ -60,7 +60,7 @@ pub struct DigestSummary {
 
 /// Read `<field>` from an event value regardless of envelope: the unified
 /// shape nests under `/data`, the retired flat shape is top-level. The flat
-/// fallback covers the mixed-binary + rotated-history window (x-2901); drop it
+/// fallback covers the mixed-binary + rotated-history window; drop it
 /// once the daemon fleet has restarted on the post-cut binary.
 fn field<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     v.get("data")
@@ -69,7 +69,7 @@ fn field<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
 }
 
 /// The event's `type` (unified) with a `kind` fallback for retired flat lines
-/// during the mixed-binary window (x-2901); drop the fallback post-cut.
+/// during the mixed-binary window; drop the fallback post-cut.
 fn event_kind(v: &Value) -> Option<&str> {
     v.get("type")
         .and_then(|t| t.as_str())
@@ -302,7 +302,7 @@ fn basename(path: &str) -> &str {
 /// Does this ledger entry match `selector`? An entry matches by scalar
 /// `session_id`, membership in its `sessions[]` array (execution rows carry both
 /// a provider UUID and the fno session id there), `graph_node_id`, `title`, or
-/// the basename of `worktree` / `root_path` (so a node id like `x-4e2d`, which
+/// the basename of `worktree` / `root_path` (so a node id like `x-aaaa`, which
 /// is also the worktree directory name, resolves).
 fn ledger_entry_matches(entry: &Value, selector: &str) -> bool {
     if entry.get("session_id").and_then(|s| s.as_str()) == Some(selector) {
@@ -749,7 +749,7 @@ mod tests {
         // The mux client hands a node id (worktree basename), not a session id.
         // The ledger row maps the node -> its fno session id, which then finds
         // the loop_check events.
-        let ledger = r#"[{"graph_node_id":"x-4e2d","worktree":"/w/footnote/x-4e2d","session_id":"20260703T-abc","cost_usd":2.0,"pr_number":99,"pr_url":"https://x/pull/99","completed":"2026-07-03T03:00:00Z"}]"#;
+        let ledger = r#"[{"graph_node_id":"x-aaaa","worktree":"/w/footnote/x-aaaa","session_id":"20260703T-abc","cost_usd":2.0,"pr_number":99,"pr_url":"https://x/pull/99","completed":"2026-07-03T03:00:00Z"}]"#;
         let events = loop_check(
             "2026-07-03T02:00:00Z",
             "20260703T-abc",
@@ -759,7 +759,7 @@ mod tests {
             true,
             "block",
         );
-        let d = fold(&events, ledger, "x-4e2d", "");
+        let d = fold(&events, ledger, "x-aaaa", "");
         assert_eq!(
             d.pr_number,
             Some(99),
@@ -927,9 +927,9 @@ mod tests {
     #[test]
     fn worktree_basename_selector_matches() {
         let entry: Value =
-            serde_json::from_str(r#"{"worktree":"/Users/x/conductor/workspaces/footnote/x-4e2d"}"#)
+            serde_json::from_str(r#"{"worktree":"/Users/x/conductor/workspaces/footnote/x-aaaa"}"#)
                 .unwrap();
-        assert!(ledger_entry_matches(&entry, "x-4e2d"));
+        assert!(ledger_entry_matches(&entry, "x-aaaa"));
         assert!(!ledger_entry_matches(&entry, "footnote"));
     }
 }

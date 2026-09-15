@@ -42,7 +42,7 @@ fn startup_guard_live(pid: i32, recorded_start: Option<u64>) -> bool {
         Some(observed) => observed == start,
         // An unreadable start time is a probe failure, not proof of pid
         // reuse. Condemning the holder on it deletes a live starter's marker,
-        // which is the two-server shape (x-6d3c).
+        // which is the two-server shape.
         None => true,
     })
 }
@@ -150,7 +150,7 @@ pub(crate) fn claim_startup(socket: &Path) -> std::io::Result<StartupClaim> {
                 // The holder is unqueryable: mid-startup (bound, not yet
                 // serving) or wedged. The waiter never clears its marker - a
                 // read error here is not a death proof, and deleting a live
-                // starter's marker is the two-server shape (x-6d3c): the next
+                // starter's marker is the two-server shape: the next
                 // bind reads the starter's silence as stale and unlinks its
                 // live socket. A dead holder's marker is cleared by the next
                 // acquire, which deletes only on positive death proof.

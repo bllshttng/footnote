@@ -1,4 +1,4 @@
-//! Native authority for machine-wide update source eligibility (x-bf5f).
+//! Native authority for machine-wide update source eligibility.
 //!
 //! `fno doctor update` installs whatever source its resolution picks, and that
 //! resolution cached a bare path: a linked worktree whose HEAD diverged from

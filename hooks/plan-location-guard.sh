@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # plan-location-guard.sh - PreToolUse hook: a NEW plan/design doc must be saved
-# under the configured plans dir (x-5349, unified-dispatch PRD G10).
+# under the configured plans dir (unified-dispatch PRD G10).
 #
 # `config.plans_dir` became settable (plus `fno do plan path`) without ever being
 # enforced, so a plan still lands in whatever directory the agent picked. This

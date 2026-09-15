@@ -1,4 +1,4 @@
-//! `provider-cap` verbs + daemon arm (x-7e05 wave 2).
+//! `provider-cap` verbs + daemon arm (wave 2).
 //!
 //! `status` reads the daemon's persisted snapshot when fresh, else computes
 //! one on demand (fresh = measured now, never a stale read served as fresh).

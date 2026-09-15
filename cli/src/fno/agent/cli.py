@@ -1,6 +1,6 @@
 """fno self-introspection commands: the ``whoami`` group.
 
-``whoami`` is a group (unit 6 of the x-9d6c reorg) whose bare invocation is
+``whoami`` is a group (unit 6 of the reorg) whose bare invocation is
 still the one-line operating-stack summary, byte-identical to the former
 single command. The session-read leaves folded under it: ``status`` (the
 former top-level status root, one session read under two names),
@@ -178,7 +178,7 @@ def _derive_status_from_events(project_root: Path, session_id: Optional[str]) ->
     """Derive session status from the latest termination event in events.jsonl.
 
     Returns a human-readable string. Called when target-state.md has no status
-    field (immutable manifest after control-plane collapse, ab-d0337fbc).
+    field (immutable manifest after control-plane collapse).
     Minimal read: scan the tail of events.jsonl for a termination event matching
     the session_id. Falls back to 'active' if no termination found.
     """
@@ -294,7 +294,7 @@ whoami_app = typer.Typer(
 def _route_provider_line() -> Optional[str]:
     """The model provider this session was routed to, when it was routed at all.
 
-    Env-gated on the stamp a bound route writes (x-c703), so a hand-started
+    Env-gated on the stamp a bound route writes, so a hand-started
     session on the operator's own account prints nothing here and its output is
     byte-for-byte what it was. A stamped worker gets the one fact it could not
     previously learn about itself: whose quota it is spending, and whether that
@@ -361,7 +361,7 @@ def whoami_command(
         print(f"error: {exc}", file=sys.stderr)
         raise typer.Exit(code=4) from exc
     agent_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
-    # x-8bfb: FNO_AGENT_SELF only reaches a process the spawn path started
+    # FNO_AGENT_SELF only reaches a process the spawn path started
     # with it set. A worker that joined via /fno-me, an adopted session, or a
     # restored pane has no such env, though its registry row already answers
     # the same question. Tier 2 of resolve_self (whoami.py) is exactly that
@@ -372,7 +372,7 @@ def whoami_command(
     #
     # Only the non-JSON render below reads this: the JSON payload has no
     # `agent:` line to fill, so a `--json` call must not pay for a lookup
-    # whose result it would discard (review finding, x-8bfb).
+    # whose result it would discard (review finding).
     agent_registry_name: Optional[str] = None
     if not agent_self and not opts.json_output:
         try:
@@ -509,7 +509,7 @@ def whoami_command(
             f"({context_reading.used_tokens:,} of "
             f"{context_reading.window_tokens:,} tokens)"
         )
-    # x-301a: opportunistic mesh-name pointer. `fno whoami` reports operating
+    # opportunistic mesh-name pointer. `fno whoami` reports operating
     # CONTEXT and does not otherwise surface the registered mesh name; when this
     # process IS a mesh worker (the spawn path injected FNO_AGENT_SELF), echo it
     # as one extra line so a worker that ran the reflexive `fno whoami` sees its
@@ -681,7 +681,7 @@ from fno.ledger_show import ledger_show_command  # noqa: E402
 from fno.scoreboard.cli import scoreboard_command  # noqa: E402
 
 whoami_app.command("context", hidden=True)(context_command)
-# Hidden alias (x-6db9): the advertised primary is `fno agents history`, which
+# Hidden alias: the advertised primary is `fno agents history`, which
 # reads this ledger BESIDE the live registry and reap receipts. Kept working
 # so in-flight callers and muscle memory keep resolving; the store keeps its
 # name, the verb names the question.
@@ -694,7 +694,7 @@ def cost_command(
 ) -> None:
     """Forward all args to the in-package cost CLI (``fno.cost._session_cost``).
 
-    Moved under whoami from an eager root command (unit 6, x-9d6c). The heavy
+    Moved under whoami from an eager root command (unit 6). The heavy
     ``_session_cost`` import stays deferred to call time, so loading the
     whoami group never pays for it. argparse owns the flag parsing; we bridge
     via ``sys.argv`` and translate its ``SystemExit`` into a ``typer.Exit`` so

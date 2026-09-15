@@ -1,4 +1,4 @@
-"""fno.config.writer — the `fno config set` write path (ab-098967b4, US7).
+"""fno.config.writer — the `fno config set` write path (US7).
 
 A small write verb alongside the read-only `get` / `doctor`, so toggles like
 ``config.agents.a2a.auto`` are settable without hand-editing the config file. The

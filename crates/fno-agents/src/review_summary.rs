@@ -25,7 +25,7 @@ struct AttestationRow {
 /// state root's `events.jsonl`, the mirror every attestation emission writes.
 /// An external worktree cannot name its journal as `.fno/events.jsonl` -
 /// there that path is the worktree's own legacy journal, not the mirror
-/// (x-56b0).
+///.
 fn default_events_path() -> PathBuf {
     crate::scratch::fno_state_root().join("events.jsonl")
 }

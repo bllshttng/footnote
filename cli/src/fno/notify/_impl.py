@@ -14,7 +14,7 @@ neither tool was present, but AC2-FR requires a loud, non-zero, one-line
 degrade (never a silent no-op). ``scripts/lib/notify.sh`` is kept on disk for
 in-clone bash sourcers; only the Python verb is re-pointed here.
 
-x-5f06 adds the second leg: every notice is appended to the project journal as
+ adds the second leg: every notice is appended to the project journal as
 an ``operator_notice`` event, which a status sink with
 ``events = ["operator_notice"]`` carries off the host to a remote operator.
 The return contract widens accordingly: 0 when at least one channel accepted

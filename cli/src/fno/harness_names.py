@@ -13,7 +13,7 @@ not a capability.
 
 This inverts the old derivation (names read FROM the capability table) so the
 platform layer (``fno.harness_identity``) no longer reaches into the runtime
-for the name set, which dragged ``fno.agents`` in at import time (x-cec8). The
+for the name set, which dragged ``fno.agents`` in at import time. The
 name set is the source of truth; the capability table validates against it.
 """
 from __future__ import annotations

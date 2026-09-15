@@ -167,7 +167,7 @@ def gates_for(
         except Exception as exc:  # noqa: BLE001
             out.append(_unreadable("node-claim", exc))
 
-    # Per-project occupancy row DELETED with the dead lane counter (x-7f1f).
+    # Per-project occupancy row DELETED with the dead lane counter.
 
     # The measurement rows (provider lanes, fleet rows, RAM floor, CPU share,
     # load backstop) come from the ONE gate's probe answer; this report no
@@ -511,7 +511,7 @@ def build_lane_fill_report(
     This preview used to call ``select_lane_fill(mission=epic)`` instead, which
     reaches ``fno backlog ready --mission <epic>`` - a ``mission_id`` field 0 of
     2320 graph nodes carry - so it reported an empty mission for every epic
-    (x-7f1f). It now classifies the SAME children through the SAME pre-spawn
+. It now classifies the SAME children through the SAME pre-spawn
     gates the drain runs (``_converge_gate`` plus the epic fan-out's own
     no-project / unmapped-project / lane-cap, priced per child by
     ``_lane_cap_verdict``), so it cannot describe a selection the drain would

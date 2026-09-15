@@ -1,4 +1,4 @@
-//! (x-a6b9) `fno mux workspace restore`: the verb's CLI rendering. Split by
+//! `fno mux workspace restore`: the verb's CLI rendering. Split by
 //! kind - `members` are squad members, `portals` are held portal seats - so
 //! a refused portal is never hidden behind a member total. Lives beside the
 //! verb it renders, out of the shrink-only mux_cli.rs (file budget).
@@ -62,7 +62,7 @@ pub(super) fn workspace_restore(args: &[OsString], env_session: Option<&str>) ->
     };
     match control_roundtrip(&sock, &session, verb) {
         Ok(ServerMsg::WorkspaceRestored { rows }) => {
-            // (x-a6b9) The reply splits by kind: `members` are squad members,
+            // The reply splits by kind: `members` are squad members,
             // `portals` are held portal seats. The counts sum both, so the
             // summary never hides a refused portal behind a member total.
             let (member_rows, portal_rows): (Vec<_>, Vec<_>) =

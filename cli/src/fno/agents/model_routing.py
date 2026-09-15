@@ -1,4 +1,4 @@
-"""Role-based per-spawn model routing for fno agents (x-d2fe).
+"""Role-based per-spawn model routing for fno agents.
 
 Auxiliary coordination work (backlog tidying, node orientation, memory
 consolidation) is routed to a *secondary* model provider (z.ai GLM, DeepSeek,
@@ -169,7 +169,7 @@ class BusinessRoleRoutingProjectionError(RouteCompositionError):
 
 
 #: The env key a bound route stamps so a RUNNING worker can name its own model
-#: provider. Before x-c703 the provider resolution died at the spawn boundary:
+#: provider. Before the provider resolution died at the spawn boundary:
 #: `.provider` was an attribute of the dict the parent held, and nothing carried
 #: it across the fork, so a worker could not tell whether it was billing a shared
 #: account. Route resolution for reviews reads this marker; an unstamped session
@@ -466,7 +466,7 @@ def check_spawn_tier_remap(
     raise TierRemapConflict(remap_conflict_message(*found))
 
 
-# The inherited-env carrier (x-4709): a long-lived background daemon stamps the
+# The inherited-env carrier: a long-lived background daemon stamps the
 # environment of the shell that started it into every session it spawns. When
 # that shell held a foreign vendor's model exports with no base URL, every
 # child asks Anthropic's endpoint for a model it does not serve and the whole
@@ -1034,7 +1034,7 @@ def _route_for_target(
         route[str(k)] = str(v)
     # Checked after extra_env so a hand pin that already differentiates the
     # tiers silences it. Four identical /model rows read as "the config did
-    # not take" (x-f173); this names the one lever that fixes it.
+    # not take"; this names the one lever that fixes it.
     tier_values = {route[k] for k in MODEL_ENV_KEYS}
     if len(tier_values) == 1:
         _emit(
@@ -1087,7 +1087,7 @@ def materialize_route_settings(
     A ``claude --bg`` session's serving process is forked by the claude daemon
     with the DAEMON's env, so per-spawn ``ANTHROPIC_*`` route env is dropped
     before the first model request and the session wedges on the primary model
-    (x-6de8). A settings file is read by the session process itself, so it
+. A settings file is read by the session process itself, so it
     survives that fork where an env overlay cannot. Content-addressed and
     ``0600`` (it carries ``ANTHROPIC_AUTH_TOKEN``): identical routes reuse one
     file rather than accumulating per spawn.
@@ -1118,7 +1118,7 @@ def materialize_model_scrub_settings(dropped: Sequence[str]) -> str:
 
     ``bg_create``'s incoherent-model-env scrub mutates the spawn env, but a
     ``claude --bg`` session is forked by the claude daemon with the DAEMON's
-    own env (x-6de8) - the same reason :func:`materialize_route_settings`
+    own env - the same reason :func:`materialize_route_settings`
     exists. Without a route or account overlay there is no other reason to
     write a settings file, so the plain poisoned-inherited-env case (the
     shape this module exists to fix) reached only the short-lived front-end
@@ -1281,7 +1281,7 @@ def route_settings_path_for(
 ) -> Optional[str]:
     """The ``--settings`` path a spawn carrying these overlays launches with.
 
-    ONE place expressing the composed settings payload (x-5ed4, x-8552): the
+    ONE place expressing the composed settings payload : the
     auth/model scrub floor, the account overlay minus ``CLAUDE_CONFIG_DIR``,
     and the route written last so it wins every credential variable as one
     unit. An account composed with a route keeps the non-credential env its
@@ -1418,7 +1418,7 @@ def refresh_provider_default_tiers(
     in config). Replayed verbatim on resume, a moved default keeps serving the
     old tier forever - glm-4.5-air left the z.ai coding-plan supported set, and
     every resume off a file recorded before the change failed background calls
-    with model-not-found while the main model stayed healthy (x-5cc5).
+    with model-not-found while the main model stayed healthy.
 
     The operator's 2026-08-17 rule decides the split: the recorded file pins
     what the operator chose, not what the provider happened to default to
@@ -1474,7 +1474,7 @@ class CodexRoute(NamedTuple):
 
     ``env`` also carries :data:`ROUTE_PROVIDER_ENV`, so a codex worker can name
     its own model provider exactly as a claude-lane worker can. ``provider``
-    and ``model`` are the route IDENTITY the registry row records (x-3954);
+    and ``model`` are the route IDENTITY the registry row records ;
     every relaunch door re-resolves the endpoint from today's config in Rust
     (``codex_route.rs``), so no endpoint or key is ever persisted.
     """

@@ -1,14 +1,14 @@
 """fno do phase CLI - thin wrapper over the `fno-agents kill-check` Rust verb.
 
 Formerly sourced scripts/lib/kill-criteria.sh; the predicate evaluator is now
-folded into the bundled fno-agents binary (US1, ab-58645f63), so the verb runs
+folded into the bundled fno-agents binary (US1), so the verb runs
 on a bare `pip install fno` (the binary ships in the wheel) with no repo-root
 script dependency. The Python wrapper still resolves the default plan_path from
 .fno/target-state.md and forwards it to the binary, preserving the prior
 behavior.
 
 Note: fno do phase verify (phase-verifier.sh) removed in Task 3.2
-(control-plane collapse, ab-d0337fbc). Only kill-check remains.
+(control-plane collapse). Only kill-check remains.
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# fno.sh - the no-prerequisite install channel for fno (ab-f49b54c1).
+# fno.sh - the no-prerequisite install channel for fno.
 #
 # Served at https://fno.sh and run as:
 #
@@ -19,7 +19,7 @@
 #      (idempotent; opt out with FNO_NO_MODIFY_PATH to get a manual hint only).
 #
 # This is the shell entry to the same bootstrap core the cargo channel
-# (ab-4040eee8) uses via a Rust shim: ensure uv -> uv tool install fno ->
+# uses via a Rust shim: ensure uv -> uv tool install fno ->
 # verify-ours -> done. One mechanism, two entries.
 #
 # POSIX sh ONLY (runs unmodified under dash and macOS /bin/sh): no bashisms, no
@@ -367,7 +367,7 @@ fno_real_within() {
 	done
 }
 
-# --- front-door receipt (x-538e, AC2-HP/AC2-EDGE) ---------------------------
+# --- front-door receipt (AC2-HP/AC2-EDGE) ---------------------------
 # Name the actual front-door path and PROVE both command families answer
 # through it: `mux ls` is native Rust (no Python), `--version` forwards to
 # fno-py (the adopt arm of the bootstrapper runs offline - the wheel is
@@ -401,7 +401,7 @@ frontdoor_receipt() {
 	return 0
 }
 
-# The post-install shim sweep (x-c911): repair any fno* shim in the tool bin
+# The post-install shim sweep: repair any fno* shim in the tool bin
 # that dangles or resolves into a temp dir; fail loud when unrepairable.
 shim_sweep() {
 	[ -n "$FNO_TOOL_BIN" ] || FNO_TOOL_BIN="${HOME:-}/.local/bin"
@@ -423,7 +423,7 @@ report_success() {
 	say "verified fno $FNO_VERIFIED_VERSION (this project's package)."
 	shim_sweep
 	# The advertised command is `fno`; its receipt proves the mux and the
-	# Python forwarding rather than trusting uv's exit (x-538e AC2-HP/EDGE).
+	# Python forwarding rather than trusting uv's exit (AC2-HP/EDGE).
 	frontdoor_receipt
 	# Check the DIRECTORY against PATH, not `have fno`: a pre-existing fno earlier
 	# on PATH would otherwise suppress the fix, yet `fno` would run that other

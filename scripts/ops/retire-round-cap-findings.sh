@@ -18,7 +18,7 @@
 set -euo pipefail
 
 FNO_BIN="${FNO:-fno}"
-OWNER_NODE="x-0c29"
+OWNER_NODE="x-aaaa"
 CAUSE="vented at the round cap; the vent is deleted"
 SURFACE="cli/src/fno/pr/_coverage_gate.py"
 TITLE_PREFIX="review finding filed at round cap:"

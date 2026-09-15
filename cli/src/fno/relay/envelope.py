@@ -1,4 +1,4 @@
-"""Group 3 of the cross-session agent relay (x-908b / x-a2c9): the relay
+"""Group 3 of the cross-session agent relay (/): the relay
 ENVELOPE -- a thin view over the existing bus :class:`fno.bus.log.Envelope`,
 plus the provenance WIRE FORMAT injected on every PTY hop.
 
@@ -13,7 +13,7 @@ bus fields:
 - ``provenance``  -> derived from ``from_session`` / ``from_harness`` /
   ``from_model`` and serialized to the ``<fno_mail ...>`` wire tag below.
 
-Provenance wire format (node x-1f23: the relay is the SINGLE-LINE transport
+Provenance wire format (node : the relay is the SINGLE-LINE transport
 variant of the unified ``<fno_mail>`` a2a envelope, :mod:`fno.mail.envelope`)::
 
     <fno_mail from="<short-sid>"> <message>
@@ -22,7 +22,7 @@ A single-line attribute tag prefixing the (single-lined) body, NO closing tag:
 the PTY Enter submits on newline so the turn boundary is the delimiter, so this
 hop cannot carry the paired multiline ``<fno_mail>...</fno_mail>`` form the
 control.sock inject uses. The line is built by the sole renderer
-:func:`fno.mail.envelope.fno_mail_open` (x-d7cf deleted the hand-written copy
+:func:`fno.mail.envelope.fno_mail_open` (deleted the hand-written copy
 of the tag here), so ``grep <fno_mail>`` across transcripts reconstructs relay
 hops too. The sender self-stamps -- the framed line is self-describing with no
 registry dependency.

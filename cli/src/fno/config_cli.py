@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 # mounting it eagerly here would have moved that cost onto every `fno config`.
 _LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] = {
     "accounts": ("fno.adapters.providers.cli:cli", "Manage account records."),
-    # Folded under config (unit 6, x-9d6c). The old top-level spellings stay
+    # Folded under config (unit 6). The old top-level spellings stay
     # one-release shims (fno.verb_moves); these mounts are the canonical
     # homes. Lazy for the same reason `accounts` is: `fno config get` runs
     # from shell dozens of times per phase and must not pay for their imports.
@@ -56,7 +56,7 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] 
         "Declared model-routing inventory: init (sample) / inventory (reach).",
         {"hidden": True},
     ),
-    # x-6233 (d-344fe242): `project init` gives a checkout its own fno state
+    # (d-344fe242): `project init` gives a checkout its own fno state
     # root, which is state-root configuration - config's territory. Same
     # lazy+hidden treatment as its siblings above.
     "project": (
@@ -82,7 +82,7 @@ app = typer.Typer(
 
 
 # ---------------------------------------------------------------------------
-# Post-merge config readiness oracle (ab-dba85fcc)
+# Post-merge config readiness oracle
 #
 # One pure, read-only verdict consumed by three callers: `fno config doctor
 # --post-merge` (this surface), the /target preflight check, and the deferred
@@ -187,8 +187,8 @@ def _load_repo_post_merge(repo_root: Path):
 
     raw: dict = _read_flat(fno_dir / "config.toml", fno_dir / "settings.yaml")
 
-    # Per-worktree local override (x-cbce): layer the allowlisted key (project.id
-    # since x-071c narrowed the allowlist) so this oracle agrees with
+    # Per-worktree local override: layer the allowlisted key (project.id
+    # since narrowed the allowlist) so this oracle agrees with
     # load_settings() and `fno config get`. Repo-local only (the local file is
     # never symlinked to canonical), which preserves the "a global
     # parking_lot_path must not make every repo look ready" guard above.
@@ -726,7 +726,7 @@ def _deprecated_dispatch_file_rows():
 def _report_deprecated_auto_merge() -> None:
     """Name every config file still setting the deprecated ``dispatch.auto_merge``.
 
-    The migration arm of x-4be1: the alias keeps old files working for one
+    The migration arm of : the alias keeps old files working for one
     release, and this line tells the operator WHICH file to move.
     """
     for candidate, scope_flag, scope, legacy in _deprecated_dispatch_file_rows():
@@ -758,7 +758,7 @@ def _report_deprecated_auto_merge() -> None:
 def _report_deprecated_active_backlog_mission() -> None:
     """Name every config file still setting the ignored ``active_backlog.mission``.
 
-    x-7f1f retirement: the mission-scoped drain resolves one target per ACTIVE
+ retirement: the mission-scoped drain resolves one target per ACTIVE
     mission (an epic with ``mission_active=true`` in the graph), so this key
     selects nothing. Parseable for one release; this line names the live axis.
     """
@@ -878,7 +878,7 @@ def _report_band_routing() -> None:
 
 
 def _report_harness_overlays() -> None:
-    """Name the (config rung, harness) pairs a scalar cannot serve (x-8975).
+    """Name the (config rung, harness) pairs a scalar cannot serve.
 
     The spawn seam degrades open on config values by design, so this readout
     is where an operator hears a value will be skipped on some harness.
@@ -1012,7 +1012,7 @@ def status_sinks_cmd(
         False, "--json", "-J", help="Emit a JSON list of fanout targets for the daemon."
     ),
 ) -> None:
-    """Resolve which projects the status-fanout supervisor should tick (x-2057).
+    """Resolve which projects the status-fanout supervisor should tick.
 
     A project is a target when it has >=1 enabled ``status_sinks`` entry -
     INDEPENDENT of ``config.active_backlog``. The daemon shells this to discover
@@ -1049,7 +1049,7 @@ def assert_subagent_budget_cmd(
     Prints the verdict's reason and exits 0 on a permit, 1 on a refusal.
     Fails open: no stamp, no budget entry or an unreadable config permits,
     with the reason saying so. This is the seam skill text calls before
-    declaring a panel width (x-25a7 Locked Decision 7).
+    declaring a panel width (Locked Decision 7).
     """
     from fno.config import assert_subagent_budget
 
@@ -1094,10 +1094,10 @@ def get_cmd(
 
     The leading ``config.`` is optional: a bare ``review.required_bots`` is
     retried as ``config.review.required_bots`` so a caller need not remember
-    the redundant prefix (x-8b64 E: the review gate defaults to
+    the redundant prefix (E: the review gate defaults to
     ``config.review.required_bots`` but the shorthand used to error).
 
-    Which FILE decided the value prints on STDERR (x-4be1): the silent
+    Which FILE decided the value prints on STDERR : the silent
     home-vs-project override is the defect this fixes, so the resolved value
     alone on stdout would keep the confusion. stdout stays value-only because
     callers pipe it (normalize.sh compares the whole stream); the source line,
@@ -1343,7 +1343,7 @@ def set_cmd(
 
     _check_overridden_writes(results)
 
-    # x-e106: setting pr_watch.enabled couples to the launchd agent so enabled
+    # setting pr_watch.enabled couples to the launchd agent so enabled
     # means running. Loud on failure, never reverts config (doctor is the guard).
     for r in results:
         if r.key.endswith("pr_watch.enabled"):
@@ -1366,7 +1366,7 @@ def set_cmd(
 
 def _check_overridden_writes(results: list) -> None:
     """Warn on stderr when a write succeeded on disk but a higher-precedence
-    configuration layer overrides it (x-389d).
+    configuration layer overrides it.
 
     Receipt defect fix: local-over-global precedence is correct and stays, but
     `fno config set` must not silently report success on a write that is inert in

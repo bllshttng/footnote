@@ -79,13 +79,13 @@ pub(crate) struct ReconcileOutcome {
 ///   already-`Orphaned` or terminal (`Exited`/`PermanentDead`) entry unchanged.
 /// - `Err` (inconclusive): preserve status, record an inconsistency. Never
 ///   orphan on a probe timeout (Failure Modes / Errors invariant).
-/// - Ask-bucket rows (one-shot asks AND claude bg threads, x-5d96): a roster
+/// - Ask-bucket rows (one-shot asks AND claude bg threads): a roster
 ///   `bg_live` hit plus a SILENT liveness ladder (no socket, no advancing
 ///   heartbeat, no working truth state) transitions `Orphaned` - the
 ///   reversible state - so roster presence can no longer pin a zombie row
 ///   `live` forever. An `Alive` ladder answer blocks the flip.
 ///
-/// `liveness` is the shared reader (x-5d96), injected like `probe` so the
+/// `liveness` is the shared reader, injected like `probe` so the
 /// ladder is deterministically stageable in tests.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_reconcile<P, D, L, B, H, R, V>(
@@ -158,7 +158,7 @@ where
         // `live`. This is the actual cause of the reported stale-`live` rows: the
         // `probe` is skipped entirely here, so no provider reachability call can
         // decide an ask row's status. An already-terminal ask is left untouched.
-        // [plan ab-70faa65b, Locked Decision #1]
+        // [plan, Locked Decision #1]
         // A `claude --substrate bg` thread lands in this same bucket (claude
         // harness, no footnote pid, no mux) and yet it IS a running process --
         // claude's own daemon owns it and lists it in `roster.json`. Reaping it
@@ -184,7 +184,7 @@ where
                 && bg_live(entry)
                 && measured == RowLiveness::Unknown
             {
-                // x-5d96: a roster entry used to hold a claude row `live`
+                // a roster entry used to hold a claude row `live`
                 // forever. Roster presence is weak evidence - a dead
                 // supervisor can leave stale entries - so a row the shared
                 // ladder answers `Unknown` on (no socket, no advancing
@@ -198,7 +198,7 @@ where
                 // chance to produce any marker, so its silence is
                 // meaningless (the same never-reap-something-still-coming-up
                 // rule the sweep uses). An advancing heartbeat or a working
-                // truth state answers Alive and blocks the flip (the x-d3ad
+                // truth state answers Alive and blocks the flip (the
                 // resurrected session). An Orphaned row is not re-visited
                 // here (not live-ish), and gc still protects it: removal
                 // needs positive corroboration, so a falsely-flipped live
@@ -242,7 +242,7 @@ where
                 // recipient nobody drains. A row with no recorded pid keeps the
                 // old behavior (`pid_live` is true), so exec rows are untouched.
                 // Ask-bucket rows never reach this arm (they continue above),
-                // so an Orphaned x-5d96 zombie cannot recover here and
+                // so an Orphaned zombie cannot recover here and
                 // oscillate: gc ages it from the terminal set instead.
                 if entry.status == AgentStatus::Orphaned && pid_live(entry) {
                     out.recovered.push(entry.name.clone());
@@ -378,7 +378,7 @@ pub(crate) fn apply_reconcile_change(
             e.screen_state = None;
         }
         if matches!(s, AgentStatus::Orphaned) {
-            // x-5d96 (codex P2, PR 1329): the transition just re-decided the
+            // (codex P2, PR 1329): the transition just re-decided the
             // row's liveness from current evidence, so any `exited_at` it
             // carried is a stamp from an earlier, falsified reading. Keeping
             // it would let gc age the row on a clock that started before the

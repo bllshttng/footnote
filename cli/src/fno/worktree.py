@@ -28,7 +28,7 @@ _SETUP_HOOK_TIMEOUT_S = 120
 
 
 # ---------------------------------------------------------------------------
-# Branch naming (x-ff83 W3)
+# Branch naming (W3)
 # ---------------------------------------------------------------------------
 
 # The <slug> component is truncated on length; the node id is NEVER truncated -
@@ -67,7 +67,7 @@ def _slug_for_node(node_id: str) -> str:
 def branch_name(
     node_id: str, *, slug: Optional[str] = None, prefix: Optional[str] = None
 ) -> str:
-    """Legible dispatch branch name ``<prefix>/<slug>-<node>`` (x-ff83 W3).
+    """Legible dispatch branch name ``<prefix>/<slug>-<node>`` (W3).
 
     The full node id is preserved so the branch round-trips back to its node;
     the slug is ref-sanitized and truncated on length, never the id. An empty or
@@ -239,7 +239,7 @@ class WorktreeManager:
 
     Each active node gets one worktree at:
         {base_dir}/{node_id}
-    with branch name (x-ff83 W3):
+    with branch name (W3):
         <config.branch.prefix>/<slug>-<node_id>   (default prefix "fno")
     An explicit ``branch_suffix`` still produces the legacy ``feature/<suffix>``.
 
@@ -314,7 +314,7 @@ class WorktreeManager:
         Parameters
         ----------
         node_id:
-            The graph node identifier (e.g. "ab-12345678").
+            The graph node identifier (e.g. "x-aaaa").
         base_ref:
             The git ref to base the worktree branch on (default "main").
         branch_suffix:
@@ -344,7 +344,7 @@ class WorktreeManager:
         # Disk space check
         self.disk_pressure_check()
 
-        # x-ff83 W3: default to the legible <prefix>/<slug>-<node> name (round-trip
+        # W3: default to the legible <prefix>/<slug>-<node> name (round-trip
         # resolvable). An explicit branch_suffix override keeps the legacy feature/
         # shape so existing callers that pin a suffix are unchanged.
         branch = f"feature/{branch_suffix}" if branch_suffix else branch_name(node_id)

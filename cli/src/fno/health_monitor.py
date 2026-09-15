@@ -348,7 +348,7 @@ def evaluate_thresholds(
             hint="closed over an unmerged PR",
         ))
 
-    # 8. Unsettleable supersessions (presence, x-e451): the successor merged but
+    # 8. Unsettleable supersessions (presence): the successor merged but
     # the declared surfaces were not in its PR; the sweep never settles it alone.
     if (su_count := len(report.get("supersession_unverified", []))) > 0:
         breaches.append(_make_breach(
@@ -361,7 +361,7 @@ def evaluate_thresholds(
                   "the sweep will never settle it alone."),
         ))
 
-    # 9. Edges held open by a deferred or missing blocker (presence, x-e451).
+    # 9. Edges held open by a deferred or missing blocker (presence).
     if (bh_count := len(report.get("blocked_by_held", []))) > 0:
         breaches.append(_make_breach(
             "blocked_by_held",

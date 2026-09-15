@@ -160,7 +160,7 @@ def _tier3_tokens(
     deny_tools: Optional[str] = None,
     computed_dirs: "Sequence[str]" = (),
 ) -> list[str]:
-    """x-b6e2: claude's own spellings for the Tier-3 passthrough flags, in a fixed
+    """x-aaaa: claude's own spellings for the Tier-3 passthrough flags, in a fixed
     order (--add-dir/--agent/--allowedTools/--disallowedTools), skipping empty.
     claude-only (the fail-closed for other providers lives at the CLI/client
     guard); kept identical to the Rust HarnessFlags::push_onto for argv parity.
@@ -222,7 +222,7 @@ def _build_argv(
     set, so the substrate is verified portably. The smoke-marker test
     (Locked Decision 4) catches real-CLI drift.
 
-    A truthy ``model`` (x-571f per-node pin) appends ``--model <m>`` between
+    A truthy ``model`` (per-node pin) appends ``--model <m>`` between
     ``--name`` and the message; unset/empty means today's argv byte-for-byte.
     The model/permission/effort flags are kept identical to the Rust
     ``build_argv`` (AC2-FR cross-runtime parity).
@@ -245,19 +245,19 @@ def _build_argv(
     lane = "interactive_resume" if resume_session_id else "interactive_create"
     identity = render_session_argv("claude", lane, resume_session_id)
     argv = [identity[0], "--bg", "--name", name]
-    # x-6de8: a routed bg session's serving process is forked by the daemon
+    # a routed bg session's serving process is forked by the daemon
     # without the per-spawn ANTHROPIC_* env; --settings is read by the session
     # process itself and survives that fork, so the route actually applies.
     if settings_path:
         argv += ["--settings", settings_path]
-    # x-dfa4: exact passthrough to claude's own --permission-mode; the caller
+    # exact passthrough to claude's own --permission-mode; the caller
     # resolves --yolo -> bypassPermissions before this point. Kept identical to
     # the Rust build_argv (cross-runtime parity). Empty/None = unchanged argv.
     if permission_mode:
         argv += ["--permission-mode", permission_mode]
     if effort:
         argv += ["--effort", effort]
-    # x-b6e2: Tier-3 passthrough, same order as the Rust build_argv (parity).
+    # x-aaaa: Tier-3 passthrough, same order as the Rust build_argv (parity).
     argv += _tier3_tokens(
         add_dir,
         agent,
@@ -384,7 +384,7 @@ def headless_create(
 
         route_env = resolve_spawn_route(None, route_env)
     argv = ["claude", "-p"]
-    # x-6de8: apply an explicit --route via --settings, same as bg_create. A
+    # apply an explicit --route via --settings, same as bg_create. A
     # direct `claude -p` subprocess would inherit route env too, but --settings
     # keeps the two lanes identical and is the mechanism that survives the bg
     # daemon fork, so the route behaves the same whichever substrate the caller
@@ -404,7 +404,7 @@ def headless_create(
         argv += ["--model", model]
     if effort:
         argv += ["--effort", effort]
-    # x-b6e2: Tier-3 passthrough, same order as the Rust headless builder.
+    # x-aaaa: Tier-3 passthrough, same order as the Rust headless builder.
     argv += _tier3_tokens(
         add_dir, agent, tools, deny_tools, computed_dirs=worker_writable_dirs(cwd)
     )
@@ -419,17 +419,17 @@ def headless_create(
     argv += ["--", message or "hello"]
     # A one-shot `claude -p` inherits the parent env, so an ambient
     # ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN would override BOTH a per-spawn
-    # account overlay (x-d012) AND a routed --settings token (x-6de8, codex P1):
+    # account overlay AND a routed --settings token (codex P1):
     # claude prefers an env credential over the settings file, so a routed
     # headless spawn from a logged-in shell would authenticate with the primary
     # Claude account instead of the selected provider (routing failure / wrong
     # billing). compose_worker_credentials scrubs the inherited auth vars
     # whenever we route or pin an account and applies the same scrub/account/
-    # route precedence as every other seam (x-8552), belt-and-suspenders with
+    # route precedence as every other seam, belt-and-suspenders with
     # --settings. Without either overlay, inherit the parent env untouched.
     spawn_env: Optional[dict[str, str]] = None
     # Identity scrubbing is NOT done here: worker_environment() below is the
-    # floor every adapter's child env crosses (x-b57a), so an adapter cannot
+    # floor every adapter's child env crosses, so an adapter cannot
     # decline it and the next adapter cannot miss it. The env is constructed
     # only when an overlay or an incoherent model env demands one; a coherent,
     # overlay-free call still passes None and inherits byte-identically (there
@@ -544,14 +544,14 @@ def bg_create(
         cwd: Working directory passed to subprocess.run so claude inherits
             it for tool execution.
         timeout: Subprocess timeout in seconds. ``None`` means no timeout.
-        role: Optional routing role (x-d2fe). An auxiliary role (coordinate /
+        role: Optional routing role. An auxiliary role (coordinate /
             tidy / orient / consolidate) with a configured provider key routes
             the worker to a secondary provider via env overrides; ``None`` or a
             production role leaves the spawn env byte-for-byte as today.
         route_env: Optional pre-resolved explicit route env (from ``spawn
             --route``, already fail-closed at the CLI). When present it WINS over
             ``role`` (named intent beats auto-routing) and is merged directly.
-        model: Optional per-node model pin (x-571f). Truthy appends
+        model: Optional per-node model pin. Truthy appends
             ``--model <m>`` to the ``claude --bg`` argv; unset leaves it as
             today. Orthogonal to ``role``: the argv pin beats a role's env
             model, which is the right precedence (node pin is more specific).
@@ -578,11 +578,11 @@ def bg_create(
         )
     msg_bytes = message.encode("utf-8")
     use_stdin = len(msg_bytes) > _ARGV_OVERFLOW_THRESHOLD
-    # x-6de8: a routed bg session loses its ANTHROPIC_* env across the daemon
+    # a routed bg session loses its ANTHROPIC_* env across the daemon
     # fork; write it to a --settings file the session process reads itself.
     # An --account spawn has the same problem: the env scrub below is dropped at
     # the fork too, so the scrub (and an api_key account's resolved ANTHROPIC_*)
-    # rides a settings file as well. --account and --route compose (x-5ed4):
+    # rides a settings file as well. --account and --route compose:
     # when both are present the route wins the settings file (route-wins
     # atomicity - endpoint+auth+model as one unit), and the account overlay
     # rides the spawn env below (CLAUDE_CONFIG_DIR selects the per-account daemon).
@@ -601,9 +601,9 @@ def bg_create(
     # Without a route/account there is no settings file, so an env-only scrub
     # of the model vars below is decorative for `claude --bg`: the serving
     # session is forked by the claude daemon with the DAEMON's own env
-    # (x-6de8), never this process's spawn_env. Float a settings file
+    #, never this process's spawn_env. Float a settings file
     # flooring the offending vars so the fix reaches the actual worker in the
-    # plain unrouted case too - the shape x-4709 exists to fix. The floor
+    # plain unrouted case too - the shape exists to fix. The floor
     # covers COHERENT inherited claims as well: a daemon-forked child cannot
     # be reached by the spawn_env clear below, and an unrouted child running
     # on a model the launching shell happened to export is the same
@@ -645,7 +645,7 @@ def bg_create(
     # SESSION gracefully via caller_kind=nested_agent + from_session_id=None.
     spawn_env = dict(os.environ)
     # Identity scrubbing happens in worker_environment() below, the floor every
-    # adapter's child env crosses (x-b57a): a spawned child inherits its
+    # adapter's child env crosses: a spawned child inherits its
     # parent's ROUTE (account/model below) but never its parent's IDENTITY - a
     # claude reviewer spawned from a codex parent carrying a foreign
     # CODEX_THREAD_ID would stamp the parent's session and read as
@@ -673,14 +673,14 @@ def bg_create(
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_HARNESS"] = "claude"
     # Raise the harness Stop-hook block cap so fno's repeated-block loop is not
-    # force-ended at the default 9 (x-1680). Non-auth spawn env reaches the bg
+    # force-ended at the default 9. Non-auth spawn env reaches the bg
     # session process the same way FNO_AGENT_SELF above does.
     spawn_env["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"] = claude_stop_hook_block_cap()
 
-    # Role-based model routing (x-d2fe) and the per-spawn account overlay
-    # (x-d012) compose through ONE function (x-8552): scrub inherited auth vars,
+    # Role-based model routing and the per-spawn account overlay
+    # compose through ONE function: scrub inherited auth vars,
     # layer the account (profile + its own login), layer the route last so it
-    # wins endpoint+auth+model as one unit (x-2af5 atomicity) while
+    # wins endpoint+auth+model as one unit (atomicity) while
     # CLAUDE_CONFIG_DIR survives. The role or explicit route was resolved once
     # above; reusing that captured value keeps mutable manifest discovery from
     # changing within one launch.
@@ -706,7 +706,7 @@ def bg_create(
     # floor CLEARS this group for every adapter (a child must never inherit its
     # parent's seed attribution); setting before it would be silently undone.
     #
-    # KNOWN GAP on this lane, and the same one x-6de8 names ~90 lines up: a
+    # KNOWN GAP on this lane, and the same one names ~90 lines up: a
     # ROUTED `claude --bg` session is forked by the claude daemon with the
     # DAEMON's env, not this spawn_env, so these fields do not reach that
     # child and its SessionStart renders no sidecar. The forgery refusal below
@@ -772,7 +772,7 @@ def bg_create(
 
 
 # ===========================================================================
-# Spawn-time full session-UUID capture (ab-f1b0ccd1, US1 / AC1-HP)
+# Spawn-time full session-UUID capture (US1 / AC1-HP)
 # ===========================================================================
 #
 # `claude --bg` registers a worker by its 8-hex jobId (`claude_short_id`), but
@@ -967,7 +967,7 @@ _LIVE_STATUS_INPUT = {
     "idle": "Idle",
     "done": "Done",
     "failed": "Done",
-    # x-8bfb: claude emits this routinely for a terminal row with no live
+    # claude emits this routinely for a terminal row with no live
     # turn. Liveness is the axis this vocabulary carries, and a stopped
     # session has none - same as a failed one above. Outcome (why it
     # stopped) is a different axis this vocabulary does not carry; do not
@@ -1024,7 +1024,7 @@ def _alias_value(
     When two aliases both hold valid but DIFFERENT values there is no way to
     tell which the producer meant, so the first value in ``keys`` order is
     returned with a warning rather than a silent pick - UNLESS ``recognized``
-    is given and every found value passes it (x-8bfb AC6/AC8): ``state``
+    is given and every found value passes it (AC6/AC8): ``state``
     already wins by the fixed ``keys`` order regardless, so a disagreement
     between two individually-understood values is precedence working as
     documented, not drift. Passing ``recognized`` in (rather than making this
@@ -1232,7 +1232,7 @@ def claude_agents_json(
     rows, warnings = claude_agents_rows(timeout=timeout)
     out_map: dict[str, dict] = {}
     agent_rows = len(rows)
-    # x-8bfb: both drift families below are collected per DISTINCT shape while
+    # both drift families below are collected per DISTINCT shape while
     # iterating and emitted once each after the loop, rather than once per
     # row. A value drift is loud once no matter how many rows carry it
     # (AC7-EDGE); a genuine fleet can carry the same unmapped value or the
@@ -1258,7 +1258,7 @@ def claude_agents_json(
                 f"claude agents --json {_row_label(row, index, 'non-interactive rows')} short id {id_warning}"
             )
         # `recognized` scopes the alias-conflict suppression to THIS call site
-        # only (x-8bfb AC6/AC8/AC9): a disagreement between two values that
+        # only (AC6/AC8/AC9): a disagreement between two values that
         # both already resolve to a known live-status is precedence working
         # as documented (`state` wins - unchanged), not drift, so it stays
         # quiet. A disagreement touching a genuinely unknown value still
@@ -1502,7 +1502,7 @@ def claude_attach(
     timeout is applied because attach is an interactive verb whose
     duration is operator-driven, not bounded by fno.
 
-    x-d285: ``env`` is the row's recorded ACCOUNT binding (a
+    : ``env`` is the row's recorded ACCOUNT binding (a
     ``CLAUDE_CONFIG_DIR`` overlay) and ``settings_path`` the validated
     route-settings file; a fresh claude process re-resolves its namespace
     from ambient env, so the recorded binding must ride the child or the

@@ -1,13 +1,13 @@
 """In-package port of verify-pr-merged.sh + verify-review-replies.sh.
 
-ab-d4c98550, US2. Two external-outcome audits for the auto-merge / external-
+, US2. Two external-outcome audits for the auto-merge / external-
 review gates, ported from bash to gh-api subprocess + native JSON parsing.
 
 verify --kind merged  (verify-pr-merged.sh):
     GitHub merge-state audit. Records the merge into the state-file frontmatter
     when MERGED; blocks with a specific reason when the merge cannot happen;
     runs ONE bounded remediation (single merge attempt + single 30s poll,
-    anti-thrash; x-9d11: no --auto and no --delete-branch - checks enforced
+    anti-thrash; no --auto and no --delete-branch - checks enforced
     in-process, cleanup split from the merge) when OPEN + all-clean: attempt.
     Exit 0 merged/degrade-open, 1 blocked-with-reason, 2 substrate failure.
 
@@ -469,7 +469,7 @@ def _failing_required(rollup: Sequence[dict]) -> List[str]:
 
 
 def _remote_delete_cleanup(pr_number: str, cwd: str, auto_merge) -> None:
-    """Post-merge remote-branch delete (x-9d11), warn-only: reuses the merge
+    """Post-merge remote-branch delete, warn-only: reuses the merge
     verb's helper so both executors treat cleanup identically and neither can
     fail its merge with a cleanup result."""
     if not getattr(auto_merge, "delete_branch_on_merge", False):
@@ -491,7 +491,7 @@ def _bounded_remediation(
     sleep_fn,
     gate_head: str = "",
 ) -> int:
-    """Single gh pr merge attempt + single 30s poll (anti-thrash; x-9d11: the
+    """Single gh pr merge attempt + single 30s poll (anti-thrash; the
     verb executes - no --auto, no --delete-branch)."""
     auto_merge = _auto_merge(repo_root)
     strategy = auto_merge.merge_strategy

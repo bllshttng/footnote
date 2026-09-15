@@ -6,7 +6,7 @@
 //!
 //! - [`AttachPlace`] (selector `p`): place an attachable row in a WORKSPACE,
 //!   optionally with split geometry.
-//! - [`PortalPick`] (selector `P`, x-9fd0): show a paneless live row through
+//! - [`PortalPick`] (selector `P`): show a paneless live row through
 //!   a PORTAL - an existing open one by index, or a new one the server
 //!   numbers.
 //!
@@ -43,7 +43,7 @@ impl AttachPlace {
     }
 }
 
-/// (x-9fd0) The portal-placement picker state: the attach id of the row being
+/// The portal-placement picker state: the attach id of the row being
 /// placed and a cursor. Like [`AttachPlace`] the cursor is an index into the
 /// DRAWN list, never a portal index - portal membership is derived per frame,
 /// so a stored copy of the list would be the staleness defect; the commit
@@ -90,7 +90,7 @@ impl View {
         });
     }
 
-    /// Open the portal-placement picker (x-9fd0) on `id`: one row per OPEN
+    /// Open the portal-placement picker on `id`: one row per OPEN
     /// portal (index, tab, occupant), then a new-portal row, with the
     /// new-portal row PRE-SELECTED so `P` then Enter sends exactly what bare
     /// `P` sent when it allocated immediately (`portal_new`, the server picks
@@ -159,7 +159,7 @@ impl View {
         lines
     }
 
-    /// (x-9fd0) The open portals as `(occupant row, portal index)`, in index
+    /// The open portals as `(occupant row, portal index)`, in index
     /// order, derived per frame from the live layout - the same derivation the
     /// `◫N` sideline markers render from. Portal membership is a pointer
     /// relation the server recomputes per frame, so this is never stored on
@@ -176,7 +176,7 @@ impl View {
         rows
     }
 
-    /// Build the portal-placement picker lines (x-9fd0): a header, one row per
+    /// Build the portal-placement picker lines: a header, one row per
     /// OPEN portal (list position, portal index, tab, occupant), then the
     /// new-portal row, then a footer where each axis names its OWN keys.
     ///
@@ -371,7 +371,7 @@ pub(crate) async fn attach_place_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// (x-9fd0) The portal picker's keys, mirrored on [`attach_place_keys`] so one
+/// The portal picker's keys, mirrored on [`attach_place_keys`] so one
 /// interaction never grows a second vocabulary: lowercase hjkl and the arrows
 /// MOVE the cursor, `1`-`9` jump the cursor to that list row, Enter commits,
 /// esc/q cancels. The list is re-derived per key from the live layout, so a

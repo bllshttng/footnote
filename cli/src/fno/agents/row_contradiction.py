@@ -10,7 +10,7 @@ _TERMINAL_STATUSES = {"orphaned", "exited"}
 _RESUME_BAND_SECONDS = 600
 _MESSAGE_EVENT_SKEW_SECONDS = 2
 
-#: (x-d401) How long a stored `spawning` token can stay honest while a live
+#: How long a stored `spawning` token can stay honest while a live
 #: pid exists. A spawn completes when the worker names itself or the row
 #: acquires a pid; past this age a still-`spawning` row with a LIVE pid is a
 #: token the emitter never refreshed (rows read `spawning` for 3-16 hours
@@ -121,9 +121,9 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
     if _spawning_outlived_by_a_live_pid(row, now=now):
         # The movement-derived state with a basis naming the contradiction:
         # a bare `spawning` for a working row is the stored token standing in
-        # for a measurement nobody took (x-d401 / x-0248). The process is
+        # for a measurement nobody took (/). The process is
         # confirmed there and the transcript is unread, so the served word is
-        # `quiet`, never a `live` token (x-c672).
+        # `quiet`, never a `live` token.
         projected["status"] = "quiet"
         projected["basis"] = "stale-spawning-live-pid"
 
@@ -136,7 +136,7 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
     projected["liveness_origin_basis"] = origin_basis
     # Always rides the row (null = no contradiction): a superseded supervisor
     # claim beside the falsifier that beat it, so the operator reads WHICH
-    # source said what rather than only which one won (x-d401 / x-d4a6).
+    # source said what rather than only which one won (/).
     projected["live_status_basis"] = _supervisor_contradicted(row)
     projected.pop("superseded_live_status", None)
     return projected
@@ -212,10 +212,10 @@ def model_substitution(
     requested: Any,
     observed: Any,
 ) -> str:
-    """Compare a row's REQUESTED model with its OBSERVED model (x-2019).
+    """Compare a row's REQUESTED model with its OBSERVED model.
 
     Returns one of three words. ``substituted`` - the observed family differs
-    from the requested family, the silent replacement x-2019 exists to name.
+    from the requested family, the silent replacement exists to name.
     ``match`` - same family after suffix normalization. ``unknown`` - either
     side is absent/unreadable: an unanswered probe is not a verdict, and
     neither is a row whose mint never saw a request.

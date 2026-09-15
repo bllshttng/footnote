@@ -437,14 +437,14 @@ FIELD_META: dict[str, Meta] = {
         "Mux chrome theme: terminal (default, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker.",
         default_source="default",
     ),
-    # --- config.dev.* (x-88b9: maintainer local-dev) ---
+    # --- config.dev.* (: maintainer local-dev) ---
     "dev.source": Meta("never", "Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default)."),
-    # --- config.context.* (x-edf5: project-supplied context artifacts) ---
+    # --- config.context.* (: project-supplied context artifacts) ---
     "context.artifacts": Meta(
         "advanced",
         "Project-supplied context artifacts: {identifier: {path, sensitivity}}. A role's context selector names an identifier resolved here (default sensitivity internal), so a pack installed in a second project is reviewed against that project's facts, not the first's. An unconfigured identifier blocks resolution with MISSING_CONTEXT.",
     ),
-    # --- config.loops.* (x-ce71: per-loop level + pause-all substrate) ---
+    # --- config.loops.* (: per-loop level + pause-all substrate) ---
     "loops": Meta(
         "advanced",
         "Per-loop level overrides: {<name>: {level: report|assisted|unattended}} (default report).",
@@ -585,7 +585,7 @@ FIELD_META: dict[str, Meta] = {
     "routing.operator_access": Meta(
         "never", "The operator's access posture: local (attending), remote (only verified-native-view rows qualify), or unknown (the default; filters like remote, labeled unknown in receipts). Never inferred.",
     ),
-    # --- config.sideline.colors (x-1b35, the mux sideline lane color) ---
+    # --- config.sideline.colors (the mux sideline lane color) ---
     # Four axis tables, every key naming its axis. A bare key under
     # [sideline.colors] is REFUSED (extra=forbid): it is ambiguous between
     # account, route and model. Resolution is one fixed cascade, most
@@ -607,7 +607,7 @@ FIELD_META: dict[str, Meta] = {
     "sideline.colors.row": Meta(
         "advanced", "Lane colors keyed by a [[routing.models]] row NAME (row.zai-glm-flash = \"orange\"). A row's own `color` field outranks this table for the same row.",
     ),
-    # --- config.model_routing.* (role-based per-spawn model routing, x-d2fe) ---
+    # --- config.model_routing.* (role-based per-spawn model routing) ---
     "model_routing.enabled": Meta(
         "advanced", "Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.",
         question="Route auxiliary coordination work to a secondary model provider (production stays on Anthropic)?",
@@ -621,7 +621,7 @@ FIELD_META: dict[str, Meta] = {
     "model_routing.extra_env": Meta(
         "never", "Extra env merged into routed spawns (e.g. API_TIMEOUT_MS). Prefer tier_models for per-tier models; extra_env still wins as a hand pin."
     ),
-    # --- config.status_sinks / config.status_fanout (x-2057) ---
+    # --- config.status_sinks / config.status_fanout ---
     "status_sinks": Meta(
         "advanced", "Status-fanout subscribers: list of {name, type (json-webhook|text-webhook|backlog-progress), events, match, url|url_env, template, field, cloudevents, enabled}.",
     ),

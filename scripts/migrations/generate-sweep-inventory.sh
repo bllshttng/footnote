@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generate a machine-readable inventory of direct scripts/lib/*.sh and
 # scripts/<name>.py invocations across the migration surface for the
-# canonical-instruction sweep (ab-cf715197).
+# canonical-instruction sweep.
 #
 # Output: .fno/sweep-inventory.json (gitignored, transient).
 # Read-only: this script never modifies source files.

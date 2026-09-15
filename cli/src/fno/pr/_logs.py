@@ -83,7 +83,7 @@ def _fetch_rollup(pr: Optional[str], cwd: Optional[str]) -> tuple[Optional[list]
 
     REST, never `gh pr view`: the GraphQL quota is per-USER and shared by
     every session on the machine, and this verb was one of the remaining
-    lanes spending it (x-4eac). `fetch_pr_rest` answers the same rollup
+    lanes spending it. `fetch_pr_rest` answers the same rollup
     shape - check runs carrying a `detailsUrl` job ref, legacy statuses
     beside them - out of the core REST budget.
     """

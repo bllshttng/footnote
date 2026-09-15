@@ -181,7 +181,7 @@ def _codex_thread_spawn(
             env.update(overlay)
     # This client IS a footnote process and a non-claude oauth_dir overlay is a
     # HOME override, so seal it or the client's own reads resolve under the
-    # account's home and go unfindable (x-c33e). Env is the only channel to the
+    # account's home and go unfindable. Env is the only channel to the
     # app-server child, so the override stays; seal_state_root's docstring says
     # what that leaves open.
     env = seal_state_root(env)

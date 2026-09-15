@@ -1,4 +1,4 @@
-# Known spawn-shaped call sites, held by the CI ratchet (x-aaaf wave 3.3).
+# Known spawn-shaped call sites, held by the CI ratchet (wave 3.3).
 # Each entry is <file>::<enclosing-function> (Python) or <file>:: (shell,
 # file-level: bash has no reliable function-boundary AST, so a shell site is
 # tracked per-file, not per-function - the ceiling this baseline accepts;

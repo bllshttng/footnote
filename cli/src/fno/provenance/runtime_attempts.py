@@ -1,4 +1,4 @@
-"""Runtime-attempt projection for ``fno backlog provenance`` (x-2ccd wave 3).
+"""Runtime-attempt projection for ``fno backlog provenance`` (wave 3).
 
 A READ-TIME join that answers "which session worked on this node?" by projecting
 active or interrupted target attempts from manifests + claims, alongside the

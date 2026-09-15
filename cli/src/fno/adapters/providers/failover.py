@@ -1,6 +1,6 @@
 """Failover controller: swap orchestration + per-phase counter state.
 
-Phase 03 of provider rotation failover (ab-9728b70b). The controller
+Phase 03 of provider rotation failover. The controller
 owns the read-mutate-write of settings.yaml during a swap and the
 per-phase state that bounds swap behavior. v0 ships:
 
@@ -393,7 +393,7 @@ class FailoverController:
             return SwapResult(decision=SwapDecision.NO_SWAP_NEEDED,
                               reason="error_class_not_swap_trigger")
 
-        # Update per-provider backoff state (Plan A, ab-6534a78a). The
+        # Update per-provider backoff state (Plan A). The
         # runtime-state write is supplementary to the swap decision: if
         # classify_error returns a rule, we update; otherwise the
         # existing storm-cap path runs unchanged. update_provider_health
@@ -402,7 +402,7 @@ class FailoverController:
         # introduced by a future refactor must surface in CI rather than
         # be hidden.
         #
-        # Plan A1 (ab-7fe3cdaf): when ``error.model`` is set, the lock
+        # Plan A1: when ``error.model`` is set, the lock
         # is written to ``model_locks[model]`` instead of
         # ``rate_limited_until``. When None (existing call sites),
         # behavior matches Plan A baseline (provider-level lock).
@@ -511,7 +511,7 @@ class FailoverController:
 def record_success(provider_id: str) -> None:
     """Reset per-provider exponential backoff after a successful call.
 
-    Plan A (ab-6534a78a) public API: callers (dispatch_target, the loop
+    Plan A public API: callers (dispatch_target, the loop
     runner, future cooldown-aware code) invoke this when a provider call
     returns 2xx. Calling this is OPTIONAL today - the runtime_state's
     1h TTL covers stale entries - but RECOMMENDED so the backoff_level

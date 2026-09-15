@@ -108,7 +108,7 @@ def _is_crowned() -> bool:
             registry = load_registry()
         except RegistryVersionError:
             pass
-        # READ-ONLY (x-20f1 LD5): resolves the crown holder to display it.
+        # READ-ONLY (LD5): resolves the crown holder to display it.
         ident = resolve_harness_identity()
         result = resolve_self(
             env=os.environ,
@@ -261,7 +261,7 @@ def ask(
         raise typer.Exit(2)
     qid = f"q-{secrets.token_hex(4)}"
     session_id = _session_id()
-    # OWNED (x-20f1): the asker handle lands on a durable question event and is
+    # OWNED: the asker handle lands on a durable question event and is
     # the address the answer comes back to.
     ident = resolve_self_identity()
     asker = canonical_handle(ident.session_id) if ident.session_id and ident.harness else None

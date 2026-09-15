@@ -1,12 +1,12 @@
 //! Build script: embed the source git revision into the fno-agents bins so a
-//! built binary can self-report which commit it came from (ab-24a59d50).
+//! built binary can self-report which commit it came from.
 //!
 //! Rust-side `fno doctor` staleness now keys on a rev baked INTO the binary
 //! instead of the external `~/.fno/installed-rust-rev` marker (which was
 //! written only by `fno doctor update`, so a bare `cargo install` or dirty dev build
 //! was misjudged). `FNO_AGENTS_CRATES_REV` is the crates/ subtree rev the
-//! verdict compares against the source's crates/ subtree rev (ab-716cd330);
-//! `FNO_AGENTS_GIT_REV` is the full HEAD identity (ab-24a59d50). Both surface
+//! verdict compares against the source's crates/ subtree rev ;
+//! `FNO_AGENTS_GIT_REV` is the full HEAD identity. Both surface
 //! via `fno-agents version --json`, so the verdict needs no marker.
 //!
 //! Always emits all three env vars (falling back to "unknown"/"0") so `env!`
@@ -33,7 +33,7 @@ fn main() {
     let rev = git_rev().unwrap_or_else(|| "unknown".to_string());
     let dirty = git_dirty();
     // The crates/ subtree rev (last commit touching crates/) is the rev `fno
-    // doctor` keys its rust-staleness verdict on (ab-716cd330). It must be the
+    // doctor` keys its rust-staleness verdict on. It must be the
     // SAME quantity Python's update._rust_subtree_rev computes -- the last
     // commit touching crates/ -- so the binary's self-reported rev and the
     // source rev compare apples-to-apples (both subtree revs, not HEAD).
@@ -185,7 +185,7 @@ fn sync_harness_capabilities() {
     write_if_different(&mux_copy, &bytes);
 }
 
-/// PRODUCE the downstream copy of the merge-posture carrier table (x-8151).
+/// PRODUCE the downstream copy of the merge-posture carrier table.
 ///
 /// Same shape as [`sync_harness_capabilities`]: the canonical TOML lives in
 /// this crate (`merge_posture.rs` `include_str!`s it), and the Python package
@@ -206,7 +206,7 @@ fn sync_merge_posture() {
     write_if_different(&cli_copy, &bytes);
 }
 
-/// PRODUCE the downstream copy of the spawn verb-to-phase table (x-007c).
+/// PRODUCE the downstream copy of the spawn verb-to-phase table.
 ///
 /// Same shape as [`sync_merge_posture`]: the canonical TOML lives in this
 /// crate, and the Python package reads a byte copy as package data so

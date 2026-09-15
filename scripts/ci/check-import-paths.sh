@@ -6,7 +6,7 @@
 # can keep the old `from fno.agents import moved_module` spelling and fail at
 # collection time - but changed-smoke selects tests from CHANGED files, and a
 # module move does not change test_done.py, so the fast gate ran green on exactly
-# the files that were broken (x-ac5f). This static lint catches the whole class
+# the files that were broken. This static lint catches the whole class
 # without test selection: any `from fno.PKG import NAME` / `import fno.PKG.NAME`
 # whose target is neither a submodule on disk nor a name re-exported by the
 # package __init__ is a dead import path.

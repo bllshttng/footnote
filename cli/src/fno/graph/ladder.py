@@ -142,8 +142,8 @@ _STATUS_TO_RUNG: dict[str, Rung] = {
 # its `grep | sed | tr` block rather than a new policy. Rung.NONE is NOT here:
 # a plan-less node has no plan to launch "against". It is instead COLD-dispatched
 # (the worker authors the plan via think -> blueprint) through the separate
-# :func:`is_cold_dispatchable` gate, which adds the required ``status == "idea"``
-# conjunct so a blocked/done plan-less node is never admitted (x-e24a). Keeping
+#:func:`is_cold_dispatchable` gate, which adds the required ``status == "idea"``
+# conjunct so a blocked/done plan-less node is never admitted. Keeping
 # NONE out of this set preserves is_dispatchable's "has a launchable plan"
 # contract; the cold path is its own predicate, not an overload of this one.
 _DISPATCHABLE: frozenset[Rung] = frozenset(
@@ -395,14 +395,14 @@ def is_dispatchable(entry: object) -> bool:
 def is_cold_dispatchable(entry: object) -> bool:
     """A plan-less idea node the autonomous drain may dispatch without a plan.
 
-    The SOLE admission path for ``Rung.NONE`` (x-e24a): ``is_dispatchable`` stays
+    The SOLE admission path for ``Rung.NONE`` : ``is_dispatchable`` stays
     False for plan-less nodes (no plan to launch against), so this predicate -
     not ``_DISPATCHABLE`` - is what the four drain selectors OR into their status
     gate. Requires ``status == "idea"`` (so blocked / in_progress / done
     plan-less nodes are excluded) AND ``plan_rung`` is ``NONE`` (so a linked
     decompose stub, ``Rung.IDEA``, stays excluded). The derived verb authors
     the plan - low dispatches ``/target`` (think -> blueprint -> do);
-    medium/high blueprint first (x-ebd2) - so a plan-less idea is dispatchable
+    medium/high blueprint first - so a plan-less idea is dispatchable
     as-is either way.
 
     The status conjunct is load-bearing: ``plan_rung`` is ``NONE`` for any node

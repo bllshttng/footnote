@@ -79,7 +79,7 @@ pub(super) fn without_arm_hint(reason: &str) -> String {
     }
 }
 
-/// Why a watch-lease renewal declined (x-b445). The first three are permanent
+/// Why a watch-lease renewal declined. The first three are permanent
 /// for this session: arming another watcher cannot change them. `contended`
 /// (a peer held the recovery mutex, or the record answered nothing) and
 /// `write_failed` can succeed on the next stop.
@@ -147,13 +147,13 @@ another watcher will not change that. {remedy}"
 
 /// True for the no-claim refusal and every permanent-cause refusal: arming
 /// another watcher cannot help, so the block reason must not prescribe the
-/// ritual it just refused (x-b445 generalizes the [`NO_CLAIM_REFUSAL`] cut).
+/// ritual it just refused (generalizes the [`NO_CLAIM_REFUSAL`] cut).
 pub(super) fn refusal_is_permanent(reason: &str) -> bool {
     reason == NO_CLAIM_REFUSAL || reason.starts_with(PERMANENT_REFUSAL_LEAD)
 }
 
 /// Why `renew` did not answer Ok(true) for this session's own claim pair
-/// (x-b445). Reads the claim once and applies the same status verdict
+///. Reads the claim once and applies the same status verdict
 /// `fno agents claim status` prints, so a refusal names the answer the
 /// operator would see - never a second liveness opinion. `renew_error` is
 /// renew's Err payload when it errored; `root` mirrors renew's own root
@@ -187,7 +187,7 @@ pub(super) fn renew_cause(
 
 /// Attach the watching refusal cause to a block `loop_check` event, but ONLY
 /// when the fire carried one: a non-watching block carries no `watch_refusal`
-/// key at all, so consumers read its ABSENCE, never a null (x-b445).
+/// key at all, so consumers read its ABSENCE, never a null.
 pub(super) fn attach_watch_refusal(event: &mut serde_json::Value, kind: Option<&'static str>) {
     if let Some(kind) = kind {
         event["watch_refusal"] = serde_json::Value::String(kind.to_string());

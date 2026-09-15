@@ -182,7 +182,7 @@ def find_tracking_node(
     writes, via :func:`fno.retro.dedup.cv_cite_needle`, or a done/superseded
     owner the carve-out text names); a bare cv-id MENTION returns
     ``exact=False`` naming the mentioning node, so a node that merely
-    describes a carve-out (x-6c67's specimens) parks the row for review
+    describes a carve-out (specimens) parks the row for review
     instead of letting ``--apply`` consume it on a citation. A fuzzy subject
     match likewise returns ``exact=False``. ``link_to`` is set only when the
     carve-out text names a LIVE owner node: nothing tracks the work yet, but

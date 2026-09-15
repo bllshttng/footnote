@@ -241,7 +241,7 @@ pub fn which_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
-// ── launch-time headroom picking (x-7d45) ─────────────────────────────────────
+// ── launch-time headroom picking ─────────────────────────────────────
 
 /// The single env var a picked account contributes to the driver's environment.
 const PICKED_ENV_KEY: &str = "CLAUDE_CONFIG_DIR";
@@ -378,7 +378,7 @@ fn pick_account_env() -> Result<PickedEnv, String> {
 pub struct ShelloutSession {
     child: Child,
     /// Path the driver redirects claude stdout+stderr into (env `OUTPUT_FILE`),
-    /// read after exit to classify a claude bg-guard refusal (x-4504). `None`
+    /// read after exit to classify a claude bg-guard refusal. `None`
     /// when the dispatcher env carried no `OUTPUT_FILE`. The driver truncates
     /// this file at the start of every `driver_invoke`, so after `wait()` it
     /// holds exactly this iteration's output.
@@ -573,7 +573,7 @@ impl Dispatcher for ShelloutDispatcher {
             .map_err(|e| LoopError::Dispatch(format!("spawn bash driver_invoke: {e}")))?;
 
         // Capture OUTPUT_FILE (the driver's stdout+stderr sink) so the walk can
-        // classify a claude bg-guard refusal after exit (x-4504).
+        // classify a claude bg-guard refusal after exit.
         let output_file = self
             .env
             .iter()
@@ -824,7 +824,7 @@ mod tests {
     }
 
     // AC1-EDGE: opencode resolves to the `opencode` binary (loop-wrapper path,
-    // x-6007). The loop-wrapper drivers have fixed binary names (no env/alias
+    //). The loop-wrapper drivers have fixed binary names (no env/alias
     // precedence, unlike claude-code).
     #[test]
     fn loop_wrapper_drivers_resolve_to_fixed_binaries() {

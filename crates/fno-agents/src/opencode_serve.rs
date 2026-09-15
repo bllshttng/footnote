@@ -1,4 +1,4 @@
-//! The serve-HTTP opencode worker lane (x-d9f9): `spawn --harness opencode
+//! The serve-HTTP opencode worker lane : `spawn --harness opencode
 //! --substrate bg` as a real, unattended, persistent provider.
 //!
 //! opencode hosts two unattended shapes before this module: the headless
@@ -28,7 +28,7 @@
 //! - `opencode run --attach <url> --session <id> [--command ...]` drives one
 //!   turn on the shared serve with native command-template expansion. The
 //!   spawn launches that as a detached writer and returns immediately: no
-//!   template text is duplicated into this crate (x-de43 keeps biting anyone
+//!   template text is duplicated into this crate (keeps biting anyone
 //!   who routes a slash command as prose). The attach writer prints NOTHING on
 //!   stdout (verified live; `--format json` is dead on this path) - structured
 //!   capture is the serve's own message readback (`GET /session/:id/message`,
@@ -801,7 +801,7 @@ fn dispatch_opencode_serve_inner(
     // retire it - serve sessions persist after the work is done).
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let new_entry = RegistryEntry {
-        // x-98ab: client-side mint - this process inherited the spawning
+        // client-side mint - this process inherited the spawning
         // session's env, so the exported FNO_NODE names the node THIS spawn
         // is for.
         // v25: the route axes this lane actually used - opencode is both
@@ -817,7 +817,7 @@ fn dispatch_opencode_serve_inner(
         name: name.to_string(),
         short_id: session_id.clone(),
         legacy_provider: String::new(),
-        // x-d285: non-claude harness; the account axis does not apply.
+        // non-claude harness; the account axis does not apply.
         launch_account: None,
         related_session_id: None,
         provider: Some("opencode".to_string()),
@@ -826,7 +826,7 @@ fn dispatch_opencode_serve_inner(
             .filter(|m| !m.is_empty())
             .map(|_| "requested".to_string()),
         effort: effort.map(str::to_string),
-        // v23 (x-2019): the request beside the effect; verbatim as typed.
+        // v23: the request beside the effect; verbatim as typed.
         requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
         requested_provider: None,
         requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
@@ -1569,7 +1569,7 @@ mod tests {
             pid: 1,
             pid_start: None,
         };
-        // Slash command rides --command (x-de43). No --format json: the attach
+        // Slash command rides --command. No --format json: the attach
         // writer prints nothing on stdout (verified live), so the flag is dead.
         assert_eq!(
             writer_argv(&serve, "ses_abc123", "/fno:target --no-merge x-1", None),
@@ -1847,7 +1847,7 @@ mod tests {
             &cwd,
             None,
             None,
-            Some("x-535c"),
+            Some("x-aaaa"),
             vec![state_dir.to_string_lossy().to_string()],
             &stub.to_string_lossy(),
         );
@@ -1857,7 +1857,7 @@ mod tests {
         assert_eq!(receipt["session_id"], "ses_dispatchtest1");
         assert_eq!(receipt["ok"], true);
         let registry = crate::state::load_registry(&h.registry_json()).unwrap();
-        assert_eq!(registry.entries[0].node.as_deref(), Some("x-535c"));
+        assert_eq!(registry.entries[0].node.as_deref(), Some("x-aaaa"));
         // The registry row exists with the harness session bound. The
         // short-lived writer is not the worker's liveness axis.
         let reg = load_registry(&h.registry_json()).unwrap();

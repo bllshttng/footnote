@@ -245,7 +245,7 @@ def parse_review_invocation(raw: str) -> dict[str, Any] | None:
     # then the first token that is not the leading level token is the review's
     # subject. An all-digit subject, or a GitHub PR URL, is a PR number. The
     # hold side keys on this instead of whatever branch the session stands on,
-    # so a review that names its PR holds that PR from any checkout (x-b5f6).
+    # so a review that names its PR holds that PR from any checkout.
     rest = args[1:] if args and (args[0] == "ultra" or args[0] in REVIEW_LEVELS) else args
     target = next(
         (arg for arg in rest if not (canonical_flag(arg) or arg.startswith("--"))),

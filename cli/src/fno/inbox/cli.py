@@ -1,6 +1,6 @@
 """``fno inbox`` - what is waiting on a human.
 
-Mints the inbox root (x-afa6, unit 2 of the command reorg x-9d6c). approvals,
+Mints the inbox root (unit 2 of the command reorg). approvals,
 notify, and outstanding fold in whole - each app is registered here exactly
 as it was registered at the top level, so `fno inbox approvals ls` etc. reach
 the same commands `fno approvals ls` did. The king board LEAF joins them too
@@ -8,7 +8,7 @@ the same commands `fno approvals ls` did. The king board LEAF joins them too
 stays put here and folds into agents in a later unit, so `board_cmd` is
 registered under both `king` and `inbox` rather than moved.
 
-x-6233 (d-add90c60): the human-authority verbs join the human-facing group.
+ (d-add90c60): the human-authority verbs join the human-facing group.
 `decide`/`decisions` and the whole `law` app mount here; the `fno backlog
 decide` spellings stay registered as silent aliases of the same command
 objects, and the root `fno decide` / `fno law` spellings are VERB_MOVES

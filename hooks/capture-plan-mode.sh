@@ -6,7 +6,7 @@
 # enrich, and (on confirm) execute it. On any CLI without an ExitPlanMode tool
 # the matcher never fires, so this is a no-op there (graceful degradation).
 #
-# Detection-path contract (source-confirmed, ab-588650c7):
+# Detection-path contract (source-confirmed):
 #   Approve and keep-planning route to DIFFERENT hook events. A kept-planning /
 #   rejected ExitPlanMode fires PermissionDenied (the can-use-tool path), NOT
 #   PostToolUse; PostToolUse fires only after a successful tool call, i.e. after
@@ -17,7 +17,7 @@
 #   teammate path's awaitingLeaderApproval==true (submitted to a team lead, not
 #   yet approved). The /target confirm step remains the human backstop.
 #   Provenance: open-sourced Claude Code tree (ExitPlanModeV2Tool.ts:110-142,
-#   304-312; toolExecution.ts:1001/1081 vs :1483). See
+#   304-312; toolExecution.ts:1001/1081 vs:1483). See
 #   docs/architecture/target-plan-mode-integration.md and
 #   skills/target/references/plan-mode-backfill.md.
 #
@@ -64,7 +64,7 @@ log_event() {
     >> "$STATE_DIR/hook-events.jsonl" 2>/dev/null || true
 }
 
-# Skip gate (source-confirmed, ab-588650c7). The Output has NO approval field;
+# Skip gate (source-confirmed). The Output has NO approval field;
 # a PostToolUse fire already means the plan was approved (keep-planning fires
 # PermissionDenied, a different event). The one genuine "not approved yet"
 # signal is the teammate path: awaitingLeaderApproval==true means the plan was

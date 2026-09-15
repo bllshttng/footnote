@@ -3,7 +3,7 @@
 //!
 //! The operator asked for this and said the part that matters: "I just don't
 //! know what our cap even is." The cap is the fleet's share of CPU capacity
-//! (`agents.max_fleet_cpu_share`, x-7783), and `fno doctor lanes` already
+//! (`agents.max_fleet_cpu_share`), and `fno doctor lanes` already
 //! knows it. This module is the SURFACE for a shipped advisor, never a second
 //! capacity model: it folds one payload and renders it, and no arithmetic
 //! here decides anything.
@@ -70,12 +70,12 @@ pub struct Census {
     #[serde(default)]
     pub roster_rows: Option<u32>,
     /// Set when live rows could not be attributed to processes. The fleet CPU
-    /// share is then an UNDERCOUNT, never headroom (x-e040). It qualifies the
+    /// share is then an UNDERCOUNT, never headroom. It qualifies the
     /// CPU reading and is never folded into the counts above.
     #[serde(default)]
     pub attribution_gap: Option<String>,
     /// The caller's own share reading, from the one function the spawn gate
-    /// refuses on (x-5283 AC3). `None` when the census could not read it.
+    /// refuses on (AC3). `None` when the census could not read it.
     #[serde(default)]
     pub share: Option<ShareReading>,
     /// Top fleet consumers by program name, aggregated from the ps read the
@@ -86,7 +86,7 @@ pub struct Census {
     pub read_ms: Option<u64>,
 }
 
-/// The caller's own share reading (x-5283), produced by the same Python
+/// The caller's own share reading, produced by the same Python
 /// function the spawn gate refuses on. `None` counts are a failed read and
 /// render `unknown`, never zero.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -101,7 +101,7 @@ pub struct ShareReading {
     pub unattributed: Option<Unattributed>,
 }
 
-/// The live rows that name nobody (x-5283 LD4): one named bucket, count plus
+/// The live rows that name nobody (LD4): one named bucket, count plus
 /// row names. They divide nothing and pay no king's tax.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct Unattributed {
@@ -343,7 +343,7 @@ impl Panel {
             court.arm_num("cpu admission", "ceiling"),
         ) {
             (Some(low), Some(cores), Some(ceiling)) => {
-                // x-7783: the fleet's attributed share is what decides, so
+                // the fleet's attributed share is what decides, so
                 // that is what renders - never a load average.
                 let mut l = format!(
                     "  fleet     {:.0}% of {cores:.0} cores against {:.0}%",
@@ -410,7 +410,7 @@ impl Panel {
         let mut lines = Vec::new();
 
         // the fleet's CPU admission: the operator's own question, first.
-        // The share is what decides (x-7783); the 1m/5m/15m trio is trend
+        // The share is what decides; the 1m/5m/15m trio is trend
         // only, and the 15-minute figure sits beside its backstop.
         match (
             court.arm_num("cpu admission", "share_low"),
@@ -524,7 +524,7 @@ impl Panel {
                 label = "warn"
             ));
         }
-        // x-5283: the caller's own share, from the one function the spawn
+        // the caller's own share, from the one function the spawn
         // gate refuses on. The unattributed bucket renders only when it
         // holds someone - a count that sees nobody says so by being absent.
         if let Some(share) = &census.share {
@@ -686,9 +686,9 @@ mod tests {
                            "unattributed": {"count": 2, "rows": ["ghost-a", "ghost-b"]}},
                  "top_consumers": [
                    {"name": "fno-py", "procs": 23, "cpu_pct": 41.2,
-                    "worktree": ".fno/worktrees/x-b1ee", "worktree_procs": 22},
+                    "worktree": ".fno/worktrees/x-aaaa", "worktree_procs": 22},
                    {"name": "fno-agents-worker", "procs": 18, "cpu_pct": 27.9,
-                    "worktree": ".fno/worktrees/x-b1ee", "worktree_procs": 18}
+                    "worktree": ".fno/worktrees/x-aaaa", "worktree_procs": 18}
                  ]},
       "arms": [
         {"name": "cpu admission", "state": "measured",
@@ -755,7 +755,7 @@ mod tests {
             .expect("top consumers parse");
         assert_eq!(top.len(), 2);
         assert_eq!(top[0].name, "fno-py");
-        assert_eq!(top[0].worktree.as_deref(), Some(".fno/worktrees/x-b1ee"));
+        assert_eq!(top[0].worktree.as_deref(), Some(".fno/worktrees/x-aaaa"));
     }
 
     #[test]
@@ -835,7 +835,7 @@ mod tests {
     fn ac4_hp_every_load_number_names_its_unit_and_comparand() {
         let text = opened(live()).expanded_lines(&AC6_AGES).join("\n");
 
-        // x-7783: the share renders as the deciding number, the trend trio is
+        // the share renders as the deciding number, the trend trio is
         // display-only, and the over-line names the fleet_cpu_share axis.
         assert!(
             text.contains("fleet    58% of 12 cores against 50%"),
@@ -939,11 +939,11 @@ mod tests {
 
         assert!(text.contains("fno-py 23 procs 41%"), "{text}");
         assert!(
-            text.contains("22 of fno-py in .fno/worktrees/x-b1ee"),
+            text.contains("22 of fno-py in .fno/worktrees/x-aaaa"),
             "{text}"
         );
         assert!(
-            text.contains("18 of fno-agents-worker in .fno/worktrees/x-b1ee"),
+            text.contains("18 of fno-agents-worker in .fno/worktrees/x-aaaa"),
             "{text}"
         );
     }
@@ -1115,7 +1115,7 @@ mod tests {
 
     #[test]
     fn the_attribution_gap_gets_its_own_line_and_never_a_count() {
-        // x-e040 made the gap honest. A panel that folded it into a count
+        // made the gap honest. A panel that folded it into a count
         // would re-open the hole: the gap is a process-to-row failure and
         // cannot change how many rows exist.
         let mut court = live();

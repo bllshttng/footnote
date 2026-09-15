@@ -1,6 +1,6 @@
 """Crown-scope compilation helpers, split out of the retired board module.
 
-`fno.king.board` was retired into the Rust collector (x-25b8, d-450caaeb).
+`fno.king.board` was retired into the Rust collector (d-450caaeb).
 `compile_scope_ids` and `scope_undelivered` outlived it: `fno.pr_watch` reads
 scope-compiled rows on every wake tick, and the walk's termination reads the
 drain count, which is why they live here instead of dying with the board.

@@ -66,7 +66,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         PopupRow::Header("scroll wheel · pgup/pgdn · ⏎/click/tap runs".into()),
         None,
     );
-    // (x-7683) The right-click config note. The mux side works whenever the
+    // The right-click config note. The mux side works whenever the
     // bytes arrive (FNO_MUX_MOUSE_TRACE proves it either way); the terminals
     // that never send them are named so the operator configures the terminal,
     // or reaches for the no-config paths, instead of reading a dead feature.
@@ -84,7 +84,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         PopupRow::Header("Terminal.app never does · iTerm2: report mouse events".into()),
         None,
     );
-    // (x-b465) Ghostty joins the named list: it binds right-click to its own
+    // Ghostty joins the named list: it binds right-click to its own
     // context menu by default (`right-click-action`), measured against Warp on
     // the same build, where the identical press opens the menu. The SETTING is
     // named, not a value to set: which value restores forwarding is untested
@@ -101,7 +101,7 @@ pub(crate) fn build_keys_modal() -> KeysModal {
         )),
         None,
     );
-    // (x-b5d1) The glyph legend rides the modal tail, after the notes: the
+    // The glyph legend rides the modal tail, after the notes: the
     // x7683 pin holds the notes above the 64-row fold, and the legend is
     // reference material the same scroll reaches. Generated from the same
     // lattice table the rows and the header band render - one source, so
