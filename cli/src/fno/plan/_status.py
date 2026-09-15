@@ -66,14 +66,14 @@ KNOWN_STATUSES: frozenset[str] = (
 # graph vocabulary; None means "no plan write" (a graph-side gate that must not
 # touch plan state). Identity on every rung: x-3ad5 unified the spellings and
 # `idea`'s last non-identity row retired once `idea` became a plan-side rung. It
-# survives for the two None gates, which are real behavior with no naming
+# survives for its None rows, which are real behavior with no naming
 # component.
 GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
     "idea": "idea",  # doc may exist (a decompose scaffold) but is undesigned
     "design": "design",  # doc exists but is still a design doc
     "ready": "ready",
-    "in_progress": "in_progress",
-    "claimed": "in_progress",  # legacy graph vocabulary, pre-x-5d91 rows
+    "in_progress": None,  # a claim is reversible and the plan axis is
+    "claimed": None,  # forward-only: plan state stands, same reason as `deferred`
     "blocked": None,  # graph-side gate; plan keeps its current state
     "in_review": "in_review",  # PR open = implementation complete
     "done": "done",  # merged
@@ -192,8 +192,6 @@ def coerce_status_from_yaml(value: Any) -> str:
 
     Then validates the result is in STATUS_PROGRESSION. Raises
     StatusTransitionError if the coerced value is not a known status.
-
-    Per feedback_literal_string_rejects_yaml_bool memory entry.
     """
     if value is None:
         raise StatusTransitionError(

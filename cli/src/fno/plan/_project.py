@@ -193,14 +193,14 @@ def project_node_to_plan(
             # to leave a terminal status, so force the plan off it or the doc
             # stays terminal while the graph is active. Only the field-derived
             # statuses are safe to trust: done (completed_at), in_review
-            # (pr_number), in_progress (lock) come from graph FIELDS, not the
+            # (pr_number) come from graph FIELDS, not the
             # plan. Every other graph status here was derived from the stale
             # superseded plan doc itself (`SUPERSEDED` rung -> graph `ready`) or
             # has no plan rung (blocked), and the prior rung was overwritten by
             # supersede so it cannot be recovered. Fail closed to
             # non-dispatchable `design` rather than stamp `ready`, which would
             # let unfinished planning work auto-dispatch.
-            forced = graph_status if graph_status in ("done", "in_review", "in_progress") else "design"
+            forced = graph_status if graph_status in ("done", "in_review") else "design"
             # Only `superseded` is suppressed here, never `done`: unsupersede
             # reviving a node that carries completed_at legitimately promotes
             # its plan superseded -> done, and suppressing that left the plan

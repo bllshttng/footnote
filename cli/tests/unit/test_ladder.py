@@ -281,8 +281,13 @@ def test_graph_and_frontmatter_are_a_fixed_point(tmp_path, stamped):
     assert node["status"] == stamped  # and it stays put
 
 
-def test_claiming_a_design_node_advances_the_doc_off_design(tmp_path):
-    """Forward motion still projects: claiming beats the design rung."""
+def test_claiming_a_design_node_leaves_the_doc_at_design(tmp_path):
+    """The lock lives in the graph; the doc is the planner's.
+
+    Claiming never projects onto the plan status line, so a claimed node whose
+    blueprint never finished still reads design-stage - /blueprint can keep
+    editing its own doc while the node is locked.
+    """
     from fno.graph.statuses import recompute_statuses
     from fno.plan._project import project_node_to_plan
 
@@ -291,13 +296,11 @@ def test_claiming_a_design_node_advances_the_doc_off_design(tmp_path):
     node = {"id": "x-a", "plan_path": str(plan), "locked_by": "w", "claimed_at": _now()}
 
     recompute_statuses([node])
-    assert node["status"] == "in_progress"
+    assert node["status"] == "in_progress"  # the lock is graph state
 
-    assert project_node_to_plan(node, plan) is True
-    assert _fm(plan) == "in_progress"
-
-    # Re-derived from the advanced doc, it is no longer design-stage.
-    assert not is_design_stage(node)
+    assert project_node_to_plan(node, plan) is False
+    assert _fm(plan) == "design"  # the doc stands
+    assert is_design_stage(node)
 
 
 def test_stale_graph_design_never_regresses_a_blueprinted_doc(tmp_path):
