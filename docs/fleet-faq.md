@@ -112,7 +112,7 @@ A brief that still says "hold for the operator ruling" will park a fresh worker 
 
 In this order:
 
-1. **Reuse** a live worker with headroom: `fno agents retask <name> --node <id>`. Read `fno agents top` first.
+1. **Reuse** a live worker with headroom: `fno agents top` picks the candidate. `fno agents retask <name> --node <id>` resolves the node's routed lane. When the receipt reports `status=retasked`, reuse is complete. On `spawn_required`, keep the worker and spawn fresh.
 2. **Resume** an idle worker that already knows the task.
 3. When neither exists, **spawn**.
 

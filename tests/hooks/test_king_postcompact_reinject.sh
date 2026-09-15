@@ -79,8 +79,10 @@ RC=$?
 [[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext
     | contains("level 1 over fno") and contains("Encode, then abdicate")
       and contains("--substrate thread") and contains("glm-5.3-flash[1m]")
+      and contains("status=retasked") and contains("spawn_required")
+      and (contains("retier: ") | not)
       and (contains("king-for-a-day") | not)' >/dev/null 2>&1 \
-  && pass "crowned claude: additionalContext carries crown + first rule" \
+  && pass "crowned claude: additionalContext carries crown + first rule + retask receipts" \
   || fail "crowned claude rc=$RC payload=$OUT"
 
 # 2. Crowned row, no source field, codex lane resolved through CODEX_THREAD_ID:
@@ -275,6 +277,10 @@ RC=$?
 : > "$KING_HANDOFF_PATH_FIXTURE"
 
 # 7. Byte budget: the brief is paid on every compaction of every king.
+BRIEF_BYTES=$(wc -c < "$BRIEF" | tr -d '[:space:]')
+[[ "$BRIEF_BYTES" -le "$BRIEF_MAX_BYTES" ]] \
+  && pass "source brief within budget (${BRIEF_BYTES} <= ${BRIEF_MAX_BYTES} bytes)" \
+  || fail "source brief over budget: ${BRIEF_BYTES} > ${BRIEF_MAX_BYTES} bytes"
 
 echo ""
 echo "king-postcompact-reinject: $PASS passed, $FAIL failed"
