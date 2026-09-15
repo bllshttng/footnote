@@ -534,7 +534,7 @@ def test_mint_node_name_is_the_source_less_manual_t_form(
 
 
 # ---------------------------------------------------------------------------
-# x-2c0d: a verbless --node spawn routes by the node's derived verb
+# a verbless --node spawn routes by the node's derived verb
 # ---------------------------------------------------------------------------
 
 

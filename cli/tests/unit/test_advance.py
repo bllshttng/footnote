@@ -3025,7 +3025,7 @@ from datetime import datetime, timezone, timedelta  # noqa: E402
 def _node_row(
     node_id: str, difficulty: str | None = "low", verb: str | None = None
 ) -> dict:
-    """The minimal node dict tests pass to the dispatcher (x-2c0d).
+    """The minimal node dict tests pass to the dispatcher.
 
     Key presence is what the projection check reads; difficulty low derives
     /target, matching what the builtin path asserted before the None branch
@@ -3346,7 +3346,7 @@ def test_long_configured_node_id_and_slug_still_spawn_one_valid_worker(monkeypat
             return passthrough
         parts = [str(part) for part in cmd]
         if "fno-agents" in parts[0]:
-            # x-2c0d: a node-bearing dispatch consults the gate and the slot
+            # a node-bearing dispatch consults the gate and the slot
             # grid before the launch; the probes are not worker launches.
             return _FakeProc(0, _RECEIPT)
         calls.append(cmd)
@@ -3490,7 +3490,7 @@ def test_spawn_worker_refuses_a_state_root_key_in_extra_env(monkeypatch):
             return passthrough
         parts = [str(part) for part in cmd]
         if "fno-agents" in parts[0]:
-            # x-2c0d: pre-launch gate/grid probes are infrastructure; the
+            # pre-launch gate/grid probes are infrastructure; the
             # refusal this test pins is about the worker launch.
             return _FakeProc(0, _RECEIPT)
         pytest.fail("must not spawn with a state-root override on the wrapper")

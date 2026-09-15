@@ -636,7 +636,7 @@ def _default_resolver(short_id: str) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Per-verb profile resolution (x-3d5b): a pure string rule over the seed's first
+# Per-verb profile resolution: a pure string rule over the seed's first
 # token selects `config.agents.profiles.<verb>`, layered over `agents.defaults`.
 # No content-based inference of any kind - only an explicit leading slash-verb.
 # --------------------------------------------------------------------------- #
@@ -658,7 +658,7 @@ def _seed_slot(toks: Sequence[str]) -> Optional[tuple[int, str]]:
     None. One scan so the reader and the seam rewrite agree on the slot.
     Same rules as :func:`_seed_of`: the ``--argv`` boundary ends the head,
     and a bare ``--`` fence wins only in the legacy no-message idiom
-    (x-1caa: a positional message outranks the fenced tail)."""
+    ."""
     i = 0
     while i < len(toks):
         t = toks[i]
@@ -1137,7 +1137,7 @@ def inject_spawn_defaults(
             return out
     agents = settings.agents  # type: ignore[attr-defined]
     defaults = agents.defaults
-    # Per-verb profile (x-3d5b): the seed's leading slash-verb selects a
+    # Per-verb profile: the seed's leading slash-verb selects a
     # profile layered OVER defaults, resolved field-wise into one view. A
     # verbless `--node` spawn routes by the node's derived verb, which the
     # seam passes as ``node_verb``; the journal keeps the real seed.

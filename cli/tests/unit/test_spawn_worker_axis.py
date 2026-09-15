@@ -24,7 +24,7 @@ from fno.backlog import advance
 def _node_row(
     node_id: str, difficulty: str | None = "low", verb: str | None = None
 ) -> dict:
-    """The minimal node dict tests pass to the dispatcher (x-2c0d).
+    """The minimal node dict tests pass to the dispatcher.
 
     Key presence is what the projection check reads; difficulty low derives
     /target, matching what the builtin path asserted before the None branch

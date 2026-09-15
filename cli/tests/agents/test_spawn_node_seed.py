@@ -130,7 +130,7 @@ def test_typed_message_without_a_node_is_never_consulted(monkeypatch, runner):
 
 
 def test_typed_message_with_a_node_composes_the_nodes_command(monkeypatch, runner):
-    """x-2c0d: with `--node`, a prose message gains the node's derived
+    """with `--node`, a prose message gains the node's derived
     command in front; the node row is read and the brief rides along."""
     received = _stub_pane_path(monkeypatch, rec=dict(_ENCODED))
     result = _invoke(runner, "--node", "x-1", "say hi directly", "--here", "--substrate", "pane")
@@ -242,7 +242,7 @@ def test_typed_cwd_skips_the_ensure(monkeypatch, runner, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# x-2c0d: the seam projects facts to `fno-agents node-seed` and applies the
+# the seam projects facts to `fno-agents node-seed` and applies the
 # answer before any lane is chosen. The transport is stubbed here; the
 # requires_rust test drives the real binary.
 # ---------------------------------------------------------------------------
