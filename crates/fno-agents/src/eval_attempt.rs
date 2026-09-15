@@ -637,7 +637,7 @@ pub fn run_evals_attempt(args: &[String]) -> i32 {
                         "{}",
                         serde_json::to_string(&json!({"error": e})).unwrap_or_default()
                     );
-                    3
+                    EXIT_REFUSED
                 }
             }
         } else {
