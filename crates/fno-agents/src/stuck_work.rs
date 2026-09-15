@@ -63,11 +63,19 @@ fn hung_verb(pid: u32, age_s: u64, args: &str, now_unix: u64) -> Option<Finding>
         return None;
     }
     // Long-lived shapes: the daemon and the mux clients run for days by
-    // design; a bare `fno` is a shell, not a verb.
+    // design; a bare `fno` is a shell, not a verb. The exclusion tokens
+    // count only in the subcommand prefix, before the first flag, so an
+    // argument like `--project mux` can never swallow a real verb.
+    let subcommand: Vec<&str> = tokens
+        .iter()
+        .skip(1)
+        .take_while(|a| !a.starts_with('-'))
+        .copied()
+        .collect();
     if tokens.len() == 1
         || tokens.contains(&"--server")
-        || tokens.iter().any(|a| LONG_LIVED_TOKENS.contains(a))
-        || tokens.windows(2).any(|w| w == ["loop", "run"])
+        || subcommand.iter().any(|a| LONG_LIVED_TOKENS.contains(a))
+        || subcommand.windows(2).any(|w| w == ["loop", "run"])
     {
         return None;
     }
@@ -96,8 +104,13 @@ fn hung_verb(pid: u32, age_s: u64, args: &str, now_unix: u64) -> Option<Finding>
 
 /// The raw `--timeout <dur>` token, as written (`30`, `30s`, `30m`, `30h`).
 fn declared_timeout(tokens: &[&str]) -> Option<(String, u64)> {
-    let pos = tokens.iter().position(|a| *a == "--timeout")?;
-    let raw = *tokens.get(pos + 1)?;
+    let pos = tokens
+        .iter()
+        .position(|a| *a == "--timeout" || a.starts_with("--timeout="))?;
+    let raw = match tokens[pos].split_once('=') {
+        Some((_, value)) => value,
+        None => *tokens.get(pos + 1)?,
+    };
     let digits = raw.trim_end_matches(|c: char| c.is_ascii_alphabetic());
     if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
         return None;
@@ -411,6 +424,45 @@ mod tests {
             ),
         ];
         assert!(hung_verbs(&rows, now).is_empty());
+    }
+
+    // A flag VALUE naming a long-lived word is not the long-lived shape.
+    #[test]
+    fn a_flag_value_never_counts_as_a_long_lived_shape() {
+        let now = 1_800_000_000u64 + 12_540;
+        let rows = vec![(
+            7u32,
+            12_540u64,
+            "fno-py backlog advance --loose --project mux".to_string(),
+        )];
+        let findings = hung_verbs(&rows, now);
+        assert_eq!(findings.len(), 1, "a project named mux is still a verb");
+        // The real shapes keep their exclusion.
+        let quiet = vec![
+            (1u32, 900u64, "fno agents attach".to_string()),
+            (
+                2u32,
+                900u64,
+                "fno-agents loop run --driver target".to_string(),
+            ),
+        ];
+        assert!(hung_verbs(&quiet, now).is_empty());
+    }
+
+    // AC2-ERR, equals form: --timeout=90s triples from 90, not 1800.
+    #[test]
+    fn equals_form_timeout_triples_the_floor() {
+        let now = 1_800_000_000u64;
+        let args = "fno-py do pr wait 7 --timeout=90s".to_string();
+        // The floor is 3 x 90 s = 270, not 3 x 1800.
+        assert!(hung_verbs(&vec![(1u32, 200u64, args.clone())], now).is_empty());
+        let findings = hung_verbs(&vec![(1u32, 5_000u64, args)], now);
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0].line.contains("(over 3x --timeout 90s)"),
+            "{}",
+            findings[0].line
+        );
     }
 
     #[test]
