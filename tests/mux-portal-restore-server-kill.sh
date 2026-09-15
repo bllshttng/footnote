@@ -53,8 +53,14 @@ mkdir -p "$STUB_DIR" "$AGENTS_HOME" "$DAEMON_DIR" "$TMP_DIR/repo"
 
 CLAUDE_SID="01a0f1ce-0000-4c1e-8a1c-2d3e4f5a6b7c"
 CODEX_SID="01a0f1ce-1111-4c1e-8a1c-2d3e4f5a6b7c"
+CLAUDE_NAME="proof-claude"
+CODEX_NAME="proof-codex"
 
 if [[ "${FNO_PORTAL_LIVE:-0}" == "1" ]]; then
+    # Run-unique names: a leftover row named proof-codex would make the next
+    # LIVE spawn refuse with AgentExists.
+    CLAUDE_NAME="proof-claude-$$"
+    CODEX_NAME="proof-codex-$$"
     echo "[mode] LIVE: real claude + codex threads through the real resolver"
 else
     echo "[mode] STUB: harnesses and the resolver are stubs"
@@ -143,6 +149,27 @@ s.close()
 PY
 
 cleanup() {
+    if [[ "${FNO_PORTAL_LIVE:-0}" == "1" ]]; then
+        # The LIVE run plants its threads in the real agents home by design;
+        # without this removal every run leaks rows the daemon then re-hosts
+        # (the x-f313 leak). The assert reads cwds under TMP_DIR, so it runs
+        # before that directory is removed.
+        "$MUX_BIN" agents rm "$CLAUDE_NAME" --force >/dev/null 2>&1 || true
+        "$MUX_BIN" agents rm "$CODEX_NAME" --force >/dev/null 2>&1 || true
+        "$MUX_BIN" agents list --json 2>/dev/null | python3 -c '
+import json, sys
+tmp = sys.argv[1]
+try:
+    rows = json.load(sys.stdin).get("agents", [])
+except Exception as exc:
+    print(f"FAIL: agents list unreadable, the live registry is unproven: {exc}", file=sys.stderr)
+    sys.exit(1)
+left = [r.get("name") for r in rows if str(r.get("cwd", "")).startswith(tmp)]
+for name in left:
+    print(f"FAIL: live registry still holds {name} from this run", file=sys.stderr)
+sys.exit(1 if left else 0)
+' "$TMP_DIR"
+    fi
     "$MUX_BIN" mux kill-server "$SESSION" >/dev/null 2>&1 || true
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         kill -9 "$SERVER_PID" 2>/dev/null || true
@@ -209,23 +236,23 @@ start_server
 # ── plant ────────────────────────────────────────────────────────────────
 if [[ "${FNO_PORTAL_LIVE:-0}" == "1" ]]; then
     "$MUX_BIN" agents spawn 'echo portal-restore-a6b9 and stop.' \
-        --name proof-claude --harness claude --substrate thread --cwd "$TMP_DIR/repo" >/dev/null
+        --name "$CLAUDE_NAME" --harness claude --substrate thread --cwd "$TMP_DIR/repo" >/dev/null
     "$MUX_BIN" agents spawn 'echo portal-restore-a6b9 and stop.' \
-        --name proof-codex --harness codex --model gpt-5.6-luna --substrate thread --cwd "$TMP_DIR/repo" >/dev/null
+        --name "$CODEX_NAME" --harness codex --model gpt-5.6-luna --substrate thread --cwd "$TMP_DIR/repo" >/dev/null
 fi
 
-if ! "$MUX_BIN" mux thread proof-claude --portal 0 >/dev/null 2>&1; then
+if ! "$MUX_BIN" mux thread "$CLAUDE_NAME" --portal 0 >/dev/null 2>&1; then
     echo "[plant] first reach refused; what the server's registry sees:" >&2
     "$MUX_BIN" agents list --json 2>&1 | head -c 900 >&2 || true
     echo >&2
-    if ! "$MUX_BIN" mux thread proof-claude --portal 0; then
+    if ! "$MUX_BIN" mux thread "$CLAUDE_NAME" --portal 0; then
         echo "FAIL: the first portal reach never filled; server log tail:" >&2
         tail -5 "$TMP_DIR/server.log" >&2
         exit 1
     fi
 fi
 sleep 1
-"$MUX_BIN" mux thread proof-codex --portal 2 --split right >/dev/null 2>&1 || \
+"$MUX_BIN" mux thread "$CODEX_NAME" --portal 2 --split right >/dev/null 2>&1 || \
     echo "[plant] portal 2's first reach did not fill; the verb will still answer for it by name"
 
 # A codex PANE worker: the keeper-hosted survivor whose child pid must not
