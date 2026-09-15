@@ -33,7 +33,7 @@ if [[ -n "${CLAIMS_ID:-}" ]]; then
 fi
 ```
 
-**Take the node claim.** Right after `CLAIMS_ID` resolves, read the claim. A live or suspect claim means a caller already covers this run (the subagent wrapper, a spawn-handover worker, a crown): print the holder and open nothing. Otherwise open the claim and keep the holder, so an early halt can release exactly that holder.
+**Take the node claim.** Right after `CLAIMS_ID` resolves, read the claim. A live or suspect claim means a caller covers this run (the subagent wrapper, a spawn-handover worker, a crown): print the holder and open nothing. Otherwise open the claim and keep the holder, so an early halt can release exactly that holder.
 
 ```bash
 OPENED_HOLDER=""
@@ -48,7 +48,7 @@ if [[ -n "${CLAIMS_ID:-}" ]]; then
 fi
 ```
 
-**Halt release.** Every halt after this block and before `session close` runs `fno agents claim release "node:$CLAIMS_ID" --holder "$OPENED_HOLDER"` when `OPENED_HOLDER` is set. Never pass `--stamp-do`. The halts in scope are the Consolidation Gate halt, the validate-and-finalize failure, and the post-write claims refusal.
+**Halt release.** When `OPENED_HOLDER` is set, every halt after this block and before `session close` runs `fno agents claim release "node:$CLAIMS_ID" --holder "$OPENED_HOLDER"`. Never pass `--stamp-do`. The halts in scope are the Consolidation Gate halt, the validate-and-finalize failure, and the post-write claims refusal.
 
 After resolution, the plan body proceeds as if the user had pasted the
 node's title plus details directly. The classifier below sees a raw
