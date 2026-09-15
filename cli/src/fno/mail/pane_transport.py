@@ -368,7 +368,7 @@ def wrap(
             "submit keystroke."
         )
     from fno.agents.self_stamp import (
-        resolve_self_identity,
+        resolve_self_harness,
         resolve_self_session_id,
         stamp_from,
     )
@@ -378,12 +378,7 @@ def wrap(
         wrap_fno_mail,
     )
 
-    # The same resolver `fno whoami` trusts (process-tree proof). A None omits
-    # the attribute, never renders a guess (x-7e16).
-    try:
-        sender_harness = resolve_self_identity().harness
-    except Exception:  # noqa: BLE001 - an unresolvable harness is omitted
-        sender_harness = None
+    sender_harness = resolve_self_harness()
     try:
         return wrap_fno_mail(
             text,

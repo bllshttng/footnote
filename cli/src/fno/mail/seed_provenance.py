@@ -89,7 +89,7 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
     sidecar or none, and it has no stake in the work being launched.
     """
     from fno.agents.self_stamp import (
-        resolve_self_identity,
+        resolve_self_harness,
         resolve_self_session_id,
         stamp_from,
     )
@@ -128,12 +128,7 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
 
     from fno.inbox.store import generate_msg_id
 
-    # The raw harness from the whoami resolver; a None omits the attribute,
-    # never renders a guess (x-7e16).
-    try:
-        sender_harness = resolve_self_identity().harness
-    except Exception:  # noqa: BLE001 - an unresolvable harness is omitted
-        sender_harness = None
+    sender_harness = resolve_self_harness()
     env = {
         ENV_SEED_B64: base64.b64encode(raw).decode("ascii"),
         ENV_FROM: stamp_from(None),

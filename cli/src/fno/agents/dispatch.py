@@ -59,7 +59,7 @@ from fno.agents.sender_provenance import (
     _proven_self_sender,
     _resolve_sender_entry,
     _sender_provenance,
-    warn_sender_provenance_miss as _loud_sender_provenance,
+    stamped_provenance as _stamped_sender_provenance,
 )
 from fno.agents import launch_provenance
 from fno.agents.context import EventContext, build_context
@@ -7299,8 +7299,8 @@ def _deliver_live(
         # otherwise leave that side raw rather than emit <fno_mail from=""> (codex
         # peer P2). mail.to is the recipient short resolved in dispatch_send.
         if mail.to:
-            # x-3dcc: this ctx wraps B's replies, which are injected into A, so
-            # the recipient-crown line reads A's session (mail.from_session).
+            # x-3dcc: this ctx wraps B's replies, injected into A, so the
+            # reader rank reads A's session (mail.from_session).
             relay_ctxs[entry.name] = _MailCtx(
                 from_=mail.to,
                 harness=entry.harness,
@@ -7427,10 +7427,9 @@ def _queue_durable_fallback(
 
     msg_id = msg_id or generate_msg_id()
     if mail_ctx is None:
-        from_harness, from_session = _sender_provenance(
+        from_harness, from_session = _stamped_sender_provenance(
             _resolve_sender_entry(entries, from_name), from_name
         )
-        _loud_sender_provenance(from_name, from_harness, from_session)
         mail_ctx = _build_mail_ctx(
             from_name,
             from_session,
@@ -7443,12 +7442,10 @@ def _queue_durable_fallback(
             to_session=entry.harness_session_id,
         )
     else:
-        # Reuse the caller's provenance: the envelope body and the structured
-        # thread row must name the same sender.
+        # The envelope body and the thread row must name the same sender.
         from_harness = mail_ctx.harness
         from_session = mail_ctx.from_session
-    # No `to_session`: a durable body is read whenever the recipient next
-    # drains, so a crown baked into it outlives its own reading.
+    # No to_session: a durable body is read whenever the recipient next drains.
     durable_body = wrap_fno_mail(
         message,
         from_=mail_ctx.from_,
@@ -7472,9 +7469,7 @@ def _queue_durable_fallback(
             to_harness=entry.harness,
             from_harness=from_harness,
             from_session=from_session,
-            # The envelope no longer renders the model (x-d7cf); the durable
-            # row carries it, matching what the live hosted path records.
-            from_model=mail_ctx.model,
+            from_model=mail_ctx.model,  # the tag never renders the model
             owner=owner or DurableOwner.WAKE_DAEMON.value,
             origin=mail_ctx.origin,
             # Count the raw body, not the wire wrapper: Rule 7 and the rolling
@@ -7863,10 +7858,9 @@ def dispatch_send(
                 # daemon would attribute the stranger. Floor it to unproven,
                 # which is also what the old exact-name lookup left here.
                 sender_entry = None
-            from_harness, from_session = _sender_provenance(
+            from_harness, from_session = _stamped_sender_provenance(
                 sender_entry, from_name, self_proof
             )
-            _loud_sender_provenance(from_name, from_harness, from_session)
             # A `fno agents mail send <name>` is always directed -> stamp the selected
             # session's canonical handle as the envelope `to`. A transport short
             # id is retained only for hosted delivery when the legacy row has no
@@ -8226,10 +8220,9 @@ def dispatch_send(
                 from fno.inbox.store import generate_msg_id
 
                 msg_id = generate_msg_id()
-                from_harness, from_session = _sender_provenance(
+                from_harness, from_session = _stamped_sender_provenance(
                     _resolve_sender_entry(timeout_entries, from_name), from_name
                 )
-                _loud_sender_provenance(from_name, from_harness, from_session)
                 timeout_recipient = canonical_handle(
                     timeout_entry.harness_session_id
                 )

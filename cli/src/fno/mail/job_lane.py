@@ -35,7 +35,7 @@ def job_lane_send(
         _mail_inject_codex,
     )
     from fno.agents.self_stamp import (
-        resolve_self_identity,
+        resolve_self_harness,
         resolve_self_model,
         stamp_from,
     )
@@ -75,13 +75,7 @@ def job_lane_send(
         msg_id=msg_id,
         allow_reason=style_exception,
     )
-    # The same resolver `fno whoami` trusts (process-tree proof), not the env
-    # marker reader: a session that inherited a foreign marker must not stamp
-    # its harness. A None omits the attribute, never renders a guess (x-7e16).
-    try:
-        sender_harness = resolve_self_identity().harness
-    except Exception:  # noqa: BLE001 - an unresolvable harness is omitted
-        sender_harness = None
+    sender_harness = resolve_self_harness()
     sender_model = resolve_self_model()
     # The collision-safe reply address; a reply consults the durable records
     # below, not the envelope.
