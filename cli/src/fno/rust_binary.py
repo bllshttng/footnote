@@ -104,8 +104,23 @@ def _cargo_dev_binary() -> Optional[Path]:
     return None
 
 
+def _front_binary() -> Optional[Path]:
+    """The checkout-scoped front binary CI and the doctor tooling export
+    (``$FNO_AGENTS_FRONT``, from the smoke-setup action). Sits behind PATH so
+    a stale export never outranks a fresh install, but ahead of the cargo dev
+    walk so a lane that built the binary and exported only the FRONT name
+    stays readable - the footprint door now resolves through this finder, and
+    a resolver blind to FRONT refuses every dispatch on those lanes.
+    """
+    raw = (os.environ.get("FNO_AGENTS_FRONT") or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+
 def resolve_binary() -> Optional[Path]:
-    """Locate ``fno-agents``: env override -> bundled -> sibling -> PATH -> cargo dev.
+    """Locate ``fno-agents``: env override -> bundled -> sibling -> PATH -> FRONT -> cargo dev.
 
     Bundled beats PATH so a ``pip install fno`` wheel is self-contained even when
     a different (older) ``fno-agents`` happens to be on PATH. The launcher-sibling
@@ -118,6 +133,7 @@ def resolve_binary() -> Optional[Path]:
         _bundled_binary,
         _sibling_binary,
         _path_binary,
+        _front_binary,
         _cargo_dev_binary,
     ):
         found = finder()

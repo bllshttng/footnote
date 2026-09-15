@@ -79,6 +79,32 @@ def test_env_override_outranks_the_search(tmp_path, monkeypatch):
     assert rust_binary.resolve_binary() == override
 
 
+def test_front_env_is_honored_when_path_has_none(tmp_path, monkeypatch):
+    """The smoke lanes export only FNO_AGENTS_FRONT for the built binary.
+
+    The footprint door resolves through resolve_binary, so a lane that built
+    the binary and exported the FRONT name must stay readable; a stale FRONT
+    export must still lose to a fresh install on PATH."""
+    front = _make_exe(tmp_path / "built" / rust_binary.BINARY_NAME)
+    monkeypatch.setenv("FNO_AGENTS_FRONT", str(front))
+    monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_cargo_dev_binary", lambda: None)
+    monkeypatch.delenv("PATH", raising=False)
+    assert rust_binary.resolve_binary() == front
+
+    on_path = _make_exe(tmp_path / "onpath" / rust_binary.BINARY_NAME)
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    assert rust_binary.resolve_binary() == on_path
+
+    monkeypatch.delenv("PATH", raising=False)
+    for bad in ("", "   ", str(tmp_path / "gone")):
+        monkeypatch.setenv("FNO_AGENTS_FRONT", bad)
+        # Every other finder is stubbed out, so a junk FRONT is a fall-through
+        # to nothing: None, never the stale value.
+        assert rust_binary.resolve_binary() is None, f"junk FRONT won for {bad!r}"
+
+
 def test_unusable_env_override_falls_through(tmp_path, monkeypatch):
     """A stale export must not make an installed binary unreachable."""
     on_path = _make_exe(tmp_path / "onpath" / rust_binary.BINARY_NAME)
