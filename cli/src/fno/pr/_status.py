@@ -702,14 +702,28 @@ def _merge_execution_projection(repo: str, pr: str) -> dict:
     return projection
 
 
-def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
+def run_status(
+    pr: str, cwd: Optional[str] = None, *, review_reader=None, prior: Optional[dict] = None
+) -> int:
     """Print a one-line JSON verdict for PR `pr`; return the exit code.
 
     The exit code is always the CI verdict's code; review fields are additive
     and advisory, and `ready` conjoins them with `ready_blockers` naming the
     failed conjuncts (docs/architecture/pr-status-verdict.md, `run_status`).
+    `prior` is the same head's previous payload (the cache row being
+    refreshed): failure detail is reused by job id and rerun facts replay -
+    never across heads, since the key that carries the row includes the sha.
     """
     import sys
+
+    prior_payload: dict = prior if isinstance(prior, dict) else {}
+    # Failure detail keyed by job id (x-c770): GitHub mints a new job id per
+    # attempt, so a reused entry always describes the job the rollup names
+    # now, and a completed job's log never changes.
+    known: dict = {}
+    for f in prior_payload.get("failures") or []:
+        if isinstance(f, dict) and f.get("job_id"):
+            known[str(f["job_id"])] = f
 
     pr_json, reason = _fetch(pr, cwd)
     if pr_json is None:
@@ -757,7 +771,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
                 for c in _latest_per_name(generic_rollup)
                 if _classify(c) == "fail" and _has_settled_marker(c)
             ]
-            failures = collect_failures(failing_rows, cwd)
+            failures = collect_failures(failing_rows, cwd, known=known)
         except Exception:  # noqa: BLE001 - the verdict stays authoritative
             failures = None
 

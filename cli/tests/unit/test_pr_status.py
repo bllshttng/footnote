@@ -3088,7 +3088,7 @@ def test_red_status_names_its_failures(monkeypatch, capsys):
     monkeypatch.setattr(
         _failures,
         "collect_failures",
-        lambda rows, cwd=None, runner=None: [
+        lambda rows, cwd=None, runner=None, known=None: [
             {
                 "check": "smoke-pytest",
                 "step": "Pytest (unit + integration)",
@@ -3126,7 +3126,7 @@ def test_detail_failure_never_breaks_the_verdict(monkeypatch, capsys):
     """The failure detail is additive: an exception in the detail path must
     degrade to counts, never to a wrong or crashed verdict."""
 
-    def boom(rows, cwd=None, runner=None):
+    def boom(rows, cwd=None, runner=None, known=None):
         raise RuntimeError("detail path exploded")
 
     from fno.pr import _failures

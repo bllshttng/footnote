@@ -383,7 +383,11 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
             real_stdout = sys.stdout
             sys.stdout = buf
             try:
-                code = run_status(pr, cwd)
+                # The row being refreshed is this HEAD's previous payload: its
+                # failure detail is reused by job id and its green rerun facts
+                # replay (x-c770). The key carries the head sha, so a new head
+                # has no prior row and its first read fetches everything.
+                code = run_status(pr, cwd, prior=(row or {}).get("output"))
             finally:
                 sys.stdout = real_stdout
             line = buf.getvalue()

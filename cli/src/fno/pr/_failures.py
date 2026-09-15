@@ -179,6 +179,7 @@ def collect_failures(
     failing: Sequence[dict],
     cwd: Optional[str] = None,
     runner: Callable = run,
+    known: Optional[dict] = None,
 ) -> list[dict]:
     """Detail entries for the failing rollup rows, loudest facts first.
 
@@ -191,6 +192,10 @@ def collect_failures(
     its class rather than vanishing - an omitted check reads as passed, which
     is the exact lie this module exists to stop. Capped at
     MAX_DETAILED_FAILURES with an explicit truncation entry.
+
+    `known` maps job id -> a prior entry for the SAME job (x-c770): a job id
+    is minted per attempt and a completed job's log never changes, so a known
+    id replays its entry and spends no log or job-object read.
     """
     out: list[dict] = []
     for check in list(failing)[:MAX_DETAILED_FAILURES]:
@@ -202,6 +207,10 @@ def collect_failures(
             continue
         owner, repo, job_id = ref
         entry["job_id"] = job_id
+        prior = (known or {}).get(job_id)
+        if prior is not None:
+            out.append(prior)
+            continue
         log_res = fetch_job_log(owner, repo, job_id, cwd, runner)
         log_text = log_res.stdout if log_res.ok else ""
         if not log_res.ok:
