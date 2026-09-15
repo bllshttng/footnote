@@ -1,4 +1,4 @@
-"""Status-sink fanout: the dumb dispatcher (x-2057).
+"""Status-sink fanout: the dumb dispatcher.
 
 Layer 2 of the status-breakpoints protocol. Workers emit x-dbaf protocol-family
 events (``task_started`` / ``task_done`` / ``blocked`` / ``run_summary``) once to
@@ -508,20 +508,19 @@ class _HttpResult:
     retry_after: Optional[float] = None
 
 
-def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
-    """POST a JSON body. A connect-class failure (timeout / DNS / refused) returns
+def _post_data(url: str, data: bytes, content_type: str, timeout: float) -> _HttpResult:
+    """POST raw bytes. A connect-class failure (timeout / DNS / refused) returns
     status=None; an HTTP error response returns its status code."""
     import urllib.error
     import urllib.request
 
-    data = json.dumps(body).encode("utf-8")
     try:
         req = urllib.request.Request(
             url, data=data, method="POST",
             # Discord's webhook API 403s the stdlib default `Python-urllib/x.y`
             # User-Agent (anti-abuse); an explicit UA is required or every send
             # short-circuits forever. Any descriptive string passes.
-            headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
+            headers={"Content-Type": content_type, "User-Agent": _USER_AGENT},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             code = resp.getcode()
@@ -542,6 +541,18 @@ def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
         return _HttpResult(ok=False, status=None)  # connect-class
 
 
+def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
+    """POST a JSON body (failure classes: _post_data)."""
+    return _post_data(url, json.dumps(body).encode("utf-8"), "application/json", timeout)
+
+
+def _post_raw(url: str, text: str, timeout: float) -> _HttpResult:
+    """POST the text verbatim as the body (text/plain). This is the ntfy shape:
+    with the topic in the URL the body IS the raw message, and a JSON envelope
+    would be shown to the reader literally."""
+    return _post_data(url, text.encode("utf-8"), "text/plain", timeout)
+
+
 # 4xx codes that are a fixable/transient operator or timeout condition, not a
 # permanent client error: a bad baked-in secret (401/403) or a request timeout
 # (408) should hold the cursor and retry (mirroring 429), not silently DROP every
@@ -549,8 +560,15 @@ def _post_json(url: str, body: dict[str, Any], timeout: float) -> _HttpResult:
 _TRANSIENT_4XX = frozenset((401, 403, 408, 429))
 
 
-def _deliver(url: str, body: dict[str, Any], fanout: StatusFanoutConfig) -> "tuple[str, str]":
+def _deliver(
+    url: str,
+    body: dict[str, Any],
+    fanout: StatusFanoutConfig,
+    raw: Optional[str] = None,
+) -> "tuple[str, str]":
     """Retry/failure-class driver shared by the webhook adapters.
+
+    ``raw`` mode posts the raw text and ignores ``body``.
 
     - 4xx except 401/403/408/429 -> DROPPED immediately (permanent; advance past it).
     - connect-class / 5xx / 401 / 403 / 408 / 429 -> bounded retry, then
@@ -560,7 +578,10 @@ def _deliver(url: str, body: dict[str, Any], fanout: StatusFanoutConfig) -> "tup
     attempts = max(1, fanout.retries + 1)
     result = _HttpResult(ok=False)
     for i in range(attempts):
-        result = _post_json(url, body, float(fanout.http_timeout_secs))
+        if raw is not None:
+            result = _post_raw(url, raw, float(fanout.http_timeout_secs))
+        else:
+            result = _post_json(url, body, float(fanout.http_timeout_secs))
         if result.ok:
             return DELIVERED, ""
         if result.status is not None and 400 <= result.status < 500 and result.status not in _TRANSIENT_4XX:
@@ -683,18 +704,24 @@ def _dispatch_text_webhook(
     sink: StatusSinkConfig, event: dict[str, Any], fanout: StatusFanoutConfig
 ) -> "tuple[str, str]":
     """Render ``template`` against the event and POST ``{field: rendered}``. One
-    adapter serves Discord (``content``) / Slack-incoming (``text``) / ntfy via
-    the configurable ``field``. A Discord-shaped post (``field == "content"``)
+    adapter serves Discord (``content``) / Slack-incoming (``text``) via the
+    configurable ``field``. ``raw_body = True`` posts the rendered text verbatim
+    instead - the ntfy shape, where a topic-in-URL body IS the raw message
+    (ntfy parses JSON bodies only on its root URL, so an envelope reaches the
+    reader as literal JSON). A Discord-shaped post (``field == "content"``)
     sends ``allowed_mentions: {"parse": []}`` so a worker-influenced reason
-    containing ``@everyone`` cannot ping the server. For any non-Discord field the
-    rendered text is defanged - ``<!`` -> ``&lt;!`` - so Slack's broadcast tokens
-    (``<!channel>`` / ``<!here>`` / ``<!everyone>`` / ``<!subteam^...>``) render as
-    literal text instead of pinging the workspace (Slack shows ``&lt;`` as ``<``,
-    so the visible text is unchanged; ntfy is plain text and unaffected)."""
+    containing ``@everyone`` cannot ping the server. In JSON mode any non-Discord
+    field has its rendered text defanged - ``<!`` -> ``&lt;!`` - so Slack's
+    broadcast tokens (``<!channel>`` / ``<!here>`` / ``<!everyone>`` /
+    ``<!subteam^...>``) render as literal text instead of pinging the workspace
+    (Slack shows ``&lt;`` as ``<``, so the visible text is unchanged); raw mode
+    posts before that point, so a plain-text channel shows the text verbatim."""
     url, err = _resolve_url(sink)
     if url is None:
         return SHORT_CIRCUIT, err or "no url"
     rendered = _render_template(sink.template, event)
+    if sink.raw_body:
+        return _deliver(url, {}, fanout, raw=rendered)
     if sink.field != "content":
         rendered = rendered.replace("<!", "&lt;!")
     body: dict[str, Any] = {sink.field: rendered}

@@ -33,9 +33,7 @@ retries = 2
 
 ### Sink types
 
-- **`text-webhook`** renders `template` per event and POSTs `{field: rendered}`.
-  One adapter serves Discord (`field = "content"`), Slack-incoming (`field = "text"`), and ntfy.
-  `field = "content"` also sends `allowed_mentions: {"parse": []}`, so a worker-controlled reason containing `@everyone` cannot ping the channel; other fields defang Slack broadcast tokens.
+- **`text-webhook`** renders `template` per event and POSTs `{field: rendered}`. One adapter serves Discord (`field = "content"`) and Slack-incoming (`field = "text"`). ntfy instead sets `raw_body = true`. With a topic in the URL, the body IS the raw message. A JSON envelope shows as literal JSON. `field = "content"` also sends `allowed_mentions: {"parse": []}`, so a worker-controlled reason containing `@everyone` cannot ping the channel. Other fields defang Slack broadcast tokens.
 - **`json-webhook`** POSTs the raw event JSON (optionally CloudEvents-wrapped via `cloudevents = true`).
   The escape hatch for n8n / Zapier / a custom receiver.
 - **`backlog-progress`** appends a progress note to the event's backlog node and its plan doc.
@@ -64,12 +62,25 @@ Put the value in `~/.fno/.env` (`FNO_STATUS_DISCORD=https://...`) for unattended
 [[status_sinks]]
 name = "phone"
 type = "text-webhook"
-url_env = "FNO_STATUS_PHONE"          # e.g. an ntfy topic or a Discord webhook
+url_env = "FNO_STATUS_PHONE"          # e.g. an ntfy topic URL or a Discord webhook
+raw_body = true                        # ntfy needs this; a Discord webhook does not
 field = "content"
 events = ["operator_notice"]
 template = "fno [{project}] {data.title} - {data.body} ({data.pointer})"
 enabled = true
 ```
+
+### The ntfy recipe (self-hosted over Tailscale)
+
+The sink URL is `https://<host>:8443/<topic>` and the rendered template is the whole POST body. Keep `raw_body = true`. Measured on ntfy 2.28.0: any JSON envelope posted to a topic URL reaches the phone as literal JSON.
+
+One macOS recipe that works end to end:
+
+- Build the server binary yourself: the Homebrew formula and the darwin release image are client-only. The goreleaser config builds darwin with the `noserver` tag. Clone the repo at your version tag and run `go build -tags sqlite_omit_load_extension`. cgo is required, the sqlite cache dies under `CGO_ENABLED=0`.
+- Config at `/opt/homebrew/etc/ntfy/server.yml` with `listen-http 127.0.0.1:2586`, `behind-proxy true`, and a `cache-file` under the fno state dir. Set `base-url` to the public HTTPS URL. Set `upstream-base-url` to `https://ntfy.sh` so iOS pushes instantly. ntfy.sh receives only a topic-hash poll request. The phone fetches the content from your server.
+- Run it from a user LaunchAgent with `KeepAlive` and `RunAtLoad` so it survives reboots. `ProgramArguments` points at the built binary with `serve --config <path>`.
+- Expose it tailnet-only with `tailscale serve --bg --https=8443 http://127.0.0.1:2586`. Never `tailscale funnel`: the server carries no auth of its own. The tailnet boundary is the access control, and no token enters the repo or the config files.
+- Set `FNO_STATUS_PHONE=https://<host>:8443/<topic>` in `~/.fno/.env` so the daemon resolves it. Subscribe the phone app to that exact URL, and keep `base-url` matching it. Verify with one `fno doctor event emit` plus a fanout tick.
 
 A notice is a pointer, never a second inbox. `data.pointer` names the verb that shows the durable state (`fno inbox outstanding`, `fno inbox board`). `data.body` carries counts, never queue rows. With no sink configured, nothing leaves the host.
 
