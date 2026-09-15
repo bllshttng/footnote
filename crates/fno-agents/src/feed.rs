@@ -841,6 +841,7 @@ mod tests {
             assignment: None,
             details_expired_at: None,
             writer_build: None,
+            retirement_contract: None,
         }
     }
 

@@ -80,11 +80,17 @@ pub struct ReapReceipt {
     /// enrichment, per-effect rows) but the identity-critical core was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details_expired_at: Option<String>,
-    /// The binary that applied the retirement, stamped at write time: the
-    /// build pin `reap --verify` audits against. Absent on v1 receipts and
-    /// reads as stale.
+    /// The binary that applied the retirement, stamped at write time as
+    /// provenance. Absent on v1 receipts. The pin `reap --verify` audits
+    /// against is `retirement_contract`, not this stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub writer_build: Option<String>,
+    /// The retirement contract the writer promised
+    /// (`gc_verify::retirement_contract`): the pin `reap --verify` audits
+    /// against. Absent on receipts written before the stamp existed, and
+    /// those skip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retirement_contract: Option<String>,
 }
 
 /// One retirement effect's durable record: what ran, what answered, when.
@@ -243,6 +249,7 @@ pub fn build_reap_receipt(
         assignment: None,
         details_expired_at: None,
         writer_build: Some(crate::gc_verify::current_build()),
+        retirement_contract: Some(crate::gc_verify::retirement_contract()),
     })
 }
 
