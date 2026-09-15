@@ -1127,13 +1127,15 @@ def test_internal_slash_guard_lives_inside_normalize_command():
 
     It used to live in resolve_dispatch, whose three direct normalize_command
     call sites bypassed it. If the inline test reappears in resolve_dispatch,
-    a future caller split re-opens the capture hole."""
+    a future caller split re-opens the capture hole. x-c976: the guard is the
+    parse owner's no-second-slash shape rule, so the normalizer reads the
+    parser instead of hand-rolling the prefix test."""
     import inspect
 
     from fno.agents import harness_map
 
     norm_src = inspect.getsource(harness_map.normalize_command)
-    assert '"/" in first_word[1:]' in norm_src
+    assert "parse_verb_token(first_word)" in norm_src
     resolve_src = inspect.getsource(harness_map.resolve_dispatch)
     assert "'/' not in first_word[1:]" not in resolve_src
 
