@@ -55,6 +55,12 @@ pub struct EscalationRequest {
     /// The scope the verdict was read for; names the handoff offer's crown.
     #[serde(default)]
     pub scope: Option<String>,
+    /// The escalating session. Naming it scopes the rendered needle and the
+    /// returned marker to that session's crown scope, so the operator
+    /// question channel keys per king; absent or unreadable keeps the
+    /// legacy shared channel.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -66,6 +72,10 @@ pub struct EscalationAnswer {
     pub mail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The fold marker the caller records the question under; present on
+    /// every ok answer so the caller never re-derives the channel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
 }
 
 fn refused(message: &str) -> EscalationAnswer {
@@ -74,6 +84,7 @@ fn refused(message: &str) -> EscalationAnswer {
         question: None,
         mail: None,
         message: Some(format!("king escalation refused: {message}")),
+        marker: None,
     }
 }
 
@@ -230,8 +241,18 @@ pub fn render(req: &EscalationRequest) -> EscalationAnswer {
     if let Some(verdict) = req.verdict.as_deref() {
         append_verdict(&mut closing, verdict, req.scope.as_deref(), &readings);
     }
+    // The per-king channel: naming the session scopes both the rendered
+    // needle and the returned marker to that session's crown scope; an
+    // unreadable registry keeps the legacy shared channel.
+    let marker = match req.session_id.as_deref() {
+        Some(sid) => crate::paths::AgentsHome::from_env_opt()
+            .and_then(|home| crate::state::load_registry(&home.registry_json()).ok())
+            .map(|registry| scoped_marker(&registry.entries, sid))
+            .unwrap_or_else(|| MARKER.to_owned()),
+        None => MARKER.to_owned(),
+    };
     let question = format!(
-        "[{MARKER}:{key}] The king stopped on {subject}. Reason given: {reason}. {closing}",
+        "[{marker}:{key}] The king stopped on {subject}. Reason given: {reason}. {closing}",
         key = req.key,
         reason = req.reason,
     );
@@ -247,6 +268,7 @@ pub fn render(req: &EscalationRequest) -> EscalationAnswer {
         question: Some(question),
         mail: Some(mail),
         message: None,
+        marker: Some(marker),
     }
 }
 
@@ -280,6 +302,32 @@ pub fn run_king_escalation_text(args: &[String]) -> i32 {
     0
 }
 
+/// The escalation channel's per-king scope read: resolve the escalating
+/// session's registry row and return its `crown_scope`. Session ids compare
+/// under the crate's one identity contract (`claims::same_session_id`), and
+/// a blank scope reads as None, keeping a malformed row on the legacy
+/// shared channel.
+fn escalation_scope(entries: &[crate::state::RegistryEntry], session_id: &str) -> Option<String> {
+    let row = entries.iter().find(|e| {
+        e.harness_session_id
+            .as_deref()
+            .is_some_and(|sid| crate::claims::same_session_id(sid, session_id))
+    })?;
+    row.crown_scope
+        .clone()
+        .filter(|scope| !scope.trim().is_empty())
+}
+
+/// The ask's fold marker, scoped by the king's crown scope. A scopeless
+/// session keeps the legacy shared channel. The needle key stays the
+/// caller's dedupe key: the text reads `[{marker}:{key}]`.
+fn scoped_marker(entries: &[crate::state::RegistryEntry], session_id: &str) -> String {
+    match escalation_scope(entries, session_id) {
+        Some(scope) => format!("{MARKER}:{scope}"),
+        None => MARKER.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +346,7 @@ mod tests {
             unknown_reason: None,
             verdict: None,
             scope: None,
+            session_id: None,
         }
     }
 
@@ -422,6 +471,7 @@ mod tests {
             unknown_reason: None,
             verdict: None,
             scope: None,
+            session_id: None,
         };
         let text = question(&r);
         assert!(text.starts_with("[king-escalation:87c620d35067]"));
@@ -603,5 +653,65 @@ mod tests {
         let mail = ans.mail.expect("ok case carries mail");
         assert!(mail.contains("A crown under yours stopped on a quiet board:"));
         assert!(mail.contains("Reason given: NoProgress"));
+    }
+
+    // --- the per-king scope read ---
+
+    fn registry_row(sid: &str, scope: Option<&str>) -> crate::state::RegistryEntry {
+        crate::state::RegistryEntry {
+            name: "king".to_owned(),
+            harness_session_id: Some(sid.to_owned()),
+            crown_scope: scope.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scope_resolution_returns_the_crowned_rows_scope() {
+        let rows = vec![
+            registry_row("King-A-Session", Some("fno")),
+            registry_row("king-b-session", Some("reaper")),
+        ];
+        assert_eq!(
+            escalation_scope(&rows, "king-a-session").as_deref(),
+            Some("fno")
+        );
+        assert_eq!(
+            escalation_scope(&rows, "KING-B-SESSION").as_deref(),
+            Some("reaper")
+        );
+    }
+
+    #[test]
+    fn scope_resolution_reads_blank_scope_and_unknown_session_as_none() {
+        let rows = vec![
+            registry_row("plain-session", Some("  ")),
+            registry_row("crowned-session", Some("fno")),
+            registry_row("ses_kept1", Some("reaper")),
+        ];
+        assert!(escalation_scope(&rows, "plain-session").is_none());
+        assert!(escalation_scope(&rows, "no-such-session").is_none());
+        assert_eq!(
+            escalation_scope(&rows, "ses_kept1").as_deref(),
+            Some("reaper")
+        );
+    }
+
+    #[test]
+    fn scoped_marker_names_the_crowned_session_only() {
+        let rows = vec![registry_row("king-a-session", Some("fno"))];
+        assert_eq!(
+            scoped_marker(&rows, "king-a-session"),
+            "king-escalation:fno"
+        );
+        assert_eq!(scoped_marker(&rows, "no-such-session"), MARKER);
+    }
+
+    #[test]
+    fn render_without_a_session_keeps_the_shared_channel() {
+        let ans = render(&req(IDS.to_vec(), Some(true)));
+        assert_eq!(ans.marker.as_deref(), Some(MARKER));
+        let text = ans.question.expect("ok case carries a question");
+        assert!(text.starts_with(&format!("[{}:{}]", MARKER, KEY)));
     }
 }

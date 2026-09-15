@@ -23,17 +23,29 @@ from fno.outstanding.core import read_open_questions, read_question_events
 STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
 
 
-def _fake_render(ids, key, reason, *, live=None, unknown_reason=None, verdict=None, scope=None) -> dict:
+#: The per-session crown scopes the fake renderer resolves, mirroring the
+#: crate's registry read. Channel tests install their map here.
+SCOPES: "dict[str, str]" = {}
+
+
+def _fake_render(
+    ids, key, reason, *, live=None, unknown_reason=None, verdict=None, scope=None,
+    session_id=None,
+) -> dict:
     """The renderer runs in the fno-agents crate; the fake keeps its
-    contract where the fold tests depend on it: the marker+key leads."""
+    contract where the fold tests depend on it: the marker+key leads, and a
+    session in SCOPES scopes both the marker and the needle key."""
+    crown_scope = SCOPES.get(session_id or "")
+    marker = f"king-escalation:{crown_scope}" if crown_scope else "king-escalation"
     return {
         "ok": True,
         "question": (
-            f"[king-escalation:{key}] The king stopped on {len(ids)} board "
+            f"[{marker}:{key}] The king stopped on {len(ids)} board "
             f"row(s) nothing is clearing: {', '.join(ids)}. "
             f"Reason given: {reason}. body"
         ),
         "mail": f"A crown under yours stopped on {len(ids)} rows. Reason given: {reason}.",
+        "marker": marker,
     }
 
 
@@ -44,6 +56,7 @@ def isolate_question_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
         lambda: tmp_path / "questions.jsonl",
         raising=False,
     )
+    SCOPES.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -406,6 +419,86 @@ def test_mail_presiding_king_true_only_on_a_zero_exit(monkeypatch) -> None:
     assert mail_presiding_king("l1-king", STALLED, "NoProgress") is False
 
 
+# ---------------------------------------------------------------------------
+# The channel is keyed by the escalating king's crown scope
+# ---------------------------------------------------------------------------
+
+
+def _two_channels() -> None:
+    SCOPES.update({"king-a-session": "fno", "king-b-session": "reaper"})
+
+
+def _escalate_as(root: Path, session: str, ids: "list[str]") -> "tuple[str, str]":
+    return escalate(ids, reason="NoProgress", root=root, session_id=session, cwd=root)
+
+
+def test_two_reigning_kings_never_close_each_others_question(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two kings with different stuck sets reconcile in turn: each keeps one
+    open question and neither closes the other.
+
+    The crown measured 8 asks and 7 mechanical supersedes in 41 minutes on
+    2026-09-15 because the channel keyed on the marker alone; a king's ask
+    must match on the king too, or the operator never sees a stable question.
+    """
+    _two_channels()
+    reaper_set = ["unheld_progress:x-9"]
+
+    first_a = _escalate_as(tmp_path, "king-a-session", STALLED)
+    first_b = _escalate_as(tmp_path, "king-b-session", reaper_set)
+    assert first_a[0] == "recorded"
+    assert first_b[0] == "recorded"
+
+    assert _escalate_as(tmp_path, "king-a-session", list(reversed(STALLED))) == (
+        "duplicate",
+        first_a[1],
+    )
+    assert _escalate_as(tmp_path, "king-b-session", reaper_set) == (
+        "duplicate",
+        first_b[1],
+    )
+
+    assert {q.id for q in read_open_questions(tmp_path)} == {first_a[1], first_b[1]}
+
+
+def test_a_kings_changed_set_supersedes_only_its_own_question(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A changed board still supersedes, within the king's own channel."""
+    _two_channels()
+
+    first_a = _escalate_as(tmp_path, "king-a-session", STALLED)
+    first_b = _escalate_as(tmp_path, "king-b-session", ["unheld_progress:x-9"])
+    outcome, new_id = _escalate_as(tmp_path, "king-a-session", ["undispatched:x-9999"])
+
+    assert outcome == "recorded"
+    assert {q.id for q in read_open_questions(tmp_path)} == {new_id, first_b[1]}
+    closes = [
+        rec["data"]
+        for rec in read_question_events()
+        if rec.get("type") == "operator_question_closed"
+        and rec.get("data", {}).get("question_id") == first_a[1]
+    ]
+    assert len(closes) == 1
+    assert "superseded by" in closes[0]["answer"]
+
+
+def test_a_crowned_ask_never_sweeps_the_uncrowned_shared_channel(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A scopeless caller stays on the legacy shared marker, and a crowned
+    ask never closes its row: the scoped sweep cannot match the unscoped
+    prefix. Legacy rows open at deploy time linger until a human answers."""
+    SCOPES.update({"king-a-session": "fno"})
+    legacy = _escalate_as(tmp_path, "k-test", STALLED)
+    crowned = _escalate_as(tmp_path, "king-a-session", ["undispatched:x-1"])
+
+    assert legacy[0] == "recorded"
+    assert crowned[0] == "recorded"
+    assert {q.id for q in read_open_questions(tmp_path)} == {legacy[1], crowned[1]}
+
+
 # --- the reign verdict rides the renderer (x-4d4f) ------------------------------
 
 
@@ -414,10 +507,12 @@ def test_escalate_threads_verdict_and_scope_to_the_renderer(tmp_path: Path, monk
     rendered words themselves are the crate's contract (king_escalation.rs)."""
     seen: dict = {}
 
-    def _spy(ids, key, reason, *, live=None, unknown_reason=None, verdict=None, scope=None) -> dict:
+    def _spy(ids, key, reason, *, live=None, unknown_reason=None, verdict=None, scope=None,
+             session_id=None) -> dict:
         seen.update(
             ids=ids, key=key, reason=reason,
             live=live, unknown_reason=unknown_reason, verdict=verdict, scope=scope,
+            session_id=session_id,
         )
         return _fake_render(ids, key, reason)
 
