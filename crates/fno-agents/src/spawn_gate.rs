@@ -354,6 +354,8 @@ fn meminfo_swap_pct() -> Option<f64> {
 
 /// Parse `vm_stat` output (macOS) for the cumulative `Swapins:` counter:
 /// `(pages, page_size)`. `None` without the line or the header.
+/// Dead off macOS except in tests, which parse the fixture on every platform.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn parse_vm_stat_swapins(text: &str) -> Option<(u64, u64)> {
     let page_size = vm_stat_page_size(text)?;
     let line = text.lines().find(|l| l.starts_with("Swapins:"))?;
