@@ -2856,11 +2856,25 @@ pub(crate) fn stage_session_retirement(
     Ok(StagedRetirement::Retired)
 }
 
+/// The evidence verdict when no receipt could be built at all: not
+/// resumable, and the basis names the absence instead of borrowing one.
+pub(crate) fn resume_evidence_effect_unbuilt() -> EffectRecord {
+    EffectRecord {
+        op: "resume-evidence".into(),
+        outcome: "failed".into(),
+        detail: Some("no-receipt".to_string()),
+        at: crate::daemon::now_rfc3339_like(),
+    }
+}
+
 /// The resume-evidence op, measured off the staged receipt: the resume
 /// tokens are present AND at least one located transcript exists on disk.
-/// A `failed` outcome does not hold the row (the session is already
-/// stopped); it marks the receipt unverifiable so the gate refuses it
-/// rather than certifying a retirement nothing can recover (AC6-EDGE).
+/// The `detail` carries the measured basis, so the event's `resumable`
+/// answer is auditable rather than a bare yes: `transcript-present`,
+/// `no-transcript`, or `no-resume-form`. A `failed` outcome does not hold
+/// the row (the session is already stopped); it marks the receipt
+/// unverifiable so the gate refuses it rather than certifying a retirement
+/// nothing can recover (AC6-EDGE).
 pub(crate) fn resume_evidence_effect(receipt: &ReapReceipt) -> EffectRecord {
     let transcript_exists = receipt.native_locator.as_ref().is_some_and(|loc| {
         loc.get("transcripts")
@@ -2872,7 +2886,12 @@ pub(crate) fn resume_evidence_effect(receipt: &ReapReceipt) -> EffectRecord {
                     .any(|p| std::path::Path::new(p).exists())
             })
     });
-    let confirmed = !receipt.resume_argv.is_empty() && transcript_exists;
+    let has_resume_form = !receipt.resume_argv.is_empty();
+    let (confirmed, basis) = match (has_resume_form, transcript_exists) {
+        (true, true) => (true, "transcript-present"),
+        (true, false) => (false, "no-transcript"),
+        (false, _) => (false, "no-resume-form"),
+    };
     EffectRecord {
         op: "resume-evidence".into(),
         outcome: if confirmed {
@@ -2880,7 +2899,7 @@ pub(crate) fn resume_evidence_effect(receipt: &ReapReceipt) -> EffectRecord {
         } else {
             "failed".into()
         },
-        detail: None,
+        detail: Some(basis.to_string()),
         at: crate::daemon::now_rfc3339_like(),
     }
 }
@@ -3112,6 +3131,27 @@ pub(crate) fn commit_retirements(
                         .unwrap_or((None, "none")),
                 };
                 let _ = emitter.emit("agent_row_reaped", &{
+                    // `resumable` is the receipt's measured resume-evidence
+                    // verdict, never a constant: a retirement whose transcript
+                    // is gone reports `no-transcript` instead of promising a
+                    // resume nothing can deliver.
+                    let (resumable, resumable_basis) = receipts
+                        .get(&e.name)
+                        .and_then(|receipt| {
+                            receipt
+                                .effects
+                                .iter()
+                                .find(|eff| eff.op == "resume-evidence")
+                        })
+                        .map(|eff| {
+                            (
+                                eff.outcome == "confirmed-removed",
+                                eff.detail
+                                    .clone()
+                                    .unwrap_or_else(|| "unmeasured".to_string()),
+                            )
+                        })
+                        .unwrap_or((false, "no-receipt".to_string()));
                     let mut event = json!({
                         "short_id": e.short_id,
                         "name": e.name,
@@ -3122,10 +3162,8 @@ pub(crate) fn commit_retirements(
                         "harness": e.harness_name(),
                         "harness_session_id": e.harness_session_id,
                         "basis": order.basis,
-                        // Every retirement is a finished-turn shape now: the
-                        // receipt and the node's sessions[] row keep the
-                        // resumable handle.
-                        "resumable": true,
+                        "resumable": resumable,
+                        "resumable_basis": resumable_basis,
                     });
                     // The release names itself as the remover (x-e3cc): a
                     // retirement an operator ruling applied is auditable

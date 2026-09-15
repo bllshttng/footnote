@@ -90,21 +90,29 @@ esac
     }
 }
 
-/// PATH + daemon-dir + agents-home swap, restored on drop. The env lock
-/// serializes every test that mutates process state the sweep reads. The
-/// agents home points at the sweep's own tmp root: the stop runner resolves
-/// its state root eagerly, and an undeclared `$HOME` root panics under test.
+/// PATH + daemon-dir + agents-home (+ optional HOME) swap, restored on
+/// drop. The env lock serializes every test that mutates process state the
+/// sweep reads. The agents home points at the sweep's own tmp root: the
+/// stop runner resolves its state root eagerly, and an undeclared `$HOME`
+/// root panics under test.
 struct EnvSwap {
     old_path: Option<std::ffi::OsString>,
     old_daemon: Option<std::ffi::OsString>,
     old_agents_home: Option<std::ffi::OsString>,
+    old_home: Option<std::ffi::OsString>,
 }
 
 impl EnvSwap {
-    fn to(bin: &std::path::Path, daemon: &std::path::Path, agents_home: &std::path::Path) -> Self {
+    fn to(
+        bin: &std::path::Path,
+        daemon: &std::path::Path,
+        agents_home: &std::path::Path,
+        home: Option<&std::path::Path>,
+    ) -> Self {
         let old_path = std::env::var_os("PATH");
         let old_daemon = std::env::var_os(crate::claude_roster::DAEMON_DIR_ENV);
         let old_agents_home = std::env::var_os("FNO_AGENTS_HOME");
+        let old_home = std::env::var_os("HOME");
         let joined = format!(
             "{}:{}",
             bin.display(),
@@ -113,10 +121,14 @@ impl EnvSwap {
         std::env::set_var("PATH", joined);
         std::env::set_var(crate::claude_roster::DAEMON_DIR_ENV, daemon);
         std::env::set_var("FNO_AGENTS_HOME", agents_home);
+        if let Some(home) = home {
+            std::env::set_var("HOME", home);
+        }
         Self {
             old_path,
             old_daemon,
             old_agents_home,
+            old_home,
         }
     }
 }
@@ -134,6 +146,10 @@ impl Drop for EnvSwap {
         match &self.old_agents_home {
             Some(h) => std::env::set_var("FNO_AGENTS_HOME", h),
             None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        match &self.old_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
         }
     }
 }
@@ -238,7 +254,7 @@ fn retiring_a_claude_thread_row_keeps_the_harness_session() {
     let quiet = quiet_transcript(&store_dir, "q.jsonl", 2 * 3600);
 
     let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
-    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root());
+    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root(), None);
 
     let summary = production_sweep(&home, quiet);
 
@@ -279,7 +295,7 @@ fn rm_still_removes_what_retirement_keeps() {
         .unwrap_or_else(|e| e.into_inner());
     let (_dir, home) = staged_graph_home();
     let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
-    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root());
+    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root(), None);
     let mut e = state::RegistryEntry::default();
     e.name = "worker-rm".into();
     e.short_id = "abcd1234".into();
@@ -321,7 +337,7 @@ fn an_update_registry_drop_stages_receipts_and_keeps_both_harnesses() {
         .unwrap_or_else(|e| e.into_inner());
     let (dir, home) = staged_graph_home();
     let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
-    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root());
+    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root(), None);
     let codex_home = tempfile::tempdir().unwrap();
     let old_codex_home = std::env::var_os("CODEX_HOME");
     std::env::set_var("CODEX_HOME", codex_home.path());
@@ -536,7 +552,7 @@ fn the_planner_routes_retire_without_rming_the_harness_session() {
     .unwrap();
 
     let fake_a = FakeClaude::install("bpaaa111", "aaaa1111-1111-2222-3333-444444444444");
-    let _swap = EnvSwap::to(&fake_a.bin_dir(), &fake_a.daemon_dir(), home.root());
+    let _swap = EnvSwap::to(&fake_a.bin_dir(), &fake_a.daemon_dir(), home.root(), None);
     let store_dir = home.root().join("store");
     std::fs::create_dir_all(&store_dir).unwrap();
     let quiet = quiet_transcript(&store_dir, "q.jsonl", 2 * 3600);
@@ -565,4 +581,102 @@ fn the_planner_routes_retire_without_rming_the_harness_session() {
         log.lines().any(|l| l == "stop bpaaa111"),
         "the retirement stops each worker: {log}"
     );
+}
+
+/// The `agent_row_reaped` event this sweep emitted for one row, read off
+/// the events journal.
+fn reaped_event(home: &AgentsHome, short_id: &str) -> Option<serde_json::Value> {
+    let events = std::fs::read_to_string(home.events_jsonl()).ok()?;
+    events
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| event["type"] == "agent_row_reaped" && event["data"]["short_id"] == short_id)
+        .map(|event| event["data"].clone())
+}
+
+/// AC2-HP: the event's `resumable` verdict is measured off the staged
+/// receipt, never a constant. A transcript present in the row's own store
+/// reads resumable true, with the basis named.
+#[test]
+fn the_reaped_event_measures_resumable_off_the_receipt() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (dir, home) = staged_graph_home();
+    stage_kept_row(
+        dir.path(),
+        &home,
+        "worker-kept",
+        "abcd1234",
+        "abcd1234-1111-2222-3333-444444444444",
+    );
+    // The transcript staged where the REAL store index looks: a temp HOME
+    // whose projects tree holds one quiet `<session id>.jsonl`.
+    let store_home = tempfile::tempdir().unwrap();
+    let projects = store_home
+        .path()
+        .join(".claude")
+        .join("projects")
+        .join("work");
+    std::fs::create_dir_all(&projects).unwrap();
+    let store_transcript = quiet_transcript(
+        &projects,
+        "abcd1234-1111-2222-3333-444444444444.jsonl",
+        2 * 3600,
+    );
+    let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
+    let _swap = EnvSwap::to(
+        &fake.bin_dir(),
+        &fake.daemon_dir(),
+        home.root(),
+        Some(store_home.path()),
+    );
+    let store_dir = home.root().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let quiet = quiet_transcript(&store_dir, "q.jsonl", 2 * 3600);
+    let summary = production_sweep(&home, quiet);
+
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    let event = reaped_event(&home, "abcd1234").expect("the retirement emits its event");
+    assert_eq!(event["resumable"], true, "{event}");
+    assert_eq!(event["resumable_basis"], "transcript-present", "{event}");
+    // The store transcript is the locator's evidence, so it is the file the
+    // basis names; the classification transcript only staged the quiet.
+    assert!(store_transcript.exists());
+}
+
+/// AC2-ERR: a transcript gone from the row's own store reads resumable
+/// false with the `no-transcript` basis, even though the receipt itself
+/// staged fine.
+#[test]
+fn a_transcript_gone_reads_no_transcript_even_with_a_receipt() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (dir, home) = staged_graph_home();
+    stage_kept_row(
+        dir.path(),
+        &home,
+        "worker-kept",
+        "abcd1234",
+        "abcd1234-1111-2222-3333-444444444444",
+    );
+    // The real store reads EMPTY: the temp HOME holds no projects tree.
+    let store_home = tempfile::tempdir().unwrap();
+    let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
+    let _swap = EnvSwap::to(
+        &fake.bin_dir(),
+        &fake.daemon_dir(),
+        home.root(),
+        Some(store_home.path()),
+    );
+    let store_dir = home.root().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+    let quiet = quiet_transcript(&store_dir, "q.jsonl", 2 * 3600);
+    let summary = production_sweep(&home, quiet);
+
+    assert_eq!(summary.retired.len(), 1, "{:?}", summary.retired);
+    let event = reaped_event(&home, "abcd1234").expect("the retirement emits its event");
+    assert_eq!(event["resumable"], false, "{event}");
+    assert_eq!(event["resumable_basis"], "no-transcript", "{event}");
 }

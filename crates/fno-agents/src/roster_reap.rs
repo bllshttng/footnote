@@ -472,17 +472,23 @@ fn write_receipt(
     node: Option<&str>,
     basis: &str,
 ) {
-    let receipt_staged = match crate::receipt::build_reap_receipt(entry, None) {
+    // The event's `resumable` is the receipt's measured resume-evidence
+    // verdict (the same basis the retirement sweep emits), never the fact
+    // that a receipt happened to stage: a transcript gone from the store
+    // reports `no-transcript` even though the receipt itself staged fine.
+    let (receipt_staged, evidence) = match crate::receipt::build_reap_receipt(entry, None) {
         Ok(mut receipt) => {
+            let evidence = crate::gc_sweep::resume_evidence_effect(&receipt);
             if crate::receipt::reap_receipt_path(home, &receipt).exists() {
-                true
+                (true, evidence)
             } else {
                 receipt.removed_by = Some("roster-reap".to_string());
                 receipt.effects = vec![outcome.effect_record("active-surface")];
-                crate::receipt::write_reap_receipt(home, &receipt).is_ok()
+                let staged = crate::receipt::write_reap_receipt(home, &receipt).is_ok();
+                (staged, evidence)
             }
         }
-        Err(_) => false,
+        Err(_) => (false, crate::gc_sweep::resume_evidence_effect_unbuilt()),
     };
     let emitter = crate::events::EventEmitter::new(home.events_jsonl(), "daemon");
     let _ = emitter.emit(
@@ -496,7 +502,8 @@ fn write_receipt(
             "harness": entry.harness_name(),
             "harness_session_id": entry.harness_session_id,
             "basis": basis,
-            "resumable": receipt_staged,
+            "resumable": evidence.outcome == "confirmed-removed",
+            "resumable_basis": evidence.detail,
             "receipt_staged": receipt_staged,
             "remover": "roster-reap",
         }),
@@ -977,6 +984,81 @@ mod tests {
         assert!(summary.refused[0].1.contains("failed"));
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
         assert!(!events.lines().any(|line| line.contains("fade5678")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// AC2-ERR, roster side: the event's resumable verdict is measured off
+    /// the receipt's resume-evidence, not the staging fact. A transcript
+    /// present in the row's own store reads true with its basis; a missing
+    /// one reads `no-transcript`, even though the receipt staged fine.
+    #[test]
+    fn roster_reap_measures_the_resumable_basis() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tmpdir("resumable-basis");
+        let home = crate::paths::AgentsHome::at(dir.join("home"));
+        home.ensure_root().unwrap();
+        // The real store: a temp HOME whose projects tree holds the
+        // transcript for the PRESENT case only.
+        let store_home = tempfile::tempdir().unwrap();
+        let projects = store_home
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("work");
+        std::fs::create_dir_all(&projects).unwrap();
+        let staged = quiet_transcript(&projects, "present-1111-2222-3333-444444444444");
+        std::env::set_var("HOME", store_home.path());
+        let present = row(
+            "present1",
+            Some("present-1111-2222-3333-444444444444"),
+            Some("target-x-aaaa-present"),
+        );
+        let absent = row(
+            "absent01",
+            Some("absent-1111-2222-3333-444444444444"),
+            Some("target-x-aaaa-absent"),
+        );
+        let summary = run(
+            &home,
+            900,
+            RosterScope::Provenanced,
+            false,
+            &roster(vec![present, absent]),
+            &[],
+            &|| Some(graph_done("x-aaaa")),
+            &|_| Some(vec![staged.clone()]),
+            &|_e| Some(10_000i64),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::Removed,
+        );
+        assert_eq!(summary.retired.len(), 2, "{summary:?}");
+        let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        let found: Vec<serde_json::Value> = events
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter(|event: &serde_json::Value| event["type"] == "agent_row_reaped")
+            .collect();
+        let present_event = found
+            .iter()
+            .find(|e| e["data"]["short_id"] == "present1")
+            .expect("the present row emits its event");
+        assert_eq!(present_event["data"]["resumable"], true, "{present_event}");
+        assert_eq!(
+            present_event["data"]["resumable_basis"], "transcript-present",
+            "{present_event}"
+        );
+        let absent_event = found
+            .iter()
+            .find(|e| e["data"]["short_id"] == "absent01")
+            .expect("the absent row emits its event");
+        assert_eq!(absent_event["data"]["resumable"], false, "{absent_event}");
+        assert_eq!(
+            absent_event["data"]["resumable_basis"], "no-transcript",
+            "{absent_event}"
+        );
+        let _ = std::env::remove_var("HOME");
         std::fs::remove_dir_all(&dir).ok();
     }
 
