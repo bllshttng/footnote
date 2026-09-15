@@ -61,248 +61,6 @@ def _user_row(text, uuid: str, ts: str = "2026-09-06T21:00:00.000Z") -> dict:
     }
 
 
-def test_naive_timestamp_reads_as_utc_not_local(tmp_path, tmp_ledger, monkeypatch):
-    """A naive transcript timestamp must not skew the age by the local offset."""
-    from datetime import datetime, timezone
-
-    from fno.inbox import operator_turns as ot
-
-    _pin(monkeypatch, tmp_path, [_user_row("ask", "u-naive", ts="2026-09-06T21:00:00.000000")])
-    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert result.exit_code == 0, result.output
-    rows = json.loads(result.stdout)
-    expected = datetime(2026, 9, 6, 21, 0, tzinfo=timezone.utc).timestamp()
-    assert rows[0]["ts_epoch"] == expected
-
-
-def test_duplicate_rows_derive_distinct_ids(tmp_path, tmp_ledger, monkeypatch):
-    """Two id-less identical rows get distinct derived ids, so one ack disposes one turn."""
-    tp = _transcript(
-        tmp_path,
-        [
-            {"type": "user", "timestamp": "2026-09-06T21:00:00.000Z",
-             "message": {"role": "user", "content": "same text"}},
-            {"type": "user", "timestamp": "2026-09-06T21:00:00.000Z",
-             "message": {"role": "user", "content": "same text"}},
-        ],
-    )
-    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "s-test")
-    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(tp))
-    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert result.exit_code == 0, result.output
-    rows = json.loads(result.stdout)
-    assert len(rows) == 2
-    assert rows[0]["turn_id"] != rows[1]["turn_id"]
-
-
-def test_turn_beyond_two_mb_still_queues(tmp_path, tmp_ledger, monkeypatch):
-    """AC: a turn more than 2,000,000 bytes before EOF still queues; no window drops it."""
-    tp = tmp_path / "transcript.jsonl"
-    pad = b'{"type":"user","uuid":"pad"}\n' * (2_000_000 // 28 + 1)
-    tp.write_bytes(
-        _transcript(tmp_path, [_user_row("old turn beyond any window", "u-old",
-                                         ts="2026-09-01T00:00:00.000Z")]).read_bytes()
-        + pad
-        + _transcript(tmp_path, [_user_row("fresh turn near EOF", "u-new",
-                                          ts="2026-09-06T21:00:00.000Z")]).read_bytes()
-    )
-    monkeypatch.setenv("FNO_OPERATOR_SESSION_ID", "s-test")
-    monkeypatch.setenv("FNO_OPERATOR_TRANSCRIPT", str(tp))
-    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert result.exit_code == 0, result.output
-    rows = json.loads(result.stdout)
-    assert [r["turn_id"] for r in rows] == ["u-old", "u-new"]
-
-
-def test_scan_cursor_saves_state_and_second_read_stays_incremental(tmp_path, tmp_ledger, monkeypatch):
-    """AC: a saved state plus an appended turn queues both, with offset at the file size."""
-    _pin(monkeypatch, tmp_path, [_user_row("first ask", "u-1", ts="2026-09-01T00:00:00.000Z")])
-    first = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert first.exit_code == 0, first.output
-    tp = tmp_path / "transcript.jsonl"
-    scan = tmp_ledger / "s-test.scan.json"
-    assert scan.is_file()
-    assert json.loads(scan.read_text())["offset"] == tp.stat().st_size
-
-    with tp.open("a") as fh:
-        fh.write(json.dumps(_user_row("second ask", "u-2", ts="2026-09-06T21:00:00.000Z")) + "\n")
-    second = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert second.exit_code == 0, second.output
-    assert [r["turn_id"] for r in json.loads(second.stdout)] == ["u-1", "u-2"]
-
-
-def test_scan_state_resets_on_invalid_alien_or_past_eof(tmp_path, tmp_ledger, monkeypatch):
-    """AC: invalid JSON, an alien transcript path, or an offset past EOF all read fresh."""
-    _pin(monkeypatch, tmp_path, [_user_row("ask", "u-1")])
-    tp = tmp_path / "transcript.jsonl"
-    fresh = json.loads(runner.invoke(app, ["inbox", "user", "list", "--json"]).stdout)
-    scan = tmp_ledger / "s-test.scan.json"
-
-    scan.write_text("{not json")
-    again = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert json.loads(again.stdout) == fresh
-
-    scan.write_text(json.dumps({"transcript": "/elsewhere.jsonl", "offset": 5,
-                                "line_no": 1, "turns": [], "skipped": {}}))
-    again = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert json.loads(again.stdout) == fresh
-
-    scan.write_text(json.dumps({"transcript": str(tp), "offset": tp.stat().st_size + 10,
-                                "line_no": 1, "turns": [], "skipped": {}}))
-    again = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert json.loads(again.stdout) == fresh
-
-
-def test_ack_prunes_the_saved_scan_state(tmp_path, tmp_ledger, monkeypatch):
-    """AC: after an ack, depth drops and the saved cursor no longer holds that id."""
-    _pin(monkeypatch, tmp_path, [_user_row("doom", "u-1"), _user_row("kept", "u-2")])
-    runner.invoke(app, ["inbox", "user", "list", "--json"])
-    ack = runner.invoke(app, ["inbox", "user", "ack", "u-1", "--outcome", "nothing"])
-    assert ack.exit_code == 0, ack.output
-    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert [r["turn_id"] for r in json.loads(result.stdout)] == ["u-2"]
-    state = json.loads((tmp_ledger / "s-test.scan.json").read_text())
-    assert [t["turn_id"] for t in state["turns"]] == ["u-2"]
-
-
-def test_torn_trailing_row_waits_for_its_newline(tmp_path, tmp_ledger, monkeypatch):
-    """AC: a last row with no trailing newline queues only once the newline lands."""
-    _pin(monkeypatch, tmp_path, [_user_row("whole", "u-1")])
-    tp = tmp_path / "transcript.jsonl"
-    with tp.open("a") as fh:
-        fh.write(json.dumps(_user_row("torn", "u-2")))
-    first = json.loads(runner.invoke(app, ["inbox", "user", "list", "--json"]).stdout)
-    assert [r["turn_id"] for r in first] == ["u-1"]
-    scan = tmp_ledger / "s-test.scan.json"
-    assert json.loads(scan.read_text())["offset"] < tp.stat().st_size
-
-    with tp.open("a") as fh:
-        fh.write("\n")
-    second = json.loads(runner.invoke(app, ["inbox", "user", "list", "--json"]).stdout)
-    assert [r["turn_id"] for r in second] == ["u-1", "u-2"]
-
-
-def test_derived_turn_id_stable_across_reads(tmp_path, tmp_ledger, monkeypatch):
-    """AC: an id-less row keeps its derived id after rows are appended and the queue is re-read."""
-    _pin(
-        monkeypatch,
-        tmp_path,
-        [{"type": "user", "timestamp": "2026-09-06T21:00:00.000Z",
-          "message": {"role": "user", "content": "no id here"}}],
-    )
-    tp = tmp_path / "transcript.jsonl"
-    (first,) = json.loads(runner.invoke(app, ["inbox", "user", "list", "--json"]).stdout)
-    with tp.open("a") as fh:
-        fh.write(json.dumps(_user_row("later", "u-later")) + "\n")
-    rows = json.loads(runner.invoke(app, ["inbox", "user", "list", "--json"]).stdout)
-    assert rows[0]["turn_id"] == first["turn_id"]
-
-
-def test_unwritable_capture_dir_still_answers(tmp_path, tmp_ledger, monkeypatch):
-    """AC: a capture dir that cannot be written still answers the right depth, exit 0."""
-    d = tmp_path / "ro-capture"
-    d.mkdir()
-    d.chmod(0o500)
-    try:
-        monkeypatch.setenv("FNO_OPERATOR_CAPTURE_DIR", str(d))
-        _pin(monkeypatch, tmp_path, [_user_row("ask", "u-1")])
-        result = runner.invoke(app, ["inbox", "user", "status", "--json"])
-        assert result.exit_code == 0, result.output
-        assert json.loads(result.stdout)["depth"] == 1
-    finally:
-        d.chmod(0o700)
-
-
-# -- the classifier and the queue --
-
-
-def test_prose_turn_queues_and_mail_turn_does_not(tmp_path, tmp_ledger, monkeypatch):
-    """AC: a fixture holding one prose and one <fno_mail> turn lists exactly the prose turn."""
-    _pin(
-        monkeypatch,
-        tmp_path,
-        [
-            _user_row("please widen the review gate", "u-prose-1"),
-            _user_row(
-                ['<fno_mail from="peer" harness="claude">run the sweep</fno_mail>'],
-                "u-mail-1",
-                ts="2026-09-06T21:01:00.000Z",
-            ),
-        ],
-    )
-    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert result.exit_code == 0, result.output
-    rows = json.loads(result.stdout)
-    assert [r["turn_id"] for r in rows] == ["u-prose-1"]
-
-
-def test_bare_command_and_system_only_turns_never_queue(tmp_path, tmp_ledger, monkeypatch):
-    """A bare slash command, a bare $fno: verb, and system-reminder-only content are not turns."""
-    _pin(
-        monkeypatch,
-        tmp_path,
-        [
-            _user_row("/fno:setup", "u-cmd-1"),
-            _user_row("$fno:review medium", "u-cmd-2"),
-            _user_row(
-                [{"type": "text", "text": "<system-reminder>hook output</system-reminder>"}],
-                "u-hook-1",
-            ),
-            _user_row(
-                [{"type": "tool_result", "tool_use_id": "t1", "content": "out"}],
-                "u-tool-1",
-            ),
-        ],
-    )
-    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout) == []
-
-
-def test_command_with_following_prose_still_queues(tmp_path, tmp_ledger, monkeypatch):
-    """A slash invocation carrying prose after it is an operator turn (fail toward the queue)."""
-    _pin(
-        monkeypatch,
-        tmp_path,
-        [_user_row("/fno:target x-1. A plan already exists at /tmp/plan.md, execute it", "u-arg-1")],
-    )
-    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert result.exit_code == 0, result.output
-    assert [r["turn_id"] for r in json.loads(result.stdout)] == ["u-arg-1"]
-
-
-def test_status_counts_pending_and_ack_disposes(tmp_path, tmp_ledger, monkeypatch):
-    """AC: depth reads 3 with zero acks; after one ack it reads 2 and the ledger holds a row."""
-    _pin(
-        monkeypatch,
-        tmp_path,
-        [
-            _user_row("first ask", "u-1", ts="2026-09-06T20:00:00.000Z"),
-            _user_row("second ask", "u-2", ts="2026-09-06T21:00:00.000Z"),
-            _user_row("third ask", "u-3", ts="2026-09-06T22:00:00.000Z"),
-        ],
-    )
-    result = runner.invoke(app, ["inbox", "user", "status", "--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
-    assert payload["depth"] == 3
-    assert payload["oldest_turn_id"] == "u-1"
-
-    ack = runner.invoke(
-        app, ["inbox", "user", "ack", "u-1", "--outcome", "nothing"]
-    )
-    assert ack.exit_code == 0, ack.output
-
-    result = runner.invoke(app, ["inbox", "user", "status", "--json"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["depth"] == 2
-    ledger = tmp_ledger / "s-test.jsonl"
-    rows = [json.loads(ln) for ln in ledger.read_text().splitlines() if ln.strip()]
-    assert len(rows) == 1
-    assert rows[0]["turn_id"] == "u-1"
-    assert rows[0]["outcome"] == "nothing"
-
-
 def test_ack_with_ref_names_the_artifact(tmp_path, tmp_ledger, monkeypatch):
     _pin(monkeypatch, tmp_path, [_user_row("record this as law", "u-law-1")])
     ack = runner.invoke(
@@ -432,110 +190,59 @@ def test_find_filters_by_source_kind(tmp_graph):
     assert [r["id"] for r in rows] == ["ab-opr000001"]
 
 
-def test_operator_spelling_still_reaches_the_queue(tmp_path, tmp_ledger, monkeypatch):
-    """The pre-rename `fno inbox operator` spelling is a hidden alias, not a removal."""
+def test_queue_verbs_delegate_to_the_rust_reader(tmp_path, tmp_ledger, monkeypatch):
+    """AC: both queue verbs hand the resolved ids and paths to the Rust reader door,
+    status prints the payload without `turns`, list prints the turns, a set
+    `cursor_error` warns on stderr, and a door error exits 1 naming the reader
+    instead of ever reading as depth 0."""
+    import fno.rust_binary as rb
+
+    captured: dict = {}
+
+    def stub(verb, args=()):
+        captured["verb"] = verb
+        captured["args"] = args
+        return (
+            None,
+            {
+                "depth": 1,
+                "oldest_age_s": 42,
+                "oldest_excerpt": "hello",
+                "oldest_turn_id": "u-1",
+                "skipped": {"task_notification": 1},
+                "cursor_error": "/ro/scan.json: permission denied",
+                "turns": [
+                    {"turn_id": "u-1", "ts_epoch": 1.0, "text": "hello", "excerpt": "hello"}
+                ],
+            },
+        )
+
+    monkeypatch.setattr(rb, "call_binary_json", stub)
     _pin(monkeypatch, tmp_path, [_user_row("old spelling", "u-alias-1")])
-    result = runner.invoke(app, ["inbox", "operator", "status", "--json"])
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["depth"] == 1
 
-
-# -- machine shapes never queue --
-
-
-def test_machine_shapes_never_queue_and_are_counted(tmp_path, tmp_ledger, monkeypatch):
-    """AC: one row per measured machine shape plus prose queues only the prose,
-    and the skip line names every refused shape and count."""
-    _pin(
-        monkeypatch,
-        tmp_path,
-        [
-            _user_row(
-                "<task-notification><task-id>b55cj2z2z</task-id>"
-                "<output-file>/tmp/out</output-file></task-notification>",
-                "u-tn",
-            ),
-            _user_row(
-                'Another Claude session sent a message:\n'
-                '<teammate-message teammate_id="t1" color="blue">{}</teammate-message>',
-                "u-tm",
-            ),
-            _user_row(
-                "This session is being continued from a previous conversation "
-                "that ran out of context. The summary below covers the work.",
-                "u-cp",
-            ),
-            _user_row("[Request interrupted by user]", "u-int1"),
-            _user_row("[Request interrupted by user for tool use]", "u-int2"),
-            _user_row("<bash-input>git status</bash-input>", "u-bi"),
-            _user_row("<bash-stdout>nothing to commit</bash-stdout>", "u-bs"),
-            _user_row(
-                "<command-message>fno:target</command-message>\n"
-                "<command-name>/fno:target</command-name>",
-                "u-cm",
-            ),
-            _user_row("status on your nodes?", "u-prose"),
-        ],
-    )
-    result = runner.invoke(app, ["inbox", "user", "list", "--json"])
-    assert result.exit_code == 0, result.output
-    assert [r["turn_id"] for r in json.loads(result.stdout)] == ["u-prose"]
-    assert "skipped 8 machine turn(s)" in result.output
-    for shape in (
-        "task_notification=1",
-        "teammate_message=1",
-        "compaction_preamble=1",
-        "interrupt_marker=2",
-        "bash_echo=2",
-        "command_invocation=1",
-    ):
-        assert shape in result.output
-
-
-def test_status_depth_excludes_machine_turns_and_carries_skipped(tmp_path, tmp_ledger, monkeypatch):
-    """AC: a task-notification turn does not raise depth; the JSON names the skip."""
-    _pin(
-        monkeypatch,
-        tmp_path,
-        [
-            _user_row(
-                "<task-notification><task-id>t9</task-id></task-notification>",
-                "u-tn",
-                ts="2026-09-06T20:30:00.000Z",
-            ),
-            _user_row("status on your nodes?", "u-real", ts="2026-09-06T21:00:00.000Z"),
-        ],
-    )
-    result = runner.invoke(app, ["inbox", "user", "status", "--json"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.stdout)
+    status = runner.invoke(app, ["inbox", "user", "status", "--json"])
+    assert status.exit_code == 0, status.output
+    assert captured["verb"] == "compaction"
+    assert captured["args"][:2] == ["operator-turns", "--session"]
+    assert "s-test" in captured["args"]
+    assert str(tmp_path / "transcript.jsonl") in captured["args"]
+    assert str(tmp_ledger) in captured["args"]
+    payload = json.loads(status.stdout)
     assert payload["depth"] == 1
-    assert payload["oldest_turn_id"] == "u-real"
-    assert payload["skipped"] == {"task_notification": 1}
+    assert "turns" not in payload
+    assert payload["cursor_error"] == "/ro/scan.json: permission denied"
+    assert "scan cursor not saved" in status.output
+
+    listed = runner.invoke(app, ["inbox", "user", "list", "--json"])
+    assert listed.exit_code == 0, listed.output
+    rows = json.loads(listed.stdout)
+    assert [r["turn_id"] for r in rows] == ["u-1"]
+    assert rows[0]["excerpt"] == "hello"
+    assert "scan cursor not saved" in listed.output
+
+    monkeypatch.setattr(rb, "call_binary_json", lambda verb, args=(): ("reader gone", None))
+    failed = runner.invoke(app, ["inbox", "user", "status", "--json"])
+    assert failed.exit_code == 1
+    assert "operator turn reader" in failed.output
 
 
-def test_status_human_path_names_skips_even_at_depth_zero(tmp_path, tmp_ledger, monkeypatch):
-    """A queue that is all machine noise reads depth 0 AND says what was skipped."""
-    _pin(
-        monkeypatch,
-        tmp_path,
-        [
-            _user_row("<task-notification><task-id>t1</task-id></task-notification>", "u-tn"),
-            _user_row("[Request interrupted by user]", "u-int"),
-        ],
-    )
-    result = runner.invoke(app, ["inbox", "user", "status"])
-    assert result.exit_code == 0, result.output
-    assert "user queue: 0" in result.output
-    assert "skipped 2 machine turn(s)" in result.output
-    assert "interrupt_marker=1" in result.output
-    assert "task_notification=1" in result.output
-
-
-def test_bare_command_reads_both_sigils_and_rejects_paths():
-    """x-c976: `$target x-1` is a bare command; a path is never one."""
-    from fno.inbox.operator_turns import _is_bare_command
-
-    assert _is_bare_command("$target x-1") is True
-    assert _is_bare_command("/fno:target x-1") is True
-    assert _is_bare_command("/Users/bb16/plan.md") is False
