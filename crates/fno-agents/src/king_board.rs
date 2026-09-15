@@ -888,17 +888,41 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         if candidates.is_empty() {
                             SourceRead::ok(Value::Array(Vec::new()))
                         } else {
-                            let cutoffs: HashMap<String, String> = candidates
+                            // A row keyed by its run id is never bus-addressed;
+                            // the node's live claim names the harness session
+                            // the bus does address.
+                            let claim_session_by_node: HashMap<String, String> = claim_rows
                                 .iter()
-                                .map(|(row, _)| (row.session.clone(), row.ts.clone()))
+                                .filter_map(|row| {
+                                    let node = s_str(row, "key")?.strip_prefix("node:")?;
+                                    Some((node.to_string(), s_str(row, "session_id")?.to_string()))
+                                })
+                                .collect();
+                            let mail_candidates: Vec<(String, Option<String>, String)> = candidates
+                                .iter()
+                                .map(|(row, _)| {
+                                    let holder = row
+                                        .node
+                                        .as_deref()
+                                        .and_then(|n| claim_session_by_node.get(n))
+                                        .cloned();
+                                    (row.session.clone(), holder, row.ts.clone())
+                                })
                                 .collect();
                             let answered =
-                                queues::mail_answered_since(&bus_live_log_path(), &cutoffs);
+                                queues::mail_answered_since(&bus_live_log_path(), &mail_candidates);
 
-                            let sessions: Vec<Value> = candidates
-                                .iter()
-                                .map(|(row, _)| Value::String(row.session.clone()))
-                                .collect();
+                            let mut sessions: Vec<String> = Vec::new();
+                            for (session, holder, _) in &mail_candidates {
+                                for key in [Some(session.as_str()), holder.as_deref()]
+                                    .into_iter()
+                                    .flatten()
+                                {
+                                    if !sessions.iter().any(|s| s == key) {
+                                        sessions.push(key.to_string());
+                                    }
+                                }
+                            }
                             let mut cmd = fno_py_cmd();
                             cmd.extend([
                                 "agents".to_string(),
@@ -908,15 +932,15 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                                     .unwrap_or_else(|_| "[]".to_string()),
                             ]);
                             let verdict_payload = run_json(cmd, &cwd, slice);
-                            let verdicts: HashMap<String, String> = candidates
+                            let verdicts: HashMap<String, String> = mail_candidates
                                 .iter()
-                                .filter_map(|(row, _)| {
-                                    verdict_payload
-                                        .payload
-                                        .as_ref()
-                                        .and_then(|p| p.get(&row.session))
-                                        .and_then(Value::as_str)
-                                        .map(|v| (row.session.clone(), v.to_string()))
+                                .filter_map(|(session, holder, _)| {
+                                    queues::verdict_for(
+                                        verdict_payload.payload.as_ref(),
+                                        session,
+                                        holder.as_deref(),
+                                    )
+                                    .map(|v| (session.clone(), v))
                                 })
                                 .collect();
                             SourceRead::ok(Value::Array(queues::filter_unanswered_by_mail(
