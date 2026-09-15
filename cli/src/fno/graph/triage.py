@@ -1901,6 +1901,8 @@ def cmd_health(
     if evals_summary:
         rate = evals_summary["regression_pass_rate"]
         alarm = " ALARM" if evals_summary["regression_alarm"] else ""
+        regressed = evals_summary.get("regressed") or []
+        regressed_txt = f" REGRESSED {len(regressed)}" if regressed else ""
         rate_txt = f"regression pass {rate:.0%}, " if rate is not None else ""
         age = evals_summary.get("age_days")
         age_txt = (
@@ -1910,7 +1912,7 @@ def cmd_health(
         )
         stale_txt = " STALE" if evals_summary.get("stale") else ""
         typer.echo(
-            f"  evals: {rate_txt}flakes {evals_summary['flake_count']}{age_txt}{stale_txt}{alarm}"
+            f"  evals: {rate_txt}flakes {evals_summary['flake_count']}{age_txt}{stale_txt}{alarm}{regressed_txt}"
         )
     if routing_metrics:
         rm = routing_metrics

@@ -42,7 +42,7 @@ Success criteria must be **mechanical** (develop-tests discipline): a task with 
 | Command | What it does |
 |---|---|
 | `fno doctor evals run [--task ID] [--tier T] [--repeat K] [--provider P] [--variant NAME] [--ref REF] [--lane NAME] [--cohort ID]` | Run bank tasks in disposable worktrees, grade mechanically, append one history line per task-run. Confirms above 20 total runs (`--yes` skips). `--variant v1 --ref REF` scores a change (see Variants). `--lane NAME --cohort ID` qualifies a model lane (see Lanes). |
-| `fno doctor evals report [--since N] [--graduate] [--json] [--compare vN]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. `--compare vN` scores a variant against baseline. |
+| `fno doctor evals report [--since N] [--graduate] [--json] [--compare vN] [--trend]` | Fold history: per-tier pass rates, pass@1, pass^k, flake list, regression alarm (exit 4 on alarm). `--graduate` lists eligible capability tasks. `--compare vN` scores a variant against baseline. `--trend` scores the recent window against the prior one (see Trend). |
 | `fno doctor evals macro [--since 30d] [--topic TYPE:LABEL] [--window 20] [--all] [--json] [--events PATH]` | Fold existing event journals into a recurring failure-pattern leaderboard, or drill into one pattern. |
 | `fno doctor evals graduate <id>` | Retag a capability task's YAML to regression. |
 | `fno doctor evals grade --brief B --golden G` | Grade a research brief against a golden doc (three mechanical assertions); exit 0 green. |
@@ -68,7 +68,17 @@ A variant is a **git ref of this repository**. Every prompt, skill, and project 
 - **The default report is baseline-only.** A failing `v1` never drags the baseline pass rate down. It never fires the regression alarm in doctor and triage health. Rows written before the variant axis carry no `variant` key and read as baseline.
 - **Compare.** `fno doctor evals report --compare v1` prints one line per task: baseline p@1 (n), the variant's p@1 (n), the delta, and a verdict. The verdict is `improved`, `regressed`, or `unchanged`. Then come the missing-task lists and the `git diff` line. `--json` emits the same as a dict.
 
-## Lanes
+## Trend
+
+The variant axis answers "did this change help?". The trend axis answers "are we regressing week over week?" - the question `--compare` cannot, because it scores git refs, not time.
+
+Where the history lives: `~/.fno/evals-history.jsonl` (`config.paths.evals_history`), one append-only line per task-run, one writer. It is not a git artifact (a bank run needs a spawn-capable machine and rows are per machine) and not a second journal (the `evals_scheduled_run` event is the receipt that a run happened; the history rows are what it graded).
+
+A window is `evals.stale_days` days (default 7) - the same length every health surface already calls "recent". `fno doctor evals report --trend` scores the recent window `(now - W, now]` against the prior window `(now - 2W, now - W]`, per task, with the same improved/regressed/unchanged verdicts the variant compare prints. Tasks present in only one window land in the missing lists with no verdict. `regressed` names regression-tier tasks whose verdict is `regressed`, and drives exit 4.
+
+The default report's regression alarm reads the recent window too, so a 50-day-old flake that was fixed three minutes later no longer holds exit 4 open; `tiers`, `tasks` and `flakes` stay the all-rows long view. `fno doctor` prints `evals REGRESSING - <ids> dropped against the prior <W>d window`, and `fno backlog triage health` appends ` REGRESSED <n>` to its evals line.
+
+## Run cadence and demand
 
 A **lane** is a NAME joined against the existing `config.routing.models` inventory (harness, model, effort, route, account). `agents.profiles.*.lanes` already references these same rows. This is never a second model/effort enum. An unknown lane name refuses and lists the declared lanes. A lane that config never declared cannot be requested.
 
@@ -85,10 +95,11 @@ A row missing `experiment_id` or `requested_lane` is legacy/unattributed and can
 
 ## Run cadence and demand
 
-Without a forcing function an eval harness dies. The bank sat fully built while its history went quiet. A 40-day-old 100% rendered exactly like a fresh one. The demand is now built in: the tick runs the tier on a cadence, and the health surfaces go red past the window.
+Without a forcing function an eval harness dies. The bank sat fully built while its history went quiet. A 40-day-old 100% rendered exactly like a fresh one. The demand is built in: the pr-watch tick launches the regression tier detached when the bank ages past the schedule, and the health surfaces go red past the window.
 
-- **The tick.** The pr-watch daemon's evals phase runs the regression tier on a schedule. Past the `evals.schedule_days` window (default 7, `0` disables the scheduled run) it fires `fno doctor evals run --tier regression -y`. With spawn-gate headroom the run proceeds. The run shares the tick's remaining wall budget. It journals `evals_scheduled_run` with the task count, passes, and duration. Past twice `evals.stale_days`, a plumbing failure journals `evals_stale` with the reason, plus one OS notice per schedule window. Graded fails are data: the run still journals as scheduled. Plumbing failures are could-not-fire: a refused gate, a timeout, a non-zero exit, an exit-0 run that appended no history rows.
-- **The red row.** `fno backlog triage health` renders the evals line with the newest regression run's age (`age 9d STALE`). `fno doctor` renders the same verdict in its staleness vocabulary. A stale bank prints STALE with the age and the run command. No history or no regression row prints UNKNOWN. Unknown never asserts staleness. A fresh bank prints nothing. A red evals row is an escalation, never a gate. Nothing refuses while the bank is stale. The row is what demands the run.
+- **The tick and the arm.** The pr-watch daemon's evals phase resolves the paths and the schedule, then invokes the native `fno-agents evals-arm` (one JSON receipt line back - it never runs the bank inside the tick, whose whole wall budget is 480s shared by nine phases). When the newest regression run is older than `evals.schedule_days` (default 7, `0` disables the leg) and the spawn gate admits, the arm launches `fno doctor evals run --tier regression -y` as the leader of a new process group, stdio on /dev/null, and holds the `evals:scheduled-run` claim across ticks so no second run starts while one is in flight. The run is bounded by its own 3600s budget - above the 50-minute sum of the tier's task timeouts - and the group is killed on timeout. Graded fails are data: the run still journals as scheduled. Plumbing failures are could-not-fire: a refused gate (slots at `agents.max_live` or free RAM under `agents.min_free_gb`), a dead previous run without a receipt, a timeout, a non-zero exit, an exit-0 run that appended no history rows.
+- **The journal and the notice.** Every outcome lands in the global events journal: `evals_scheduled_run` with the task count, passes, and duration (rows attributed by their own timestamps, never by a count delta), or `evals_stale` with the reason. Past twice `evals.stale_days`, a plumbing failure carries one OS notice per schedule window - the journal row IS the dedup, so no state file of its own exists.
+- **The red row.** `fno backlog triage health` renders the evals line with the newest regression run's age (`age 9d STALE`) and a ` REGRESSED <n>` suffix when the trend names regressions. `fno doctor` renders the same verdict in its staleness vocabulary, plus the REGRESSING line when the trend drops a task. A stale bank prints STALE with the age and the run command. No history or no regression row prints UNKNOWN. Unknown never asserts staleness. A fresh, trending-clean bank prints nothing. A red evals row is an escalation, never a gate. Nothing refuses while the bank is stale. The row is what demands the run.
 - **By hand.** Run `fno doctor evals run --tier regression` before a risky change. Run `--repeat 5` on a suspect flaky task.
 
 The report has two wired consumers from day one, so the harness is not a write-only artifact:

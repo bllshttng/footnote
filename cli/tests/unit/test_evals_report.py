@@ -1,6 +1,7 @@
 """Report fold + graduation (US3): AC2-HP, AC6-HP."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -307,7 +308,9 @@ def test_common_rev_tie_breaks_deterministically() -> None:
 
 def test_report_cli_regression_alarm_exit_4(tmp_path: Path) -> None:
     hp = tmp_path / "h.jsonl"
-    _history.append_row(hp, _row("r", "regression", False))
+    # ts inside the recent window: the default report's alarm reads the
+    # window since x-cf8f.
+    _history.append_row(hp, {**_row("r", "regression", False), "ts": _ts(datetime.now(timezone.utc))})
     res = runner.invoke(evals_app, ["report", "--history", str(hp)])
     assert res.exit_code == 4
     assert "REGRESSION ALARM" in res.stdout
@@ -336,6 +339,66 @@ def test_graduate_cli_unknown_id_exit_1(tmp_path: Path) -> None:
                                 encoding="utf-8")
     res = runner.invoke(evals_app, ["graduate", "nope", "--bank", str(d)])
     assert res.exit_code == 1
+
+
+# --- AC4: the trend readback CLI ---
+
+def _cli_rows(hp: Path) -> None:
+    now = datetime.now(timezone.utc)
+    prior = _ts(now - timedelta(days=10))
+    recent = _ts(now - timedelta(days=1))
+    for _ in range(3):
+        _history.append_row(hp, {**_row("r", "regression", True), "ts": prior})
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": recent})
+    _history.append_row(hp, {**_row("r", "regression", False), "ts": recent})
+    _history.append_row(hp, {**_row("r", "regression", False), "ts": recent})
+
+
+# AC4-HP: 3-of-3 prior then 1-of-3 recent -> regressed, exit 4.
+def test_report_cli_trend_regressed_exit_4(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _cli_rows(hp)
+    res = runner.invoke(evals_app, ["report", "--trend", "--history", str(hp)])
+    assert res.exit_code == 4
+    assert "REGRESSED: r" in res.stdout
+    assert "prior" in res.stdout and "recent" in res.stdout
+
+
+def test_report_cli_trend_healthy_exit_0(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    now = datetime.now(timezone.utc)
+    for days in (10.0, 1.0):
+        for _ in range(2):
+            _history.append_row(hp, {**_row("r", "regression", True), "ts": _ts(now - timedelta(days=days))})
+    res = runner.invoke(evals_app, ["report", "--trend", "--history", str(hp)])
+    assert res.exit_code == 0
+    assert "REGRESSED" not in res.stdout
+
+
+# AC4-ERR: no history prints no_data at exit 0; the --compare conflict exits 1.
+def test_report_cli_trend_no_data_exit_0(tmp_path: Path) -> None:
+    res = runner.invoke(evals_app, ["report", "--trend", "--history", str(tmp_path / "none.jsonl")])
+    assert res.exit_code == 0
+    assert "no_data" in res.stdout
+
+
+def test_report_cli_trend_compare_conflict_exit_1(tmp_path: Path) -> None:
+    res = runner.invoke(
+        evals_app,
+        ["report", "--trend", "--compare", "v1", "--history", str(tmp_path / "none.jsonl")],
+    )
+    assert res.exit_code == 1
+    assert "mutually exclusive" in res.output
+
+
+def test_report_cli_trend_json(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    _cli_rows(hp)
+    res = runner.invoke(evals_app, ["report", "--trend", "--json", "--history", str(hp)])
+    assert res.exit_code == 4
+    view = json.loads(res.stdout)
+    assert view["regressed"] == ["r"]
+    assert view["window_days"] >= 1
 
 
 # --- time axis: the windowed alarm and the trend (x-cf8f) ---

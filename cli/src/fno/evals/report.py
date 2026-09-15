@@ -317,6 +317,7 @@ def evals_health_summary(
         "flake_count": len(report["flakes"]),
         "regression_alarm": report["regression_alarm"],
         "regressed": regressed,
+        "window_days": stale_days,
         "age_days": age_days,
         "stale": stale,
         "never_ran": never_ran,

@@ -164,21 +164,65 @@ def report_command(
     n: int = typer.Option(3, "--consecutive", help="Consecutive passes required for graduation eligibility."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
     compare: Optional[str] = typer.Option(None, "--compare", help="Score this variant round (v<N>) against baseline instead of the default fold."),
+    trend: bool = typer.Option(False, "--trend", help="Score the recent window against the prior one (see docs/evals.md, Trend)."),
     history_file: Optional[Path] = typer.Option(None, "--history", help="History file (default: paths.evals_history())."),
 ) -> None:
     """Fold evals history: per-tier pass rates, pass@1, pass^k, flakes, alarm.
 
     Exit codes:
       0  report rendered (or no data); a --compare view never fires the alarm
-      4  regression alarm: a regression-tier task is below 100%
+      4  regression alarm: a regression-tier task is below 100% in the window
     """
     import json as _json
 
-    from fno.evals.report import build_report, compare_variants, graduation_candidates, load_rows
+    from datetime import datetime, timezone
+
+    from fno.config import load_settings
+    from fno.evals.report import (
+        build_report,
+        compare_variants,
+        compare_windows,
+        graduation_candidates,
+        load_rows,
+    )
 
     if history_file is None:
         from fno.paths import evals_history
         history_file = evals_history()
+
+    if trend and compare is not None:
+        typer.echo("Error: --trend and --compare are mutually exclusive", err=True)
+        raise typer.Exit(code=1)
+
+    if trend:
+        if not history_file.exists():
+            typer.echo("evals report: no_data (no history yet)")
+            raise typer.Exit(code=0)
+        view = compare_windows(
+            load_rows(history_file),
+            window_days=int(load_settings().evals.stale_days),
+            now=datetime.now(timezone.utc),
+        )
+        if json_output:
+            typer.echo(_json.dumps(view, indent=2))
+        else:
+            typer.echo(f"Eval trend (window {view['window_days']}d):")
+            typer.echo(f"  prior  since {view['prior_start']}")
+            typer.echo(f"  recent since {view['recent_start']}")
+            for tid, t in view["tasks"].items():
+                p, r = t["prior"], t["recent"]
+                typer.echo(
+                    f"  {tid}  prior {p['pass_at_1']:.0%} ({p['runs']})  "
+                    f"recent {r['pass_at_1']:.0%} ({r['runs']})  "
+                    f"delta={t['delta']:+.2f}  {t['verdict']}"
+                )
+            for label, miss in (("prior", view["missing_in_prior"]),
+                                ("recent", view["missing_in_recent"])):
+                if miss:
+                    typer.echo(f"  missing in {label}: {', '.join(miss)}")
+            if view["regressed"]:
+                typer.echo(f"  REGRESSED: {', '.join(view['regressed'])}")
+        raise typer.Exit(code=4 if view["regressed"] else 0)
 
     if compare is not None:
         if not VARIANT_RE.match(compare):
@@ -203,7 +247,13 @@ def report_command(
         raise typer.Exit(code=0)
 
     rows = load_rows(history_file, since=since)
-    report = build_report(rows)
+    # The default report's alarm reads the recent window (x-cf8f): a
+    # long-since-fixed flake outside the window no longer holds exit 4 open.
+    report = build_report(
+        rows,
+        now=datetime.now(timezone.utc),
+        window_days=int(load_settings().evals.stale_days),
+    )
 
     if graduate:
         candidates = graduation_candidates(rows, n=n)
