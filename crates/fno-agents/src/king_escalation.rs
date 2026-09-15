@@ -55,6 +55,12 @@ pub struct EscalationRequest {
     /// The scope the verdict was read for; names the handoff offer's crown.
     #[serde(default)]
     pub scope: Option<String>,
+    /// The escalating session. Naming it scopes the rendered needle and the
+    /// returned marker to that session's crown scope, so the operator
+    /// question channel keys per king; absent or unreadable keeps the
+    /// legacy shared channel.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -66,6 +72,10 @@ pub struct EscalationAnswer {
     pub mail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// The fold marker the caller records the question under; present on
+    /// every ok answer so the caller never re-derives the channel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker: Option<String>,
 }
 
 fn refused(message: &str) -> EscalationAnswer {
@@ -74,6 +84,7 @@ fn refused(message: &str) -> EscalationAnswer {
         question: None,
         mail: None,
         message: Some(format!("king escalation refused: {message}")),
+        marker: None,
     }
 }
 
@@ -230,8 +241,18 @@ pub fn render(req: &EscalationRequest) -> EscalationAnswer {
     if let Some(verdict) = req.verdict.as_deref() {
         append_verdict(&mut closing, verdict, req.scope.as_deref(), &readings);
     }
+    // The per-king channel: naming the session scopes both the rendered
+    // needle and the returned marker to that session's crown scope; an
+    // unreadable registry keeps the legacy shared channel.
+    let marker = match req.session_id.as_deref() {
+        Some(sid) => crate::paths::AgentsHome::from_env_opt()
+            .and_then(|home| crate::state::load_registry(&home.registry_json()).ok())
+            .map(|registry| scoped_marker(&registry.entries, sid))
+            .unwrap_or_else(|| MARKER.to_owned()),
+        None => MARKER.to_owned(),
+    };
     let question = format!(
-        "[{MARKER}:{key}] The king stopped on {subject}. Reason given: {reason}. {closing}",
+        "[{marker}:{key}] The king stopped on {subject}. Reason given: {reason}. {closing}",
         key = req.key,
         reason = req.reason,
     );
@@ -247,6 +268,7 @@ pub fn render(req: &EscalationRequest) -> EscalationAnswer {
         question: Some(question),
         mail: Some(mail),
         message: None,
+        marker: Some(marker),
     }
 }
 
@@ -296,60 +318,14 @@ fn escalation_scope(entries: &[crate::state::RegistryEntry], session_id: &str) -
         .filter(|scope| !scope.trim().is_empty())
 }
 
-/// The ask's channel: the fold marker and the renderer key, scoped by the
-/// king's crown scope. A scopeless session keeps the legacy shared channel.
-fn escalation_channel(
-    entries: &[crate::state::RegistryEntry],
-    session_id: &str,
-    key: &str,
-) -> (String, String) {
+/// The ask's fold marker, scoped by the king's crown scope. A scopeless
+/// session keeps the legacy shared channel. The needle key stays the
+/// caller's dedupe key: the text reads `[{marker}:{key}]`.
+fn scoped_marker(entries: &[crate::state::RegistryEntry], session_id: &str) -> String {
     match escalation_scope(entries, session_id) {
-        Some(scope) => (format!("{MARKER}:{scope}"), format!("{scope}:{key}")),
-        None => (MARKER.to_owned(), key.to_owned()),
+        Some(scope) => format!("{MARKER}:{scope}"),
+        None => MARKER.to_owned(),
     }
-}
-
-/// `fno-agents king-escalation-scope`: the crate side of the per-king
-/// escalation channel. One JSON request on stdin
-/// (`{"session_id": "...", "key": "..."}`), one JSON answer on stdout
-/// (`{"ok": true, "marker": "...", "key": "..."}`). An unreadable registry
-/// answers the legacy shared channel, never a failure - the ask must not
-/// block. Exit 2 on malformed args or an unreadable request.
-pub fn run_king_escalation_scope(args: &[String]) -> i32 {
-    if args.iter().any(|a| a == "-h" || a == "--help") {
-        println!("usage: fno-agents king-escalation-scope (one JSON request on stdin)");
-        return 0;
-    }
-    if !args.is_empty() {
-        eprintln!(
-            "fno-agents king-escalation-scope: unexpected arguments; the request rides stdin"
-        );
-        return 2;
-    }
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
-        eprintln!("fno-agents king-escalation-scope: could not read stdin");
-        return 2;
-    }
-    #[derive(Deserialize)]
-    struct ScopeRequest {
-        session_id: String,
-        key: String,
-    }
-    let req: ScopeRequest = match serde_json::from_str(&input) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("fno-agents king-escalation-scope: bad request: {e}");
-            return 2;
-        }
-    };
-    let path = crate::paths::AgentsHome::from_env().registry_json();
-    let channel = crate::state::load_registry(&path)
-        .map(|registry| escalation_channel(&registry.entries, &req.session_id, &req.key))
-        .unwrap_or((MARKER.to_owned(), req.key));
-    let answer = serde_json::json!({ "ok": true, "marker": channel.0, "key": channel.1 });
-    println!("{answer}");
-    0
 }
 
 #[cfg(test)]
@@ -370,6 +346,7 @@ mod tests {
             unknown_reason: None,
             verdict: None,
             scope: None,
+            session_id: None,
         }
     }
 
@@ -494,6 +471,7 @@ mod tests {
             unknown_reason: None,
             verdict: None,
             scope: None,
+            session_id: None,
         };
         let text = question(&r);
         assert!(text.starts_with("[king-escalation:87c620d35067]"));
@@ -720,18 +698,20 @@ mod tests {
     }
 
     #[test]
-    fn channel_scopes_marker_and_key_for_the_crowned_session_only() {
+    fn scoped_marker_names_the_crowned_session_only() {
         let rows = vec![registry_row("king-a-session", Some("fno"))];
         assert_eq!(
-            escalation_channel(&rows, "king-a-session", "deadbeef1234"),
-            (
-                "king-escalation:fno".to_owned(),
-                "fno:deadbeef1234".to_owned()
-            )
+            scoped_marker(&rows, "king-a-session"),
+            "king-escalation:fno"
         );
-        assert_eq!(
-            escalation_channel(&rows, "no-such-session", "deadbeef1234"),
-            ("king-escalation".to_owned(), "deadbeef1234".to_owned())
-        );
+        assert_eq!(scoped_marker(&rows, "no-such-session"), MARKER);
+    }
+
+    #[test]
+    fn render_without_a_session_keeps_the_shared_channel() {
+        let ans = render(&req(IDS.to_vec(), Some(true)));
+        assert_eq!(ans.marker.as_deref(), Some(MARKER));
+        let text = ans.question.expect("ok case carries a question");
+        assert!(text.starts_with(&format!("[{}:{}]", MARKER, KEY)));
     }
 }

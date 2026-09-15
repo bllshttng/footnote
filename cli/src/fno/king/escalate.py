@@ -26,11 +26,13 @@ def _render(
     unknown_reason: "str | None" = None,
     verdict: "str | None" = None,
     scope: "str | None" = None,
+    session_id: "str | None" = None,
 ) -> dict:
     """One round-trip with the crate renderer (d-b6cc1a2a: new code in
     ``crates/``). ``ok: false`` is a REFUSAL, not a failure: the caller must
     raise, never fall back to Python text - the fallback is the defect.
     ``verdict`` (first word = verdict name, x-4d4f) and ``scope`` ride along.
+    Naming ``session_id`` scopes the answer's ``marker`` to that king.
     """
     from fno.rust_binary import verb_call
 
@@ -44,6 +46,7 @@ def _render(
             "unknown_reason": unknown_reason,
             "verdict": verdict,
             "scope": scope,
+            "session_id": session_id,
         },
     )
 
@@ -62,13 +65,13 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
 
     ids = sorted(set(stalled_ids))
     key = dedupe_key(ids)
-    marker, render_key = _escalation_channel(session_id, key)
     # Render BEFORE the fold: a refusal must raise while the channel is still
     # untouched. The channel's empty branch closes open asks, so reaching it
-    # with a refused set would read as a clean board.
+    # with a refused set would read as a clean board. Naming the session
+    # scopes the answer's marker to this king.
     answer = _render(
-        ids, render_key, reason, live=live, unknown_reason=unknown_reason,
-        verdict=verdict, scope=scope,
+        ids, key, reason, live=live, unknown_reason=unknown_reason,
+        verdict=verdict, scope=scope, session_id=session_id,
     )
     if not answer.get("ok"):
         raise ValueError(answer.get("message", "king escalation refused"))
@@ -77,7 +80,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         root=root,
         session_id=session_id,
         cwd=cwd,
-        marker=marker,
+        marker=answer.get("marker") or MARKER,
         subject="king-escalation",
         identities=ids,
         question=lambda _key: answer["question"],
@@ -91,24 +94,6 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         asker=canonical_handle(session_id) if session_id else None,
     )
     return ("recorded", qid) if outcome == "asked" else (outcome, qid)
-
-
-def _escalation_channel(session_id: "str | None", key: str) -> "tuple[str, str]":
-    """The ask's marker and render key from the crate; legacy on failure."""
-    if not session_id:
-        return MARKER, key
-    try:
-        from fno.rust_binary import verb_call
-
-        answer = verb_call(
-            "king-escalation-scope", {"session_id": session_id, "key": key}
-        )
-    except Exception:  # noqa: BLE001 - an unreadable crate answer never blocks the ask
-        return MARKER, key
-    marker, out_key = answer.get("marker"), answer.get("key")
-    if isinstance(marker, str) and marker and isinstance(out_key, str) and out_key:
-        return marker, out_key
-    return MARKER, key
 
 
 def resolve_presiding_king(session_id: "str | None") -> "dict | None":

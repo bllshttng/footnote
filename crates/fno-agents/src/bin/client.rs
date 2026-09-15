@@ -353,16 +353,6 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::king_escalation::run_king_escalation_text(&args[1..]);
     }
 
-    // `king-escalation-scope` is the crate side of the per-king escalation
-    // channel: the registry read that resolves the escalating session's
-    // crown scope, so the channel key computes in crates and Python keeps
-    // only the call. Same `matches!` treatment as `king-escalation-text` so
-    // the routable-verb parity guard does not see it - no advertised fno
-    // verb is added.
-    if matches!(verb, "king-escalation-scope") {
-        return fno_agents::king_escalation::run_king_escalation_scope(&args[1..]);
-    }
-
     // `review-start` is the hidden codex review-forcing verb (node x-c24d): the
     // app-server `review/start` RPC is the codex counterpart of claude's
     // `--raw /code-review` (the Python raw router sends exact review verbs here;
