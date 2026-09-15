@@ -53,7 +53,11 @@ _INLINE_LIST_RE = re.compile(r"^\[(?P<body>.*)\]$")
 # Resolve the escapes `_serialize_item` emits inside a double-quoted item.
 _DQ_ESCAPE_RE = re.compile(r'\\(["\\])')
 # An inline item carrying either of these cannot be written bare.
-_NEEDS_QUOTE_RE = re.compile(r'[,"]')
+_NEEDS_QUOTE_RE = re.compile(r'[,"\[\]{}]')
+
+# A plain YAML item that starts with an indicator, holds ": " or " #", or has
+# edge whitespace reads back as a different node, or does not parse at all.
+_YAML_UNSAFE_RE = re.compile(r"""^[-?:](\s|$)|^[][{}#&*!|>%@`,'"]|:(\s|$)|\s#|^\s|\s$""")
 
 
 class RawBlock:
@@ -176,11 +180,9 @@ def _quote_item(item: str) -> str:
 def _bare_is_ambiguous(item: str) -> bool:
     """True when an unquoted item would not read back as itself.
 
-    Shared by both list forms: surrounding whitespace is eaten by the reader's
-    `.strip()`, an empty item is dropped entirely, and a leading quote
-    character makes `_parse_scalar` try to unwrap the item.
+    Shared by both list forms; quoting is on structure, never on type.
     """
-    return not item or item != item.strip() or item[0] in "\"'"
+    return not item or bool(_YAML_UNSAFE_RE.search(item))
 
 
 def _serialize_item(item: str) -> str:
