@@ -7,7 +7,7 @@ respawned king meeting the same board records no second question, and a
 changed board supersedes only that king's stale row.
 
 The operator-facing text renders in the ``fno-agents`` crate
-(``king-escalation-text``, x-ff27); this module keeps the fold and the
+(``king-escalation-text``); this module keeps the fold and the
 liveness read.
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ def _render(
     """One round-trip with the crate renderer (d-b6cc1a2a: new code in
     ``crates/``). ``ok: false`` is a REFUSAL, not a failure: the caller must
     raise, never fall back to Python text - the fallback is the defect.
-    ``verdict`` (first word = verdict name, x-4d4f) and ``scope`` ride along.
+    ``verdict`` (first word = verdict name) and ``scope`` ride along.
     Naming ``session_id`` scopes the answer's ``marker`` to that king.
     """
     from fno.rust_binary import verb_call
@@ -84,7 +84,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         subject="king-escalation",
         identities=ids,
         question=lambda _key: answer["question"],
-        # No ask line. A stalled row is queue-qualified (`undispatched:x-1234`)
+        # No ask line. A stalled row is queue-qualified (`undispatched:`)
         # and not every queue holds backlog nodes, so any single clearing
         # command here would be a guess. The question text names the rows.
         ask=lambda _key: "",
@@ -97,7 +97,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
 
 
 def resolve_presiding_king(session_id: "str | None") -> "dict | None":
-    """The crown above the escalating session's own, or None (x-3ecf AC4-HP)."""
+    """The crown above the escalating session's own, or None (AC4-HP)."""
     if not session_id:
         return None
     try:

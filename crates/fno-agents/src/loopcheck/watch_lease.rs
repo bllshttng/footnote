@@ -409,11 +409,11 @@ mod tests {
 
     #[test]
     fn renew_extends_an_expired_bg_job_claim_whose_witness_says_live() {
-        // x-aad7: a claude BACKGROUND-JOB session holds a node claim (ee2edef3
-        // on x-3954, PR 2010), arms the sanctioned watcher, and idles past the
+        // a claude BACKGROUND-JOB session holds a node claim (ee2edef3
+        // on, PR 2010), arms the sanctioned watcher, and idles past the
         // claim TTL. The job's supervisor pid is gone by the next stop, but the
         // session itself is alive: the witness answers from the registry row
-        // keyed by the bg-job session id. Pre-x-b445 renew refused every
+        // keyed by the bg-job session id. Pre- renew refused every
         // expired claim, and the stop hook rejected the watching tag 32 times
         // with the transient "could not be renewed" text. This pins the
         // bg-job shape: expired + a LIVE verdict through a session id means
@@ -450,8 +450,8 @@ mod tests {
             pid: Some(dead_pid()),
             ..Default::default()
         };
-        let _ = crate::claims::acquire("node:x-3227-bglease", "target-session:me", opts);
-        let path = crate::claims::claim_path("node:x-3227-bglease", Some(td.path())).unwrap();
+        let _ = crate::claims::acquire("node:x-aaaa-bglease", "target-session:me", opts);
+        let path = crate::claims::claim_path("node:x-aaaa-bglease", Some(td.path())).unwrap();
         let mut rec = crate::claims::read_claim_file(&path).unwrap();
         rec.session_id = Some("t-3227-bgjob-session".into());
         rec.expires_at = Some(crate::claims::now_ms() - 1);
@@ -472,7 +472,7 @@ mod tests {
         );
 
         let result = crate::claims::renew(
-            "node:x-3227-bglease",
+            "node:x-aaaa-bglease",
             "target-session:me",
             120_000,
             Some(td.path()),

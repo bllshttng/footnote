@@ -2070,8 +2070,8 @@ mod tests {
     #[test]
     fn canonical_scope_row_is_emitted() {
         let dir = tempfile::tempdir().unwrap();
-        let (ctx, path) = emit_ctx(&dir, "x-cccc");
-        let data = json!({"scope": "x-cccc", "change": "beat"});
+        let (ctx, path) = emit_ctx(&dir, "x-a792");
+        let data = json!({"scope": "x-a792", "change": "beat"});
         assert!(emit_row(&ctx, data.as_object().unwrap()));
         let rows = std::fs::read_to_string(&path).unwrap();
         assert_eq!(rows.lines().count(), 1);
@@ -2081,8 +2081,8 @@ mod tests {
     #[test]
     fn non_canonical_scope_refuses_the_row() {
         let dir = tempfile::tempdir().unwrap();
-        let (ctx, path) = emit_ctx(&dir, "x-dddd ready no build, idea");
-        let data = json!({"scope": "x-dddd ready no build, idea", "change": "beat"});
+        let (ctx, path) = emit_ctx(&dir, "x-0c60 ready no build, x-8984 idea");
+        let data = json!({"scope": "x-0c60 ready no build, x-8984 idea", "change": "beat"});
         assert!(!emit_row(&ctx, data.as_object().unwrap()));
         assert!(
             !path.exists() || std::fs::read_to_string(&path).unwrap().trim().is_empty(),

@@ -440,7 +440,7 @@ fn mint_walk_discriminator() -> String {
 }
 
 /// `kl-th-<scope>-<walk-discriminator>`, minted through the canonical
-/// `fno agents name` bridge : the kl source names the king loop as the
+/// `fno agents name` bridge: the kl source names the king loop as the
 /// spawner, th the think-class walk verb, and the scope the crown it belongs
 /// to so a journal read by a human says which reign spawned the unit. A failed
 /// mint REFUSES the walk (Err) rather than falling back to an uncoded key.

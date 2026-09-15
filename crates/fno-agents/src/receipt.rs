@@ -1,6 +1,6 @@
 //! Recovery receipts for a registry row that left the registry.
 //!
-//! Moved out of `daemon.rs` (x-a879) so the write choke point
+//! Moved out of `daemon.rs` so the write choke point
 //! (`state::update_registry`) can stage the same receipt for a row removed
 //! through ANY door, not only the reap sweep. `daemon.rs` re-exports the
 //! moved items, so existing reap-path references are unchanged.
@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use crate::paths::AgentsHome;
 use crate::state;
 
-/// One reaped row's recovery record (x-b150). Built from the registry row
+/// One reaped row's recovery record. Built from the registry row
 /// itself - the fields present on every row - plus the harness-DECLARED
 /// interactive resume form read from the capability table (the same single
 /// source `fno whoami ledger` renders), and enriched from the ledger entry
@@ -41,7 +41,7 @@ pub struct ReapReceipt {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ledger: Option<Value>,
     /// Who took the row, when the removal came through a NON-reap door
-    /// (x-a879). A reap receipt stays byte-identical in shape to before this
+    ///. A reap receipt stays byte-identical in shape to before this
     /// field existed: the key is skipped when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub removed_by: Option<String>,
@@ -68,7 +68,7 @@ pub struct ReapReceipt {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resume_argv: Vec<String>,
     /// Per-effect retirement progress, appended as effects land so a
-    /// crash/retry continues instead of repeating (x-70e1 task 3). Empty on
+    /// crash/retry continues instead of repeating (task 3). Empty on
     /// a v1 receipt and on every receipt until the first effect records.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<EffectRecord>,
@@ -265,7 +265,7 @@ fn store_root_for(harness: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Requested/observed model provenance from the row's axis fields, in the
-/// x-aa8e shape (a bare model is two facts; the basis travels beside it).
+/// shape (a bare model is two facts; the basis travels beside it).
 fn model_provenance_of(e: &state::RegistryEntry) -> Option<serde_json::Value> {
     let model = e.model.as_deref()?;
     let mut out = serde_json::json!({ "model": model });
@@ -341,7 +341,7 @@ mod tests {
     }
 
     /// The reap receipt's on-disk shape is unchanged: `removed_by` is absent
-    /// for a reap, present for a non-reap removal (x-a879 change 2).
+    /// for a reap, present for a non-reap removal (change 2).
     #[test]
     fn reap_receipt_omits_removed_by_and_a_removal_receipt_sets_it() {
         let e = sample_row("shape");

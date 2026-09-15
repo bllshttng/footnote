@@ -1064,7 +1064,7 @@ def build_dir_cmd() -> None:
     """Print the CARGO_BUILD_BUILD_DIR value: ``<base>/{workspace-path-hash}``.
 
     The shell surface over fno.paths.cargo_build_dir_value(); the target stop
-    hook exports it for done_probes that run cargo (x-3227). Hidden: consumed
+    hook exports it for done_probes that run cargo. Hidden: consumed
     by the hook, not by operators.
     """
     from fno.paths import cargo_build_dir_value

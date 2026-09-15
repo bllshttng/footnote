@@ -568,7 +568,7 @@ verb_rc=0
 if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
     DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
 else
-    # x-3227: done_probes inherit the session cargo build-dir env, TARGET loops
+    # done_probes inherit the session cargo build-dir env, TARGET loops
     # only (probes run for target plans, and the settle sweep below must stay
     # the hook's last `fno` call for a king driver). The hook env is replayed
     # from the session snapshot and fno declares none, so a probe running cargo

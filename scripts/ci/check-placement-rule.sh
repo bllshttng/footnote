@@ -114,7 +114,7 @@
 #      same census: it stages reap receipts and measures resume evidence off
 #      that transcript tree, and its test stages one under a tmp HOME.
 #      Footnote stores nothing there.
-#      scratch.rs (x-caf8) is the scratch-shape sweep: its whole subject IS
+#      scratch.rs is the scratch-shape sweep: its whole subject IS
 #      Claude Code's own ~/.claude/jobs/<job>/tmp tree, read-only rglob for
 #      authored py/sh scratch; it writes only the global events journal
 #      under the state root. scratch_cli.py is its Python leaf, which only
