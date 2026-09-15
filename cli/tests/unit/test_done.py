@@ -15,6 +15,12 @@ from typer.testing import CliRunner
 
 from fno.cli import app
 
+# The done shim drives CliRunner captures that break when a loaded xdist
+# worker interleaves them with unrelated files: the deprecation line leaks
+# into captured stdout and the invocation exits 1. A dedicated loadgroup
+# worker keeps this module off the crowded workers.
+pytestmark = [pytest.mark.xdist_group("done-audit-serial")]
+
 runner = CliRunner()
 
 

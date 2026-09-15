@@ -29,6 +29,11 @@ from fno.king.lane import LaneItem
 from fno.outstanding.cli import outstanding_app
 from fno.outstanding.core import RENDER_CAP, Outstanding, Question, VerdictRow, render
 
+# Same loaded-worker hazard as test_done.py: liveness forks a child per
+# report, and the captures break under interleaving. One dedicated loadgroup
+# worker keeps this module off the crowded workers.
+pytestmark = [pytest.mark.xdist_group("done-audit-serial")]
+
 runner = CliRunner()
 
 requires_rust = pytest.mark.skipif(
