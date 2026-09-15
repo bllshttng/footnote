@@ -1365,9 +1365,8 @@ mod tests {
         );
 
         let uuid = "9d2874cb-9365-48c0-aeb6-9e1d244f4cd3";
-        let wt_project = home
-            .join(".claude")
-            .join("projects")
+        let wt_project = ClaudeHome::at(&home)
+            .projects_dir()
             .join(crate::claude_ask::claude_cwd_slug(&wt));
         std::fs::create_dir_all(&wt_project).unwrap();
         std::fs::write(wt_project.join(format!("{uuid}.jsonl")), "[]").unwrap();
@@ -1405,9 +1404,8 @@ mod tests {
         let recorded = home.join("recorded");
         std::fs::create_dir_all(&recorded).unwrap();
         let uuid = "aaaaaaaa-0000-0000-0000-000000000000";
-        let project = home
-            .join(".claude")
-            .join("projects")
+        let project = ClaudeHome::at(&home)
+            .projects_dir()
             .join(crate::claude_ask::claude_cwd_slug(&recorded));
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join(format!("{uuid}.jsonl")), "[]").unwrap();
@@ -1537,7 +1535,7 @@ mod tests {
         // probe must not win just because the slug matches.
         let recorded = tmp.path().join("gone-dir");
         let slug = crate::claude_ask::claude_cwd_slug(&recorded);
-        let project = tmp.path().join(".claude").join("projects").join(slug);
+        let project = ClaudeHome::at(tmp.path()).projects_dir().join(slug);
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
             project.join(format!("{uuid}.jsonl")),
