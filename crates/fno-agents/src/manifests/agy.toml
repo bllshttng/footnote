@@ -1,4 +1,4 @@
-# Agy readiness manifest (x-8f7f) - authored from `AgyReadinessDetector`
+# Agy readiness manifest - authored from `AgyReadinessDetector`
 # (readiness.rs), NOT from a live capture: agy is closed-source, so the markers
 # are cribbed from the detector it mirrors. agy runs Gemini models under the hood
 # and draws the same prompt-glyph family via the shared `prompt_ready` logic
@@ -16,7 +16,7 @@
 # State vocabulary + arbitration: see codex.toml header (same contract):
 #   auth_wall (980) > busy (900) > idle_prompt (100).
 #
-# No [rule.answer] (x-5103): validated against a live agy TUI, agy's trust prompt
+# No [rule.answer]: validated against a live agy TUI, agy's trust prompt
 # is an ARROW-ONLY menu ("> Yes, I trust this folder" / "  No, exit" with a
 # "↑/↓ Navigate · enter Confirm" footer) - no numbered options to send a digit
 # to. Per the epic's Open Q1 that is the documented no-op: agy stays focus-only

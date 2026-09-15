@@ -1,4 +1,4 @@
-"""Deterministic blast-radius classifier (x-518f).
+"""Deterministic blast-radius classifier.
 
 `classify(paths, cfg)` reads a plan's touched-surface path list against a blast
 map and returns ``{"verdict": "high"|"low"|"unknown", "matched_paths": [...],

@@ -34,7 +34,7 @@ fi
 #
 # GLOBAL_SETTINGS is the per-user global config and must NEVER alias CONFIG_FILE
 # (the ACTIVE config = the project-local file when one exists; aliasing it hid
-# every global-only key from bash consumers - ab-5d6c3d47). Honor
+# every global-only key from bash consumers -). Honor
 # FNO_GLOBAL_SETTINGS_PATH so bash matches Python's _global_settings_path().
 GLOBAL_SETTINGS="${GLOBAL_SETTINGS:-${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/config.toml}}"
 # LOCAL_SETTINGS is the active project config. Prefer CONFIG_FILE (the stub's
@@ -306,7 +306,7 @@ get_auto_merge_conflict_resolution() {
 }
 
 # The who-may-merge gate `is_auto_merge_allowed_for <skill>` was removed
-# (x-04ab): auto-merge is gated by `get_auto_merge_enabled` alone (plus the merge
+# auto-merge is gated by `get_auto_merge_enabled` alone (plus the merge
 # command's CI-green / external-review / stub-manifest guards). Callers now read
 # `get_auto_merge_enabled` directly.
 

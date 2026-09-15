@@ -1,15 +1,15 @@
 # state-roots-baseline.txt - the ratchet for `fno doctor lint state-roots`.
 #
-# Epic x-3d21 R4 rules that every fno state access resolves against a DECLARED
+# Epic R4 rules that every fno state access resolves against a DECLARED
 # root. Eighty-four sites already build one by hand. Migrating them is not
-# this gate's job (the Rust journal sites are x-1571's, the duplication half is
-# x-6f9f's), so they are held here with an owner and a reason while the gate
+# this gate's job (the Rust journal sites are, the duplication half is
+#), so they are held here with an owner and a reason while the gate
 # stops the next one appearing.
 #
 # FORMAT, tab-separated:  RULE<TAB>path<TAB>key<TAB>owner<TAB>reason
 #   RULE   A = a hand-built `<root>/.fno/<state file>` path.
 #          B = a zero-argument lru_cache/cache over a reader that resolves a
-#              state root (x-3d21 R5).
+#              state root (R5).
 #   key    rule A: the state filename. rule B: the function name.
 #   owner  the node that owns draining it, or `unowned`.
 #
@@ -83,17 +83,17 @@ A	cli/src/fno/verify_advise.py	events.jsonl	unowned	Python journal site survivin
 A	cli/src/fno/wake/detect.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/worker/cli.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	cli/src/fno/worktree_stranded.py	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	crates/fno-agents/src/king_board.rs	events.jsonl	x-1571	the board port's project-journal anchor: the needs fold reads the same journals the needs verb reads, and no Rust project-events resolver exists yet; x-1571 owns draining Rust journal sites.
-A	crates/fno-agents/src/active_backlog.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
-A	crates/fno-agents/src/claims.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno-agents/src/king_board.rs	events.jsonl	unowned	the board port's project-journal anchor: the needs fold reads the same journals the needs verb reads, and no Rust project-events resolver exists yet; owns draining Rust journal sites.
+A	crates/fno-agents/src/active_backlog.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno-agents/src/claims.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/daemon.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	crates/fno-agents/src/finalize.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno-agents/src/finalize.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/kill_criteria.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	crates/fno-agents/src/loop_runtime.rs	events.jsonl	x-77f7	canonical Rust ProjectJournalPath constructor; x-77f7 owns the shared caller-root path seam.
-A	crates/fno-agents/src/loop_target.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno-agents/src/loop_runtime.rs	events.jsonl	unowned	canonical Rust ProjectJournalPath constructor; owns the shared caller-root path seam.
+A	crates/fno-agents/src/loop_target.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/loop_target.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
-A	crates/fno-agents/src/loopcheck.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
-A	crates/fno-agents/src/loopcheck/authorship.rs	target-state.md	x-3a6f	the manifest author read moved here from loopcheck.rs with the authorship wiring; the Rust side cannot call the Python resolver (fno.paths.target_state_path), so the hand-built fallback stays a declared root until a Rust resolver exists.
+A	crates/fno-agents/src/loopcheck.rs	events.jsonl	unowned	surviving Rust ProjectJournalPath site; owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno-agents/src/loopcheck/authorship.rs	target-state.md	unowned	the manifest author read moved here from loopcheck.rs with the authorship wiring; the Rust side cannot call the Python resolver (fno.paths.target_state_path), so the hand-built fallback stays a declared root until a Rust resolver exists.
 A	crates/fno-agents/src/gc_sweep.rs	ledger.json	unowned	best-effort ledger enrichment for the reap receipt (moved from daemon.rs with the sweep); the receipt stands on the row when the path is overridden.
 A	crates/fno-agents/src/graph_get.rs	graph.json	unowned	same class as crates/fno/src/backlog_view.rs below; no Rust resolver exists yet for graph.json.
 A	crates/fno-agents/src/manifest_lookup.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
@@ -103,4 +103,4 @@ A	crates/fno-agents/src/spawn_gate.rs	claims	unowned	call the resolver STATE_FIL
 A	crates/fno/src/agents_view.rs	claims	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/agents_view.rs	registry.json	unowned	call the resolver STATE_FILES names for this file.
 A	crates/fno/src/backlog_view.rs	graph.json	unowned	call the resolver STATE_FILES names for this file.
-A	crates/fno/src/review_invocation.rs	events.jsonl	x-1571	the mux client's ProjectJournalPath site, moved verbatim out of mux_cli.rs (x-91ba); x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
+A	crates/fno/src/review_invocation.rs	events.jsonl	unowned	the mux client's ProjectJournalPath site, moved verbatim out of mux_cli.rs ; owns draining these and carries a standing warning against re-adding the events pin here.

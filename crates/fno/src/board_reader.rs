@@ -33,7 +33,7 @@ pub(crate) fn spawn(
     let external = backlog_view::external_backend_selected();
     let mut count_rx = client_count_rx.clone();
     tokio::spawn(async move {
-        // The board's project scope, latched ONCE (x-20f1). The server
+        // The board's project scope, latched ONCE. The server
         // resolves nothing: the CLIENT read the config at spawn, from the
         // checkout the operator launched in, and passed the answer in the
         // env. Latched rather than re-read per tick, because a scope that
@@ -43,7 +43,7 @@ pub(crate) fn spawn(
         let (scope, why) = backlog_view::board_scope_from_spawn_env();
         eprintln!("fno mux: backlog board scope: {why}");
         let mut state = backlog_view::ReaderState::with_scope(scope);
-        // The last-good claim sweep (x-54fa): `None` until the first
+        // The last-good claim sweep: `None` until the first
         // success (render un-overlaid), then only ever replaced by a
         // fresher success — a sweep failure keeps this tick's overlay.
         let mut last_live: Option<HashMap<String, String>> = None;
@@ -64,7 +64,7 @@ pub(crate) fn spawn(
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             // Gate the per-tick claim-sweep SUBPROCESS + store read on
-            // an attached client (x-4e30). This is the idle-CPU root fix:
+            // an attached client. This is the idle-CPU root fix:
             // an orphaned server with no viewer stops fork/exec'ing a whole
             // `fno-agents claim sweep` process every second. The
             // `changed()` arm is the 0->1 kick so the first attach's

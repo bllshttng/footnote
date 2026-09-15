@@ -103,7 +103,7 @@ flags="$(printf '%s' "$parsed" | jq -c '.flags // []' 2>/dev/null || echo '[]')"
 pr_number="$(printf '%s' "$parsed" | jq -r '.pr_number // empty' 2>/dev/null || true)"
 target="$(printf '%s' "$parsed" | jq -r '.target // empty' 2>/dev/null || true)"
 
-# x-b5f6: the hold keys the review's NAMED target, never the branch this
+# the hold keys the review's NAMED target, never the branch this
 # checkout happens to stand on - the observed wedge held PR 1709's branch for
 # a review of PR 1713 and left 1713 unprotected. A PR number resolves to
 # nothing here: the acquire verb reads the PR's head ref from GitHub, so a PR

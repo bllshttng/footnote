@@ -46,7 +46,7 @@ If no frontend-craft executor is installed, plain execution is fine.
 
 ```bash
 PLAN_PATH="$1"   # the .md file path passed to /execute
-# kill-criteria.sh was folded into the fno-agents binary (US1, ab-58645f63).
+# kill-criteria.sh was folded into the fno-agents binary (US1).
 # `fno do phase kill-check` reads the plan frontmatter, prints
 # `KILL_CRITERIA_FIRED <name>|<reason>` and exits
 # 1 when a predicate fires, exits 0 (empty) when none fire, and exits 2 when the
@@ -91,7 +91,7 @@ Run every step listed under `## Verification`:
 - Behavioral checks → verify manually or describe result
 - A failed verification in the plan's scope gets REPAIRED, and the failed step re-runs - a fix-verify round per the change that broke it - while the plan's explicit iteration bound remains. At a spent bound, or on a failure genuinely outside this plan's scope, stop and name the real blocker. A green CI run never substitutes for a failed local verification, and neither substitutes for the configured review count.
 
-## 3b. Status-breakpoint emit (x-dbaf, best-effort)
+## 3b. Status-breakpoint emit (best-effort)
 
 After each change lands (or blocks), emit the task-boundary event so observers can track the run. `task_started` already fired from `resolve-executor.sh` at dispatch; `run_summary` fires from `finalize` at the loop terminal. You emit the middle boundary — one non-fatal line per change, never gating anything:
 

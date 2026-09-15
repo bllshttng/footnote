@@ -30,7 +30,7 @@ LEDGER_SESSION_UNRESOLVED = "unresolved:no-harness-session"
 
 
 def _utc_iso(value: datetime | str | None) -> str | None:
-    """One clock for every `started` / `completed` this writer stamps (x-b6bd):
+    """One clock for every `started` / `completed` this writer stamps :
     aware UTC with a `+00:00` suffix. The old writer mixed a naive-local
     `completed` with a `Z` `started`, so any reader subtracting the two was off
     by the UTC offset. Accepts a datetime or an ISO string (GitHub `merged_at`,
@@ -199,7 +199,7 @@ def _pr_number_from_ship_artifact(root_path: str, session_id: str) -> int | None
 
     The post-wedge immutable manifest (target-state.md) no longer carries
     ``pr_number``; the ship phase records it at
-    ``{root}/.fno/artifacts/handoff/ship-{session_id}.md`` (ab-a933adf4).
+    ``{root}/.fno/artifacts/handoff/ship-{session_id}.md``.
     Worktree /target runs therefore lost the node->PR auto-link because
     build_entry only read the manifest. The artifact basename matches the
     manifest ``session_id`` exactly, so it is deterministically locatable.
@@ -334,7 +334,7 @@ def build_entry(
 ) -> dict:
     """Build a ledger.json entry from target-state and git.
 
-    `termination_reason` (step 6, ab-f8e5f214) records WHY the session ended;
+    `termination_reason` (step 6, x-aaaa) records WHY the session ended;
     `cost_json` carries session-cost.py output so cost lands without the
     immutable manifest having to hold it. Both are optional so the legacy
     stop-hook callers stay byte-identical when they pass neither.
@@ -360,7 +360,7 @@ def build_entry(
     canonical_root_path = str((canonical_root or Path(root_path)).resolve()) if root_path else None
     cwd = os.getcwd()
 
-    # PR number (ab-a933adf4). The immutable manifest no longer carries
+    # PR number. The immutable manifest no longer carries
     # pr_number post-wedge, so a worktree /target run used to record pr=None and
     # never auto-link the node to its PR (reconcile then found "no drift" and the
     # node had to be closed by hand). Prefer the manifest (legacy/back-compat),
@@ -394,7 +394,7 @@ def build_entry(
     # (the LLM wrote them during pre-promise). Step 6's immutable manifest
     # carries no cost, so `finalize` passes session-cost.py's JSON via
     # --cost-json and these fields come straight from it. cost_json wins when
-    # present; otherwise fall back to the manifest values (ab-f8e5f214).
+    # present; otherwise fall back to the manifest values.
     cj = cost_json if isinstance(cost_json, dict) else {}
     # Contract guard: a provider that breaches the tokens shape (list/str) must
     # not reach the `"total" in cj_tokens` / subscript logic below (gemini review).
@@ -549,7 +549,7 @@ def build_entry(
     # in target-state.md frontmatter (set by the loop walker, not here).
     # provider_id: prefer the rotation-written provider_id; fall back to the
     # provider CLI family from target-state.md so EVERY terminal session leaves
-    # a provider-attributed ledger row (US7, ab-f8e5f214 - the per-node paper
+    # a provider-attributed ledger row (US7, x-aaaa - the per-node paper
     # trail needs provider_id present even on standard, non-rotation runs).
     provider_id = state.get("provider_id") or state.get("provider")
     account_id = state.get("account_id")
@@ -1087,7 +1087,7 @@ def main():
     parser.add_argument(
         "--termination-reason",
         dest="termination_reason",
-        help="Terminal reason recorded on the ledger row (step 6, ab-f8e5f214)",
+        help="Terminal reason recorded on the ledger row (step 6, x-aaaa)",
     )
 
     args = parser.parse_args()

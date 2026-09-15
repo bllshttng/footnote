@@ -13,7 +13,7 @@ The ``backfill`` kind is special-cased downstream: the generic retro harvest
 SKIPS it (``retro.harvest.harvest_carveouts``) so it SURVIVES untouched for
 ``/fno:pr merged``'s backfill slot, which reads it via
 :func:`read_carveouts` and removes it via :func:`consume_carveouts` once run or
-filed as a node (ab-4a1a4fea, Group 3).
+filed as a node (Group 3).
 
 Records append one JSON line to ``.fno/carveouts.jsonl`` using the same
 mkdir-mutex + append convention as the events.jsonl writer
@@ -31,7 +31,7 @@ from typing import Any, Optional, Tuple
 
 # kind is a closed enum: a deferred decision, an out-of-scope bug, or a data
 # backfill the merged PR enables. ``backfill`` is consumed by /pr merged, not
-# the generic retro harvest (ab-4a1a4fea).
+# the generic retro harvest.
 BACKFILL_KIND = "backfill"
 VALID_KINDS: Tuple[str, ...] = ("deferred", "oos-bug", BACKFILL_KIND)
 # Severity is orthogonal to kind: how much a left-out item matters. Routed to
@@ -59,7 +59,7 @@ def resolve_carveout_root() -> Path:
     find it. The ledger itself lands in the repo's space via
     :func:`fno.paths.project_log` (co-located with its ``.lock.d`` mutex, so
     concurrent writers across worktrees serialize - a per-worktree file would
-    keep the lock worktree-local and not cross-serialize appends, ab-44408b6e).
+    keep the lock worktree-local and not cross-serialize appends).
 
     Uses ``git worktree list --porcelain`` (the PR #400 pattern, robust across
     ``--separate-git-dir`` layouts), via
@@ -154,7 +154,7 @@ def resolve_session_id(repo_root: Path) -> Optional[str]:
 def _owning_node_id(repo_root: Path) -> Optional[str]:
     """The node THIS worker provably owns, as a bare id, or None.
 
-    The claim lockfile is the liveness authority (x-4af4), and it is
+    The claim lockfile is the liveness authority, and it is
     harness-agnostic: a live ``node:<id>`` claim held by
     ``target-session:<this harness session>`` names the owner for a codex or
     gemini executor too, not just claude. init acquires the claim before the
@@ -305,7 +305,7 @@ def add_carveout(
     :func:`resolve_carveout_root` (the canonical/main worktree) so a carve-out
     written inside a linked worktree survives that worktree's archival; the
     default keeps both roots equal for callers that don't split them
-    (ab-44408b6e).
+.
     """
     if kind not in VALID_KINDS:
         raise CarveoutError(

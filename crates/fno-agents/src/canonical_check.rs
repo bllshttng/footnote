@@ -1,4 +1,4 @@
-//! `canonical-check` (x-a150): the divergence read for the post-merge
+//! `canonical-check` : the divergence read for the post-merge
 //! canonical sync. One JSON payload on stdin (`canonical` required; optional
 //! `files`, `pr`, `sha`, `fetch`), one JSON answer on stdout naming the
 //! dirty-overlap refusal and the ahead-of-origin refusal - the two shapes a

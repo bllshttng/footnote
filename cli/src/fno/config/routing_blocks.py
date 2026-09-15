@@ -21,7 +21,7 @@ class RoutingBlock(BaseModel):
     # shape is {name, harness, model, route, account, band, effort,
     # operator_view, cost_per_mtok_in, context, color}; a repeated name folds
     # per field. The one seam boundary (_field) reads the mapping spelling -
-    # a type test at a reader is the trap (x-947c), never the cure.
+    # a type test at a reader is the trap, never the cure.
     models: list[dict[str, Any]] = Field(default_factory=list)
     # Opt-in strict inventory (default off): a spawn qualifies against the
     # work-kind slot's declared lanes only. A typed --model, -P or --route is

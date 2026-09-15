@@ -73,22 +73,22 @@ enum Role {
     /// `mux pane` verbatim; `mux_cli::pane` parses the verb + flags. No TTY
     /// needed (control verbs are scriptable one-shots).
     MuxPane(Vec<OsString>),
-    /// `mux block <verb> ...`: block porcelain (`block pipe`, x-fe8f). Same
+    /// `mux block <verb> ...`: block porcelain (`block pipe`). Same
     /// carry-verbatim shape as `MuxPane`; `mux_cli::block` parses.
     MuxBlock(Vec<OsString>),
-    /// (x-d865) `mux tab <verb> ...`: the layout-tab script verbs
+    /// `mux tab <verb> ...`: the layout-tab script verbs
     /// (ls|create|rename|join). Same carry-verbatim shape; `mux_cli::tab` parses.
     MuxTab(Vec<OsString>),
-    /// (x-d865) `mux layout <get> ...`: dump the nested layout tree + geometry.
+    /// `mux layout <get> ...`: dump the nested layout tree + geometry.
     MuxLayout(Vec<OsString>),
     ///  `mux rows [--json]`: the one row-set receipt - the last
     /// derived `layout.agents` with the paint verdict per row.
     MuxRows(Vec<OsString>),
-    /// (x-d865) `mux where <fno_id>`: resolve an fno session id to its
+    /// `mux where <fno_id>`: resolve an fno session id to its
     /// location; a selector naming no agent is retried as a tab location -
-    /// ordinal, stable id, or name (x-1499).
+    /// ordinal, stable id, or name.
     MuxWhere(Vec<OsString>),
-    /// (x-07c2, hidden) `mux thread <name> [--portal N]`: show a thread row
+    /// (hidden) `mux thread <name> [--portal N]`: show a thread row
     /// through a portal. `--portal` names the index (default 0), so two calls
     /// naming 0 and 1 put two threads in two panes for the tab menu's Join
     /// actions to tile.
@@ -99,17 +99,17 @@ enum Role {
     /// whole move (operator ruling, 2026-09-06); the former Python front
     /// door is deleted.
     MuxThreadReseat(Vec<OsString>),
-    /// (v75, x-7649) `mux retire-session <session> --harness <name> --session-id <id>`:
+    /// (v75) `mux retire-session <session> --harness <name> --session-id <id>`:
     /// the thin transport for the exact-session retirement. The server closes
     /// only the identity's attached panes and tombstones through the store.
     MuxRetireSession(Vec<OsString>),
-    /// (x-b80d) `mux view <selector> [--url] [--fzf] [--json]`: point the
+    /// `mux view <selector> [--url] [--fzf] [--json]`: point the
     /// operator's view at the pane hosting an agent, selected by node id,
     /// slug, or name; a selector naming no agent focuses the tab at that
-    /// location instead (x-1499). Same carry-verbatim shape; `mux_cli::view`
+    /// location instead. Same carry-verbatim shape; `mux_cli::view`
     /// parses.
     MuxView(Vec<OsString>),
-    /// (x-a572) `mux workspace <verb> ...`: workspace-store maintenance
+    /// `mux workspace <verb> ...`: workspace-store maintenance
     /// (`workspace prune`). Same carry-verbatim shape as `mux pane`;
     /// `mux_cli::workspace` parses.
     MuxWorkspace(Vec<OsString>),
@@ -117,7 +117,7 @@ enum Role {
     /// snippet (v6). `None` / an unsupported shell is an error in the verb.
     MuxShellInit(Option<String>, bool),
     /// `mux serve --web [--session <name>] [--bind <addr>] [--port <n>]`: the
-    /// read-only web bridge (x-6a14). Attaches to a session as an observer and
+    /// read-only web bridge. Attaches to a session as an observer and
     /// serves its frame stream to browsers over HTTP+WebSocket. No TTY needed.
     /// `mux serve --stop [--session <name>]` kills the running bridge: it reads
     /// the bridge's own state file, identity-checks the pid against its
@@ -189,7 +189,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             // A `--server` value containing `/` keeps the internal
             // ServerSocket role (client.rs spawns it with an absolute path);
             // any other value is the attach that `fno --session <name>`
-            // performs today (x-f209).
+            // performs today.
             if explicit_socket {
                 Role::ServerSocket(OsString::from(name.unwrap_or_default()))
             } else if is_tty {
@@ -230,7 +230,7 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
 /// is handed off byte-exact: `rest` is the family verb plus its argv.
 fn mux_carry_role(rest: &[OsString]) -> Role {
     match rest.first().and_then(|a| a.to_str()) {
-        // `mux serve --web ...`: the read-only web bridge (x-6a14). `--web`
+        // `mux serve --web ...`: the read-only web bridge. `--web`
         // or `--stop` is required (the `serve` verb reserves room for
         // future modes; `--stop` is the bridge's kill switch).
         Some("serve") => match parse_web_args(&rest[1..]) {
@@ -247,24 +247,24 @@ fn mux_carry_role(rest: &[OsString]) -> Role {
         // `mux block <verb> ...`: block porcelain; a bare `mux block`
         // falls through to MuxUsage. Never forwards to Python.
         Some("block") if rest.len() > 1 => Role::MuxBlock(rest[1..].to_vec()),
-        // (x-d865) layout script porcelains, same carry-verbatim shape.
+        // layout script porcelains, same carry-verbatim shape.
         Some("tab") if rest.len() > 1 => Role::MuxTab(rest[1..].to_vec()),
         Some("layout") if rest.len() > 1 => Role::MuxLayout(rest[1..].to_vec()),
         // `mux rows [--json] [--session <name>]`: the one row-set receipt.
         // No positional; the verb family parses its own flags.
         Some("rows") => Role::MuxRows(rest[1..].to_vec()),
         Some("where") if rest.len() > 1 => Role::MuxWhere(rest[1..].to_vec()),
-        // (x-07c2, hidden) thread: drive the dedicated thread pane for a
+        // (hidden) thread: drive the dedicated thread pane for a
         // row from outside the TUI - the door `fno agents attach` uses.
         // (v72) `thread reseat <pane>` is its own door: the re-seat move.
         Some("thread") if rest.len() > 2 && rest[1] == "reseat" => {
             Role::MuxThreadReseat(rest[2..].to_vec())
         }
         Some("thread") if rest.len() > 1 => Role::MuxThread(rest[1..].to_vec()),
-        // (v75, x-7649) The exact-session retirement door, same
+        // (v75) The exact-session retirement door, same
         // carry-verbatim shape: a bare verb falls through to MuxUsage.
         Some("retire-session") if rest.len() > 1 => Role::MuxRetireSession(rest[1..].to_vec()),
-        // (x-b80d) view: focus a pane by node id/slug/name; --fzf picks.
+        // view: focus a pane by node id/slug/name; --fzf picks.
         // An explicit -h/--help prints the usage banner (the verb family's
         // one self-teaching surface) rather than parsing as a selector.
         Some("view") if rest.len() > 1 => match rest[1].to_str() {
@@ -400,7 +400,7 @@ fn run_server(socket: PathBuf) {
     // blocks until killed, so the config warning it recorded while resolving
     // the socket dir would otherwise never surface. Server stderr is a log
     // stream, not a PTY the harness scrapes, so printing here is safe (the
-    // NEVER-stderr rule governs the TUI client, x-0296).
+    // NEVER-stderr rule governs the TUI client).
     if let Some((warning, _)) = proto::pending_config_warning() {
         eprintln!("{warning}");
     }
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn server_axis_top_level_server_flag_attaches_or_spawns_internal() {
-        // x-f209 AC4-HP/EDGE: `--server <name>` is the attach that
+        // AC4-HP/EDGE: `--server <name>` is the attach that
         // `--session <name>` performs today; a value containing `/` keeps the
         // internal ServerSocket role the client spawns.
         assert_eq!(
@@ -501,7 +501,7 @@ mod tests {
 
     #[test]
     fn server_axis_mux_server_takes_server_flag() {
-        // x-f209: `mux server --server <name>`; --session keeps working.
+        // `mux server --server <name>`; --session keeps working.
         assert_eq!(
             decide_role(&os(&["mux", "server", "--server", "work"]), false),
             Role::ServerSession("work".into())
@@ -679,7 +679,7 @@ mod tests {
 
     #[test]
     fn proto_role_mux_view_carries_rest_verbatim() {
-        // (x-b80d) `mux view <selector>` and `mux view --fzf` route to the
+        // `mux view <selector>` and `mux view --fzf` route to the
         // shared-resolver focus door; a bare `mux view` is usage.
         assert_eq!(
             decide_role(&os(&["mux", "view", "x919"]), false),

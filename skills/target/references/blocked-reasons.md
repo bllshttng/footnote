@@ -1,4 +1,4 @@
-> **SUPERSEDED (2026-06-05, ab-d0337fbc):** the machinery this file describes was deleted by the control-plane collapse wedge. Kept for historical context; see docs/architecture/control-plane-loop.md.
+> **SUPERSEDED (2026-06-05):** the machinery this file describes was deleted by the control-plane collapse wedge. Kept for historical context; see docs/architecture/control-plane-loop.md.
 
 # BLOCKED reasons taxonomy
 

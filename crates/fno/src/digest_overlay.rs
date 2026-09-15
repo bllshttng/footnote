@@ -1,4 +1,4 @@
-//! Attach-time "while you were gone" catch-up overlay (x-4e2d, client half).
+//! Attach-time "while you were gone" catch-up overlay (x-aaaa, client half).
 //!
 //! On attach the client asks: was I away from this mux session long enough to
 //! want a catch-up? If so it shells out to `fno-agents digest --json` for the
@@ -84,7 +84,7 @@ pub fn attach_digest_enabled(cwd: &Path) -> bool {
 }
 
 /// `config.mux.hover_focus` (default ON) — the focus-follows-mouse off-switch
-/// (x-a496). Latched once at client startup. Lives here because this module owns
+///. Latched once at client startup. Lives here because this module owns
 /// the `fno` crate's `config.mux.*` reader (mirrors `attach_digest_enabled`).
 pub fn hover_focus_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "hover_focus", true)
@@ -123,7 +123,7 @@ pub fn backlog_section_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "show_backlog", true)
 }
 
-/// (x-f75e) `config.mux.theme`: the chrome palette name, latched once at client
+/// `config.mux.theme`: the chrome palette name, latched once at client
 /// startup. An unset key reads as `None` (meaning "no preference") and resolves
 /// to `terminal`. An UNKNOWN name also resolves to `terminal` but carries a
 /// notice through the same channel a refused keymap rebind uses, because a
@@ -493,7 +493,7 @@ pub(crate) fn mux_restore_hold_workers(cwd: &Path) -> bool {
         .unwrap_or(true)
 }
 
-/// (x-7b5e) What startup restore does with worker members. `hold` is the
+/// What startup restore does with worker members. `hold` is the
 /// shipped default: named held panes, resume on focus. `idle` leaves every
 /// member an idle row. `resume` additionally runs the bulk restore driver at
 /// startup, bringing each member back through its own harness.
@@ -730,7 +730,7 @@ fn parse_bool(v: &str) -> Option<bool> {
 /// Resolve the `fno-agents` binary: `$FNO_AGENTS_BIN`, else a sibling of the
 /// running `fno` binary (the installed layout, mirroring `resolve_daemon_bin`),
 /// else bare `fno-agents` on PATH. Crate-visible: the server's claim-sweep
-/// shell-out (x-54fa) resolves the same binary the same way.
+/// shell-out resolves the same binary the same way.
 /// The cargo profile dir (`…/target/debug`) of a running binary's directory,
 /// when that binary is a dev-build artifact: `exe_dir` itself for a plain
 /// binary, its parent for a TEST binary (cargo links those one level deeper,
@@ -977,10 +977,10 @@ mod tests {
     #[test]
     fn selector_is_worktree_basename() {
         assert_eq!(
-            selector_from_cwd("/Users/x/conductor/workspaces/footnote/x-4e2d").as_deref(),
-            Some("x-4e2d")
+            selector_from_cwd("/Users/x/conductor/workspaces/footnote/x-aaaa").as_deref(),
+            Some("x-aaaa")
         );
-        assert_eq!(selector_from_cwd("/w/x-4e2d/").as_deref(), Some("x-4e2d"));
+        assert_eq!(selector_from_cwd("/w/x-aaaa/").as_deref(), Some("x-aaaa"));
         assert_eq!(selector_from_cwd(""), None);
         assert_eq!(selector_from_cwd("/"), None);
     }

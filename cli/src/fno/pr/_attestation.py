@@ -25,7 +25,7 @@ def _project_events_path(events: Optional[Path]) -> Path:
         return events
     # The space journal, not a hand-built checkout path: the coverage reader
     # (_reviews) resolves the space, so a hand-built path here writes
-    # attestations the gate can never see (x-d2e9).
+    # attestations the gate can never see.
     from fno.paths import project_events_json
 
     return project_events_json()

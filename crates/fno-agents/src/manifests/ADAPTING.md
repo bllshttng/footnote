@@ -29,7 +29,7 @@ Regions we support: `whole_recent`, `bottom_non_empty_lines(n)`, `prompt_box_bod
 `after_last_horizontal_rule` and `state = "unknown"` are NOT supported and are
 deferred (YAGNI) until a target manifest needs them - none of opencode/agy do.
 
-## Two corrections verified against the reference engine (x-83e7)
+## Two corrections verified against the reference engine
 
 The two rules the roster port (amp..qodercli) proved out against the reference
 engine's source, load-bearing enough to state plainly:
@@ -86,6 +86,6 @@ A bundled manifest only *fires* once its harness clears three rungs:
 3. only then does its bundled manifest match.
 
 opencode has a bundled manifest (this dir) but none of rungs 1-2, so it sits
-inert until node x-51f6 hosts it - staged, not live. agy cleared rungs 1-2 in
-x-8f7f (READABLE + `AgyProvider` + a `build_pane_argv` agy arm), so its manifest
+inert until node hosts it - staged, not live. agy cleared rungs 1-2 in
+ (READABLE + `AgyProvider` + a `build_pane_argv` agy arm), so its manifest
 can fire.

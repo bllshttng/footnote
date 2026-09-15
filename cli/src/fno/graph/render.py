@@ -104,7 +104,7 @@ def _kanban_column(
     if status == "in_progress":
         return "In Progress"
     entry_id = entry.get("id")
-    # In-progress epic (x-33b2): a container with a done/claimed child has no
+    # In-progress epic: a container with a done/claimed child has no
     # claim of its own (sessions claim the children) but is genuinely underway,
     # so surface it in In Progress. The set is derived from children by the
     # caller; the epic's `status` stays honest (never a claim without a session_id).
@@ -177,7 +177,7 @@ def _kanban_card(
 
     # Project lane label leads the metadata tail so per-project clusters are
     # legible (the Obsidian Kanban plugin is column-only, so a per-card label
-    # plus clustered sort order is the honest ceiling for swimlanes - ab-95a4a479).
+    # plus clustered sort order is the honest ceiling for swimlanes -).
     project = _project_key(entry)
     header = f"- {marker} **{title}** `{eid}` · {project} · {priority}"
     if eid in orphans:

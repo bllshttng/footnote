@@ -3,7 +3,7 @@
 
 Rewrites the macOS x86_64 + arm64 wheel `url`+`sha256` and the pinned `version`
 in a `Formula/fno.rb` to the wheels PyPI is serving for <version>. Driven by the
-release workflow's Homebrew leg (x-0afe); also runnable by hand for a one-off.
+release workflow's Homebrew leg ; also runnable by hand for a one-off.
 
     update-homebrew-formula.py <version> <formula_path>
     update-homebrew-formula.py --self-check

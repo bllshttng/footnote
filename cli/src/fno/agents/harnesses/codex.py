@@ -312,7 +312,7 @@ def plan_writable_args(cwd: Path) -> list[str]:
 
 
 def _effective_yolo(yolo: bool, headless_yolo: Optional[bool] = None) -> bool:
-    """Resolve the effective sandbox-bypass for the autonomous exec lane (ab-994222ee).
+    """Resolve the effective sandbox-bypass for the autonomous exec lane.
 
     The create/resume path is the headless (MODE==exec) lane: a worker no
     operator is watching. Returns whether this launch is FULL yolo (unsandboxed
@@ -574,7 +574,7 @@ def _run_codex(
         spawn_env["FNO_AGENT_SELF"] = agent_self
         spawn_env["FNO_AGENT_HARNESS"] = "codex"
     if route_env:
-        # Codex-lane routing (x-db50 Item 4): the api key named by the
+        # Codex-lane routing (Item 4): the api key named by the
         # model_provider's env_key. The base_url/model ride the -c config.
         spawn_env.update(route_env)
 
@@ -776,7 +776,7 @@ def create(
     """
     full_prompt = inject_from_name(prompt, from_name)
     eff_yolo = _effective_yolo(yolo, headless_yolo)
-    # Role-based routing (x-db50 Item 4). An openai-protocol provider routes the
+    # Role-based routing (Item 4). An openai-protocol provider routes the
     # codex lane via inline `-c` config (codex ignores OPENAI_BASE_URL); the api
     # key rides the spawn env. None (no role / non-openai provider / missing key)
     # changes nothing (fail-safe). `-c` flags are GLOBAL, so they precede `exec`.
@@ -794,7 +794,7 @@ def create(
         config_args += ["-c", f"model_reasoning_effort={reasoning_effort}"]
     # Approval is a GLOBAL flag and must precede `exec`; sandbox is an `exec`
     # flag and follows it. See `approval_flag` / `sandbox_flag`.
-    # x-b6e2: a user --add-dir grants extra write access on `codex exec`
+    # a user --add-dir grants extra write access on `codex exec`
     # (additive; codex's own cwd rides -C). Empty/None = unchanged argv.
     # The computed set rides the same cell through the shared decision, so the
     # headless lane grants the state root exactly as the pane lane does. It is
@@ -851,7 +851,7 @@ def create(
         agent_self=agent_self,
         route_env=route_env or None,
     )
-    # x-3954: carry the resolved route identity on the result so the minted
+    # carry the resolved route identity on the result so the minted
     # registry row records it (never an endpoint or a key - the relaunch
     # re-resolves the route from today's config). CodexResult is frozen, so
     # the identity rides a copy, not a mutation.

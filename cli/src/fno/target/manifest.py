@@ -7,7 +7,7 @@ looks like. The manifest is YAML frontmatter (validated by
 init writes below the frontmatter for the body-only identity fields. Both halves
 are merged here.
 
-The manifest is the identity anchor for native resume (x-2ccd): its
+The manifest is the identity anchor for native resume : its
 ``harness``/``harness_session_id``/``fno_id``/``graph_node_id``/
 ``target_claim_holder`` tuple is what a resumed process must match to rebind
 the node claim.

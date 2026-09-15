@@ -1,4 +1,4 @@
-# The x-84b2 dispatch-provenance vocabulary: data behind
+# The dispatch-provenance vocabulary: data behind
 # cli/src/fno/agents/naming.py, the single owner of worker-name generation.
 # A code here is contract, not decoration: autonomy status, the CI provenance
 # audit, and `fno agents name --source/--verb` all read this table.
@@ -39,7 +39,7 @@ word_codes:
   think: th
   fix: f
   builtin: t
-# x-57fe: the short per-model name tag, matched longest-key-first as a
+# the short per-model name tag, matched longest-key-first as a
 # substring of the lowered model string. An unknown model falls back to the
 # first 8 alphanumeric characters.
 model_codes:

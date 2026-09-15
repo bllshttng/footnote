@@ -55,7 +55,7 @@ _NAME_NODE_RE = re.compile(r"^target-([a-z][a-z0-9]*-[0-9a-f]+)(?:-|$)")
 # ``fno agents list`` node join through parse_node_id cannot regress.
 _NAME_MISSION_RE = re.compile(r"^(target|think)-([a-z][a-z0-9]*-[0-9a-f]+)(?:-|$)")
 
-# Verb code -> mission kind (x-84b2): t/f are PR-shaped; bp/r/th are design
+# Verb code -> mission kind: t/f are PR-shaped; bp/r/th are design
 # passes whose only artifact is a linked ``plan_path``.
 _VERB_TO_MISSION = {"t": "target", "f": "target", "bp": "think", "r": "think", "th": "think"}
 
@@ -99,7 +99,7 @@ def parse_worker_mission(name: Optional[str]) -> Optional[tuple[str, str]]:
 
     Kind is ``target`` (PR-shaped mission) or ``think`` (design pass, whose only
     completion artifact is a linked ``plan_path``). Names are a *convention*, not
-    a guarantee - real spawns like ``tgt-x-4175-liveness`` exist - so this is only
+    a guarantee - real spawns like ``tgt-x-aaaa-liveness`` exist - so this is only
     ever the fallback behind a manifest read, and a miss returns None rather than
     a guess (the caller fails closed on None).
     """

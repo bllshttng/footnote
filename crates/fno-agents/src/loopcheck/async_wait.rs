@@ -31,7 +31,7 @@ pub(super) fn conflicting_reason(pr: &PrInfo) -> Option<String> {
 }
 
 /// Whether the PR is in the async-wait class a `<watching>` tag may idle on
-/// (x-e2c8): PR open, local HEAD pushed, no unaddressed findings (inline OR
+/// PR open, local HEAD pushed, no unaddressed findings (inline OR
 /// operator), and the sole remaining blocker is CI still pending or an
 /// outstanding bot review. Returns the blocker label, or None if anything else
 /// blocks. External truth only - the tag is a request, this is the authority.
@@ -72,16 +72,16 @@ pub(super) fn async_wait_class(
     // session forever. Require an outstanding bot (codex P1).
     //
     // An outstanding LOCAL reviewer disqualifies the wait even when a bot is
-    // also outstanding (codex review of x-cdc7): the session has work it can do
+    // also outstanding (codex review of): the session has work it can do
     // right now, and if the bot never posts, idling means that work never
     // happens and the run dies on budget with the gate still unmet.
     //
-    // x-b167: idle ONLY when every missing bot is in an idlable nudge state
+    // idle ONLY when every missing bot is in an idlable nudge state
     // (Awaiting, a genuine async wait; or NotNudgeable, today's status quo). A
     // NeedsNudge bot is work to DO (post its trigger) and an Unresponsive bot is
     // a wait nobody ends - idling on either parks the session. This is the same
-    // rule x-cdc7 gave unattested_reviewers. An empty bot_nudges (not classified)
-    // means every-bot-idlable vacuously, preserving pre-x-b167 behavior.
+    // rule gave unattested_reviewers. An empty bot_nudges (not classified)
+    // means every-bot-idlable vacuously, preserving pre- behavior.
     if pr.ci_conclusion.is_ok()
         && !pr.reviewed
         && !pr.review_skipped
@@ -94,7 +94,7 @@ pub(super) fn async_wait_class(
     None
 }
 
-/// The arm-and-tag ritual (x-e2c8, US3) that converts an unwatched async wait
+/// The arm-and-tag ritual (US3) that converts an unwatched async wait
 /// into a single idle turn. Supersedes the old "wait silently" prose: waiting
 /// silently still costs a full model invocation every ~90s tick, whereas arming
 /// a harness-tracked watcher and emitting `<watching>` idles the session to ZERO

@@ -1,6 +1,6 @@
 # Single-Doc Blueprint Spec
 
-Reference for the `/blueprint` mutation behavior introduced in PR1 (2026-05-18, `ab-69f7ee8f`). The architectural overview lives at [docs/architecture/lean-blueprint.md](../../../docs/architecture/lean-blueprint.md).
+Reference for the `/blueprint` mutation behavior introduced in PR1 (2026-05-18, ``). The architectural overview lives at [docs/architecture/lean-blueprint.md](../../../docs/architecture/lean-blueprint.md).
 
 ## Design doc shape
 

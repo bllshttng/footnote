@@ -33,7 +33,7 @@ class Refused(NamedTuple):
 
 
 def claim_holder(node_id: str) -> Optional[str]:
-    """The session holding ``node:<id>``. ``suspect`` is still owned (x-ba4b)."""
+    """The session holding ``node:<id>``. ``suspect`` is still owned."""
     from fno.claims.core import claim_status
 
     try:

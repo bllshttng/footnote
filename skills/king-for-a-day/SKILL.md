@@ -103,7 +103,7 @@ The spawn shape is the skill invocation itself: claude `/fno:target`, codex `$fn
 
 **That same silence has more than one cause, and the unstamped row is not the only one.** `manifest-path` also exits 1 with empty streams when the `--state-root` it was handed holds no `kings/<scope>.md`, which is what a repo-local `.fno` does - manifests live under the space dir, and both hooks used to pass the wrong root. Tell the causes apart: silent with `--state-root` and correct without it is the flag, silent both ways is the row. Since 2026-09-12 the verb prints the reason on stderr, so one run answers it.
 
-**If you crown a peer, run the verb or say you cannot.** Mailing "you are crowned L2 over x-1234" and stopping there leaves that session believing it holds authority the machine cannot see. Either run `fno agents crown` yourself, or tell them plainly that the grant needs an attended shell, and name the command they should ask for.
+**If you crown a peer, run the verb or say you cannot.** Mailing "you are crowned L2 over x-aaaa" and stopping there leaves that session believing it holds authority the machine cannot see. Either run `fno agents crown` yourself, or tell them plainly that the grant needs an attended shell, and name the command they should ask for.
 
 **In-place coronation keeps the session where it is.** `fno agents crown <handle> --scope <scope>` changes only the crown fields on an existing live registered row. Its transcript, process, and pane stay in place. Run it from an attended terminal, or from a live king whose own crown strictly contains the scope. A session cannot crown itself, and same-scope succession is refused here. When creating a king, placing a court, or handing your own scope to an heir, use spawn-time `--crown`.
 
@@ -454,7 +454,7 @@ fno agents spawn --name <node-name> "$payload" --substrate pane --at current --s
 
 ### The minion contract rides every spawn payload
 
-The coordination contract is two-sided: your duties are worthless if the teammate does not know its own. End every spawn payload with the canonical minion clause - **paste it verbatim from [references/minion-clause.md](references/minion-clause.md)**, the single source. Do not compose it freehand: the x-304c Director did, three times, and each drift dropped something load-bearing (once the delivery doctrine itself, so reports rested undelivered on the durable bus). The clause covers five behaviors:
+The coordination contract is two-sided: your duties are worthless if the teammate does not know its own. End every spawn payload with the canonical minion clause - **paste it verbatim from [references/minion-clause.md](references/minion-clause.md)**, the single source. Do not compose it freehand: the Director did, three times, and each drift dropped something load-bearing (once the delivery doctrine itself, so reports rested undelivered on the durable bus). The clause covers five behaviors:
 
 1. **Report.** On finishing a unit of work or blocking, mail the king a `RESULT: ...` line with `--from-self`, and treat any receipt that is not `delivered (hosted)` or `delivered (woken)` as undelivered - peek; only if it did not already land, re-resolve and re-send; never re-queue. The verbatim report line and the full delivery doctrine live in the template.
 2. **Ask for help.** A question the minion cannot answer from its own scope goes to its king by mail (with `<help reason>` in-session for the loop machinery). Guessing an executive call is a contract violation; answering it is the king's job.
@@ -518,7 +518,7 @@ Context pressure is not a handoff trigger. A harness compacts its current sessio
 
 ### Post-epic: interview the court
 
-When the epic's **last** wave has merged - not merely this wave - run the retro interview as a standard court step before you abdicate. This is the ceremony the x-304c synthesis marked `ADD`: the best-performing ritual of that epic, which until now was prose in a human's head (the maintainer hand-asked the Director to interview each builder and prodded the thin answers with the dogfooding lens). You hold the cross-session view every builder lacks, so you are the one who runs it.
+When the epic's **last** wave has merged - not merely this wave - run the retro interview as a standard court step before you abdicate. This is the ceremony the synthesis marked `ADD`: the best-performing ritual of that epic, which until now was prose in a human's head (the maintainer hand-asked the Director to interview each builder and prodded the thin answers with the dogfooding lens). You hold the cross-session view every builder lacks, so you are the one who runs it.
 
 Interview each builder session that carried a node in this epic - mail it the prompt, collect its first-person account, write the account to your project's retros directory (the template names how to resolve it; do not assume the gitignored `internal/` vault path exists). The dogfooding-lens questions and the dig-deeper follow-up are baked into the template so it fires without prodding. The full prompt, delivery mechanics, landing path, and retro epistemics (how much to trust what comes back) are in [references/retro-interview.md](references/retro-interview.md) - load it when the epic completes.
 

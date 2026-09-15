@@ -1,6 +1,6 @@
 """Stub-manifest: the durable artifact a `contract`-tier dependent's first pass
 emits so a later merge-triggered reconciliation can de-stub from it (G3 of the
-stub-and-reconcile design, x-24b7).
+stub-and-reconcile design, x-aaaa).
 
 A `contract` dependent (see `fno backlog decompose`, G2) builds *now* against a
 pinned interface contract, stubbing the parts that need its blocker landed, and
@@ -15,7 +15,7 @@ Schema (`[{stub_id, file, symbol, contract_ref, kind}]` per the design's
 Claude's-Discretion #1, wrapped in a small envelope)::
 
     {
-      "node": "x-24b7",
+      "node": "x-aaaa",
       "contract_version": 1,
       "contract_ref": "design.md#interface-contract",
       "reconciled": false,
@@ -195,7 +195,7 @@ def unreconciled_manifest_for_pr(
     not yet reconciled. None means "nothing holds this merge" — the default
     `hard` path and every non-contract PR fall through unchanged (AC6-EDGE)."""
     node = _node_for_pr(pr_number, graph_path)
-    # ponytail: a hard node (or no node) never holds — keeps the x-a10e path
+    # ponytail: a hard node (or no node) never holds — keeps the path
     # byte-for-byte unchanged. dep is popped to absent on hard nodes (G2).
     if not node or node.get("dep") != "contract":
         return None

@@ -123,7 +123,7 @@ pub const CANONICAL_FIELD_ORDER: &[&str] = &[
 /// CHILD_SUMMARY_FIELDS).
 pub const CHILD_SUMMARY_FIELDS: &[&str] = &["id", "title", "project", "status"];
 
-/// Fields whose change marks a node as human-curated "just now" (x-7dcb).
+/// Fields whose change marks a node as human-curated "just now".
 const CURATION_FIELDS: &[&str] = &["status", "priority", "rank", "parent", "blocked_by", "size"];
 
 /// Legacy `priority` vocabulary -> current (constants.PRIORITY_MIGRATION).
@@ -1037,8 +1037,8 @@ pub fn lock_timestamp_quality(entry: &Value) -> &'static str {
 }
 
 /// The open-do-row TTL, read from TASK_DO_TTL_HOURS at first use. 12.0 sits
-/// far above any legitimate do window (x-7649 was live at 2.5 hours) and far
-/// above the seventeen-minute spawn-handover window that made x-5c25 look
+/// far above any legitimate do window (was live at 2.5 hours) and far
+/// above the seventeen-minute spawn-handover window that made look
 /// identical to a strand, so youth is never misread as strandedness.
 fn do_ttl_hours() -> f64 {
     static TTL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
@@ -1078,7 +1078,7 @@ fn open_do_quality_and_holder(entry: &Value) -> Option<(&'static str, String)> {
 }
 
 /// Classify the node's open do row(s) by age without deciding writer death -
-/// the open-do counterpart of [`lock_timestamp_quality`] (x-f8b1 change 4).
+/// the open-do counterpart of [`lock_timestamp_quality`] (change 4).
 /// `fresh` when no open do row exists or the youngest reading is inside the
 /// TTL, `unreadable` when a row's started_at will not parse as RFC3339, `old`
 /// past the TTL.
@@ -1326,7 +1326,7 @@ pub fn is_open_do_row(row: &Value) -> bool {
 
 /// The WORK-done verdict for one session, read through the reverse join over
 /// `sessions[]`. This is the one WORK-done reader on the Rust side
-/// (x-c672): retirement asks it, never `row.node`, and no second predicate
+/// retirement asks it, never `row.node`, and no second predicate
 /// folds WORK, SHIP, WRITING or HOLDING into one boolean.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkState {
@@ -1563,7 +1563,7 @@ pub fn recompute_statuses_with_plan_rungs(
             obj.insert("status".to_string(), Value::String("done".into()));
             continue;
         }
-        // A superseded_by edge is the terminal fact (x-e8f3): supersession
+        // A superseded_by edge is the terminal fact: supersession
         // evidence stays with the record and the reconcile receipts, never in
         // status, so a superseded row can no longer read as live held work.
         if superseded {
@@ -1599,7 +1599,7 @@ pub fn recompute_statuses_with_plan_rungs(
         } else {
             // The open-do route gets the same diagnostic, symmetric with the
             // lock route above: a row whose writer died is otherwise
-            // indistinguishable from one whose writer is typing (x-f8b1). The
+            // indistinguishable from one whose writer is typing. The
             // status word is not touched - age records uncertainty, it never
             // clears an owner. A lock defect already stamped keeps priority.
             if let Some((quality, holder)) = do_quality {
@@ -1882,7 +1882,7 @@ pub fn ensure_slugs(entries: &mut [Value]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Curation key + touched_at stamping (x-7dcb)
+// Curation key + touched_at stamping
 // ---------------------------------------------------------------------------
 
 fn curation_key(entry: &Value) -> Value {
@@ -1970,7 +1970,7 @@ impl Drop for BoundedLock {
 
 /// Backups live in a `backups/` sibling of the graph file, never beside it:
 /// a rotation family at the state-root top level is exactly what
-/// docs/state-root-inventory.md forbids (x-a469).
+/// docs/state-root-inventory.md forbids.
 fn backup_dir(path: &Path) -> Option<PathBuf> {
     let dir = path.parent()?.join("backups");
     std::fs::create_dir_all(&dir).ok()?;
@@ -2184,7 +2184,7 @@ pub fn base_version(path: &Path) -> Result<String, StoreError> {
 /// touched_at stamp, the closure-detection hook, canonicalization, and the
 /// atomic publish with backup. Contention is resolved by the caller
 /// retrying on [`StoreError::LockTimeout`] or a version conflict.
-/// x-920a wave 1: the publication-seam prose policy. Every locked mutation
+/// wave 1: the publication-seam prose policy. Every locked mutation
 /// passes through it, so every writer obeys the combined
 /// `details`+`current_state.body` budget, and a migrated row's
 /// `progress_notes` can never grow again. An oversized legacy row may be
@@ -2251,7 +2251,7 @@ pub fn locked_mutate(
 /// mutation lock, after every guard, right before the bytes are written, and
 /// receives the raw begin snapshot. An error refuses the whole mutation;
 /// `node_state` uses this to journal the exact pre-image before any
-/// replacement publishes (x-920a wave 1).
+/// replacement publishes (wave 1).
 pub fn locked_mutate_with_hook(
     path: &Path,
     input: MutateInput,
@@ -2364,7 +2364,7 @@ pub fn locked_mutate_with_hook(
         }
     }
 
-    // Slug assignment on EVERY persisted mutation (ab-f82e8083).
+    // Slug assignment on EVERY persisted mutation.
     ensure_slugs(&mut entries);
     recompute_statuses_with_plan_rungs(&mut entries, input.plan_rungs.as_ref());
 
@@ -2384,7 +2384,7 @@ pub fn locked_mutate_with_hook(
         }
     }
 
-    // Node closure releases the node claim (x-94f8): a transition into a
+    // Node closure releases the node claim: a transition into a
     // terminal rung during THIS mutation is the one moment every closure path
     // shares. Ids are COLLECTED here; the release runs in the caller after
     // the lock drops. Only the CONFIGURED graph owns the global node-id space.
@@ -2420,7 +2420,7 @@ pub fn locked_mutate_with_hook(
 
     canonicalize_entries(&mut entries);
 
-    // x-920a wave 1: the publication-seam prose policy. Every writer goes
+    // wave 1: the publication-seam prose policy. Every writer goes
     // through here, so every writer obeys the combined details+current_state
     // budget, and a migrated row's progress_notes can never grow again.
     enforce_node_state_policy(&raw, &entries)?;
@@ -2590,7 +2590,7 @@ pub fn read_defaulted_opts(
             if backup_on_corrupt {
                 // path.with_suffix(".json.bak") in Python; the file-name form
                 // keeps "graph.json" -> "graph.json.bak" for the same effect,
-                // inside backups/ rather than at the state root (x-a469).
+                // inside backups/ rather than at the state root.
                 if let Some(dir) = backup_dir(path) {
                     let backup = dir.join(format!(
                         "{}.bak",
@@ -3103,7 +3103,7 @@ mod tests {
     fn open_do_row_quality_classifies_age() {
         // No open do row at all -> fresh.
         assert_eq!(open_do_row_quality(&json!({"id": "n"})), "fresh");
-        // A row started 17 minutes ago is inside the TTL: x-5c25's
+        // A row started 17 minutes ago is inside the TTL:
         // spawn-handover window must never read as strandedness.
         let fresh = json!({
             "id": "n",
@@ -3115,7 +3115,7 @@ mod tests {
             }],
         });
         assert_eq!(open_do_row_quality(&fresh), "fresh");
-        // 11 days old: x-4c23's specimen age.
+        // 11 days old: specimen age.
         let old = json!({
             "id": "n",
             "sessions": [{
@@ -3213,7 +3213,7 @@ mod tests {
 
     #[test]
     fn recompute_persists_superseded_even_when_the_record_is_unverified() {
-        // The supersede edge is the terminal fact (x-e8f3): an unverified
+        // The supersede edge is the terminal fact: an unverified
         // supersession record never holds the row at blocked, so a superseded
         // node cannot read as live held work after the 19-row legacy drift.
         let mut entries = vec![json!({

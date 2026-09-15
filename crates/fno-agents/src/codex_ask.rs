@@ -1,4 +1,4 @@
-//! Client-side `codex exec` ask path (ab-0429c6e1).
+//! Client-side `codex exec` ask path.
 //!
 //! `codex` is a one-shot `codex exec --json` subprocess (NOT a PTY agent):
 //! it emits a JSONL stream to stdout, the Rust client drains and parses it,
@@ -146,7 +146,7 @@ pub fn build_argv_create(
         cwd.to_string_lossy().to_string(),
         "--skip-git-repo-check".to_string(),
     ]);
-    // x-b6e2: a user `--add-dir` grants extra write access on `codex exec`.
+    // a user `--add-dir` grants extra write access on `codex exec`.
     // codex's own cwd rides `-C` (separate flag), so this is purely additive -
     // no collision. Empty/None = unchanged argv.
     if let Some(d) = add_dir.filter(|d| !d.is_empty()) {
@@ -171,7 +171,7 @@ pub fn build_argv_create(
         argv.extend(crate::provider::codex_git_writable_args(cwd));
         argv.extend(crate::provider::codex_plan_writable_args(cwd));
     }
-    // x-c772: an explicit --model is forwarded to `codex exec --model <m>`
+    // an explicit --model is forwarded to `codex exec --model <m>`
     // (empty/None = codex default). Exact passthrough, no fuzzy resolution.
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
@@ -331,7 +331,7 @@ pub enum CodexAskError {
     /// Non-transient OSError at Popen time (not NotFound) — exit 1.
     OsError { message: String },
     /// Operator SIGINT (Ctrl-C) forwarded to the codex group — exit 130.
-    /// Mirrors Python's KeyboardInterrupt -> CPython exit 130 (ab-e7fdbcb6).
+    /// Mirrors Python's KeyboardInterrupt -> CPython exit 130.
     Interrupted,
 }
 
@@ -435,7 +435,7 @@ fn open_tee(log_path: &Path) -> Result<std::fs::File, CodexAskError> {
     })
 }
 
-// SIGINT forwarding (ab-e7fdbcb6 / cv-cfdb7a56) now lives in the shared
+// SIGINT forwarding (/ cv-cfdb7a56) now lives in the shared
 // `subprocess_ask` module so codex and gemini share one implementation. See
 // `crate::subprocess_ask::{SigintForwarder, ask_interrupted}`.
 
@@ -465,13 +465,13 @@ fn run_codex(
     // structured CodexAskError::TeeOpen rather than a raw panic.
     let tee_fh = open_tee(output_path)?;
 
-    // QoS (x-c5cc): every codex child is an fno-spawned worker process —
+    // QoS: every codex child is an fno-spawned worker process —
     // exec-wrap at background priority (identity when worker_qos=off).
     let argv =
         crate::spawn_gate::qos_wrap(popen_cwd.unwrap_or_else(|| Path::new(".")), argv.to_vec());
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
-    // x-3954: a resumed followup carries its route's env (key + provider
+    // a resumed followup carries its route's env (key + provider
     // stamp) in the child env - the argv cannot hold a secret.
     for (key, value) in route_env {
         cmd.env(key, value);
@@ -511,7 +511,7 @@ fn run_codex(
     let pid = child.id();
 
     // Forward operator Ctrl-C to the codex process group for the lifetime of
-    // this call (ab-e7fdbcb6). Dropped at function end, after the child is
+    // this call. Dropped at function end, after the child is
     // reaped, which restores the prior SIGINT disposition. codex is
     // `setpgid(0, 0)`, so its pgid equals its pid.
     let _sigint_guard = crate::subprocess_ask::SigintForwarder::install(pid);
@@ -672,7 +672,7 @@ fn run_codex(
     let duration_ms = started.elapsed().as_millis() as u64;
     let was_timed_out = watchdog.timed_out();
 
-    // Operator Ctrl-C (ab-e7fdbcb6 / cv-cfdb7a56): the SIGINT-forwarding
+    // Operator Ctrl-C (/ cv-cfdb7a56): the SIGINT-forwarding
     // handler (installed via `_sigint_guard`) already relayed the signal to
     // the codex process group and set this flag. Fail with `Interrupted` (exit
     // 130) BEFORE the timeout / no-session / exit-code checks so a Ctrl-C'd
@@ -772,7 +772,7 @@ pub fn codex_create(
 ) -> Result<CodexResult, CodexAskError> {
     let effective_prompt = render_verb_seed(prompt, "codex");
     let full_prompt = inject_from_name(&effective_prompt, from_name);
-    // ab-994222ee: the create/exec path is the autonomous headless lane. codex
+    // the create/exec path is the autonomous headless lane. codex
     // exec is treated as possibly-blocking, so default to no-prompt
     // (--dangerously-bypass-approvals-and-sandbox); config.agents.codex.headless_yolo=false opts back in.
     let eff = crate::agents_config::effective_yolo(
@@ -817,7 +817,7 @@ pub fn codex_create(
 
 /// Spawn `codex exec resume <session_id> --json ...` from `cwd`.
 /// Resume does NOT accept `--cd`; cwd is pinned via `Command::current_dir`.
-/// `route` (x-3954) carries the row's re-resolved codex route: its tokens are
+/// `route` carries the row's re-resolved codex route: its tokens are
 /// spliced right after `codex` and its env (key + provider stamp) rides the
 /// child env, so a followed-up headless worker reaches the same routed
 /// endpoint it was minted on.
@@ -836,7 +836,7 @@ pub fn codex_resume(
 ) -> Result<CodexResult, CodexAskError> {
     let effective_prompt = render_verb_seed(prompt, "codex");
     let full_prompt = inject_from_name(&effective_prompt, from_name);
-    // ab-994222ee: a resumed autonomous worker is the same headless risk class.
+    // a resumed autonomous worker is the same headless risk class.
     let eff = crate::agents_config::effective_yolo(
         yolo,
         crate::agents_config::headless_yolo_enabled("codex", cwd),
@@ -1264,11 +1264,11 @@ fn dispatch_create(
 
     // Build the registry entry.
     use crate::state::RegistryEntry;
-    // The spawning session's ambient identity (x-132c): dispatch_create runs
+    // The spawning session's ambient identity: dispatch_create runs
     // in the CLIENT process that inherited the spawning session's env.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let new_entry = RegistryEntry {
-        // x-98ab: client-side mint - this process inherited the spawning
+        // client-side mint - this process inherited the spawning
         // session's env, so the exported FNO_NODE names the node THIS spawn
         // is for.
         node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
@@ -1277,13 +1277,13 @@ fn dispatch_create(
         name: name.to_string(),
         short_id: String::new(),
         legacy_provider: String::new(),
-        // x-d285: codex accounts are not the claude account axis; unknown.
+        // codex accounts are not the claude account axis; unknown.
         launch_account: None,
         related_session_id: None,
         provider: Some("openai".to_string()),
         model: None,
         model_basis: None,
-        // v23 (x-2019): the request beside the effect. The codex lane resolves
+        // v23: the request beside the effect. The codex lane resolves
         // no vendor flag, so the provider request stays None; model and
         // reasoning effort ride through verbatim even though the observed
         // `model` axis stays unset until a verified read stamps it.
@@ -1321,7 +1321,7 @@ fn dispatch_create(
         // live and immediately promotable/visible in `grid --all`, and the row
         // records a resumable session (codex resume <uuid>). It is NOT a
         // permanent Live: `reconcile` settles a finished ask to `Exited` by
-        // process-liveness alone (plan ab-70faa65b, Locked Decision #1 -- a
+        // process-liveness alone (plan, Locked Decision #1 -- a
         // surviving session file is "resumable", not "running", so it must not
         // keep the row `live`). promote is unaffected because admit_promote
         // admits a settled `Exited` exec source (see admit_promote_exited_source_
@@ -1492,7 +1492,7 @@ fn dispatch_resume(
     );
 
     let timeout_sec = timeout.unwrap_or(DEFAULT_FOLLOWUP_TIMEOUT);
-    // x-3954: a routed headless row re-resolves its route from today's config
+    // a routed headless row re-resolves its route from today's config
     // before the followup runs. A route the row names but config cannot
     // rebuild refuses with exit 2 - the code every route-composition refusal
     // already uses - and no codex process starts.

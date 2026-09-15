@@ -1,4 +1,4 @@
-# CLONE_ONLY_SCRIPTS - the allowlist for `fno doctor lint shellout-drift` (US4, ab-acbde274).
+# CLONE_ONLY_SCRIPTS - the allowlist for `fno doctor lint shellout-drift` (US4).
 #
 # Every repo-root script that a `cli/src/fno/` verb still shells out to MUST be
 # listed here, and each entry's verb MUST degrade on a bare `pip install fno`
@@ -41,7 +41,7 @@ scripts/lint/no-cross-skill-runtime-calls.sh :: bundle lint
 # degrades with an actionable error when the script is unavailable.
 scripts/lint-flock-pattern.sh :: lint flock-pattern
 
-# fno do pr {merge,verify,rebase} - INTERNALIZED (ab-d4c98550). The four pr-*.sh
+# fno do pr {merge,verify,rebase} - INTERNALIZED. The four pr-*.sh
 # were ported to in-package Python (fno/pr/_merge.py, _verify.py, _rebase.py)
 # shelling to gh/git, so these verbs run from a bare pip install with no
 # repo-root script. No allowlist entry remains; the drift guard now passes
@@ -52,7 +52,7 @@ scripts/lint-flock-pattern.sh :: lint flock-pattern
 scripts/lib/worktree-lifecycle.sh :: worktree status
 
 # fno doctor lint stale-skill-refs - the stale-skill-reference audit gate; operates on
-# the repo's skills/ source tree (re-homed from `fno consolidation audit`, x-71b6).
+# the repo's skills/ source tree (re-homed from `fno consolidation audit`).
 scripts/ci/check-no-stale-skill-refs.sh :: lint stale-skill-refs
 
 # fno doctor lint flock-pattern - lints the repo's own source for open-coded agent
@@ -65,7 +65,7 @@ scripts/lint-flock-pattern.sh :: lint flock-pattern
 scripts/ci/check-retired-command-strings.sh :: lint retired-commands
 scripts/ci/check-preamble-budget.sh :: lint preamble-budget
 
-# fno doctor lint internal-refs - the node-id leak guard (x-53d1); scans the
+# fno doctor lint internal-refs - the node-id leak guard ; scans the
 # repo's tracked prose via the same _run_ci_gate wrapper as its siblings.
 scripts/ci/check-no-internal-refs.sh :: lint internal-refs
 

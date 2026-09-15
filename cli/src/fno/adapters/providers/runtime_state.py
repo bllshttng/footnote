@@ -1,6 +1,6 @@
 """Per-provider runtime state for exponential-backoff failover.
 
-Plan A of provider failover hardening (ab-6534a78a). Distinct from the
+Plan A of provider failover hardening. Distinct from the
 phase-scoped ``failover-state.json`` (storm-cap, no-swap-back): this
 file owns per-provider exponential backoff state that survives target
 spawns within a megawalk campaign.
@@ -61,7 +61,7 @@ class ProviderHealth:
     reset_provider_health) and increments by 1 on each consecutive
     backoff-class error, capped at ``MAX_BACKOFF_LEVEL`` (15).
 
-    ``model_locks`` (Plan A1, ab-7fe3cdaf) is a dict mapping
+    ``model_locks`` (Plan A1) is a dict mapping
     model identifier -> unix-epoch-seconds cooldown expiry. It lets a
     quota error on one model lock only that model while leaving the
     provider record (and its other models) usable. Provider-level
@@ -106,7 +106,7 @@ class ProviderHealth:
 class ComboCursor:
     """Per-combo round-robin cursor state.
 
-    Plan B (Spec 4, ab-0e5a921e). One entry per round-robin combo, keyed by
+    Plan B (Spec 4). One entry per round-robin combo, keyed by
     combo name in ``ProviderRuntimeState.combo_cursors``. The cursor sticks
     on ``cursor_index`` for ``sticky_limit`` consecutive ``advance_cursor``
     calls before rolling to the next index.
@@ -592,7 +592,7 @@ def _parse_usage_payload(raw: dict[str, Any]) -> dict[str, UsageSnapshot]:
     reads as UNKNOWN, never OK).
 
     ``resets_at`` is nullable and may be absent, so a window written before
-    x-763a and a reset-less window written after it both load. ``partial``
+ and a reset-less window written after it both load. ``partial``
     defaults False and ``confidence`` defaults ``unknown``: a row already on
     disk was written by a probe that recorded neither, and claiming ``exact``
     for it would assert precision nobody measured.
@@ -900,7 +900,7 @@ def _next_health(
     contract. The cap fires at level 15 (BASE * 2^14 already exceeds
     MAX_BACKOFF_MS so subsequent hits stay at the cap).
 
-    When ``model`` is provided (Plan A1, ab-7fe3cdaf) the cooldown is
+    When ``model`` is provided (Plan A1) the cooldown is
     written to ``model_locks[model]`` and ``rate_limited_until`` is
     preserved untouched. The cooldown ramp (``backoff_level``) is per
     provider regardless of model so a second 429 on a sibling model
@@ -973,7 +973,7 @@ def update_provider_health(
     write, and returns the last-known-good ``ProviderHealth`` (or a
     zero state if no prior entry exists).
 
-    When ``model`` is provided (Plan A1, ab-7fe3cdaf), the cooldown is
+    When ``model`` is provided (Plan A1), the cooldown is
     written to ``model_locks[model]`` and ``rate_limited_until`` is
     untouched (Locked Decision 2: model-locks-only when model is
     known). The provider-level ``backoff_level`` still increments
@@ -1142,7 +1142,7 @@ def is_in_cooldown(
 ) -> bool:
     """Lock-free read: is ``provider_id`` currently in cooldown?
 
-    Two-level lookup (Plan A1, ab-7fe3cdaf):
+    Two-level lookup (Plan A1):
 
     1. If ``model`` is provided and ``model_locks[model] > now``, True.
     2. If ``rate_limited_until > now``, True (provider-level lock).
@@ -1183,7 +1183,7 @@ def is_in_cooldown(
 # ---------------------------------------------------------------------------
 # Usage snapshot: read (lock-free, TTL) + write (locked) + refresh (probe).
 #
-# Quota-aware dispatch (x-5d3e). The snapshot is advisory-only: absence or
+# Quota-aware dispatch. The snapshot is advisory-only: absence or
 # staleness reads as "no data" and the caller proceeds fail-open. Writes carry
 # health + cursors through the same lock so a usage write never drops a
 # concurrent health/cursor mutation (and vice versa) - the same last-writer-wins
@@ -1530,7 +1530,7 @@ def _headroom_from(
         )
     # A window with no reset can never be "already reset", so the check that
     # exempts a stale window cannot exempt it: it always binds, on percentage
-    # alone. That is the whole point of retaining it (x-763a).
+    # alone. That is the whole point of retaining it.
     binding = [
         w
         for w in (snap.windows if snap else ())
@@ -1621,7 +1621,7 @@ def evaluate_quota_signal(
     UNKNOWN with both verdicts false, so a fresh install never probes, never
     defers and never reroutes.
 
-    Looking and acting are separate decisions (x-763a). ``observe`` arms the
+    Looking and acting are separate decisions. ``observe`` arms the
     probe and the snapshot write; ``defer_dispatch`` arms the verdicts that
     hold or reroute a dispatch, and implies ``observe`` because deferring
     requires looking. With ``observe`` on and ``defer_dispatch`` off the probe
@@ -1721,7 +1721,7 @@ def evaluate_quota_signal(
 # ---------------------------------------------------------------------------
 # Combo cursor: read (lock-free, eventual consistency) + advance (locked).
 #
-# Plan B (Spec 4, ab-0e5a921e). Mirrors the post-#228 invariant from the
+# Plan B (Spec 4). Mirrors the post-#228 invariant from the
 # health side: lazy cleanup of stale or hash-mismatched entries happens
 # ONLY in locked write paths. read_cursor never writes; it returns None
 # when the entry is stale, hash-mismatched, or absent. Cleanup of the

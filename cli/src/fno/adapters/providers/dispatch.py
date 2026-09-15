@@ -1,10 +1,10 @@
 """dispatch_env and resolve_env_value for provider rotation substrate.
 
-Phase 03 of the provider rotation substrate (ab-256f6b6e).
+Phase 03 of the provider rotation substrate.
 
 Pure functions: no global state, no caching, concurrency-safe by design.
 
-Phase 02b of provider rotation failover (ab-9728b70b) adds
+Phase 02b of provider rotation failover adds
 ``spawn_with_provider_snapshot``: read the active provider snapshot once
 under a shared lock and inject it into a child subprocess's env so the
 subprocess and its descendants see a stable provider for their lifetime,
@@ -183,7 +183,7 @@ def dispatch_env(
 
     record = by_id[provider_id]
 
-    # A config-dir account (x-d012) lives in its OWN dir, not the shared managed
+    # A config-dir account lives in its OWN dir, not the shared managed
     # slot. Honor it regardless of auth, else a managed record carrying config_dir
     # would fall through to the `managed -> {}` arm below and dispatch on the
     # ambient default account (silent mis-bill).
@@ -217,7 +217,7 @@ def dispatch_env(
 
 
 # ---------------------------------------------------------------------------
-# Phase 02b of provider rotation failover (ab-9728b70b).
+# Phase 02b of provider rotation failover.
 # ---------------------------------------------------------------------------
 
 FNO_PROVIDER_ENV_KEYS = (

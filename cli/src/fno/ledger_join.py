@@ -1,4 +1,4 @@
-"""Resolve the session(s) that own a merged PR, from ``ledger.json`` (x-f47f).
+"""Resolve the session(s) that own a merged PR, from ``ledger.json``.
 
 The join the ``/fno:pr merged`` ritual used to do in markdown bash (a jq
 pipeline filtered through ``grep -vxE 'null|'``, an empty alternation that

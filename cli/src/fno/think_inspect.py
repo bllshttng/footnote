@@ -16,7 +16,7 @@ from typing import Any, Callable
 Run = Callable[..., subprocess.CompletedProcess[str]]
 _UNSET = object()
 _DB_ENV_KEYS = re.compile(r"^\s*(DATABASE_URL|SUPABASE_DB_URL|POSTGRES_URL|DIRECT_URL)\s*=", re.MULTILINE)
-# x-38d3 (a done node) carries six live rulings; a cap keeps the receipt small
+# (a done node) carries six live rulings; a cap keeps the receipt small
 # without silently dropping an old one off the end unannounced (decisions_truncated).
 _DECISIONS_CAP = 20
 _DECISIONS_TEXT_WIDTH = 200

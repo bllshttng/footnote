@@ -1,5 +1,5 @@
 //! `fno-agents kill-check` verb — Rust port of `scripts/lib/kill-criteria.sh`
-//! (packaging EPIC ab-8bdb4642, eliminate-don't-vendor leg).
+//! (packaging EPIC, eliminate-don't-vendor leg).
 //!
 //! Provable byte-parity with the bash `check_kill_criteria <plan_path>`:
 //! the bash script stays in-tree as the parity oracle (differential tests in

@@ -67,7 +67,7 @@ pub struct Behavior {
     pub stray_completion_after: Option<Duration>,
     /// Answer `initialize` with an `error` frame on the matching id: the
     /// protocol/version skew shape a refusing real daemon produces
-    /// (codex offered 0.149.1 to 0.150.1 on the machine x-296f was measured
+    /// (codex offered 0.149.1 to 0.150.1 on the machine was measured
     /// on). A client that treats the id match as success reads HEALTHY here.
     pub refuse_initialize: bool,
     /// The canned `project/list` page. One page, no cursor: the resolver's

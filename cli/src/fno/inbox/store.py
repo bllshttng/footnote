@@ -138,7 +138,7 @@ def classify_durable_owner(
 
 def owner_ttl_hours(owner: DurableOwner | str) -> float:
     """The unread horizon (hours) the sweep enforces; the receipt's drain
-    window (x-1602) quotes this same table. Unknown classes return 0."""
+    window quotes this same table. Unknown classes return 0."""
     key = owner.value if isinstance(owner, DurableOwner) else owner
     return _OWNER_TTL_HOURS.get(key, 0.0)
 
@@ -256,7 +256,7 @@ def inbox_dir_for(project: str) -> Path:
     override_root = _inbox_root()
     if override_root is not None:
         return override_root / project / "inbox"
-    # Production path: consult settings.yaml via path-config (ab-6fe0d039).
+    # Production path: consult settings.yaml via path-config.
     from fno import paths as _paths
     return _paths.inbox_root_for(project)
 
@@ -603,7 +603,7 @@ def find_thread_by_msg_id(recipient: str, msg_id: str) -> Optional[ThreadHandle]
 
 
 # ---------------------------------------------------------------------------
-# Durable write (jsonl-canon) + derived render (ab-cee91152, Move A)
+# Durable write (jsonl-canon) + derived render (Move A)
 # ---------------------------------------------------------------------------
 # LD2: the global JSONL bus log is the durable-first system of record; the
 # per-recipient markdown thread file is a derived, regenerable render. This is
@@ -640,7 +640,7 @@ def _append_to_bus(
 ) -> None:
     """Append a versioned envelope to the canonical bus log (the durable write).
 
-    LD2 (ab-cee91152): the JSONL bus log is the durable-first system of record.
+    LD2 : the JSONL bus log is the durable-first system of record.
     A failure here FAILS the caller's send - the message is NOT durably stored,
     so reporting success would be a silent loss. This raises (it does NOT swallow);
     the markdown render is the best-effort, regenerable half.
@@ -689,7 +689,7 @@ def _append_to_bus(
 def _write_render_best_effort(target: Path, content: str) -> bool:
     """Write the derived markdown render under the per-path lock. Best-effort.
 
-    LD2 (ab-cee91152): the render is derived from the canonical log, so a write
+    LD2 : the render is derived from the canonical log, so a write
     failure here is logged loudly but never fatal - the durable bus append has
     already landed, and ``rebuild_render`` regenerates the render from the log.
     Returns True on success, False on a logged failure.
@@ -1062,7 +1062,7 @@ def _unique_render_path(inbox: Path, base: str) -> Path:
 def rebuild_render(recipient: str) -> int:
     """Regenerate ``recipient``'s markdown render from the canonical bus log.
 
-    LD2 / AC1-EDGE (ab-cee91152): the JSONL bus log is the source of truth and
+    LD2 / AC1-EDGE : the JSONL bus log is the source of truth and
     the per-recipient markdown is a derived, throwaway view. This clears the
     recipient's existing render files and rewrites them from the log so a
     deleted or corrupted render is recovered with no message lost. Idempotent:

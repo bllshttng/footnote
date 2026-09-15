@@ -70,7 +70,7 @@ class PrCandidate:
     # The originating session's harness (claude|codex|gemini): selects which
     # live vehicle the warm route uses. None -> claude (back-compat default).
     source_harness: Optional[str] = None
-    # The originating session's cwd: the direct-finalize rung (x-88df) resolves
+    # The originating session's cwd: the direct-finalize rung resolves
     # its on-disk transcript + manifest from here. None -> probe skipped (cold).
     source_cwd: Optional[str] = None
     # The latest pre-dispatch ``phase: ship`` identity from the node's
@@ -393,7 +393,7 @@ def read_tracked_pr_states(
     clean one. Successful listings also return every OPEN PR, even when it
     was absent from the cache, so the swept snapshot converges to repository
     truth. A tracked key absent from a successful open listing is NOT_OPEN:
-    the tick needs nothing more than that fact (x-c79d), and the closed-listing
+    the tick needs nothing more than that fact, and the closed-listing
     page walk it replaced timed out at 30s against page 5. A failed open
     listing leaves its keys UNKNOWN and increments the failure count.
 

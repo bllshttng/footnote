@@ -337,7 +337,7 @@ git push
 
 #### 8a. Per-thread replies (LOAD-BEARING for the autonomous loop)
 
-The loop-check review gate (control-plane step 2, ab-f1c5a9ed) computes a
+The loop-check review gate (control-plane step 2) computes a
 blocking finding (codex P1 / gemini critical|high) as **addressed** ONLY when
 its thread has a non-bot reply AND (a fix commit landed after the finding's
 timestamp OR the reply body carries `wontfix:`). A consolidated top-level
@@ -510,7 +510,7 @@ MEMORY_DIR="${HOME}/.claude/projects/$(printf '%s' "$_CANON_ROOT" | sed 's|/|-|g
 
 CANDIDATE='<JSON for this candidate>'
 
-# Read-before-write (x-8fc0), same guard as the pre-promise recipe. A memory
+# Read-before-write, same guard as the pre-promise recipe. A memory
 # file with this name may already exist. If it does, the writer refuses the
 # update without proof you read the CURRENT content this turn. Read
 # "$TARGET" with the Read tool first, THEN hash it - the hash is proof of

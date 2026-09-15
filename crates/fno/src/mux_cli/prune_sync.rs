@@ -60,7 +60,7 @@ pub(super) fn prune_identity(sq: &crate::squad_store::PrunedSquad) -> String {
 }
 
 /// The one-line summary after a (dry-)run: count pruned plus why the rest
-/// stayed. The tabs line splits `kept` by reason (x-cf97) so "kept 22" is
+/// stayed. The tabs line splits `kept` by reason so "kept 22" is
 /// never again one opaque number, and a dry-run NAMES each tab it would
 /// close - a count alone stopped being a decision somewhere around tab six.
 #[allow(clippy::too_many_arguments)]
@@ -215,7 +215,7 @@ pub(super) fn render_prune_json(
         "tabs_skipped_named": tabs.skipped_named,
         "tabs_named_would_close": tabs.named_would_close,
         "tabs_kept": tabs.kept,
-        // (x-cf97) The kept split and the opt-in used-shell population:
+        // The kept split and the opt-in used-shell population:
         // the four reasons sum to `tabs_kept` whenever the fold ran, and
         // `kept_not_probed` covers the run where it did not.
         "tabs_kept_last_in_squad": tabs.kept_last_in_squad,

@@ -3,7 +3,7 @@
 - Calls `gh pr list --head <branch>` first to detect an existing PR.
 - If found, updates artifact with existing PR number (no duplicate).
 - If not found, calls `gh pr create`.
-- Does NOT arm auto-merge: that moved to `fno-agents finalize` (x-1951).
+- Does NOT arm auto-merge: that moved to `fno-agents finalize`.
 - Writes .fno/artifacts/ship-{session_id}.md.
 - Emits fno doctor event emit --type pr_created/pr_exists.
 - Sets state field artifact_shipped=true (via fno do state set).
@@ -117,7 +117,7 @@ def ship(
     state = _read_state(state_path)
     session_id = state.get("session_id", "unknown-session")
 
-    # Incarnation fence (x-eea5 followup): a losing incarnation - one whose
+    # Incarnation fence (followup): a losing incarnation - one whose
     # session:<uuid> single-writer claim another incarnation holds - must not
     # create a PR. Same read-only, fail-closed semantics as fno do pr merge. Runs
     # before any gh/git call so a fenced incarnation publishes nothing.
@@ -251,7 +251,7 @@ def ship(
         pr_number = _extract_pr_number(pr_url)
         action = "pr_created"
 
-    # Step 2.5: stamp the backlog node <-> PR link (x-a166). Without this the
+    # Step 2.5: stamp the backlog node <-> PR link. Without this the
     # node's pr_number stays null through the whole PR review window, so the
     # _has_unmerged_open_pr selection guard and `fno backlog reconcile` cannot
     # see the in-flight/merged PR - leaving only the 2h PID claim to guard the

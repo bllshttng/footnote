@@ -552,7 +552,7 @@ def _ordinary_verdict(
     # which drops its reason and answers None, so the verb reports "pr head
     # fetch failed" - true of the probe, silent about the argument that broke
     # it, and exactly the wrong-subject sentence this gate learned to stop
-    # printing (x-51f7). Refuse at the door, before any probe has a chance to
+    # printing. Refuse at the door, before any probe has a chance to
     # misattribute it. UNANSWERED, not REFUSED: a gate that cannot read its
     # own inputs has not judged the PR.
     #
@@ -737,7 +737,7 @@ def _ordinary_verdict(
             if n
         ]
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", "; ".join(notes), None
-    # x-aecc: a fail attestation answers this head, so an uncovered row in
+    # a fail attestation answers this head, so an uncovered row in
     # that shape is uncovered BECAUSE of the non-terminal findings. Name them
     # (the disposition sentence carries each finding key) instead of falling
     # through to the generic "0 reviewed" text - that text taught the loop to
@@ -1209,7 +1209,7 @@ def rounds_since_last_pass(
 ) -> int:
     """The PR's review-round total, oldest-first.
 
-    The operator's ruling (x-2219, 2026-08-27) made this a PER-PR TOTAL:
+    The operator's ruling (2026-08-27) made this a PER-PR TOTAL:
     ``max_rounds`` counts rounds across the whole life of the PR, and a
     ``verdict: pass`` refunds nothing - it is one round like any verdict,
     and its coverage role lives in the coverage classify, never here. The
@@ -1370,7 +1370,7 @@ def _pr_reviews(pr_number: int, cwd: str) -> Tuple[Optional[list[dict]], str]:
             # The reason names its own subject. This used to be the fixed
             # sentence "repo slug unreadable", which is wrong whenever the slug
             # is the readable thing and the CWD is what does not exist - the
-            # exact case a caller hits by passing `owner/repo` here (x-51f7).
+            # exact case a caller hits by passing `owner/repo` here.
             return None, slug_reason or "repo slug unreadable"
         # The plain bounded runner, NOT _rest_runner. _rest_runner stamps
         # _quota.delegate_environment(), which strips the quota proxy from

@@ -40,7 +40,7 @@ class Move(NamedTuple):
 
 VERB_MOVES: dict[str, Move] = {
     # The 2026-08-22 "mail, test, update stay canonical at root" ruling is
-    # superseded (d-b93d7754, d-df6c29a6, x-6233): mail and test fold like
+    # superseded (d-b93d7754, d-df6c29a6): mail and test fold like
     # every other root verb, and update remains a root verb outright. The
     # nested registrations (agents mail / doctor test / doctor update) are
     # now the canonical spellings; these entries retire the root forms.

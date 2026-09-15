@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # graph-write-protect.sh - PreToolUse hook: block writes to the two forbidden
 # state files ~/.fno/graph.json and .fno/target-state.md across Edit, Write,
-# AND Bash tools (x-4c48: close the Bash bypass + fail-closed parse + general
+# AND Bash tools (: close the Bash bypass + fail-closed parse + general
 # manifest immutability).
 #
-# Flow (design x-4c48):
+# Flow (design):
 #   1. jq-free substring pre-filter: if neither protected path token appears in
 #      the raw payload, approve fast. This never calls jq, so a missing jq can
 #      no longer fail OPEN (old finding b), and normal edits pay ~zero cost.
@@ -66,7 +66,7 @@ _block() {
 # a protected path (.fno/graph.json or .fno/target-state.md), else 1. Keyed on
 # operator+path adjacency, not bare mention: `echo "see .fno/graph.json" >> x`
 # writes x (no match); `cat .fno/graph.json` reads (no match). Enumerated floor
-# per design x-4c48; not Turing-complete coverage (merge-gate artifact backstop).
+# per design; not Turing-complete coverage (merge-gate artifact backstop).
 _bash_targets_protected() {
     local cmd="$1"
     # A protected-path token. The prefix (leading dir/`~`/`$HOME`/quote chars up

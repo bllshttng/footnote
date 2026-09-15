@@ -69,7 +69,7 @@ doctor_app.command("lint")(lint)
 # Machine janitor for dev-built disk bloat; hidden, `fno help doctor --all`.
 doctor_app.command("reclaim", hidden=True)(reclaim_command)
 doctor_app.command("footprint", hidden=True)(footprint_command)
-# Bash-call shape over this project's transcripts (x-997a); hidden, `fno help doctor --all`.
+# Bash-call shape over this project's transcripts; hidden, `fno help doctor --all`.
 doctor_app.command("bash-census", hidden=True)(bash_census_command)
 # `doctor lanes` is the whole-machine lane advisor: one number and its
 # reasoning, or a refusal naming every dark sensor. Hidden per the new-verb
@@ -106,11 +106,11 @@ doctor_app.command("plugin-file", hidden=True)(plugin_file_command)
 # this" gap). Hidden per the new-verb convention; `fno help doctor --all`.
 doctor_app.command("route", hidden=True)(inventory_cmd)
 doctor_app.add_typer(observer_app, name="observer")
-# `doctor scratch` is the scratch-shape sweep (x-caf8); the Rust binary is
+# `doctor scratch` is the scratch-shape sweep; the Rust binary is
 # the only implementation and the leaf refuses without it.
 doctor_app.add_typer(scratch_app, name="scratch")
 doctor_app.add_typer(skill_diff_app, name="skill-diff")
-# `doctor test` is the canonical spelling (x-6233, d-df6c29a6): the root
+# `doctor test` is the canonical spelling (d-df6c29a6): the root
 # `fno test` is a VERB_MOVES shim. `doctor update` resolves the same command
 # object as the root `fno update`, which stays a root verb.
 doctor_app.command("update")(update_command)

@@ -27,7 +27,7 @@ A done_race_collision event is emitted to events.jsonl for forensic audit.
 
 Never hand-rolls graph writes - goes through locked_mutate_graph for safety.
 
-Registered under `fno backlog done` (x-6233): the plain node-id close is
+Registered under `fno backlog done` : the plain node-id close is
 graph.cli's cmd_done; this command owns the rich completion surface
 (--backfill rollups, PR/link/note metadata, fuzzy and branch queries) and is
 reached through cmd_done's delegation and the `fno done` VERB_MOVES shim.
@@ -192,7 +192,7 @@ def _rollup_from_ledger(node: Optional[dict]) -> dict:
     on plan_path, so N nodes sharing one plan each claim the same cost, points,
     and session_id - the flat project sum at ``fno backlog`` project-cost then
     counts one run N times. A contained node must therefore be suppressed here
-    (x-e957 task 1.4), and a plan_path parameter cannot see that. Passing the
+    (task 1.4), and a plan_path parameter cannot see that. Passing the
     node makes the containment read structurally unskippable: there is no
     signature a caller can satisfy while bypassing the guard.
 
@@ -396,7 +396,7 @@ def done_command(
             "owner/name of the repo the PR lives in, when that differs from the "
             "cwd checkout. Naming the repo makes the stamp an assertion rather "
             "than a cwd derivation, which is also what lets it override a "
-            "recorded pr_url naming a different repo (x-43e4)."
+            "recorded pr_url naming a different repo."
         ),
     ),
     link: Optional[str] = typer.Option(
@@ -657,7 +657,7 @@ def done_command(
             raise typer.Exit(code=evidence.exit_code)
         merge_status_to_write = "merged"
 
-    # -- promise gate (x-5d34) --
+    # -- promise gate --
     # Only on the close path (node not already done): a metadata update on a
     # done node was gated when it first closed, and re-gating here would let a
     # gh outage block a --note on a node that closed months ago. fno done has no
@@ -737,7 +737,7 @@ def done_command(
             pr_url_to_write = pr_url_for_repo(pr, node.get("cwd"))
             # The cwd derivation is a guess; on a node whose recorded pr_url
             # names another repo it would re-stamp a cross-repo move silently
-            # and PR numbers collide across repos (x-43e4). Refuse the guess,
+            # and PR numbers collide across repos. Refuse the guess,
             # keep the assertion path open.
             if pr_url_to_write is not None:
                 recorded = repo_slug_from_url(node.get("pr_url"))
@@ -857,7 +857,7 @@ def done_command(
         ) as exc:
             emit_outcome = f"emit failed: {exc!r}"
         # On corrupt graph entries first_completed_at can be empty; conditional
-        # to avoid an awkward "already done at ;" diagnostic.
+        # to avoid an awkward "already done at;" diagnostic.
         at_msg = f" at {first_completed_at}" if first_completed_at else ""
         typer.echo(
             f"fno backlog done: {node_id} already done{at_msg}; "

@@ -1,4 +1,4 @@
-"""fno agents mail: the durable polled mailbox CLI surface (ab-cee91152).
+"""fno agents mail: the durable polled mailbox CLI surface.
 
 Messaging extracted from ``fno agents`` (send) and ``fno inbox`` (receive) into
 one namespace over the jsonl-canon bus log. The render/data layer stays in

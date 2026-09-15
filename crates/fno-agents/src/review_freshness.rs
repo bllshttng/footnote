@@ -1,4 +1,4 @@
-//! Review freshness: one predicate, both producers (x-5b99 / x-62a1).
+//! Review freshness: one predicate, both producers (/).
 //!
 //! Freshness used to be decided TWICE with two different rules: a `github_app`
 //! verdict got none at all (a bot opinion was inherited across commits it never
@@ -732,7 +732,7 @@ mod tests {
 
     #[test]
     fn resolver_rebase_still_carries_by_identity_first() {
-        // The pre-existing x-e8db contract on the moved code: a rebase that
+        // The pre-existing contract on the moved code: a rebase that
         // rewrote every commit but changed no content carries by identity,
         // paying no interdiff read at all.
         let tmp = tempfile::tempdir().unwrap();

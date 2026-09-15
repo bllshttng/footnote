@@ -19,7 +19,7 @@ pub const PANE_REFERENCE_USAGE: &str =
     "pane refs are <pane-id> or <session>:<pane-id>; --session overrides the prefix";
 
 /// `pane send`'s one non-obvious flag, stated where an operator looks for it
-/// (node x-3a64). The default is the surprising half, so name it first and show
+/// (node). The default is the surprising half, so name it first and show
 /// the raw case with a real payload rather than a placeholder: an envelope
 /// around the character `1` is the nonsense the flag exists to avoid.
 pub const PANE_SEND_RAW_HELP: &str = "pane send wraps the text in an <fno_mail> envelope by \
@@ -34,7 +34,7 @@ invocation reads unattributed:<pid>).";
 /// `pane run --worker`'s one line, same posture as [`PANE_SEND_RAW_HELP`]: the
 /// flag records the pane as a squad member joined to the registry row by name,
 /// so a non-claude worker survives a mux restart as an idle, resumable row
-/// instead of vanishing (x-5f7f). Without it nothing is recorded - a plain
+/// instead of vanishing. Without it nothing is recorded - a plain
 /// `pane run` stays byte-identical.
 pub const PANE_RUN_WORKER_HELP: &str = "pane run --worker <registry-name> records the pane as a \
 squad member joined to that registry row: after a mux restart the member stays as an idle row in \
@@ -43,7 +43,7 @@ worker pane outlives the server outright and a fresh server re-adopts it in plac
 keeper list` reads them); startup restore holds (default) or idles it by policy; `fno mux \
 workspace restore` respawns it on demand. A run without --worker records no member.";
 
-/// (x-b029) What the `fno_id` column answers, stated where the listing is
+/// What the `fno_id` column answers, stated where the listing is
 /// read: identity, never idleness or reusability. The dash is reserved for
 /// panes with no fno evidence at all; `unresolved:<reason>` marks an fno pane
 /// whose session id never resolved, so it can never share the dash.
@@ -161,7 +161,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     cwd = Some(v.clone());
                     i += 1;
                 }
-                // (x-5f7f) The registry name of the worker this pane hosts.
+                // The registry name of the worker this pane hosts.
                 // Validated here with the same rule the store's load gate
                 // holds, so an unrecordable name refuses before any pane
                 // exists rather than landing in the store and being dropped
@@ -196,7 +196,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     split = Some(parse_dir(v, "split/-x")?);
                     i += 1;
                 }
-                // (x-d865) exact placement: land in a named tab, adjacent to an
+                // exact placement: land in a named tab, adjacent to an
                 // anchor pane.
                 "--tab" => {
                     let Some(v) = sargs.get(i + 1) else {
@@ -206,7 +206,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     i += 1;
                 }
                 // Bare "at" mirrors bare "split" above: mux_spawn.py's
-                // placement_args sends directives unprefixed (x-d865).
+                // placement_args sends directives unprefixed.
                 "--at" | "at" => {
                     let Some(v) = sargs.get(i + 1) else {
                         return Err("--at needs a value".into());
@@ -344,13 +344,13 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 session = Some(v.clone());
                 i += 1;
             }
-            // (x-d865) split/break/ls flags.
+            // split/break/ls flags.
             "--direction" | "-d" => {
                 let v = value_of!();
                 direction = Some(parse_dir(&v, tok)?);
             }
             "--focus" => focus = true,
-            // (x-b80d) focus-only: open the interactive pane picker.
+            // focus-only: open the interactive pane picker.
             "--fzf" => fzf = true,
             "--name" => name = Some(value_of!()),
             "--fno-id" => fno_id = Some(value_of!()),

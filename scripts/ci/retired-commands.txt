@@ -10,10 +10,10 @@
 # someone goes looking, and a runtime string fires when someone is about to
 # act. Only the second is the moment that matters.
 claude rm|fno agents rm, then fno agents adopt <session-id> to reverse it|d-1900e419
-worktree cargo-offload|nothing: cargo writes outside the checkout now (build.build-dir); reclaim stale intermediates with fno agents workspace worktree cleanup --cargo-targets|x-7ca7
-config setup codex-plugin|fno config plugin install codex [--force], the one install verb for every harness|x-7ca7
+worktree cargo-offload|nothing: cargo writes outside the checkout now (build.build-dir); reclaim stale intermediates with fno agents workspace worktree cleanup --cargo-targets|the cargo build-dir move
+config setup codex-plugin|fno config plugin install codex [--force], the one install verb for every harness|the one-install-verb ruling
 claude stop|fno agents stop|d-1900e419
-# x-6233 root folds: the old root spellings forward for one release, but no
+# root folds: the old root spellings forward for one release, but no
 # caller-facing string may TEACH them. Full two-token paths so the canonical
 # nested spellings (fno backlog done, fno inbox decide, ...) never match.
 fno done|fno backlog done (same flags)|d-9de9f05b
@@ -23,19 +23,19 @@ fno mail|fno agents mail (the form every skill already teaches)|d-b93d7754
 fno test|fno doctor test|d-df6c29a6
 fno workspace|fno agents workspace|d-cf2d6fe1
 fno project|fno config project|d-344fe242
-fno yard|fno agents yard|x-6233
+fno yard|fno agents yard|the root-verb fold
 fno runtime|fno agents workspace (retired outright, tombstoned)|d-cf2d6fe1
---model-tier|fno backlog update --difficulty <band> - the work-difficulty axis (low, medium, high)|x-baef
+--model-tier|fno backlog update --difficulty <band> - the work-difficulty axis (low, medium, high)|the difficulty-axis rename
 # The launch-on-write hook retired with the ordered advance nudge: blueprint
 # completion nudges fno backlog advance; the hook must stay unrunnable.
-autolaunch-on-ready.sh|fno backlog advance (the ordered drain start)|x-4628
+autolaunch-on-ready.sh|fno backlog advance (the ordered drain start)|the one-drain-start ruling
 # d-e1eec854 collapses /fno:law to one user-invoked step. The staged-proposal
 # ceremony is gone: one `fno inbox law set` call records and returns a d- id.
 inbox law prepare|fno inbox law set (one call, no staged proposal)|d-e1eec854
 inbox law enact|fno inbox law set (one call, no hash and no receipt)|d-e1eec854
 inbox law resume|fno inbox law set (nothing is staged, so nothing resumes)|d-e1eec854
 inbox law inspect|fno inbox decisions <subject> --lane law|d-e1eec854
-# d-496680aa (x-3873) retires the second launch verb: one launch verb, and it
+# d-496680aa retires the second launch verb: one launch verb, and it
 # is spawn. The door renders the verb, brief and lane for a node-seeded spawn.
 fno agents dispatch|fno agents spawn --node <id>|d-496680aa
 fno dispatch|fno agents spawn --node <id>|d-496680aa

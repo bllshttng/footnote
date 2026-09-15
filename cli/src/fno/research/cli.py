@@ -127,7 +127,7 @@ def research_command(
         f"(+{delivered.slug}.sources.jsonl, {delivered.verified} cited) -> DoneAdvisory"
     )
     if delivered.bind_warning:
-        # Non-fatal (x-953b): the deliverable already landed above, so this
+        # Non-fatal: the deliverable already landed above, so this
         # warns rather than exits - a lost doc would be worse than an unbound one.
         typer.echo(f"research: {delivered.bind_warning}", err=True)
 

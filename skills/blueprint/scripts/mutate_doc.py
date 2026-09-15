@@ -863,7 +863,7 @@ def _ensure_difficulty(new_fm: dict[str, Any]) -> None:
 
     A doc minted here carries ``created: <today>``, so the wall clock crossing
     DIFFICULTY_REQUIRED_AFTER (2026-08-26, strictly-after) makes every mint
-    born failing its own validator with no code change at all (x-e3d1). The
+    born failing its own validator with no code change at all. The
     probe above keeps the pre-gate contract intact: a plan created on or
     before the boundary passes bandless by design, and stamping a band onto
     it would fabricate an estimate nobody made. A PRESENT band is never
@@ -1181,7 +1181,7 @@ def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
     frontmatter["status"] = "ready"
     frontmatter["acceptance_contract"] = "compiled-v1"
     # finalize is the second frontmatter write path: a doc promoted to ready
-    # here must not be born failing the difficulty gate either (x-e3d1).
+    # here must not be born failing the difficulty gate either.
     try:
         assert_blueprint_can_write("difficulty")
     except OwnershipViolation as exc:
@@ -1254,7 +1254,7 @@ def _bind_node_id(frontmatter: dict) -> tuple[str | None, str | None]:
     Ported from ``plan_claims`` (``cli/src/fno/graph/_intake.py:736``), the
     parser authority for this fact: 330 of 807 plans carry ``node:`` instead of
     ``claims:``, so a writer keyed on ``node:`` alone goes blind on roughly 41%
-    of plans - x-7760 authored ``claims:`` and its bind never ran. This script
+    of plans - authored ``claims:`` and its bind never ran. This script
     must stay portable, so the union is re-spelled here rather than imported;
     the two-spelling parity test (``cli/tests/unit/test_plan_bind_routes.py``)
     pins the two resolvers to the same answers.

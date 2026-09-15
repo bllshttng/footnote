@@ -1,4 +1,4 @@
-"""fno do pr CLI - in-package gh/git PR operations (ab-d4c98550).
+"""fno do pr CLI - in-package gh/git PR operations.
 
 Verbs:
     merge  - merge a PR with the fno-canonical guards (-> _merge.py)
@@ -667,7 +667,7 @@ def review_hold(
         raise typer.Exit(code=1)
     if action == "acquire":
         if pr_number is not None:
-            # x-b5f6: a review that names its PR keys the hold on that PR's head
+            # a review that names its PR keys the hold on that PR's head
             # ref, resolved from GitHub - never on whatever branch this checkout
             # stands on. No hold rather than a guessed one: a hold on a
             # bystander branch reports protection of a PR it is not protecting.
@@ -809,7 +809,7 @@ def global_receipt_events_path() -> None:
 @pr_app.command(
     "sync-canonical",
     help=(
-        "Post-merge canonical-checkout sync (x-47be). Runs "
+        "Post-merge canonical-checkout sync. Runs "
         "config.post_merge.sync_command in the CANONICAL checkout after a PR "
         "merges (opt-in; unset command = no-op). Exactly-once per merge SHA via "
         "a marker + single-flight lock; fail-open. Exit 0 no-op/skipped/synced, "
@@ -895,7 +895,7 @@ def rebase(ctx: typer.Context) -> None:
     "ritual",
     hidden=True,
     help=(
-        "Mechanical core of the post-merge ritual (x-bbde). Runs the CLI-only "
+        "Mechanical core of the post-merge ritual. Runs the CLI-only "
         "steps as one idempotent sequence, printing a per-leg receipt line "
         "(step=<name> status=<ok|skipped|failed> detail=...). Non-zero if any "
         "leg failed; no leg is swallowed. The judgment residue (deferral triage "

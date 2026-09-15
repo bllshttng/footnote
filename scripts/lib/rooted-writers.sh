@@ -2,7 +2,7 @@
 # rooted-writers.sh - foreign live writers rooted in a checkout, attributed to
 # an owning agent-registry row. Consumed by hooks/context-nudge.sh section 7b
 # so the flush nudge never advises committing another session's mid-flight
-# work (x-299b: a king was urged to commit 351 lines belonging to a live codex
+# work (: a king was urged to commit 351 lines belonging to a live codex
 # worker that had edited canonical before entering its own worktree).
 #
 # foreign_rooted_writers <checkout> [<my-harness-session-id>]

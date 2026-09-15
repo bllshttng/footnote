@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dispatch-node.sh - Dispatch ready backlog node(s) as fresh detached `/target`
 # workers, fire-and-forget, with a per-node outcome line. The launch is ONE
-# command per node: `fno agents spawn --node <id> --substrate thread` (x-3873).
+# command per node: `fno agents spawn --node <id> --substrate thread`.
 # The spawn door renders the seed from the node's declared verb and brief chain,
 # picks the lane from the grid while the model axis is free, ensures the launch
 # worktree, and takes the family-2 guard against double-dispatch. This script
@@ -16,15 +16,15 @@
 #   dispatch-node.sh --all-ready  [--max N] [--dry-run] [--here]
 #                                 [--permission-mode <mode>] [--route provider/model]
 #
-# Merge posture (x-3873): config.auto_merge.grant decides at target init, the
+# Merge posture: config.auto_merge.grant decides at target init, the
 # same way it does for every advance worker. There is no per-run flag. The
 # per-run override is a typed message on the spawn itself:
 #   fno agents spawn --node <id> '/fno:target --no-merge <id>'
 # A typed /target or /blueprint must agree with the verb the node derives
-# (x-2c0d); on disagreement the spawn refuses before any lane is spent, so
+#; on disagreement the spawn refuses before any lane is spent, so
 # drop the verb from the payload and let --node supply it.
 #
-# --route provider/model: per-dispatch explicit model route (x-b0b4), forwarded
+# --route provider/model: per-dispatch explicit model route, forwarded
 #   to every worker spawn only when typed. Fails CLOSED in the spawn.
 #
 # --here / --in-place: keep the worker in the dispatcher's cwd instead of the
@@ -33,7 +33,7 @@
 # Per-node outcome lines (stdout; one per node; NEVER silent):
 #   launched         <node> name=<agent> session=<sid> hint="fno agents logs <agent>"
 #   already-running  <node> reason="live target worker holds node:<id> (<holder>)"
-#   skipped-contested <node> reason="suspect claim (respawned worker); advancing" (x-ba4b)
+#   skipped-contested <node> reason="suspect claim (respawned worker); advancing"
 #   parked           <node> reason="blocked|deferred|<status> (not up-next)"
 #   skipped-done     <node> reason="already done|superseded"
 #   failed           <node> reason="<why>"
@@ -55,7 +55,7 @@
 #   - Fire-and-forget: this script NEVER writes/clears the caller's
 #     .fno/target-state.md. The planning session is untouched.
 #   - Under --all-ready, `ready` nodes and plan-less `idea` nodes (Rung.NONE,
-#     cold-dispatchable per x-e24a) dispatch; a linked idea stub (plan_path set,
+#     cold-dispatchable per) dispatch; a linked idea stub (plan_path set,
 #     Rung.IDEA) and `design` are parked. An EXPLICITLY-NAMED node also dispatches
 #     when idea-status (the triage pile; there is no distinct `triage` status) -
 #     naming it is the human's vet, the worker runs think->blueprint->do;
@@ -74,7 +74,7 @@ MAX=0          # 0 => no cap (quota is the throttle; do not invent a hard cap)
 DRY_RUN=0
 HERE=0         # 1 => keep the worker in the dispatcher's cwd (opt out of ensure)
 PERMISSION_MODE=""  # forwarded as --permission-mode only when the human typed it
-ROUTE=""       # x-b0b4: per-dispatch explicit provider,model route (fail-closed)
+ROUTE=""       # per-dispatch explicit provider,model route (fail-closed)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -169,7 +169,7 @@ for id in "${NODES[@]}"; do
       # it and let the /target worker run the phases the rung still needs -
       # think->blueprint->do from `idea`, blueprint->do from `design`.
       # Under --all-ready a plan-less idea (Rung.NONE) is cold-dispatchable
-      # (x-e24a) and drains like ready work; a linked idea stub (plan_path set,
+      # and drains like ready work; a linked idea stub (plan_path set,
       # Rung.IDEA) or a `design` doc still needs warm inline-fill, so park it.
       if [[ "$ALL_READY" -eq 1 && ( "$status" != "idea" || -n "$plan_path" ) ]]; then
         echo "parked $id reason=\"$status (not up-next)\""
@@ -201,7 +201,7 @@ for id in "${NODES[@]}"; do
     continue
   fi
 
-  # ---- Read-only early receipt; cmd_spawn owns the real guard (x-5c08) ----
+  # ---- Read-only early receipt; cmd_spawn owns the real guard ----
   # Dry-run and legacy claimed-node parking need a verdict before the spawn
   # branch. A real ready dispatch passes --node to `fno agents spawn`, whose one
   # birth choke point reruns this family-2 decision with side effects and takes
@@ -260,7 +260,7 @@ for id in "${NODES[@]}"; do
         fi
         n_already=$((n_already + 1))
       elif [[ "$reason" == "suspect-claim" ]]; then
-        # x-ba4b: TTL-unexpired dead-pid claim (a respawned worker). Contested
+        # TTL-unexpired dead-pid claim (a respawned worker). Contested
         # liveness degrades to SKIP, never steal and never park the lane -
         # advance to the next unblocked ready node.
         holder="$(printf '%s' "$guard_json" | jq -r '.holder // "unknown"' 2>/dev/null || true)"
@@ -275,7 +275,7 @@ for id in "${NODES[@]}"; do
         echo "skipped-contested $id reason=\"suspect claim on node:$id ($holder); respawned worker, advancing\""
         n_skipped=$((n_skipped + 1))
       else
-        # x-a7ab 1.2 / x-b44e: a peer dispatcher holds dispatch:<id> (reservation-
+        # 1.2 / a peer dispatcher holds dispatch:<id> (reservation-
         # held, or won the visibility barrier). Mirror spawn.sh's receipt so the
         # /target bg and /agent spawn dispatch paths never disagree: the loser
         # carries skipped: duplicate-claim, not a generic racing-launch line.
@@ -322,8 +322,8 @@ for id in "${NODES[@]}"; do
       continue ;;
   esac
 
-  # Provenance-carrying name (x-84b2): [<source>-]<verb-code>-<node>-<slug>,
-  # minted through the canonical owner (x-3218), which sanitizes the slug AND
+  # Provenance-carrying name: [<source>-]<verb-code>-<node>-<slug>,
+  # minted through the canonical owner, which sanitizes the slug AND
   # budgets the assembled name against the runtime's 64-char limit. No --verb:
   # the seed (and so the verb) is rendered by the spawn door from the node.
   # FNO_AGENTS_RUNTIME=python pins the Python dispatch: an ambient `=rust` routes
@@ -340,8 +340,8 @@ for id in "${NODES[@]}"; do
   # dispatch here until 2026-09-14, so every name came from the fallback
   # assembly below). FNO_AGENTS_NAME_MODEL: the route's model when pinned, so
   # the name carries the model tag that makes a misroute visible at a glance
-  # (x-57fe); an env var, not a flag - the flag registry refuses Python flag
-  # growth (x-72fc).
+  #; an env var, not a flag - the flag registry refuses Python flag
+  # growth.
   name_args=("$id" --verb t --slug "$node_slug")
   name_env=(FNO_AGENTS_RUNTIME=python)
   [[ -n "$ROUTE" ]] && name_env+=(FNO_AGENTS_NAME_MODEL="${ROUTE##*/}")
@@ -394,7 +394,7 @@ for id in "${NODES[@]}"; do
   fi
 
   # ---- Preview / launch ----
-  # One command per node (x-3873 change 4): the door renders the seed, picks
+  # One command per node (change 4): the door renders the seed, picks
   # the lane while the model axis is free, ensures the worktree, and takes the
   # family-2 guard. Only what the human typed rides beside --node: --here,
   # --route, --permission-mode. Worktree isolation is the door's (change 1), so
@@ -437,7 +437,7 @@ for id in "${NODES[@]}"; do
 
   # ---- Dispatch, fire-and-forget ----
   # The detached thread lane: for claude this is the `claude --bg` thread
-  # (x-2c27) - it runs the node to completion unattended and shows in
+  # - it runs the node to completion unattended and shows in
   # `claude agents`. NOT an owned-PTY pane (a fire-and-forget dispatch must not
   # stall at a placement prompt) and NEVER --bare/-p (the API-credit pool).
   # stderr goes to a temp file, NOT 2>&1: a stderr warning must never pollute
@@ -545,7 +545,7 @@ fi
 # because one node of twenty is wedged - it did the other nineteen - but
 # `dispatch-node.sh <one-id>` that launched nothing because that node is wedged
 # has no other work to report, and exiting 0 tells its caller the launch worked
-# (x-05be shape 3). The remedy line is already on stdout above.
+# (shape 3). The remedy line is already on stdout above.
 if [[ "$n_wedged" -gt 0 && "${#NODES[@]}" -eq 1 && "$n_launched" -eq 0 ]]; then
   exit 1
 fi

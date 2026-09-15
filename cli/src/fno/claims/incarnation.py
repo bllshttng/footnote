@@ -1,4 +1,4 @@
-"""Incarnation fence (x-eea5 1.3).
+"""Incarnation fence (1.3).
 
 A mail-wake fork and the supervisor-restarted original can both be alive on one
 lineage. The one that LOST the ``session:<uuid>`` single-writer claim must refuse

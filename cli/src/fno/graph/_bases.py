@@ -1,4 +1,4 @@
-"""Emit canonical Obsidian Base files for the backlog (x-6c2b waves 2-3).
+"""Emit canonical Obsidian Base files for the backlog (waves 2-3).
 
 One source of truth for the epic/mission progress views, replacing the
 hand-synced roadmap bases (mux/protocol/harden) and their hand-stamped

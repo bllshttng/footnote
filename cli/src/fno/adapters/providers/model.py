@@ -1,6 +1,6 @@
 """Data models for provider rotation substrate.
 
-Phase 01 of the provider rotation substrate (ab-256f6b6e).
+Phase 01 of the provider rotation substrate.
 Only data shapes; no CLI surface, no loop wiring.
 """
 from __future__ import annotations
@@ -51,7 +51,7 @@ _ID_PATTERN = r"^[a-z][a-z0-9-]{0,63}$"
 class Pricing(BaseModel):
     """Per-provider rate card.
 
-    Phase 02 of provider rotation failover (ab-9728b70b). The schema slot
+    Phase 02 of provider rotation failover. The schema slot
     is pinned now so per-segment cost attribution (Spec 2.5) can apply
     these rates without a follow-up shape change. v0 only validates the
     numbers; the math that consumes them lands in 2.5.
@@ -71,7 +71,7 @@ class AgentProviderBinding(BaseModel):
     Value is an object (not a bare string) so future fields (e.g. fallback,
     model_override) can land here without a schema break.
 
-    Part of: ab-978e93ed (per-agent sigma-review routing, Spec 3).
+    Part of: (per-agent sigma-review routing, Spec 3).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -138,7 +138,7 @@ class ProviderRecord(BaseModel):
     tags: list[str] = Field(default_factory=list)
     description: str | None = None
 
-    # Per-spawn account selection (x-d012). config_dir pins an explicit
+    # Per-spawn account selection. config_dir pins an explicit
     # CLAUDE_CONFIG_DIR - a full second login in its own dir (e.g. ~/.claude-alt
     # sharing projects/plugins/settings with ~/.claude via symlinks). This is
     # the verified-correct mechanism that bills the right account; a read-only
@@ -254,7 +254,7 @@ class ProviderRecord(BaseModel):
 class FailoverConfig(BaseModel):
     """config.providers.failover block.
 
-    Phase 03 of provider rotation failover (ab-9728b70b). Holds the
+    Phase 03 of provider rotation failover. Holds the
     storm-cap and any future failover-tunable knobs. The actual default
     handling lives in failover.py (DEFAULT_MAX_SWAPS_PER_PHASE) so a
     record without a failover block still works.
@@ -266,9 +266,9 @@ class FailoverConfig(BaseModel):
 
 
 class QuotaConfig(BaseModel):
-    """config.providers.quota block (quota-aware dispatch, x-5d3e).
+    """config.providers.quota block (quota-aware dispatch).
 
-    Two decisions, two flags (x-763a). ``observe`` says fno may LOOK at quota
+    Two decisions, two flags. ``observe`` says fno may LOOK at quota
     on the dispatch path; ``defer_dispatch`` says it may ACT on what it sees by
     holding a dispatch. One flag used to decide both, so an operator who wanted
     a working meter had to accept automatic deferral, and the safe choice was
@@ -287,7 +287,7 @@ class QuotaConfig(BaseModel):
     defer_threshold_pct: float = Field(default=90.0, ge=0.0, le=100.0)
     probe_ttl_seconds: int = Field(default=300, ge=1)
     defer_horizon_minutes: int = Field(default=60, ge=0)
-    # Launch-time headroom picking (x-7d45). When true, a spawn with no explicit
+    # Launch-time headroom picking. When true, a spawn with no explicit
     # --account consults `fno config accounts pick` and launches on an account that
     # still has quota. Opt-in for one release, matching defer_dispatch's posture:
     # picking changes which account gets billed without the operator asking, so
@@ -302,7 +302,7 @@ class ProvidersConfig(BaseModel):
     (a sibling of ``config.providers``, NOT nested under it). Absent block
     returns an empty dict so callers never need a None check.
 
-    Part of: ab-978e93ed (per-agent sigma-review routing, Spec 3).
+    Part of: (per-agent sigma-review routing, Spec 3).
     """
 
     model_config = ConfigDict(extra="forbid")

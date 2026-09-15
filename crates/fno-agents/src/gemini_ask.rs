@@ -1,4 +1,4 @@
-//! Client-side `gemini -p` ask path (ab-73da4ac2).
+//! Client-side `gemini -p` ask path.
 //!
 //! `gemini` is a one-shot `gemini --skip-trust -p ... --output-format json`
 //! subprocess (NOT a PTY agent): it emits a SINGLE JSON object to stdout at
@@ -195,7 +195,7 @@ fn build_argv_create_with_sandbox(
         "--output-format".to_string(),
         "json".to_string(),
     ];
-    // x-c772: an explicit --model is forwarded to `gemini --model <m>`
+    // an explicit --model is forwarded to `gemini --model <m>`
     // (empty/None = gemini default). Exact passthrough, no fuzzy resolution.
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
@@ -433,7 +433,7 @@ fn run_gemini(
     // (exit 12) rather than a panic.
     let tee_fh = open_tee(output_path)?;
 
-    // QoS (x-c5cc): exec-wrap at background priority (identity when
+    // QoS: exec-wrap at background priority (identity when
     // worker_qos=off).
     let argv =
         crate::spawn_gate::qos_wrap(popen_cwd.unwrap_or_else(|| Path::new(".")), argv.to_vec());
@@ -669,7 +669,7 @@ pub fn gemini_create(
     model: Option<&str>,
 ) -> Result<GeminiResult, GeminiAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
-    // ab-994222ee: the create/exec path is the autonomous headless lane. Default
+    // the create/exec path is the autonomous headless lane. Default
     // to no-prompt (--yolo) so a headless gemini cannot wedge on the first
     // approval prompt; config.agents.gemini.headless_yolo=false opts back in.
     let eff = crate::agents_config::effective_yolo(
@@ -705,7 +705,7 @@ pub fn gemini_resume(
     agent_self: Option<&str>,
 ) -> Result<GeminiResult, GeminiAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
-    // ab-994222ee: a resumed autonomous worker is the same headless risk class.
+    // a resumed autonomous worker is the same headless risk class.
     let eff = crate::agents_config::effective_yolo(
         yolo,
         crate::agents_config::headless_yolo_enabled("gemini", cwd),
@@ -1062,7 +1062,7 @@ fn dispatch_create(
         .filter(|s| !s.is_empty())
         .expect("gemini_create guarantees a non-empty session_id on success (expect_session=true)");
 
-    // The spawning session's ambient identity (x-132c): gemini_create runs in
+    // The spawning session's ambient identity: gemini_create runs in
     // the CLIENT process that inherited the spawning session's env.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let new_entry = RegistryEntry {
@@ -1072,14 +1072,14 @@ fn dispatch_create(
         name: name.to_string(),
         short_id: String::new(),
         legacy_provider: String::new(),
-        // x-d285: non-claude harness; the account axis does not apply.
+        // non-claude harness; the account axis does not apply.
         launch_account: None,
         related_session_id: None,
         provider: None,
         model: None,
         model_basis: None,
         effort: None,
-        // v23 (x-2019): the request beside the effect; the observed axes stay
+        // v23: the request beside the effect; the observed axes stay
         // unset, the request rides through verbatim.
         requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
         requested_provider: None,

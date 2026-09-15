@@ -22,13 +22,13 @@ from fno.agents.session_truth import STALE_ATTENTION_S
 
 # Bumped when the JSON output shape changes in a breaking way.
 # Distinct from registry SCHEMA_VERSION (storage substrate).
-# v2 (ab-098967b4): adds the additive ``discovered_sessions`` /
+# v2: adds the additive ``discovered_sessions`` /
 # ``discovered_count`` keys for the P1 live-session lane.
-# v3 (x-f273): adds the additive ``provider`` key, the registry's
+# v3: adds the additive ``provider`` key, the registry's
 # spawn-stamped model vendor (see the `stored` note in
 # schemas/agents-list-row.json).
-# v4 (x-3587): adds the stored reasoning-effort axis.
-# v5 (x-2019): adds `requested_model` (the stored spawn request, verbatim) and
+# v4: adds the stored reasoning-effort axis.
+# v5: adds `requested_model` (the stored spawn request, verbatim) and
 # `model_substituted` (the emission-time marker naming both values when the
 # request and the observation disagree family-wise). Both always present; null
 # means unknown, never a clean bill.
@@ -102,7 +102,7 @@ def row_address(
 
 
 def _dnd_label(entry: AgentEntry) -> Optional[str]:
-    """This row's do-not-disturb state for the DND column, or None (x-481e).
+    """This row's do-not-disturb state for the DND column, or None.
 
     None whenever mail flows right now, so a row whose hold already lapsed
     reads the same as a row that never had one. Both are states in which a
@@ -135,7 +135,7 @@ def _dnd_label(entry: AgentEntry) -> Optional[str]:
 def _model_substitution_marker(
     requested: Optional[str], observed_model: Optional[dict]
 ) -> Optional[dict]:
-    """The row's substitution marker, or None on match-or-unknown (x-2019).
+    """The row's substitution marker, or None on match-or-unknown.
 
     One shared verdict (`row_contradiction.model_substitution`) decides; this
     wrapper only shapes the positive marker the contract wants: BOTH values,
@@ -199,7 +199,7 @@ def serialize_entry(
         # `harness` is the sole identity axis. `provider` beside it is the
         # v15+ model-vendor axis, stamped at spawn and never inferred from
         # harness. The pre-split alias that carried the HARNESS value under
-        # this name stayed gone until x-f273, which left the list answering
+        # this name stayed gone until, which left the list answering
         # null for a field the writer stored; `observed_model` below remains
         # the transcript-derived answer to what actually answered.
         "harness": entry.harness,
@@ -216,7 +216,7 @@ def serialize_entry(
         # from the registry record and never inferred from mux or thread_id:
         # a paneless pane row and a thread row would then read identically.
         "substrate": getattr(entry, "substrate", None),
-        # The two identity axes, stated explicitly (x-dfe7): `thread_id` is
+        # The two identity axes, stated explicitly: `thread_id` is
         # the stable fno identity one worker keeps across succession, and
         # `current_session_id` is the address delivery follows NOW. They are
         # emitted separately so a renderer that sourced current identity
@@ -263,7 +263,7 @@ def serialize_entry(
         # spawn-recorded route would report the INTENDED model in exactly the
         # case an operator suspects a silent fallback; this cannot.
         "observed_model": observed_model or {"kind": "no-transcript"},
-        # v23 (x-2019): the REQUEST verbatim beside the observation, so a
+        # v23: the REQUEST verbatim beside the observation, so a
         # silent substitution is a one-line diff a reader makes from the list
         # alone. `requested_model` is write-once at birth; `model_substituted`
         # is derived HERE from the same observed payload this row already
@@ -275,7 +275,7 @@ def serialize_entry(
         "model_substituted": _model_substitution_marker(
             getattr(entry, "requested_model", None), observed_model
         ),
-        # x-481e: a field fno already modelled, consumed internally, and never
+        # a field fno already modelled, consumed internally, and never
         # showed. `delivery_policy` (registry.py, schema v14) decides whether
         # mail to this row may ever paste into its prompt line - readable by
         # twelve call sites and invisible to the human deciding.
@@ -303,7 +303,7 @@ def serialize_entry(
         # hand, "spawn" for a footnote-created worker, null for a row nothing
         # stamped. The reap lane REFUSES on "operator", so a human auditing that
         # refusal has to be able to read the field it turned on - and until
-        # x-944f this projection did not emit it at all, which left the one
+        # this projection did not emit it at all, which left the one
         # answer to "is somebody sitting in this?" visible to nobody.
         "origin": entry.origin,
         # The mux hosting ref ({session, pane_id}) for a pane-hosted row, else

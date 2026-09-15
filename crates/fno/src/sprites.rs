@@ -1,4 +1,4 @@
-//! The yard's sprite table (x-b2bf): the f[no]nimals. 18 species x 3 frames
+//! The yard's sprite table : the f[no]nimals. 18 species x 3 frames
 //! x 5 rows x 12 columns of plain monospace text - the same cell grid the
 //! mux already renders, which is why there is no image pipeline to build.
 //! The art here is ORIGINAL to this repo (the 3x5x12 cell-grid format and

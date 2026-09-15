@@ -5,7 +5,7 @@
 # Lifted from hooks/target-stop-hook.sh (Phase 1 of stop-hook refactor).
 # Behavior is identical to the inline definitions.
 #
-# Per plan 2026-05-13-megatron-discoveries-field (ab-bc919f7f), the brief
+# Per plan 2026-05-13-megatron-discoveries-field, the brief
 # assembler at cli/src/fno/megatron/brief.py needs each wave's
 # cross-wave learnings to seed wave N+1 dispatch context. emit_mission_
 # complete_if_needed sources those learnings from HANDOFF.md via

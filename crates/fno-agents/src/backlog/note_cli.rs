@@ -1,4 +1,4 @@
-//! `fno-agents backlog-note` (x-920a wave 2): the native note action the
+//! `fno-agents backlog-note` (wave 2): the native note action the
 //! Python `fno backlog note` bridge calls. The Rust side owns the bounded
 //! state policy, revision-checked replacement, history routing (machine,
 //! wave, terminal), and the combined-prose budget; the bridge keeps the

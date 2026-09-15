@@ -2,7 +2,7 @@
 
 Single source of truth for where worktrees live. Replaces the previous
 ``.claude/worktrees/`` and ``~/conductor/workspaces/`` locations that
-were hardcoded in multiple files (ab-3180b3f4).
+were hardcoded in multiple files.
 
 The path shape is flat with a project prefix so a single
 ``~/.fno/worktrees/`` directory holds every worktree across every
@@ -169,7 +169,7 @@ def legacy_worktree_path(name: str, repo_root: Path | None = None) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Worktree policy resolution (x-168b)
+# Worktree policy resolution
 # ---------------------------------------------------------------------------
 # Per-project opt-out from auto-isolation. The c3po incident: an Obsidian vault
 # whose working tree IS the product got auto-worktree'd. The gate reads this
@@ -295,7 +295,7 @@ def resolve_worktree_policy(
     built-in ``harness-native``. A config file that exists but fails to parse
     RAISES (fail closed); an absent key is not an error. ``harness-native``
     degrades to ``external`` when the harness has no native mechanism (anything
-    but claude), when ``paths.worktrees_base`` is explicitly set (x-f96e: the
+    but claude), when ``paths.worktrees_base`` is explicitly set (: the
     key alone relocates; setting it AND ``worktree.policy`` is no longer
     required), and under the deprecated ``worktree.use_conductor_canonical``.
     """
@@ -356,7 +356,7 @@ def resolve_worktree_policy(
     if policy == "harness-native":
         # An explicit paths.worktrees_base is an external allocator choice on
         # its own: setting the key relocates, no second key needed. Before
-        # x-f96e the hooks read the raw key and relocated while this resolver
+        # the hooks read the raw key and relocated while this resolver
         # (and `worktree ensure` with it) ignored it unless policy was also
         # set - two location answers that disagreed.
         explicit = _explicit_worktrees_base(merged)

@@ -1,13 +1,15 @@
 name: internal-refs
 
 # The check-no-internal-refs guard blocks four leak classes: `internal/`
-# vault-path literals and node IDs / session URLs in shipped prose (docs/,
-# agents/, commands/, and top-level AGENTS.md / README.md / CLAUDE.md /
-# GEMINI.md), plus competitor product names ANYWHERE in the tree, code
-# included. That last class is repo-wide, so the guard must run on every
-# change; the script is a few seconds of bash, so this workflow is
-# deliberately unconditional rather than path-filtered. cli-ci still avoids
-# the full matrix on docs-only edits; this job is the cheap always-on net.
+# vault-path literals in shipped prose (docs/, agents/, commands/, and
+# top-level AGENTS.md / README.md / CLAUDE.md / GEMINI.md), node IDs /
+# session URLs in that prose AND in the code tree (cli/src/, crates/, hooks/,
+# scripts/, skills/ - test paths exempt, per AGENTS.md principle 6), plus
+# competitor product names ANYWHERE in the tree, code included. That last
+# class is repo-wide, so the guard must run on every change; the script is a
+# few seconds of bash, so this workflow is deliberately unconditional rather
+# than path-filtered. cli-ci still avoids the full matrix on docs-only edits;
+# this job is the cheap always-on net.
 on:
   workflow_dispatch:
   push:
@@ -24,10 +26,18 @@ permissions:
 jobs:
   check-no-internal-refs:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: No internal refs or competitor names in the tree
         run: bash scripts/ci/check-no-internal-refs.sh
+
+      # A gate a rule cites must be watched failing: the selftest plants one
+      # leak per class/scope and asserts each is rejected, and each sanctioned
+      # form (allowlisted synthetics, code-tree internal/ literals, test-path
+      # fixtures) is accepted. It mirrors the tree to a fixture, so it never
+      # mutates the checkout.
+      - name: Gate selftest (positive and negative controls)
+        run: bash scripts/tests/check-no-internal-refs-selftest.sh

@@ -14,7 +14,7 @@
 //!   sidecar beside the claim), the cross-process counterpart of the reap
 //!   arm's `requests=N`. The count belongs to the CURRENT holder: each
 //!   acquire removes the sidecar, so `requests` reads held attempts against
-//!   this acquire, never an all-time tally across holders (x-9c91 change 6).
+//!   this acquire, never an all-time tally across holders (change 6).
 //! - Every outcome is one JSON line on stdout and exit 0; a gate-side error
 //!   is exit 3, which the shim treats as fail-open (ungated, the pre-gate
 //!   behavior).
@@ -80,7 +80,7 @@ fn print_receipt(value: &Value) {
 /// Remove the held-attempts sidecar on a fresh acquire: the count now
 /// belongs to the NEW holder and starts at zero. NotFound is the normal
 /// first acquire; any other failure is swallowed because the sidecar is
-/// report-only - a lost reset must never fail an acquire (x-9c91 AC6-ERR).
+/// report-only - a lost reset must never fail an acquire (AC6-ERR).
 fn reset_held_requests(key: &str, root: Option<&Path>) {
     if let Some(path) = requests_path(key, root) {
         let _ = std::fs::remove_file(&path);

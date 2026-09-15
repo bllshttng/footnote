@@ -38,7 +38,7 @@
 # ponytail: the braille spinner (U+2800-28FF), the "✳ " idle title, the
 # rule-bordered composer, and the `esc to interrupt` / `Press up to edit queued
 # messages` / title-spinner ◐ ◑ markers are PINNED 2026-09-11 against claude
-# 2.1.268 (plain-pty capture, x-3ea6). The transcript-pager / permission /
+# 2.1.268 (plain-pty capture). The transcript-pager / permission /
 # select-menu MARKER STRINGS and the bottom_non_empty_lines(N) window sizes are
 # from the reference design and are NOT yet pinned against a live claude TUI.
 # Pin them via cli/scripts/smoke/capture-readiness-grid.sh when E2 lands.
@@ -62,7 +62,7 @@ gate = { regex = '^[\x{2800}-\x{28FF}\x{25D0}-\x{25D3}]' }
 # 2.1.268, pinned 2026-09-11). The title is None on a portal view, so this grid
 # rule carries the busy signal the title used to carry. A false `working` is
 # the safe direction; a missed one lets the idle composer rule send into a
-# busy claude - the one direction x-3ea6 exists to close.
+# busy claude - the one direction exists to close.
 [[rule]]
 id = "composer_working"
 state = "working"
@@ -130,7 +130,7 @@ gate = { all = [
   { any = [ { contains = "1. Yes" }, { contains = "1. yes" } ] },
 ] }
 
-# Answer grammar (x-c929): each numbered line ("  ❯ 1. Yes", "  2. No") is one
+# Answer grammar: each numbered line ("  ❯ 1. Yes", "  2. No") is one
 # option; named captures `idx` (the digit to send) + `label` (display text).
 # `send = "digit"` maps a picked option to its single ASCII digit byte. The
 # extractor validates the indices form a contiguous 1..N run and fingerprints

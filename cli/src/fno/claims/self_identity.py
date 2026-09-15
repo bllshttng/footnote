@@ -38,7 +38,7 @@ def resolve_self_identity(
     no answer, resolution refuses rather than guesses, except for the
     uncontended single-family elimination; a walk that cannot tell is
     "cannot tell" (``None``), never a contradiction (``False``) - only a walk
-    that found a DIFFERENT harness contradicts (x-0992: returning False on a
+    that found a DIFFERENT harness contradicts (: returning False on a
     silent walk refused every spawned worker whose ancestry the sandbox
     hides).
 
@@ -65,7 +65,7 @@ def resolve_self_identity(
     rollout fd witnesses for this process (see
     ``fno.agents.codex_rollout.codex_rollout_witness``). The id comes from the
     fd, not the marker under test, so completing a name_only stamp's pair with
-    it is not circular (x-a409).
+    it is not circular.
     """
     from fno.claims.session_pid import resolve_session_harness
 
@@ -111,7 +111,7 @@ def resolve_self_identity(
         == session_identity_key(attested_session_id)
     )
 
-    # x-a409: a name_only codex stamp carries no id and codex never carries
+    # a name_only codex stamp carries no id and codex never carries
     # CODEX_THREAD_ID in its own env, so the attester cannot complete the
     # pair. A marker value the rollout witness sees in a live fd IS this
     # process's id; the thread id wins (CODEX_SESSION_ID is the ROOT session).
@@ -151,7 +151,7 @@ def resolve_self_identity(
 
     # The stamp-declared pair: a COMPLETE stamp names the id independently of
     # the markers under test (spawn writes the stamp and the row in one act),
-    # which is the x-6d6c non-circular ground. A name_only stamp names only
+    # which is the non-circular ground. A name_only stamp names only
     # the family and completes NO pair - the ambient marker would be
     # self-attesting, and own_pair stays None so the collider keeps its full
     # ambient-leak strength there.
@@ -175,7 +175,7 @@ def resolve_self_identity(
 
 def _fill_spawn_record(owned):
     """Fill a session id the walk could not supply from the cwd-keyed spawn
-    record (x-e882).
+    record.
 
     Guards, in order: a resolved session id short-circuits before the read, a
     fail-closed disposition is never overwritten, and a process carrying ANY
@@ -304,7 +304,7 @@ def _roster_name_for_session(session_id: str) -> str:
     name is this worker's own - the same guarantee the ``FNO_WORKER_NAME``
     export was meant to give. The env write cannot reach a daemon-forked
     worker: the serving session inherits the claude daemon's env, never the
-    spawning process's (x-6de8), so a spawned worker's holder degraded to a
+    spawning process's, so a spawned worker's holder degraded to a
     raw session id (live join proof, 2026-08-27). The registry row survives
     that fork. Best-effort by design: an unreadable registry, a missing row,
     or an ambiguous session id (two names) answers "" and the caller keeps

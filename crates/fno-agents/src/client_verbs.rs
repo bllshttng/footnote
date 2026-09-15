@@ -240,7 +240,7 @@ pub fn run_drive_authority(args: &[String], home: &AgentsHome) -> i32 {
     let mut json_out = false;
     for a in args {
         match a.as_str() {
-            "--json" | "-J" => json_out = true, // ab-3ff64151: global-register short
+            "--json" | "-J" => json_out = true, // global-register short
             other if other.starts_with("--") => {
                 eprintln!("fno-agents: unknown drive-authority flag: {other}");
                 return 2;
@@ -355,9 +355,9 @@ fn read_jsonl(path: &Path) -> (Vec<(String, Value)>, usize) {
 
 /// A well-shaped registry identity token (provider or harness): non-empty,
 /// all-lowercase, whitespace-free. The relaxed load-gate corruption guard
-/// (x-8dfc) mirroring Python `registry._is_identity_token` -- it replaced the
+/// mirroring Python `registry._is_identity_token` -- it replaced the
 /// `KNOWN_PROVIDERS` enumeration so one alien harness never bricks the shared
-/// read (it degrades to durable routing, x-ec59 posture); dispatch capability
+/// read (it degrades to durable routing, posture); dispatch capability
 /// is gated separately at the spawn/ask seam (`bin/client.rs`).
 pub(crate) fn is_identity_token(v: Option<&str>) -> bool {
     matches!(
@@ -437,7 +437,7 @@ pub(crate) fn load_registry_entries(registry_path: &Path) -> Result<Vec<Value>, 
     // (the current write version plus the older shapes it back-fills in
     // memory). Each bump is forward-compat: a stale reader pinned to a lower
     // set rejects a newer store instead of silently dropping a field. v10
-    // (x-880e) removes the on-disk `provider` + per-provider session-id trio;
+    // removes the on-disk `provider` + per-provider session-id trio;
     // a legacy v1..=v9 row still carries `provider`, read leniently below. A
     // range, not a list: the upper bound cannot drift from the version this
     // binary writes.
@@ -555,7 +555,7 @@ fn validate_registry_row(
         // Required-field presence, mirroring Python `AgentEntry(**row)` (codex P2):
         // a row missing a no-default field (name/cwd/log_path) raises
         // TypeError -> RegistryVersionError, not a later "agent not found" / "no
-        // cwd". `provider` left OFF this list (x-8dfc): a provider-less post-v10
+        // cwd". `provider` left OFF this list: a provider-less post-v10
         // row backfills provider <- harness below, so identity is enforced by the
         // shape check above, not by provider presence. Presence only (a null
         // value is a value), matching the dataclass.
@@ -574,7 +574,7 @@ fn validate_registry_row(
 /// fields regardless of the schema version that wrote the row.
 ///
 /// Extracted from [`load_registry_entries`] because a row healed from a harness
-/// store (x-da8c) never passes through that loader, and a row that skips this
+/// store never passes through that loader, and a row that skips this
 /// is subtly broken in ways the verb reports as something else: `logs`/`attach`
 /// read `provider`, which v10 no longer stores, and `claude_resume_argv` reads
 /// `claude_session_uuid`, which v10 replaced with `harness_session_id`. One
@@ -587,7 +587,7 @@ pub(crate) fn backfill_row_aliases(
     obj: &mut serde_json::Map<String, Value>,
     legacy_provider_semantics: bool,
 ) {
-    // Lockstep alias heal (x-8dfc), mirroring Python `load_registry`:
+    // Lockstep alias heal, mirroring Python `load_registry`:
     // the two identity fields are the same token in the skew window, so
     // heal whichever is missing OR corrupt (shape-checked, not truthy)
     // from the valid sibling. Both directions, because resume reads
@@ -612,7 +612,7 @@ pub(crate) fn backfill_row_aliases(
             obj.insert("harness".into(), Value::String(p));
         }
     }
-    // v10 (x-880e) accept-on-read, the raw-Value mirror of the typed
+    // v10 accept-on-read, the raw-Value mirror of the typed
     // backfill_harness_aliases: TWO-WAY sync harness_session_id <-> the
     // harness-matching legacy per-provider key (canonical wins). A v1..=v9
     // row's legacy id back-fills the canonical field; a v10 row's canonical
@@ -643,7 +643,7 @@ pub(crate) fn backfill_row_aliases(
             (None, None) => {}
         }
     }
-    // v9 transport-key backfill (x-1b1e), the raw-Value mirror of Python
+    // v9 transport-key backfill, the raw-Value mirror of Python
     // `load_registry` popping `claude_short_id` into `short_id`: a legacy row's
     // jobId moves into an empty `short_id` and the old key is dropped so no verb
     // body reads it. A conflicting pair keeps `short_id` and warns once.
@@ -738,7 +738,7 @@ fn parse_trace_args(rest: &[String]) -> Result<TraceArgs, String> {
     let mut it = rest.iter().cloned().peekable();
     while let Some(arg) = it.next() {
         match arg.as_str() {
-            // ab-3ff64151: -A/-J are the global-register shorts; mirror the
+            // -A/-J are the global-register shorts; mirror the
             // Python typer.Option aliases so Rust-routed `trace` honors them.
             "--all" | "-A" => a.all_agents = true,
             "--json" | "-J" => a.json_out = true,
@@ -799,7 +799,7 @@ fn trace_logic(args: &TraceArgs, events_path: &Path, registry_path: &Path) -> Tr
     }
 
     // Registry membership gate (unless --all). Resolve the token (name | short |
-    // full id, x-1b1e) to its canonical name so events - which key on the name -
+    // full id) to its canonical name so events - which key on the name -
     // filter correctly regardless of the address form the caller used.
     let mut resolved_name: Option<String> = args.name.clone();
     if let Some(token) = &args.name {
@@ -1023,13 +1023,13 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 
 /// Harness -> session-id registry field, mirroring Python
 /// `registry.HARNESS_SESSION_ID_FIELDS`. claude resolves to the unified `short_id`
-/// transport key (the jobId); v10 (x-880e) resolves codex/gemini to the canonical
+/// transport key (the jobId); v10 resolves codex/gemini to the canonical
 /// `harness_session_id` (their per-provider fields are gone -- load_registry_entries
 /// back-fills it from a legacy row's per-provider key). This is the ONLY place a
 /// verb touches a session-id field; every session-connecting verb reaches a row via
 /// [`find_agent_entry`] instead of its own name-only `.find`.
 ///
-/// This is an EXCEPTION table, not the roster (x-efd7). claude is the one harness
+/// This is an EXCEPTION table, not the roster. claude is the one harness
 /// whose transport key differs from its canonical id, so it is the one entry that
 /// changes the answer; every other harness resolves `harness_session_id`, which is
 /// also what [`resume_session_id`] falls back to when this returns `None`. Read it
@@ -1048,7 +1048,7 @@ fn session_id_field(harness: &str) -> Option<&'static str> {
 /// else the canonical `harness_session_id`.
 ///
 /// The exact mirror of Python `resume_cli._session_id_for` and the
-/// `AgentEntry.session_id` property, whose fallback this half lacked (x-efd7).
+/// `AgentEntry.session_id` property, whose fallback this half lacked.
 /// Two rows differing only in `harness` resumed differently: codex reached exec,
 /// pi -- absent from [`session_id_field`] but declaring `interactive_resume`
 /// support in the capability contract -- refused with "no recorded session_id".
@@ -1065,7 +1065,7 @@ pub(crate) fn resume_session_id<'a>(entry: &'a Value, harness: &str) -> &'a str 
 }
 
 // ---------------------------------------------------------------------------
-// Shared identifier resolver (x-1b1e): the Rust mirror of Python
+// Shared identifier resolver: the Rust mirror of Python
 // `registry.resolve_agent`. Every session-connecting verb (resume, attach,
 // logs, trace) resolves a token to one row through this, so a session is
 // addressable by name/slug, full harness_session_id, or an 8-hex short. Same
@@ -1112,13 +1112,13 @@ fn entry_session_tier(entry: &Value, token: &str) -> Option<u8> {
         return Some(tier);
     }
     // The one optional related id addresses the row at the same tiers as the
-    // primary (x-d285: both ids stay valid forever).
+    // primary (: both ids stay valid forever).
     if let Some(related) = entry.get("related_session_id").and_then(Value::as_str) {
         if let Some(tier) = session_handle_tier(token, related) {
             return Some(tier);
         }
     }
-    // A predecessor id addresses the row at the FULL tier only (x-dfe7):
+    // A predecessor id addresses the row at the FULL tier only:
     // succession retired it, so delivery naming A follows the row that now
     // answers as B, while A's retired short/handle forms stay retired.
     entry
@@ -1221,7 +1221,7 @@ pub(crate) fn find_agent_entry<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// All-source short-token resolution (x-da8c). The registry is a cache of reality,
+// All-source short-token resolution. The registry is a cache of reality,
 // not a gate in front of it: store-only sessions participate in the same
 // ambiguity namespace as registry rows. Rust lifecycle verbs reach the Python
 // resolver through a shellout rather than growing a second store prober.
@@ -1292,7 +1292,7 @@ fn resolve_entry_with_heal_scoped(
 }
 
 // ---------------------------------------------------------------------------
-// adopt: synthesize a registry entry from durable evidence (plan x-0358)
+// adopt: synthesize a registry entry from durable evidence (plan x-aaaa)
 // ---------------------------------------------------------------------------
 
 /// All non-bare git worktrees of the repo at `cwd`. The durable evidence for an
@@ -1309,7 +1309,7 @@ fn derived_short_id(session_id: &str) -> String {
 
 /// Derivable, stable row name for a synthesized entry so re-adopting upserts one
 /// row (the upsert keys on `harness_session_id`; the name is for display + name
-/// addressing). `t-` is the bridge's manual form (x-84b2): no provenance.
+/// addressing). `t-` is the bridge's manual form: no provenance.
 fn synthesized_name(short: &str) -> String {
     format!("t-{short}")
 }
@@ -1338,7 +1338,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
     let session = id.canonical_session_id().to_string();
     let short = derived_short_id(&session);
     let is_claude = harness == "claude";
-    // The synthesizing session's ambient identity (x-132c): this fn runs in
+    // The synthesizing session's ambient identity: this fn runs in
     // the CLIENT process, so the markers name the session that vouched for
     // the adopted row.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
@@ -1353,7 +1353,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // "adopted" says that; it is not a claim that no human is sitting in
         // it, and both watchdog lanes treat it as the non-answer it is.
         origin: Some("adopted".into()),
-        // x-d285: synthesized from an identity that arrived without a row; the
+        // synthesized from an identity that arrived without a row; the
         // account it rode in on is unobserved, so the axis stays unknown.
         launch_account: None,
         related_session_id: None,
@@ -1363,7 +1363,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         model: None,
         model_basis: None,
         effort: None,
-        // v23 (x-2019): synthesized from an identity that arrived without a
+        // v23: synthesized from an identity that arrived without a
         // row - no spawn request was observed, so the requested axis stays
         // unknown.
         requested_model: None,
@@ -1451,7 +1451,7 @@ fn upsert_synthesized_row(
                 merged.exited_at = old.exited_at.clone();
                 merged.predecessor_session_ids = old.predecessor_session_ids.clone();
                 merged.forked_from_session_id = old.forked_from_session_id.clone();
-                // x-98ab: adoption observed nothing about the node, so a
+                // adoption observed nothing about the node, so a
                 // merge keeps whatever a spawn/register path stamped.
                 if merged.node.is_none() {
                     merged.node = old.node.clone();
@@ -1496,7 +1496,7 @@ fn persist_manifest_identity(
 ) -> Result<Value, AdoptError> {
     let mut entry = mint_synthesized_entry(id, &crate::daemon::now_rfc3339_like());
     entry.last_message_at = crate::claude_adopt::transcript_stamp(id.canonical_session_id());
-    // x-98ab: same missing-model closure as the roster adopt - the claude
+    // same missing-model closure as the roster adopt - the claude
     // transcript states the model; the provider comes only from the
     // route-settings match and otherwise records None.
     if let Some(model) = crate::claude_adopt::transcript_model(id.canonical_session_id()) {
@@ -1571,7 +1571,7 @@ fn interactive_resume_supported(provider: &str) -> bool {
 
 /// True iff `s` is a lowercase `8-4-4-4-12` hex UUID (the shape `claude --resume`
 /// accepts). Guards the dead-arm argv so a malformed/empty recorded uuid can
-/// never reach `claude --resume` (x-9844 Failure Modes / Boundaries).
+/// never reach `claude --resume` (Failure Modes / Boundaries).
 fn is_uuid_shaped(s: &str) -> bool {
     let groups = [8usize, 4, 4, 4, 12];
     let parts: Vec<&str> = s.split('-').collect();
@@ -1583,7 +1583,7 @@ fn is_uuid_shaped(s: &str) -> bool {
         })
 }
 
-/// The shared liveness reader's answer (x-5d96). One stable vocabulary for
+/// The shared liveness reader's answer. One stable vocabulary for
 /// every caller that has to know whether a registry row's WORKER is running,
 /// replacing per-caller liveness derivations that each read a different
 /// surface (the stored `status` field chief among them, which is a constant
@@ -1603,7 +1603,7 @@ pub enum RowLiveness {
     Unknown,
 }
 
-/// The ladder of positive liveness markers (x-5d96), run in order:
+/// The ladder of positive liveness markers, run in order:
 ///
 /// 1. **Socket** (claude rows): a 250 ms in-process connect to the session's
 ///    messaging socket. This is the same probe `claude_resume_argv_with_truth`
@@ -1613,7 +1613,7 @@ pub enum RowLiveness {
 ///    printed a clean plausible negative).
 /// 2. **Heartbeat** (the codex arm; harness-agnostic): an
 ///    `inside_leg.received_at` STRICTLY LATER than `exited_at` proves the row
-///    advanced past its own exit stamp. This is the x-d3ad rule stated as a
+///    advanced past its own exit stamp. This is the rule stated as a
 ///    positive marker, not a preference between two fields: a heartbeat that
 ///    advances past `exited_at` proves life, a quiet one proves nothing.
 ///    Codex carries no claude socket, so without this rung a claude-only
@@ -1621,7 +1621,7 @@ pub enum RowLiveness {
 /// 3. **Transcript truth state** (claude rows): `working`, `watching` or
 ///    `your-move` is life. `done` is a TURN state, not a process state, and
 ///    answers nothing here.
-/// 4. **Codex rollout freshness** (codex rows, x-798a): the session's rollout
+/// 4. **Codex rollout freshness** (codex rows): the session's rollout
 ///    jsonl under `~/.codex/sessions/` written within
 ///    [`CODEX_ROLLOUT_FRESH_SECS`] proves the worker is still advancing. The
 ///    heartbeat rung cannot cover these rows - it needs `exited_at` to
@@ -1632,7 +1632,7 @@ pub enum RowLiveness {
 ///    fresh-written past its worker's stop, so on a stamped row freshness
 ///    would resurrect it - the stamp path owns that row instead.
 ///
-/// Rung 4's freshness window (x-798a): a codex rollout jsonl written within
+/// Rung 4's freshness window: a codex rollout jsonl written within
 /// this many seconds of now proves the session is advancing. A quiet rollout
 /// proves nothing - it falls through to `Unknown`, which keeps. The window
 /// only decides whether the sweep NAMES the row live; absence never
@@ -1791,7 +1791,7 @@ where
     RowLiveness::Unknown
 }
 
-/// The claude arm of `resume` (x-9844 Fix 1): liveness-probe first, then pick the
+/// The claude arm of `resume` (Fix 1): liveness-probe first, then pick the
 /// argv. A live (incl. idle) supervisor -> `claude attach <short_id>` (today's
 /// behavior); a dead/absent one -> `claude --resume <uuid>` in the recorded cwd.
 /// Probe reality (locate_session + a 250 ms socket connect), never the registry
@@ -1836,7 +1836,7 @@ where
     // short-circuit on an empty short_id, so a pane worker (no short_id by
     // design: _validate_single_live_ref enforces mux XOR worker XOR bg) never
     // probed and reported "liveness is inconclusive" for a session whose uuid
-    // was resolvable - the x-b84f bug. The attach arm below gates on a present
+    // was resolvable - the bug. The attach arm below gates on a present
     // short_id, so dropping the short_id term lets a mux row probe without ever
     // issuing a bare `claude attach ""`.
     let truth_state = if socket_live || uuid.is_empty() {
@@ -1872,7 +1872,7 @@ where
         .map_err(|_| 13)?;
         Ok((argv, None))
     } else if dead && has_uuid {
-        // x-ae2d: this arm RELAUNCHES (the live arm above only attaches), so it
+        // this arm RELAUNCHES (the live arm above only attaches), so it
         // is the one door on this verb that can lose a route. A row that records
         // one gets it re-applied through `--settings`, the same mechanism the
         // original spawn used; a recorded file that is gone refuses rather than
@@ -1955,7 +1955,7 @@ where
     }
 }
 
-/// The dead-row pointer for `attach` (x-9844 Fix 2): `Some(message)` when `entry`
+/// The dead-row pointer for `attach` (Fix 2): `Some(message)` when `entry`
 /// is a claude row whose supervisor is gone (probe says dead) AND a well-shaped
 /// session uuid is recorded - the two revival commands to print instead of
 /// dead-ending in claude's own "session not found". `None` when the row is live
@@ -2238,7 +2238,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     };
     let entry = &entry;
 
-    // Identity is one axis (x-8dfc): resume keys on harness (provider fallback
+    // Identity is one axis: resume keys on harness (provider fallback
     // for a not-yet-backfilled row), and the exit-13 errors name the harness,
     // matching Python resume_cli. harness == provider on every current row.
     let harness = entry
@@ -2247,7 +2247,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .filter(|s| !s.is_empty())
         .or_else(|| entry.get("provider").and_then(Value::as_str))
         .unwrap_or("");
-    // x-5cef: the account flag is parsed so a wake never exits 2 at argv. The
+    // the account flag is parsed so a wake never exits 2 at argv. The
     // ROW's recorded launch account stays the binding authority on this path -
     // a wake continues a transcript that lives under the config dir it was
     // created in, so an injected pick cannot move the namespace (the spawn
@@ -2317,7 +2317,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 13;
     }
 
-    // claude gets the liveness-probed smart fork (US1/US2, x-9844): a live
+    // claude gets the liveness-probed smart fork (US1/US2): a live
     // (incl. idle) supervisor -> attach; a dead/absent one -> `claude --resume
     // <uuid>`. Other harnesses keep their settled-session resume CLI. Check
     // support before session_id so an unknown harness surfaces "not supported",
@@ -2357,7 +2357,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         (v, None)
     };
 
-    // x-3954: a routed codex row re-resolves its route from TODAY's config,
+    // a routed codex row re-resolves its route from TODAY's config,
     // spliced eagerly so the print and launch shapes carry the tokens. The
     // refusal waits for the loaded-thread wake: it needs no route.
     let codex_route_outcome =
@@ -2366,7 +2366,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // A pane (mux) row carries the session it was launched on; resume puts the
     // worker back THERE via `fno mux pane run`, not in this terminal, so the
     // operator keeps their shell and the resumed session stays drivable from the
-    // mux (x-b84f D3). A row with no mux ref keeps the in-terminal exec.
+    // mux (D3). A row with no mux ref keeps the in-terminal exec.
     let mux_session = entry
         .get("mux")
         .and_then(|m| m.get("session"))
@@ -2379,7 +2379,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 14;
     }
 
-    // x-d285: a claude row's re-entry resolves through the canonical plan so
+    // a claude row's re-entry resolves through the canonical plan so
     // the ACCOUNT axis (and, on the attach arm, the route) rides every launch
     // shape below - delegation, --print-command, the mux pane relaunch, and
     // the in-terminal exec. The dead arm's own `--settings` splice stays the
@@ -2434,7 +2434,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
-    // x-0345 W1 (identity IN): the pane relaunch must boot wearing the row's
+    // W1 (identity IN): the pane relaunch must boot wearing the row's
     // name, or the mux titles the pane from the command basename (the
     // `2:resume_f75e.sh` shape) and one worker renders split: an anonymous
     // pane beside a row still pointing at the dead pane. Both the printed
@@ -2452,7 +2452,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     };
 
     if print_command {
-        // x-3954: an unresolvable codex route refuses even the print form.
+        // an unresolvable codex route refuses even the print form.
         if let Some(Err(reason)) = &codex_route_outcome {
             eprintln!(
                 "{}",
@@ -2460,7 +2460,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             );
             return crate::reentry::REENTRY_REFUSED_EXIT;
         }
-        // x-d285: a claude row prints its CANONICAL plan argv - env prefix,
+        // a claude row prints its CANONICAL plan argv - env prefix,
         // session id, and the recorded --settings together, matching what
         // `fno agents attach` and `recover --print-command` print. Paths and
         // ids only; nothing from inside the route file is printed (AC5).
@@ -2540,7 +2540,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             // the stale pre-EnterWorktree cwd from the registry entry itself.
             .args(["agents", "resume", &name, "--cwd", cwd])
             .env("FNO_AGENTS_RUNTIME", "python");
-        // x-d285: the delegated wake re-resolves the same plan on the Python
+        // the delegated wake re-resolves the same plan on the Python
         // side; carrying the env here keeps the two runtimes from disagreeing
         // if a stale binary lags one side of the rule.
         if let Some(plan) = &reentry_plan {
@@ -2562,12 +2562,12 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 127;
     }
 
-    // The pane target decides the claim, not the other way round (x-eb79): a
+    // The pane target decides the claim, not the other way round: a
     // row with a mux ref AND a session id claims first; a row with no mux ref
     // keeps the in-terminal exec and acquires NO claim (a pid-scoped claim on
     // a path that never took one would make a thread-lane codex resume exit
     // 11 where it used to exec).
-    // x-4a68: a codex row wakes over the daemon before any pane machinery.
+    // a codex row wakes over the daemon before any pane machinery.
     if harness == "codex" {
         let route = crate::resume_wake::codex_resume_wake_route(
             &name,
@@ -2584,7 +2584,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
-    // x-3954: refuse after the wake, before any claim; announce a restore.
+    // refuse after the wake, before any claim; announce a restore.
     if let Some(code) = crate::codex_route::resume_verdict(&codex_route_outcome, entry, &row_name) {
         return code;
     }
@@ -2625,14 +2625,14 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // new pane on a live proof, and prints the pane's last output on a death.
     if let Some(session) = pane_target {
         let pane = mux_pane_run_argv(session, cwd, &argv, &identity, Some(&row_name));
-        // x-d285: the account namespace rides the pane relaunch. The mux CLI
+        // the account namespace rides the pane relaunch. The mux CLI
         // forwards its environment to the pane child; the server-side
         // canonical resolution lands with the mux gestures (wave 2.2).
         let mut plan_env: Vec<(String, String)> = reentry_plan
             .as_ref()
             .map(|p| p.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
             .unwrap_or_default();
-        // x-3954: the restored route's env (key + provider stamp) rides the
+        // the restored route's env (key + provider stamp) rides the
         // pane relaunch - the child env is the only key channel.
         if let Some(Ok(Some(route))) = &codex_route_outcome {
             plan_env.extend(route.env.clone());
@@ -2679,7 +2679,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         );
     }
 
-    // x-6ac3: a thread row's daemon arm lives in `resume_wake::codex_resume_route`.
+    // a thread row's daemon arm lives in `resume_wake::codex_resume_route`.
 
     // chdir BEFORE the emit so a stale cwd surfaces as exit 13 rather than a
     // misleading "agent_resumed" event followed by a failed exec.
@@ -2705,7 +2705,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         &[
             ("name", Value::String(name.clone())),
             // Event field key stays "provider" (schema parity with Python's
-            // emit); the value is the resolved harness (== provider) (x-8dfc).
+            // emit); the value is the resolved harness (== provider).
             ("provider", Value::String(harness.to_string())),
             ("session_id", Value::String(session_id.to_string())),
             ("cwd", Value::String(cwd.to_string())),
@@ -2721,7 +2721,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             exec_command.env(key, value);
         }
     }
-    // x-3954: the restored route's env rides the in-terminal exec.
+    // the restored route's env rides the in-terminal exec.
     if let Some(Ok(Some(route))) = &codex_route_outcome {
         for (key, value) in &route.env {
             exec_command.env(key, value);
@@ -2734,7 +2734,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// recover (x-d285 task 3.2)
+// recover (task 3.2)
 // ---------------------------------------------------------------------------
 
 /// `fno agents recover <agent> [--session <id>] [--print-command]` -- restore a
@@ -2857,7 +2857,7 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
     // worker stayed up before claiming success, and rebinds the row on a live
     // proof (same contract as the resume pane arm).
     if let Some(mux_ref) = plan.mux.as_ref() {
-        // x-0345 W1: same wrapper the resume arm carries. `which_on_path`
+        // W1: same wrapper the resume arm carries. `which_on_path`
         // above deliberately read the UNWRAPPED plan.argv[0]; the wrap
         // happens inside mux_pane_run_argv.
         let identity = match mesh_identity_assignments(&plan.name, "claude", plan.node.as_deref()) {
@@ -3101,7 +3101,7 @@ pub(crate) fn validate_lifecycle_name(name: &str) -> Result<(), (i32, String)> {
     Ok(())
 }
 
-/// (x-6678) Is this registry row a codex THREAD? Mirrors
+/// Is this registry row a codex THREAD? Mirrors
 /// `is_codex_thread_entry` in the daemon: an interactive host with no claude
 /// short id and no pane of its own. A codex PANE row answers false and keeps
 /// the refusal, because its process already has a place and `fno mux` is how
@@ -3147,7 +3147,7 @@ fn parse_logs_args(rest: &[String]) -> Result<LogsArgs, (i32, String)> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--follow" | "-f" => follow = true,
-            "--json" | "-J" => json_out = true, // ab-3ff64151: global-register short
+            "--json" | "-J" => json_out = true, // global-register short
             "--tail" | "-n" => {
                 let v = it.next().ok_or((2, "--tail needs a value".to_string()))?;
                 tail = v
@@ -3286,7 +3286,7 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
     // codex / gemini: read the tee'd JSONL file. Retrieval IS implemented
     // (proven by test_logs_codex_oneshot_parity); the only failure left here is
     // a genuinely-absent log file, so report that honestly instead of the stale
-    // "ships in Phase 3 US4" stub that made codex look unsupported (ab-65c3e60d).
+    // "ships in Phase 3 US4" stub that made codex look unsupported.
     // Byte-parity with read.py's matching branch.
     let log_path = entry.get("log_path").and_then(Value::as_str).unwrap_or("");
     if log_path.is_empty() || !Path::new(log_path).exists() {
@@ -3333,7 +3333,7 @@ pub async fn run_logs(rest: &[String], home: &AgentsHome) -> i32 {
     if args.follow {
         // Stream subsequent lines via the agent.logs daemon RPC (Locked Decision #5).
         // The daemon looks up log_path by exact registry `name`, so carry the
-        // RESOLVED row's canonical name (x-1b1e: args.name may be a short/session
+        // RESOLVED row's canonical name (: args.name may be a short/session
         // id) rather than the raw token, or the follow attach silently misses.
         let resolved_name = entry
             .get("name")
@@ -3596,7 +3596,7 @@ mod tests {
     use crate::resume_wake::acquire_named_session_claim;
     use serde_json::json;
 
-    // --- attach: which rows are codex THREADS (x-6678) -----------------------
+    // --- attach: which rows are codex THREADS -----------------------
 
     /// AC17 / AC18 (row-selection half): exactly the codex rows that are
     /// threads take the exec path, and every other row falls through to the
@@ -3644,7 +3644,7 @@ mod tests {
         assert!(is_codex_thread_row(&nulled));
     }
 
-    // --- find_agent_entry (x-1b1e): parity with Python resolve_agent ----------
+    // --- find_agent_entry: parity with Python resolve_agent ----------
 
     const CLAUDE_UUID_FIXTURE: &str = "a1b2c3d4-1111-2222-3333-444455556666";
 
@@ -3674,7 +3674,7 @@ mod tests {
 
     #[test]
     fn session_lineage_predecessor_full_id_resolves_the_current_row() {
-        // x-dfe7 AC6-HP (Rust half): delivery naming a succeeded session's
+        // AC6-HP (Rust half): delivery naming a succeeded session's
         // full uuid follows the row that now answers as its successor.
         let mut row = claude_row("worker", "08054b1d", "08054b1d-2222-3333-4444-555555555555");
         row["predecessor_session_ids"] = json!(["e6f78b98-1111-2222-3333-444444444444"]);
@@ -3690,7 +3690,7 @@ mod tests {
 
     #[test]
     fn session_lineage_predecessor_short_form_stays_retired() {
-        // x-dfe7: a predecessor's 8-hex short retired with it and never
+        // a predecessor's 8-hex short retired with it and never
         // re-enters the successor's short-address namespace.
         let mut row = claude_row("worker", "08054b1d", "08054b1d-2222-3333-4444-555555555555");
         row["predecessor_session_ids"] = json!(["e6f78b98-1111-2222-3333-444444444444"]);
@@ -3841,7 +3841,7 @@ mod tests {
         ));
     }
 
-    // --- registry-miss heal (x-da8c) -----------------------------------------
+    // --- registry-miss heal -----------------------------------------
 
     #[test]
     fn session_shape_gate_admits_only_probeable_tokens() {
@@ -4149,7 +4149,7 @@ mod tests {
         assert!(!result.stderr.contains("not found"));
     }
 
-    /// The gate x-efd7 exists to install: the resume roster and the identity
+    /// The gate exists to install: the resume roster and the identity
     /// read are derived from ONE source, so they cannot disagree again.
     ///
     /// Keyed on the capability contract because that is what
@@ -4196,7 +4196,7 @@ mod tests {
     /// Both directions of the fallback, so neither reads as passing by accident.
     #[test]
     fn transport_key_wins_and_canonical_id_backstops() {
-        // pi: the x-efd7 repro. Absent from `session_id_field`, so the read has
+        // pi: the repro. Absent from `session_id_field`, so the read has
         // only the fallback to reach its id with.
         let pi = serde_json::json!({
             "harness": "pi",
@@ -4215,7 +4215,7 @@ mod tests {
         assert_eq!(resume_session_id(&claude, "claude"), "119e3c52");
 
         // A claude PANE row carries the canonical id and no short_id by design
-        // (x-b84f). It resolves rather than reporting "no session id".
+        //. It resolves rather than reporting "no session id".
         let pane = serde_json::json!({
             "harness": "claude",
             "short_id": "",
@@ -4394,7 +4394,7 @@ mod tests {
         assert!(!should_delegate_claude_live_attach("codex", &None, &None));
     }
 
-    // ---- recover (x-d285 task 3.2) --------------------------------------
+    // ---- recover (task 3.2) --------------------------------------
 
     fn forked_row() -> crate::state::RegistryEntry {
         let mut entry = mint_synthesized_entry(
@@ -4519,7 +4519,7 @@ mod tests {
 
     #[test]
     fn claude_resume_dead_arm_restores_a_recorded_route_or_refuses() {
-        // x-ae2d: the dead arm RELAUNCHES, so it is the one door on this verb
+        // the dead arm RELAUNCHES, so it is the one door on this verb
         // that can lose a route. Untested, the branch is a guard on paper: the
         // Python spawn door has its own tests and neither covers this one.
         let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
@@ -4587,7 +4587,7 @@ mod tests {
 
     #[test]
     fn claude_resume_argv_mux_row_relaunches_on_a_gone_verdict() {
-        // x-b84f: a pane worker carries a canonical uuid but NO short_id (empty
+        // a pane worker carries a canonical uuid but NO short_id (empty
         // by design: _validate_single_live_ref enforces mux XOR worker XOR bg, so
         // a mux row never gets the transport key). The loader backfill mirrors
         // harness_session_id -> claude_session_uuid, so the uuid IS resolvable.
@@ -4644,7 +4644,7 @@ mod tests {
 
     #[test]
     fn claude_resume_argv_live_pane_row_is_not_called_inconclusive() {
-        // x-b84f review #4: a live pane worker has no short_id, so the live
+        // review #4: a live pane worker has no short_id, so the live
         // attach arm (which gates on a present short_id) does not fire. Pre-fix
         // it fell through to the else arm and printed "liveness is
         // inconclusive" for a session the probe JUST answered live, then told
@@ -4795,14 +4795,14 @@ mod tests {
     fn parse_manifest_identity_reads_canonical_fields() {
         let content = "---\n\
             fno_id: 20260804T202518Z-cl99002-4e0236\n\
-            input: \"x-0358\"\n\
+            input: \"x-aaaa\"\n\
             harness: claude\n\
             harness_session_id: c7dc6218-493a-4299-916a-330ec0b0b055\n\
             owner_cwd: \"/Users/x/code/wt\"\n\
             claude_session_id: c7dc6218-493a-4299-916a-330ec0b0b055\n\
             codex_thread_id: null\n\
             ---\n\
-            graph_node_id: x-0358\n";
+            graph_node_id: x-aaaa\n";
         let m = parse_manifest_identity(content);
         assert_eq!(m.harness, "claude");
         assert_eq!(m.harness_session_id, "c7dc6218-493a-4299-916a-330ec0b0b055");
@@ -4903,8 +4903,8 @@ mod tests {
 
     #[test]
     fn parse_manifest_identity_single_line_input_does_not_open_scalar() {
-        // `input: "x-0358"` closes on the same line; the next real key parses.
-        let content = "input: \"x-0358\"\nharness: codex\n";
+        // `input: "x-aaaa"` closes on the same line; the next real key parses.
+        let content = "input: \"x-aaaa\"\nharness: codex\n";
         let m = parse_manifest_identity(content);
         assert_eq!(m.harness, "codex");
     }
@@ -5283,7 +5283,7 @@ mod tests {
 
     #[test]
     fn parse_logs_args_accepts_json_short() {
-        // ab-3ff64151 (codex P2, PR #431): -J must parse like --json on the
+        // (codex P2, PR #431): -J must parse like --json on the
         // Rust-routed `logs` path, not fall through to "unknown flag".
         let a = parse_logs_args(&["w".to_string(), "-J".to_string()]).unwrap();
         assert!(a.json_out);
@@ -5291,7 +5291,7 @@ mod tests {
 
     #[test]
     fn parse_trace_args_accepts_global_register_shorts() {
-        // ab-3ff64151 (codex P2, PR #431): -A/-J must parse identically to
+        // (codex P2, PR #431): -A/-J must parse identically to
         // --all/--json on the Rust-routed `trace` path.
         let short = parse_trace_args(&["-A".to_string(), "-J".to_string()]).unwrap();
         let long = parse_trace_args(&["--all".to_string(), "--json".to_string()]).unwrap();
@@ -5338,7 +5338,7 @@ mod tests {
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
-        // Current v8 (canonical-identity bump, x-ec59), v5 (inside_leg), and the
+        // Current v8 (canonical-identity bump), v5 (inside_leg), and the
         // prior v4 (host_mode bump) are accepted, and v1 back-compat reads are
         // retained (the widened accepted set).
         fs::write(
@@ -5395,7 +5395,7 @@ mod tests {
         fs::write(&reg, r#"{"schema_version":"fourteen","agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
-        // x-8dfc: an unknown provider no longer bricks the read -- it loads as
+        // an unknown provider no longer bricks the read -- it loads as
         // an undispatchable identity row (goose: a real CLI we deliberately do
         // not host). Capability is refused later at the spawn seam, not here.
         fs::write(
@@ -5424,7 +5424,7 @@ mod tests {
         // `exited` (and the other projected AgentStatus values) MUST be
         // accepted: the daemon writes `status:"exited"` when a worker exits
         // and retains the row until rm. A too-narrow {live,orphaned} set
-        // hard-errored every read until the row was removed (ab-3c063856
+        // hard-errored every read until the row was removed (
         // grid testing surfaced this). Spot-check the previously-rejected
         // statuses now load cleanly.
         for st in [
@@ -5470,7 +5470,7 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    /// x-8dfc load-gate relaxation, the Rust half of the cross-language parity
+    /// load-gate relaxation, the Rust half of the cross-language parity
     /// (AC1-FR): this reader accepts the same alien-harness fixture Python's
     /// `test_load_gate` accepts, and refuses the same corrupt fixture -- both
     /// directions pinned. Also covers AC1-EDGE (provider-less post-v10 shape)

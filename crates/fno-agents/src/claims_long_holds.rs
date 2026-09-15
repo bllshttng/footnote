@@ -1,10 +1,10 @@
-//! Long single-flight holds (x-9c91 change 4): the rows `fno agents top`
+//! Long single-flight holds (change 4): the rows `fno agents top`
 //! shows for `flight:` holds older than the measured reconcile budget. One
 //! implementation serves the Python `top` render through the `claim
 //! long-holds` op, so the per-row pid probe and sidecar count live beside
 //! the claims reader they depend on.
 //!
-//! The holder annotation is the session-aware classification (x-63f9): claim
+//! The holder annotation is the session-aware classification : claim
 //! basis outranks the pid, so an ambient pid is never printed as the holder
 //! verdict. An absent pid prints on every row with the flight gate's own
 //! consequence - the gate reclaims a pid-absent hold on the next acquire -
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn live_session_heals_the_annotation_and_names_the_pid_disagreement() {
-        // The x-63f9 specimen: expired lease, ambient pid gone, holder
+        // The specimen: expired lease, ambient pid gone, holder
         // session demonstrably alive. The annotation must read live on the
         // session witness, name the absent pid as ambient (never as the
         // verdict), and keep the lapsed lease on its own axis.

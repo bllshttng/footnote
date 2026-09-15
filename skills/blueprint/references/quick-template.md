@@ -38,7 +38,7 @@ difficulty: <low | medium | high> # Required for plans created after 2026-08-26.
 #   set_by: <person-or-agent>      # Required attribution for safe ownership/lift.
 # depends_on:                     # Graph edges wired at auto-adopt time
 #   - ../2026-04-19-sibling-slug  # sibling plan (resolved against graph.plan_path)
-#   - ab-d359579e                 # or an existing graph node ID
+#   -                 # or an existing graph node ID
 # consolidation: the step 2d Consolidation Gate's recorded outcome. Exactly one
 #                                 # of absorb | append | proceed_alone, judged on the
 #                                 # 2b receipt's graph.duplicates + graph.closure with

@@ -129,7 +129,7 @@ impl Response {
     }
 
     /// Mutable success value, so a caller can ride extra receipt fields on a
-    /// response it did not build (x-9c91 change 5's `claims` field).
+    /// response it did not build (change 5's `claims` field).
     pub fn result_mut(&mut self) -> Option<&mut Value> {
         match &mut self.payload {
             ResponsePayload::Ok(v) => Some(v),

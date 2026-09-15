@@ -1,4 +1,4 @@
-"""Title-derived human-handle slugs for graph nodes (ab-f82e8083).
+"""Title-derived human-handle slugs for graph nodes.
 
 A slug is a stable, title-derived handle that LEADS in display and is an
 accepted resolution input, while ``ab-{8hex}`` stays the canonical key. The

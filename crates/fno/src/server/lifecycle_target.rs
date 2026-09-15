@@ -4,7 +4,7 @@
 //! every live pane - including one whose registry row is gone (retired, or
 //! never written). `stop` and `remove` used to resolve through the registry
 //! alone and answered `no such agent` for exactly those rows, stranding a
-//! live process behind a live pane (x-e763). This module owns the one
+//! live process behind a live pane. This module owns the one
 //! resolver both verbs route through, with the pane-table fallback.
 //!
 //! Resolution rules (fail-closed, one unambiguous target per keypress):
@@ -23,7 +23,7 @@
 //! as before; on a pane target stop signals the child and leaves the pane,
 //! remove kills it and drops the pane. Neither gesture is gated behind the
 //! other, and remove never asks twice unless the operator turned the confirm
-//! pref back on. (v26/x-76ea and v67 wire prose for the two commands moved
+//! pref back on. (v26/ and v67 wire prose for the two commands moved
 //! here from proto.rs, where this module now lives.)
 
 use crate::agents_view::RegistryAgent;
@@ -131,7 +131,7 @@ pub fn session_id_shaped(value: &str) -> bool {
     true
 }
 
-/// (x-b029) The `fno_id` column for one row: `(state, cell)`. Three states
+/// The `fno_id` column for one row: `(state, cell)`. Three states
 /// where two lived before. A RESOLVED session id. UNRESOLVED with the reason
 /// named, for a row carrying fno evidence but no resolvable id: `spawned-name`
 /// (the spawn captured a worker `name`, so the row is fno's even though the
@@ -185,13 +185,13 @@ pub(crate) fn scan_panes<'a>(
 }
 
 impl super::Core {
-    /// Resolve a sideline lifecycle target (x-76ea) by identity, then label.
+    /// Resolve a sideline lifecycle target by identity, then label.
     /// Fail-closed: absent, any external row sharing the name, or a >1
     /// non-external collision are all refused, so a keypress can only ever
     /// act on exactly one unambiguous registry agent. The registry-only
     /// callers (rename) resolve here; the lifecycle verbs take
     /// [`Self::resolve_lifecycle_full`], which also answers from the pane
-    /// the row was drawn from (x-e763).
+    /// the row was drawn from.
     pub(super) fn resolve_lifecycle_target(
         &self,
         name: &str,
@@ -221,7 +221,7 @@ impl super::Core {
     }
 
     /// Resolve with every leg, including the pane the client's row was drawn
-    /// from (x-e763). Returns an owned target, so no catalog borrow is held
+    /// from. Returns an owned target, so no catalog borrow is held
     /// across the handler's `&mut self` action calls.
     pub(super) fn resolve_lifecycle_full(
         &self,
@@ -251,7 +251,7 @@ impl super::Core {
         })
     }
 
-    /// Stop on a pane target (x-e763): signal the child, leave the pane. The
+    /// Stop on a pane target: signal the child, leave the pane. The
     /// row flips exited on the next render when the child died; the leftover
     /// pane is the operator's remove to make.
     pub(super) fn stop_pane_child(&self, client_id: u64, pane_id: u64, name: &str) {
@@ -278,7 +278,7 @@ impl super::Core {
         }
     }
 
-    /// Remove on a pane target (x-e763): kill the child, release the writer
+    /// Remove on a pane target: kill the child, release the writer
     /// claim, drop the pane. `close_pane` is the cascade - reap_pane kills
     /// via the pty, so a keeper-hosted child dies correctly too.
     pub(super) fn remove_pane_row(
@@ -438,7 +438,7 @@ mod tests {
         assert!(scan_panes(&panes, None, "t-dup").is_none());
     }
 }
-/// (x-e763) Ask one session's server for the pane hosting `row` when the
+/// Ask one session's server for the pane hosting `row` when the
 /// registry row carries no mux field. One `PaneLs` round-trip; a server that
 /// does not answer is an honest `None`. The join is
 /// `lifecycle_target::scan_panes` - the same question the sideline asks,

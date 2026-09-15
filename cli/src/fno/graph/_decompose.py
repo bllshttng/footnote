@@ -1,4 +1,4 @@
-"""Bounded epic decomposition into group child nodes (ab-e9c81ed3, C1).
+"""Bounded epic decomposition into group child nodes (C1).
 
 A `group child node` bundles 1+ execution waves into a single shippable PR.
 This module holds the pure validation + planning logic; the IO (reading the
@@ -41,7 +41,7 @@ class NormalizedGroup(TypedDict):
     `hard`) happens in the CLI, which can read the epic doc. `stub_against` is an
     optional explicit contract-ref override; absent, the CLI derives it.
 
-    `adopt` (x-b9d7 US1, default []) names EXISTING node ids to re-parent under
+    `adopt` (US1, default []) names EXISTING node ids to re-parent under
     this group child instead of minting new ones - the packaging path for an
     epic already populated by `fno backlog idea --parent`. Only the shape is
     checked here; resolution, group-child identity, and the cycle guard need the
@@ -50,7 +50,7 @@ class NormalizedGroup(TypedDict):
     `find_orphans` and the Pass 1 upsert) reads, so a second claimant for one
     slug would break re-decompose idempotency. Membership rides on `parent`.
 
-    `needs_think` (x-edf7 US3, default False) flags a group whose child gets a
+    `needs_think` (US3, default False) flags a group whose child gets a
     dispatched `/think` + `/blueprint` design pass rather than inline-fill - set
     it for a group that owns a feasibility spike, carries unresolved epic Open
     Questions, or introduces a novel subsystem. The decompose invocation is the
@@ -200,7 +200,7 @@ def canonical_child_plan_path(
     return str(plan_doc_path(slug, child_id, project_root=Path(child_root), now=now))
 
 
-# Stub markers the validator refuses to link/ready (x-edf7 US1). An unfilled
+# Stub markers the validator refuses to link/ready (US1). An unfilled
 # scaffold carries these; inline-fill (or the fan-out design pass) must replace
 # every one before the child is linked. Kept next to the scaffold that emits
 # them so the writer and the checker share one list.
@@ -446,7 +446,7 @@ def scaffold_separate_plan(
 
     Seeded from the group's wave range, a transcribed ``## Why (from epic)``
     (US4), and stub markers for the concrete change/file/verify detail the
-    builder fills inline. Born ``status: idea`` (NOT ``ready``, x-edf7 US1): the
+    builder fills inline. Born ``status: idea`` (NOT ``ready``, US1): the
     validator refuses to link a child still carrying any :data:`STUB_MARKERS`, so
     a fresh-context worker never dispatches against an unfilled plan. The epic doc
     remains the design authority; this child carries its own execution plan.
@@ -479,7 +479,7 @@ def scaffold_separate_plan(
     # which reads that key to tell a new plan from a pre-gate one - so every
     # child of a decompose would be grandfathered forever. Caller-injectable
     # for deterministic tests. The same stamp makes the child post-gate for
-    # the difficulty gate (created after 2026-08-26 needs a band, x-e3d1), so
+    # the difficulty gate (created after 2026-08-26 needs a band), so
     # the scaffold carries the floor band; the builder filling the stub
     # revises it like every other placeholder.
     created_date = created or _date.today().isoformat()
@@ -555,7 +555,7 @@ def is_shipped(node: dict) -> bool:
 def group_child_slug(node: dict, base: str) -> Optional[str]:
     """The group slug of a child node, or None if it is not a group child.
 
-    Identity is the durable ``group_slug`` field (x-edf7 US2) - present on every
+    Identity is the durable ``group_slug`` field (US2) - present on every
     child born unlinked, so a child with no ``plan_path`` yet is still
     identifiable. Falls back to deriving the slug from a legacy ``plan_path`` (the
     ``fragment`` form ``<base>#group-<slug>`` or the ``separate`` form
@@ -801,14 +801,14 @@ def validate_groups(
                 f"group {slug!r} stub_against must be a non-empty string when set",
                 exit_code=1,
             )
-        # Optional design-pass flag (x-edf7 US3). Default False (inline-fill).
+        # Optional design-pass flag (US3). Default False (inline-fill).
         needs_think = grp.get("needs_think", False)
         if not isinstance(needs_think, bool):
             raise DecomposeError(
                 f"group {slug!r} needs_think must be a boolean (got {needs_think!r})",
                 exit_code=1,
             )
-        # Optional adoption list (x-b9d7 US1). Default [] = mint-only, today's
+        # Optional adoption list (US1). Default [] = mint-only, today's
         # behavior. Shape only: the graph-dependent checks (resolvable, not
         # already a group child, no cycle) need the locked snapshot and live in
         # the CLI's Pass 1, keeping the module's rule that a bad SPEC fails

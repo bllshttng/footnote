@@ -1,4 +1,4 @@
-"""Aggregate gate_escape events for the retro autonomy-debt summary (x-f894).
+"""Aggregate gate_escape events for the retro autonomy-debt summary.
 
 Reads the canonical events.jsonl (where reconcile lands gate_escapes) plus the
 durable emit-failure counter beside it, and renders a ranked-by-reason block.

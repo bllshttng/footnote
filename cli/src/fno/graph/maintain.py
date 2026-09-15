@@ -1,4 +1,4 @@
-"""Backlog + kanban hygiene sweep for ``fno backlog maintain`` (ab-9c144a4c).
+"""Backlog + kanban hygiene sweep for ``fno backlog maintain``.
 
 Legs that keep ``graph.json`` and the kanban board clean by composing
 detection logic over the entries list. The CLI command in ``cli.py``
@@ -115,7 +115,7 @@ class RescopeFix:
 # it does not map directly to a canonical workspace path). Three layouts are
 # recognized; the caller guards the result with ``hint in workspaces``, so a
 # segment that is not a known project simply declines (never mis-scopes):
-#   - harness-native (the worktrees_base default, x-33e9):
+#   - harness-native (the worktrees_base default):
 #       ``<repo>/.claude/worktrees/<name>``        -> ``<repo>``
 #   - conductor back-compat (use_conductor_canonical / worktrees_base = conductor):
 #       ``.../conductor/workspaces/<repo>/<name>``  -> ``<repo>``
@@ -404,7 +404,7 @@ def detect_rollup_candidates(
 class SharedPlanCostViolation:
     """A plan_path held by more than one node that ALL carry ``cost_usd``.
 
-    ``plan == PR == node`` (x-04b9): one plan should cost once. Two nodes sharing
+    ``plan == PR == node`` : one plan should cost once. Two nodes sharing
     a plan that both carry cost triple the dollars, points, and sessions at the
     flat project sum. Change 1.1 stops new bindings; this leg finds the instances
     already in the graph - the check that would have caught the 2026-07-28
@@ -420,7 +420,7 @@ def detect_shared_plan_cost_violations(entries: list[dict]) -> list[SharedPlanCo
     """Plans whose cost is claimed by more than one node.
 
     A plan held by two nodes where only one carries ``cost_usd`` is the LEGAL
-    contained shape (one delivery unit plus contained children, x-e957) and is
+    contained shape (one delivery unit plus contained children) and is
     NOT reported - only the double-count is the violation. Never mutates.
     """
     from fno.graph.store import normalize_plan_path
@@ -904,7 +904,7 @@ def is_stale_ready(entry: dict, now: datetime, staleness_days: int) -> bool:
     if entry.get("contained_in"):
         # Contained work is delivered inside another node's PR, so it can never
         # acquire a movement signal - no PR, session, or claim of its own, by
-        # design (x-e957). Without this it is quarantine-eligible the moment it
+        # design. Without this it is quarantine-eligible the moment it
         # is old enough, and `maintain --apply` auto-defers it with the
         # misleading reason "stale-quarantine". The adopt back-fill makes that
         # immediate rather than eventual: it stamps containment onto legacy
@@ -964,7 +964,7 @@ def detect_stale_ideas(
     status/priority/rank/parent/blocked_by/size - actually changed), falling
     back to ``created_at`` for a node that has never had a post-creation
     curation change. ``touched_at`` is only ever written at or after
-    ``created_at``, so the fallback is a max without needing one (x-7dcb): a
+    ``created_at``, so the fallback is a max without needing one : a
     deliberate undefer hours ago resets the clock even though the node was
     created weeks earlier, so it reads as fresh instead of stale.
 
@@ -1010,7 +1010,7 @@ class SuspectRevert:
 
 def detect_suspect_reverts(entries: list[dict], events: Optional[list[dict]] = None) -> list[SuspectRevert]:
     """Nodes the stale-ideas drain deferred despite evidence a human curated
-    them (x-7dcb retro sweep).
+    them (retro sweep).
 
     Read-only: surfaces, never mutates and never emits an undefer command.
     Reverting a human decision is the defect this node fixes; reverting it a
@@ -1521,7 +1521,7 @@ def collect_evidence(
                 packet.items[f"git:{sym}"] = f"{count} matches"
 
     # retro-only enrichment: fetch the originating review comment + merged file
-    # region so the classifier can judge "already satisfied" (the x-fdff shape a
+    # region so the classifier can judge "already satisfied" (the shape a
     # base packet cannot catch). Merged LAST so ``_cap_packet`` drops these before
     # any base item (AC4-EDGE). Only ``pr:``/``git:`` keys are accepted; anything
     # else is rejected, not merged (AC1-HP injection boundary). Absent/empty/raising

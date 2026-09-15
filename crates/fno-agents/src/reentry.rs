@@ -1,4 +1,4 @@
-//! The one resolver of a Claude re-entry (x-d285).
+//! The one resolver of a Claude re-entry.
 //!
 //! Every door that re-enters a Claude session (`fno agents attach`, the dead
 //! and live resume arms, the mux attach/ResumeAgent gestures, the recovery
@@ -1167,7 +1167,7 @@ mod tests {
 
     #[test]
     fn attach_resolves_past_a_dead_account() {
-        // x-32f4: the operator's blocked portal press. The row's pinned
+        // the operator's blocked portal press. The row's pinned
         // account no longer resolves, but the job is running and the attach
         // reaches it by transport id. The plan carries no namespace and keeps
         // the recorded id as billing provenance.
@@ -1617,7 +1617,7 @@ mod tests {
         // the two are unrelated axes and mesh_identity_assignments folds
         // whatever this plan carries into FNO_NODE.
         let mut e = row("thread-worker");
-        e.node = Some("x-6910".into());
+        e.node = Some("x-aaaa".into());
         e.fno_id = Some("5bab90bc-1391-4b94-8e5a-bfb663268506".into());
         e.harness_session_id = Some("5bab90bc-1391-4b94-8e5a-bfb663268506".into());
         e.short_id = "5bab90bc".into();
@@ -1633,6 +1633,6 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(plan.node.as_deref(), Some("x-6910"));
+        assert_eq!(plan.node.as_deref(), Some("x-aaaa"));
     }
 }

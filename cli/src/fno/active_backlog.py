@@ -1,10 +1,10 @@
 """Active-backlog state helpers that stay Python-side.
 
 The territory fact set, the drain-target receipt, and the blueprinter record
-store are native to ``crates/fno-agents/src/territory.rs`` (the x-e221 port);
+store are native to ``crates/fno-agents/src/territory.rs`` (the port);
 ``fno config active-backlog*`` prints the binary's receipt. What survives here
 is the wake-nudge sentinel the graph writers touch and the status-fanout
-target resolver (x-2057), which is a separate supervisor with its own
+target resolver, which is a separate supervisor with its own
 enablement contract.
 
 Pure + best-effort: a malformed settings file yields no targets rather than
@@ -62,7 +62,7 @@ def _workspace_paths() -> dict[str, str]:
 
 @dataclass
 class FanoutTarget:
-    """A project the status-fanout supervisor should tick (x-2057). Enablement is
+    """A project the status-fanout supervisor should tick. Enablement is
     'has >=1 enabled status sink', INDEPENDENT of active_backlog drain."""
 
     project: str

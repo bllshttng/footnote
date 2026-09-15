@@ -51,7 +51,7 @@ pub(super) fn attention_sort_key(row: &Value) -> (u8, std::cmp::Reverse<u64>, St
 }
 
 /// The STATUS word `list` renders: SERVED ACTIVITY, never a `live` token
-/// (x-c672, AC7). Nothing decides on this word anymore - retirement reads the
+/// (x-aaaa, AC7). Nothing decides on this word anymore - retirement reads the
 /// reverse join, the lanes read their own probes - so the column answers the
 /// operator's actual question, what is this session doing: `writing` (the
 /// transcript moved inside `STALE_ATTENTION_S`), `quiet` (older), `parked`
@@ -293,12 +293,12 @@ pub(super) fn apply_row_contradiction(
         );
     }
 
-    // (x-d401) A stored `spawning` token a live pid has outlived: the token
+    // A stored `spawning` token a live pid has outlived: the token
     // stopped being a measurement. Fires only on POSITIVE liveness (the
     // caller measured a live pid and injected `pid_alive: true`); unknown
     // keeps the token, and a missing `created_at` is absent age evidence,
     // not staleness. Mirrors `_spawning_outlived_by_a_live_pid` in Python;
-    // rows read `spawning` for 3-16 hours while alive (x-0248).
+    // rows read `spawning` for 3-16 hours while alive.
     if incoming_status == "spawning"
         && row.get("pid_alive") == Some(&Value::Bool(true))
         // `> Duration::seconds(600)`, not `num_seconds() > 600`: num_seconds
@@ -322,7 +322,7 @@ pub(super) fn apply_row_contradiction(
         "liveness_origin_basis".into(),
         origin_basis.map_or(Value::Null, |basis| json!(basis)),
     );
-    // (x-d401, x-d4a6) A superseded supervisor claim beside the falsifier
+    // A superseded supervisor claim beside the falsifier
     // that beat it: `superseded_live_status` is a caller-injected input (like
     // `pid`), popped here; only the basis key survives. PRESENCE is the
     // caller's assertion that a supersession happened; which words claim
@@ -432,14 +432,14 @@ mod tests {
         assert_eq!(
             rendered_status_from_truth(probe("stalled").as_ref()),
             "unknown",
-            "a probe that answered nothing reads unknown, never orphaned (x-c672)"
+            "a probe that answered nothing reads unknown, never orphaned "
         );
     }
 
     #[test]
     fn no_probe_at_all_reads_unknown_even_for_a_live_row() {
         // A live pid is a fact about the PROCESS, not about served activity,
-        // so it is not an input to the STATUS word (x-c672): the Python list
+        // so it is not an input to the STATUS word: the Python list
         // lane has no pid census, and an unanswered activity age must read
         // the same word on both lanes.
         assert_eq!(
@@ -649,7 +649,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // The provider-refusal arm (x-e594). One case table, copied verbatim from
+    // The provider-refusal arm. One case table, copied verbatim from
     // the Python lane's `test_reachability.py`, because two lanes rendering
     // the same row differently is the defect this field exists to close.
     // ------------------------------------------------------------------

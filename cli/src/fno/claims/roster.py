@@ -109,7 +109,7 @@ def classify_workers(workers: list) -> tuple[list, list, dict]:
 
 
 def _worker_reachability(worker: dict):
-    """One roster row through the ONE shared predicate (x-dead task 1.1).
+    """One roster row through the ONE shared predicate (task 1.1).
 
     REACHABLE engaged, UNREACHABLE finished, UNKNOWN its own arm - never
     engaged-by-default. The transcript outranks the supervisor word for EVERY
@@ -138,7 +138,7 @@ def _worker_reachability(worker: dict):
     # The pid falsifier fires only on an INCARNATION-PROVEN pid (a recorded
     # start token, the same bound the claims layer's hybrid arm uses): a bare
     # stale pid on a live worker must never read as death. A FRESH tail is a
-    # resumed session's witness (x-a613) over even a proven corpse.
+    # resumed session's witness over even a proven corpse.
     pid = worker.get("pid")
     proven = pid is not None and worker.get("pid_start_time") is not None
     falsifier = pid_falsifier(pid, worker.get("pid_start_time")) if proven else None

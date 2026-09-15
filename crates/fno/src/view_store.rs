@@ -83,9 +83,9 @@ impl SectionKey {
     }
 }
 
-/// How much of a section renders. `LiveOnly` is the middle state x-975a adds:
+/// How much of a section renders. `LiveOnly` is the middle state adds:
 /// exited agent rows are hidden while the header's `✗N` rollup keeps them
-/// discoverable. Display filtering only - no row is reaped (that is x-f300).
+/// discoverable. Display filtering only - no row is reaped (that is).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SectionView {
@@ -154,7 +154,7 @@ pub fn view_path() -> PathBuf {
     }
 }
 
-/// `sections` rather than a bare map so a later view preference (x-b186's
+/// `sections` rather than a bare map so a later view preference (
 /// density/sort) extends this file instead of minting another one.
 /// Values stay `Value` on the way in so ONE unrecognized state does not fail
 /// the whole map: a file written by a build with a fourth `SectionView` would
@@ -167,7 +167,7 @@ struct StoreFile {
     version: u32,
     #[serde(default)]
     sections: HashMap<String, serde_json::Value>,
-    /// (x-b186) Sideline density and agent-sort order. `Value`, not the typed
+    /// Sideline density and agent-sort order. `Value`, not the typed
     /// enums, for the same reason `sections` is: a state a newer build wrote
     /// must survive a round-trip through this one rather than being reset to
     /// the default on the next gesture.
@@ -175,19 +175,19 @@ struct StoreFile {
     density: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sort: Option<serde_json::Value>,
-    /// (x-2e86) The operator's chosen sideline width, once they drag the border
+    /// The operator's chosen sideline width, once they drag the border
     /// off its density-canonical size. `Value` for the same forward-compat
     /// reason as `density`/`sort`; `None` (absent) means "use the current
     /// density's canonical width" - the back-compat default so existing installs
     /// are unchanged until their first drag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     width: Option<serde_json::Value>,
-    /// (x-e763) Ask before stop/remove. Default absent = false: the operator
+    /// Ask before stop/remove. Default absent = false: the operator
     /// said the stop-then-confirm two-step costs too many taps, so the confirm
     /// is opt-in, and the next lifecycle gesture persists a clean value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     confirm_lifecycle: Option<serde_json::Value>,
-    /// (x-f089) The operator's chosen feed-panel width, once they drag the
+    /// The operator's chosen feed-panel width, once they drag the
     /// panel's border. `Value` for the same forward-compat reason as `width`;
     /// absent means "use the default width" - existing installs are unchanged
     /// until their first drag.
@@ -195,7 +195,7 @@ struct StoreFile {
     feed_width: Option<serde_json::Value>,
 }
 
-/// (x-e763) Read the operator's stop/remove confirm pref. Absent, corrupt, or
+/// Read the operator's stop/remove confirm pref. Absent, corrupt, or
 /// non-bool reads as `false` - a stop means stop, a remove means remove - and
 /// the next toggle persists a clean value.
 pub fn load_confirm_lifecycle() -> bool {
@@ -209,7 +209,7 @@ pub fn load_confirm_lifecycle() -> bool {
         .unwrap_or(false)
 }
 
-/// (x-e763) Persist the operator's stop/remove confirm pref. Best-effort like
+/// Persist the operator's stop/remove confirm pref. Best-effort like
 /// every other write here.
 pub fn save_confirm_lifecycle(confirm: bool) {
     mutate(|file| {
@@ -217,7 +217,7 @@ pub fn save_confirm_lifecycle(confirm: bool) {
     });
 }
 
-/// (x-f089) Read the operator's feed-panel width pref. Absent, corrupt, or
+/// Read the operator's feed-panel width pref. Absent, corrupt, or
 /// out-of-range reads as `None` - "use the default width" - and the first
 /// drag persists a clean value, the same degrade-independently posture every
 /// pref here keeps.
@@ -232,7 +232,7 @@ pub fn load_feed_width() -> Option<u16> {
         .and_then(|v| u16::try_from(v).ok())
 }
 
-/// (x-f089) Persist the operator's dragged feed-panel width. Best-effort and
+/// Persist the operator's dragged feed-panel width. Best-effort and
 /// fire-and-forget, the same locked read-modify-write core as [`save_width`].
 pub fn save_feed_width(width: u16) {
     mutate(|file| {
@@ -240,7 +240,7 @@ pub fn save_feed_width(width: u16) {
     });
 }
 
-/// How much of each sideline row renders (x-b186). Orthogonal to the panel's
+/// How much of each sideline row renders. Orthogonal to the panel's
 /// on/off toggle: `Slim` is a narrow rail, NOT a hidden panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -464,7 +464,7 @@ pub fn load() -> HashMap<SectionKey, SectionView> {
         .collect()
 }
 
-/// Read the persisted density, sort, and sideline width (x-b186, x-2e86).
+/// Read the persisted density, sort, and sideline width.
 ///
 /// Missing, corrupt, or written by a build with a state this one cannot parse
 /// all resolve to the defaults (`Regular` + status/attention-first + no width), independently
@@ -502,7 +502,7 @@ pub fn save_prefs(density: Density, sort: AgentSort) {
     });
 }
 
-/// (x-2e86) Persist the operator's dragged sideline width. The same locked
+/// Persist the operator's dragged sideline width. The same locked
 /// read-modify-write core as [`save_prefs`], so a width write never clobbers a
 /// concurrent density/sort write from another mux client. Best-effort and
 /// fire-and-forget: a drag release must never block on the file write.
@@ -512,7 +512,7 @@ pub fn save_width(width: u16) {
     });
 }
 
-/// (x-2e86) Persist a density PRESET - mode, sort, and canonical width - in ONE
+/// Persist a density PRESET - mode, sort, and canonical width - in ONE
 /// locked mutation. A preset is a single logical choice of both mode and width,
 /// so writing density and width through separate `save_prefs`/`save_width` calls
 /// could interleave with another mux client (or be interrupted between them) and
@@ -830,7 +830,7 @@ mod tests {
         assert_eq!(got[&SectionKey::Squad("/a".into())], SectionView::Expanded);
     }
 
-    // ---- x-b186: density + sort preferences ----
+    // ----: density + sort preferences ----
 
     #[test]
     fn prefs_default_then_round_trip() {
@@ -849,7 +849,7 @@ mod tests {
 
     #[test]
     fn width_round_trips_and_coexists_with_prefs() {
-        // x-2e86 US1: a dragged width persists, and shares the file with
+        // US1: a dragged width persists, and shares the file with
         // density/sort without either clobbering the other (one locked RMW).
         let _s = Scratch::new("width-roundtrip");
         save_prefs(Density::Slim, AgentSort::Attention);

@@ -1,6 +1,6 @@
 //! Active backlog dispatcher: the mission drain-tick core + circuit breaker.
 //!
-//! This module is the engine for the always-on backlog drain. Since x-a4dc (K2)
+//! This module is the engine for the always-on backlog drain. Since (K2)
 //! the drain is MISSION-SCOPED: the daemon's resident supervisor
 //! ([`run_supervisor`]) drives one independent drain loop PER ACTIVE MISSION -
 //! an epic with `mission_active=true`, K1's activation record - not per project.
@@ -18,7 +18,7 @@
 //! dispatch logic the merge-advance path uses and never forks it. See
 //! [`dispatch_mission`] / [`mission_drain_tick`] / [`mission_drain_loop`].
 //!
-//! ## Fire-and-forget reconcile (x-0ad6, preserved)
+//! ## Fire-and-forget reconcile (preserved)
 //!
 //! The tick does NOT own the worker child. `advance --epic` self-mints each
 //! worker session and re-anchors the `node:<id>` claim to `target-session:<sid>`.
@@ -135,7 +135,7 @@ pub struct DrainConfig {
     pub fno_bin: String,
     /// The active mission's epic id - the `advance --epic <mission>` argument.
     pub mission: String,
-    /// The territory key (x-e221): the canonical crown scope this loop drains.
+    /// The territory key: the canonical crown scope this loop drains.
     /// Empty on a legacy receipt; the loop then keys by `mission`.
     pub scope: String,
     /// No live crown holds this territory; the readout names it kingless while
@@ -164,7 +164,7 @@ pub struct DrainConfig {
     pub rotation: Option<(usize, usize)>,
 }
 
-/// One member a territory tick converges (x-e221).
+/// One member a territory tick converges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainMember {
     /// The epic id (rung 2) or project name (rungs 0/1) to converge.
@@ -317,7 +317,7 @@ fn map_outcome(
     // DoneAwaitingMerge / DoneAwaitingReview: the node built successfully (PR
     // up, green) but could not auto-complete - DoneAwaitingMerge is blocked by a
     // proven pre-existing main-red; DoneAwaitingReview by a rate-limited required
-    // bot that posted a usage-limit comment instead of a review (x-9ab2). Both
+    // bot that posted a usage-limit comment instead of a review. Both
     // are SUCCESSFUL dispatches for the daemon, not failures - the node is closed
     // at the human merge by `fno backlog reconcile`, exactly like DoneBatched.
     // Keep them out of the cross-tick circuit breaker (mirror the DoneBatched
@@ -331,7 +331,7 @@ fn map_outcome(
         return DrainOutcome::Dispatched { node };
     }
 
-    // DoneUnreviewed (x-0eaf): green but nothing reviewed. A SUCCESSFUL dispatch
+    // DoneUnreviewed: green but nothing reviewed. A SUCCESSFUL dispatch
     // for the daemon - the node closes later at a human merge or the reconcile
     // path, exactly like DoneAwaitingMerge. Keep it out of the cross-tick
     // circuit breaker so an unreviewed-but-green terminal does not auto-defer
@@ -354,7 +354,7 @@ fn map_outcome(
             );
             DrainOutcome::Dispatched { node }
         }
-        // x-aba7: an exit-5 (PR OPEN, not merged) close arrives here as
+        // an exit-5 (PR OPEN, not merged) close arrives here as
         // AwaitingMerge with a DonePRGreen reason (the DoneAwaitingMerge-reason
         // early return above handles the other producer). It is a SUCCESSFUL
         // dispatch - closed later at the human merge by reconcile - so it must
@@ -416,7 +416,7 @@ fn map_outcome(
     }
 }
 
-// ── fire-and-forget reconcile (x-0ad6) ───────────────────────────────────────
+// ── fire-and-forget reconcile ───────────────────────────────────────
 //
 // A tick DISPATCHES the mission's ready children fire-and-forget via K1's
 // converge core (`fno backlog advance --epic`, which routes through `fno agents
@@ -666,7 +666,7 @@ fn sync_child_completed(cfg: &DrainConfig, node_id: &str) -> bool {
 }
 
 /// Resolve a synchronous (headless) child on the spot instead of holding it
-/// open for crash reconcile (x-7f1f). A completed/deferred/PR'd node records a
+/// open for crash reconcile. A completed/deferred/PR'd node records a
 /// success; a node with none of those goes through `map_outcome` as
 /// `CloseOutcome::Parked`, so the streak, the defer and the journal row stay
 /// one implementation with the detached path.
@@ -771,7 +771,7 @@ struct AdvanceEpicReceipt {
     error: Option<String>,
     /// A held receipt: another advance for this scope was still in flight and
     /// the CLI stood this one down instead of stacking a second copy (the
-    /// x-ef2c one-in-flight gate). Held is a skip, never a retirement.
+    /// one-in-flight gate). Held is a skip, never a retirement.
     #[serde(default)]
     held: bool,
     /// Held requests the gate has counted for this scope.
@@ -791,14 +791,14 @@ struct DispatchFacts {
     reason: Option<String>,
     error: Option<String>,
     /// The CLI reported the scope held: no children were considered because a
-    /// previous advance for the same scope is still running (x-ef2c).
+    /// previous advance for the same scope is still running.
     held: bool,
     /// Held requests the gate has counted for this scope; readout only.
     requests: u64,
     /// Children resolved synchronously this pass (dispatched headless rows):
     /// real work the tick did even though nothing entered `pending`.
     sync_resolved: usize,
-    /// A dispatch gate (x-39f4, the fleet-incident defense in depth) refused
+    /// A dispatch gate (the fleet-incident defense in depth) refused
     /// this pass before the advance shell-out. Names the tick's skip token;
     /// nothing else may read as this gate, so a stopped verdict can never
     /// masquerade as `no_work` and trigger the stranded observer.
@@ -860,7 +860,7 @@ fn facts_from_receipt(receipt: &AdvanceEpicReceipt) -> DispatchFacts {
 /// One drain member's `backlog advance` arguments. Epic members converge as
 /// `--epic <id> --continuation`; project members drain as
 /// `--loose --project <id>` (never retire - a loose territory has no mission
-/// lifecycle, x-e221, and the CLI takes no positional beside those flags).
+/// lifecycle, and the CLI takes no positional beside those flags).
 fn advance_member_args(member: &DrainMember) -> Vec<String> {
     if member.epic {
         vec![
@@ -881,7 +881,7 @@ fn advance_member_args(member: &DrainMember) -> Vec<String> {
 /// dispatched child in `pending` for later reconcile. Epic members run
 /// `advance --epic <id> --continuation` (Retire on deactivated/all-done);
 /// project members run `advance --loose --project <id>` (never retire - a
-/// loose territory has no mission lifecycle, x-e221).
+/// loose territory has no mission lifecycle).
 ///
 /// The converge core owns ALL dispatch policy (cross-project fan-out, per-root
 /// `walker:` respect, `max_lanes` cap, claim dedup), so this never forks it. A
@@ -897,7 +897,7 @@ fn dispatch_member(
     pending: &mut Vec<PendingDispatch>,
     journal: &Journal,
 ) -> (MissionDispatch, DispatchFacts) {
-    // x-77db: the durable fleet incident stop gates BEFORE the advance
+    // the durable fleet incident stop gates BEFORE the advance
     // subprocess, and the file is re-read EVERY tick - a daemon that starts
     // mid-incident takes this branch on its first tick, proving the stop is
     // durable state rather than a missed announcement. Reconciliation and tick
@@ -1007,7 +1007,7 @@ fn dispatch_member(
         match child.decision.as_str() {
             "dispatched" => {}
             "failed" => {
-                // A spawn failure is a real failure: before x-7f1f a failed
+                // A spawn failure is a real failure: before a failed
                 // child never entered pending, so failure_limit never tripped
                 // and the drain retried the node forever. Feed the SAME
                 // map_outcome policy with the row's reason; it never enters
@@ -1047,7 +1047,7 @@ fn dispatch_member(
         // Synchronous (headless) dispatch: subprocess.run returned only after
         // the one-shot worker finished and released its claim, so there is
         // nothing to reconcile later - the crash floor would fabricate a crash
-        // on tick 3, every time (x-7f1f). Resolve from graph state now.
+        // on tick 3, every time. Resolve from graph state now.
         if child.substrate.as_deref() == Some("headless") {
             resolve_sync_child(cfg, breaker, journal, &child.node_id);
             facts.sync_resolved += 1;
@@ -1081,7 +1081,7 @@ fn dispatch_member(
 /// Dispatch the territory by converging EVERY member, recording each dispatched
 /// child in `pending` for later reconcile. Retires only when the territory has
 /// epic members and EVERY one reports deactivated / all children done - a
-/// project member never retires its territory (x-e221: a loose territory has
+/// project member never retires its territory (: a loose territory has
 /// no mission lifecycle; it drains while the workspace exists).
 fn dispatch_mission(
     cfg: &DrainConfig,
@@ -1113,7 +1113,7 @@ fn dispatch_mission(
         }
         // The gate is per member but the tick reads it once: any member the
         // incident stopped must survive the fold, or a stopped verdict folds
-        // back into `no_work` (x-39f4).
+        // back into `no_work`.
         if merged.gate.is_none() {
             merged.gate = facts.gate.clone();
             merged.gate_detail = facts.gate_detail.clone();
@@ -1133,7 +1133,7 @@ fn dispatch_mission(
     (outcome, merged)
 }
 
-/// The seed prompt for a machinery-spawned territory blueprinter (x-e221): a
+/// The seed prompt for a machinery-spawned territory blueprinter: a
 /// worker holds no crown, dispatches nothing, and self-reports nothing - it
 /// designs the mailed idea nodes and waits for the next one.
 fn blueprinter_prompt(scope: &str) -> String {
@@ -1145,7 +1145,7 @@ nothing: finish each blueprint and wait."
     )
 }
 
-/// The `blueprint-feed --json` status receipt (x-e221). `ideas` stays raw
+/// The `blueprint-feed --json` status receipt. `ideas` stays raw
 /// JSON: the tick only journals ids, it never interprets rungs.
 #[derive(Debug, Clone, Deserialize, Default)]
 struct BlueprinterStatus {
@@ -1198,7 +1198,7 @@ fn run_blueprint_feed(cfg: &DrainConfig, extra: &[String]) -> Option<serde_json:
     serde_json::from_slice(&out.stdout).ok()
 }
 
-/// One territory's blueprinter tick (x-e221 AC5/AC6): with unfed triaged
+/// One territory's blueprinter tick (AC5/AC6): with unfed triaged
 /// ideas and no live standing worker, spawn AT MOST ONE replacement through
 /// the standard `fno agents spawn` gates; then deliver. A refused spawn is
 /// recorded as a repair and the ideas stay preserved for the next tick.
@@ -1323,12 +1323,12 @@ pub fn mission_drain_tick(
         // The dispatch gate refused before any child: name the gate, never
         // `no_work` - a stopped verdict must not read as an exhausted
         // mission, and `no_work` is what triggers the stranded observer
-        // (x-39f4).
+        //.
         MissionDispatch::Continue if facts.gate.is_some() => facts.gate.clone(),
         MissionDispatch::Continue if closed + newly_dispatched + sync_closed > 0 => None,
         // The gate held this tick's converge: name HELD, never no_work - an
         // empty child set from a held receipt is the amplifier reporting
-        // itself, not an exhausted mission (x-ef2c).
+        // itself, not an exhausted mission.
         MissionDispatch::Continue if facts.held => Some("held".to_string()),
         // Something dispatched by an earlier tick is still running: a full
         // spawn lane on THIS pass does not make that stale.
@@ -1426,7 +1426,7 @@ pub struct ResolvedTarget {
     /// mission is skipped by the supervisor.
     #[serde(default)]
     pub mission: Option<String>,
-    /// The territory key (x-e221): the canonical crown scope, empty on a
+    /// The territory key: the canonical crown scope, empty on a
     /// legacy receipt (the loop then keys by `mission`).
     #[serde(default)]
     pub scope: String,
@@ -1517,7 +1517,7 @@ impl ConvergeGate {
 
 /// [`resolve_targets`] plus what the supervisor's tick row needs to say WHY:
 /// the receipt's own zero-path token and mission count (a disabled drain is
-/// `drain_disabled`, not `no_missions` - x-338c), beside the shell-level
+/// `drain_disabled`, not `no_missions` -), beside the shell-level
 /// failure (`env_broken`, the missing-click class) that predates the receipt.
 #[derive(Debug, Clone)]
 pub struct DrainResolve {
@@ -1612,7 +1612,7 @@ fn drain_targets_json(
 }
 
 /// [`resolve_targets`] plus what the supervisor's tick row needs to say WHY
-/// (x-338c), computed on one native pass: the receipt's own zero-path token
+///, computed on one native pass: the receipt's own zero-path token
 /// (`drain_disabled`, `bad_interval`, `no_missions`, `project_disabled`,
 /// `no_workspace_path`) and the territory count, taken BEFORE the config
 /// gates so the count is the truth even when the drain is off. An unreadable
@@ -1671,7 +1671,7 @@ pub fn resolve_targets_report(config_cwd: &Path, registry_path: &Path) -> DrainR
     }
 }
 
-/// A project the status-fanout supervisor should tick (x-2057). Enablement is
+/// A project the status-fanout supervisor should tick. Enablement is
 /// "has >=1 enabled status sink", INDEPENDENT of the drain's active_backlog set -
 /// a project can fan status out without opting into the backlog drain.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1754,7 +1754,7 @@ async fn per_project_fanout_loop(target: FanoutTarget, fno_bin: String, shutdown
 }
 
 /// Spawn one fanout loop per project not already live. Shared by the normal
-/// pass and the paused pass (x-39f4), which differ only in what they resolve.
+/// pass and the paused pass, which differ only in what they resolve.
 fn spawn_fanout_loops(
     fanout_targets: Vec<FanoutTarget>,
     fno_bin: &str,
@@ -1874,7 +1874,7 @@ async fn wait_for_wake(
     }
 }
 
-/// The resident drain supervisor (node x-c070).
+/// The resident drain supervisor (node).
 ///
 /// Spawns ONE independent drain loop per enabled project so a long-running drain
 /// in one project never blocks or starves another (gemini finding). It sets
@@ -1890,9 +1890,9 @@ pub async fn run_supervisor(
     live: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
 ) {
-    // Mission drain loops, keyed by epic id (x-a4dc K2): one per active mission.
+    // Mission drain loops, keyed by epic id (K2): one per active mission.
     let mut tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
-    // Sibling loop family (x-2057): status-fanout ticks, keyed by project. A
+    // Sibling loop family: status-fanout ticks, keyed by project. A
     // separate enablement set (projects with >=1 status sink) from the drain
     // above, so a sinks-only project fans out without opting into the drain.
     let mut fanout_tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
@@ -1909,7 +1909,7 @@ pub async fn run_supervisor(
         tasks.retain(|_, h| !h.is_finished());
         fanout_tasks.retain(|_, h| !h.is_finished());
 
-        // x-39f4: while dispatch is effectively paused, the supervisor must
+        // while dispatch is effectively paused, the supervisor must
         // NOT resolve drain targets. Resident mission handles are retained
         // (each loop gates itself before any child); status-fanout keeps
         // resolving so the fanout family stays live. One positive tick row
@@ -1971,7 +1971,7 @@ pub async fn run_supervisor(
         // nothing to do - a broken resolver (env_broken, the class that ticked
         // silently for hours because its Python env lacked click), the
         // receipt's own zero-path (drain_disabled names the config switch;
-        // x-338c), or genuinely no missions. ab_live covers the fanout family.
+        //), or genuinely no missions. ab_live covers the fanout family.
         if targets.is_empty() {
             let skip = if resolve_failure.is_some() {
                 "env_broken".to_string()
@@ -2001,7 +2001,7 @@ pub async fn run_supervisor(
         }
 
         for target in targets {
-            // Key by territory (x-e221): the canonical crown scope; a legacy
+            // Key by territory: the canonical crown scope; a legacy
             // receipt without one still keys by mission. An empty key is a
             // malformed receipt; skip it rather than key an unnamed loop.
             let key = territory_key(&target);
@@ -2073,7 +2073,7 @@ async fn mission_drain_loop(
     let key = territory_key(&target);
     let mut breaker = CircuitBreaker::new(target.failure_limit);
     // In-flight fire-and-forget dispatches, reconciled from events across ticks
-    // (x-0ad6). Resident like the breaker so a worker dispatched one tick is
+    //. Resident like the breaker so a worker dispatched one tick is
     // polled to completion on the next.
     let mut pending: Vec<PendingDispatch> = Vec::new();
     let mut last_nudge = nudge_mtime().await;
@@ -2084,7 +2084,7 @@ async fn mission_drain_loop(
             break;
         }
 
-        // x-39f4: the EFFECTIVE dispatch pause (manual sentinel OR fleet
+        // the EFFECTIVE dispatch pause (manual sentinel OR fleet
         // incident) is checked BEFORE the target re-resolve and the converge
         // permit, so a stopped incident runs no dispatch-oriented child. The
         // target this loop was spawned with names the blocked tick (cwd,
@@ -2290,7 +2290,7 @@ mod tests {
     #[test]
     fn advance_epic_receipt_parses_children_and_substrate() {
         // children[] is THE enqueue authority; substrate decides detached vs
-        // synchronous (x-7f1f).
+        // synchronous.
         let r: AdvanceEpicReceipt = serde_json::from_slice(
             br#"{"epic_id":"x-e","error":null,"activated":true,"deactivated":false,
                  "all_done":false,"dispatched":["x-a"],
@@ -2337,7 +2337,7 @@ mod tests {
 
     #[test]
     fn a_held_receipt_parses_and_reads_as_held_not_no_work() {
-        // x-ef2c: the CLI's one-in-flight gate answers `held` with an empty
+        // the CLI's one-in-flight gate answers `held` with an empty
         // child set. Without the field that receipt read as no_work - a lie
         // that hides exactly the stacking this gate exists to delete. Held is
         // never a retirement, so the mission flags must stay false.
@@ -2365,7 +2365,7 @@ mod tests {
         assert!(!is_done_reason(&TerminationReason::NoProgress));
     }
 
-    // ── reconcile policy (x-0ad6) ────────────────────────────────────────────
+    // ── reconcile policy ────────────────────────────────────────────
     //
     // These drive the private reconcile helpers directly with a stub `fno` (for
     // the defer/done side effects) + a temp Journal, so the failure-streak policy
@@ -2784,7 +2784,7 @@ mod tests {
 
     #[test]
     fn resolve_dispatch_done_exit5_is_awaiting_merge_success() {
-        // x-aba7: a no-merge dispatch lands its PR OPEN, so `fno backlog done`
+        // a no-merge dispatch lands its PR OPEN, so `fno backlog done`
         // exits 5 (awaiting merge). That is a SUCCESSFUL dispatch (the node
         // closes at the human merge via reconcile), so the breaker must NOT
         // record a failure for the exit-5 awaiting-merge mapping.
@@ -2839,20 +2839,20 @@ mod tests {
         let fno = bin.join("fno");
         std::fs::write(
             &fno,
-            "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Unknown: x-b6db could not confirm 2 ships (1 confirmed MERGED): gh pr view timed out' >&2\n  exit 4\nfi\nexit 0\n",
+            "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Unknown: x-aaaa could not confirm 2 ships (1 confirmed MERGED): gh pr view timed out' >&2\n  exit 4\nfi\nexit 0\n",
         )
         .unwrap();
         std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
         let cfg = test_cfg(tmp.path(), fno.display().to_string(), 3);
         let (journal, project_journal) = test_journal(tmp.path());
         let mut breaker = CircuitBreaker::new(3);
-        breaker.record_failure("x-b6db"); // pre-existing streak to prove reset
+        breaker.record_failure("x-aaaa"); // pre-existing streak to prove reset
 
         resolve_dispatch(
             &cfg,
             &mut breaker,
             &journal,
-            "x-b6db",
+            "x-aaaa",
             Evidence {
                 reason: TerminationReason::DonePRGreen,
                 message: "pr green".to_string(),
@@ -2860,7 +2860,7 @@ mod tests {
         );
 
         assert_eq!(
-            breaker.consecutive_failures("x-b6db"),
+            breaker.consecutive_failures("x-aaaa"),
             0,
             "done exit 4 (retryable read outage) is a success, never a failure"
         );
@@ -2871,7 +2871,7 @@ mod tests {
 
     #[test]
     fn resolve_dispatch_done_exit6_is_parked_with_refusal_intact() {
-        // x-5d34: the promise gate refuses with exit 6. The loop closer must NOT
+        // the promise gate refuses with exit 6. The loop closer must NOT
         // need a new arm - the catch-all (non-zero, non-5) maps it to Parked with
         // the stderr intact, so an unmet promise parks the node with its refusal
         // as the recorded reason rather than closing it.
@@ -2882,7 +2882,7 @@ mod tests {
         let fno = bin.join("fno");
         std::fs::write(
             &fno,
-            "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Refused: x-5d34 promised 2 waves and asserts none of them.' >&2\n  exit 6\nfi\nexit 0\n",
+            "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Refused: promised 2 waves and asserts none of them.' >&2\n  exit 6\nfi\nexit 0\n",
         )
         .unwrap();
         std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -3366,7 +3366,7 @@ mod tests {
         .unwrap();
     }
 
-    /// x-39f4 regression: with a positive stopped record, one supervisor and
+    /// regression: with a positive stopped record, one supervisor and
     /// one mission cycle record ZERO dispatch-only poll children
     /// (`backlog advance`, `backlog undispatched`) while the tick rows name
     /// fleet_stop with the generation. The pause check sits BEFORE the loop's
@@ -3984,7 +3984,7 @@ mod tests {
         );
     }
 
-    // ── synchronous children (x-7f1f) ────────────────────────────────────────
+    // ── synchronous children ────────────────────────────────────────
 
     #[test]
     fn dispatch_mission_resolves_synchronous_child_on_the_spot() {
@@ -4117,7 +4117,7 @@ mod tests {
 
     #[test]
     fn failed_child_feeds_the_circuit_breaker() {
-        // Before x-7f1f a failed child never entered pending, so failure_limit
+        // Before a failed child never entered pending, so failure_limit
         // never tripped and the drain retried the node forever. Three
         // consecutive failed receipts at failure_limit 3 defer exactly once.
         let _env = env_guard();
@@ -4242,7 +4242,7 @@ mod tests {
 
     fn territory_cfg(tmp: &std::path::Path, fno_bin: String) -> DrainConfig {
         let mut cfg = test_cfg(tmp, fno_bin, 3);
-        cfg.scope = "x-a792".to_string();
+        cfg.scope = "x-bbbb".to_string();
         cfg
     }
 
@@ -4259,8 +4259,8 @@ mod tests {
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let record = tmp.path().join("argv.log");
-        let status = r#"{"action":"status","scope":"x-a792","worker":null,
-            "worker_name_next":"blueprinter-x-a792-abc123",
+        let status = r#"{"action":"status","scope":"x-bbbb","worker":null,
+            "worker_name_next":"blueprinter-x-bbbb-abc123",
             "ideas":[{"id":"x-1","rung":"idea"},{"id":"x-2","rung":"design"}]}"#;
         let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, false);
         let cfg = territory_cfg(tmp.path(), fno);
@@ -4271,8 +4271,8 @@ mod tests {
         let argv = std::fs::read_to_string(&record).unwrap();
         assert_eq!(argv.matches("agents spawn").count(), 1);
         assert!(argv.contains("--substrate thread"));
-        assert!(argv.contains("--name blueprinter-x-a792-abc123"));
-        assert!(argv.contains("territory blueprinter for scope x-a792"));
+        assert!(argv.contains("--name blueprinter-x-bbbb-abc123"));
+        assert!(argv.contains("territory blueprinter for scope x-bbbb"));
         assert_eq!(argv.matches("--deliver").count(), 1);
         eprintln!(
             "JOURNAL RAW: {:?}",
@@ -4289,7 +4289,7 @@ mod tests {
         );
         let delivered = journal_rows(&project_journal, "blueprinter_delivered");
         assert_eq!(delivered.len(), 1);
-        assert_eq!(delivered[0]["data"]["worker"], "blueprinter-x-a792-abc123");
+        assert_eq!(delivered[0]["data"]["worker"], "blueprinter-x-bbbb-abc123");
     }
 
     #[test]
@@ -4297,9 +4297,9 @@ mod tests {
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let record = tmp.path().join("argv.log");
-        let status = r#"{"action":"status","scope":"x-a792",
-            "worker":{"name":"blueprinter-x-a792-abc123","live":true},
-            "worker_name_next":"blueprinter-x-a792-abc123",
+        let status = r#"{"action":"status","scope":"x-bbbb",
+            "worker":{"name":"blueprinter-x-bbbb-abc123","live":true},
+            "worker_name_next":"blueprinter-x-bbbb-abc123",
             "ideas":[{"id":"x-1","rung":"idea"}]}"#;
         let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, false);
         let cfg = territory_cfg(tmp.path(), fno);
@@ -4318,8 +4318,8 @@ mod tests {
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let record = tmp.path().join("argv.log");
-        let status = r#"{"action":"status","scope":"x-a792","worker":null,
-            "worker_name_next":"blueprinter-x-a792-abc123",
+        let status = r#"{"action":"status","scope":"x-bbbb","worker":null,
+            "worker_name_next":"blueprinter-x-bbbb-abc123",
             "ideas":[{"id":"x-1","rung":"idea"}]}"#;
         let fno = stub_fno_blueprint_feed(&tmp.path().join("bin"), &record, status, true);
         let cfg = territory_cfg(tmp.path(), fno);

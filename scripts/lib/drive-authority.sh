@@ -9,7 +9,7 @@
 # operator-initiated and MUST NOT be honored as LLM authorship.
 #
 # Detection is delegated to the shipped primitive `fno agents drive-authority`
-# (Wave 4, ab-8d258ddb): `--json` reports every open authority window
+# (Wave 4): `--json` reports every open authority window
 # (interactive/step/paranoid; "watch" is read-only and excluded), reading each
 # agent's daemon-owned state.json. This module is the bash consumption seam the
 # Python-layer stop hook + graph-write-protect hook call.

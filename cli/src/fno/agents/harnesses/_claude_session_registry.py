@@ -1,6 +1,6 @@
 """Read-only helpers over claude 2.1.143's session + jobs filesystem layout.
 
-US2 (ab-8b90e793) reverse-engineered three external surfaces from the
+US2 reverse-engineered three external surfaces from the
 ``claude`` binary that have no documented schema. The provider adapter
 imports them through this thin wrapper so a future replacement (MCP
 channel server, daemon-backend wake) only needs to swap this module
@@ -134,7 +134,7 @@ def roster_live(short_id: str) -> bool:
 
 
 def roster_sessions() -> list[dict]:
-    """Live claude sessions from the daemon roster, shaped for discover (x-605c).
+    """Live claude sessions from the daemon roster, shaped for discover.
 
     Each ``workers[*]`` row yields a discover-compatible dict
     ``{session_id, short_id, pid, cwd, status, agent}``. Lenient like
@@ -144,7 +144,7 @@ def roster_sessions() -> list[dict]:
     a durable floor, never a wrong delivery. A bg worker leaves no pid-sidecar, so
     this is the only source that surfaces it (the send-resolve bug this fixes).
 
-    The pid is resolved to the process that IS the session (x-3f84 W2): the
+    The pid is resolved to the process that IS the session (W2): the
     daemon's recorded pid for a bg row names the PTY HOST, so each row joins
     through the rendezvous socket farm before leaving here. A join miss keeps
     the recorded pid -- an operator-run interactive session has no rv socket

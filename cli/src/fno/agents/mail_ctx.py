@@ -8,7 +8,7 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class _MailCtx:
-    """Sender identity stamped into the ``<fno_mail>`` envelope (node x-1f23)."""
+    """Sender identity stamped into the ``<fno_mail>`` envelope (node x-aaaa)."""
 
     from_: str
     model: str

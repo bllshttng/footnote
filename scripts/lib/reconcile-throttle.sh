@@ -41,7 +41,7 @@ _reconcile_mtime() {
     # --file-system, NOT a format flag, so `stat -f %m FILE` SUCCEEDS there
     # (treating both as operands) and prints its default block, which starts
     # `  File: ...`. Exit 0 means the `||` never reaches `-c %Y`, and the caller
-    # feeds that text to `$(( ))`, where bash reads `File` as a variable name:
+    # feeds that text to `$(())`, where bash reads `File` as a variable name:
     # `File: unbound variable` under the hook's `set -u`, killing the whole
     # SessionStart reconcile on every Linux host with an existing stamp.
     # So validate the ANSWER rather than trusting the exit code.
@@ -100,13 +100,13 @@ reconcile_maybe_fire() {
     # affects the reconcile result publish and, per retro's own contract, a
     # failed harvest RETAINS the sentinel for the next window's retry.
     #
-    # `fno backlog retro drain-postmortems` also co-fires here (x-42f6 US3): a stuck
+    # `fno backlog retro drain-postmortems` also co-fires here (US3): a stuck
     # session's postmortem is decoupled from the post-merge `retro run` trigger,
     # so it drains within one throttle window of the next session start instead
     # of waiting for an unrelated PR to merge. Best-effort, sequenced last; dedup
     # by existing-node + consumed_at makes a race with a post-merge run safe.
     #
-    # `fno agents prove-it-verdicts --route` co-fires too (x-6d64): a FAIL verdict
+    # `fno agents prove-it-verdicts --route` co-fires too: a FAIL verdict
     # written to plan artifacts gets its progress note within one throttle window
     # instead of sitting unread. Idempotent by the routed marker (a note already
     # naming the report is never rewritten). Best-effort.

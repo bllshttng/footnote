@@ -78,7 +78,7 @@ pub fn render_restart(
 /// Dispatch `fno-agents restart`: swap a (possibly stale) daemon for one built
 /// from the current binary. SIGTERM the running daemon (graceful drain; PTY
 /// workers survive), wait for the socket to clear, lazy-start fresh. With
-/// `force`, SIGKILL the lockfile holder first and lazy-start fresh (x-3498).
+/// `force`, SIGKILL the lockfile holder first and lazy-start fresh.
 /// With `json`, stdout carries ONE machine line (the keepers summary the
 /// Python adapter parses); every human receipt moves to stderr.
 pub async fn run_restart(force: bool, json: bool, if_drifted: bool) -> i32 {
@@ -107,7 +107,7 @@ pub async fn run_restart(force: bool, json: bool, if_drifted: bool) -> i32 {
     if code != 0 {
         return code;
     }
-    // x-f188 change 6: cycle the stale store keepers. A store cycle ends
+    // change 6: cycle the stale store keepers. A store cycle ends
     // nothing a person can see (the graph on disk survives; the next read
     // respawns the keeper on this binary), so this leg is not behind
     // --force/--mux gating. Spared keepers fail the verb: a spared keeper

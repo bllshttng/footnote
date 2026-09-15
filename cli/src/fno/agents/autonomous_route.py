@@ -44,7 +44,7 @@ def launch_is_pinned(
 
     Precedence is explicit invocation pin > node pin > configured dispatch
     harness > quota policy, and each of those outranks an automatic cutover.
-    Since x-e53e there is ONE launcher (`fno agents spawn`), so every caller
+    Since there is ONE launcher (`fno agents spawn`), so every caller
     reads the configured harness the same way and no launcher needs an opt-out
     from this rung any more - the hardcoded-harness dispatcher that forced the
     ``honors_config_harness`` escape hatch is gone with the collapse.
@@ -197,7 +197,7 @@ def _select_destination(
     spawn``, so it passes ``record_id`` as ``--dispatch-account`` and lets the
     front door re-resolve the overlay at the launch boundary; putting it on that
     wrapper's own env would move footnote's state root, because a non-claude
-    record's overlay is a HOME override (x-c33e).
+    record's overlay is a HOME override.
     """
     try:
         from fno.config import load_settings, load_settings_for_repo
@@ -355,7 +355,7 @@ def select_autonomous_route(
         # dual-implementation inventory) happened when only ONE caller had the
         # check: identical fixtures deferred under `backlog advance` and
         # launched under the retired dispatch verb. That launcher is gone
-        # (x-e53e - everything dispatches through `fno agents spawn` now), and
+        # (- everything dispatches through `fno agents spawn` now), and
         # this function stays the single seam every remaining caller reads.
         if not pinned and _healthy_alternate_exists(node_cwd):
             return AutonomousRoute(

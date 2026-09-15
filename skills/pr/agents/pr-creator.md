@@ -274,7 +274,7 @@ fi
 
 ### 5.5 Bind the created PR to its backlog node
 
-Bind the just-opened PR to its node through the one shared binder. That makes the dispatcher's selection guard (`_has_unmerged_open_pr`) and `fno backlog reconcile` see the in-flight PR. Otherwise the node's `pr_number` stays null through the whole review window. A lapsed claim then lets the 5-min dispatcher re-spawn a finished node (x-a166, x-d3c6).
+Bind the just-opened PR to its node through the one shared binder. That makes the dispatcher's selection guard (`_has_unmerged_open_pr`) and `fno backlog reconcile` see the in-flight PR. Otherwise the node's `pr_number` stays null through the whole review window. A lapsed claim then lets the 5-min dispatcher re-spawn a finished node.
 
 When the manifest names a real node, the manifest node LEADS. When it does not, the branch is the fallback. That covers a PR whose manifest was never stamped. Both routes reach the same atomic writer, so the graph never sees two stamping paths. The binder stamps the ship lifecycle row itself. No second provenance stamp follows it.
 

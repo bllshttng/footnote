@@ -2,7 +2,7 @@
 
 The dispatch-payload protocol (``fno loop --continue`` exit-42 resume
 commands) was deleted with the ``fno loop`` stub in step-5 group 3
-(ab-9fd662c6); the unified loop (``fno-agents loop run``) resumes from
+; the unified loop (``fno-agents loop run``) resumes from
 world state, not from dispatch payloads. What remains here is the exit
 code contract and the JSON-mode output helpers the sub-apps share.
 """

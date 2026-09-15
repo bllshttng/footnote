@@ -1,12 +1,12 @@
 """fno.agents.discover — discover live hand-started Claude Code sessions.
 
-Group A / P1 of the live-session-comms epic (ab-098967b4). A transport-free
+Group A / P1 of the live-session-comms epic. A transport-free
 read over Claude Code's own per-session registry at
 ``~/.claude/sessions/<pid>.json`` (Locked Decision 3: no MCP /
 register-channel dependency — the registry already exists on disk). Surfaces
 live, un-adopted sessions in ``fno agents list`` so they are addressable by a
 legible handle without a UUID. When that sidecar is absent or repurposed, it
-falls back to the canonical transcript store ``~/.claude/projects`` (x-a1d5).
+falls back to the canonical transcript store ``~/.claude/projects``.
 
 Host-local (Locked Decision 8): PID liveness is per-machine, so only this
 host's sessions are discovered; the lane never claims to see another host's.
@@ -117,7 +117,7 @@ def _is_accreted(alias: str) -> bool:
 # reads the developer's real ~/.claude/sessions.
 SESSIONS_DIR_ENV = "FNO_CLAUDE_SESSIONS_DIR"
 
-# Canonical session store (x-a1d5). The ``<pid>.json`` sidecar above is absent
+# Canonical session store. The ``<pid>.json`` sidecar above is absent
 # or repurposed on some hosts (observed live: a user syncs cleared/compacted
 # ``.md`` exports into ``~/.claude/sessions``), so the sidecar scan finds zero.
 # The canonical store is the transcript jsonl at
@@ -137,7 +137,7 @@ def default_sessions_dir() -> Path:
 
 
 def default_projects_dir() -> Path:
-    """Claude Code's canonical transcript store on this host (x-a1d5)."""
+    """Claude Code's canonical transcript store on this host."""
     override = os.environ.get(PROJECTS_DIR_ENV)
     if override:
         return Path(override)
@@ -172,7 +172,7 @@ _CODEX_DAEMON_DISCOVERY_TIMEOUT_SECONDS = 12.0
 
 
 def default_codex_sessions_dir() -> Path:
-    """Codex's rollout transcript store on this host (mirror of x-a1d5)."""
+    """Codex's rollout transcript store on this host (mirror of x-aaaa)."""
     override = os.environ.get(CODEX_SESSIONS_DIR_ENV)
     if override:
         return Path(override)
@@ -948,7 +948,7 @@ def _discover_from_opencode(
 
 
 def _discover_from_roster(*, exclude_session_ids: Iterable[str] = ()) -> list[dict]:
-    """Live claude sessions from the daemon roster (US1, x-605c).
+    """Live claude sessions from the daemon roster (US1).
 
     A ``claude --bg`` worker leaves no pid-sidecar and is dropped from the live
     process scan, so the roster is the ONLY source that surfaces it -- the exact
@@ -965,9 +965,9 @@ def _discover_from_registry(
     *,
     exclude_session_ids: Iterable[str] = (),
 ) -> list[dict]:
-    """Registered fno-agent sessions, resolvable by canonical handle (US2, x-605c).
+    """Registered fno-agent sessions, resolvable by canonical handle (US2).
 
-    A spawned worker registered under a name (e.g. ``x-d899-us8-build``) also
+    A spawned worker registered under a name (e.g. ``x-aaaa-us8-build``) also
     answers to its bare ``<short8>`` handle, because its harness session id
     is surfaced as a discover row. The harness -> id mapping is
     ``HARNESS_SESSION_ID_FIELDS`` (the single source of truth also read by the
@@ -989,7 +989,7 @@ def _discover_from_registry(
     except Exception:  # noqa: BLE001 — a torn/version-drifted registry contributes no rows
         return rows
     for e in entries:
-        # Identity is one axis (x-8dfc): gate LIVE discovery on the row's
+        # Identity is one axis: gate LIVE discovery on the row's
         # harness (provider fallback). A known-harness row keeps resolving; an
         # alien harness stays excluded here (no live transport exists for it)
         # while remaining durably mail-routable -- the live/durable split the
@@ -1004,7 +1004,7 @@ def _discover_from_registry(
             # short_id MUST be the authoritative jobId -- the stored short and
             # the uuid's first 8 hex can differ, and the jobId is what
             # `fno agents mail send <short>` and mail-inject key on.
-            # Canonical harness_session_id leads (x-ec59): a row whose only
+            # Canonical harness_session_id leads: a row whose only
             # identity is the canonical field (a heal-backfilled bg row) resolves
             # here, where before it fell through to durable-only forever.
             short_val = getattr(e, "short_id", "") or None
@@ -1085,7 +1085,7 @@ class DiscoveredSession:
     #: ``classify_progress``; ``None`` before that probe has run.
     observed_model: Optional[dict] = None
     #: The provider refusal the truth probe classified off the last assistant
-    #: turn (x-e594). Feeds both renderers; ``None`` before that probe has run.
+    #: turn. Feeds both renderers; ``None`` before that probe has run.
     provider_refusal: Optional[str] = None
 
     def _reachability(self) -> Reachability:
@@ -1281,7 +1281,7 @@ def _read_registry_file(path: Path) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------
-# Canonical transcript-store discovery (x-a1d5)
+# Canonical transcript-store discovery
 # --------------------------------------------------------------------------
 
 
@@ -1377,7 +1377,7 @@ def _discover_from_projects(
     psutil_mod,
     exclude_session_ids: Iterable[str] = (),
 ) -> list[dict]:
-    """Fallback discovery from the canonical transcript store (x-a1d5).
+    """Fallback discovery from the canonical transcript store.
 
     The ``<pid>.json`` sidecar is gone, so liveness comes from a running
     ``claude`` process: each live process' cwd maps to a projects subdir, and the
@@ -1420,7 +1420,7 @@ def _discover_from_projects(
 
 
 # --------------------------------------------------------------------------
-# Harness-native subagents (sidechain 'limbs') - read-only visibility (x-af92)
+# Harness-native subagents (sidechain 'limbs') - read-only visibility
 # --------------------------------------------------------------------------
 # A harness-native subagent (Claude's Agent tool; codex/agy/opencode task
 # primitives) is a nested conversation inside its PARENT session's process.
@@ -1465,7 +1465,7 @@ def _subagent_live_seconds() -> float:
 
 @dataclass
 class DiscoveredSubagent:
-    """One harness-native subagent surfaced read-only (x-af92).
+    """One harness-native subagent surfaced read-only.
 
     Keyed on ``agentId`` (the transcript's first-record field and the filename
     stem), never a pid: a subagent has no process of its own. ``parent_session_id``
@@ -2438,7 +2438,7 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
         # the mail.
         return [], False
     hits: _Hits = []
-    # Node stamps carry their own harness, so identity is the pair (x-c670).
+    # Node stamps carry their own harness, so identity is the pair.
     seen: set[tuple[str, str]] = set()
     malformed = False
     for node in entries or []:
@@ -2674,7 +2674,7 @@ def discover_live_sessions(
             except ValueError:
                 continue
         # short_id is a hex mailbox handle, never a friendly name: a --name
-        # like "blueprint-x-ce6e-glm" is not a session id, and admitting it as
+        # like "blueprint-x-bbbb-glm" is not a session id, and admitting it as
         # a handle strands mail on the bus (the drain is handle-keyed, so a
         # name never matches a session's handle). jobId is Claude's own
         # transport key; otherwise derive the canonical address.
@@ -2757,7 +2757,7 @@ def discover_live_sessions(
             continue
         candidates.append(r)
 
-    # Daemon roster + fno-agents registry (US1/US2, x-605c). Unioned ALWAYS,
+    # Daemon roster + fno-agents registry (US1/US2). Unioned ALWAYS,
     # like the codex source: a rostered bg worker (no pid-sidecar) or a named
     # registered session must resolve alongside live disk sessions. Dedup on
     # session_id below folds any overlap. Both readers are lenient -> zero rows

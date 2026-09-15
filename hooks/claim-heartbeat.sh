@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hooks/claim-heartbeat.sh - PostToolUse: renew this session's node:<id> claim
-# TTL while the owning session is actively working (x-a166, Facet A).
+# TTL while the owning session is actively working (Facet A).
 #
 # The node claim is anchored to a transient init PID (dead seconds after init)
 # plus a fixed 2h TTL that nothing renews, so a genuinely-live session (attended

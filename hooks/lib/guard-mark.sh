@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # guard-mark.sh - sourced by PreToolUse guards; provides _guard_mark, the
 # positive liveness signal that a guard actually ran and what it decided
-# (x-04bc). One guard_decision event row per guard invocation, appended to
+#. One guard_decision event row per guard invocation, appended to
 # the project events log: without it, a guard that cannot prove it ran is
 # indistinguishable from one that never launched, and under
 # permissions.defaultMode = dontAsk the guards are the entire safety layer.

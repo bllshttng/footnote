@@ -17,7 +17,7 @@ pub(super) struct LiveTab {
     pub(super) tab_name: Option<String>,
     pub(super) pane_count: usize,
     pub(super) pristine: bool,
-    /// (x-cf97) Every pane in the tab is a spent shell: `cmd: None`, no
+    /// Every pane in the tab is a spent shell: `cmd: None`, no
     /// `fno_id`, measured idle NOW (ran something, at a prompt). The AND-fold
     /// over panes mirrors `pristine`, but the predicate is deliberately
     /// narrower than `!pristine` - it can only ever hold for bare shells,
@@ -28,7 +28,7 @@ pub(super) struct LiveTab {
     /// default fold closes such a tab: a reaped worker leaves scrollback, so
     /// `pristine` alone never fires for it.
     pub(super) orphaned: bool,
-    /// (x-1b90) The first release evidence carried by any pane in the tab,
+    /// The first release evidence carried by any pane in the tab,
     /// printed on the tab's `closed_named` line so the reason names the
     /// harness, the session id, the reap time and the basis.
     pub(super) release: Option<String>,
@@ -44,7 +44,7 @@ pub(super) struct LiveTab {
 /// removal, see [`session_names`]), so an unreachable session is a steady
 /// state, not an anomaly - folding the per-session fact into one boolean
 /// disabled the sweep for every healthy session and reported a clean exit 0
-/// (x-6e79).
+///.
 pub(super) fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String>) {
     let Ok(names) = session_names() else {
         // The session list itself is unreadable: nothing was probed, so no
@@ -108,7 +108,7 @@ pub(super) fn live_tabs() -> (Vec<LiveTab>, Vec<String>, Vec<String>, Vec<String
                     });
                     tab.pane_count += 1;
                     tab.pristine &= pane.pristine_idle_shell;
-                    // (x-cf97) `shell_idle` already carries `cmd: None`; the
+                    // `shell_idle` already carries `cmd: None`; the
                     // `fno_id` clause here keeps an occupied pane out of the
                     // category even if its shell layer reads idle.
                     tab.used_shell_only &= pane.fno_id.is_none() && pane.shell_idle;
@@ -134,7 +134,7 @@ pub(super) struct TabPruneOutcome {
     pub(super) would_close: usize,
     pub(super) skipped_named: usize,
     pub(super) kept: usize,
-    /// (x-cf97) `kept` is one number covering four reasons; these split it so
+    /// `kept` is one number covering four reasons; these split it so
     /// a receipt can say WHY a tab stayed. Within a run fold they sum to
     /// `kept`; `kept_not_probed` covers the no-fold case on its own, so the
     /// arithmetic stays auditable instead of trusted.
@@ -146,7 +146,7 @@ pub(super) struct TabPruneOutcome {
     /// is "kept" only in the sense that nobody looked. Counted separately so
     /// the four real reasons still sum to `kept` when it did run.
     pub(super) kept_not_probed: usize,
-    /// (x-cf97) The used-shell population that passed every guard: tabs the
+    /// The used-shell population that passed every guard: tabs the
     /// opt-in flag WOULD close. Counted whatever the flag did, so the sweep
     /// modal can carry the number while the default posture stays off.
     pub(super) used_shells: usize,
@@ -222,7 +222,7 @@ pub(super) fn prune_live_tabs(
             continue;
         }
         // The zero-pane guard is NOT loosened by the used-shell category
-        // (x-cf97): `pristine` is an AND-fold, so a zero-pane tab reads
+        // `pristine` is an AND-fold, so a zero-pane tab reads
         // pristine VACUOUSLY, with no pane having voted, and the absence-
         // is-not-an-outcome rule keeps it out of every close arm. Counting
         // the population here is what makes it visible.
@@ -257,7 +257,7 @@ pub(super) fn prune_live_tabs(
             continue;
         }
         if !tab.pristine {
-            // (x-cf97) The one widening, and it is opt-in: a tab of spent
+            // The one widening, and it is opt-in: a tab of spent
             // shells (cmd: None, no fno_id, idle now) closes only when the
             // operator asked for that category by name. Anything else merely
             // not-pristine - an agent pane, a running command, an unmeasured
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(outcome.closed, 0);
         assert_eq!(outcome.skipped_named, 1);
         assert_eq!(outcome.kept, 1);
-        // (x-cf97) The kept split accounts for the one kept tab. Tab 11 closed
+        // The kept split accounts for the one kept tab. Tab 11 closed
         // first, so tab 12 was the squad's LAST tab standing when it was
         // evaluated - the decrement order is the reason it names.
         assert_eq!(outcome.kept_last_in_squad, 1);
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn workspace_prune_folds_answering_session_despite_dead_sibling() {
-        // AC4-HP (x-6e79): one session answers PaneLs, a sibling (the socket a
+        // AC4-HP: one session answers PaneLs, a sibling (the socket a
         // dead server left behind) does not. The assertion is that the tab
         // fold RUNS over the answering session's tabs anyway - asserting the
         // prune ran proves nothing, it always ran when every socket was live.
@@ -535,7 +535,7 @@ mod tests {
             "the fold runs despite the dead sibling"
         );
         assert_eq!(outcome.kept, 1, "the squad's last tab stands");
-        // (x-cf97) The five-way kept arithmetic accounts for every tab.
+        // The five-way kept arithmetic accounts for every tab.
         assert_eq!(outcome.kept_last_in_squad, 1);
         assert_eq!(outcome.kept_not_pristine, 0);
         assert_eq!(outcome.kept_zero_panes, 0);
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn workspace_prune_names_the_unreachable_session_in_the_receipt() {
-        // AC5-ERR (x-6e79): a positive marker - the refusal names WHICH
+        // AC5-ERR: a positive marker - the refusal names WHICH
         // session could not be probed. The measured defect: a dead
         // x7b5e-proof socket disabled the sweep for every healthy session and
         // the receipt printed a clean zero at exit 0, naming nothing.
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn workspace_prune_used_shell_category_is_opt_in_and_named() {
-        // (x-cf97) The default sweep's posture is UNCHANGED: a tab of spent
+        // The default sweep's posture is UNCHANGED: a tab of spent
         // shells is kept_not_pristine, exactly what it was before this
         // category existed. Only the named flag moves it, and the dry-run
         // receipt then NAMES the tab it would close - a count alone is not a
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn workspace_prune_store_pass_stays_closed_on_partial_liveness() {
-        // AC6-EDGE (x-6e79): live_cwds is CROSS-session protective evidence -
+        // AC6-EDGE: live_cwds is CROSS-session protective evidence -
         // a live pane's cwd makes prune_decision_with_evidence return Keep,
         // and an unreachable session contributes no cwds. Running the store
         // pass on partial evidence would turn a Keep into a Prune, so it
@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn the_reap_flag_set_leaves_a_live_process_tab_standing() {
-        // (x-91eb) The combination `fno agents reap` passes automatically is
+        // The combination `fno agents reap` passes automatically is
         // `--tabs-only --include-used-shells`. The live-process floor under
         // it: a pane carrying an `fno_id`, or a busy shell (`shell_idle:
         // false`), folds to neither `used_shell_only` (the

@@ -1,5 +1,5 @@
 //! One subprocess read under a wall-clock budget (moved out of daemon.rs,
-//! x-a150: the file-budget ratchet made daemon.rs shrink-only).
+//! : the file-budget ratchet made daemon.rs shrink-only).
 
 /// One subprocess read under a wall-clock budget: `std` has no
 /// `Command::output` timeout, and a git stalled on a wedged filesystem must

@@ -11,7 +11,7 @@ Design constraints (locked):
   - NO ANTHROPIC_API_KEY in EnvironmentVariables (auth via macOS keychain OAuth)
   - RunAtLoad = false (human gate: operator runs `launchctl load` themselves)
   - ProcessType = Standard (Background throttled the tick 15.8x slower than
-    Standard at load 161-178: 103.38s against 6.54s on one A/B loop, x-c79d)
+    Standard at load 161-178: 103.38s against 6.54s on one A/B loop)
   - PATH captured at install time so launchd's minimal PATH can resolve fno/gh/claude
 """
 
@@ -295,7 +295,7 @@ def _etime_seconds(etime: str) -> Optional[int]:
 def _tick_in_flight(run: Optional[Callable[[list[str]], str]] = None) -> Optional[int]:
     """PID of a tick process younger than one StartInterval (600s), else None.
 
-    launchd owns this answer (x-09d8): the old cwd-routed ``pr-watch:tick``
+    launchd owns this answer : the old cwd-routed ``pr-watch:tick``
     claim covered only the sweep phase and read free while merge or recovery ran.
     """
     run = run or _stdout_of
@@ -551,7 +551,7 @@ def install(
         Print plist and hint, write nothing, do not prompt.
     activate:
         After writing the plist, run ``launchctl load`` so enabled means
-        running (x-e106). ``--no-activate`` (activate=False) restores the old
+        running. ``--no-activate`` (activate=False) restores the old
         write-only behavior for packaging/CI contexts.
     """
     plist_text = render_plist(
@@ -607,7 +607,7 @@ def install(
 
 
 # ---------------------------------------------------------------------------
-# Activation coupling (x-e106): enabled means running
+# Activation coupling: enabled means running
 # ---------------------------------------------------------------------------
 
 
@@ -693,7 +693,7 @@ def uninstall(*, launch_agents_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-#: x-d211: which timeout mechanism fired; the self-kill is not a budget outcome.
+#: : which timeout mechanism fired; the self-kill is not a budget outcome.
 _WHY_PHRASES = {
     "deadline_exceeded": "deadline exceeded",
     "slice_starved": "phase slice starved",
@@ -781,7 +781,7 @@ def status(
     else:
         typer.echo("Merge scan:   (no scan receipt from a merge_scan-capable tick)")
 
-    # Fleet watchdog freshness (x-55c3): a watchdog on a dead cadence never
+    # Fleet watchdog freshness: a watchdog on a dead cadence never
     # fires, and its silence is indistinguishable from a healthy fleet. When
     # the lane is armed and the last sweep is older than two intervals, say so
     # LOUD - absence is never evidence, so status never reads clean here. The
@@ -1004,7 +1004,7 @@ def _parked_prs(state_path: Optional[Path]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Liveness verdict (x-e106): doctor's residual ground-truth guard
+# Liveness verdict: doctor's residual ground-truth guard
 # ---------------------------------------------------------------------------
 
 

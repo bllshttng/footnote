@@ -2,7 +2,7 @@
 operator's executor-routing surface globs.
 
 Ported byte-for-byte from the retired ``scripts/lib/infer-task-executor.sh``
-(internalized for self-contained packaging, ab-58645f63). This module is now
+(internalized for self-contained packaging). This module is now
 the one definition of the locked patterns; ``infer-has-ui.sh`` and any other
 consumer reach the list through here so executor routing and the has_ui /
 frontend-craft signals can never drift apart.

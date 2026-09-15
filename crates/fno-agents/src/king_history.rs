@@ -625,7 +625,7 @@ fn scan_readings(
 ///
 /// rc 0 verdict read (any verdict), 1 refused or unreadable input (the
 /// message names the failed reading), 2 usage failure. The read assembles
-/// its own inputs (x-5952): crown, manifest, config, graph scope, window,
+/// its own inputs: crown, manifest, config, graph scope, window,
 /// and delivery split come from `king_verdict_inputs`; accepting
 /// precomputed facts on the argv would keep the split owner this port
 /// removes. `--verdict` selects this mode of the king-history action (law
@@ -903,7 +903,7 @@ mod verdict_tests {
             std::slice::from_ref(&path),
             "kg1",
             "hs1",
-            "x-a792",
+            "x-bbbb",
             "2026-09-10T00:00:00Z",
         )
         .unwrap();
@@ -1007,7 +1007,7 @@ mod verdict_tests {
             json!({"ts": "2026-09-10T10:05:00Z", "type": "loop_check_config", "source": "loop",
                    "data": {"session_id": "kg1", "block_cap": 9, "block_cap_source": "default"}}),
             json!({"ts": "2026-09-10T10:06:00Z", "type": "king_context_nudge", "source": "hook",
-                   "data": {"used_pct": 60, "trigger": 40, "crown_level": 0, "crown_scope": "x-a792"}}),
+                   "data": {"used_pct": 60, "trigger": 40, "crown_level": 0, "crown_scope": "x-bbbb"}}),
         ];
         for row in rows {
             writeln!(fh, "{row}").unwrap();
@@ -1017,7 +1017,7 @@ mod verdict_tests {
             std::slice::from_ref(&path),
             "kg1",
             "hs1",
-            "x-a792",
+            "x-bbbb",
             "2026-09-01T00:00:00Z",
         )
         .unwrap();
@@ -1062,7 +1062,7 @@ mod verdict_tests {
             std::slice::from_ref(&path),
             "kg1",
             "hs1",
-            "x-a792",
+            "x-bbbb",
             "2026-09-01T00:00:00Z",
         )
         .unwrap();
@@ -1089,7 +1089,7 @@ mod verdict_tests {
             std::slice::from_ref(&path),
             "kg1",
             "",
-            "x-a792",
+            "x-bbbb",
             "2026-09-01T00:00:00Z",
         )
         .unwrap();
@@ -1141,18 +1141,18 @@ mod verdict_tests {
         std::fs::write(
             &graph,
             json!({"entries": [
-                {"id": "x-a792", "type": "epic", "project": "fno", "created_at": "2026-09-01T00:00:00Z"},
-                {"id": "x-old", "parent": "x-a792", "created_at": "2026-09-05T00:00:00Z"},
-                {"id": "x-new", "parent": "x-a792", "created_at": "2026-09-12T00:00:00Z"}
+                {"id": "x-bbbb", "type": "epic", "project": "fno", "created_at": "2026-09-01T00:00:00Z"},
+                {"id": "x-old", "parent": "x-bbbb", "created_at": "2026-09-05T00:00:00Z"},
+                {"id": "x-new", "parent": "x-bbbb", "created_at": "2026-09-12T00:00:00Z"}
             ]})
             .to_string(),
         )
         .unwrap();
-        let manifest = root.join("kings/x-a792.md");
+        let manifest = root.join("kings/x-bbbb.md");
         std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         std::fs::write(
             &manifest,
-            "---\nfno_id: kg1\nscope: x-a792\nharness_session_id: hs1\ncreated_at: 2026-09-10T00:00:00Z\nbudget_max_iterations: 2\nrespawn_count: 0\nrespawn_ceiling: 4\n---\nbody\n",
+            "---\nfno_id: kg1\nscope: x-bbbb\nharness_session_id: hs1\ncreated_at: 2026-09-10T00:00:00Z\nbudget_max_iterations: 2\nrespawn_count: 0\nrespawn_ceiling: 4\n---\nbody\n",
         )
         .unwrap();
         let journal = root.join("events.jsonl");
@@ -1178,7 +1178,7 @@ mod verdict_tests {
             "--cwd".to_string(),
             root.display().to_string(),
             "--scope".to_string(),
-            "x-a792".to_string(),
+            "x-bbbb".to_string(),
             "--manifest".to_string(),
             manifest.display().to_string(),
             "--events-path".to_string(),
@@ -1215,7 +1215,7 @@ mod verdict_tests {
         assert_eq!(run_king_verdict(&["--cwd".into(), "/tmp".into()]), 2);
         assert_eq!(run_king_verdict(&["--nope".into()]), 2);
         // The precomputed facts are gone on purpose: passing one is a usage
-        // failure, never a silently accepted input (x-5952).
+        // failure, never a silently accepted input.
         assert_eq!(
             run_king_verdict(&["--inherited-undelivered".into(), "5".into()]),
             2
@@ -1252,7 +1252,7 @@ mod tests {
         let (_dir, path) = journal(&[
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"scope": "x-a792", "change": "first"}),
+                json!({"scope": "x-aaaa", "change": "first"}),
             ),
             json!({"ts": "2026-09-10T09:00:00Z", "type": "phase_transition", "source": "loop", "data": {"phase": "review"}}),
             checkin(
@@ -1261,10 +1261,10 @@ mod tests {
             ),
             checkin(
                 "2026-09-10T12:00:00Z",
-                json!({"scope": "x-a792", "change": "merged PR 1710", "open_prs_fleet": 3}),
+                json!({"scope": "x-aaaa", "change": "merged PR 1710", "open_prs_fleet": 3}),
             ),
         ]);
-        let payload = scan(std::slice::from_ref(&path), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&path), "x-aaaa").unwrap();
         assert_eq!(payload["scanned"], json!(2), "only reign rows are read");
         assert_eq!(payload["matched"], json!(2));
         let events = payload["events"].as_array().unwrap();
@@ -1278,15 +1278,15 @@ mod tests {
         let (_dir, path) = journal(&[
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"crown_scope": "x-a792", "change": "old"}),
+                json!({"crown_scope": "x-aaaa", "change": "old"}),
             ),
             checkin(
                 "2026-09-10T08:30:00Z",
-                json!({"scope": "x-a792", "result": "no change"}),
+                json!({"scope": "x-aaaa", "result": "no change"}),
             ),
             checkin("2026-09-10T09:00:00Z", json!({"change": "no scope named"})),
         ]);
-        let payload = scan(std::slice::from_ref(&path), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&path), "x-aaaa").unwrap();
         assert_eq!(payload["matched"], json!(0));
         assert_eq!(payload["rejected"], json!(3));
         let legacy = payload["rejected_legacy"].as_array().unwrap();
@@ -1300,7 +1300,7 @@ mod tests {
     fn missing_journal_reads_as_positive_zero() {
         let dir = tempfile::tempdir().unwrap();
         let absent = dir.path().join("absent.jsonl");
-        let payload = scan(std::slice::from_ref(&absent), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&absent), "x-aaaa").unwrap();
         assert_eq!(payload["scanned"], json!(0));
         assert_eq!(payload["matched"], json!(0));
         let journals = payload["journals"].as_array().unwrap();
@@ -1321,7 +1321,7 @@ mod tests {
         drop(fh);
         // A corrupt line is stored with its reject_reason; it is never a
         // reign row, so the read succeeds and reports zero.
-        let payload = scan(std::slice::from_ref(&path), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&path), "x-aaaa").unwrap();
         assert_eq!(payload["scanned"], json!(0));
         assert_eq!(payload["matched"], json!(0));
         let journals = payload["journals"].as_array().unwrap();
@@ -1339,7 +1339,7 @@ mod tests {
             "{}",
             checkin(
                 "2026-09-09T08:00:00Z",
-                json!({"scope": "x-a792", "change": "rotated past"}),
+                json!({"scope": "x-aaaa", "change": "rotated past"}),
             )
         )
         .unwrap();
@@ -1348,7 +1348,7 @@ mod tests {
             "{}",
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"scope": "x-a792", "change": "older"}),
+                json!({"scope": "x-aaaa", "change": "older"}),
             )
         )
         .unwrap();
@@ -1359,12 +1359,12 @@ mod tests {
             "{}",
             checkin(
                 "2026-09-10T12:00:00Z",
-                json!({"scope": "x-a792", "change": "newest"}),
+                json!({"scope": "x-aaaa", "change": "newest"}),
             )
         )
         .unwrap();
         drop(fh);
-        let payload = scan(&[rotated, live], "x-a792").unwrap();
+        let payload = scan(&[rotated, live], "x-aaaa").unwrap();
         assert_eq!(payload["scanned"], json!(3));
         assert_eq!(payload["matched"], json!(3));
         let events = payload["events"].as_array().unwrap();
@@ -1394,14 +1394,14 @@ mod tests {
         let mirror = dir.path().join("global.jsonl");
         let row = checkin(
             "2026-09-10T12:00:00Z",
-            json!({"scope": "x-a792", "change": "mirrored"}),
+            json!({"scope": "x-aaaa", "change": "mirrored"}),
         );
         for path in [&space, &mirror] {
             let mut fh = std::fs::File::create(path).unwrap();
             writeln!(fh, "{row}").unwrap();
             drop(fh);
         }
-        let payload = scan(&[space, mirror], "x-a792").unwrap();
+        let payload = scan(&[space, mirror], "x-aaaa").unwrap();
         assert_eq!(payload["matched"], json!(1));
         assert_eq!(payload["duplicates"], json!(1));
     }
@@ -1416,12 +1416,12 @@ mod tests {
             "{}",
             checkin(
                 "2026-09-10T08:00:00Z",
-                json!({"crown_scope": "x-a792", "change": "old"}),
+                json!({"crown_scope": "x-aaaa", "change": "old"}),
             )
         )
         .unwrap();
         drop(fh);
-        let payload = scan(std::slice::from_ref(&rotated), "x-a792").unwrap();
+        let payload = scan(std::slice::from_ref(&rotated), "x-aaaa").unwrap();
         let legacy = payload["rejected_legacy"].as_array().unwrap();
         assert_eq!(legacy.len(), 1);
         assert!(
@@ -1437,7 +1437,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("events.jsonl");
         std::fs::create_dir(dir.path().join("events.db")).unwrap();
-        let err = scan(std::slice::from_ref(&live), "x-a792").unwrap_err();
+        let err = scan(std::slice::from_ref(&live), "x-aaaa").unwrap_err();
         assert!(err.contains("events.db"), "err: {err}");
     }
 
@@ -1445,11 +1445,11 @@ mod tests {
     fn run_relays_json_and_human_formats() {
         let (_dir, path) = journal(&[checkin(
             "2026-09-10T12:00:00Z",
-            json!({"scope": "x-a792", "change": "did a thing", "open_prs_fleet": 3}),
+            json!({"scope": "x-aaaa", "change": "did a thing", "open_prs_fleet": 3}),
         )]);
         let args = vec![
             "--scope".to_string(),
-            "x-a792".to_string(),
+            "x-aaaa".to_string(),
             "--events-path".to_string(),
             path.display().to_string(),
             "--json".to_string(),
@@ -1463,12 +1463,12 @@ mod tests {
     fn the_short_json_spelling_parses_like_the_long_one() {
         let (_dir, path) = journal(&[checkin(
             "2026-09-10T12:00:00Z",
-            json!({"scope": "x-a792", "change": "did a thing", "open_prs_fleet": 3}),
+            json!({"scope": "x-aaaa", "change": "did a thing", "open_prs_fleet": 3}),
         )]);
         let args = vec![
             "-J".to_string(),
             "--scope".to_string(),
-            "x-a792".to_string(),
+            "x-aaaa".to_string(),
             "--events-path".to_string(),
             path.display().to_string(),
         ];
