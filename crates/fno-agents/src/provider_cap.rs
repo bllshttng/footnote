@@ -450,8 +450,9 @@ pub struct CapScan {
     pub settings_candidates: Vec<std::path::PathBuf>,
     /// AgentsHome root: compaction stamps live under `<root>/compacting/`.
     pub compaction_home: std::path::PathBuf,
-    /// HOME-style root whose `.claude/sessions/` maps a thread row's 8-hex
-    /// short_id to its full session uuid.
+    /// HOME-style root whose claude sessions dir (via
+    /// [`crate::claude_ask::ClaudeHome::sessions_dir`]) maps a thread row's
+    /// 8-hex short_id to its full session uuid.
     pub claude_home: std::path::PathBuf,
     /// `reset_timezone` zones read from config.toml `[[accounts.records]]`,
     /// keyed by record id and by route provider prefix.
@@ -1819,7 +1820,9 @@ mod tests {
             r#"{"schema_version":25,"agents":[{"name":"w-d899","short_id":"d8996f9b","harness":"claude","provider":"zai","launch_account":"default","state":"working"}]}"#,
         );
         write(
-            &claude_home.join(".claude").join("sessions").join("1.json"),
+            &crate::claude_ask::ClaudeHome::at(claude_home.clone())
+                .sessions_dir()
+                .join("1.json"),
             &format!(
                 r#"{{"jobId":"d8996f9b","kind":"bg","messagingSocketPath":null,"sessionId":"{uuid}","cwd":"/tmp"}}"#
             ),
