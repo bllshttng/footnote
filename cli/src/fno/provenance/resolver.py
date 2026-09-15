@@ -101,7 +101,7 @@ def transcript_listing(projects_root: Optional[Path] = None):
     Same stem filter as the per-session glob (a dotted stem is a sibling
     artifact). A miss re-globs, so a transcript written after entry is still
     found, and a different root ignores the scope. Scoped, never process-cached:
-    a worktree entry can copy a transcript into a second project dir (x-a472),
+    a worktree entry can copy a transcript into a second project dir mid-batch,
     and a long-lived cache would keep serving the stale first-dir copy.
     """
     root = projects_root or _DEFAULT_PROJECTS_ROOT

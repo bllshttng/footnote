@@ -474,7 +474,7 @@ def test_ac4_opencode_missing_db(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# x-baa2: transcript_listing scope
+# transcript_listing scope
 # ---------------------------------------------------------------------------
 
 _FULL = "abcdef12-1234-5678-9abc-def012345678"
@@ -493,7 +493,7 @@ def _write(root: Path, cwd: str, name: str, text: str) -> Path:
 
 
 def test_ac2_hp_scope_resolutions_match_globs_with_one_listing(tmp_path, monkeypatch):
-    """AC2-HP (x-baa2): every resolution inside transcript_listing() equals the
+    """AC2-HP: every resolution inside transcript_listing() equals the
     resolution outside it, and Path.glob runs once for the shared `*/*.jsonl`
     listing plus once for the missing session's re-glob -- nothing else."""
     from fno.provenance.resolver import resolve_transcript, transcript_listing
@@ -566,7 +566,7 @@ def test_ac2_hp_scope_resolutions_match_globs_with_one_listing(tmp_path, monkeyp
 
 
 def test_ac2_edge_transcript_written_after_entry_is_found(tmp_path):
-    """AC2-EDGE (x-baa2): a transcript written after the scope opened still
+    """AC2-EDGE: a transcript written after the scope opened still
     resolves (resolved=True) inside the scope -- the miss re-globs."""
     from fno.provenance.resolver import resolve_transcript, transcript_listing
 

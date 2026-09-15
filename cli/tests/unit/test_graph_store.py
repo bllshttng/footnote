@@ -1391,7 +1391,7 @@ class _CappedStream:
 
 
 def test_recv_exact_linear_on_16mb_frame():
-    """AC1-HP (x-baa2): a 16,044,243-byte reply (the measured graph frame) read
+    """AC1-HP: a 16,044,243-byte reply (the measured graph frame) read
     in <=8192-byte chunks returns equal bytes in under 2s. The old
     `data += chunk` loop on bytes copies the whole buffer per chunk and measured
     ~6s of pure copy on this payload."""
@@ -1408,7 +1408,7 @@ def test_recv_exact_linear_on_16mb_frame():
 
 
 def test_recv_exact_refuses_silent_close_midframe():
-    """AC1-ERR (x-baa2): a stream that goes silent after half the payload
+    """AC1-ERR: a stream that goes silent after half the payload
     raises StoreUnavailable (state silent, keeper-closed wording), never a
     short frame."""
     from fno.graph.store import STATE_SILENT, StoreUnavailable, _recv_exact

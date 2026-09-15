@@ -65,7 +65,7 @@ def test_ready_reuses_a_precomputed_occupancy(monkeypatch):
 
 
 def test_ready_reads_claims_and_worked_concurrently(monkeypatch):
-    """AC3-HP (x-baa2): the two occupancy legs overlap. Both wait on the same
+    """AC3-HP: the two occupancy legs overlap. Both wait on the same
     barrier, so a sequential spelling breaks it (5s bound) and fails here.
     The 7.18s claim read plus the 8.96s worked read queueing one after the
     other is the wall clock this node is about."""
@@ -90,7 +90,7 @@ def test_ready_reads_claims_and_worked_concurrently(monkeypatch):
 
 
 def test_ready_claim_refusal_never_reaches_the_keeper(monkeypatch):
-    """AC3-ERR (x-baa2): a claim reader that raises -> ClaimsUnavailableError
+    """AC3-ERR: a claim reader that raises -> ClaimsUnavailableError
     carrying the original cause, and the keeper is never asked."""
     def _boom(**_kw):
         raise RuntimeError("claims root unreadable")

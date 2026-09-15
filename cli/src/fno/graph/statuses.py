@@ -337,7 +337,7 @@ def live_worked_node_ids(
         worked: dict[str, list[str]] = {}
         # One store-wide listing for every transcript resolution in this batch:
         # per-session globs over ~2000 project dirs measured 4.32s for 31
-        # sessions (x-baa2).
+        # sessions.
         with transcript_listing():
             for entry in entries:
                 if not isinstance(entry, dict) or entry.get("status") in TERMINAL_RUNGS:
@@ -349,7 +349,7 @@ def live_worked_node_ids(
                 closed_ids = closed_worker_session_ids(entry)
 
                 def _admit(name, verdict):
-                    # x-dead: unmeasured rows are listed marked, never vanished.
+                    # Unmeasured rows are listed marked, never vanished.
                     label = (
                         name if verdict == REACHABLE
                         else f"{name} {UNMEASURABLE_LABEL_MARK} no positive liveness evidence)"

@@ -540,7 +540,7 @@ def shutdown_keeper(path: Path) -> None:
 
 def _recv_exact(stream: socket.socket, length: int) -> bytes:
     # Preallocated buffer filled in place: `data += chunk` on bytes copies the
-    # whole buffer per chunk, which on a 16 MB graph reply cost ~6s (x-baa2).
+    # whole buffer per chunk, which on a 16 MB graph reply cost ~6s.
     buf, got = bytearray(length), 0
     view = memoryview(buf)
     while got < length:
