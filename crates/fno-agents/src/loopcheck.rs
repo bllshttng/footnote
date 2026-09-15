@@ -9861,9 +9861,6 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
                     let blocker = if can_idle { observed_async_wait } else { None };
                     let claim = watch_lease::claim_pair(&manifest_content);
-                    // x-b445: capture renew's outcome, not just its truth, so a
-                    // refusal can name WHY the lease died instead of telling the
-                    // reader to arm the watcher it just refused.
                     let mut lease_cause: Option<watch_lease::RenewCause> = None;
                     if let Some(blocker) = blocker {
                         // Extend the node claim to cover the watch window BEFORE
@@ -10113,7 +10110,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 });
                 watch_lease::attach_watch_refusal(
                     &mut block_event,
-                    watching_refusal.as_ref().map(|(_, kind)| *kind),
+                    watching_refusal.as_ref().map(|(_, kind)| kind),
                 );
                 emit("loop_check", block_event);
                 return (
