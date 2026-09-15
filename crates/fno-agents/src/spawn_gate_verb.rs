@@ -158,6 +158,36 @@ mod probe {
             });
         }
 
+        // The route axis of the quota wall: the SAME call the gate makes, so
+        // the probe and the gate cannot disagree about what refuses (the gate
+        // runs it ahead of every machine axis).
+        if let Some(provider) = opt_str_of(payload, "route_provider") {
+            let mut lane_warnings = Vec::new();
+            if let Err(refusal) =
+                spawn_gate_lanes::check_lane_quota_lock(home.root(), &provider, &mut lane_warnings)
+            {
+                let receipt = refusal.receipt.unwrap_or(Value::Null);
+                return refuse_with(
+                    "provider_quota_lock",
+                    format!(
+                        "provider lane {} is rate-limited (resets_at {})",
+                        receipt
+                            .get("lane")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&provider),
+                        receipt
+                            .get("resets_at")
+                            .and_then(Value::as_f64)
+                            .map(|r| r.to_string())
+                            .unwrap_or_else(|| "unknown".into())
+                    ),
+                    receipt,
+                    &[],
+                    out,
+                );
+            }
+        }
+
         // The slot count: the same counter the gate refuses on. The rows are
         // named right away, so every verdict this answer can take (refused on
         // max_live, refused later, accepted) carries them.
@@ -768,6 +798,54 @@ mod tests {
             spawn_gate::ram_floor_term(reading.avail, 4.0, reading.swap, reading.swapin_bps, 90.0);
         let row = ram_floor_row(&reading, 4.0, 90.0, &term);
         assert_eq!(row["verdict"].as_str().unwrap(), "refuse");
+    }
+
+    /// The probe mirrors the gate's quota refusal: a payload naming a
+    /// route_provider whose lane is walled reads refused, never accepted.
+    #[test]
+    fn probe_refuses_a_route_provider_with_a_walled_lane() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-lanequota-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(home.join("provider-cap")).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", dir.join(".fno").join("config.toml"));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        std::fs::write(
+            home.join("provider-cap").join("snapshot.json"),
+            format!(
+                r#"{{"lanes":[{{"lane":"zai:default","provider":"zai","account":"default","reset_epoch":{},"reset_passed_epoch":null,"missing_reset_timezone":[],"state":"open","members":[]}}],"measured_at":"probe","measured_at_epoch":{}}}"#,
+                now + 600,
+                now
+            ),
+        )
+        .unwrap();
+
+        let answer = probe::answer(&json!({
+            "name": "probe-lane-lock",
+            "substrate": "headless",
+            "route_provider": "zai",
+            "account": ""
+        }));
+
+        std::env::remove_var(crate::paths::HOME_ENV);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        assert_eq!(answer["verdict"], "refused");
+        assert_eq!(answer["reason"], "provider_quota_lock");
+        assert_eq!(answer["lane"], "zai:default");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Over-cap allocation with no swap-ins renders pass, and the measured

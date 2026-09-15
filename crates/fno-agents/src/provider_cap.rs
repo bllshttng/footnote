@@ -491,6 +491,21 @@ pub fn snapshot_with(
     let rows = registry_rows(&scan.registry)?;
     let timezones = account_reset_timezones(&scan.settings_candidates);
     let now_f = now_epoch as f64;
+    // One walk of claude's sessions dir serves every thread row: resolving
+    // per row re-reads the same directory once per row on every tick.
+    let thread_ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| {
+            if s_field(row, "session_id").is_some() {
+                return None;
+            }
+            s_field(row, "short_id")
+        })
+        .collect();
+    let resolved_ids = crate::claude_ask::resolve_session_uuids(
+        &crate::claude_ask::ClaudeHome::at(scan.claude_home.clone()),
+        &thread_ids,
+    );
     let mut lanes: BTreeMap<(String, String), Vec<CapMember>> = BTreeMap::new();
     for row in &rows {
         let Some(name) = s_field(row, "name") else {
@@ -523,14 +538,9 @@ pub fn snapshot_with(
         // short_id; resolve the full session uuid through claude's sessions
         // dir so the transcript is reachable (the d8996f9b specimen read
         // transcript-not-found through this hole while its lane walled).
-        let lookup_id = session_id.clone().or_else(|| {
-            s_field(row, "short_id").and_then(|jid| {
-                crate::claude_ask::resolve_session_uuid(
-                    &crate::claude_ask::ClaudeHome::at(scan.claude_home.clone()),
-                    jid,
-                )
-            })
-        });
+        let lookup_id = session_id
+            .clone()
+            .or_else(|| s_field(row, "short_id").and_then(|jid| resolved_ids.get(jid).cloned()));
         let transcript = lookup_id
             .as_deref()
             .and_then(|sid| crate::claude_drive::find_transcript_in(&scan.projects_dir, sid));
