@@ -48,7 +48,8 @@ def _assert_fits(question) -> None:
 def test_king_escalation_of_25_stalled_rows_with_unreadable_liveness_fits(
     tmp_path: Path,
 ) -> None:
-    from fno.king.escalate import dedupe_key, escalate
+    from fno.agents.stale_escalate import dedupe_key
+    from fno.king.escalate import escalate
 
     stalled = [f"stalled_holder:x-{i:06x}" for i in range(1, 26)]
     stalled.append("stalled_holder:x-1005")
@@ -103,15 +104,18 @@ def test_a_scope_that_spells_no_node_sets_none(tmp_path: Path) -> None:
 def test_a_regression_past_the_cap_raises_ask_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC9: the gate fires at the shared write path, whatever the writer."""
+    """AC9: the gate fires at the shared write path, whatever the writer -
+    including the crate renderer this module no longer owns."""
     import fno.king.escalate as esc
 
-    real = esc.question_text
+    real = esc._render
 
     def bloated(*a, **k):
-        return real(*a, **k) + " " + " ".join(["padding"] * 80)
+        answer = dict(real(*a, **k))
+        answer["question"] = answer["question"] + " " + " ".join(["padding"] * 80)
+        return answer
 
-    monkeypatch.setattr(esc, "question_text", bloated)
+    monkeypatch.setattr(esc, "_render", bloated)
     with pytest.raises(AskRefused):
         esc.escalate(
             ["undispatched:x-1234"],

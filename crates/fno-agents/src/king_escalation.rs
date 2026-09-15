@@ -10,8 +10,10 @@
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 
-/// How many stalled rows the question names before it says "and N more".
-const MAX_LISTED_IDS: usize = 20;
+/// How many stalled rows the question names before it says "and N more". The
+/// count and the key are the load-bearing parts, the id list is context, and
+/// the ask gate (law d-59af3235) caps the line at config.style.word_cap.ask.
+const MAX_LISTED_IDS: usize = 3;
 
 const MARKER: &str = "king-escalation";
 
@@ -109,33 +111,25 @@ fn subject_for_reading(id: &str) -> Option<String> {
 }
 
 fn closing_for(live: Option<bool>, unknown_reason: Option<&str>, rows: bool) -> String {
-    let mut closing = if live == Some(true) {
+    // Law d-59af3235 caps the recorded line, so the closing is the short
+    // question form and the full unknown_reason rides the caller's stderr,
+    // named here only by the marker that the read itself failed.
+    let _ = unknown_reason;
+    let closing = if live == Some(true) {
         if rows {
-            "It is still reigning and holding these rows, so decide whether to \
-             unblock them, defer them, or tell it to stand down."
-                .to_owned()
+            "Unblock, defer, or stand it down?"
         } else {
-            "It is still reigning, so decide whether to act on this reading or \
-             tell it to stand down."
-                .to_owned()
+            "Act on this reading or stand it down?"
         }
+    } else if rows {
+        "Unblock, defer, or crown a new king?"
     } else {
-        if rows {
-            "It has exited, so nothing restarts it on its own - decide whether \
-             to unblock these rows, defer them, or crown a new king."
-                .to_owned()
-        } else {
-            "It has exited, so nothing restarts it on its own - decide whether \
-             to act on this reading or crown a new king."
-                .to_owned()
-        }
+        "Act on this reading or crown a new king?"
     };
     if live.is_none() {
-        if let Some(reason) = unknown_reason {
-            closing.push_str(&format!(" (liveness unreadable: {reason})"));
-        }
+        return format!("{closing} (liveness unreadable)");
     }
-    closing
+    closing.to_owned()
 }
 
 /// The one entry point both branches fold through: the marker leads because
@@ -185,7 +179,7 @@ pub fn render(req: &EscalationRequest) -> EscalationAnswer {
 
     let closing = closing_for(req.live, req.unknown_reason.as_deref(), rows_branch);
     let question = format!(
-        "[{MARKER}:{key}] The king stopped on {subject}. Reason given: {reason}. {closing}",
+        "[{MARKER}:{key}] The king stopped on {subject}. Reason: {reason}. {closing}",
         key = req.key,
         reason = req.reason,
     );
@@ -241,7 +235,8 @@ mod tests {
     const IDS: [&str; 2] = ["x-1111", "x-2222"];
     const KEY: &str = "0a1b2c3d4e5f";
     const REASON: &str = "NoProgress";
-    const DEAD_SENTENCE: &str = "It has exited, so nothing restarts it on its own";
+    const LIVE_CLOSE: &str = "Unblock, defer, or stand it down?";
+    const DEAD_CLOSE: &str = "Unblock, defer, or crown a new king?";
 
     fn req(stalled: Vec<&str>, live: Option<bool>) -> EscalationRequest {
         EscalationRequest {
@@ -260,35 +255,37 @@ mod tests {
     // --- the six cases ported out of test_king_escalate_liveness.py ---
 
     #[test]
-    fn live_king_question_says_still_reigning() {
+    fn live_king_question_asks_for_a_ruling() {
         let text = question(&req(IDS.to_vec(), Some(true)));
-        assert!(text.contains("still reigning"));
-        assert!(text.contains("stand down"));
-        assert!(!text.contains(DEAD_SENTENCE));
+        assert!(text.contains(LIVE_CLOSE));
+        assert!(!text.contains(DEAD_CLOSE));
     }
 
     #[test]
-    fn dead_king_question_keeps_todays_text_verbatim() {
+    fn dead_king_question_offers_the_crown() {
         let text = question(&req(IDS.to_vec(), Some(false)));
-        assert!(text.contains(DEAD_SENTENCE));
-        assert!(text.contains("crown a new king"));
+        assert!(text.contains(DEAD_CLOSE));
+        // A measured dead is not an unreadable read: the marker is reserved
+        // for the None branch, where nothing was measured.
         assert!(!text.contains("liveness unreadable"));
     }
 
     #[test]
-    fn unknown_king_reads_dead_and_names_the_reason() {
+    fn unknown_king_reads_dead_and_names_the_read_failed() {
         let mut r = req(IDS.to_vec(), None);
         r.unknown_reason = Some("registry unreadable: disk".to_owned());
         let text = question(&r);
-        assert!(text.contains(DEAD_SENTENCE));
+        assert!(text.contains(DEAD_CLOSE));
         assert!(text.contains("liveness unreadable"));
-        assert!(text.contains("registry unreadable: disk"));
+        // The full reason rides the caller's stderr, never the capped line.
+        assert!(!text.contains("registry unreadable: disk"));
     }
 
     #[test]
-    fn default_live_argument_stays_the_dead_sentence() {
+    fn default_live_argument_reads_unknown() {
         let text = question(&req(IDS.to_vec(), None));
-        assert!(text.contains(DEAD_SENTENCE));
+        assert!(text.contains(DEAD_CLOSE));
+        assert!(text.contains("liveness unreadable"));
     }
 
     #[test]
@@ -304,33 +301,24 @@ mod tests {
         for live in [Some(true), Some(false), None] {
             let text = question(&req(IDS.to_vec(), live));
             assert!(text.contains(&format!("[{MARKER}:{KEY}]")));
-            assert!(text.contains(&format!("Reason given: {REASON}")));
+            assert!(text.contains(&format!("Reason: {REASON}")));
         }
     }
 
-    // --- AC2-HP: the row branch is byte-identical to today's Python text ---
+    // --- AC2-HP: the row branch is the law-shaped one-line template ---
 
     #[test]
-    fn row_text_is_byte_identical_to_the_python_it_ports() {
+    fn row_text_matches_the_law_template() {
         for live in [Some(true), Some(false), None] {
             let text = question(&req(IDS.to_vec(), live));
             let closing = match live {
-                Some(true) => "It is still reigning and holding these rows, so \
-                               decide whether to unblock them, defer them, or \
-                               tell it to stand down."
-                    .to_owned(),
-                Some(false) => "It has exited, so nothing restarts it on its \
-                                own - decide whether to unblock these rows, \
-                                defer them, or crown a new king."
-                    .to_owned(),
-                None => "It has exited, so nothing restarts it on its own - \
-                         decide whether to unblock these rows, defer them, or \
-                         crown a new king."
-                    .to_owned(),
+                Some(true) => LIVE_CLOSE,
+                Some(false) => DEAD_CLOSE,
+                None => "Unblock, defer, or crown a new king? (liveness unreadable)",
             };
             let want = format!(
                 "[king-escalation:{KEY}] The king stopped on 2 board row(s) \
-                 nothing is clearing: x-1111, x-2222. Reason given: NoProgress. \
+                 nothing is clearing: x-1111, x-2222. Reason: NoProgress. \
                  {closing}"
             );
             assert_eq!(text, want, "live={live:?}");
@@ -338,13 +326,13 @@ mod tests {
     }
 
     #[test]
-    fn row_list_caps_at_twenty_with_and_n_more() {
+    fn row_list_caps_at_three_with_and_n_more() {
         let many: Vec<String> = (0..25).map(|i| format!("x-{i:04}")).collect();
         let mut r = req(many.iter().map(String::as_str).collect(), Some(true));
         r.stalled = many;
         let text = question(&r);
         assert!(text.contains("25 board row(s) nothing is clearing:"));
-        assert!(text.contains(", and 5 more"));
+        assert!(text.contains(", and 22 more"));
     }
 
     #[test]
@@ -421,10 +409,10 @@ mod tests {
     #[test]
     fn reading_branch_closing_names_no_rows() {
         let live = question(&req(vec!["reading:board-unreadable"], Some(true)));
-        assert!(live.contains("act on this reading or tell it to stand down"));
+        assert!(live.contains("Act on this reading or stand it down?"));
         assert!(!live.contains("these rows"));
         let dead = question(&req(vec!["reading:board-unreadable"], Some(false)));
-        assert!(dead.contains("act on this reading or crown a new king"));
+        assert!(dead.contains("Act on this reading or crown a new king?"));
     }
 
     // --- AC5-ERR: refusals are data ---

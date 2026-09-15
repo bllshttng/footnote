@@ -95,7 +95,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         # an asker-less row can only ever be answered into the void.
         asker=canonical_handle(session_id) if session_id else None,
         node=node,
-        blocks=blocks or None,
+        blocks=blocks or (),
     )
     return ("recorded", qid) if outcome == "asked" else (outcome, qid)
 

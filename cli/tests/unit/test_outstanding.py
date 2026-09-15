@@ -217,7 +217,7 @@ def test_a_failed_verdict_read_names_itself_and_keeps_the_questions_leg(
     monkeypatch.setattr(
         "fno.outstanding.core._read_open_verdicts", lambda: ([], "the binary refused")
     )
-    assert runner.invoke(outstanding_app, ["ask", "should the gate refuse?"]).exit_code == 0
+    assert runner.invoke(outstanding_app, ["ask", "should the gate refuse?", "--node", "x-7d94"]).exit_code == 0
     result = runner.invoke(outstanding_app, [])
     assert result.exit_code == 0, result.output
     assert "prove-it verdicts could not be read (the binary refused)." in result.output
@@ -422,7 +422,7 @@ class TestAskReceiptNamesVisibility:
     def test_the_tenth_ask_renders_at_position_one_of_ten(self, root: Path):
         """AC8-HP (x-0dc5): 9 open + this one = 10; the fresh ask ranks first."""
         self._seed(root, 9)
-        result = runner.invoke(outstanding_app, ["ask", "verify the render window"])
+        result = runner.invoke(outstanding_app, ["ask", "verify the render window", "--node", "x-7d94"])
 
         assert result.exit_code == 0, result.output
         (qid,) = [row["data"]["question_id"] for row in _question_rows(root)
@@ -437,7 +437,7 @@ class TestAskReceiptNamesVisibility:
         # ts far in the future: every seeded row outranks the fresh ask, so it
         # sorts last regardless of the id the receipt mints.
         self._seed(root, 10, ts="2099-01-01T00:00:00Z")
-        result = runner.invoke(outstanding_app, ["ask", "buried on arrival"])
+        result = runner.invoke(outstanding_app, ["ask", "buried on arrival", "--node", "x-7d94"])
 
         assert result.exit_code == 0, result.output
         rows = [row["data"]["question_id"] for row in _question_rows(root)]
@@ -455,7 +455,7 @@ class TestAskReceiptNamesVisibility:
             raise RuntimeError("index unreadable")
 
         monkeypatch.setattr("fno.outstanding.core.read_open_questions", broken)
-        result = runner.invoke(outstanding_app, ["ask", "record me anyway"])
+        result = runner.invoke(outstanding_app, ["ask", "record me anyway", "--node", "x-7d94"])
 
         assert result.exit_code == 0, result.output
         assert len(_question_rows(root)) == 1
@@ -575,7 +575,7 @@ class TestAskNearbyLawRefusal:
         )
         # Positive control: an allowed ask records a row, so the absence below
         # is the gate's doing and not an empty journal.
-        control = runner.invoke(outstanding_app, ["ask", "which base do we rebase on?"])
+        control = runner.invoke(outstanding_app, ["ask", "which base do we rebase on?", "--node", "x-7d94"])
         assert control.exit_code == 0, control.output
         assert len(_question_rows(root)) == 1
 
@@ -606,6 +606,8 @@ class TestAskNearbyLawRefusal:
                 "PR 1847 shrank +207 to +142. d-4b39ad4c is in view; asking anyway.",
                 "--subject",
                 "pr-1847-budget-exception",
+                "--node",
+                "x-7d94",
             ],
         )
         assert allowed.exit_code == 0, allowed.output
@@ -620,7 +622,7 @@ class TestAskNearbyLawRefusal:
             raise VerbUnavailable("binary missing")
 
         monkeypatch.setattr("fno.outstanding.cli._law_match", broken)
-        allowed = runner.invoke(outstanding_app, ["ask", "still worth recording"])
+        allowed = runner.invoke(outstanding_app, ["ask", "still worth recording", "--node", "x-7d94"])
         assert allowed.exit_code == 0, allowed.output
         assert "live-law lookup failed" in allowed.output
         assert len(_question_rows(root)) == 1
@@ -635,11 +637,11 @@ class TestAskNearbyLawRefusal:
         assert (
             runner.invoke(
                 outstanding_app,
-                ["ask", "one", "--subject", "file-budget-exception"],
+                ["ask", "one", "--subject", "file-budget-exception", "--node", "x-7d94"],
             ).exit_code
             == 0
         )
-        assert runner.invoke(outstanding_app, ["ask", "two"]).exit_code == 0
+        assert runner.invoke(outstanding_app, ["ask", "two", "--node", "x-7d94"]).exit_code == 0
 
         from fno.outstanding.core import read_open_questions
 

@@ -238,7 +238,9 @@ def test_changed_finding_set_supersedes_the_old_ask(tmp_path: Path) -> None:
     assert new_id != first_id
     open_qs = read_open_questions(tmp_path)
     assert [q.id for q in open_qs] == [new_id]
-    assert "/w/b" in open_qs[0].question
+    # The law shape names the count and points at the report verb; the row
+    # subjects live in the watchdog listing, not the capped line.
+    assert "1 unfinished-work finding(s)" in open_qs[0].question
 
 
 def test_answered_finding_ask_suppresses_the_renag(tmp_path: Path) -> None:

@@ -25,15 +25,20 @@ STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
 
 def _fake_render(ids, key, reason, *, live=None, unknown_reason=None) -> dict:
     """The renderer runs in the fno-agents crate; the fake keeps its
-    contract where the fold tests depend on it: the marker+key leads."""
+    contract where the fold tests depend on it: the marker+key leads, and
+    the id list caps at three like the real renderer (the ask gate caps
+    the line, so an inlined 150-id list would refuse)."""
+    shown = ", ".join(ids[:3])
+    if len(ids) > 3:
+        shown += f", and {len(ids) - 3} more"
     return {
         "ok": True,
         "question": (
             f"[king-escalation:{key}] The king stopped on {len(ids)} board "
-            f"row(s) nothing is clearing: {', '.join(ids)}. "
-            f"Reason given: {reason}. body"
+            f"row(s) nothing is clearing: {shown}. "
+            f"Reason: {reason}. body"
         ),
-        "mail": f"A crown under yours stopped on {len(ids)} rows. Reason given: {reason}.",
+        "mail": f"A crown under yours stopped on {len(ids)} rows. Reason: {reason}.",
     }
 
 
