@@ -732,3 +732,269 @@ fn parse_ownership_defect(text: &str) -> Result<OwnershipDefect, String> {
         extras,
     })
 }
+
+/// The single-row recompute (x-20d2 wave 11): one projection query loads the
+/// status-relevant columns of every live node, the derivation runs over that
+/// projection in memory, and only rows whose status changed are UPDATEd, in
+/// the caller's transaction. The plan-rung ladder (idea/design/ready) is
+/// deliberately absent: the whole-graph pass derives it from a plan-rung map
+/// the caller supplies, and a single-row write has none, so a stored rung
+/// keeps. Container rollup mirrors the whole-graph pass, deepest parents
+/// first, over the derived statuses.
+pub fn recompute_status(connection: &Connection) -> Result<(), String> {
+    struct Driver {
+        id: String,
+        parent: Option<String>,
+        status: String,
+        stored: String,
+        completed: bool,
+        superseded: bool,
+        deferred: bool,
+        locked: bool,
+        locked_at: Option<String>,
+        holder: Option<String>,
+        open_do: bool,
+        has_pr: bool,
+        defect: Option<String>,
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT n.id, n.parent_id, n.status,
+                    CASE WHEN n.completed_at LIKE 'deferred:%' THEN 0
+                         ELSE n.completed_at IS NOT NULL END,
+                    n.superseded_by IS NOT NULL,
+                    CASE WHEN n.completed_at LIKE 'deferred:%' THEN 1
+                         ELSE n.deferred_at IS NOT NULL END,
+                    COALESCE((SELECT c.locked_by FROM node_claims c
+                              WHERE c.node_id = n.id), '') <> '',
+                    (SELECT c.locked_at FROM node_claims c WHERE c.node_id = n.id),
+                    (SELECT c.locked_by FROM node_claims c WHERE c.node_id = n.id),
+                    EXISTS(SELECT 1 FROM sessions s WHERE s.node_id = n.id
+                           AND s.phase = 'do' AND s.ended_at IS NULL),
+                    EXISTS(SELECT 1 FROM pull_requests p WHERE p.node_id = n.id
+                           AND p.seq = 0 AND p.number IS NOT NULL),
+                    n.ownership_defect
+             FROM nodes n",
+        )
+        .map_err(|error| error.to_string())?;
+    let mut rows: Vec<Driver> = statement
+        .query_map([], |row| {
+            Ok(Driver {
+                id: row.get(0)?,
+                parent: row.get(1)?,
+                stored: row.get::<_, String>(2)?,
+                status: row.get(2)?,
+                completed: row.get::<_, i64>(3)? != 0,
+                superseded: row.get::<_, i64>(4)? != 0,
+                deferred: row.get::<_, i64>(5)? != 0,
+                locked: row.get::<_, i64>(6)? != 0,
+                locked_at: row.get(7)?,
+                holder: row.get(8)?,
+                open_do: row.get::<_, i64>(9)? != 0,
+                has_pr: row.get::<_, i64>(10)? != 0,
+                defect: row.get(11)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    // Open do rows with their timestamps, for the ownership-defect quality
+    // read (x-f8b1 port): one query for the whole projection.
+    let mut do_rows: std::collections::HashMap<String, Vec<(String, String)>> = Default::default();
+    let mut do_statement = connection
+        .prepare(
+            "SELECT node_id, COALESCE(started_at, ''), COALESCE(session_id, '')
+             FROM sessions WHERE phase = 'do' AND ended_at IS NULL",
+        )
+        .map_err(|error| error.to_string())?;
+    let do_list = do_statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for (node_id, started_at, holder) in do_list {
+        do_rows
+            .entry(node_id)
+            .or_default()
+            .push((started_at, holder));
+    }
+    // Driver pass, same precedence as the whole-graph derivation: completed,
+    // superseded, deferred, PR, held. Otherwise the stored status keeps.
+    // The ownership defect clears every pass and restamps only for a live
+    // (non-terminal) row whose lock or open-do timestamp reads stale, the
+    // same diagnostic the whole-graph pass writes (x-f8b1 shape).
+    let fresh_defect = std::collections::HashMap::<String, Option<String>>::new();
+    let mut stamp_defect: std::collections::HashMap<String, Option<String>> = fresh_defect;
+    for row in &mut rows {
+        row.status = if row.completed {
+            "done".into()
+        } else if row.superseded {
+            "superseded".into()
+        } else if row.deferred {
+            "deferred".into()
+        } else if row.has_pr {
+            "in_review".into()
+        } else if row.locked || row.open_do {
+            "in_progress".into()
+        } else {
+            row.status.clone()
+        };
+        if row.completed || row.superseded || row.deferred {
+            stamp_defect.insert(row.id.clone(), None);
+            continue;
+        }
+        let quality = if row.locked {
+            lock_quality(row.locked_at.as_deref())
+                .map(|q| (q, row.holder.clone().unwrap_or_default()))
+        } else if row.open_do {
+            do_quality(&do_rows.get(&row.id).cloned().unwrap_or_default())
+        } else {
+            None
+        };
+        let defect = quality.map(|(kind, holder)| {
+            serde_json::json!({
+                "kind": if kind == "old" {
+                    if row.locked { "stale-active-owner-unverified" } else { "stale-open-do-unverified" }
+                } else {
+                    if row.locked { "lock-timestamp-unreadable" } else { "do-row-timestamp-unreadable" }
+                },
+                "node_id": row.id,
+                "holder": holder,
+                "liveness": "unverified",
+            })
+            .to_string()
+        });
+        stamp_defect.insert(row.id.clone(), defect);
+    }
+    // Container rollup, deepest parents first, over the derived statuses.
+    let by_id: std::collections::HashMap<String, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| (row.id.clone(), index))
+        .collect();
+    let valid_parents: std::collections::HashSet<String> = rows
+        .iter()
+        .filter_map(|row| row.parent.clone())
+        .filter(|parent| by_id.contains_key(parent))
+        .collect();
+    let mut depth: std::collections::HashMap<String, usize> = Default::default();
+    fn depth_of(
+        id: &str,
+        by_id: &std::collections::HashMap<String, usize>,
+        rows: &[Driver],
+        depth: &mut std::collections::HashMap<String, usize>,
+    ) -> usize {
+        if let Some(known) = depth.get(id) {
+            return *known;
+        }
+        let parent = by_id.get(id).and_then(|index| rows[*index].parent.clone());
+        let value = match parent {
+            Some(parent) if valid_ids_contains(by_id, &parent) => {
+                1 + depth_of(&parent, by_id, rows, depth)
+            }
+            _ => 0,
+        };
+        depth.insert(id.to_string(), value);
+        value
+    }
+    fn valid_ids_contains(by_id: &std::collections::HashMap<String, usize>, id: &str) -> bool {
+        by_id.contains_key(id)
+    }
+    let mut parents: Vec<(String, usize)> = valid_parents
+        .into_iter()
+        .map(|pid| {
+            let d = depth_of(&pid, &by_id, &rows, &mut depth);
+            (pid, d)
+        })
+        .collect();
+    parents.sort_by(|a, b| b.1.cmp(&a.1));
+    for (pid, _) in parents {
+        let pidx = by_id[&pid];
+        if rows[pidx].completed || rows[pidx].superseded || rows[pidx].deferred {
+            continue;
+        }
+        let child_statuses: Vec<String> = rows
+            .iter()
+            .filter(|row| row.parent.as_deref() == Some(pid.as_str()))
+            .map(|row| row.status.clone())
+            .collect();
+        let own_work_live = matches!(rows[pidx].status.as_str(), "in_review" | "in_progress");
+        if !child_statuses.is_empty() && child_statuses.iter().all(|s| s == "done") {
+            if !own_work_live {
+                rows[pidx].status = "done".into();
+            }
+        } else if child_statuses
+            .iter()
+            .any(|s| s == "in_review" || s == "in_progress")
+        {
+            rows[pidx].status = "in_progress".into();
+        }
+    }
+    // Only rows whose status or defect moved are written.
+    for row in &rows {
+        let fresh_defect = stamp_defect.get(&row.id).cloned().flatten();
+        // String compare: the UPDATE stores this exact spelling, so the
+        // compare converges after at most one write per row.
+        let defect_changed = fresh_defect.as_deref() != row.defect.as_deref();
+        if row.status == row.stored && !defect_changed {
+            continue;
+        }
+        connection
+            .execute(
+                "UPDATE nodes SET status = ?1, ownership_defect = ?2
+                 WHERE id = ?3 AND (status IS NOT ?1
+                    OR COALESCE(ownership_defect, '') IS NOT COALESCE(?2, ''))",
+                params![row.status, fresh_defect, row.id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// The lock route of `graph_store::lock_timestamp_quality`, over the
+/// projection's `locked_at` column: past the TTL reads "old", absent or
+/// unparusable reads "unreadable", otherwise "fresh" (which stamps nothing).
+fn lock_quality(locked_at: Option<&str>) -> Option<&'static str> {
+    let Some(ts) = locked_at else {
+        return Some("unreadable");
+    };
+    let parsed = chrono::DateTime::parse_from_rfc3339(&ts.replace('Z', "+00:00"));
+    match parsed {
+        Err(_) => Some("unreadable"),
+        Ok(parsed) => {
+            let elapsed = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_seconds();
+            if (elapsed as f64) / 3600.0 > crate::graph_store::lock_ttl_hours() {
+                Some("old")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// The open-do route of `graph_store::open_do_quality_and_holder`: any open
+/// do row past the do TTL reads ("old", holder); an unparusable row reads
+/// ("unreadable", holder); otherwise nothing stamps.
+fn do_quality(rows: &[(String, String)]) -> Option<(&'static str, String)> {
+    let mut unreadable: Option<String> = None;
+    for (started_at, holder) in rows {
+        let parsed = chrono::DateTime::parse_from_rfc3339(&started_at.replace('Z', "+00:00"));
+        match parsed {
+            Err(_) => {
+                if unreadable.is_none() {
+                    unreadable = Some(holder.clone());
+                }
+            }
+            Ok(parsed) => {
+                let elapsed =
+                    (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc)).num_seconds();
+                if (elapsed as f64) / 3600.0 > crate::graph_store::do_ttl_hours() {
+                    return Some(("old", holder.clone()));
+                }
+            }
+        }
+    }
+    unreadable.map(|h| ("unreadable", h))
+}

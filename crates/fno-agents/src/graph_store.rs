@@ -992,7 +992,7 @@ pub fn apply_readiness_overlay(entries: &mut [Value]) {
 
 /// The lock TTL, read from TASK_LOCK_TTL_HOURS at first use (statuses:
 /// LOCK_TTL_HOURS env read).
-fn lock_ttl_hours() -> f64 {
+pub(crate) fn lock_ttl_hours() -> f64 {
     static TTL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *TTL.get_or_init(|| {
         std::env::var("TASK_LOCK_TTL_HOURS")
@@ -1040,7 +1040,7 @@ pub fn lock_timestamp_quality(entry: &Value) -> &'static str {
 /// far above any legitimate do window (was live at 2.5 hours) and far
 /// above the seventeen-minute spawn-handover window that made look
 /// identical to a strand, so youth is never misread as strandedness.
-fn do_ttl_hours() -> f64 {
+pub(crate) fn do_ttl_hours() -> f64 {
     static TTL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *TTL.get_or_init(|| {
         std::env::var("TASK_DO_TTL_HOURS")
