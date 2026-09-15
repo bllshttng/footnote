@@ -113,6 +113,14 @@ def transcript_listing(projects_root: Optional[Path] = None):
         _ACTIVE_LISTING.reset(token)
 
 
+def _unresolved(
+    harness: Optional[str], session_id: Optional[str], cwd: Optional[str], reason: str
+) -> ResolvedTranscript:
+    return ResolvedTranscript(
+        harness=harness, session_id=session_id, cwd=cwd, resolved=False, reason=reason
+    )
+
+
 def resolve_transcript(
     harness: Optional[str],
     session_id: Optional[str],
@@ -124,40 +132,20 @@ def resolve_transcript(
 ) -> ResolvedTranscript:
     """Resolve a provenance pointer to its on-disk transcript path.
 
-    Parameters
-    ----------
-    harness:
-        Harness identifier, e.g. "claude", "codex", "gemini".  "claude",
-        "codex" and "opencode" are actively resolved (see the arms below);
-        every other harness returns resolved=False, reason="harness-not-
-        supported".
-    session_id:
-        Full UUID-style session id OR an 8-hex prefix for a glob match.
-        None/empty -> resolved=False immediately.
-    cwd:
-        Working directory of the session that produced the node.
-        None -> resolved=False immediately.
-    projects_root:
-        Override the default ~/.claude/projects root.  Required in tests.
-    codex_sessions_dir / opencode_db_path:
-        Override the codex rollout store / opencode SQLite store. Required in
-        tests so no read ever touches the developer's real stores.
+    ``harness``: "claude", "codex" and "opencode" are actively resolved; every
+    other harness returns resolved=False, reason="harness-not-supported".
+    ``session_id``: a full uuid or an 8-hex prefix; None/empty -> resolved=False.
+    ``cwd``: the producing session's working directory; None -> resolved=False
+    (claude needs it even though the search spans every project dir).
+    ``projects_root`` / ``codex_sessions_dir`` / ``opencode_db_path``: store
+    root overrides, required in tests so no read touches the real stores.
 
-    Returns
-    -------
-    ResolvedTranscript
-        Never raises.  resolved=True only when an actual store entry was found.
+    Never raises.  resolved=True only when an actual store entry was found.
     """
     root = projects_root if projects_root is not None else _DEFAULT_PROJECTS_ROOT
 
     if not session_id:
-        return ResolvedTranscript(
-            harness=harness,
-            session_id=session_id,
-            cwd=cwd,
-            resolved=False,
-            reason="missing-input",
-        )
+        return _unresolved(harness, session_id, cwd, "missing-input")
 
     # codex keys on the session id in the rollout; opencode keys on the session
     # id in the store. Neither needs cwd (only claude does, for its slug).
@@ -168,23 +156,11 @@ def resolve_transcript(
 
     # Guard: unsupported harnesses (gemini, antigravity, ...)
     if harness != "claude":
-        return ResolvedTranscript(
-            harness=harness,
-            session_id=session_id,
-            cwd=cwd,
-            resolved=False,
-            reason="harness-not-supported",
-        )
+        return _unresolved(harness, session_id, cwd, "harness-not-supported")
 
     # claude needs cwd for the projects slug (the guard above narrows it to str).
     if not cwd:
-        return ResolvedTranscript(
-            harness=harness,
-            session_id=session_id,
-            cwd=cwd,
-            resolved=False,
-            reason="missing-input",
-        )
+        return _unresolved(harness, session_id, cwd, "missing-input")
 
     # Claude resolution. Transcript-truth (x-a472): a session's transcript can
     # exist in more than one project dir -- EnterWorktree re-keys it from the
@@ -211,13 +187,7 @@ def resolve_transcript(
                 p for p in root.glob(f"*/{esc}*.jsonl") if "." not in p.name[: -len(".jsonl")]
             )
         if not matches:
-            return ResolvedTranscript(
-                harness=harness,
-                session_id=session_id,
-                cwd=cwd,
-                resolved=False,
-                reason="not-found",
-            )
+            return _unresolved(harness, session_id, cwd, "not-found")
 
         stems = {m.name for m in matches}
         if len(stems) > 1:
@@ -244,13 +214,7 @@ def resolve_transcript(
             ambiguous = False
 
         if chosen is None:  # every candidate vanished mid-scan (stat race)
-            return ResolvedTranscript(
-                harness=harness,
-                session_id=session_id,
-                cwd=cwd,
-                resolved=False,
-                reason="not-found",
-            )
+            return _unresolved(harness, session_id, cwd, "not-found")
         return ResolvedTranscript(
             harness=harness,
             session_id=session_id,
@@ -262,13 +226,7 @@ def resolve_transcript(
 
     except Exception:
         # Never raise (defensive: permissions, unexpected OS errors, etc.)
-        return ResolvedTranscript(
-            harness=harness,
-            session_id=session_id,
-            cwd=cwd,
-            resolved=False,
-            reason="error",
-        )
+        return _unresolved(harness, session_id, cwd, "error")
 
 
 def _resolve_codex(
