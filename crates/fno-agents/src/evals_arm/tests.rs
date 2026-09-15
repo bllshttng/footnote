@@ -1,5 +1,5 @@
 //! `evals-arm` tests: one per surviving deleted phase test plus the two
-//! claim paths (x-cf8f). No test runs the real bank: `--fno-bin` is a fixture
+//! claim paths. No test runs the real bank: `--fno-bin` is a fixture
 //! shell script, and tick mode runs run mode through an injected spawner that
 //! re-parses the child argv in-process.
 use super::*;

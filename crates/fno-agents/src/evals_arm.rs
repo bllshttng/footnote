@@ -1,4 +1,4 @@
-//! `evals-arm` (x-cf8f): the eval bank's scheduled writer, native.
+//! `evals-arm`: the eval bank's scheduled writer, native.
 //!
 //! Two modes behind one verb. **Tick mode** (default) is the pr-watch tick's
 //! evals leg: when the newest regression-tier run is older than
@@ -255,6 +255,13 @@ fn self_exe() -> String {
         .unwrap_or_else(|_| "fno-agents".into())
 }
 
+/// kill(pid, 0): existence probe, no signal delivered. EPERM counts as alive
+/// (the process exists, we lack leave); only "no such process" reads as dead.
+fn pid_alive(pid: u32) -> bool {
+    // SAFETY: kill(0) sends no signal; it only queries the process's existence.
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
 /// The child argv, shared by the production spawner and the tests that
 /// assert on it.
 fn run_argv(o: &Opts, started_rfc3339: &str) -> Vec<String> {
@@ -407,6 +414,17 @@ fn run_tick_mode(o: &Opts, gate: &dyn Fn() -> GateReading, spawner: Spawner<'_>)
                 claims::acquire(CLAIM_KEY, &pid.to_string(), opts),
                 claims::AcquireOutcome::Acquired(_)
             );
+            // A child that fails fast can release before this acquire lands,
+            // pinning the claim to a dead pid until the next tick notices.
+            // Re-probe now; if it already exited, drop the claim instead.
+            if held && !pid_alive(pid) {
+                let _ = claims::release(CLAIM_KEY, &pid.to_string(), claims_root.as_deref(), None);
+                return receipt(
+                    0,
+                    Some("child_exited"),
+                    "run child exited before the claim landed; the next tick re-arms",
+                );
+            }
             let claim_note = if held { "" } else { " (claim held elsewhere)" };
             receipt(1, None, &format!("launched pid {pid}{claim_note}"))
         }

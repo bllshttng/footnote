@@ -237,7 +237,7 @@ def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
 
 
 def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
-    """The eval bank's demand leg (x-cf8f): guards and the receipt parse here;
+    """The eval bank's demand leg: guards and the receipt parse here;
     the due read, gate, detached run and journal live in native evals-arm.
     Every failure lands as ``arm_failed``, never out of the tick."""
     evals_cfg = getattr(settings, "evals", None)
@@ -276,7 +276,7 @@ def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
             "--fno-bin", _resolve_fno_binary(),
             "--schedule-days", str(days),
             "--stale-days", str(int(getattr(evals_cfg, "stale_days", 7) or 7)),
-            "--summary-json", json.dumps(evals_health_summary(evals_history())),
+            "--summary-json", json.dumps(evals_health_summary(evals_history(), native_reads=False)),
         ]
         proc = subprocess.run(argv, capture_output=True, text=True, check=False,
                               timeout=max(1.0, seconds_left_fn() or 30.0))

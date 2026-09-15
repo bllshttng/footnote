@@ -145,6 +145,7 @@ def evals_health_summary(
     *,
     stale_days: Optional[int] = None,
     now: Optional[datetime] = None,
+    native_reads: bool = True,
 ) -> Optional[dict[str, Any]]:
     """One-line evals health for triage health and doctor; the demand row.
 
@@ -171,7 +172,9 @@ def evals_health_summary(
     age_days = None if newest_dt is None else round(
         (now - newest_dt).total_seconds() / 86400, 3)
     stale = not never_ran and age_days is not None and age_days > stale_days
-    alarm, regressed = _native_summary_reads(history_path, stale_days)
+    alarm, regressed = (
+        _native_summary_reads(history_path, stale_days) if native_reads else ([], [])
+    )
     return {
         "regression_pass_rate": reg["pass_rate"] if reg else None,
         "flake_count": len(report["flakes"]),

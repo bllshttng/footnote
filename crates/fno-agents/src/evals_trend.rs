@@ -1,4 +1,4 @@
-//! `evals-trend` (x-cf8f): the eval-history report fold and the time-window
+//! `evals-trend`: the eval-history report fold and the time-window
 //! trend, native under d-b6cc1a2a (all new code lands in crates; Python is a
 //! thin caller). One transport-only action behind two Python leaves:
 //! `fno doctor evals report` forwards `--mode report`, `fno doctor evals
@@ -416,7 +416,8 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
     let mut mode = String::from("report");
     let mut stale_days: i64 = 7;
     let mut since: Option<usize> = None;
-    let mut graduate_n: Option<usize> = None;
+    let mut graduate = false;
+    let mut consecutive_n: usize = 3;
     let mut json_out = false;
     let mut compare: Option<String> = None;
     let mut now: Option<DateTime<Utc>> = None;
@@ -428,6 +429,32 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
             Some((n, v)) => (n.to_string(), Some(v.to_string())),
             None => (arg.clone(), None),
         };
+        // `--graduate` is bare in the documented surface; an integer argument
+        // is the optional count. `--consecutive` sizes the count without
+        // enabling the graduation view (the old CLI's shapes, both kept).
+        if name == "--graduate" || name == "--consecutive" {
+            if name == "--graduate" {
+                graduate = true;
+            }
+            let had_inline = inline.is_some();
+            let raw = match inline {
+                Some(v) => Some(v),
+                None => args.get(i).filter(|t| !t.starts_with('-')).cloned(),
+            };
+            if let Some(raw) = raw {
+                match raw.parse::<usize>() {
+                    Ok(v) => consecutive_n = v,
+                    Err(_) => {
+                        eprintln!("evals-trend: --graduate needs an integer");
+                        return EXIT_USAGE;
+                    }
+                }
+                if !had_inline {
+                    i += 1;
+                }
+            }
+            continue;
+        }
         let mut value = |what: &str| -> Result<String, ()> {
             match inline.clone() {
                 Some(v) => Ok(v),
@@ -466,15 +493,6 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                     return EXIT_USAGE;
                 }
             },
-            "--graduate" | "--consecutive" => {
-                match value("--graduate").map(|v| v.parse::<usize>()) {
-                    Ok(Ok(v)) => graduate_n = Some(v),
-                    _ => {
-                        eprintln!("evals-trend: --graduate needs an integer");
-                        return EXIT_USAGE;
-                    }
-                }
-            }
             "--json" => json_out = true,
             "--compare" => match value("--compare") {
                 Ok(v) => compare = Some(v),
@@ -629,7 +647,7 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
         return 0;
     }
     let rows = read_rows(&history, Some("baseline"), since);
-    let report = report_fold(&rows, stale_days, now, graduate_n);
+    let report = report_fold(&rows, stale_days, now, graduate.then_some(consecutive_n));
     if json_out {
         println!(
             "{}",

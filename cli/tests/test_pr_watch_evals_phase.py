@@ -1,4 +1,4 @@
-"""The evals tick phase (x-cf8f): the seam between the tick and the native
+"""The evals tick phase: the seam between the tick and the native
 evals-arm. The due read, the gate, the detached run and the journal are all
 Rust and tested there; these tests pin the Python half: the guards, the argv,
 the receipt-to-tick-row parse, and every failure shape landing as
@@ -67,7 +67,8 @@ def test_receipt_becomes_one_tick_row(monkeypatch, tmp_path, rows, evals_world):
     assert "evals-arm" in argv
     for flag in ("--history", "--events", "--fno-bin", "--summary-json"):
         assert flag in argv, flag
-    assert argv[argv.index("--fno-bin") + 1].endswith("fno-py") or argv[argv.index("--fno-bin") + 1]
+    fno_bin_value = argv[argv.index("--fno-bin") + 1]
+    assert fno_bin_value, "--fno-bin must carry a value"
     assert argv[argv.index("--schedule-days") + 1] == "7"
     assert len(rows) == 1
     args, kwargs = rows[0]

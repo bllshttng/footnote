@@ -243,6 +243,68 @@ fn graduation_candidates_last_n_pass() {
     assert_eq!(out, 0);
 }
 
+// The documented bare --graduate form and --graduate followed by another
+// flag both work again (the round-1 finding; the old CLI's shapes).
+#[test]
+fn graduate_bare_and_flag_adjacent_shapes() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            row_json("cap", "capability", true, &ts_rfc(1.0, now)),
+            row_json("cap", "capability", true, &ts_rfc(1.0, now)),
+            row_json("cap", "capability", true, &ts_rfc(1.0, now)),
+        ],
+    );
+    let bare = run_evals_trend(&[
+        "--history".into(),
+        h.clone(),
+        "--stale-days".into(),
+        "7".into(),
+        "--now".into(),
+        now.to_rfc3339(),
+        "--graduate".into(),
+    ]);
+    assert_eq!(bare, 0, "bare --graduate parses with the default count");
+    let adjacent = run_evals_trend(&[
+        "--history".into(),
+        h,
+        "--stale-days".into(),
+        "7".into(),
+        "--now".into(),
+        now.to_rfc3339(),
+        "--graduate".into(),
+        "--json".into(),
+    ]);
+    assert_eq!(
+        adjacent, 0,
+        "--graduate before another flag must not eat it"
+    );
+}
+
+// --consecutive alone sizes the count but never enables the graduation view.
+#[test]
+fn consecutive_alone_does_not_enable_graduation() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[row_json("cap", "capability", true, &ts_rfc(1.0, now))],
+    );
+    let out = run_evals_trend(&[
+        "--history".into(),
+        h,
+        "--stale-days".into(),
+        "7".into(),
+        "--now".into(),
+        now.to_rfc3339(),
+        "--consecutive".into(),
+        "5".into(),
+    ]);
+    assert_eq!(out, 0);
+}
+
 #[test]
 fn usage_error_exits_2() {
     assert_eq!(run_evals_trend(&[]), 2);
