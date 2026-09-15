@@ -113,16 +113,21 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut at = None;
         let mut at_current = false;
         let mut max_panes = None;
+        // run keeps the common flags as loop arms, not a fence-less
+        // MuxCommon::take: everything from the first bare token or `--` is
+        // the spawned command's argv verbatim, and a payload token that
+        // spells --server/--session/--json is never ours to parse.
+        let mut session = None;
+        let mut json = false;
         let mut fit = false;
-        // The common grammar (--server/--session/--json) is MuxCommon's; the
-        // loop keeps run's own shape: leading flags, then the command argv
-        // verbatim from the first bare token (or `--`).
-        let (common, rest) = MuxCommon::take(args).map_err(|e| format!("pane run: {e}"))?;
-        let session = common.server.or(common.session);
-        let json = common.json;
+        let sargs: Vec<String> = args
+            .iter()
+            .map(|a| a.to_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
         let mut i = 1;
-        while i < rest.len() {
-            let tok = rest[i].as_str();
+        while i < sargs.len() {
+            let tok = sargs[i].as_str();
             match tok {
                 "-h" | "--help" => {
                     return Err(format!(
@@ -133,10 +138,19 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     i += 1;
                     break;
                 }
+                "--json" => json = true,
+                "--server" | "--session" => {
+                    note_server_flag(tok);
+                    let Some(v) = sargs.get(i + 1) else {
+                        return Err(format!("{tok} needs a value"));
+                    };
+                    session = Some(v.clone());
+                    i += 1;
+                }
                 "--claim" => claim = true,
                 "--fit" => fit = true,
                 "--cwd" => {
-                    let Some(v) = rest.get(i + 1) else {
+                    let Some(v) = sargs.get(i + 1) else {
                         return Err("--cwd needs a value".into());
                     };
                     cwd = Some(v.clone());
@@ -148,7 +162,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // exists rather than landing in the store and being dropped
                 // at the next load.
                 "--worker" => {
-                    let Some(name) = rest.get(i + 1).cloned() else {
+                    let Some(name) = sargs.get(i + 1).cloned() else {
                         return Err("--worker needs a value".into());
                     };
                     if !crate::squad_store::valid_worker_name(&name) {
@@ -161,7 +175,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     i += 1;
                 }
                 "--workspace" | "--squad" | "-s" | "workspace" | "squad" => {
-                    let Some(name) = rest.get(i + 1).cloned() else {
+                    let Some(name) = sargs.get(i + 1).cloned() else {
                         return Err(format!("{tok} needs a value"));
                     };
                     if name.trim().is_empty() {
@@ -171,7 +185,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     i += 1;
                 }
                 "--split" | "-x" | "split" => {
-                    let Some(v) = rest.get(i + 1) else {
+                    let Some(v) = sargs.get(i + 1) else {
                         return Err(format!("{tok} needs a value"));
                     };
                     split = Some(parse_dir(v, "split/-x")?);
@@ -180,7 +194,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // (x-d865) exact placement: land in a named tab, adjacent to an
                 // anchor pane.
                 "--tab" => {
-                    let Some(v) = rest.get(i + 1) else {
+                    let Some(v) = sargs.get(i + 1) else {
                         return Err("--tab needs a value".into());
                     };
                     tab = Some(parse_tab_sel(v)?);
@@ -189,7 +203,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 // Bare "at" mirrors bare "split" above: mux_spawn.py's
                 // placement_args sends directives unprefixed (x-d865).
                 "--at" | "at" => {
-                    let Some(v) = rest.get(i + 1) else {
+                    let Some(v) = sargs.get(i + 1) else {
                         return Err("--at needs a value".into());
                     };
                     if v == "current" {
@@ -200,7 +214,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     i += 1;
                 }
                 "--max-panes" => {
-                    let Some(value) = rest.get(i + 1) else {
+                    let Some(value) = sargs.get(i + 1) else {
                         return Err("--max-panes needs a value".into());
                     };
                     let parsed = value.parse::<usize>().map_err(|_| {
@@ -217,7 +231,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             }
             i += 1;
         }
-        let argv = rest[i..].to_vec();
+        let argv = sargs[i..].to_vec();
         if argv.is_empty() {
             return Err("pane run needs a command".to_string());
         }

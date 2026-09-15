@@ -132,7 +132,7 @@ pub struct JsonOnly {
 #[derive(Args, Debug, PartialEq, Eq)]
 pub struct ServerArgs {
     /// Session name to serve
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", conflicts_with = "session")]
     pub server: Option<String>,
     /// Deprecated spelling of --server (warns)
     #[arg(long, hide = true, value_name = "NAME")]
@@ -188,23 +188,19 @@ fn map_matches(m: &clap::ArgMatches, args: &[OsString]) -> FrontDoor {
         crate::mux_cli::note_server_flag("--session");
     }
     if server.is_some() || session.is_some() {
+        // Locked-7: only the exact pair attaches. A server/session flag
+        // beside a subcommand is usage - never a forward, and never the
+        // socket role, which would silently drop the trailing argv (AC3-ERR).
+        if m.subcommand_name().is_some() {
+            return FrontDoor::Usage;
+        }
         let from_server = server.is_some();
         let name = server.or(session).unwrap_or_default();
-        if from_server && name.contains('/') {
-            return FrontDoor::Attach {
-                name: Some(name),
-                explicit_socket: true,
-            };
-        }
-        if m.subcommand_name().is_none() {
-            return FrontDoor::Attach {
-                name: Some(name),
-                explicit_socket: false,
-            };
-        }
-        // A server/session flag beside a subcommand is not the exact pair:
-        // Locked-7 says usage, never a forward (AC3-ERR).
-        return FrontDoor::Usage;
+        let explicit_socket = from_server && name.contains('/');
+        return FrontDoor::Attach {
+            name: Some(name),
+            explicit_socket,
+        };
     }
     match m.subcommand() {
         Some(("mux", mux_m)) => match mux_m.subcommand() {
@@ -369,6 +365,17 @@ mod tests {
         assert_eq!(classify(&os(&["--server"])), FrontDoor::Usage);
         assert_eq!(
             classify(&os(&["--server", "work", "backlog", "list"])),
+            FrontDoor::Usage
+        );
+        // The socket spelling obeys the same exact-pair rule: trailing argv
+        // after `--server <path>` is usage, never a socket role that drops
+        // the command.
+        assert_eq!(
+            classify(&os(&["--server", "/tmp/x.sock", "version"])),
+            FrontDoor::Usage
+        );
+        assert_eq!(
+            classify(&os(&["--server", "/tmp/x.sock", "backlog", "list"])),
             FrontDoor::Usage
         );
         assert_eq!(classify(&os(&["--session"])), FrontDoor::Usage);

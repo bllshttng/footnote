@@ -450,6 +450,35 @@ mod tests {
     }
 
     #[test]
+    fn proto_role_socket_pair_is_also_exact() {
+        // The socket spelling obeys the same Locked-7 rule: trailing argv
+        // after `--server <path>` is usage, never a ServerSocket role that
+        // drops the command.
+        assert_eq!(
+            decide_role(&os(&["--server", "/tmp/x.sock", "version"]), true),
+            Role::MuxUsage
+        );
+        assert_eq!(
+            decide_role(&os(&["--server", "/tmp/x.sock", "backlog", "list"]), true),
+            Role::MuxUsage
+        );
+    }
+
+    #[test]
+    fn proto_role_mux_server_alias_combo_is_usage() {
+        // The old in-order loop resolved `--server a --session b` to the
+        // last spelling; the typed layer holds no order, so the ambiguous
+        // combination refuses loudly instead of silently picking one.
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "server", "--server", "a", "--session", "b"]),
+                false
+            ),
+            Role::MuxUsage
+        );
+    }
+
+    #[test]
     fn server_axis_top_level_server_flag_attaches_or_spawns_internal() {
         // x-f209 AC4-HP/EDGE: `--server <name>` is the attach that
         // `--session <name>` performs today; a value containing `/` keeps the

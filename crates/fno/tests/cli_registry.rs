@@ -50,3 +50,41 @@ fn typed_native_verbs_parse_and_refuse() {
         cli_args::FrontDoor::Usage
     );
 }
+
+#[test]
+fn pane_run_payload_stays_verbatim() {
+    // The payload after `--` (or the first bare token) is the spawned
+    // command's argv; a common-flag spelling inside it is never ours to
+    // parse. A fence-less MuxCommon::take across the whole argv stole them
+    // (round-2 finding), silently trimming the spawned command's flags.
+    use fno::mux_cli::{parse_pane_args, PaneCmd};
+    let argv: Vec<OsString> = ["run", "--", "true", "--server", "x"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    let parsed = parse_pane_args(&argv).expect("payload parses");
+    assert!(parsed.session.is_none());
+    assert!(!parsed.json);
+    match parsed.cmd {
+        PaneCmd::Run { argv, .. } => assert_eq!(
+            argv,
+            vec!["true".to_string(), "--server".to_string(), "x".to_string()]
+        ),
+        other => panic!("run expected, got {other:?}"),
+    }
+    // The flags BEFORE the payload still work, and a payload `--json` does
+    // not leak into the pane verb's own output flag.
+    let argv: Vec<OsString> = ["run", "--json", "--", "claude", "--json"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    let parsed = parse_pane_args(&argv).expect("pre-payload flags parse");
+    assert!(parsed.json);
+    assert!(parsed.session.is_none());
+    match parsed.cmd {
+        PaneCmd::Run { argv, .. } => {
+            assert_eq!(argv, vec!["claude".to_string(), "--json".to_string()])
+        }
+        other => panic!("run expected, got {other:?}"),
+    }
+}

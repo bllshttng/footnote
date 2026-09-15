@@ -25,18 +25,10 @@ use super::*;
 /// has a live seat keeps its geometry (the server says so) - same contract
 /// the server holds for the TUI.
 pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
-    let (common, _) = match MuxCommon::take(args) {
+    let (session_flag, parsed) = match parse_thread_args(args) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("fno mux thread: {e}");
-            return EXIT_USAGE;
-        }
-    };
-    let session_flag = common.server.or(common.session);
-    let parsed = match crate::cli_args::ThreadArgs::try_parse_from(args) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{}", crate::cli_args::refusal_line("fno mux thread", &e));
+            eprintln!("{e}");
             return EXIT_USAGE;
         }
     };
@@ -163,5 +155,50 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
             eprintln!("fno mux thread: {e}");
             EXIT_ERROR
         }
+    }
+}
+
+/// The parse `thread` runs: the shared common flags ride [`MuxCommon::take`],
+/// and the verb's own grammar parses the REMAINDER. Parsing the original argv
+/// instead would refuse `--server`/`--session`/`--json` - tokens ThreadArgs
+/// does not declare - so the server-axis override every verb shares would die
+/// on this verb. The returned error is the line the caller prints.
+fn parse_thread_args(
+    args: &[OsString],
+) -> Result<(Option<String>, crate::cli_args::ThreadArgs), String> {
+    let (common, rest) = MuxCommon::take(args).map_err(|e| format!("fno mux thread: {e}"))?;
+    let parsed = crate::cli_args::ThreadArgs::try_parse_from(&rest)
+        .map_err(|e| crate::cli_args::refusal_line("fno mux thread", &e))?;
+    Ok((common.server.or(common.session), parsed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn thread_takes_the_shared_server_flags() {
+        // The common flags are take()'s and the verb grammar parses the
+        // remainder; parsing the original argv instead refused every
+        // --server/--session/--json invocation (they are not ThreadArgs').
+        let (session_flag, parsed) =
+            parse_thread_args(&os(&["--server", "work", "--json", "myagent"]))
+                .expect("common flags parse");
+        assert_eq!(session_flag.as_deref(), Some("work"));
+        assert_eq!(parsed.name.as_deref(), Some("myagent"));
+        let (session_flag, parsed) =
+            parse_thread_args(&os(&["--session", "legacy", "myagent"])).expect("alias parses");
+        assert_eq!(session_flag.as_deref(), Some("legacy"));
+        assert_eq!(parsed.name.as_deref(), Some("myagent"));
+    }
+
+    #[test]
+    fn thread_still_refuses_its_own_unknown_flags() {
+        let err = parse_thread_args(&os(&["--wat", "myagent"])).expect_err("unknown flag refuses");
+        assert!(err.contains("--wat"), "{err}");
     }
 }
