@@ -159,6 +159,23 @@ fn main() {
         .enable_all()
         .build()
         .expect("build runtime");
+    // `evals-arm`: the eval bank's scheduled writer for the pr-watch
+    // tick. Transport-only, so it dispatches here and not in `run`: every arm
+    // in `run` is a client verb the verb-surface ratchet enumerates against
+    // ALL_CLIENT_ACTIONS, and the shrink law (d-fe66560a) bars adding one -
+    // the same door backlog-update uses. The Python evals phase reaches this
+    // arm through resolve_binary; `fno agents evals-arm` is not a supported
+    // client spelling.
+    if args.first().map(String::as_str) == Some("evals-arm") {
+        std::process::exit(fno_agents::evals_arm::run_evals_arm(&args[1..]));
+    }
+    // `evals-trend`: the eval report fold and the windowed trend,
+    // native under d-b6cc1a2a. Transport-only, dispatched here like
+    // evals-arm: the Python report/trend leaves pass --history and
+    // --stale-days and forward the rest.
+    if args.first().map(String::as_str) == Some("evals-trend") {
+        std::process::exit(fno_agents::evals_trend::run_evals_trend(&args[1..]));
+    }
     let code = rt.block_on(run(args));
     std::process::exit(code);
 }

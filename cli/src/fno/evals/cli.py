@@ -157,84 +157,65 @@ def run_command(
     raise typer.Exit(code=0)
 
 
-@evals_app.command("report")
-def report_command(
-    since: Optional[int] = typer.Option(None, "--since", help="Fold only the most recent N runs."),
-    graduate: bool = typer.Option(False, "--graduate", help="List capability tasks eligible to graduate."),
-    n: int = typer.Option(3, "--consecutive", help="Consecutive passes required for graduation eligibility."),
-    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
-    compare: Optional[str] = typer.Option(None, "--compare", help="Score this variant round (v<N>) against baseline instead of the default fold."),
-    history_file: Optional[Path] = typer.Option(None, "--history", help="History file (default: paths.evals_history())."),
-) -> None:
-    """Fold evals history: per-tier pass rates, pass@1, pass^k, flakes, alarm.
+@evals_app.command(
+    "trend",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def trend_command(ctx: typer.Context) -> None:
+    """Score the recent window against the prior one; the fold is native
+    (fno-agents evals-trend, d-b6cc1a2a). Exit 4 when regressed."""
+    _forward_evals_native(ctx.args, "trend")
 
-    Exit codes:
-      0  report rendered (or no data); a --compare view never fires the alarm
-      4  regression alarm: a regression-tier task is below 100%
-    """
-    import json as _json
 
-    from fno.evals.report import build_report, compare_variants, graduation_candidates, load_rows
+@evals_app.command(
+    "report",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def report_command(ctx: typer.Context) -> None:
+    """Fold evals history: tiers, pass@1, pass^k, flakes, alarm. A pure argv
+    forwarder (d-b6cc1a2a); the flags are the binary's. Exit 4 on alarm."""
+    _forward_evals_native(ctx.args, "report")
 
-    if history_file is None:
-        from fno.paths import evals_history
-        history_file = evals_history()
 
-    if compare is not None:
-        if not VARIANT_RE.match(compare):
-            typer.echo(f"Error: --compare must be 'baseline' or 'v<N>', got '{compare}'", err=True)
-            raise typer.Exit(code=1)
-        cmp = compare_variants(load_rows(history_file, since=since, variant=None), compare)
-        if json_output:
-            typer.echo(_json.dumps(cmp, indent=2))
-        else:
-            for tid, t in cmp["tasks"].items():
-                b, v = t["baseline"], t["variant"]
-                typer.echo(
-                    f"  {tid}  baseline {b['pass_at_1']:.0%} ({b['runs']})  "
-                    f"{cmp['variant']} {v['pass_at_1']:.0%} ({v['runs']})  "
-                    f"delta={t['delta']:+.2f}  {t['verdict']}"
-                )
-            for label, miss in (("baseline", cmp["missing_in_baseline"]),
-                                (cmp["variant"], cmp["missing_in_variant"])):
-                if miss:
-                    typer.echo(f"  missing in {label}: {', '.join(miss)}")
-            typer.echo(f"  diff: git diff {cmp['baseline_rev']} {cmp['variant_rev']}")
-        raise typer.Exit(code=0)
+def _forward_evals_native(extra: list[str], mode: str) -> None:
+    """Resolve the history default and stale window, run the native fold,
+    propagate its exit code (4 = alarm/regressed). Missing binary exits 2."""
+    import subprocess
 
-    rows = load_rows(history_file, since=since)
-    report = build_report(rows)
+    from fno._subprocess_util import propagate_returncode
+    from fno.config import load_settings
+    from fno.paths import evals_history
+    from fno.rust_binary import resolve_binary
 
-    if graduate:
-        candidates = graduation_candidates(rows, n=n)
-        report["graduation_eligible"] = candidates
-
-    if json_output:
-        typer.echo(_json.dumps(report, indent=2))
-    elif report["no_data"]:
-        typer.echo("evals report: no_data (no history yet)")
-    else:
-        typer.echo("Evals report:")
-        for tier, agg in report["tiers"].items():
-            typer.echo(f"  {tier}: {agg['passes']}/{agg['runs']} pass ({agg['pass_rate']:.0%})")
-        for t in report["tasks"]:
-            mark = "FLAKE" if t["flake"] else ("PASS" if t["pass_k"] else "FAIL")
-            typer.echo(
-                f"    {t['tier']:11} {t['task_id']}: pass@1={t['pass_at_1']:.0%} "
-                f"pass^{t['runs']}={t['pass_k']} [{mark}]"
-            )
-        if report["flakes"]:
-            typer.echo(f"  flakes: {', '.join(report['flakes'])}")
-        if report["regression_alarm"]:
-            typer.echo(f"  REGRESSION ALARM: {', '.join(report['regression_alarm'])} below 100%")
-        if graduate:
-            elig = report.get("graduation_eligible") or []
-            typer.echo(
-                f"  graduation-eligible: {', '.join(elig)}" if elig
-                else "  graduation-eligible: none"
-            )
-
-    raise typer.Exit(code=4 if report["regression_alarm"] else 0)
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno doctor evals: the fno-agents binary was not found. It ships in the "
+            "`pip install fno` wheel and with the plugin; reinstall fno or run "
+            "`fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    try:
+        stale_days = int(load_settings().evals.stale_days)
+    except Exception:  # noqa: BLE001 - an unreadable config reads the default
+        stale_days = 7
+    argv = [
+        str(binary), "evals-trend",
+        "--mode", mode,
+        "--history", str(evals_history()),
+        "--stale-days", str(stale_days),
+        *extra,
+    ]
+    result = subprocess.run(argv, check=False, capture_output=True, text=True)
+    # Re-echo through typer so CliRunner-backed tests (and any caller that
+    # wraps stdout) see the fold's output; the binary's trailing newline is
+    # preserved with nl=False.
+    if result.stdout:
+        typer.echo(result.stdout, nl=False)
+    if result.stderr:
+        typer.echo(result.stderr, nl=False, err=True)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 @evals_app.command(
@@ -268,7 +249,14 @@ def macro_command(ctx: typer.Context) -> None:
     if not any(a == "--events" or a.startswith("--events=") for a in args):
         for path in event_journals():
             argv += ["--events", str(path)]
-    result = subprocess.run(argv, check=False)
+    result = subprocess.run(argv, check=False, capture_output=True, text=True)
+    # Re-echo through typer so CliRunner-backed tests (and any caller that
+    # wraps stdout) see the fold's output; the binary's trailing newline is
+    # preserved with nl=False.
+    if result.stdout:
+        typer.echo(result.stdout, nl=False)
+    if result.stderr:
+        typer.echo(result.stderr, nl=False, err=True)
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 

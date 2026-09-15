@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import json
+
 from fno.evals import history as _history
 from fno.config import load_settings
 from fno.evals.runner import BASELINE
@@ -83,7 +85,8 @@ def _stats(rows: list[dict[str, object]]) -> list[TaskStat]:
 
 
 def build_report(rows: list[dict[str, object]]) -> dict[str, Any]:
-    """Fold *rows* into a JSON-friendly report dict."""
+    """Fold *rows* into a JSON-friendly report dict (all-rows alarm; the
+    windowed read lives in the native evals-trend fold, d-b6cc1a2a)."""
     stats = _stats(rows)
 
     tier_runs: dict[str, int] = {}
@@ -114,7 +117,7 @@ def build_report(rows: list[dict[str, object]]) -> dict[str, Any]:
         for s in stats
     ]
     flakes = [s.task_id for s in stats if s.flake]
-    # Regression alarm: any regression-tier task not at 100%.
+    # Alarm: any regression-tier task not at 100% (the windowed read is native).
     regression_alarm = [
         s.task_id for s in stats if s.tier == "regression" and s.pass_at_1 < 1.0
     ]
@@ -124,66 +127,6 @@ def build_report(rows: list[dict[str, object]]) -> dict[str, Any]:
         "tasks": tasks,
         "flakes": flakes,
         "regression_alarm": regression_alarm,
-    }
-
-
-def graduation_candidates(rows: list[dict[str, object]], *, n: int = 3) -> list[str]:
-    """Capability task ids whose last *n* runs were consecutive passes.
-
-    A candidate must have at least *n* recorded runs and every one of its most
-    recent *n* runs must be a pass. Only capability-tier tasks graduate.
-    """
-    by_id = _by_task(rows)
-    candidates: list[str] = []
-    for tid in sorted(by_id):
-        task_rows = by_id[tid]
-        if str(task_rows[-1].get("tier")) != "capability":
-            continue
-        if len(task_rows) < n:
-            continue
-        if all(r.get("pass") is True for r in task_rows[-n:]):
-            candidates.append(tid)
-    return candidates
-
-
-def _common_rev(rs: list[dict[str, object]]) -> Optional[str]:
-    revs = [v for r in rs if isinstance(v := r.get("bank_rev"), str)]
-    return max(sorted(set(revs)), key=revs.count) if revs else None
-
-
-def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, Any]:
-    """Score *variant* against baseline at one revision pair (rows from variant=None)."""
-    by_id = _by_task(rows)
-    baseline_rev = _common_rev([r for r in rows if (r.get("variant") or BASELINE) == BASELINE])
-    variant_rev = _common_rev([r for r in rows if (r.get("variant") or BASELINE) == variant])
-    tasks: dict[str, Any] = {}
-    missing_in_variant: list[str] = []
-    missing_in_baseline: list[str] = []
-    for tid, task_rows in sorted(by_id.items()):
-        b = [r for r in task_rows if (r.get("variant") or BASELINE) == BASELINE
-             and r.get("bank_rev") == baseline_rev]
-        v = [r for r in task_rows if (r.get("variant") or BASELINE) == variant
-             and r.get("bank_rev") == variant_rev]
-        if not b:
-            missing_in_baseline.append(tid)
-        if not v:
-            missing_in_variant.append(tid)
-        if not b or not v:
-            continue
-        b_p1 = sum(1 for r in b if r.get("pass") is True) / len(b)
-        v_p1 = sum(1 for r in v if r.get("pass") is True) / len(v)
-        delta = v_p1 - b_p1
-        verdict = "improved" if delta > 0 else "regressed" if delta < 0 else "unchanged"
-        tasks[tid] = {"baseline": {"runs": len(b), "pass_at_1": round(b_p1, 4)},
-                      "variant": {"runs": len(v), "pass_at_1": round(v_p1, 4)},
-                      "delta": round(delta, 4), "verdict": verdict}
-    return {
-        "variant": variant,
-        "tasks": tasks,
-        "missing_in_variant": missing_in_variant,
-        "missing_in_baseline": missing_in_baseline,
-        "baseline_rev": baseline_rev,
-        "variant_rev": variant_rev,
     }
 
 
@@ -202,6 +145,7 @@ def evals_health_summary(
     *,
     stale_days: Optional[int] = None,
     now: Optional[datetime] = None,
+    native_reads: bool = True,
 ) -> Optional[dict[str, Any]]:
     """One-line evals health for triage health and doctor; the demand row.
 
@@ -210,10 +154,6 @@ def evals_health_summary(
     if not history_path.exists():
         return None
     rows = load_rows(history_path)
-    report = build_report(rows)
-    if report["no_data"]:
-        return None
-    reg = report["tiers"].get("regression")
     if stale_days is None:
         try:
             stale_days = int(load_settings().evals.stale_days)
@@ -221,21 +161,55 @@ def evals_health_summary(
             stale_days = 7
     if now is None:
         now = datetime.now(timezone.utc)
+    report = build_report(rows)
+    if report["no_data"]:
+        return None
+    reg = report["tiers"].get("regression")
     reg_ts = [dt for r in rows if r.get("tier") == "regression"
               and (dt := _parse_ts(r.get("ts"))) is not None]
-    newest_dt = max(reg_ts) if reg_ts else None
     never_ran = reg is None
+    newest_dt = max(reg_ts, default=None)
     age_days = None if newest_dt is None else round(
         (now - newest_dt).total_seconds() / 86400, 3)
-    stale = never_ran is False and age_days is not None and age_days > stale_days
+    stale = not never_ran and age_days is not None and age_days > stale_days
+    alarm, regressed = (
+        _native_summary_reads(history_path, stale_days) if native_reads else ([], [])
+    )
     return {
         "regression_pass_rate": reg["pass_rate"] if reg else None,
         "flake_count": len(report["flakes"]),
-        "regression_alarm": report["regression_alarm"],
+        "regression_alarm": alarm,
+        "regressed": regressed,
+        "window_days": stale_days,
         "age_days": age_days,
         "stale": stale,
         "never_ran": never_ran,
     }
+
+
+def _native_summary_reads(history_path: Path, stale_days: int) -> tuple[list[str], list[str]]:
+    """The windowed alarm and `regressed`, read from the native evals-trend
+    fold; an absent binary or a failed read degrades to empty lists."""
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        return [], []
+    try:
+        proc = subprocess.run(
+            [str(binary), "evals-trend", "--mode", "summary",
+             "--history", str(history_path), "--stale-days", str(stale_days)],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        payload = (
+            json.loads(proc.stdout.strip().splitlines()[-1])
+            if proc.returncode == 0 and proc.stdout.strip() else {}
+        )
+        return list(payload.get("regression_alarm") or []), list(payload.get("regressed") or [])
+    except Exception:  # noqa: BLE001 - the summary never raises
+        return [], []
 
 
 class GraduateError(ValueError):

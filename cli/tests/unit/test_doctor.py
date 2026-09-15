@@ -3284,6 +3284,35 @@ def test_doctor_renders_evals_stale_row(monkeypatch: pytest.MonkeyPatch) -> None
     assert "fno doctor evals run --tier regression" in result.stdout
 
 
+def test_doctor_renders_evals_regressing_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_signals(
+        monkeypatch,
+        src=Path("/src"),
+        source_rev="abc123",
+        marker="abc123",
+        capture_present="present",
+    )
+    _patch_evals_summary(
+        monkeypatch,
+        {
+            "regression_pass_rate": 0.33,
+            "flake_count": 0,
+            "regression_alarm": ["r"],
+            "regressed": ["r"],
+            "window_days": 7,
+            "age_days": 1.0,
+            "stale": False,
+            "never_ran": False,
+        },
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert result.exit_code == 0
+    assert "evals REGRESSING" in result.stdout
+    assert "r dropped" in result.stdout
+    assert "prior 7d window" in result.stdout
+    assert "fno doctor evals trend" in result.stdout
+
+
 def test_doctor_renders_evals_unknown_row_without_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -2658,6 +2658,12 @@ def _emit_human(
             f"{int(ev['age_days'])}d old; run "
             "`fno doctor evals run --tier regression -y`."
         )
+    elif ev.get("regressed"):
+        out(
+            f"fno doctor: evals REGRESSING - {', '.join(ev['regressed'])} dropped "
+            f"against the prior {int(ev.get('window_days') or 7)}d window; run "
+            "`fno doctor evals trend`."
+        )
 
     agents = result.get("launch_agents") or {}
     if not agents.get("applicable"):

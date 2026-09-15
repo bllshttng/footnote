@@ -236,6 +236,58 @@ def _run_notify_watch_phase(roots: "Optional[list[Path]]" = None) -> None:
                        skip_reason="notify_failed", detail=str(exc)[:200])
 
 
+def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
+    """The eval bank's demand leg: guards and the receipt parse here;
+    the due read, gate, detached run and journal live in native evals-arm.
+    Every failure lands as ``arm_failed``, never out of the tick."""
+    evals_cfg = getattr(settings, "evals", None)
+    days = int(getattr(evals_cfg, "schedule_days", 0) or 0)
+    interval_s = days * 86400
+
+    def row(skip: Optional[str], detail: str, acted: int = 0) -> None:
+        _emit_tick_row("evals", interval_s=interval_s, acted=acted,
+                       skip_reason=skip, detail=detail[:400])
+
+    if days <= 0:
+        row("evals_off", "evals.schedule_days 0")
+        return
+    try:
+        from fno.config import autonomy_master_enabled
+        armed = autonomy_master_enabled()
+    except Exception:  # noqa: BLE001 - an unreadable master switch reads off
+        armed = False
+    if not armed:
+        row("autonomy_off", "config.autonomy.enabled is false")
+        return
+    try:
+        import subprocess
+
+        from fno.evals.report import evals_health_summary
+        from fno.paths import evals_history, state_dir
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            raise RuntimeError("fno-agents binary not found")
+        argv = [
+            str(binary), "evals-arm",
+            "--history", str(evals_history()),
+            "--events", str(state_dir() / "events.jsonl"),
+            "--fno-bin", _resolve_fno_binary(),
+            "--schedule-days", str(days),
+            "--stale-days", str(int(getattr(evals_cfg, "stale_days", 7) or 7)),
+            "--summary-json", json.dumps(evals_health_summary(evals_history(), native_reads=False)),
+        ]
+        proc = subprocess.run(argv, capture_output=True, text=True, check=False,
+                              timeout=max(1.0, seconds_left_fn() or 30.0))
+        if proc.returncode != 0:
+            raise RuntimeError(f"evals-arm exited {proc.returncode}: {proc.stderr[:160]}")
+        answer = json.loads(proc.stdout.strip().splitlines()[-1]) if proc.stdout.strip() else {}
+        row(answer.get("skip_reason"), str(answer.get("detail") or ""), int(answer.get("acted") or 0))
+    except Exception as exc:  # noqa: BLE001 - never let the arm break the tick
+        row("arm_failed", f"{type(exc).__name__}: {exc}")
+
+
 def _watchdog_recovery_roots() -> list[Path]:
     """Resolve every distinct project scope for the launchd watchdog scan.
 
@@ -366,6 +418,7 @@ _PHASE_CAP_S: dict[str, float] = {
     "king_wake": 100,
     "notify_watch": 30,
     "heal": 30,
+    "evals": 30,
     "stranded": 60,
     "recovery": 120,
 }
@@ -1204,6 +1257,10 @@ def tick() -> None:
                 except Exception as exc:  # noqa: BLE001 - never let heal break the tick
                     log.warning("pr-watch: heal phase failed: %s", exc)
 
+        def _phase_evals(_slice_s: float) -> None:
+            set_tick_phase("evals")
+            _run_evals_arm_phase(settings, seconds_left_fn=phase_seconds_left)
+
         def _phase_stranded(slice_s: float) -> None:
             assert settings is not None and cfg is not None
             # The watchdog def imports these for its own lanes; the stranded
@@ -1282,6 +1339,7 @@ def tick() -> None:
         _run_phase("king_wake", _phase_king_wake, arm="king_wake")
         _run_phase("notify_watch", _phase_notify, arm="notify_watch")
         _run_phase("heal", _phase_heal)
+        _run_phase("evals", _phase_evals)
         _run_phase("stranded", _phase_stranded)
         _run_phase("recovery", _phase_recovery)
         _run_phase("watchdog", _phase_watchdog, arm="watchdog")

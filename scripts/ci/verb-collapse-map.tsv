@@ -386,6 +386,7 @@ doctor evals macro	T1	doctor evals macro	0
 doctor evals graduate	T1	doctor evals graduate	2
 doctor evals report	T1	doctor evals report	1
 doctor evals run	T1	doctor evals run	3
+doctor evals trend	T1	doctor evals trend	0
 doctor event audit	T1	doctor event audit	5
 doctor event emit	T1	doctor event emit	37
 doctor event find	T1	doctor event find	0
@@ -413,6 +414,7 @@ doctor update	T1	doctor update	109
 done	KEEP	done	48	single-leaf group
 evals grade	T1	evals grade	11
 evals macro	T1	evals macro	0
+evals trend	T1	evals trend	0
 evals graduate	T1	evals graduate	2
 evals report	T1	evals report	1
 evals run	T1	evals run	3

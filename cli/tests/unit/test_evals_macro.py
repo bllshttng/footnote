@@ -30,7 +30,7 @@ def test_macro_forwards_flags_and_journals(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(fno.paths, "event_journals", lambda: [journal])
     captured: dict = {}
 
-    def fake_run(argv, check=False):
+    def fake_run(argv, check=False, **kw):
         captured["argv"] = argv
         return subprocess.CompletedProcess(argv, 0)
 
