@@ -1,4 +1,4 @@
-"""fno do target subpackage: blast-radius router (x-518f).
+"""fno do target subpackage: blast-radius router.
 
 Houses the deterministic blast-radius classifier (`blast.py`) that the
 `fno do target blast-check` verb and the `/target` init size-modulation consume.

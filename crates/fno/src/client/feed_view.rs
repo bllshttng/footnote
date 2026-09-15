@@ -1,9 +1,9 @@
-//! The activity feed panel (x-4433, x-f089): questions, decisions and node
+//! The activity feed panel : questions, decisions and node
 //! lifecycle, newest first, one deep link per row. The render moved-module
 //! idiom matches `needs_view.rs`; the data comes from
 //! [`crate::feed_overlay::feed_now`], which shells the `fno-agents feed`
 //! projection off the UI loop and renders a typed reason when it fails
-//! (x-d15a), never one generic sentence for five causes.
+//!, never one generic sentence for five causes.
 //!
 //! The deep link is the sideline's own path, not a new one: a row that joins
 //! a live roster row resolves through `agent_hit` exactly as a sideline click
@@ -11,7 +11,7 @@
 //! session id attaches that id directly, and the server's existing
 //! `no such agent` notice is what a dead session answers.
 //!
-//! Since x-f089 the feed is the right-edge PANEL the operator specified, not
+//! Since the feed is the right-edge PANEL the operator specified, not
 //! a centered modal: `e` toggles it, the border drags, and an UNFOCUSED panel
 //! consumes no keys at all, so typing reaches the focused pane.
 //!
@@ -118,7 +118,7 @@ pub(crate) fn feed_panel_lines(
         lines[1] = pad_to("   no activity in the last 24h", w);
     }
     let footer = if let Some(e) = &o.error {
-        // The typed reason renders verbatim (x-d15a): a timeout names its
+        // The typed reason renders verbatim: a timeout names its
         // budget, an admission refusal its slot count. pad_to truncates a
         // long stderr tail; the cause still leads the line.
         pad_to(&format!("   {e}"), w)
@@ -225,7 +225,7 @@ pub(crate) const FEED_DEFAULT_W: u16 = 40;
 /// its `feed_rx` arm.
 pub(crate) type FoldTx = tokio::sync::mpsc::UnboundedSender<(u64, crate::feed_overlay::FoldResult)>;
 
-// ---- (x-f089) The panel's View integration: geometry, input, paint ----
+// ---- The panel's View integration: geometry, input, paint ----
 
 impl View {
     /// The panel's width in columns, or 0 when it is closed or the terminal
@@ -569,7 +569,7 @@ pub(crate) fn apply_fold(view: &mut View, gen: u64, outcome: Result<Vec<FeedItem
     }
 }
 
-/// The `e` toggle. Opening keeps the x-4433 contract - prior rows render
+/// The `e` toggle. Opening keeps the contract - prior rows render
 /// instantly, a fresh fold always arms, a failure degrades loudly - and both
 /// transitions re-report the content area: a close that sent no Resize would
 /// leave the panes narrowed for good.

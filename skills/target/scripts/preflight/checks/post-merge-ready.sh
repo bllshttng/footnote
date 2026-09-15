@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# post-merge-ready.sh - target-preflight check (ab-dba85fcc, US1)
+# post-merge-ready.sh - target-preflight check (US1)
 # Contract: stdout first line "post-merge-ready {pass|warn|unknown} {message}"
 # Exit: always 0. NEVER `fail` - post-merge config is post-merge-only state and
 # must not block a /target build (warn/unknown only).

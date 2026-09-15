@@ -119,7 +119,7 @@ def _bucket_remaining(
     return remaining, reset_epoch
 
 
-# x-4eac: the 2026-08-19 incident died as `Post .../graphql: unexpected EOF`
+# the 2026-08-19 incident died as `Post .../graphql: unexpected EOF`
 # and read downstream as three fresh merge blockers on the PR. A transport or
 # auth failure is a fact about the READ, not about the PR, and the reason must
 # say so before a worker polls harder or edits content that was never read.
@@ -212,7 +212,7 @@ def _repo_slug_reason(
     "repo slug unreadable" - correct in form, wrong in subject whenever the
     SLUG is the thing that is perfectly readable and the CWD is what does not
     exist. That sentence sent a reader through three slug spellings before
-    they looked at the parameter (x-51f7).
+    they looked at the parameter.
 
     The first argument is a filesystem PATH, never a repo slug, and the two
     are both bare `str` so a wrong argument is invisible to a type checker.

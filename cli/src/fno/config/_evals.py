@@ -30,7 +30,7 @@ class EvalsBlock(BaseModel):
 
     schedule_days: int = 7
     stale_days: int = 7
-    # Scratch-shape sweep (x-caf8): a shape crossing this many distinct jobs
+    # Scratch-shape sweep: a shape crossing this many distinct jobs
     # inside the window files one p1 node; the window matches the observer
     # sweep's default.
     scratch_threshold: int = 3

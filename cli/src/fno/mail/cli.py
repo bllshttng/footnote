@@ -1,4 +1,4 @@
-"""fno agents mail: durable polled mailbox CLI (ab-cee91152).
+"""fno agents mail: durable polled mailbox CLI.
 
 One namespace over the jsonl-canon bus log. Publish appends a durable envelope;
 consume is a per-recipient cursor scan over the log; the per-recipient markdown
@@ -326,7 +326,7 @@ _CROSS_SESSION_TAG_RE = re.compile(r"</?cross-session-message", re.IGNORECASE)
 
 def _refuse_forged_envelope(body: str) -> None:
     """Refuse a body carrying an ``<fno_mail`` open tag or ``</fno_mail>`` close
-    tag (x-4ce4), before it reaches ``wrap_fno_mail``.
+    tag, before it reaches ``wrap_fno_mail``.
 
     The envelope is only trustworthy if a peer cannot forge one: a close tag
     plus a fabricated envelope renders as two messages, and the second could
@@ -1033,7 +1033,7 @@ def cmd_reply(
         None if classified_origin == "unknown" else classified_origin
     )
 
-    # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
+    # Directed-lane routing: look the --to msg-id up on the durable bus
     # and answer name/session/node mail back to its original sender. Anything else
     # falls through to the thread-store reply below.
     from fno.bus.log import iter_messages
@@ -1056,7 +1056,7 @@ def cmd_reply(
         target = orig.from_ or ""
         require_resolution = False
         # Full sender provenance wins on EVERY lane, not only the
-        # session-addressed one (node x-3a64). The name lane is the lane that
+        # session-addressed one (node). The name lane is the lane that
         # writes `from_session`, and it stamps `to_kind="name"` on all three of
         # its records, so a check gated on `to_kind == "session"` never read the
         # value it had just been taught to store. The head-8 the row also
@@ -1463,7 +1463,7 @@ def cmd_pane_prepare(
     """Gate and envelope a pane payload read from stdin; print it on stdout.
 
     The transport-agnostic half of an enveloped ``fno mux pane send``. The Rust
-    verb shells here rather than mirroring the renderer (node x-1904 deleted the
+    verb shells here rather than mirroring the renderer (node deleted the
     Rust mirror; ``fno.mail.envelope`` is the sole renderer) and fails closed on
     any non-zero exit.
 
@@ -1667,7 +1667,7 @@ def _print_thread_summary(h: ThreadHandle) -> None:
     typer.echo(f"  {h.path}")
 
 
-# Publish + cursor-consume (relocated from `fno agents`, ab-cee91152 Move B)
+# Publish + cursor-consume (relocated from `fno agents`, Move B)
 # `fno agents mail send` is the durable-first publish (the envelope lands on the bus
 # log before any live delivery is attempted). `fno agents mail unread`/`ack` are the
 # cursor-based consume over that log: unread lists messages addressed to me
@@ -2229,7 +2229,7 @@ def _name_lane_send(
     # being read whenever the recipient drains.
     wrapped = _envelope(recipient_session)
 
-    # --force (node x-3a64): change the TRANSPORT, keep every mail semantic. The
+    # --force (node): change the TRANSPORT, keep every mail semantic. The
     # branch sits here, after the envelope and the msg-id, and before the live
     # ladder: forcing means "type it into the pane", not "try the ladder first".
     # An automatic fallback is deliberately absent -- the pane path asks
@@ -2280,7 +2280,7 @@ def _name_lane_send(
     injected = False
     woken_as: Optional[str] = None
     lanes: list[str] = []
-    # node x-1904: the live lane's own cause when a claude inject misses, so the
+    # node: the live lane's own cause when a claude inject misses, so the
     # durable receipt names it (e.g. not-confirmed) instead of a bare live-miss.
     live_reason: Optional[str] = None
     to_session: Optional[str] = recipient_session
@@ -2355,7 +2355,7 @@ def _name_lane_send(
                     # possible stranger; demote durably to this candidate.
                     lanes.append(token_lane)
                 elif live_reason == BUS_ONLY_POLICY:
-                    # x-e21e: bus-only also declines the wake rung. Waking
+                    # bus-only also declines the wake rung. Waking
                     # revives a second writer on the recipient; the policy
                     # named the durable bus as this recipient's ONE lane, so
                     # hold to it rather than spawning a bg copy of a session
@@ -2371,7 +2371,7 @@ def _name_lane_send(
     if resolved is not None and self_send:
         lanes.append("self-send")
     elif resolved is not None:
-        # x-0ea6: keeper-lane membership is contract-derived. The non-raising
+        # keeper-lane membership is contract-derived. The non-raising
         # read keeps a row whose harness the table has dropped on its
         # pre-keeper fall-through lanes (roster rung, durable floor).
         lane_harness = resolved.agent
@@ -2401,7 +2401,7 @@ def _name_lane_send(
                     _resolved_codex_reason[0] if _resolved_codex_reason else None
                 )
         elif _keeper_thread_row:
-            # x-0ea6: a keeper-hosted lane-B thread has neither lane-A socket.
+            # a keeper-hosted lane-B thread has neither lane-A socket.
             # Its live transport is the keeper's own unix socket, resolved by
             # the verb from the registry row the same resolution above already
             # read `provider` from. A miss falls through with the verb's own
@@ -2422,7 +2422,7 @@ def _name_lane_send(
             # A send addressed by session id never consults the roster, so a
             # mux-hosted session of any provider would demote to durable with a
             # live pane right there. Not-found means "not mux-hosted", not an error.
-            # A keeper THREAD row sits this rung out (x-0ea6): its live transport
+            # A keeper THREAD row sits this rung out: its live transport
             # IS the keeper socket the rung above just attempted, the row hosts
             # no pane by design, and a stale ref would type into an unrelated
             # pane and read as delivered.
@@ -2521,7 +2521,7 @@ def _name_lane_send(
         recipient_resumable=not recipient_live,
     )
 
-    # x-e21e: a bus-only queue is DESIGNED, not stranded. The recipient polls
+    # a bus-only queue is DESIGNED, not stranded. The recipient polls
     # the durable bus at each turn boundary (notify-self), so this is delivery
     # on the recipient's terms -- no recovery warning, no escalation, and a
     # receipt that says so instead of reading as a live-miss.
@@ -2539,7 +2539,7 @@ def _name_lane_send(
             owner=owner.value,
             # The durable floor carries the same full sender id the live
             # envelope does, so a drained reply resolves the collision-safe
-            # address exactly as a live one does (node x-3a64).
+            # address exactly as a live one does (node).
             from_session=sender_session,
             # And the same sender provenance the hosted and typed rows carry:
             # the compact envelope no longer renders the model, so the durable
@@ -2559,12 +2559,12 @@ def _name_lane_send(
     # Routing-reason disclosure (US10): name WHY this is durable so a delivery
     # bug is diagnosable from the sender's own terminal. A self-send can never
     # inject itself; everything else here is a live miss. When the live lane
-    # named its own cause (node x-1904), carry that token so a miss to a LIVE
+    # named its own cause (node), carry that token so a miss to a LIVE
     # recipient reads as its real cause (e.g. not-confirmed), not a bare
     # live-miss that reads as a dead recipient. A bus-only queue is neither: it
     # is the recipient's declared delivery policy, and its receipt says the
     # message WILL surface at the recipient's turn boundary.
-    # x-481e: a busy-mode hold is a bus-only flag with a clock on it, and the
+    # a busy-mode hold is a bus-only flag with a clock on it, and the
     # generic receipt above would promise a turn boundary that is not coming.
     # Say what is actually true: it is held, here is when it lands.
     hold_note = None
@@ -2575,7 +2575,7 @@ def _name_lane_send(
     if bus_only:
         reason = hold_note or "DND (bus-only): recipient polls the bus at each turn boundary"
     else:
-        # x-1602: a live-lane failure renders as legs on stdout; the raw token
+        # a live-lane failure renders as legs on stdout; the raw token
         # (io-error, attach-failed, ...) stays diagnostic on stderr, because an
         # error string inside a success receipt reads as a broken lane.
         reason = durable_leg_story(live_reason) or (
@@ -2594,7 +2594,7 @@ def _name_lane_send(
             "(the socket must exist before the codex TUI starts)"
         )
     print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]{hint}{window_tail}")
-    # Live-miss escalation lane (node x-1904 widened this from attended-only). A
+    # Live-miss escalation lane (node widened this from attended-only). A
     # miss to an operator-attended session is the stranded case: the human is not
     # watching the drain, so nothing else surfaces it. A miss to a worker the
     # resolver reports reachable is the same case from the other side: worker
@@ -2857,7 +2857,7 @@ def _raw_send(
     This is the only way to make a verb the model is barred from invoking
     actually run (a harness built-in like ``/compact``, or a skill the model may
     not self-invoke). Ordinary wrapped mail already works for model-invocable
-    verbs. See node x-c24d and ``internal/fno/plans/20260806-bare-verb-injection.md``.
+    verbs. See node and ``internal/fno/plans/20260806-bare-verb-injection.md``.
 
     Never queues durable on any transport result: a not-confirmed raw inject may
     still land, and re-queueing it is how a verb fires twice at the wrong moment.
@@ -3009,7 +3009,7 @@ def _raw_send(
             "parses):\n    fno agents mail send '<payload>' --to-self --raw"
         )
 
-    # 3b. Bus-only delivery policy (x-e21e): this recipient's mail belongs on
+    # 3b. Bus-only delivery policy: this recipient's mail belongs on
     #     the durable bus, and the raw lane never queues durable -- so a raw
     #     send here can do nothing and must refuse loud rather than silently
     #     not-deliver. Under --check this refusal is an ANSWER about the
@@ -3631,7 +3631,7 @@ def cmd_send(
 
     Stdout: one line, ``msg-<id> delivered (hosted)`` or
     ``msg-<id> queued (durable) [<reason>]`` plus the drain-window clause
-    (x-1602: an empty unread inside the window is not a failure). Exit 0 for
+    (: an empty unread inside the window is not a failure). Exit 0 for
     both.
     """
     from fno.agents.dispatch import (
@@ -4036,7 +4036,7 @@ def cmd_send(
         # time to drain it: the per-project watch daemon drains project inboxes,
         # never a session-handle inbox, so send time is the reachable trigger
         # (US9). The durable note is already written, so a wake miss loses nothing.
-        # A bus-only recipient (x-e21e) declines the wake too: waking revives a
+        # A bus-only recipient declines the wake too: waking revives a
         # second writer on a session that declared the durable bus its one lane.
         elif kind == Kind.HEADS_UP.value:
             from fno.agents.dispatch import wake_if_asleep_claude
@@ -4098,7 +4098,7 @@ def cmd_send(
             print_project_demotion(result, to_project)
         return
 
-    # Job-address mode (x-8f8c part 2): node:<id> / pr:<n> names the work, not a
+    # Job-address mode (part 2): node:<id> / pr:<n> names the work, not a
     # process. It resolves to the current claim holder and outlives any session, so
     # mail survives the holder's death. Intercept before name-mode resolution: a
     # job token is neither a registered agent nor a session handle, so the normal
@@ -4196,7 +4196,7 @@ def cmd_send(
     except DispatchAskError as exc:
         from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
 
-        # US2 (ab-098967b4): a bare <name> that is not a registered agent may be
+        # US2: a bare <name> that is not a registered agent may be
         # a discovered live-session handle (friendly alias or hex short-id).
         # Resolve it to a project and ride the existing --to-project durable bus
         # (Locked Decision 2: live-to-live comms is async over the bus, never a
@@ -4210,7 +4210,7 @@ def cmd_send(
 
         resolved, suggestions = discover_mod.resolve_or_suggest(name)
 
-        # x-605c US3: ANY handle-resolved session is delivered TO THAT SESSION,
+        # US3: ANY handle-resolved session is delivered TO THAT SESSION,
         # live-inject first with a durable floor addressed to its canonical handle
         # -- that handle is exactly what the recipient's `drain-self` reads, so a
         # resolved send is always drainable by construction. Claude injects over
@@ -4270,7 +4270,7 @@ def cmd_send(
         return
 
     # AC3-UI: distinguish delivered vs queued on stdout. A durable demotion
-    # carries the live lane's own reason (node x-1904), so a miss to a LIVE
+    # carries the live lane's own reason (node), so a miss to a LIVE
     # recipient names its cause (e.g. not-confirmed) instead of reading as a
     # dead recipient. A receipt naming the wrong cause is worse than one naming
     # none: it sends the reader to diagnose a recipient that was never the
@@ -4278,7 +4278,7 @@ def cmd_send(
     if result.delivery == "hosted":
         print(f"{result.msg_id} delivered (hosted)")
     elif result.reason == "bus-only":
-        # x-e21e: the registered-agent lane's gate refused by policy; the
+        # the registered-agent lane's gate refused by policy; the
         # durable write already happened inside dispatch_send. Designed, not
         # stranded -- no recovery ladder.
         from fno.mail import hold as _hold
@@ -4290,7 +4290,7 @@ def cmd_send(
             + (f" `fno agents mail withdraw {result.msg_id}` retracts it." if _note else "")
         )
     else:
-        # x-1602: a live-lane failure renders as legs on stdout; the raw token
+        # a live-lane failure renders as legs on stdout; the raw token
         # (io-error, attach-failed, ...) stays diagnostic on stderr.
         _warn_deferred(name, reason=result.reason)
         print(demotion_receipt(
@@ -4748,7 +4748,7 @@ def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
     """Scan job-addressed mail for the node THIS session holds, verified live.
 
     The job address outlives any session, so a successor re-claiming the node
-    drains mail here that the prior holder never read (x-8f8c part 2). The node
+    drains mail here that the prior holder never read (part 2). The node
     comes from this session's own manifest (``target_claim_key``); the holder
     check reuses ``resolve_truth_status`` -- the same node->holder-session join
     ``fno agents list`` runs -- so this session drains only when IT is the live
@@ -5070,7 +5070,7 @@ def cmd_drain_self(
     msgs.sort(key=lambda _m: _m.ts)
     # Job mail: also drain mail addressed to the node THIS session holds. The
     # address outlives any session, so this is where a successor picks up mail
-    # the prior holder never read (x-8f8c part 2). Per-address cursor, so this is
+    # the prior holder never read (part 2). Per-address cursor, so this is
     # independent of the handle/form cursors -- no double-delivery across them.
     job_addr, job_msgs = _scan_held_job_mail(ident)
 
@@ -5199,7 +5199,7 @@ def cmd_rebuild_render(
 ) -> None:
     """Regenerate a recipient's markdown render from the canonical bus log.
 
-    LD2 (ab-cee91152): the jsonl bus log is the source of truth; the per-recipient
+    LD2 : the jsonl bus log is the source of truth; the per-recipient
     markdown is a derived, throwaway view. This rebuilds it from the log so a
     deleted or corrupted render is recovered with no message lost. Idempotent.
     """

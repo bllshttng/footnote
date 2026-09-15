@@ -37,7 +37,7 @@ class Footprint(NamedTuple):
     unparsed_lines: int
     # None on a complete reading. Set when live worker rows could not be
     # attributed to processes: the fleet share above is then an UNDERCOUNT,
-    # which a spawn gate must read as unknown, never as headroom (x-e040).
+    # which a spawn gate must read as unknown, never as headroom.
     attribution_gap: str | None = None
     # Whole-machine count of processes whose OWN program is a test runner.
     # Whole-machine on purpose: a test a person started competes for the same
@@ -50,10 +50,10 @@ class Footprint(NamedTuple):
     spare_pool_process_count: int = 0
     spare_pool_cpu_cores: float = 0.0
     spare_pool_rss_gb: float = 0.0
-    # Whole-machine census (x-d6ad AC10), beside the roster-scoped counts.
+    # Whole-machine census (AC10), beside the roster-scoped counts.
     machine_process_count: int = 0
     runnable_count: int = 0
-    # Masked unparsed-row evidence; unparsed_pids feeds the root arm (x-46cb).
+    # Masked unparsed-row evidence; unparsed_pids feeds the root arm.
     unparsed_samples: tuple[UnparsedRow, ...] = ()
     unparsed_pids: frozenset[int] = frozenset()
 
@@ -66,7 +66,7 @@ class UnparsedRow(NamedTuple):
 
 
 class Admission(NamedTuple):
-    """The CPU axis's decision, computed once and read by both gates (x-7783 LD1).
+    """The CPU axis's decision, computed once and read by both gates (LD1).
 
     ``verdict`` is ``admit`` | ``hold`` | ``undecidable`` | ``refuse``;
     ``axis`` names what decided: the fleet's CPU share, the fifteen-minute
@@ -237,7 +237,7 @@ def _attributed_command(command: str) -> bool:
     return names[0].startswith("python") and "fno-py" in names[1:]
 
 
-# Evidence masking (x-46cb): numeric-shaped tokens print verbatim in
+# Evidence masking: numeric-shaped tokens print verbatim in
 # evidence; every other token is argv. Raw exception text is barred the same
 # way: on a non-row line the etime field holds argv and its repr is the leak.
 _MASKED_TOKEN_RE = re.compile(r"^[0-9][0-9.:-]{0,15}$")

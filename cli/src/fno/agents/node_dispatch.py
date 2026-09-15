@@ -1,4 +1,4 @@
-"""One resolver for node-dispatch spawn preferences (x-e53e change 2).
+"""One resolver for node-dispatch spawn preferences (change 2).
 
 Everything `backlog.advance._spawn_worker` computed above its argv build is
 :func:`resolve_node_spawn`, so every node-dispatching caller reads ONE answer
@@ -77,7 +77,7 @@ def resolve_node_spawn(
     """Resolve every node-dispatch preference except the launch itself.
 
     Lifted verbatim from ``backlog.advance._spawn_worker``'s preference half
-    (x-e53e); helpers are imported at CALL time from advance so the suite's
+; helpers are imported at CALL time from advance so the suite's
     monkeypatches keep firing. Raises the same ``SpawnError``s;
     ``DispatchResolveError`` propagates to the caller's spawn-failure path.
     """
@@ -95,7 +95,7 @@ def resolve_node_spawn(
             raise SpawnError(
                 f"refusing to dispatch {node_id}: source {source!r} with a "
                 "reconcile manifest is an impossible pair; the de-stub pass "
-                "is always rd (x-84b2)."
+                "is always rd."
             )
         source = "rd"
     node_verb = (verb or "").strip() or None
@@ -110,17 +110,17 @@ def resolve_node_spawn(
         raise SpawnError(
             f"refusing to dispatch {node_id}: the node dict {caller} passed "
             "carries no dispatch_verb key; the projection feeding this "
-            "dispatcher is lossy (x-0961); fix the projection, not the node."
+            "dispatcher is lossy (id x-1111); fix the projection, not the node."
         )
     verb_source = (
         "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
     )
-    # x-ebd2: the effective workflow verb. Reconcile bypasses (its explicit
+    # the effective workflow verb. Reconcile bypasses (its explicit
     # command spells the de-stub pass).
     effective_verb: Optional[str] = None
     if not is_reconcile:
         effective_verb = node_effective_verb(node)
-    # x-84b2: the verb code resolves (and refuses) BEFORE the resolver.
+    # x-aaaa: the verb code resolves (and refuses) BEFORE the resolver.
     verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
     # --provider selects the account/record (or a bare kind like "claude"),
     # layer-separate from `harness` (the record's cli). NOT the launch harness:
@@ -145,7 +145,7 @@ def resolve_node_spawn(
             harness = grid_harness
             grid_lane_route = grid_route_resolved
             grid_lane_account = grid_account_resolved
-    # x-84b2/x-57fe: the name mints ONCE here - after the lane/model consult,
+    # x-aaaa/ the name mints ONCE here - after the lane/model consult,
     # before spawn - so it carries the model tag, riding the receipt.
     agent_name = _worker_agent_name(
         node_id,
@@ -155,7 +155,7 @@ def resolve_node_spawn(
         model=model,
     )
 
-    # x-4391/x-4be1: node_cwd precedence, so a cross-project dispatch reads
+    # / node_cwd precedence, so a cross-project dispatch reads
     # the DEPENDENT node's config; the same settings object feeds the resolver
     # and the permission-mode read. Any read failure -> no-merge.
     settings_obj = None
@@ -175,7 +175,7 @@ def resolve_node_spawn(
     # literal "dispatch" grants (a typo or a stub settings object never does).
     allow_merge = auto_merge_grant(settings_obj)
 
-    # x-0676/x-8e59: a node dispatch_verb takes the verb path (never a
+    # / a node dispatch_verb takes the verb path (never a
     # merge); reconcile spells its own posture; with neither, the builtin rung
     # reads config.auto_merge.grant itself. DispatchResolveError propagates to
     # the caller's non-fatal spawn-failure path.
@@ -184,7 +184,7 @@ def resolve_node_spawn(
     # One axis: `provider` is the harness under an older spelling, so it must
     # reach the resolver too, or the command follows the stage table instead.
     launch_axis = _launch_harness_axis(launch, node_cwd)
-    # The receipt names the RESOLVED verb (x-ebd2); verb_source keeps the
+    # The receipt names the RESOLVED verb; verb_source keeps the
     # RAW state, canonicalized so receipt and command agree on the spelling.
     receipt_verb = effective_verb or node_verb or "builtin"
     if parse_verb_token(receipt_verb):
@@ -197,7 +197,7 @@ def resolve_node_spawn(
         "settings": settings_obj,
     }
     if is_reconcile:
-        # x-8151: the refusal spelling is inserted by the shared vocabulary
+        # the refusal spelling is inserted by the shared vocabulary
         # helper, never a second hardcoded "--no-merge " string.
         resolve_kwargs["command"] = f"/target --reconcile {reconcile_manifest} {{id}}"
         if not allow_merge:
@@ -205,7 +205,7 @@ def resolve_node_spawn(
                 resolve_kwargs["command"]
             )
     else:
-        # x-ebd2: the node's lifecycle context rides so the resolver derives
+        # the node's lifecycle context rides so the resolver derives
         if isinstance(node, dict):
             from fno.graph.ladder import plan_rung as _node_plan_rung
 
@@ -218,7 +218,7 @@ def resolve_node_spawn(
     target_cmd = resolved["command"]
     spawn_env = resolved.get("env") or {}
 
-    # A registry verb is unknown to the spawn door's verb table (x-007c): the
+    # A registry verb is unknown to the spawn door's verb table: the
     # descriptor's declared phase rides the argv, else the door refuses a
     # --node spawn it cannot label. A config read failure degrades to None,
     # which is that refusal with its remedy - never a guessed label.
@@ -244,7 +244,7 @@ def resolve_node_spawn(
             f"{resolved['harness']!r} ({target_cmd!r}). Pass one axis."
         )
 
-    # x-dfa4/x-7198: explicit permission_mode > the operator's spawn default >
+    # / explicit permission_mode > the operator's spawn default >
     # the built-in unattended answer. Never unset for a claude dispatch below.
     mode = (permission_mode or "").strip()
     if not mode and settings_obj is not None:
@@ -269,7 +269,7 @@ def resolve_node_spawn(
             "the overlay where the harness is exec'd."
         )
     merged_env = {**spawn_env, **(extra_env or {})}
-    # x-9d11: the resolver's env is AUTHORITATIVE for the merge posture, so a
+    # the resolver's env is AUTHORITATIVE for the merge posture, so a
     # stale inherited TARGET_NO_MERGE never survives into a successor the
     # resolver just granted allow-merge (review round 5).
     base_env = {k: v for k, v in os.environ.items() if k != "TARGET_NO_MERGE"}
@@ -313,7 +313,7 @@ def node_spawn_argv(
     extra: tuple = (),
 ) -> list[str]:
     """The ``fno agents spawn`` flags for resolved args: ONE builder for every
-    node-dispatching caller (x-e53e), so the claude-only gates cannot drift.
+    node-dispatching caller, so the claude-only gates cannot drift.
     Callers prepend the binary + verb; ``cwd`` rides before the model axis,
     the order the advance suite pins.
     """
@@ -345,7 +345,7 @@ def node_spawn_argv(
         cmd += ["--cwd", cwd]
     else:
         cmd += ["--fresh"]
-    # x-571f: a per-node model pin rides as a spawn flag. Empty/None = provider
+    # a per-node model pin rides as a spawn flag. Empty/None = provider
     # default, byte-identical to today.
     if args.model:
         cmd += ["--model", args.model]
@@ -357,18 +357,18 @@ def node_spawn_argv(
     # A cutover's destination account rides argv as a RECORD ID, never env:
     # the front door applies the overlay where the harness is exec'd, and a
     # HOME-carrying overlay would move the state root where nothing looks
-    # (x-c33e).
+    #.
     if args.dispatch_account:
         cmd += ["--dispatch-account", args.dispatch_account]
     if extra:
         cmd += list(extra)
-    # x-0961: the worker-to-node join; without --node the registry row names
+    # the worker-to-node join; without --node the registry row names
     # no node and no instrument can answer which worker is on which node.
     cmd += ["--node", args.node_id]
     if args.node_slug:
         cmd += ["--slug", args.node_slug]
     if args.session_phase:
-        # x-007c: a registry verb's declared phase. The spawn door refuses an
+        # a registry verb's declared phase. The spawn door refuses an
         # unlabeled --node spawn, so an outside verb must carry its label.
         cmd += ["--session-phase", args.session_phase]
     cmd += ["--name", args.agent_name, args.command]
@@ -378,7 +378,7 @@ def node_spawn_argv(
 def _worktree_ensure_for_launch(
     recorded_cwd: Path, agent_name: str, harness: str
 ) -> Optional[str]:
-    """Resolve the launch cwd through the worktree verb (x-3f84 W5, change 5).
+    """Resolve the launch cwd through the worktree verb (W5, change 5).
 
     The node's recorded cwd is the canonical checkout for every organically
     filed node, and launching there puts a code worker on the protected branch
@@ -412,7 +412,7 @@ def _worktree_ensure_for_launch(
         # vault project, worktree.policy=never by design). Any other git
         # failure - dubious ownership, a corrupted .git, a missing cwd - must
         # HOLD, not silently fall back to the canonical checkout this change
-        # exists to keep workers off (review finding, x-3f84).
+        # exists to keep workers off (review finding).
         if "not a git repository" in (repo.stderr or ""):
             return str(recorded_cwd)
         return None
@@ -444,8 +444,8 @@ def _worktree_ensure_for_launch(
 
 @dataclasses.dataclass
 class NodeSeed:
-    """The rendered seed for a node-driven spawn (x-e53e change 1), plus the
-    launch workdir resolution x-3873 change 1 moved into the spawn door."""
+    """The rendered seed for a node-driven spawn (change 1), plus the
+    launch workdir resolution change 1 moved into the spawn door."""
 
     node_id: str
     message: str
@@ -553,7 +553,7 @@ def ensure_launch_workdir(
     recorded_cwd: Optional[str], node_id: str, agent_name: str, harness: str
 ) -> Optional[Path]:
     """Resolve the launch workdir through the worktree ensure verb, printing
-    the hold line on a refusal (x-3873 change 1)."""
+    the hold line on a refusal (change 1)."""
     ensured = _worktree_ensure_for_launch(
         Path(recorded_cwd) if recorded_cwd else Path.cwd(), agent_name, harness
     )

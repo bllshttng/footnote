@@ -1,4 +1,4 @@
-//! (x-b64e) One classifier answers "can this persisted squad member come
+//! One classifier answers "can this persisted squad member come
 //! back?", shared by the startup restore loop and the `workspace restore`
 //! verb so both paths can never disagree about who is a corpse.
 
@@ -48,7 +48,7 @@ pub(crate) fn classify_member(
     MemberVerdict::Gone
 }
 
-/// (x-7b5e) Why a worker member cannot be held, in the member's own terms.
+/// Why a worker member cannot be held, in the member's own terms.
 /// Moved verbatim from server.rs: pure over its inputs.
 pub(crate) fn restore_worker_refusal_reason(
     member: &StoredMember,
@@ -64,7 +64,7 @@ pub(crate) fn restore_worker_refusal_reason(
         return reason.to_string();
     }
     let Some(session_id) = member.harness_session_id.as_deref() else {
-        // (x-6b0b) No session id and no harness is the never-bound shape; when
+        // No session id and no harness is the never-bound shape; when
         // the journal carries the name's removal marker, say why the member
         // can never bind instead of only that it did not.
         if member.harness.is_none() {
@@ -93,7 +93,7 @@ pub(crate) fn restore_worker_refusal_reason(
     format!("spawn receipt is missing for {harness} session {session_id}")
 }
 
-/// (x-7b5e) The one no-form refusal string, shared by the held-worker
+/// The one no-form refusal string, shared by the held-worker
 /// restore reason and the bulk driver's report so the two surfaces cannot
 /// teach different vocabularies for the same structural gap.
 pub(crate) fn no_resume_form_reason(harness: &str, session_id: &str) -> String {

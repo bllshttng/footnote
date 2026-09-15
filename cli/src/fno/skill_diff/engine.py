@@ -67,7 +67,7 @@ def unprocessed_runs(events: list[dict], skill_id: str) -> list[str]:
 
     A run_complete carrying a ``skill_ref`` FIELD is a REPLAY/candidate eval (an
     eval-after-merge re-run, or a manual ``fno doctor observer replay``), never a bare
-    sweep - it must NOT trigger the proposer (x-ed13 Locked Decision 5), else a
+    sweep - it must NOT trigger the proposer (Locked Decision 5), else a
     closed loop re-opens: propose -> merge -> eval-after-merge -> propose ...
     Only sweeps (no ``skill_ref`` field at all) are candidate triggers.
 

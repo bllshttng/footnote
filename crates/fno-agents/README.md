@@ -1,6 +1,6 @@
 # fno-agents
 
-Rust PTY supervisor substrate for footnote multi-CLI agents (Phase 6, backlog `ab-a09e1eaf`).
+Rust PTY supervisor substrate for footnote multi-CLI agents (Phase 6, backlog ``).
 
 This crate is the substrate half of the Phase 6 design (`~/your-vault/internal/fno/design/2026-05-22-fno-pty-supervisor-and-drive.md`). It gives codex / gemini (and future OpenCode) agents the persistent-session, attach/detach, drive UX that Claude has. Python `fno agents <verb>` shells into the daemon/client binary; the daemon talks to per-agent workers over Unix sockets.
 
@@ -25,7 +25,7 @@ Accordingly, the substrate here is written **worker-side**: `PtySession` is what
 ### Provider layer (added on top of the substrate)
 
 - `provider.rs` — `Provider` + `ProviderWithPty` traits. `as_pty()` returns `Option`, so `ClaudeProvider` (shellout to `claude --bg`, not PTY-managed) is distinguished from `CodexProvider` (JSONL stream) / `GeminiProvider` (single JSON blob) in the type system. `create_argv` / `resume_argv` mirror the validated Python adapters; `reachability` is tri-state and authoritative (codex session-index membership; gemini cwd-pinned short-prefix + full-UUID content check), never reporting a dead session live.
-- `claude_ask.rs` — client-side `claude --bg` ask path (ab-cc926b4e). Because `ClaudeProvider::as_pty()` is `None`, the daemon cannot manage claude; the **client** replicates Python's `harnesses/claude.py` ask path directly (create + socket follow-up + reply extraction) with byte-parity. Wired via `bin/client.rs::maybe_run_claude_ask`. See `docs/architecture/fno-agents-claude-ask-rust.md`.
+- `claude_ask.rs` — client-side `claude --bg` ask path. Because `ClaudeProvider::as_pty()` is `None`, the daemon cannot manage claude; the **client** replicates Python's `harnesses/claude.py` ask path directly (create + socket follow-up + reply extraction) with byte-parity. Wired via `bin/client.rs::maybe_run_claude_ask`. See `docs/architecture/fno-agents-claude-ask-rust.md`.
 - `envelope.rs` — structural anti-injection `Envelope`. The user message is JSON-escaped, so the framing cannot be forged by message content (a hostile payload stays inside the `msg` field).
 - `readiness.rs` — per-CLI `CodexReadinessDetector` / `GeminiReadinessDetector` over the `ScreenView` seam. Conservative: ready only on a positive prompt-glyph signal in the bottom status region, never a byte-count guess; rejects the gemini "Waiting for auth" false-ready.
 - `screen.rs` — terminal-grid construction behind the `ScreenView` seam.

@@ -231,7 +231,7 @@ def macro_command(ctx: typer.Context) -> None:
     from fno.rust_binary import resolve_binary
 
     # A pure argv forwarder: the flags are the binary's (operator ruling on
-    # x-72fc - the Python flag surface never grows), so this arm declares no
+    # - the Python flag surface never grows), so this arm declares no
     # typer.Options of its own. It only resolves the journal defaults the
     # verb needs when the caller passed no --events.
     args = list(ctx.args)

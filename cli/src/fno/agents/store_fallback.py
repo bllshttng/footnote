@@ -1,5 +1,5 @@
 """Resolve a session token against its harness's OWN store and adopt store-only
-sessions when the fno registry misses (x-9cc5).
+sessions when the fno registry misses.
 
 The registry is a cache of reality, not a gate in front of it. A session with no
 roster row -- reaped after a terminal stop, or never spawn-created -- was
@@ -17,7 +17,7 @@ Three rules keep it from guessing:
   refuses with the candidate list; git's ambiguous-short-SHA posture.
 - **Never live** -- a store row proves the session EXISTS, never that it is
   running, so the adopted row is ``orphaned``. Store membership must not
-  resurrect a dead session into lane caps or live anycast (the x-830c lesson).
+  resurrect a dead session into lane caps or live anycast (the lesson).
 - **Project confinement** -- a store hit is adopted only into the CALLER's
   project. The probes scan machine-wide (a transcript store is global), and
   before this rule a bare handle from a foreign repo healed into scope and got
@@ -444,7 +444,7 @@ def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
     nothing downstream could falsify. A null the receipt explains is better.
 
     The stamp is the newest TIMESTAMPED entry over the whole file, not the
-    mtime (x-54cf): ``row_contradiction`` cross-checks it against truth's
+    mtime : ``row_contradiction`` cross-checks it against truth's
     ``last_event_at``, so both must come from the same field; no timestamped
     entry falls back to the mtime, truth's own labelled fallback.
     """
@@ -540,7 +540,7 @@ def adopt_store_hit(
             f"could not register it ({exc}); the row will appear on a later "
             "resolution.\n"
         )
-        # The adopting session VOUCHED for this row (x-5283 LD3); this
+        # The adopting session VOUCHED for this row (LD3); this
         # fallback copy skips register_session, stating the same split itself.
         from fno.agents.dispatch import _capture_parent_edge
 

@@ -13,14 +13,14 @@ use std::path::{Path, PathBuf};
 /// A role-prefixed row (a launch window, a requeue reservation) STAYS in the
 /// scan: it is workflow state, but the board's probe layer is what decides
 /// whether a worker stands behind it, and a lease must never answer that
-/// question itself (the x-9958 ruling: a lease must never suppress the row -
-/// x-caf7 held a fresh lease while deadlocked, and the x-db9c dispatch that
+/// question itself (the ruling: a lease must never suppress the row -
+/// held a fresh lease while deadlocked, and the dispatch that
 /// commissioned this fix minted its own handover claim on the very node being
 /// fixed). A role row whose window lapsed with no worker taking over is the
 /// stale row `stale_claim` exists to name.
 ///
 /// An unreadable directory is an ERR, never an empty row list: empty means
-/// "nobody holds anything", and a failed read must not say that (x-636f).
+/// "nobody holds anything", and a failed read must not say that.
 pub(crate) fn read_claims_in(dirs: &[PathBuf]) -> SourceRead {
     let records = match crate::claims::list_in(dirs, Some("node:"), true) {
         Ok(records) => records,
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_dir_reads_unreadable_not_empty() {
-        // x-636f: the scan's old `read_dir` failure returned zero rows, and
+        // the scan's old `read_dir` failure returned zero rows, and
         // zero rows means nobody holds anything. The read must say it failed.
         if unsafe { libc::geteuid() } == 0 {
             return; // root reads through mode 000; the assertion cannot fire

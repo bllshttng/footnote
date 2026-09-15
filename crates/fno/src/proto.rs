@@ -26,7 +26,7 @@ use crate::tree::{Axis, Dir, Node, PaneId, Rect, TabId};
 use crate::vt::ShellActivity;
 
 /// `#[serde(default = ...)]` helper for a field whose omitted default is `true`
-/// rather than serde's `bool` default of `false` (x-d865, `PaneSplit.no_focus`).
+/// rather than serde's `bool` default of `false` (`PaneSplit.no_focus`).
 fn default_true() -> bool {
     true
 }
@@ -78,7 +78,7 @@ fn default_true() -> bool {
 /// CopySelection` copies the current selection over the keyboard (the block
 /// select -> copy composition). `BlockDir` names the walk direction.
 ///
-/// v9 (blocked-prompt answer queue, x-c929): `AgentRow` gains `answerable`
+/// v9 (blocked-prompt answer queue): `AgentRow` gains `answerable`
 /// ([`AnswerablePrompt`]) - the daemon's extracted numbered menu riding the
 /// existing blocked badge; `ClientMsg::PaneAnswer { pane, fingerprint,
 /// region_lines, keystroke }` injects a picked option after the server
@@ -86,15 +86,15 @@ fn default_true() -> bool {
 /// `STALE`/`BUSY`.
 ///
 /// v10 (status-row provenance): `Layout` gains `focus_node` - the focused
-/// pane's `FNO_NODE` provenance (x-84a8), parsed server-side from the pane-run
+/// pane's `FNO_NODE` provenance, parsed server-side from the pane-run
 /// argv, so the client status row shows `⚑ <node>` config-free. `None` for an
 /// ad-hoc pane.
 ///
-/// v11 (work-queue dispatch, x-6f77): a new `DispatchNext` client verb (prefix+g
+/// v11 (work-queue dispatch, x-dddd): a new `DispatchNext` client verb (prefix+g
 /// "grab work") AND `Layout` gains `backlog: Vec<BacklogCard>` (the sideline
 /// work-queue lane) - both wire-shape changes, so the shared counter bumps once.
 ///
-/// v12 (in-scrollback search, x-e780): `ClientMsg::{SearchOpen, SearchStep,
+/// v12 (in-scrollback search): `ClientMsg::{SearchOpen, SearchStep,
 /// SearchClear}` (prefix+/ free-text find over a pane's server-side vt history)
 /// and the initiator-only reply `ServerMsg::SearchResult { pane_id, total,
 /// current }`. `SearchStep` reuses [`BlockDir`] (`Prev` = older match, `Next` =
@@ -110,85 +110,85 @@ fn default_true() -> bool {
 /// mouse; `Command::DispatchNode(id)` starts a targeted interactive session from
 /// a clicked work-queue card (the confirm path).
 /// v16: `Command::NewSquad { name, origin }` - explicit named-workspace
-/// creation (the `+` sideline footer, x-9e5e).
+/// creation (the `+` sideline footer).
 /// v17: `Command::RenameTab { tab, name }` - explicit tab rename (prefix+,,
-/// x-c150); a blank name clears the rename back to the derived label.
+///); a blank name clears the rename back to the derived label.
 /// v18: `BacklogCard.{pane_id, attach_id, where_hint}` - publish-time routes
 /// so an in-flight work-queue card focuses/attaches/locates its live session
-/// (x-54fa) instead of dead-ending.
+/// instead of dead-ending.
 /// v19: `Command::{RenameSquad, RemoveSquad, MoveSquad, MoveTab}` - squad
-/// management verbs (x-96e8): rename/clear a workspace label, close a whole
+/// management verbs: rename/clear a workspace label, close a whole
 /// workspace, reorder the sideline, re-home a tab into another workspace.
 /// Parallel-branch hazard: two in-flight mux branches both take "next", so the
 /// one that merges second must re-bump (v17/v18 were re-numbered once already).
 /// v20: `AgentRow.external` - a sideline row surfaced or liveness-upgraded from
-/// claude's daemon roster rather than the fno registry (x-0a2e); renders dim.
+/// claude's daemon roster rather than the fno registry; renders dim.
 /// `#[serde(default)]` keeps an older reader wire-tolerant. (Re-bumped from 19:
-/// x-96e8 merged first and took 19 - the second-to-merge re-bump rule.) v21
+/// merged first and took 19 - the second-to-merge re-bump rule.) v21
 /// adds `PaneSend { guarded }` for the server-side atomic guarded block-pipe.
 /// v22: `TabMeta.panes: Vec<PaneMeta>` - every leaf pane of a tab, labelled, so
-/// the session navigator (x-653d) can goto a pane in any tab/squad.
-/// v23: `AgentRow.seen` - server-side per-pane seen bit (x-4328), set when the
+/// the session navigator can goto a pane in any tab/squad.
+/// v23: `AgentRow.seen` - server-side per-pane seen bit, set when the
 /// operator focuses a `Done` pane, cleared when it leaves `Done`; distinguishes
 /// a looked-at finished agent (`Idle`) from one still surfaced (`DoneUnseen`).
-/// v24 (x-0090, agents-first sideline): `AgentRow.tab` - the `TabId` hosting a
+/// v24 (agents-first sideline): `AgentRow.tab` - the `TabId` hosting a
 /// pane-hosted row, so the sideline renders a tab-ordinal suffix (client derives
 /// the ordinal from the Layout); `AgentRow.cwd_base` - the cwd basename of an
 /// orphan watch-only row, for the ` (basename)` suffix under `~ elsewhere`. Both
 /// `#[serde(default)]`, keeping a v23 reader wire-tolerant. Parallel-branch
 /// hazard: if another mux branch takes v24 first, the second-to-merge re-bumps
 /// (same rule as the v17/v18/v20 churn).
-/// v25 (x-8f11, persisted squads + bulk recruit): `Command::RecruitAgents {
+/// v25 (persisted squads + bulk recruit): `Command::RecruitAgents {
 /// squad, ids }` recruits N watch-only agents into a named workspace
 /// (create-if-absent); `Command::DismissMember { squad, attach_id }` deletes a
 /// tombstoned member from a persisted workspace. `AgentRow.tombstone` marks a
 /// synthesized dead-member row (dimmed, dismissable) under its squad; both new
 /// `AgentRow` reads are `#[serde(default)]`, keeping a v24 reader wire-tolerant.
-/// (v24 was taken by x-0090's `AgentRow.tab`/`cwd_base`, so this re-bumps per
+/// (v24 was taken by `AgentRow.tab`/`cwd_base`, so this re-bumps per
 /// the second-to-merge rule the v17/v18/v20 churn established.)
 ///
-/// v26 (x-76ea): `Command::StopAgent { name }` / `Command::RemoveAgent { name }`
+/// v26: `Command::StopAgent { name }` / `Command::RemoveAgent { name }`
 /// give the sideline a per-row lifecycle verb, server-shelled to `fno-agents
 /// stop|rm <name>` and refused on an `external: true` roster row.
-/// v27 (x-0333): `Command::ReorderTab { squad, tab, delta }` moves a tab within
+/// v27: `Command::ReorderTab { squad, tab, delta }` moves a tab within
 /// its client-captured squad while preserving the active tab by stable id.
-/// v28 (x-3e38): pane-run and watch-only attach carry an explicit squad target
+/// v28: pane-run and watch-only attach carry an explicit squad target
 /// plus optional directional split placement.
 ///
-/// v29 (x-c376): `Command::PeekAgent { name, seq }` asks the server for a
+/// v29: `Command::PeekAgent { name, seq }` asks the server for a
 /// sideline row's recent transcript (shelled `fno agents peek <name>`, read-only)
 /// and `ServerMsg::PeekBody { seq, name, lines }` returns it to the requesting
 /// client only; the client drops any body whose `seq` is not the current request.
 ///
-/// v30 (x-7561): `Command::ReapAgents` bulk-reaps every exited fno-agent
+/// v30: `Command::ReapAgents` bulk-reaps every exited fno-agent
 /// registry row (uppercase `X`, server-shelled to `fno-agents reap`), and
 /// `Command::{StopExternal, RemoveExternal}` route an external claude-daemon
 /// row's lifecycle through `claude stop|rm <attach_id>` keyed by stable attach
 /// id, gated by a durable generation-checked compare-and-set in `squads.json`
 /// (`external_lifecycle` collection).
 ///
-/// v31 (x-9f75): `PanePlacement.here` - open-here repoints the sender's focused
+/// v31: `PanePlacement.here` - open-here repoints the sender's focused
 /// (attach-viewer) pane at the target session instead of minting a tab or
 /// split. `#[serde(default)]` keeps a v30 placement (no `here`) parseable as
 /// `here: false` (today's semantics).
 ///
-/// v32 (x-cd67): `AgentRow.subline` - the server-composed dim line-2 subline
+/// v32: `AgentRow.subline` - the server-composed dim line-2 subline
 /// (`<branch> · <cwd-tail>`) for the sideline. `#[serde(default)]` keeps a v31
 /// reader parsing it as `None` (the pre-feature one-line row).
 ///
-/// v33 (x-c914): the account-scoped dispatch verbs carry the client's
+/// v33: the account-scoped dispatch verbs carry the client's
 /// session-local active account. `ClientMsg::DispatchNext { account }` and
 /// `Command::DispatchNode { node, account }` append `--account <id>` to the
 /// server's `fno agents spawn` shell so a mux-initiated spawn bills the chosen
 /// claude account; `None` = today's default (no flag). `AgentRow { account }`
 /// carries the birth/roster account for the sideline glyph.
 ///
-/// v34 (x-9c5f): peek-overlay follow-ups. `Command::MailAgent { name, text }`
+/// v34: peek-overlay follow-ups. `Command::MailAgent { name, text }`
 /// and `Command::RespawnAgent { name }` are the two new off-loop server verbs;
 /// `AgentRow { updated_at, pr }` carry the peek header's `changed Ns ago` stamp
 /// and `PR #N` label.
 ///
-/// v36 (x-1d91, the Backlog section): `BacklogCard { project, lane, head }` carry
+/// v36 (the Backlog section): `BacklogCard { project, lane, head }` carry
 /// the sideline's `project · lane` attribution subline and the explicit on-deck
 /// head-of-queue marker; `Layout::backlog_lanes` carries UNCAPPED per-lane counts, feeding both
 /// the section's exact `+N more` and the mini-kanban's lane headers;
@@ -197,7 +197,7 @@ fn default_true() -> bool {
 /// porcelain server-side - the mux never writes `graph.json` itself. All new reads
 /// are `#[serde(default)]`, keeping a v35 reader wire-tolerant.
 ///
-/// v37 (x-b186): `AgentRow { tail }` carries the row's most recent assistant
+/// v37: `AgentRow { tail }` carries the row's most recent assistant
 /// line for the extended sideline table's message column. Additive and
 /// `#[serde(default)]`, so a v36 reader parses it as `None` (no tail cell).
 ///
@@ -207,14 +207,14 @@ fn default_true() -> bool {
 /// client and then drop it on the first decode error instead of telling the
 /// operator to restart the server.
 ///
-/// v39 (x-d807): `Command::ResizeSeam` (dragging a pane divider). Same case as
+/// v39: `Command::ResizeSeam` (dragging a pane divider). Same case as
 /// v38 - a new verb rather than an additive field, so a v38 server cannot
 /// deserialize it. Mux servers deliberately outlive client upgrades, so without
 /// the bump an upgraded client would attach cleanly to a v38 server and then
 /// have the connection dropped on its first divider drag, instead of being told
 /// at handshake to restart the server.
 ///
-/// v40 (x-aa95): `Command::MovePane` (drag-to-relocate and keyboard move-pane).
+/// v40: `Command::MovePane` (drag-to-relocate and keyboard move-pane).
 /// Same case again - a new verb, not an additive field, so a v39 server cannot
 /// deserialize it and an unbumped upgraded client would lose its connection on
 /// the first relocation rather than at handshake.
@@ -231,30 +231,30 @@ fn default_true() -> bool {
 /// deserialize a `PaneSplit`, so one bump covers the whole node's wire delta
 /// (Locked Decision 7).
 ///
-/// v43 (x-d6a8, US9 drag faces): `Command::BreakPane`/`JoinTab` - the interactive
+/// v43 (US9 drag faces): `Command::BreakPane`/`JoinTab` - the interactive
 /// drag counterparts of the `PaneBreak`/`TabJoin` control verbs, dispatching into
 /// the same `CoreMsg`s. New verbs, not additive fields, so a v42 server cannot
 /// deserialize a `BreakPane`; the handshake, not the first drag, names the skew.
 ///
-/// v45 (x-a2d0, clickable links): `ServerMsg::OpenLink { url }` - the server
+/// v45 (clickable links): `ServerMsg::OpenLink { url }` - the server
 /// resolves the URL under a click (OSC 8 or linkified text, see
 /// [`crate::link`]) and the CLIENT opens it, the process at the human's desk.
 /// New variant, not additive; handshake stops the skew.
 ///
-/// v46 (x-3e17, pane focus): `ControlVerb::PaneFocus` + `ServerMsg::PaneFocused`
+/// v46 (pane focus): `ControlVerb::PaneFocus` + `ServerMsg::PaneFocused`
 /// - the CLI door onto the focus trunk the TUI already owns. New variants;
 /// handshake stops the skew.
 ///
-/// v50 (x-132c): `AgentRow.{spawned_by_session, harness_session_id}` - the
+/// v50: `AgentRow.{spawned_by_session, harness_session_id}` - the
 /// lineage pair the sideline joins into a parent/child forest. Additive and
 /// `#[serde(default)]`, so an unbumped client would merely keep rendering
 /// flat; the bump names the skew so the handshake restarts an old server.
 ///
-/// v52 (x-588a): pane reads and sends carry the pane's captured identity and
+/// v52: pane reads and sends carry the pane's captured identity and
 /// the registry identity used to address it. Fields stay additive-defaulted,
 /// but the send identity is a safety contract: reject an older peer at handshake.
 ///
-/// v51 (x-1499, tab dictionary): `ControlVerb::TabWhere` +
+/// v51 (tab dictionary): `ControlVerb::TabWhere` +
 /// `ServerMsg::TabLocation`/`TabPaneOccupant` - the reverse location lookup
 /// (what lives at the tab the operator is looking at). `TabSel::Index`
 /// becomes the 1-based ordinal the UI shows, where it was a 0-based vector
@@ -268,13 +268,13 @@ fn default_true() -> bool {
 /// the sequenced, initiator-only hover lookup for clickable URLs. New
 /// variants; handshake stops the skew.
 ///
-/// v57 (x-d401, unmeasured liveness): `AgentNoPaneReason::LivenessUnmeasured`
+/// v57 (unmeasured liveness): `AgentNoPaneReason::LivenessUnmeasured`
 /// - a NEW enum variant, so a v56 peer cannot decode a row carrying it, the
 /// same reason `BackendNotLive` bumped 53 -> 54. `AgentRow.pane_activity`
 /// rides the same bump (additive-tolerant on its own, but it is the shape
 /// change the variant belongs to).
 ///
-/// v58 (x-07c2, dedicated thread pane): `ControlVerb::ThreadPane` - a NEW
+/// v58 (dedicated thread pane): `ControlVerb::ThreadPane` - a NEW
 /// enum variant, so a v57 peer cannot decode it and closes the connection
 /// instead of running the reach. `AgentRow.reach` rides the same bump.
 ///
@@ -301,26 +301,26 @@ fn default_true() -> bool {
 /// v66 (sideline rename): `Command::RenameAgent`, a new verb; also
 /// `ThreadPane`'s `#[serde(default)]` `placement` (the geometry a FRESH
 /// portal open honors; a repoint keeps owning its geometry and says so).
-/// v68 (x-5baf): `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
-/// v69 (x-a600): `Command::RedrawPane`, `#[serde(default)]`; floor stays 58.
+/// v68: `LayoutSlot.cwd`, `#[serde(default)]`; floor stays 58.
+/// v69: `Command::RedrawPane`, `#[serde(default)]`; floor stays 58.
 /// v71 (prune sync): `ControlVerb::SquadReload` + `ServerMsg::SquadReloaded`
 /// (handshake stops the skew) and the additive `PaneInfo.orphaned_worker`.
-/// v72 (x-867b): `ControlVerb::ThreadReseat` - the re-seat move (a live
+/// v72: `ControlVerb::ThreadReseat` - the re-seat move (a live
 /// pane-hosted worker becomes a portal seat, keeping its PTY); floor stays 58.
 /// v73: `LayoutSlot.portal` serde(default), the persisted portal seat; floor stays 58.
-/// v74 (x-b5d1): `Command::RemoveAgent.measure` - measure-and-remove skips
+/// v74: `Command::RemoveAgent.measure` - measure-and-remove skips
 /// the stop leg on an Unmeasured row; floor stays 58.
-/// v75 (x-7649): `ControlVerb::RetireSession` + `ServerMsg::SessionRetired`,
+/// v75: `ControlVerb::RetireSession` + `ServerMsg::SessionRetired`,
 /// the exact-session retirement op; floor stays 58.
-/// v76 : `ControlVerb::AgentRowsGet` + `ServerMsg::AgentRowsReceipt`
+/// v76: `ControlVerb::AgentRowsGet` + `ServerMsg::AgentRowsReceipt`
 /// + `AgentRowReceipt`, the row-set receipt behind `fno mux rows`; floor 58.
-/// v77 : `liveness_age_s` replaced by `liveness_measured_at`, the instant;
+/// v77: `liveness_age_s` replaced by `liveness_measured_at`, the instant;
 /// the client derives the age at render. Same decode both ways; floor 58.
-/// v78 : `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
+/// v78: `ControlVerb::ServerStats` + `ServerMsg::ServerStats`, the
 /// scoreboard's read-only emission-failure counter read; floor stays 58.
-/// v79 : `Layout.missions` carries the active-mission headers; floor stays 58.
-/// v80 : `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
-/// v81 (x-a6b9): `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
+/// v79: `Layout.missions` carries the active-mission headers; floor stays 58.
+/// v80: `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
+/// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
 pub const PROTO_VERSION: u32 = 81;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -449,18 +449,18 @@ pub enum ClientMsg {
     /// PTY. Refused unless the pane is known-idle - a rerun injected into a busy
     /// agent corrupts its composer (false-ready is the forbidden direction).
     BlockRerun { pane: u64 },
-    /// (v11, x-6f77) "Grab work" (prefix+g): dispatch the next ready backlog
+    /// (v11, x-dddd) "Grab work" (prefix+g): dispatch the next ready backlog
     /// node into a new pane in this session. Server-wide (no pane field): the
     /// server shells the Python porcelain off the core loop, and the outcome
     /// (no ready work / lanes full / failure) returns as a one-line `Notice`.
     /// A read-only observer client is refused at the core (mutating_sender).
-    /// (v31, x-c914) `account` is the client's session-local active account,
+    /// (v31) `account` is the client's session-local active account,
     /// appended as `--account <id>` to the spawn; `None` = the default account.
     DispatchNext {
         #[serde(default)]
         account: Option<String>,
     },
-    /// (v9, x-c929) Answer a blocked prompt from the queue without focusing it.
+    /// (v9) Answer a blocked prompt from the queue without focusing it.
     /// `keystroke` is the exact bytes the daemon pinned for the chosen option
     /// (never client-fabricated); `fingerprint`/`region_lines` name the region
     /// snapshot the operator read. The server re-reads its live bottom-N grid,
@@ -474,7 +474,7 @@ pub enum ClientMsg {
         region_lines: u16,
         keystroke: Vec<u8>,
     },
-    /// (v12, x-e780) Open/refresh a free-text search over the pane's server-side
+    /// (v12) Open/refresh a free-text search over the pane's server-side
     /// vt history (prefix+/): scan case-insensitively, jump the shared scroll to
     /// the initial match, highlight it via the v7 `SELECTED` broadcast, and store
     /// the match list as a per-pane snapshot. An empty `query` clears (never a
@@ -482,12 +482,12 @@ pub enum ClientMsg {
     /// to the initiator; co-viewers get the jump + highlight via the broadcast
     /// `Frame`. History text never crosses the wire.
     SearchOpen { pane: u64, query: String },
-    /// (v12, x-e780) Walk the active search's match snapshot: `Prev` toward older,
+    /// (v12) Walk the active search's match snapshot: `Prev` toward older,
     /// `Next` toward newer (reusing [`BlockDir`], whose doc semantics match n/N).
     /// Re-jumps + re-highlights and replies a fresh `SearchResult`. A pane with no
     /// active search no-ops with a `Notice`, never a panic.
     SearchStep { pane: u64, dir: BlockDir },
-    /// (v12, x-e780) Clear the active search: drop the highlight (selection) and
+    /// (v12) Clear the active search: drop the highlight (selection) and
     /// the per-pane search state, then broadcast a `Frame`. Idempotent: clearing
     /// with nothing active still clears + broadcasts (the client sends this on
     /// every search exit, and a no-match search_open has already dropped the
@@ -541,11 +541,11 @@ pub enum MouseButton {
 mod placement;
 pub use placement::{PanePlacement, PaneTarget, PlacementFallback, ResolvedPlacement, TabSel};
 
-/// (v60, x-7b5e) One member's line of a workspace-restore report. `outcome`
+/// (v60) One member's line of a workspace-restore report. `outcome`
 /// is `resumed` | `focused` | `refused` | `planned`; `reason` is set exactly
 /// on `refused` (a member that cannot resume is NAMED, never silently
 /// dropped), `pane` on `resumed`/`focused`, `tab` on both, `notice` the
-/// vanished-cwd fallback note, and (v81, x-a6b9) `portal` the seat index,
+/// vanished-cwd fallback note, and (v81) `portal` the seat index,
 /// `member` the portal's row key; `None`: a squad member row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RestoreRow {
@@ -603,7 +603,7 @@ pub enum ControlVerb {
         claim: bool,
         #[serde(default)]
         placement: PanePlacement,
-        /// (v49, x-5f7f) The registry name of the worker this pane hosts. The
+        /// (v49) The registry name of the worker this pane hosts. The
         /// server records the pane as a squad member joined to that registry
         /// row by name, so a non-claude worker survives a mux restart as an
         /// idle, resumable row instead of vanishing. `None` records nothing -
@@ -625,7 +625,7 @@ pub enum ControlVerb {
         bytes: Vec<u8>,
         #[serde(default)]
         guarded: bool,
-        /// (v51, x-588a) The addressed pane identity. When present, the server
+        /// (v51) The addressed pane identity. When present, the server
         /// refuses before typing unless the pane's captured name and registry
         /// row agree with this value.
         #[serde(default)]
@@ -692,7 +692,7 @@ pub enum ControlVerb {
         tab: TabSel,
         name: String,
     },
-    /// (v65, x-cf97) Move a tab within its squad so it lands at the `to`
+    /// (v65) Move a tab within its squad so it lands at the `to`
     /// position -> [`ServerMsg::Ok`]. Both selectors resolve through the same
     /// 1-based-ordinal grammar as every other `Tab*` verb; the server computes
     /// the delta and runs the exact trunk the interactive
@@ -714,7 +714,7 @@ pub enum ControlVerb {
     },
     /// Dump a layout scope's nested tree + per-pane geometry ->
     /// [`ServerMsg::LayoutTree`] (structure + rects, so templates/reconcile can
-    /// diff topology - Locked Decision 5). `workers` (v51, x-1499) additionally
+    /// diff topology - Locked Decision 5). `workers` (v51) additionally
     /// joins each pane's registry worker into `TabLayout.workers` for the
     /// human rendering; `false` (the default) keeps every `--json` reply
     /// byte-shape identical to the pre-v51 output. A `workers: true` request
@@ -753,7 +753,7 @@ pub enum ControlVerb {
     /// "your pane is gone" and "nobody is watching" are different problems, and a
     /// third ("your mux is not running") is the CLI's own connect failure.
     PaneFocus { pane: u64 },
-    /// (x-07c2) Reach a row through the ONE dedicated thread pane: the
+    /// Reach a row through the ONE dedicated thread pane: the
     /// outside-the-TUI door behind `fno agents attach <name>`. `name` is the
     /// registry name or the 8-hex attach id. The reply is the landing
     /// (`Notice` carrying where it opened/repointed/focused) or an `Err`
@@ -761,12 +761,12 @@ pub enum ControlVerb {
     /// the two doors cannot drift.
     ThreadPane {
         name: String,
-        /// (v64, x-8f9d) Which portal to reach through. `None` is portal 0,
+        /// (v64) Which portal to reach through. `None` is portal 0,
         /// which is where every pre-v64 caller landed, so the field is
         /// additive and the compatibility floor does not move.
         #[serde(default)]
         portal: Option<u8>,
-        /// (v66, x-9b60) The placement a FRESH portal open honors (`tab`,
+        /// (v66) The placement a FRESH portal open honors (`tab`,
         /// `split`, `at`, `target`). Additive and `#[serde(default)]`: a
         /// pre-v66 client sends no placement and decodes to the default,
         /// wire-identical to v65, so the compatibility floor does not move.
@@ -798,7 +798,7 @@ pub enum ControlVerb {
         direction: Dir,
     },
 
-    // -- v42 (x-c4d4) declarative layout templates. Applies a named shape with
+    // -- v42 declarative layout templates. Applies a named shape with
     //    ordered slot bindings to a whole tab; the substrate above (splits, tree
     //    ops) is what it composes. Anchored to explicit tab/slot ids, never
     //    CurrentRoute focus; no viewer focus change unless `focus` opts in. --
@@ -817,7 +817,7 @@ pub enum ControlVerb {
         #[serde(default)]
         focus: bool,
     },
-    /// (v44, x-6928) Realize a typed [`AnchoredLayoutSpec`] as a LOCAL subtree
+    /// (v44) Realize a typed [`AnchoredLayoutSpec`] as a LOCAL subtree
     /// at `anchor` -> [`ServerMsg::LayoutGrafted`]. Resolves the Anchor + Fno
     /// bindings, spawns Shell slots, and replaces the anchor leaf with the
     /// subtree in one atomic turn, preserving the enclosing tab and every live
@@ -831,7 +831,7 @@ pub enum ControlVerb {
         #[serde(default)]
         focus: bool,
     },
-    /// Resolve a tab LOCATION to what lives there (x-1499) ->
+    /// Resolve a tab LOCATION to what lives there ->
     /// [`ServerMsg::TabLocation`]. `sel` is the location grammar:
     /// `ordinal:<n>` | `id:<n>` | `name:<s>` | a bare number (ordinal or
     /// stable id - refused when the two readings name different live tabs) |
@@ -843,7 +843,7 @@ pub enum ControlVerb {
         squad: PaneTarget,
         sel: String,
     },
-    /// (v60, x-7b5e) Bulk-restore every live, non-tombstoned worker member of
+    /// (v60) Bulk-restore every live, non-tombstoned worker member of
     /// the stored workspaces: each resumes through its own harness's declared
     /// `interactive_resume` argv, in a pane at its stored tab and cwd. The
     /// operator's explicit verb - startup restore never sends this (AC4-EDGE:
@@ -860,7 +860,7 @@ pub enum ControlVerb {
     /// [`ServerMsg::SquadReloaded`]. The prune CLI sends this after an
     /// applied store pass, so `persist_squad` cannot write reaped members back.
     SquadReload,
-    /// (v75, x-7649) Retire every member whose (harness, full session id)
+    /// (v75) Retire every member whose (harness, full session id)
     /// matches, across every squad this server holds. Closes only the
     /// matching member's attached panes, tombstones through the store's own
     /// `retire_session_members`, then re-projects from the store so the
@@ -879,7 +879,7 @@ pub enum LayoutScope {
     Tab { squad: PaneTarget, tab: TabSel },
 }
 
-/// A named layout shape (v42, x-c4d4). Fixed vocabulary from the epic - a
+/// A named layout shape (v42). Fixed vocabulary from the epic - a
 /// general layout DSL is explicitly out of scope. `topology(name, k)` in
 /// `templates.rs` turns one of these plus a slot count into a pure pane tree.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -899,7 +899,7 @@ pub enum TemplateName {
     Grid2x2,
 }
 
-/// A declarative layout to realize onto one tab (v42, x-c4d4). The CLI's
+/// A declarative layout to realize onto one tab (v42). The CLI's
 /// `--template`/`--slot` flags and a persisted `.toml` spec assemble the SAME
 /// struct, so apply and restore share one code path (US8).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -909,7 +909,7 @@ pub struct LayoutSpec {
     pub slots: Vec<SlotBinding>,
 }
 
-/// What one template slot binds to (v42, x-c4d4). Arrange-only: a slot names an
+/// What one template slot binds to (v42). Arrange-only: a slot names an
 /// existing session or an intentional empty shell - it never spawns a worker
 /// (that arrives with the roles group). A `Role` variant lands later without a
 /// wire break; a v42 reader that predates it treats the unknown variant as a
@@ -925,7 +925,7 @@ pub enum SlotBinding {
     Shell,
 }
 
-/// One slot's outcome in a [`ServerMsg::LayoutApplied`] receipt (v42, x-c4d4).
+/// One slot's outcome in a [`ServerMsg::LayoutApplied`] receipt (v42).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SlotResult {
     pub slot: u32,
@@ -934,7 +934,7 @@ pub struct SlotResult {
     pub outcome: SlotOutcome,
 }
 
-/// How a slot was filled (v42, x-c4d4). Per-slot detail rides the receipt list,
+/// How a slot was filled (v42). Per-slot detail rides the receipt list,
 /// never the top-level `Err`: a partial success (one slot's shell failed to
 /// spawn) is still a success with detail, so live panes are never rolled back.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -957,7 +957,7 @@ pub enum SlotOutcome {
     Bound,
 }
 
-/// A recursive topology whose leaves name slots (v44, x-6928). The canonical
+/// A recursive topology whose leaves name slots (v44). The canonical
 /// arbitrary layout representation; named templates compile into one (AC3-HP),
 /// and the compact `H[..]`/`V[..]` CLI syntax is deferred beyond v1 (Locked
 /// Decision 8). Weights are positive/finite and normalized before geometry.
@@ -982,7 +982,7 @@ pub struct LayoutTreeChild {
 
 pub use crate::proto_slot::{LayoutBinding, LayoutSlot, PortalSlot};
 
-/// A versioned anchored layout (v44, x-6928): a typed [`LayoutTreeSpec`] plus
+/// A versioned anchored layout (v44): a typed [`LayoutTreeSpec`] plus
 /// the per-slot bindings. The graft surface accepts this (a `--spec` file) or a
 /// named template plus ordered slots (compiled into the same representation).
 /// Local/session-only; never persisted in the whole-tab template store.
@@ -1008,14 +1008,14 @@ pub enum AgentNoPaneReason {
     MissingSessionId,
     UnsupportedHarness,
     BackendNotLive,
-    /// (v57, x-d401) The liveness reading is absent: no confirmed-dead pid and
+    /// (v57) The liveness reading is absent: no confirmed-dead pid and
     /// no confirmed-live backend either. Distinct from `BackendNotLive`
     /// because that variant asserts a falsified backend; this one says the
     /// reading does not exist and names the check to run instead.
     LivenessUnmeasured,
 }
 
-/// (x-07c2) What the dedicated thread pane can do for a row: `Drive` (an
+/// What the dedicated thread pane can do for a row: `Drive` (an
 /// interactive attach form exists; the pane runs it), `Follow` (no attach
 /// form, but a transcript reader answers; the pane tails it), `Locate`
 /// (neither; the pane renders the row's facts and the routes that do reach
@@ -1045,17 +1045,17 @@ pub enum Reach {
 pub struct AgentRow {
     pub squad: Option<u64>,
     pub name: String,
-    /// (v63, x-1b35) The harness axis, verbatim from the registry row
+    /// (v63) The harness axis, verbatim from the registry row
     /// (`claude`, `codex`, ...). `None` for a bare pane. The lane-color
     /// cascade's coarsest key; never the whole lane on its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
-    /// (v63, x-1b35) The spawn-recorded model string, raw. A recorded value
+    /// (v63) The spawn-recorded model string, raw. A recorded value
     /// may name an alias rather than a resolved id, so the client renders it
     /// (as a deviation token) without implying resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// (v63, x-1b35) The vendor lane the row bills: the registry `route` key,
+    /// (v63) The vendor lane the row bills: the registry `route` key,
     /// else the `provider` key. The bill-separating axis the default lane
     /// color keys on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1063,14 +1063,14 @@ pub struct AgentRow {
     /// The mux pane hosting this agent in THIS session; `None` = a watch-only
     /// row (bg/headless/daemon-worker agents surfaced from the registry).
     pub pane_id: Option<u64>,
-    /// (v64, x-8f9d) The portal showing this row, when `pane_id` is a portal
+    /// (v64) The portal showing this row, when `pane_id` is a portal
     /// seat. DERIVED at projection time by matching `pane_id` against the
     /// server's open portals, never stored per row: the row-to-pane relation
     /// is a POINTER, so one row moving between portals stays ONE row whose
     /// index changes. `None` = this row is not shown through a portal, never
     /// "unknown". Match on the `Option` and compare seats for EQUALITY: pane
     /// ids allocate from zero, so pane 0 is a valid seat and a truthiness
-    /// test on it is the x-d914 defect.
+    /// test on it is the defect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portal: Option<u8>,
     /// In-TTL inside-leg badge; `None` = liveness-only (never a scraped guess).
@@ -1085,7 +1085,7 @@ pub struct AgentRow {
     /// Missing on an older wire defaults false and false stays off the wire.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dnd: bool,
-    /// (v47, x-9de7) True only when `exited` is a terminal registry status
+    /// (v47) True only when `exited` is a terminal registry status
     /// with NO positive corroboration (no confirmed-dead pid, no confirmed-
     /// gone pane) -- `agents_view::Liveness::Unmeasured`. `exited` keeps its
     /// full meaning for every existing consumer (attach eligibility, sort,
@@ -1114,7 +1114,7 @@ pub struct AgentRow {
     /// wire-tolerant (defaults None, nothing renders).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_title: Option<String>,
-    /// (v9, x-c929) The answerable-prompt payload when this row is `blocked` on
+    /// (v9) The answerable-prompt payload when this row is `blocked` on
     /// a numbered menu a manifest `[rule.answer]` grammar could enumerate;
     /// `None` for any other state or a focus-only blocked prompt. A structural
     /// twin of the daemon's `AnswerablePrompt` (the crates share no types - the
@@ -1130,7 +1130,7 @@ pub struct AgentRow {
     /// non-attachable row. `#[serde(default)]` keeps a v13 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_id: Option<String>,
-    /// (v20, x-0a2e) True when this row's provenance is claude's daemon roster
+    /// (v20) True when this row's provenance is claude's daemon roster
     /// (a synthesized foreign session or a roster-liveness-upgraded registry
     /// row) rather than the fno registry: rendered dim, read-only toward the
     /// claude daemon roster. NOT an attachability signal (that is
@@ -1139,7 +1139,7 @@ pub struct AgentRow {
     /// wire-tolerant (defaults false).
     #[serde(default)]
     pub external: bool,
-    /// (v23, x-4328) True once the operator has focused this pane while it was
+    /// (v23) True once the operator has focused this pane while it was
     /// `Done` (server-side `Core.seen`, keyed by `pane_id`; a watch-only row
     /// with no `pane_id` is always false - it cannot be focused). Consumed at
     /// the client's `pane_state` fold to distinguish a seen-Done (`Idle`) from
@@ -1148,7 +1148,7 @@ pub struct AgentRow {
     /// pre-feature `done == unseen`).
     #[serde(default)]
     pub seen: bool,
-    /// (v24, x-0090) The tab hosting this row's pane, for the agents-first
+    /// (v24) The tab hosting this row's pane, for the agents-first
     /// sideline: the client derives the display ordinal from the `Layout` it
     /// already holds (a `TabId`, not a precomputed ordinal, so a closed tab
     /// recomputes correctly - Discretion 2). `Some` only on a pane-hosted row
@@ -1156,9 +1156,9 @@ pub struct AgentRow {
     /// keeps a v23 reader wire-tolerant (`None` -> no ordinal suffix).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab: Option<TabId>,
-    /// (v24, x-0090; x-6851 US3) The cwd basename of this row. An ORPHAN
+    /// (v24,; US3) The cwd basename of this row. An ORPHAN
     /// (squad-unmatched) row renders it as a ` (basename)` suffix under the
-    /// `~ elsewhere` header (x-0090 AC2-UI); a squad-matched row uses it for the
+    /// `~ elsewhere` header (AC2-UI); a squad-matched row uses it for the
     /// foreign-cwd exception subline - the sideline compares it to the squad's
     /// project basename and shows a subline only when they differ. Now carried
     /// on every row (was orphan-only): the client can't derive it for a matched
@@ -1167,7 +1167,7 @@ pub struct AgentRow {
     /// `#[serde(default)]` keeps a v23 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd_base: Option<String>,
-    /// (v25, x-8f11) True for a SYNTHESIZED dead-member row: a tombstoned
+    /// (v25) True for a SYNTHESIZED dead-member row: a tombstoned
     /// persisted member with no live pane, rendered dimmed under its squad and
     /// dismissable (`DismissMember`). Distinguishes it from a squad-header row
     /// (`x` removes the squad) so the same `x` key dismisses a tombstone but
@@ -1175,7 +1175,7 @@ pub struct AgentRow {
     /// v24 reader wire-tolerant (defaults false).
     #[serde(default)]
     pub tombstone: bool,
-    /// (v32, x-cd67) The server-composed dim subline for the row's line 2:
+    /// (v32) The server-composed dim subline for the row's line 2:
     /// `<branch> · <cwd-tail>` (either part omitted if unknown, both absent ->
     /// `None`). The server owns the formatting; the client renders it verbatim
     /// under the name line and truncates to the panel width. `None` -> no
@@ -1184,27 +1184,27 @@ pub struct AgentRow {
     /// row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subline: Option<String>,
-    /// (v33, x-c914) The claude account this row bills, for the sideline
+    /// (v33) The claude account this row bills, for the sideline
     /// account glyph: an isolated-account roster row's structural tag, or a
     /// mux-spawned pane's `FNO_ACCOUNT` birth account. `None` = the default
     /// `~/.claude` account (no glyph). `#[serde(default)]` keeps a v32 reader
     /// wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
-    /// (v34, x-9c5f) The freshest activity stamp on the row (epoch secs, the max
+    /// (v34) The freshest activity stamp on the row (epoch secs, the max
     /// of the registry's parseable timestamps), for the peek header's `changed Ns
     /// ago` line. `None` when no stamp parsed (the line is then absent, never a
     /// placeholder). `#[serde(default)]` keeps a v33 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
-    /// (v34, x-9c5f) The PR number of the node this row's live claim holds, for
+    /// (v34) The PR number of the node this row's live claim holds, for
     /// the peek header's `PR #N` label. A server-side layout-time join (holder
     /// name -> node id -> `pr_number`); `None` when the row holds no live claim,
     /// the holder is not this row's name, or the node carries no pr.
     /// `#[serde(default)]` keeps a v33 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<u64>,
-    /// (v37, x-b186) The row's most recent assistant line, for the extended
+    /// (v37) The row's most recent assistant line, for the extended
     /// sideline table's message-tail column. Composed server-side off the UI
     /// loop from the session transcript; claude rows only (the transcript is a
     /// claude artifact). `None` when the row has no resolvable transcript or its
@@ -1226,13 +1226,13 @@ pub struct AgentRow {
     /// paint path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_scope: Option<String>,
-    /// (v49, x-132c) The session id this row was spawned by; `None` = no
+    /// (v49) The session id this row was spawned by; `None` = no
     /// recorded parent (a lineage root). Joined against
     /// [`AgentRow::harness_session_id`] to nest children beneath their parent
     /// in the sideline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_session: Option<String>,
-    /// (v49, x-132c) The row's own harness session id (claude/codex uuid),
+    /// (v49) The row's own harness session id (claude/codex uuid),
     /// the join key for `spawned_by_session`. Same value the registry row
     /// carries; `None` for a row the registry wrote without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1258,7 +1258,7 @@ pub struct AgentRow {
     /// `#[serde(default)]` keeps a v47 reader wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_age_s: Option<u64>,
-    /// (v49, x-5f7f) True on a paneless row whose harness owns a resume form
+    /// (v49) True on a paneless row whose harness owns a resume form
     /// and whose registry row carries the session id to resume: clicking it
     /// sends `Command::ResumeAgent` instead of dead-ending on "agent has no
     /// pane here". False on every pane-hosted row (click focuses the pane)
@@ -1273,7 +1273,7 @@ pub struct AgentRow {
     /// additive field wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_pane_reason: Option<AgentNoPaneReason>,
-    /// (v57, x-d401) What this pane's own OSC 133 evidence says about its
+    /// (v57) What this pane's own OSC 133 evidence says about its
     /// shell activity, read server-side from the pane's vt. Carried by BARE
     /// panes (a pane with no registry row can still be a full agent running a
     /// real workload - not-in-registry is not is-a-shell); `None` on rows that
@@ -1283,9 +1283,9 @@ pub struct AgentRow {
     /// no-reading, never as idle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_activity: Option<ShellActivity>,
-    /// (x-07c2) The dedicated thread-pane tier for a paneless live row (see
+    /// The dedicated thread-pane tier for a paneless live row (see
     /// [`Reach`]); meaningless on a pane-hosted row (its reach focuses the
-    /// pane). `#[serde(default)]` keeps a pre-x-07c2 reader wire-tolerant and
+    /// pane). `#[serde(default)]` keeps a pre-change reader wire-tolerant and
     /// a stale reader's rows degrade to `Locate`, which still routes the
     /// reach command - the server re-derives the real tier.
     #[serde(default)]
@@ -1324,7 +1324,7 @@ pub struct AgentRowReceipt {
     pub resumable: Option<bool>,
 }
 
-/// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
+/// (v11, x-dddd) One work-queue card for the sideline backlog lane, derived
 /// read-only from `~/.fno/graph.json` (backlog_view). The mux needs four fields
 /// per node, not the whole graph model; the FILE is the contract.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1403,7 +1403,7 @@ pub struct AnswerOption {
 }
 
 /// A blocked prompt the operator can answer from the queue without focusing the
-/// pane (v9, x-c929). Extracted by the daemon, carried on the badge; the client
+/// pane (v9). Extracted by the daemon, carried on the badge; the client
 /// renders `prompt` + `options` in the answer overlay and, on a pick, sends
 /// [`ClientMsg::PaneAnswer`] with `fingerprint`/`region_lines`/the option's
 /// `keystroke`, which the server re-verifies against its live grid before
@@ -1442,7 +1442,7 @@ pub enum Command {
     ClosePane,
     FocusDir(Dir),
     ResizeDir(Dir),
-    /// (x-d807) Move one seam under a mouse drag on a divider. The seam is
+    /// Move one seam under a mouse drag on a divider. The seam is
     /// named by the panes flanking it (`a` left/top, `b` right/bottom) because
     /// that is what the client can see - `Layout` carries rects, never the
     /// tree - and the server resolves the pair to a branch child pair, refusing
@@ -1465,7 +1465,7 @@ pub enum Command {
         b: u64,
         pos: u16,
     },
-    /// (v40, x-aa95) Relocate `mover` to sit adjacent to `target` on its `dir`
+    /// (v40) Relocate `mover` to sit adjacent to `target` on its `dir`
     /// side - the drop of a grip drag, and the keyboard move-pane bind.
     ///
     /// Addressed by pane pair for the same reason [`Command::ResizeSeam`] is:
@@ -1497,7 +1497,7 @@ pub enum Command {
         target: Option<u64>,
         dir: Dir,
     },
-    /// (v43, x-d6a8) Break `pane` into its OWN new tab, the drop of a pane grip
+    /// (v43) Break `pane` into its OWN new tab, the drop of a pane grip
     /// onto the tab strip. Dispatches into the SAME [`CoreMsg::PaneBreak`] the
     /// [`ControlVerb::PaneBreak`] script path sends (one tree-mutation site); the
     /// interactive path additionally repoints the acting client's focus to the
@@ -1516,7 +1516,7 @@ pub enum Command {
     DetachPane {
         pane: u64,
     },
-    /// (v43, x-d6a8) Join the whole `src_tab` into `anchor_pane`'s tab as a split
+    /// (v43) Join the whole `src_tab` into `anchor_pane`'s tab as a split
     /// on `dir`, removing the now-empty source tab - the drop of a tab cell onto a
     /// content edge. Dispatches into the SAME [`CoreMsg::TabJoin`] the
     /// [`ControlVerb::TabJoin`] script path sends. `src_tab` is a concrete stable
@@ -1562,7 +1562,7 @@ pub enum Command {
         #[serde(default)]
         pane: Option<u64>,
     },
-    /// (v69, x-a600) The operator's repaint gesture for a garbled pane: the
+    /// (v69) The operator's repaint gesture for a garbled pane: the
     /// server nudges the child's winsize (two SIGWINCHes over the existing
     /// resize path) and re-seeds the pane's frame to every viewer, the same
     /// flush-then-re-emit `push_layout(reemit)` does, scoped to one pane.
@@ -1591,14 +1591,14 @@ pub enum Command {
     /// bounces `already-dispatching`), and the "read-only observer refused"
     /// guarantee all hold exactly as prefix+g. Value over `DispatchNext`: the
     /// operator picks WHICH card, not just "next".
-    /// (v31, x-c914) `account` rides the same session-local active-account
+    /// (v31) `account` rides the same session-local active-account
     /// passthrough as `DispatchNext`; `None` = the default account.
     DispatchNode {
         node: String,
         #[serde(default)]
         account: Option<String>,
     },
-    /// (v49, x-5f7f) Resume a paneless agent row through its own harness: the
+    /// (v49) Resume a paneless agent row through its own harness: the
     /// server joins `name` to its registry row, then spawns the harness's
     /// resume argv (`claude --resume <sid>` / `codex resume <sid>`) as a pane
     /// in the recorded cwd. The operator's explicit gesture - restore never
@@ -1620,7 +1620,7 @@ pub enum Command {
         name: String,
         origin: Option<String>,
     },
-    /// (v17) Rename a tab (x-c150). `tab` names a stable [`TabMeta::id`] from
+    /// (v17) Rename a tab. `tab` names a stable [`TabMeta::id`] from
     /// the last `Layout`'s catalog (a stale id is refused fail-closed with a
     /// notice, like `SelectTab`). The server sanitizes `name` (strip control
     /// chars, trim, cap [`MAX_TAB_NAME`]) before storing; a blank/whitespace
@@ -1631,7 +1631,7 @@ pub enum Command {
         tab: TabId,
         name: String,
     },
-    /// (v19, x-96e8) Rename a squad/workspace. `squad` names a stable squad id
+    /// (v19) Rename a squad/workspace. `squad` names a stable squad id
     /// from the last `Layout` catalog (a stale id is refused fail-closed with a
     /// notice, like `SelectSquad`). The server sanitizes `name` (strip control
     /// chars, trim, cap [`MAX_SQUAD_NAME`]); a blank name CLEARS the explicit
@@ -1642,7 +1642,7 @@ pub enum Command {
         squad: u64,
         name: String,
     },
-    /// (v19, x-96e8) Close a whole workspace: reap every pane across all its
+    /// (v19) Close a whole workspace: reap every pane across all its
     /// tabs, remove the squad, re-anchor views. Removing the LAST squad ends
     /// the session (`Bye`), identical to closing its tabs one at a time
     /// (Locked Decision 8). Destructiveness is gated CLIENT-side by a confirm,
@@ -1650,7 +1650,7 @@ pub enum Command {
     /// "refuse while occupied" would be a dead verb). A stale/unknown id is
     /// refused with a notice.
     RemoveSquad(u64),
-    /// (v19, x-96e8) Reorder the sideline: move the squad `delta` positions in
+    /// (v19) Reorder the sideline: move the squad `delta` positions in
     /// `Session::squads` (the sideline order). The target index is clamped to
     /// the list bounds; an already-at-edge move is a silent no-op (holding a
     /// reorder key at the top must not bell). An unknown id is refused with a
@@ -1659,7 +1659,7 @@ pub enum Command {
         squad: u64,
         delta: i32,
     },
-    /// (v19, x-96e8) Re-home a whole tab (and every pane in it) into another
+    /// (v19) Re-home a whole tab (and every pane in it) into another
     /// squad. `tab` names a `TabMeta::id`, `squad` a destination squad id, both
     /// from the last `Layout` catalog. An unknown tab, unknown dst, or dst ==
     /// src is refused fail-closed with a notice. Panes are NOT reaped (they
@@ -1669,7 +1669,7 @@ pub enum Command {
         tab: TabId,
         squad: u64,
     },
-    /// (v27, x-0333) Reorder a tab within its current squad. The target index is
+    /// (v27) Reorder a tab within its current squad. The target index is
     /// clamped to the sibling bounds; an already-at-edge move is a silent no-op.
     /// The server remaps `active_tab` so the same stable tab remains active. A
     /// stale/unknown tab id is refused with a notice.
@@ -1678,7 +1678,7 @@ pub enum Command {
         tab: TabId,
         delta: i32,
     },
-    /// (v25, x-8f11) Recruit N watch-only agents into a NAMED workspace
+    /// (v25) Recruit N watch-only agents into a NAMED workspace
     /// (create-if-absent, no origin). `squad` is a workspace name; `ids` are
     /// `claude attach` jobIds from the sideline marks. The server is the
     /// authoritative gate: a blank name or empty `ids` is refused fail-closed;
@@ -1690,7 +1690,7 @@ pub enum Command {
         squad: String,
         ids: Vec<String>,
     },
-    /// (v25, x-8f11) Delete a TOMBSTONED member (a dead worker's dimmed row)
+    /// (v25) Delete a TOMBSTONED member (a dead worker's dimmed row)
     /// from a persisted workspace. `squad` names a stable squad id; `attach_id`
     /// the member. Only a tombstone is dismissable (a live member leaves by
     /// closing its pane); an unknown workspace/member is refused with a notice.
@@ -1699,9 +1699,9 @@ pub enum Command {
         squad: u64,
         attach_id: String,
     },
-    /// (v26, x-76ea) Stop a live sideline row. Fail-closed resolution -
+    /// (v26) Stop a live sideline row. Fail-closed resolution -
     /// identity first, then label, then the drawn-from pane (`pane_id`,
-    /// x-e763; full rules + refusal texts in `server/lifecycle_target.rs`).
+    ///; full rules + refusal texts in `server/lifecycle_target.rs`).
     /// An external row refuses; a pane target signals the child, leaves
     /// the pane.
     StopAgent {
@@ -1711,12 +1711,12 @@ pub enum Command {
         #[serde(default)]
         pane_id: Option<u64>,
     },
-    /// (v26, x-76ea) Remove an agent row in one gesture. Registry targets
-    /// run through `fno-agents rm`, which since x-a33f ends a live row's
-    /// process itself; a pane target (x-e763) kills the child, releases
+    /// (v26) Remove an agent row in one gesture. Registry targets
+    /// run through `fno-agents rm`, which since ends a live row's
+    /// process itself; a pane target kills the child, releases
     /// the claim, and drops the pane. Same fail-closed resolution as
     /// `StopAgent`.
-    /// (v74, x-b5d1; unread since x-a33f) `measure` is protocol-floor
+    /// (v74,; unread since) `measure` is protocol-floor
     /// only: older servers measured by it, this server no longer reads
     /// the flag. Additive, default false; floor stays 58.
     RemoveAgent {
@@ -1734,7 +1734,7 @@ pub enum Command {
         name: String,
         new_name: String,
     },
-    /// (v29, x-c376) Ask the server for a sideline row's recent transcript so the
+    /// (v29) Ask the server for a sideline row's recent transcript so the
     /// operator can peek BEFORE attaching (peek reads disk; only attach spawns a
     /// pane). `name` is an `AgentRow.name` from the last `Layout` (the same union
     /// resolver `fno agents peek` accepts); the server shells `fno agents peek
@@ -1748,7 +1748,7 @@ pub enum Command {
         name: String,
         seq: u64,
     },
-    /// (v30, x-7561) Bulk-reap every EXITED fno-agent registry row: the server
+    /// (v30) Bulk-reap every EXITED fno-agent registry row: the server
     /// shells `fno-agents reap` once, off-loop, and reports the bounded count
     /// (`reaped N`; zero candidates is a visible successful `reaped 0`). No
     /// payload - the reap verb owns the candidate set. Refused for a passive
@@ -1758,7 +1758,7 @@ pub enum Command {
     /// Sweep positively dead stored squad members and the empty sideline rows
     /// from the operator menu. The server re-folds the current identities.
     SweepDead,
-    /// (v30, x-7561) Stop a LIVE external claude-daemon row by its stable
+    /// (v30) Stop a LIVE external claude-daemon row by its stable
     /// `attach_id` (8-hex). The server re-validates the exact live external
     /// catalog row (`external` + matching `attach_id`), durably records
     /// `stopping` via a generation-checked compare-and-set BEFORE spawning
@@ -1769,7 +1769,7 @@ pub enum Command {
         attach_id: String,
         name: String,
     },
-    /// (v30, x-7561) Remove a STOPPED external tombstone by `attach_id`: a second
+    /// (v30) Remove a STOPPED external tombstone by `attach_id`: a second
     /// durable compare-and-set records `removing` before `claude rm <attach_id>`
     /// may spawn. Refused unless the persisted lifecycle record for that id is
     /// `stopped` - a live/`stopping`/`failed`/`unknown` target cannot reach rm
@@ -1778,7 +1778,7 @@ pub enum Command {
         attach_id: String,
         name: String,
     },
-    /// (v34, x-9c5f) Send a one-line free-text message to a sideline row from the
+    /// (v34) Send a one-line free-text message to a sideline row from the
     /// peek overlay (`m`). The server resolves `name` fail-closed via the shared
     /// `resolve_lifecycle_target` (mail to an EXITED row is legal - it
     /// queues durable; an external row is refused - it is not in the fno
@@ -1791,18 +1791,18 @@ pub enum Command {
         name: String,
         text: String,
     },
-    /// (v34, x-9c5f) Respawn an EXITED claude bg row from the peek overlay (`r`).
+    /// (v34) Respawn an EXITED claude bg row from the peek overlay (`r`).
     /// The server resolves `name` fail-closed, refuses a still-live row, refuses
     /// a row with no recorded `claude_session_uuid` (which also covers non-claude
     /// providers, since `derive_rows` carries the uuid only for claude rows),
     /// shape-validates the uuid before it reaches argv, then shells `fno agents
     /// spawn <name> --resume <uuid> --substrate bg` OFF-loop. The 1s registry
     /// poll owns the row flipping live; the notice is advisory (fact beats
-    /// report). Rides x-9844's revive-in-place: the porcelain is shelled as-is.
+    /// report). Rides revive-in-place: the porcelain is shelled as-is.
     RespawnAgent {
         name: String,
     },
-    /// (v36, x-1d91) Run one reorder verb against a Backlog card. The server
+    /// (v36) Run one reorder verb against a Backlog card. The server
     /// validates `node` against its own card set (fail-closed: a card that raced
     /// out between menu-open and dispatch launches no subprocess), then shells the
     /// fixed [`BacklogVerb`] OFF-loop and surfaces the verdict as a notice.
@@ -1818,7 +1818,7 @@ pub enum Command {
     },
 }
 
-/// (v36, x-1d91) The v1 reorder verb set on a Backlog card, each a fixed
+/// (v36) The v1 reorder verb set on a Backlog card, each a fixed
 /// store operation. An enum (not a string) so the wire can never widen the
 /// write. Each variant's doc names the CLI verb whose effect it mirrors -
 /// the effects, not a subprocess: since the store port the server drives
@@ -2015,7 +2015,7 @@ impl Command {
         }
     }
 
-    /// (x-9f75) Open-here: attach `id` by repointing the sender's focused
+    /// Open-here: attach `id` by repointing the sender's focused
     /// viewer pane, rather than minting a tab/split.
     pub fn attach_agent_here(id: impl Into<String>) -> Self {
         Self::AttachAgent {
@@ -2066,24 +2066,24 @@ pub enum ServerMsg {
         #[serde(default)]
         agents: Vec<AgentRow>,
         /// (v10) The focused pane's `FNO_NODE` provenance, parsed server-side
-        /// from the pane-run argv (x-84a8). `None` for an ad-hoc pane; carried
+        /// from the pane-run argv. `None` for an ad-hoc pane; carried
         /// on `Layout` (not `Frame`) because it changes only on focus/structure
         /// changes, mirroring how `SquadMeta::canonical_cwd` reaches the client.
         #[serde(default)]
         focus_node: Option<String>,
-        /// (v11, x-6f77) Board-ordered work-queue cards for the sideline backlog
+        /// (v11, x-dddd) Board-ordered work-queue cards for the sideline backlog
         /// lane (backlog_view). Empty when the graph is unreadable or has no
         /// ready/blocked/in-flight work; `#[serde(default)]` keeps a v10 reader
         /// wire-tolerant.
         #[serde(default)]
         backlog: Vec<BacklogCard>,
-        /// (v36, x-1d91) The UNCAPPED per-lane queue-card counts (lane name ->
+        /// (v36) The UNCAPPED per-lane queue-card counts (lane name ->
         /// count, lane-sorted). Feeds both the section's exact `+N more` under
         /// the capped `backlog` list above and the mini-kanban's lane headers, so
         /// the two can never disagree about how much work exists.
         #[serde(default)]
         backlog_lanes: Vec<(String, usize)>,
-        /// (v36, x-1d91) The graph read has been failing, so `backlog` is the
+        /// (v36) The graph read has been failing, so `backlog` is the
         /// last-known set rather than current fact. The section keeps rendering
         /// it (a blank lane would be worse) but says it is stale.
         #[serde(default)]
@@ -2140,16 +2140,16 @@ pub enum ServerMsg {
         text: String,
         #[serde(default)]
         block: Option<BlockMeta>,
-        /// (v51, x-588a) Identity captured from the pane's spawn argv.
+        /// (v51) Identity captured from the pane's spawn argv.
         #[serde(default)]
         pane_name: Option<String>,
-        /// (v51, x-588a) The registry identity joined to this pane ref, not a
+        /// (v51) The registry identity joined to this pane ref, not a
         /// fact owned by the pane itself.
         #[serde(default)]
         registry_fno_id: Option<String>,
     },
     /// Answer to [`ControlVerb::PaneRun`]: the fresh pane's id, machine-read
-    /// by the CLI so scripts compose. `placement` (v44, x-6928) carries the
+    /// by the CLI so scripts compose. `placement` (v44) carries the
     /// server-authored exact-placement receipt on `--at current` spawns; `None`
     /// on legacy focused-relative spawns (omitted on the wire via skip-if-none,
     /// so a v43 reader is unaffected).
@@ -2160,7 +2160,7 @@ pub enum ServerMsg {
     },
     /// A verb that carries no payload succeeded (`PaneSend`, `PaneKill`).
     Ok,
-    /// (v60, x-7b5e) Answer to [`ControlVerb::WorkspaceRestore`]: one row per
+    /// (v60) Answer to [`ControlVerb::WorkspaceRestore`]: one row per
     /// member, including every refusal with its reason.
     WorkspaceRestored { rows: Vec<RestoreRow> },
     /// (v71) Answer to [`ControlVerb::SquadReload`]: counts now held.
@@ -2172,7 +2172,7 @@ pub enum ServerMsg {
     /// (v75) Answer to [`ControlVerb::RetireSession`]: how many members the
     /// store tombstoned and how many attached panes closed. Both are zero on
     /// a repeat call: retirement is idempotent, never an error.
-    /// (x-9b37) The closed panes are NAMED, and any tab the closes emptied
+    /// The closed panes are NAMED, and any tab the closes emptied
     /// and removed is named too; both lists ride default-skipped so an older
     /// reader is unaffected.
     SessionRetired {
@@ -2194,7 +2194,7 @@ pub enum ServerMsg {
     /// else reports the failure visibly. Reliable - a dropped copy is silent
     /// data loss, never acceptable.
     Copy { text: String },
-    /// (v45, x-a2d0) A URL the user clicked, for the client to hand to the
+    /// (v45) A URL the user clicked, for the client to hand to the
     /// platform opener. Resolved server-side because the grid (and its OSC 8
     /// hyperlink state and scrollback) lives there; opened client-side because
     /// the client is the process at the human's desk, exactly like [`Self::Copy`]
@@ -2212,7 +2212,7 @@ pub enum ServerMsg {
         seq: u64,
         cells: Vec<(u16, u16)>,
     },
-    /// (v12, x-e780) The initiator-only result of a `SearchOpen`/`SearchStep`:
+    /// (v12) The initiator-only result of a `SearchOpen`/`SearchStep`:
     /// `total` matches in the snapshot and the `current` 1-based position after
     /// the jump. `total == 0` means no matches (the client shows "no matches" +
     /// BEL and the viewport did not move). Co-viewers never receive this - they
@@ -2223,7 +2223,7 @@ pub enum ServerMsg {
         total: u32,
         current: u32,
     },
-    /// (v29, x-c376) The transcript body for a [`Command::PeekAgent`], sent only
+    /// (v29) The transcript body for a [`Command::PeekAgent`], sent only
     /// to the requesting client. `seq` echoes the request's counter so the client
     /// drops a stale reply; `name` is the peeked row (for a defensive header
     /// cross-check); `lines` is the shelled `fno agents peek` output (already
@@ -2241,7 +2241,7 @@ pub enum ServerMsg {
     /// Answer to [`ControlVerb::LayoutGet`]: the nested tree + per-pane geometry
     /// for the requested scope (Locked Decision 5).
     LayoutTree { squads: Vec<SquadLayout> },
-    /// Answer to [`ControlVerb::AgentRowsGet`] : the row-set receipt.
+    /// Answer to [`ControlVerb::AgentRowsGet`]: the row-set receipt.
     AgentRowsReceipt { rows: Vec<AgentRowReceipt> },
     /// Answer to [`ControlVerb::PaneWhere`]: where an `fno_id` lives right now.
     /// The multi-tab / multi-pane shape is mirroring-ready (one id can host
@@ -2252,7 +2252,7 @@ pub enum ServerMsg {
         squad_name: Option<String>,
         /// The tabs hosting this id's panes, each with its optional name.
         tabs: Vec<(TabId, Option<String>)>,
-        /// (v51, x-1499) Each hosting tab's current 1-based ordinal, parallel
+        /// (v51) Each hosting tab's current 1-based ordinal, parallel
         /// to `tabs`, so the human receipt prints label and id together.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_ordinals: Option<Vec<usize>>,
@@ -2260,7 +2260,7 @@ pub enum ServerMsg {
         panes: Vec<u64>,
     },
     /// Answer to [`ControlVerb::PaneBreak`]: the id of the freshly created
-    /// tab, plus (v51, x-1499) its label pair for the human receipt.
+    /// tab, plus (v51) its label pair for the human receipt.
     TabSpawned {
         tab_id: TabId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2281,7 +2281,7 @@ pub enum ServerMsg {
         squad_id: u64,
         squad_name: Option<String>,
         tab_id: TabId,
-        /// (v51, x-1499) Label pair for the human receipt; see
+        /// (v51) Label pair for the human receipt; see
         /// [`ResolvedPlacement::tab_name`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_name: Option<String>,
@@ -2289,20 +2289,20 @@ pub enum ServerMsg {
         tab_ordinal: Option<usize>,
         clients_moved: usize,
     },
-    /// (v42, x-c4d4) Answer to [`ControlVerb::LayoutApply`]: one [`SlotResult`]
+    /// (v42) Answer to [`ControlVerb::LayoutApply`]: one [`SlotResult`]
     /// per requested slot, in slot order, so a script captures the created pane
     /// ids from the receipt (never predicts them). A top-level `Err` (arity /
     /// fit / unknown template) means nothing was mutated; a `LayoutApplied` with
     /// a `SpawnFailed` slot is a reported partial success.
     LayoutApplied { results: Vec<SlotResult> },
-    /// (v44, x-6928) Answer to [`ControlVerb::LayoutGraft`]: the committed
+    /// (v44) Answer to [`ControlVerb::LayoutGraft`]: the committed
     /// anchor/squad/tab and one outcome per named slot. Graft is all-or-nothing,
     /// so every slot is filled on this receipt; a refusal is a top-level `Err`.
     LayoutGrafted {
         anchor: u64,
         squad: u64,
         tab: TabId,
-        /// (v51, x-1499) Label pair for the human receipt; see
+        /// (v51) Label pair for the human receipt; see
         /// [`ResolvedPlacement::tab_name`].
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tab_name: Option<String>,
@@ -2310,7 +2310,7 @@ pub enum ServerMsg {
         tab_ordinal: Option<usize>,
         results: Vec<GraftSlotResult>,
     },
-    /// (v51, x-1499) Answer to [`ControlVerb::TabWhere`]: what lives at a tab
+    /// (v51) Answer to [`ControlVerb::TabWhere`]: what lives at a tab
     /// location right now. `panes` is every pane in the tab in tree order,
     /// each with its joined worker identity; an occupant with `fno_id: None`
     /// is an EXPLICIT empty pane, never a failed lookup. A tab always holds
@@ -2335,7 +2335,7 @@ pub enum ServerMsg {
     },
 }
 
-/// One pane of a [`ServerMsg::TabLocation`] (v51, x-1499): the pane id plus
+/// One pane of a [`ServerMsg::TabLocation`] (v51): the pane id plus
 /// the registry worker it hosts, if any. `fno_id: None` is the explicit
 /// empty marker for a pane nobody occupies.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2345,7 +2345,7 @@ pub struct TabPaneOccupant {
 }
 
 /// One named slot's outcome in a [`ServerMsg::LayoutGrafted`] receipt (v44,
-/// x-6928). Graft never partially succeeds, so `pane_id` is always present.
+///). Graft never partially succeeds, so `pane_id` is always present.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GraftSlotResult {
     pub slot: String,
@@ -2353,7 +2353,7 @@ pub struct GraftSlotResult {
     pub outcome: GraftOutcome,
 }
 
-/// How a graft slot was filled (v44, x-6928).
+/// How a graft slot was filled (v44).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum GraftOutcome {
@@ -2393,7 +2393,7 @@ pub struct TabLayout {
     pub focus: PaneId,
     pub root: Node,
     pub panes: Vec<(u64, Rect)>,
-    /// (v51, x-1499) Per-pane worker identities joined from the registry,
+    /// (v51) Per-pane worker identities joined from the registry,
     /// parallel to `panes`, filled on the control-verb path so the human
     /// layout rendering can name occupants. `None` keeps the machine JSON
     /// byte-shape unchanged for every existing consumer.
@@ -2419,14 +2419,14 @@ pub struct PaneInfo {
     /// Missing/false is never treated as empty by a cleanup caller.
     #[serde(default)]
     pub pristine_idle_shell: bool,
-    /// (v65, x-cf97) The pane ran something and sits at a prompt NOW: shell
+    /// (v65) The pane ran something and sits at a prompt NOW: shell
     /// integration measured, no command running, a completed block. Narrower
     /// than `!pristine_idle_shell` (which also covers running and unmeasured
     /// panes): a cleanup caller may close on this, never the bare negation.
     /// `#[serde(default)]` keeps a pre-v65 reader wire-tolerant.
     #[serde(default)]
     pub shell_idle: bool,
-    /// (v51, x-1499) The pane's tab name and 1-based ordinal, so the human
+    /// (v51) The pane's tab name and 1-based ordinal, so the human
     /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` mid-teardown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_name: Option<String>,
@@ -2442,12 +2442,12 @@ pub struct PaneInfo {
     /// tab. `#[serde(default)]`: a v68 payload reads false.
     #[serde(default)]
     pub orphaned_worker: bool,
-    /// (x-1b90) When the release tier fired, the evidence the release rode:
+    /// When the release tier fired, the evidence the release rode:
     /// `reaped <harness> <session id> at <ts>: <basis>`. Additive like
     /// `orphaned_worker`; absent on every other pane and every other tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
-    /// (x-dfe7) The joined row's classified lineage: the CURRENT harness
+    /// The joined row's classified lineage: the CURRENT harness
     /// session the row answers as, the succession chain it retired, and the
     /// fork edge of a parallel branch. `fno_id` stays the stable thread join;
     /// these print BESIDE it so a retired id never reads as current.
@@ -2457,7 +2457,7 @@ pub struct PaneInfo {
     pub predecessor_session_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_session_id: Option<String>,
-    /// (v51, x-588a) The pane's spawn-captured `FNO_AGENT_SELF` identity.
+    /// (v51) The pane's spawn-captured `FNO_AGENT_SELF` identity.
     #[serde(default)]
     pub name: Option<String>,
 }
@@ -2533,38 +2533,38 @@ pub mod err_code {
     /// no live pane (a paneless bg/headless session). DISTINCT from NOT_FOUND so
     /// a script can branch (Locked 4).
     pub const NOT_PANE_HOSTED: u32 = 9;
-    /// (v42, x-c4d4) `LayoutApply`: a fixed-arity template got the wrong slot
+    /// (v42) `LayoutApply`: a fixed-arity template got the wrong slot
     /// count (e.g. `grid-2x2` with 3 slots). Pre-mutation, atomic.
     pub const TEMPLATE_ARITY: u32 = 10;
-    /// (v42, x-c4d4) `LayoutApply`: the template's slots cannot tile the tab's
+    /// (v42) `LayoutApply`: the template's slots cannot tile the tab's
     /// viewport above `MIN_ROWS x MIN_COLS`. The refusal names the overflowing
     /// slots; the tab is left completely unchanged (atomic).
     pub const TEMPLATE_UNFITTABLE: u32 = 11;
-    /// (v42, x-c4d4) `LayoutApply`: an unknown template name. Pre-mutation, atomic.
+    /// (v42) `LayoutApply`: an unknown template name. Pre-mutation, atomic.
     pub const TEMPLATE_UNKNOWN: u32 = 12;
     /// `PaneFocus`: the pane exists but no non-passive client is attached, so
     /// there is no viewer to move. DISTINCT from [`DEAD_PANE`] on purpose: "your
     /// pane is gone" and "nobody is watching" are different problems, and
     /// collapsing them leaves the operator unable to tell which one they have.
     pub const NO_CLIENT: u32 = 13;
-    /// (v51, x-588a) The addressed identity disagrees with the pane's captured
+    /// (v51) The addressed identity disagrees with the pane's captured
     /// identity or its unique registry occupant; no bytes were typed.
     pub const TARGET_IDENTITY_MISMATCH: u32 = 14;
-    /// (v60, x-7b5e) `WorkspaceRestore` arrived before the session's first real
+    /// (v60) `WorkspaceRestore` arrived before the session's first real
     /// attach, so the persisted squads were never read into memory and an empty
     /// member list would read as "nothing to restore". The refusal names the
     /// attach precondition; the store is untouched.
     pub const RESTORE_NOT_RUN: u32 = 15;
-    /// (v61, x-7d02) `PaneSend` targeted a pane whose registry row is DND.
+    /// (v61) `PaneSend` targeted a pane whose registry row is DND.
     /// The bytes did not land; use mail send to queue durable until release.
     pub const TARGET_DND: u32 = 16;
-    /// (v75, x-7649) `RetireSession`'s durable half failed: the store write
+    /// (v75) `RetireSession`'s durable half failed: the store write
     /// did not land, so the retirement is NOT durable and the caller retries
     /// the whole verb.
     pub const STORE_WRITE_FAILED: u32 = 17;
 }
 
-/// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
+/// One pane inside a [`TabMeta`] (v22): the leaf id the session
 /// navigator's goto targets plus a derived, display-only `label` (the running
 /// command / node / cwd basename, else `shell`). The client never focuses a
 /// pane by label - it sends `FocusPane(id)`; the label is filter/display text.
@@ -2582,7 +2582,7 @@ pub struct PaneMeta {
 pub struct TabMeta {
     pub id: u64,
     pub name: String,
-    /// (v35, x-0f9d) Whether `name` is an operator-CHOSEN name (an explicit
+    /// (v35) Whether `name` is an operator-CHOSEN name (an explicit
     /// rename) versus a pane-derived or ordinal fallback the server resolved.
     /// The wire `name` flattens all three sources, but the strip renders a
     /// chosen name WITHOUT a forced ordinal (Locked 2) while a derived/ordinal
@@ -2591,7 +2591,7 @@ pub struct TabMeta {
     /// false -> today's ordinal rendering).
     #[serde(default)]
     pub named: bool,
-    /// (v22, x-653d) Every leaf pane of this tab, so the session navigator can
+    /// (v22) Every leaf pane of this tab, so the session navigator can
     /// list and goto panes across tabs/squads (the sideline only ever tiled the
     /// active view's panes). `#[serde(default)]` keeps a v21 reader wire-tolerant
     /// (empty -> the navigator simply lists no plain panes for the tab).
@@ -2623,7 +2623,7 @@ pub struct SquadMeta {
     pub canonical_cwd: String,
     pub tabs: Vec<TabMeta>,
     pub active_tab: usize,
-    /// (v19, x-96e8) Total live pane count across ALL the squad's tabs - the
+    /// (v19) Total live pane count across ALL the squad's tabs - the
     /// blast radius the `RemoveSquad` confirm names before it reaps them.
     /// Display-only; a slightly stale count only skews the prompt, and the
     /// server reaps whatever is actually live at commit.
@@ -2928,7 +2928,7 @@ thread_local! {
 /// (`FNO_CONFIG` sole candidate, else the global config; the cwd-anchored
 /// project tier is deliberately absent - see `resolved_state_root`), else
 /// `~/.fno/mux`. `FNO_CONFIG` therefore isolates the mux with everything else
-/// (x-f02b): a demo config's state root gets its own socket dir, and a pinned
+/// a demo config's state root gets its own socket dir, and a pinned
 /// config that cannot be parsed lands the dir beside the pinned file rather
 /// than reaching back to the real fleet's `~/.fno/mux`.
 ///
@@ -2963,7 +2963,7 @@ fn mux_dir_uncached() -> PathBuf {
 /// (yaml-pinned, unreadable, missing key): isolation was requested, so the
 /// root stays the pinned file's own directory - standard layouts keep the
 /// config inside the state dir. Falling back to `~/.fno` here is the exact
-/// leak x-f02b closes. Note Python's own loader defaults an absent state_dir
+/// leak closes. Note Python's own loader defaults an absent state_dir
 /// to `~/.fno/`, so a pinned config with no key leaves the mux MORE isolated
 /// than the graph; that asymmetry is deliberate and the warning names it.
 #[cfg(not(test))]
@@ -3309,7 +3309,7 @@ pub fn legacy_fallback_allowed() -> bool {
 /// TUI client appends it to its client log instead. proto itself never
 /// writes stderr: resolution runs before the client enters the alternate
 /// screen, and any pre-TUI stderr byte lands in the PTY the harness reads
-/// (client.rs, x-0296's NEVER-stderr rule).
+/// (client.rs, NEVER-stderr rule).
 static CONFIG_WARNING: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
 
 #[allow(dead_code)]
@@ -3352,7 +3352,7 @@ pub fn socket_path(session: &str) -> Result<PathBuf, String> {
 }
 
 /// The wire-version sidecar for a session socket (`<name>.sock` -> `<name>.ver`),
-/// written by the server at startup with its [`PROTO_VERSION`] (x-1a85). It lets
+/// written by the server at startup with its [`PROTO_VERSION`]. It lets
 /// `fno mux ls` tell a below-floor server from one whose wire is compatible - a
 /// distinction the FROZEN, version-agnostic `Query`/`Info` probe cannot make.
 /// A `.ver` file is skipped by [`session_names`]'s `.sock` filter, so it never
@@ -3362,7 +3362,7 @@ pub fn version_sidecar_path(socket: &Path) -> PathBuf {
 }
 
 /// The pid sidecar for a session socket (`<name>.sock` -> `<name>.pid`),
-/// written by the server at bind with its own pid (x-48a5) so `kill-server`
+/// written by the server at bind with its own pid so `kill-server`
 /// can signal a wedged holder without an accepted connection - the
 /// connected-peer route cannot serve a connect that never completes. Skipped
 /// by [`session_names`]'s `.sock` filter, the same reason `.ver` is. Content is
@@ -3376,7 +3376,7 @@ pub fn pid_sidecar_path(socket: &Path) -> PathBuf {
 /// meaningful only compared for equality against a value captured for the
 /// SAME pid, never converted to wall-clock time. Lets a pid sidecar prove it
 /// still names the process that wrote it rather than one that reused the pid
-/// after that process exited (x-48a5): a stale sidecar can survive a rebind
+/// after that process exited: a stale sidecar can survive a rebind
 /// whose rewrite failed (best-effort, like the `.ver` sidecar), so the pid
 /// alone is not proof of identity.
 #[cfg(target_os = "linux")]
@@ -3423,7 +3423,7 @@ pub fn write_pid_sidecar(socket: &Path) -> std::io::Result<()> {
     std::fs::write(pid_sidecar_path(socket), contents)
 }
 
-/// Parse a `.pid` sidecar's contents: `"<pid>:<start_time>"` (x-48a5, the
+/// Parse a `.pid` sidecar's contents: `"<pid>:<start_time>"` (the
 /// identity-checked format) or bare `"<pid>"` (a platform `pid_start_time`
 /// cannot supply one for). Tolerant of trailing whitespace/newline. A `:` is
 /// present only when the writer meant to supply a start time, so a present
@@ -3441,7 +3441,7 @@ pub fn parse_pid_sidecar(s: &str) -> Option<(i32, Option<u64>)> {
 /// True while `pid` is a zombie: dead but not yet reaped by its parent, so
 /// `kill(pid, 0)` keeps succeeding even though it holds no fds and serves
 /// nothing. A bare-init container never reaps an adopted orphan, so waiting
-/// out a grace window for ESRCH there never converges (x-48a5); a zombie
+/// out a grace window for ESRCH there never converges; a zombie
 /// must read as gone the moment it is observed.
 #[cfg(target_os = "linux")]
 pub fn pid_is_zombie(pid: i32) -> bool {
@@ -3478,7 +3478,7 @@ pub fn pid_is_zombie(_pid: i32) -> bool {
 /// reads as not-provably-dead. The single implementation for a read that
 /// three call sites (kill-server's pre-check, its poll loop, and the
 /// server's own respawn-vs-alive check) each duplicated inline before
-/// x-48a5, which is exactly the shape that lets one of them drift.
+///, which is exactly the shape that lets one of them drift.
 pub fn pid_confirmed_dead(pid: i32) -> bool {
     let result = unsafe { libc::kill(pid, 0) };
     result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
@@ -3973,7 +3973,7 @@ mod tests {
             ClientMsg::Command(Command::DetachPane { pane: 7 }),
             ClientMsg::Command(Command::attach_agent("c19cd2c3")),
             ClientMsg::Command(Command::DispatchNode {
-                node: "x-a496".into(),
+                node: "x-aaaa".into(),
                 account: None,
             }),
             ClientMsg::Query,
@@ -4043,11 +4043,11 @@ mod tests {
 
     #[test]
     fn proto_v43_us9_drag_commands_roundtrip() {
-        // US9 (x-d6a8): the two interactive drag verbs are additive Command
+        // US9: the two interactive drag verbs are additive Command
         // variants that ride the 43 bump. Externally-tagged, so a v42 server
         // cannot decode them at all - the PROTO_VERSION handshake is what stops
         // the skew (a mismatched client is told to restart the server), NOT a
-        // serde default. The anchored-layout node (x-6928) bumped 43 -> 44;
+        // serde default. The anchored-layout node bumped 43 -> 44;
         // what we assert here is (a) the canonical version and (b) the new
         // variants survive the codec losslessly, exactly the discipline every
         // prior new-verb bump followed. (The version literal is pinned once, in
@@ -4082,7 +4082,7 @@ mod tests {
 
     #[test]
     fn agent_row_from_pre_external_json_defaults_external_false() {
-        // x-0a2e AC3-FR: a pre-external (<=v19) AgentRow omits `external`
+        // AC3-FR: a pre-external (<=v19) AgentRow omits `external`
         // entirely. A v20 reader must decode it as `false`, never fail - the
         // skew window that lets an older client talk to a v20 server during
         // the handshake, and vice versa.
@@ -4094,7 +4094,7 @@ mod tests {
 
     #[test]
     fn agent_row_lane_axes_are_wire_tolerant_both_ways() {
-        // (x-1b35, v63) The three lane axes ride additive and
+        // (v63) The three lane axes ride additive and
         // skip-when-None. A pre-v63 row (no keys) decodes with all three
         // None; a None row serializes without the keys; a filled row
         // roundtrips verbatim.
@@ -4130,7 +4130,7 @@ mod tests {
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
         assert_eq!(PROTO_VERSION, 81);
-        // (x-8f9d) v64 added `PanePlacement.portal` and `AgentRow.portal`.
+        // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
         // version because a bump that DID move the floor would refuse every
@@ -4190,7 +4190,7 @@ mod tests {
 
     #[test]
     fn proto_v44_placement_fallback_and_anchored_spec_roundtrip() {
-        // x-6928: the 43 -> 44 bump adds the serde-defaulted placement fallback
+        // the 43 -> 44 bump adds the serde-defaulted placement fallback
         // and the typed anchored-layout spec. A v43 PanePlacement omits
         // `fallback`; a v44 reader decodes it as NewTab (the shipped default),
         // never a failure - the skew window the handshake holds. An exact
@@ -4312,7 +4312,7 @@ mod tests {
 
     #[test]
     fn agent_row_from_pre_seen_json_defaults_seen_false() {
-        // AC1-ERR (x-4328): a pre-v23 AgentRow omits `seen` entirely. A v23
+        // AC1-ERR: a pre-v23 AgentRow omits `seen` entirely. A v23
         // reader must decode it as `false` - the client then degrades to the
         // pre-feature `done == unseen`, never a panic.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -4323,7 +4323,7 @@ mod tests {
 
     #[test]
     fn agent_row_from_pre_subline_json_defaults_subline_none() {
-        // AC2-EDGE (x-cd67): a pre-v32 AgentRow omits `subline` entirely
+        // AC2-EDGE: a pre-v32 AgentRow omits `subline` entirely
         // (skip-when-None). A v32 reader must decode it as `None` and render
         // the pre-feature one-line row, never fail - the skew window contract.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -4337,7 +4337,7 @@ mod tests {
         // A pre-v18 (v11..v17) BacklogCard omits the route fields entirely
         // (skip-when-None). A v18 reader must decode it as all-None, never
         // fail - same skew contract as the v14 `AgentRow.attach_id` bump.
-        let pre_v18 = r#"{"id":"x-54fa","slug":"card-attach","priority":"p2",
+        let pre_v18 = r#"{"id":"x-bbbb","slug":"card-attach","priority":"p2",
                       "state":"InFlight"}"#;
         let card: BacklogCard = serde_json::from_str(pre_v18).unwrap();
         assert_eq!(card.pane_id, None);
@@ -4352,7 +4352,7 @@ mod tests {
 
     #[test]
     fn pane_placement_from_pre_here_json_defaults_here_false() {
-        // AC3-EDGE (x-9f75): a v30 PanePlacement omits `here`; a v31 reader must decode it as `false`
+        // AC3-EDGE: a v30 PanePlacement omits `here`; a v31 reader must decode it as `false`
         // (today's tab/split semantics), never fail - the same skew contract as every prior serde-default bump.
         let v30 = r#"{"target":"CurrentRoute","split":null}"#;
         let p: PanePlacement = serde_json::from_str(v30).unwrap();
@@ -4511,10 +4511,10 @@ mod tests {
                         pane_activity: None,
                     },
                 ],
-                focus_node: Some("x-66e8".into()),
+                focus_node: Some("x-cccc".into()),
                 backlog: vec![
                     BacklogCard {
-                        id: "x-6f77".into(),
+                        id: "x-dddd".into(),
                         slug: "work-queue-sideline".into(),
                         priority: "p1".into(),
                         state: CardState::InFlight,
@@ -4853,7 +4853,7 @@ mod tests {
         );
     }
 
-    // ---- v41 (x-d865) wire compatibility -------------------------------
+    // ---- v41 wire compatibility -------------------------------
 
     #[test]
     fn v41_control_verbs_and_replies_round_trip() {
@@ -4872,7 +4872,7 @@ mod tests {
             ControlVerb::PaneWhere {
                 fno_id: "abcd1234".into(),
             },
-            // (x-3e17, v46) A new externally-tagged variant, so a v45 server
+            // (v46) A new externally-tagged variant, so a v45 server
             // cannot decode it at all - the handshake is what stops the skew.
             ControlVerb::PaneFocus { pane: 31 },
             ControlVerb::LayoutGet {
@@ -4934,7 +4934,7 @@ mod tests {
         let bytes = serde_json::to_vec(&loc).unwrap();
         assert_eq!(loc, serde_json::from_slice::<ServerMsg>(&bytes).unwrap());
 
-        // (x-3e17, v46) The focus receipt, including the field that keeps it
+        // (v46) The focus receipt, including the field that keeps it
         // honest: `clients_moved` must survive the wire, since the CLI's whole
         // receipt is "how many viewers actually ended up there".
         let focused = ServerMsg::PaneFocused {

@@ -1,4 +1,4 @@
-"""``fno backlog note``: the Rust note action's public bridge (x-920a).
+"""``fno backlog note``: the Rust note action's public bridge.
 
 The native action owns state policy, history routing, and the budget; this
 bridge keeps the recipient walk, evidence checks, identity, and transport.
@@ -142,7 +142,7 @@ def native_update(
     graph_path,
     json_out: bool = True,
 ) -> "tuple[int, Optional[dict]]":
-    """One native `backlog-update` invocation (x-665f): the patch door.
+    """One native `backlog-update` invocation : the patch door.
 
     Returns `(exit, receipt)`; the receipt is parsed from the child's stdout
     when `json_out` and the exit is 0. Without `json_out` the child's text

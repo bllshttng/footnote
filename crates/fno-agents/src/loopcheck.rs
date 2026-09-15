@@ -1,4 +1,4 @@
-//! `fno-agents loop-check` verb (Task 1.1, ab-d0337fbc).
+//! `fno-agents loop-check` verb (Task 1.1).
 //!
 //! Single entry-point decision-maker for the target stop hook. Reads external
 //! state (manifest, transcript, git, gh, events, ledger) and returns a JSON
@@ -60,11 +60,11 @@ pub enum TerminationReason {
     DoneAwaitingMerge,
     /// A PR is green, mergeable, and nothing objected - but nothing reviewed it
     /// either (coverage 0 or Unknown; the old conjuncts all asked "did anyone
-    /// object", never "did anyone review", x-0eaf). Terminal on the first
+    /// object", never "did anyone review"). Terminal on the first
     /// evaluation (no iteration spent waiting) and NOT a ship reason, shaped
     /// like `DoneAwaitingMerge`: `should_arm_auto_merge` arms only on
     /// `DonePRGreen`, so a human merge plus reconcile closes it. The
-    /// discriminator is coverage, NOT the `attended` manifest field (x-be78:
+    /// discriminator is coverage, NOT the `attended` manifest field (:
     /// that field lies for spawned workers).
     DoneUnreviewed,
     /// Work complete (PR open, green, HEAD shipped) but `done()` fails because a
@@ -77,7 +77,7 @@ pub enum TerminationReason {
     /// / a local review and a re-run), then the out-of-band-merge reconcile
     /// path closes it. This is the fail-closed flip of the old "drop the bot
     /// and proceed" behavior that let ~10 PRs (#890-#912) merge unreviewed
-    /// (x-9ab2).
+    ///.
     DoneAwaitingReview,
     /// A plan-only thread reached the plan boundary cleanly (manifest `planned`
     /// flag + a promise). It produced planning output, not a delivery, so it is
@@ -148,7 +148,7 @@ impl Default for Manifest {
 /// the frontmatter block. `fno do target init` writes the immutable frontmatter
 /// first, then APPENDS the node-claim fields (`target_claim_key/holder/ttl`)
 /// after the closing `---`, so `parse_manifest` (frontmatter-bounded) never sees
-/// them. Renewal reads them here instead (x-ba4b). Surrounding quotes stripped.
+/// them. Renewal reads them here instead. Surrounding quotes stripped.
 fn scan_manifest_field(content: &str, field: &str) -> Option<String> {
     let prefix = format!("{field}:");
     content.lines().find_map(|line| {
@@ -271,13 +271,13 @@ pub(crate) struct Settings {
     unattended_wall_cap_minutes: Option<Result<u64, String>>,
     /// config.budget.unattended.cost_cap_usd
     unattended_cost_cap_usd: Option<Result<f64, String>>,
-    /// flat budget_cap: (folds in ab-41b13d9d) - applies as cost cap for both modes
+    /// flat budget_cap: (folds in) - applies as cost cap for both modes
     flat_budget_cap: Option<Result<f64, String>>,
     /// config.ci.declared_none: true
     ci_declared_none: bool,
     /// config.external_reviewers list
     external_reviewers: Vec<String>,
-    /// config.review.github_apps (x-4baa; the GitHub App bot logins gate).
+    /// config.review.github_apps (; the GitHub App bot logins gate).
     /// None = key absent -> code default (empty, no gate).
     /// Some([]) = explicitly `[]` -> declared no-review-gate path.
     /// Some(list) = every listed login must have a completed review pass.
@@ -297,7 +297,7 @@ pub(crate) struct Settings {
     /// one still holds the gate until addressed ("honor if present"). None =
     /// no optional reviewers.
     optional_apps: Option<Vec<String>>,
-    /// config.review.reviewers (x-e703, Phase 2): local reviewer names (sigma |
+    /// config.review.reviewers (Phase 2): local reviewer names (sigma |
     /// code-review | declare) satisfied by a head-pinned `review_attestation`
     /// event in events.jsonl, NOT a GitHub login. Empty = no reviewers gate
     /// (additive to the login gate; no "declared empty" distinction needed). A
@@ -339,12 +339,12 @@ pub(crate) struct Settings {
     /// from the older head still carries. `0` disables the arm. Parsed in the
     /// same block as `max_rounds`; resolved by `carry_interdiff_lines_resolved`.
     carry_interdiff_lines: Option<i64>,
-    /// config.review.nudge (x-b167): per-login overrides for the bot-review
+    /// config.review.nudge: per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
     /// malformed entry degrades that login to non-nudgeable, never panics (AC8).
     nudge_overrides: Vec<NudgeOverride>,
-    /// Top-level `done_probes` (x-a534): the repo-wide probe list, evaluated
+    /// Top-level `done_probes`: the repo-wide probe list, evaluated
     /// alongside the plan's own. The file is FLAT, so this reads off the TOML
     /// root, not out of a `config` table. None = key absent (no project gate);
     /// Some(Err(why)) = present but not an array of strings, which BLOCKS - a
@@ -395,7 +395,7 @@ fn strip_inline_comment(raw: &str) -> &str {
     }
 }
 
-/// Fail-closed sentinel for an unparseable config.toml (x-81d9 (c)). A
+/// Fail-closed sentinel for an unparseable config.toml ((c)). A
 /// scanner error (e.g. tab-indentation, which YAML forbids) previously caused
 /// the hand-parser to silently drop the whole config.review subtree, yielding
 /// zero required_bots and shipping the PR unreviewed. Now such a file fails
@@ -456,7 +456,7 @@ fn value_as_login_list(v: &toml::Value) -> Option<Vec<String>> {
     }
 }
 
-/// One `[review.nudge]` per-login override (x-b167). Every field is optional in
+/// One `[review.nudge]` per-login override. Every field is optional in
 /// TOML; a value of the wrong type sets `malformed` so that login degrades to
 /// non-nudgeable rather than panicking - the stop gate must never panic (AC8).
 #[derive(Debug, Clone, Default)]
@@ -526,7 +526,7 @@ fn value_as_nudge_overrides(v: &toml::Value) -> Vec<NudgeOverride> {
     out
 }
 
-/// Classify a config.review.reviewers value (x-e703 local-attestation gate).
+/// Classify a config.review.reviewers value (local-attestation gate).
 /// Unlike the login lists, a structurally-wrong mapping fails CLOSED (Python
 /// raises) via the unsatisfiable sentinel, never a silent empty gate. A leading
 /// '/' is normalized off each entry.
@@ -681,7 +681,7 @@ pub(crate) fn value_as_probe_list(v: &toml::Value) -> Result<Vec<String>, String
 }
 
 /// Settings with the login gate pinned unsatisfiable - the fail-closed result
-/// when config.toml cannot be parsed as TOML at all (x-81d9 (c)). The
+/// when config.toml cannot be parsed as TOML at all ((c)). The
 /// sentinel goes into BOTH github_apps and required_bots: resolved_required_bots
 /// prefers github_apps.or(required_bots), so pinning required_bots alone would
 /// be silently outranked by a parseable global file's github_apps during the
@@ -699,7 +699,7 @@ fn fail_closed_settings() -> Settings {
 /// Parse config.toml with the `toml` crate (stage 3), replacing the
 /// former hand-rolled indent state machine that derived one global indent unit
 /// and silently dropped the config.review subtree on tabs or mixed widths
-/// (x-81d9 (c)). A genuine YAML scanner error (e.g. tab indentation) returns
+/// ((c)). A genuine YAML scanner error (e.g. tab indentation) returns
 /// Err so the caller can fail closed + emit an event, rather than silently
 /// zeroing the gate. The typed-Value classification preserves every semantic
 /// the old ListForm branches encoded (see the value_as_* helpers).
@@ -712,7 +712,7 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         s.flat_budget_cap = read_f64_cap(v, "budget_cap");
     }
 
-    // Top-level flat `done_probes` (x-a534). Presence is recorded even when the
+    // Top-level flat `done_probes`. Presence is recorded even when the
     // value is junk: the Err arm blocks downstream rather than degrading to
     // "no probes declared".
     if let Some(v) = root.get("done_probes") {
@@ -911,7 +911,7 @@ enum Intent {
     Aborted {
         reason: String,
     },
-    /// Agent-declared async watch (x-e2c8): it has armed a harness-tracked
+    /// Agent-declared async watch: it has armed a harness-tracked
     /// watcher and wants the session to idle until that watcher fires rather
     /// than re-blocking every stop tick. All attributes are advisory (used for
     /// the event and the lease math), never load-bearing: external truth
@@ -950,7 +950,7 @@ fn extract_assistant_text(val: &Value) -> String {
 }
 
 /// Detect intent with proper attribute extraction. Precedence within one
-/// message: aborted > watching > promise (x-e2c8). aborted is the hardest stop;
+/// message: aborted > watching > promise. aborted is the hardest stop;
 /// watching outranks promise so a session that both promises and asks to idle
 /// idles (its promise is re-evaluated on the next wake).
 fn detect_intent_from_text(text: &str) -> Intent {
@@ -987,7 +987,7 @@ pub(crate) fn parse_xml_attr(tag_text: &str, attr: &str) -> Option<String> {
 }
 
 /// Extract `last_assistant_message` from the Stop-hook stdin JSON
-/// (ab-223d2dae). The harness emits it as a plain string (the stopping
+///. The harness emits it as a plain string (the stopping
 /// turn's final assistant text, blocks joined by newline and trimmed),
 /// omitted when empty. Any parse failure -> None so the caller falls back
 /// to the transcript scan.
@@ -1002,7 +1002,7 @@ fn extract_last_assistant_message(hook_input: &str) -> Option<String> {
     }
 }
 
-/// A-primary, B-fallback intent read (ab-223d2dae). A present payload is the
+/// A-primary, B-fallback intent read. A present payload is the
 /// stopping turn's final text - recomputed per fire, race-free, overwrite-
 /// proof - and is authoritative, INCLUDING its "no tag" answer. Falling
 /// through to the transcript behind a tag-less payload would resurrect the
@@ -1018,7 +1018,7 @@ fn detect_intent(
     }
 }
 
-/// Fallback transcript scan (ab-223d2dae, B): bounded lookback over the
+/// Fallback transcript scan (B): bounded lookback over the
 /// newest INTENT_LOOKBACK_ENTRIES assistant text entries instead of
 /// last-line-only. Newest tag wins; a tag-less entry no longer ends the
 /// scan, which covers the promise-overwritten-by-block-feedback shape when
@@ -1035,7 +1035,7 @@ fn detect_intent_full(transcript_path: &Path) -> Intent {
     let lines: Vec<&str> = content.lines().collect();
     let mut scanned: usize = 0;
     // `watching` is honored ONLY from the single newest assistant entry
-    // (x-e2c8): a stale watch-request from earlier work must not idle a session
+    // a stale watch-request from earlier work must not idle a session
     // that has since moved on. `promise`/`aborted` keep their bounded lookback.
     let mut newest_entry = true;
     for line in lines.iter().rev() {
@@ -1178,7 +1178,7 @@ struct PrInfo {
     /// Required bots with no completed review pass (names the gap in the
     /// block message, AC1-UI).
     missing_bots: Vec<String>,
-    /// Per-missing-bot nudge classification for this fire (x-b167), same order
+    /// Per-missing-bot nudge classification for this fire, same order
     /// as `missing_bots`. Empty when the review reads were skipped or there is no
     /// PR. `missing_bots` stays the gate; this only changes idling and messaging.
     /// An EMPTY list with a non-empty `missing_bots` means "not classified" and
@@ -1212,7 +1212,7 @@ struct PrInfo {
     /// across two producer axes (github_app review objects; local_attestation
     /// head-pinned passes). Terminal selection consumes this: a run that would
     /// report `DonePRGreen` at coverage 0/Unknown reports `DoneUnreviewed`
-    /// instead (x-0eaf). Never cached, never inferred from `reviewed`.
+    /// instead. Never cached, never inferred from `reviewed`.
     coverage: CoverageReport,
     /// The resolved review-posture verdict , computed alongside
     /// coverage when the caller supplied a resolved `review.posture`. None on
@@ -1338,7 +1338,7 @@ fn harness_can_self_review(_harness: Option<&str>) -> bool {
 /// floors.
 const KNOWN_VERBLESS_HARNESSES: &[&str] = &[];
 
-/// The self-review FLOOR policy on the author harness (x-129b). Distinct from
+/// The self-review FLOOR policy on the author harness. Distinct from
 /// the capability question above: `None` answers "unattributable", not
 /// "verbless". With the owned lane as the default reviewer no KNOWN harness
 /// escapes the floor - claude and codex never did, and gemini/agy/opencode
@@ -1515,12 +1515,12 @@ fn classify_payload_for_floor(
     }
 }
 
-// ── review freshness: one predicate, both producers (x-5b99 / x-62a1) ─────────
+// ── review freshness: one predicate, both producers (/) ─────────
 //
 // The predicate, its git reads, and the resolver live in
 // `review_freshness.rs`, a module named by their question: `loopcheck.rs` is
 // over the file budget and shrink-only, so the freshness machinery moved there
-// rather than growing here. The x-82ac interdiff-carry arm (law d-608344c1)
+// rather than growing here. The interdiff-carry arm (law d-608344c1)
 // rode the same move.
 
 #[cfg(test)]
@@ -1563,7 +1563,7 @@ use watch_lease::{harness_can_idle, watch_window_ms};
 /// reviewer's worktree necessarily carries a branch of its own (git refuses
 /// two worktrees on one branch), so a branch-only match would read its
 /// exact-HEAD pass as out of scope. The branch arm is what survives a head
-/// move: a same-branch attestation can still carry (x-62a1), while a foreign
+/// move: a same-branch attestation can still carry, while a foreign
 /// branch at a different head stays out of scope - the cherry-pick shape.
 ///
 /// Named, not closed: a shared sha proves COMMIT identity, not PR identity.
@@ -2058,7 +2058,7 @@ fn scan_unrecorded_decisions(
 }
 
 /// The `config.review.reviewers` entries NOT satisfied by a head-pinned
-/// `review_attestation` event (x-e703 Phase 2; list form added by x-cdc7). A
+/// `review_attestation` event (Phase 2; list form added by). A
 /// reviewer is satisfied when events.jsonl carries a line with
 /// `type == "review_attestation"`, `data.reviewer` matching (leading '/'
 /// stripped on both sides), the line in scope for this PR
@@ -2072,9 +2072,9 @@ fn scan_unrecorded_decisions(
 ///
 /// Fail closed everywhere: an empty/unreadable events file, a stale head_sha
 /// (attestation for a prior commit), or a `fail` verdict leaves the reviewer
-/// UNSATISFIED - except x-aecc's ONE softening directly below. An empty
+/// UNSATISFIED - except ONE softening directly below. An empty
 /// reviewer list is vacuously satisfied (no reviewers gate).
-/// x-aecc: the one softening of the `fail` arm - a `fail` whose own chain
+/// the one softening of the `fail` arm - a `fail` whose own chain
 /// raised keyed findings that are all terminally dispositioned ANSWERS this
 /// head, so it satisfies the reviewer exactly like a pass ("answered at this
 /// head", never "clean at this head"). A findings-free fail and a RETRACTION
@@ -2130,7 +2130,7 @@ pub fn unattested_reviewers_scan(
     // that sequence.
     let mut other_heads: std::collections::HashMap<String, Vec<(String, bool)>> =
         std::collections::HashMap::new();
-    // x-aecc per-reviewer answered-fail marks, collected in the SAME pass
+    // per-reviewer answered-fail marks, collected in the SAME pass
     // (review findings 1-2): which reviewers' own fails raised keyed
     // findings, and whether a reviewer's latest counting line is a RETRACTION
     // (which revokes and never satisfies). Plus the in-scope chain for the
@@ -2211,7 +2211,7 @@ pub fn unattested_reviewers_scan(
         latest_pass.insert(r.clone(), is_pass);
         latest_is_retraction.insert(r, is_retraction);
     }
-    // x-aecc: a latest-`fail` reviewer is satisfied when its OWN fails raised
+    // a latest-`fail` reviewer is satisfied when its OWN fails raised
     // keyed findings AND the chain's blocking findings are all terminal (or
     // cap-filed, which only hard findings survive). A bystander's
     // findings-free fail never rides another reviewer's dispositions, and a
@@ -2267,7 +2267,7 @@ pub fn unattested_reviewers_scan(
     (out, malformed)
 }
 
-/// An operator review finding (x-f8d4) still open: a `review_finding` event for
+/// An operator review finding still open: a `review_finding` event for
 /// the node with no later `review_finding_resolved` for the same id.
 #[derive(Debug, Clone)]
 struct OpenFinding {
@@ -2415,7 +2415,7 @@ fn read_pr_info(
     } else {
         "pr_checks_parse"
     };
-    // An explicit PR selector for the branch-resolved gh calls (x-3a3f):
+    // An explicit PR selector for the branch-resolved gh calls:
     // Some(n) inserts the number (`gh pr view <n>`, `gh pr checks <n>`) so the
     // standalone review-coverage verb can evaluate a PR from a checkout that is
     // NOT on its branch (`fno do pr merge <n>` from canonical); None keeps the
@@ -2494,7 +2494,7 @@ fn read_pr_info(
         .unwrap_or("UNKNOWN")
         .to_string();
 
-    // One freshness resolver for every reviewer on this PR (x-5b99 / x-62a1).
+    // One freshness resolver for every reviewer on this PR (/).
     // Both producers and both presence scans read it, so there is one rule
     // rather than the two divergent ones this replaces. Memoized per reviewed
     // sha, and the HEAD identity is computed lazily, so a PR whose reviewers
@@ -2522,7 +2522,7 @@ fn read_pr_info(
         max_rounds,
     );
 
-    // x-8b64 (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
+    // (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
     // web/mobile, or `gh pr merge`) is done regardless of whether the required
     // bot ever reviewed it or whether CI is still green post-merge - the merge
     // IS the authority. Short-circuit the now-irrelevant CI + review polls
@@ -2602,7 +2602,7 @@ fn read_pr_info(
     // Skip the review reads only when there is NOTHING to honor: no required
     // login AND no optional login. An optional-only gate still reads (to catch
     // an optional blocking finding), but its presence is never required.
-    // x-e703: the gate is a strict conjunction over the union of GitHub-login
+    // the gate is a strict conjunction over the union of GitHub-login
     // evidence (github_apps/peers via optional_bots+required_bots) AND the
     // local-attestation `reviewers`. Each satisfied by its own evidence source,
     // so the two skips are INDEPENDENT: `no_external` (and an empty login set)
@@ -2611,7 +2611,7 @@ fn read_pr_info(
     // repo that pins `reviewers: [sigma]` still requires that local pass even
     // when a session runs `--no-external` to skip usage-wedged App bots
     // (fixes a fail-open the sigma review caught). `reviewers` is empty for
-    // every pre-x-e703 config, so `reviewers_all_attested` is vacuously true
+    // every pre-change config, so `reviewers_all_attested` is vacuously true
     // there and this changes nothing for them.
     let login_gate_active = !required_bots.is_empty() || optional_lane_configured;
     let login_skipped = no_external || !login_gate_active;
@@ -2695,7 +2695,7 @@ fn read_pr_info(
         // mut so the arm's tuple below answers from whatever budget this arm
         // ends on.
         let mut reviewers_ok = reviewers_ok;
-        // x-2219: the round budget counts the GitHub reviews axis on THIS arm
+        // the round budget counts the GitHub reviews axis on THIS arm
         // too. A stock install (no required bots, no optional lane) never
         // reached the external arm's refresh, so rounds the connector posted
         // read 0 here and the cap could not fire on exactly the lane that
@@ -2805,7 +2805,7 @@ fn read_pr_info(
         // optional login's blocking P1 still holds the gate ("honor if
         // present"). A dedup keeps a login that is in both lists counted once.
         let info = compute_review_info(&reviews_json, required_bots, &freshness);
-        // Per-outstanding-bot nudge classification (x-b167), computed AFTER the
+        // Per-outstanding-bot nudge classification, computed AFTER the
         // usage-limit retain (which happened inside compute_review_info) so
         // the two give-up paths never compose (AC6): a usage_limited bot is
         // already out of missing_bots and is never classified here. A STALE
@@ -2934,7 +2934,7 @@ fn read_pr_info(
         // inline-only review traffic advances the fingerprint (closes the
         // false-NoProgress hole).
         let activity_ts = max_ts(&info.latest_ts, &inline_ts);
-        // x-e703: the login gate AND the local-attestation reviewers gate must
+        // the login gate AND the local-attestation reviewers gate must
         // both clear. reviewers is usually empty (vacuously true) so this is a
         // no-op for login-only configs.
         // (a) Record the rate-limit drop so a post-hoc audit sees why the gate
@@ -3049,7 +3049,7 @@ fn read_pr_info(
     // run from canonical read `<canonical>/.fno/events.jsonl` - a satisfied
     // gate reading as an unsatisfiable one, silently, with a refusal that
     // named a count and not a location. The global log is the one file both
-    // stand in; `repo` in the payload keeps it scoped (x-f43c).
+    // stand in; `repo` in the payload keeps it scoped.
     // The posture verdict rides the same emit: coverage computed the verdicts,
     // so satisfaction against the resolved rung is one predicate here rather
     // than a reclassification on the Python side (AC6-HP).
@@ -3151,7 +3151,7 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     // `gh pr checks --json` classifies each check into a rollup `bucket`:
     // pass | fail | pending | skipping | cancel. (`conclusion` is NOT an
     // available field on this subcommand; requesting it errored the read on
-    // every fire - ab-610d2ee3 follow-on, previously masked by the budget
+    // every fire - follow-on, previously masked by the budget
     // bug terminating sessions before this read ran.) Unknown or missing
     // buckets fail closed as Pending - never green.
     let bucket_of = |check: &Value| -> String {
@@ -3454,7 +3454,7 @@ pub(crate) fn loopcheck_fno_bin() -> String {
 
 /// `$HOME/.fno/events.jsonl`, the global-log fallback every direct-dispatch
 /// verb reaches for when no `--global-events` override is given. Hand-built
-/// (no Rust resolver for events.jsonl exists yet, x-1571 debt this file
+/// (no Rust resolver for events.jsonl exists yet, debt this file
 /// already carries) rather than a new duplicate of the same literal in
 /// every caller.
 pub(crate) fn default_global_events_path() -> std::path::PathBuf {
@@ -3476,7 +3476,7 @@ fn best_effort_notify(title: &str, body: &str) {
     crate::operator_notice::notify_operator_with(&fno_bin, title, body, None);
 }
 
-/// Post a bot's review trigger to the PR once, returning true on success (x-b167
+/// Post a bot's review trigger to the PR once, returning true on success (
 /// section 5). `FNO_LOOPCHECK_NO_COMMENT=1` suppresses the post so the test suite
 /// never comments on a real PR, mirroring `FNO_LOOPCHECK_NO_NOTIFY`.
 ///
@@ -4046,7 +4046,7 @@ fn publish_coverage_status(
     );
 }
 
-/// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
+/// The give-up line for an unresponsive nudged bot (AC13): the operator's
 /// two questions ("will it finish, must I act") answered in one line.
 fn nudge_giveup_message(n: &BotNudge) -> String {
     format!(
@@ -4067,7 +4067,7 @@ fn nudge_giveup_message(n: &BotNudge) -> String {
 ///   - `reply_handle`  what an in-thread reply must ADDRESS to reach the bot
 /// A `github-app` reviewer that reviews on mention (not on push) is `nudgeable`:
 /// footnote may post its `review_handle` to un-stick a required gate that nobody
-/// mentioned (x-b167). Nudge timing (`wait_minutes`, `ceiling`, `enabled`) is
+/// mentioned. Nudge timing (`wait_minutes`, `ceiling`, `enabled`) is
 /// config, not code - see `[review.nudge]` / `resolved_nudge_configs`.
 struct BotProfile {
     login: &'static str,
@@ -4125,7 +4125,7 @@ const BOT_PROFILES: &[BotProfile] = &[
 /// The profile for an actual review/comment AUTHOR login (may carry gh's `[bot]`
 /// suffix or be the full login): the profile login is a substring of the author,
 /// matching `login_matches_bot(author, profile.login)`. Used to reach a finding
-/// author's `reply_handle` (x-b167 AC14).
+/// author's `reply_handle` (AC14).
 fn profile_by_author(author: &str) -> Option<&'static BotProfile> {
     BOT_PROFILES
         .iter()
@@ -4140,13 +4140,13 @@ fn logins_correspond(a: &str, b: &str) -> bool {
     login_matches_bot(a, b) || login_matches_bot(b, a)
 }
 
-/// Default nudge cadence (x-b167). 15 minutes is the observed 6m55s worst-case
+/// Default nudge cadence. 15 minutes is the observed 6m55s worst-case
 /// latency on PR #618 with headroom, not a guess; 3 nudges bounds the give-up at
 /// ~45 minutes of *asked-for* waiting versus the unbounded budget burn today.
 const DEFAULT_NUDGE_WAIT_MINUTES: i64 = 15;
 const DEFAULT_NUDGE_CEILING: usize = 3;
 
-/// Sanity ceilings for `[review.nudge]` override integers (x-b167). A value
+/// Sanity ceilings for `[review.nudge]` override integers. A value
 /// beyond these is a typo, not a cadence: `wait_minutes` is bounded well under
 /// `i64::MAX/60` so `chrono::Duration::minutes` can never overflow-panic in the
 /// stop gate, and a nudge cadence past a week / 1000 asks is meaningless anyway.
@@ -4221,7 +4221,7 @@ fn nudge_config_for<'a>(configs: &'a [NudgeConfig], bot: &str) -> Option<&'a Nud
     configs.iter().find(|c| logins_correspond(&c.login, bot))
 }
 
-/// A missing bot's nudge classification for this fire (x-b167). Derived fresh
+/// A missing bot's nudge classification for this fire. Derived fresh
 /// from PR comments every fire - no durable counter - so a mention posted by a
 /// human, `/fno:pr check`, or a sibling worktree counts identically and
 /// self-heals across restart / compaction / handoff.
@@ -4687,13 +4687,13 @@ fn resolved_required_bots(settings: &Settings) -> Vec<String> {
 }
 
 /// The set of expected review logins that must have passed for the gate to
-/// clear (x-4baa): `github_apps` (or its legacy `required_bots` alias) UNION
+/// clear: `github_apps` (or its legacy `required_bots` alias) UNION
 /// the resolved posting identity of each identity-backed `peers` entry.
 /// Identity-free peers are resolved separately into local reviewer evidence.
 ///
 /// `author_harness` is the invoking harness (`claude`/`codex`/`gemini`), resolved
 /// from the ambient env markers by the caller. When it resolves to a model
-/// family, the same-model guard (x-c2e7) replaces any peer login backed ONLY by
+/// family, the same-model guard replaces any peer login backed ONLY by
 /// the author's own model with SAME_MODEL_PEER_SENTINEL, so a codex-authored run
 /// with `peers: [codex]` can no longer review its own work and clear the gate.
 /// `None` (unknown authorship) leaves the login set byte-identical - fail open.
@@ -4734,7 +4734,7 @@ fn resolved_required_bots_for_author(
         }
     }
 
-    // Same-model guard (x-c2e7): a peer login backed ONLY by the author's own
+    // Same-model guard: a peer login backed ONLY by the author's own
     // model cannot honestly satisfy the cross-model gate. Inert unless the
     // author harness resolves to a family (fail open on unknown authorship, so
     // the block above stays byte-identical). The GITHUB_APPS base set is never
@@ -4854,7 +4854,7 @@ const DEFAULT_OPTIONAL_APPS: [&str; 2] = ["gemini-code-assist", "chatgpt-codex-c
 
 /// The OPTIONAL reviewer logins (config.review.optional_apps): honored-if-
 /// present but never required. Their blocking findings hold the gate, but their
-/// absence never does (x-4baa "honor if present"). Unset resolves to the
+/// absence never does ("honor if present"). Unset resolves to the
 /// built-in default; an explicit `[]` is a real opt-out and wins over it.
 fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
     match settings.optional_apps.clone() {
@@ -4924,7 +4924,7 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
 /// Unioned rather than scoped per-login to stay byte-identical to the old flat
 /// `USAGE_LIMIT_MARKERS` const it replaced.
 ///
-/// The asymmetry here INVERTED with x-9ab2 and the marker list must be read in
+/// The asymmetry here INVERTED with and the marker list must be read in
 /// the new direction: an under-match leaves the bot in `missing_bots`, which
 /// blocks (safe, just slow), while an over-match now PARKS the PR at
 /// `DoneAwaitingReview` with no automatic path back, rather than dropping the
@@ -5174,7 +5174,7 @@ fn marker_at_sentence_end(lower: &str, marker: &str) -> bool {
 /// this ONE question through this ONE predicate: independent scans of the
 /// same payload are how a PR ends up `all_required_passed` while coverage
 /// reads `Refused` (or the inverse) and the run wedges between two gates
-/// that never reconcile - the reader-divergence class x-e601 exists to
+/// that never reconcile - the reader-divergence class exists to
 /// delete. Precedence, each rule falling through only when its evidence is
 /// absent or does not count:
 /// 1. a review object whose commit still matches HEAD -> `Reviewed`
@@ -5391,7 +5391,7 @@ fn compute_review_info(
     // else an explicit refusal comment. Computing this with independent
     // scans is how `all_required_passed` reads true while coverage reads
     // `Refused` (or the inverse) and the run wedges between two gates that
-    // never reconcile - the reader-divergence class x-e601 exists to delete.
+    // never reconcile - the reader-divergence class exists to delete.
     // A STALE verdict lands in `stale_bots`, keeping the sha it read: the
     // remedy is a re-read, a different one from "has not reviewed", and the
     // block message must be able to say which. The gate weight is
@@ -5420,7 +5420,7 @@ fn compute_review_info(
     }
 }
 
-// ── review coverage (x-0eaf) ──────────────────────────────────────────────────
+// ── review coverage ──────────────────────────────────────────────────
 //
 // The old gate's `reviewed` boolean (loopcheck.rs `let reviewed =
 // all_required_passed() && unaddressed.is_empty() && reviewers_ok`) was a claim
@@ -5437,12 +5437,12 @@ fn compute_review_info(
 // name "codex": the `chatgpt-codex-connector` GitHub App (posts review objects,
 // can refuse on quota) and the local `codex` CLI (posts none, never rate-limited
 // by the App's quota). They are told apart by `CoverageProducer`, never by the
-// reviewer string (x-9ae8's one-word-two-entities disease). A third local lane,
+// reviewer string (one-word-two-entities disease). A third local lane,
 // claude `/code-review`, shares the `LocalAttestation` axis.
 
 /// The channel a review verdict came from. Two producers that share a name (the
 /// `chatgpt-codex-connector` App vs the local `codex` CLI) are distinguished by
-/// this axis, never by the reviewer string alone (x-9ae8, x-0eaf).
+/// this axis, never by the reviewer string alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageProducer {
@@ -5455,7 +5455,7 @@ pub enum CoverageProducer {
     LocalAttestation,
 }
 
-/// One verdict for one reviewer over one producer axis (x-0eaf). `reviewed` here
+/// One verdict for one reviewer over one producer axis. `reviewed` here
 /// is derived from observed evidence, unlike the old boolean of the same name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5465,7 +5465,7 @@ pub enum CoverageVerdict {
     /// counts toward coverage.
     Reviewed,
     /// Responded, but against a commit whose code no longer matches HEAD
-    /// (x-5b99). Positive evidence that a reviewer READ AN OLDER COMMIT, which
+    ///. Positive evidence that a reviewer READ AN OLDER COMMIT, which
     /// is a different fact from `Absent` (never responded) and needs a
     /// different response: nudge for a re-read, do not wait for a first read.
     /// Recorded rather than dropped so the trail shows what happened; excluded
@@ -5488,7 +5488,7 @@ pub enum CoverageVerdict {
 /// honest). Collapsing an API error into 0 produces false refusals; collapsing
 /// it into a count reproduces the bug.
 ///
-/// NOTE (x-0eaf finding 4): a FAILED GitHub reviews read still never yields
+/// NOTE (finding 4): a FAILED GitHub reviews read still never yields
 /// `Unknown` - `read_pr_info` returns `Err` and the caller block-retries
 /// (fail-safe: the session retries, it does not green or merge). `Unknown` IS
 /// reachable in production through the login_skipped arm: a `no_external`
@@ -5570,7 +5570,7 @@ pub struct ReviewerVerdict {
     /// unknowable (a review object with no commit, a verdict with no review),
     /// which [`review_freshness`] treats as `Stale` - fail closed.
     ///
-    /// This is the field whose absence WAS the x-5b99 defect: the event pinned
+    /// This is the field whose absence WAS the defect: the event pinned
     /// the head at EVAL time, so a bot verdict rendered twelve hours and two
     /// commits earlier serialized as coverage for a commit its author never
     /// saw.
@@ -5613,7 +5613,7 @@ pub struct ReviewerVerdict {
     /// Whether the review behind this verdict PASSED: a local attestation with
     /// `verdict == pass`, or a GitHub review object that approved. The counted
     /// axis (`Reviewed`) says the reviewer READ the head whatever it concluded
-    /// (x-aecc), so the pass subset lives here and reaches the row only as the
+    ///, so the pass subset lives here and reaches the row only as the
     /// aggregate `passed_count` - never serialized per verdict, because no
     /// reader keys on it and the schema stays byte-stable.
     #[serde(skip)]
@@ -5709,7 +5709,7 @@ fn default_true() -> bool {
 }
 
 /// One reviewer's latest attestation, the commit it pinned, and whether that
-/// verdict was `pass` (x-aecc: a `fail` whose findings are all terminal
+/// verdict was `pass` (: a `fail` whose findings are all terminal
 /// answers the head too, so the coverage axis needs the verdict, not just the
 /// pass subset).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5729,7 +5729,7 @@ struct LocalPass {
     is_pass: bool,
     /// The line that produced this entry was a RETRACTION
     /// (`retracts_attester`): it revokes, it never covers - the answered-fail
-    /// arm must not resurrect the pass it killed (x-aecc review, finding 1).
+    /// arm must not resurrect the pass it killed (review, finding 1).
     is_retraction: bool,
     /// Positive fresh-context provenance from the attestation
     /// (`reviewer_context`: fresh | shared | unknown). None on events that
@@ -5774,7 +5774,7 @@ pub struct RangeTiling {
     /// The `config.review.max_rounds` budget `rounds_exhausted` was computed
     /// against, carried so the row is self-contained: `fno do pr status`
     /// prints the gate's pair verbatim instead of re-reading config (one
-    /// producer per number; x-027b).
+    /// producer per number;).
     pub rounds_max: i64,
     /// Whether `rounds_used` reaches the resolved `config.review.max_rounds`.
     /// At the cap the review obligation is satisfied - the merge gate
@@ -5792,7 +5792,7 @@ pub struct RangeTiling {
 /// with the legacy exact-head admission, both verdicts, head-pinned lines
 /// only. ONE parse serves every consumer (disposition blockers, tiling
 /// ranges, the answered-fail predicates); a second hand-copy of this loop is
-/// how the gates drift (x-aecc review, finding 4).
+/// how the gates drift (review, finding 4).
 fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<Value> {
     let mut chain: Vec<Value> = Vec::new();
     for line in events_text.lines() {
@@ -5858,7 +5858,7 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
 }
 
 /// The PR's review-round total, on two evidence axes. The operator's ruling
-/// (x-2219, 2026-08-27) made this a PER-PR TOTAL: `max_rounds` counts rounds
+/// (2026-08-27) made this a PER-PR TOTAL: `max_rounds` counts rounds
 /// across the whole life of the PR, and a `verdict: pass` refunds nothing -
 /// it is one round like any verdict, and its coverage role lives elsewhere
 /// (the pass scan and the classify), never here. The name survives from the
@@ -6115,7 +6115,7 @@ pub fn compute_range_tiling(
 
 /// Distinct `(reviewer, attester_session_id)` pairs' LATEST in-scope
 /// attestation, each with the head it pinned and whether its verdict was
-/// `pass` (the caller decides whether an answered `fail` counts; x-aecc).
+/// `pass` (the caller decides whether an answered `fail` counts;).
 /// Keying on the pair - not the reviewer name alone -
 /// keeps a same-session re-run collapsed (one key, last-writer-wins, retraction
 /// intact) while letting two sessions attesting under the same reviewer label
@@ -6144,7 +6144,7 @@ pub fn compute_range_tiling(
 /// still skipped - absence must not be read as "had files".
 /// Whether a `review_attestation` line carries at least one keyed finding -
 /// the answered-fail evidence predicate, ONE spelling for the reviewers scan
-/// and the coverage promotion (x-aecc review 2, finding 4: the hand-copied
+/// and the coverage promotion (review 2, finding 4: the hand-copied
 /// pair had already been flagged as the drift shape).
 fn line_carries_keyed_findings(val: &Value) -> bool {
     val.pointer("/data/findings")
@@ -6370,7 +6370,7 @@ fn local_latest_attestations(
             .pointer("/data/reviewer_context")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        // x-aecc: a fail that RAISED keyed findings marks its own pair as
+        // a fail that RAISED keyed findings marks its own pair as
         // answer-capable. Per-pair, never chain-global: a bystander's
         // findings-free fail must not ride another reviewer's dispositions
         // (review finding 2), and a retraction line marks nothing. The mark
@@ -6454,7 +6454,7 @@ fn author_is_bot(author: &str, github_app_logins: &[String]) -> bool {
 }
 
 /// One local-attestation verdict from a pair's latest attestation, shared by
-/// the pass arm and x-aecc's answered-fail arm so the two can never drift.
+/// the pass arm and answered-fail arm so the two can never drift.
 /// Counts (`Reviewed`) when the attestation's head is fresh OR a member of a
 /// tiled chain; the authorship label and scope marker come off the entry.
 fn local_attestation_verdict(
@@ -6506,7 +6506,7 @@ fn local_attestation_verdict(
 /// makes coverage `Unknown` UNLESS the local axis carries a head-pinned pass:
 /// positive local evidence survives a bot outage, because the local lane is
 /// never rate-limited by the bot's quota (the PR #214 failure in a new hat,
-/// which this node exists to escape). (x-0eaf)
+/// which this node exists to escape).
 ///
 /// `author_session` is the manifest's `harness_session_id` (the session that ran
 /// `fno do target init` in this worktree). Each local attestation's
@@ -6770,7 +6770,7 @@ pub fn classify_coverage_tiled(
     }
 
     // local_attestation axis: one verdict per distinct latest attestation -
-    // every `pass`, plus (x-aecc, guards below) an ANSWERED `fail` - labeled
+    // every `pass`, plus (guards below) an ANSWERED `fail` - labeled
     // with whether the authoring session emitted it, and pinned to the head the
     // attestation itself recorded rather than to the head at eval time.
     // A verdict also counts when the branch's attestation CHAIN tiles
@@ -6779,7 +6779,7 @@ pub fn classify_coverage_tiled(
     // disciplined fix-and-re-review loop still cannot terminate. Tiling is
     // what makes the later rounds of that loop count.
     //
-    // x-aecc: a latest-`fail` pair whose chain findings are all terminally
+    // a latest-`fail` pair whose chain findings are all terminally
     // dispositioned ANSWERS this head and counts exactly like a pass here.
     // The pass condition is answered-at-this-head, never clean-at-this-head,
     // so declining everything terminates the loop instead of demanding the
@@ -7114,7 +7114,7 @@ fn coverage_event_data_full(
         // classify_attestation_origin labels a present-attester verdict
         // Unmeasured (or Unknown when the attester is absent too), so
         // `self_attested_count()` would read 0 while the truth is unmeasured
-        // - a measured-zero shape (x-62a1: an aggregate reporting a state
+        // - a measured-zero shape (: an aggregate reporting a state
         // its inputs do not support). The field is omitted instead, never 0,
         // so the day a gate enforces it, absence reads unmeasured rather
         // than "no self-attest" and cannot serve as the bypass. After a
@@ -7153,7 +7153,7 @@ fn coverage_event_data_full(
         data["rounds_used"] = serde_json::json!(t.rounds_used);
         // The budget beside the count, so the row is the one producer of the
         // pair: `fno do pr status` reads both from here instead of re-reading
-        // config (x-027b: two readers of one number disagreed on PR 1380).
+        // config (: two readers of one number disagreed on PR 1380).
         data["rounds_max"] = serde_json::json!(t.rounds_max);
         data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
     }
@@ -7534,7 +7534,7 @@ struct LoopEventEnvelope<'a> {
     data: serde_json::Value,
 }
 
-// pub(crate): the `finalize` verb (step 6, ab-f8e5f214) reuses this so its
+// pub(crate): the `finalize` verb (step 6) reuses this so its
 // `session_finalized` events carry the identical RFC3339 timestamp shape.
 pub(crate) fn now_rfc3339_utc() -> String {
     // Seconds precision, Z suffix, as required by the envelope spec.
@@ -7581,7 +7581,7 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
 
 /// Append to both project and global event logs.
 ///
-/// pub(crate): the `finalize` verb (step 6, ab-f8e5f214) emits its
+/// pub(crate): the `finalize` verb (step 6) emits its
 /// `session_finalized` / `session_finalize_failed` events through the same
 /// writer so they land in both logs with the identical `{ts,type,source,data}`
 /// envelope loop-check uses.
@@ -7818,7 +7818,7 @@ struct LoopCheckArgs {
     author_harness_override: Option<String>,
     /// When set, the full Stop-hook JSON payload is read from stdin so
     /// `last_assistant_message` becomes the primary intent channel
-    /// (ab-223d2dae). Flag-gated so manual terminal invocations never hang
+    ///. Flag-gated so manual terminal invocations never hang
     /// on a stdin read.
     hook_input_stdin: bool,
     /// Which driver's `done()` this fire evaluates. `target` asks whether one
@@ -7911,7 +7911,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             fno_bin = val;
         } else if arg == "--hook-input-stdin" {
             // Bare boolean flag (no value): try_flag_value would consume the
-            // next token as a value, so it is matched directly (ab-223d2dae).
+            // next token as a value, so it is matched directly.
             hook_input_stdin = true;
         }
         i += 1;
@@ -7970,7 +7970,7 @@ pub(crate) fn try_flag_value(
 
 /// The manifest-independent inputs every coverage/review evaluation needs:
 /// event-log paths, repo identity, the merged settings, and the reviewer sets
-/// derived from them. Extracted from `decide()` (x-3a3f) so the standalone
+/// derived from them. Extracted from `decide()` so the standalone
 /// `review-coverage` verb resolves EXACTLY what the stop hook resolves - one
 /// resolver, no second precedence implementation (the N-implementations trap).
 pub(crate) struct ReviewInputs {
@@ -8021,7 +8021,7 @@ pub(crate) fn resolve_review_inputs(
     // Scopes the review_coverage event written into the cross-project global
     // log. The git remote is the one identifier canonical and every one of its
     // worktrees agree on, which is exactly the agreement the coverage reader
-    // needs (x-f43c). It is the FULL `host/owner/repo`, not the last path
+    // needs. It is the FULL `host/owner/repo`, not the last path
     // segment: this key gates auto-merge, so `org-a/widget` aliasing
     // `org-b/widget` would let one repo's coverage clear the other's guard.
     // Empty when there is no remote; the payload then omits `repo` and no
@@ -8034,7 +8034,7 @@ pub(crate) fn resolve_review_inputs(
     // must not silently uncap the session). An explicit --settings path
     // replaces the merge entirely (tests rely on full isolation).
     //
-    // x-81d9 (c): a genuinely unparseable settings.yaml fails CLOSED (the login
+    // (c): a genuinely unparseable settings.yaml fails CLOSED (the login
     // gate is pinned unsatisfiable) and emits loop_check_settings_unparseable,
     // rather than silently zeroing the required bots and shipping unreviewed.
     let parse_or_emit = |content: &str, path: &Path| -> Settings {
@@ -8148,12 +8148,12 @@ pub(crate) fn resolve_review_inputs(
 
     // Resolve the must-have-reviewed list once (code default when unset). The
     // author harness (from the ambient env markers, shared with claims.rs) drives
-    // the same-model peer guard (x-c2e7); None leaves the set unchanged.
+    // the same-model peer guard; None leaves the set unchanged.
     // `--author-harness none` pins the no-harness case, which an absent flag
     // cannot express, and an absent flag keeps reading the ambient markers.
     // The pin is recorded separately: a PINNED none is the hermetic opt-out,
     // while an UNRESOLVED None (absent or ambiguous markers) floors the
-    // self-review reviewer instead of dropping it (x-129b).
+    // self-review reviewer instead of dropping it.
     let author_harness_pinned_none = matches!(author_harness_override, Some("none") | Some(""));
     let author_harness = match author_harness_override {
         Some("none") | Some("") => None,
@@ -8230,7 +8230,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     let transcript_path = parsed.transcript_path.clone();
     let cwd = parsed.cwd.clone();
 
-    // ab-223d2dae (A): the shim feeds the full Stop-hook JSON via stdin so
+    // (A): the shim feeds the full Stop-hook JSON via stdin so
     // the stopping turn's final text (`last_assistant_message`, recomputed
     // per fire) is readable without racing the transcript flush. Read or
     // parse failures degrade to None (transcript fallback), never an error -
@@ -8285,7 +8285,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         }
     };
 
-    // Lease renewal (x-ba4b): keep this session's node claim fresh on every
+    // Lease renewal: keep this session's node claim fresh on every
     // stop, so a worker whose supervisor pid died mid-run (and now runs under a
     // new pid) never loses its claim to TTL expiry. Best-effort and non-fatal:
     // renew only bumps expires_at when the on-disk holder still matches, so it
@@ -8310,7 +8310,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     }
 
     // Resolve paths + settings + reviewer sets through the ONE shared resolver
-    // (x-3a3f): the standalone review-coverage verb resolves exactly these,
+    // the standalone review-coverage verb resolves exactly these,
     // from the same overlay, so there is no second precedence implementation.
     let inputs = resolve_review_inputs(
         &cwd,
@@ -8350,7 +8350,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         emit_to_both(&project_events, &global_events, event_type, data);
     };
 
-    // <help> distress (x-77a0): parsed from the same stopping message the
+    // <help> distress: parsed from the same stopping message the
     // intent read uses, ahead of every branch below (including the advisory
     // no-gh mode), because it is a side channel that must fire once per stop
     // regardless of how the stop itself is decided. The node id is resolved
@@ -8983,7 +8983,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     let this_fire = prior_fires + 1;
     // The harness caps consecutive Stop-hook blocks at
     // CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (Claude Code default 9) and force-ends the
-    // turn once it binds (x-1680). Record the resolved cap on the first fire of
+    // turn once it binds. Record the resolved cap on the first fire of
     // a session so a run ended by the harness override (last events are blocks
     // whose running consecutive count meets the cap, then silence) is
     // distinguishable from one ended by budget (a terminal budget decision).
@@ -9012,7 +9012,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
 
     let backstop_tripped = consecutive_after >= backstop_n;
 
-    // D (ab-223d2dae): probe done() after MUTE_PROBE_N unchanged mute fires
+    // D: probe done() after MUTE_PROBE_N unchanged mute fires
     // instead of waiting out the full backstop streak. A done-but-mute
     // session (all reads pass, no promise as final text) now resolves as a
     // late DonePRGreen in ~2 fires instead of 5/3 - the post-wedge events
@@ -9083,7 +9083,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             );
         }
 
-        // Operator review-finding gate (x-f8d4, Locked Decision 3): an open
+        // Operator review-finding gate (Locked Decision 3): an open
         // review_finding for this node HOLDS every success terminal-allow
         // (DonePlanned / DoneAdvisory / DoneDelivery / DoneBatched / DonePRGreen) until an
         // explicit resolve - a promise cannot self-authorize past an operator's
@@ -9293,7 +9293,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         // The floor applies where a session can satisfy it: a harness with a
         // self-review verb (claude /code-review, codex /review, opencode
         // /review-changes), or a harness that could not be attributed at all -
-        // ambiguity is not permission (x-129b). A KNOWN verbless harness
+        // ambiguity is not permission. A KNOWN verbless harness
         // (gemini/agy) stays unfloored: the floor would demand an attestation no
         // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
         // those harnesses' path and is deferred.
@@ -9308,7 +9308,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         if let Some(floored) = self_review_floor.clone() {
             required_reviewers.push(floored);
         }
-        // x-0eaf: DoneUnreviewed applies only when review is required. A stock
+        // DoneUnreviewed applies only when review is required. A stock
         // install that opts out (self_review_required=false AND no lane, or a
         // harness with no self-review verb) has zero coverage as its configured
         // state, not a defect - those green PRs still reach DonePRGreen.
@@ -9382,7 +9382,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 };
                 let backstop_tripped = consecutive_after >= backstop_n;
 
-                // x-b167 section 5: post the trigger for any NeedsNudge bot ONCE,
+                // section 5: post the trigger for any NeedsNudge bot ONCE,
                 // then treat it as Awaiting for this fire's messaging + idle read.
                 // A NeedsNudge state means !reviewed, so no terminal below can
                 // fire (they require reviewed=true); posting here is safe. A
@@ -9463,7 +9463,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     }
                 }
 
-                // plan fidelity (x-cbab): the stop-gate half of AC5. A plan whose
+                // plan fidelity: the stop-gate half of AC5. A plan whose
                 // declared deliverables did not all ship blocks DonePRGreen until
                 // each shortfall carries a carveout - the agent files one and the
                 // next eval passes. Gated on the same conjuncts as done_probes and
@@ -9559,15 +9559,15 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     );
                 }
                 if pr_passes(pr_open, ci_ok, reviewed, head_shipped, probes_passed) {
-                    // Coverage gate (x-0eaf): the three pr_passes conjuncts all ask
+                    // Coverage gate: the three pr_passes conjuncts all ask
                     // "did anyone object"; coverage asks "did anyone review". A
                     // passing PR nothing reviewed terminates DoneUnreviewed, not
                     // DonePRGreen - terminal on first eval (no PR #214 wedge),
                     // never a ship reason (never arms auto-merge). The
                     // discriminator is coverage, NOT the `attended` manifest field
-                    // (x-be78: that field lies for spawned workers). A MERGED PR
+                    // (: that field lies for spawned workers). A MERGED PR
                     // is exempt: the merge (human out-of-band, or an earlier
-                    // autonomous arm) is the terminal authority (x-8b64), and
+                    // autonomous arm) is the terminal authority, and
                     // loop-check must not re-litigate review on an already-merged
                     // PR - the coverage fix prevents the autonomous MERGE (arming),
                     // not the post-merge terminal.
@@ -9665,13 +9665,13 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         }
                         waived_green_description = waiver;
                     }
-                    // A rate-limited bot now fails the gate closed (x-9ab2), so a
+                    // A rate-limited bot now fails the gate closed, so a
                     // green+reviewed DonePRGreen can never carry one: reaching
                     // here means every required bot has a real completed pass.
                     // The not-required arm must never say "reviewed": no
                     // coverage check ran, so the word would assert the exact
                     // opposite of the uncovered row this same fire emits
-                    // (x-8cb6: PR 1294's terminal said "green and reviewed"
+                    // (: PR 1294's terminal said "green and reviewed"
                     // while its coverage event said uncovered, and auto-merge
                     // acted on the terminal).
                     let done_msg = match waived_green_description {
@@ -9822,7 +9822,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     }
                 }
 
-                // ── Watching idle-allow (x-e2c8) ─────────────────────────────
+                // ── Watching idle-allow ─────────────────────────────
                 // A verified async wait (CI pending or awaiting a bot review,
                 // head pushed, zero unaddressed findings) plus an agent-armed
                 // <watching> tag idles NON-terminally: the harness re-invokes the
@@ -9833,7 +9833,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // wait degrades to budget/claim-expiry, never a spurious kill.
                 //
                 // The observation is hoisted out of the intent arm on purpose
-                // (x-cd97): async_wait_class reads external truth (PR open,
+                // async_wait_class reads external truth (PR open,
                 // head shipped, no findings, the wait class) and the backstop
                 // below needs the same truth. The idle-allow only rescues a
                 // session whose lease renewal succeeds and whose harness can
@@ -9927,7 +9927,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     None
                 };
 
-                // x-b167: a freshly-posted nudge sits in Awaiting until
+                // a freshly-posted nudge sits in Awaiting until
                 // wait_minutes elapses. On a harness that cannot idle on a
                 // `<watching>` tag (a loop-run child, codex/gemini, or a failed
                 // lease renewal) the fingerprint is stable, so without this guard
@@ -9949,7 +9949,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         .bot_nudges
                         .iter()
                         .any(|n| n.class == NudgeClass::Awaiting);
-                // x-cd97: the observation guard for BOTH async-wait classes. CI
+                // the observation guard for BOTH async-wait classes. CI
                 // still pending, or an outstanding bot in an idlable nudge state,
                 // is a runtime-OBSERVED wait (PR open, head shipped, no
                 // findings) - external truth that work is in flight. NoProgress
@@ -9957,7 +9957,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // regardless of whether the idle-allow engaged: its
                 // preconditions (lease renewal, harness idling) fail for reasons
                 // unrelated to liveness, and the fall-through is what wrote a
-                // terminal for a live CI-waiting session (x-b57a). The
+                // terminal for a live CI-waiting session. The
                 // same-model-peer sentinel is the deliberate exception: nothing
                 // can EVER satisfy that wait (the configured peer is the
                 // author's own model), so NoProgress is then true rather than a
@@ -9981,7 +9981,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     && !sole_blocker_is_awaiting
                     && !sole_blocker_is_observed_wait
                 {
-                    // Backstop tripped + done() false -> NoProgress. x-b167 AC13:
+                    // Backstop tripped + done() false -> NoProgress. AC13:
                     // when a nudged bot never answered, the operator's question is
                     // "is this going to finish, and must I do something" - so name
                     // the bot + nudge count + elapsed instead of a bare fingerprint
@@ -10059,7 +10059,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 }
 
                 // done() false on promise -> block with named reason. P2
-                // (ab-098967b4): enrich with a loop-boundary inbox nudge.
+                // enrich with a loop-boundary inbox nudge.
                 // A failed probe OR a fidelity refusal IS the blocker when
                 // everything else is green; build_block_reason would otherwise
                 // report a healthy PR.
@@ -10126,7 +10126,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // consecutive Stop-hook blocks (CLAUDE_CODE_STOP_HOOK_BLOCK_CAP,
                 // default 9) and force-ends the turn once it binds - which on
                 // the unraised harness happens long before budget, exactly the
-                // x-1680 truncation. fno raises the cap for spawned workers
+                // truncation. fno raises the cap for spawned workers
                 // (see _mesh_env_wrapper / the bg spawn_env), so its own
                 // NoProgress/budget terminals bind first in normal operation;
                 // but during a pure gh-read outage the (raised, finite) cap is
@@ -10266,7 +10266,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         }),
     );
 
-    // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
+    // P2: the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
         "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `fno do pr wait <N> --until settled --timeout=30m` - REST through the coalescing cache, 60s interval, never `gh pr checks --watch`, which spends the shared GraphQL quota; a review wait is `--until review`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
@@ -10363,7 +10363,7 @@ fn short_sha(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
-/// Plan-fidelity stop gate (x-cbab). The stop-gate half of AC5; the merge gate
+/// Plan-fidelity stop gate. The stop-gate half of AC5; the merge gate
 /// (`_merge.py`, which imports the core in-process) is the other. Shells
 /// `fno do plan fidelity --json <plan_path>` and blocks DonePRGreen when a planned
 /// deliverable is unjoined and uncovered by a carveout - the agent must file a
@@ -10378,7 +10378,7 @@ enum FidelityGate {
     Refused {
         reason: String,
     },
-    /// The child ran past `FIDELITY_TIMEOUT` and was killed (x-d21f). Fail
+    /// The child ran past `FIDELITY_TIMEOUT` and was killed. Fail
     /// open on the STOP decision like `Absent` - a hung probe must not wedge
     /// the gate that exists to let a finished session finally stop - but,
     /// unlike `Absent`, this is NAMED and carried into the emitted event so a
@@ -10389,7 +10389,7 @@ enum FidelityGate {
     },
 }
 
-/// Wall-clock ceiling for the `fno do plan fidelity` child (x-d21f). Same bound
+/// Wall-clock ceiling for the `fno do plan fidelity` child. Same bound
 /// as `PROBE_TIMEOUT`, under its own name because this and done_probes gate
 /// different things and must be free to drift independently.
 const FIDELITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -10411,7 +10411,7 @@ pub(crate) struct BoundedOutput {
 }
 
 /// Outcome of a bounded, killable child run: the whole point is that a hang
-/// inside the child (x-8ad8 was one; nothing rules out another) can never
+/// inside the child (was one; nothing rules out another) can never
 /// again read as "the read failed" or wedge forever - it reads as exactly
 /// what happened, with the verb and the elapsed time attached at the call
 /// site.
@@ -10437,7 +10437,7 @@ enum BoundedRun {
 /// the single transport boundary for synchronous external work on the stop
 /// path: `Command::output()` alone has no timeout, so it blocks until the
 /// child exits however long that takes, which is exactly how a hang three
-/// calls deep in `fno do plan fidelity` (x-8ad8) turned into loop-check
+/// calls deep in `fno do plan fidelity` turned into loop-check
 /// itself hanging forever and stranding the session behind it. stdout and
 /// stderr are drained on background threads for the same reason `run_probe`
 /// drains stderr that way: reading a pipe only after the child exits
@@ -11032,7 +11032,7 @@ fn build_block_reason(
             );
         }
         // Pending is "not green YET", not red. The MUTE_PROBE_N probe
-        // (ab-223d2dae) runs done() while CI is commonly still in flight,
+        // runs done() while CI is commonly still in flight,
         // so a "CI failed" message here would mislead the blocked agent
         // into debugging a nonexistent failure on every quiet fire.
         if pr.ci_conclusion == CiConclusion::Pending {
@@ -11069,7 +11069,7 @@ fn build_block_reason(
             } else {
                 String::new()
             };
-            // x-b167 AC14: "reply in-thread" alone is a half-remedy - a reply
+            // AC14: "reply in-thread" alone is a half-remedy - a reply
             // that does not address the bot by its full login never reaches it.
             // Name the handle when the finding author is a known bot.
             let reply_to = profile_by_author(&f.author)
@@ -11113,7 +11113,7 @@ fn build_block_reason(
             );
         }
         if !pr.unattested_reviewers.is_empty() {
-            // The branch that was missing (x-cdc7). Without it a local-only
+            // The branch that was missing. Without it a local-only
             // reviewers gate fell through to the generic string below and told
             // the session to wait on a bot that was never required.
             //
@@ -11228,11 +11228,11 @@ fn build_block_reason(
                 }
                 _ => String::new(),
             };
-            // x-b167: render per nudge state. `hint("review")` is derived from
+            // render per nudge state. `hint("review")` is derived from
             // async_wait_class, so it is EMPTY for NeedsNudge/Unresponsive (both
             // non-idlable) and PRESENT for Awaiting/NotNudgeable by construction -
             // the arm-and-tag ritual can never appear on a blocker the same file
-            // refuses to idle (the contradiction x-cdc7 removed). NeedsNudge and
+            // refuses to idle (the contradiction removed). NeedsNudge and
             // Unresponsive lead because they are work/decisions, not waits. These
             // branches come BEFORE the stale-only sentence on purpose: a stale
             // bot in NeedsNudge or Unresponsive state needs the concrete remedy
@@ -11308,11 +11308,11 @@ fn build_block_reason(
                 );
             }
             // All NotNudgeable (or not classified) + hint (AC5 - a non-nudgeable
-            // required bot keeps the pre-x-b167 behavior). The remedy must NOT
+            // required bot keeps the pre-change behavior). The remedy must NOT
             // say "trigger it": `nudge_class_idlable` counts NotNudgeable as
             // idlable, so `hint("review")` renders the arm-and-tag ritual right
             // after this sentence, and telling a session to act and to idle in
-            // one line is the contradiction x-cdc7 removed.
+            // one line is the contradiction removed.
             // A stale bot riding along in a mixed set keeps the note so its
             // entry does not read as "never responded" (each required bot is in
             // exactly one of the two lists, so no dedup is needed).
@@ -11590,7 +11590,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         bound_breached(history.total, dry, manifest.max_iterations, waiting)
     };
     // Shared spine of both blind-board blocks: bounded, quiet emit, block.
-    // The reading is what the branch measured (x-ff27), never a guess.
+    // The reading is what the branch measured, never a guess.
     let blind_block = |reading: &str, message: &str, actionable: i64, dry: u64| -> (i32, String) {
         if let Some(b) = bounded(dry, message) {
             return terminate(b.reason, &b.message, 0, b.fires, &[reading.to_owned()]);
@@ -11672,7 +11672,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             )
         };
         if undelivered == 0 {
-            // x-c911: a floor count cannot see blind queues; refuse to certify.
+            // a floor count cannot see blind queues; refuse to certify.
             if board.unreadable_sources {
                 return blind_block(
                     &crate::king_escalation::reading_sources_unreadable(),
@@ -11722,7 +11722,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let waiting = format!("{} rows still actionable", board.actionable);
     if let Some(b) = bounded(dry, &waiting) {
         // An actionable floor with no readable rows is the partially-blind
-        // board: it names its reading, never an empty set (x-ff27).
+        // board: it names its reading, never an empty set.
         let stalled = if board.actionable_ids.is_empty() {
             vec![crate::king_escalation::reading_board_unreadable()]
         } else {
@@ -11890,7 +11890,7 @@ pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
 }
 
 /// `fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>] ...`
-/// (x-3a3f). The standalone review_coverage producer. The only writer of the
+///. The standalone review_coverage producer. The only writer of the
 /// event used to be `read_pr_info` past a streak counter inside `decide()`,
 /// so a session with no target manifest could never produce the row the
 /// merge gate demands. This verb exposes the SAME computation through the
@@ -12417,7 +12417,7 @@ mod tests {
     use super::read_bounds::clamp_to_fire_budget;
     use super::*;
 
-    // ── plan fidelity stop gate (x-cbab) ──────────────────────────────────────
+    // ── plan fidelity stop gate ──────────────────────────────────────
     //
     // Hermetic: classify canned JSON without spawning, and exercise missing
     // process handling separately. Mirrors the merge-gate half (tested in
@@ -12476,7 +12476,7 @@ mod tests {
 
     #[test]
     fn plan_fidelity_gate_degrades_and_names_the_verb_on_timeout() {
-        // x-d21f: a hung `fno do plan fidelity` child (x-8ad8 was one concrete
+        // a hung `fno do plan fidelity` child (was one concrete
         // cause; the bound must hold regardless of WHY the child hangs) must
         // be killed, not waited on forever, and must report as exactly that -
         // never a silent Absent pass, and never a misattributed message about
@@ -12678,7 +12678,7 @@ mod tests {
         }
     }
 
-    // ── review freshness: the one predicate (x-5b99 / x-62a1) ───────────────
+    // ── review freshness: the one predicate (/) ───────────────
 
     fn ident_of(lines: &[&str]) -> CodeDiffIdentity {
         // Any injective stand-in for the blake3 hash keeps equality tests
@@ -12695,7 +12695,7 @@ mod tests {
             head_identity: head.map(|h| ident_of(&[h])),
             tree_paths: tree.map(|p| p.iter().map(|s| s.to_string()).collect()),
             // Default facts carry no interdiff and a cap of 0, which disables
-            // the x-82ac arm: these tests pin the pre-existing arms exactly.
+            // the arm: these tests pin the pre-existing arms exactly.
             ..Default::default()
         }
     }
@@ -12769,7 +12769,7 @@ mod tests {
         );
     }
 
-    // ── x-e8db: the resolver against a REAL rebase ──────────────────────────
+    // ──: the resolver against a REAL rebase ──────────────────────────
     //
     // The pure tests above pin the predicate over synthetic facts; this pair
     // drives the git plumbing (identity computation, base-ref qualification)
@@ -12866,7 +12866,7 @@ mod tests {
 
     #[test]
     fn resolver_carries_an_identical_rebase_and_a_small_conflict() {
-        // The x-e8db contract on the resolver itself, as amended by the
+        // The contract on the resolver itself, as amended by the
         // interdiff arm (law d-608344c1): a rebase that rewrote every commit
         // but changed no content keeps the attestation (CarriedBaseSync), and
         // a tiny conflict resolution carries as CarriedInterdiff with the
@@ -13044,7 +13044,7 @@ mod tests {
         );
     }
 
-    // ── one rounds number across axes (law d-608344c1 / x-027b) ─────────────
+    // ── one rounds number across axes (law d-608344c1 /) ─────────────
 
     fn attest_line(head: &str, branch: &str) -> String {
         format!(
@@ -13078,7 +13078,7 @@ mod tests {
         );
     }
 
-    // ── both producers go through the one predicate (x-5b99 / x-62a1) ───────
+    // ── both producers go through the one predicate (/) ───────
 
     /// PR #826's real payload shape: codex submitted at `8e557ccd` while the
     /// gate evaluated against head `89bc0b91`, two commits later.
@@ -13216,7 +13216,7 @@ mod tests {
 
     #[test]
     fn github_app_verdict_at_an_older_commit_is_stale_and_uncovers_the_pr() {
-        // THE x-5b99 specimen. Before this, the github_app axis read `state !=
+        // THE specimen. Before this, the github_app axis read `state !=
         // ""` and never asked which commit the review was submitted against,
         // so this exact payload produced `coverage: covered, reviewed_count:
         // 1` for a commit codex never saw. The state is non-empty here on
@@ -13381,7 +13381,7 @@ mod tests {
     }
 
     /// Like `attestation_line` but naming the branch the attestation is about -
-    /// the scoping field every post-x-e601 event carries. A legacy line (no
+    /// the scoping field every post-change event carries. A legacy line (no
     /// branch) is admitted only on exact head equality, so tests exercising a
     /// MOVED head must scope by branch or their fixture silently vanishes.
     fn attestation_line_on_branch(
@@ -13400,7 +13400,7 @@ mod tests {
 
     #[test]
     fn local_attestation_survives_a_carrying_head_move() {
-        // THE x-62a1 relief, and the only relief the measurement supports: an
+        // THE relief, and the only relief the measurement supports: an
         // attestation at an older commit whose code identity still matches
         // keeps counting. Before this, the scan dropped every line whose head
         // was not byte-equal to the current one, so the mandatory pre-merge
@@ -13468,7 +13468,7 @@ mod tests {
 
     #[test]
     fn a_stale_local_pass_does_not_rescue_a_failed_github_read() {
-        // Positive local evidence trumps a bot outage (x-0eaf). A STALE local
+        // Positive local evidence trumps a bot outage. A STALE local
         // pass is not positive evidence of anything current, so it must not
         // buy `covered` the way a fresh one does.
         let events = attestation_line_on_branch("code-review", "oldhead", "pass", "feature/x");
@@ -13542,7 +13542,7 @@ mod tests {
         // truth is UNMEASURED. A measured zero and an unmeasured one must
         // not serialize identically - the field is omitted, never 0, so a
         // future gate on it cannot read absence-of-measurement as
-        // absence-of-self-attestation (the x-62a1 aggregate shape).
+        // absence-of-self-attestation (the aggregate shape).
         let events = attestation_line("code-review", "h", "pass");
         let rep = classify_coverage(
             &[],
@@ -14126,7 +14126,7 @@ mod tests {
         assert_eq!(review_activity_ts(&json), "2026-08-12T17:51:48Z");
     }
 
-    // ── review_coverage reaches BOTH logs, scoped by repo (x-f43c) ───────────
+    // ── review_coverage reaches BOTH logs, scoped by repo ───────────
 
     #[test]
     fn coverage_event_carries_the_repo_slug() {
@@ -14201,7 +14201,7 @@ mod tests {
     }
 
     /// The bare sha equality the predicate replaced, as a freshness resolver.
-    /// The pre-x-5b99 tests below run against it unchanged: with no carry ever
+    /// The pre-change tests below run against it unchanged: with no carry ever
     /// granted, the new code must reproduce the old behavior exactly, and any
     /// test that moves is a regression rather than the intended softening.
     fn sha_equality_freshness(head: &str) -> impl Fn(&str) -> Freshness + '_ {
@@ -14400,14 +14400,14 @@ mod tests {
     }
 
     /// The gate's boolean view of `unattested_reviewers`, exactly as
-    /// `read_pr_info` derives it. The pre-x-cdc7 predicate tests below are
+    /// `read_pr_info` derives it. The pre-change predicate tests below are
     /// unchanged on purpose: promoting the return value to a list must not
     /// move the gate.
     fn reviewers_all_attested(events_path: &Path, reviewers: &[String], head_sha: &str) -> bool {
         unattested_reviewers(events_path, reviewers, head_sha, "").is_empty()
     }
 
-    // ── streak debounce (x-6231) ─────────────────────────────────────────────
+    // ── streak debounce ─────────────────────────────────────────────
     //
     // These drive `read_prior_fires` with an explicit `now` and gap, so they need
     // no env var and are parallel-safe -- unlike the integration suite, which
@@ -14574,13 +14574,13 @@ mod tests {
 
     #[test]
     fn scan_manifest_field_reads_claim_fields_after_frontmatter() {
-        // x-ba4b regression: `fno do target init` APPENDS the node-claim fields
+        // x-aaaa regression: `fno do target init` APPENDS the node-claim fields
         // AFTER the closing `---`, so the frontmatter-bounded parse_manifest must
         // NOT be relied on for them - the whole-file scanner is what drives
         // renewal. Mirrors init's real manifest shape.
         let content = "---\nsession_id: s1\nattended: false\n---\n\
                        Immutable session manifest.\n\
-                       target_claim_key: \"node:x-ba4b\"\n\
+                       target_claim_key: \"node:x-aaaa\"\n\
                        target_claim_holder: \"target-session:s1\"\n\
                        target_claim_ttl: \"2h\"\n";
         // parse_manifest (frontmatter-bounded) never sees the appended fields.
@@ -14589,7 +14589,7 @@ mod tests {
         // The whole-file scanner does.
         assert_eq!(
             scan_manifest_field(content, "target_claim_key").as_deref(),
-            Some("node:x-ba4b")
+            Some("node:x-aaaa")
         );
         assert_eq!(
             scan_manifest_field(content, "target_claim_holder").as_deref(),
@@ -15252,7 +15252,7 @@ git_bounded();";
         assert!(reason.contains("<watching"), "got: {reason}");
     }
 
-    // ── Watching idle-allow classification (x-e2c8) ───────────────────────
+    // ── Watching idle-allow classification ───────────────────────
     /// An open PR whose head matches local HEAD, CI still pending, no findings.
     fn watch_pr() -> PrInfo {
         PrInfo {
@@ -15282,7 +15282,7 @@ git_bounded();";
         }
     }
 
-    /// x-9ab2: the terminal fires only when the quota bounce is the SOLE unmet
+    /// the terminal fires only when the quota bounce is the SOLE unmet
     /// conjunct of `reviewed`. Each case drops one other conjunct and must
     /// block; reverting `awaiting_review_only` to the bare
     /// `!usage_limited.is_empty()` check fails them.
@@ -15433,7 +15433,7 @@ git_bounded();";
         assert_eq!(async_wait_class(&pr, true, true), None);
     }
 
-    // ── x-b167 idle rule + message rendering ──────────────────────────────────
+    // ── idle rule + message rendering ──────────────────────────────────
 
     fn bn(login: &str, class: NudgeClass, nudges: usize, newest: i64, span: i64) -> BotNudge {
         BotNudge {
@@ -15553,7 +15553,7 @@ git_bounded();";
     #[test]
     fn nudge_empty_classification_is_status_quo() {
         // A non-empty missing_bots with an EMPTY bot_nudges (not classified)
-        // behaves exactly as pre-x-b167: idlable, today's string.
+        // behaves exactly as pre-: idlable, today's string.
         let pr = bot_review_pr("chatgpt-codex-connector", vec![]);
         assert_eq!(async_wait_class(&pr, true, true), Some("review"));
         let reason = build_block_reason(&pr, "abc", true, true);
@@ -16896,7 +16896,7 @@ git_bounded();";
 
     #[test]
     fn unresolved_harness_floors_the_self_review_gate() {
-        // x-129b: `None` means UNATTRIBUTABLE, not verbless. A claude session
+        // `None` means UNATTRIBUTABLE, not verbless. A claude session
         // started from a codex shell resolves no single family, and reading
         // that ambiguity as "no floor" silently disengaged the only review a
         // stock install demands. Ambiguity is not permission; the explicit
@@ -17158,7 +17158,7 @@ git_bounded();";
     #[test]
     fn review_coverage_pr_failure_stdout_carries_quota_diagnostic() {
         let _root = crate::paths::DeclaredRoot::declare("review_coverage_pr_failure_s");
-        // x-b56a: exit 4 with a known PR persists a schema-gated unknown row,
+        // exit 4 with a known PR persists a schema-gated unknown row,
         // and its stdout must say WHY the read degraded. A bare unknown is
         // indistinguishable from "nobody reviewed this" and sent operators to
         // re-review PRs whose only problem was an exhausted quota window.
@@ -17993,7 +17993,7 @@ git_bounded();";
     #[test]
     fn budget_flat_key_enforces_cost_cap_ab41b13d9d() {
         // Prove the flat budget_cap key enforces as cost cap for BOTH attended and
-        // unattended - this is the ab-41b13d9d fold-in test.
+        // unattended - this is the fold-in test.
         let settings_cfg = "budget_cap = 0.10\n";
         let settings = parse_settings(settings_cfg);
         assert_eq!(settings.flat_budget_cap, Some(Ok(0.10)));
@@ -18465,9 +18465,9 @@ git_bounded();";
         assert!(resolved_required_bots(&empty).is_empty());
     }
 
-    // --- github_apps rename + required_bots alias (x-4baa US3/US4) ---
+    // --- github_apps rename + required_bots alias (US3/US4) ---
 
-    // --- optional_apps: honored-if-present, never required (x-4baa) ---
+    // --- optional_apps: honored-if-present, never required ---
 
     #[test]
     fn parse_settings_structural_scalar_degrades_like_python() {
@@ -18504,7 +18504,7 @@ git_bounded();";
         );
     }
 
-    // --- reviewers: local-attestation gate (x-e703, Phase 2) ---
+    // --- reviewers: local-attestation gate (Phase 2) ---
 
     #[test]
     fn parse_settings_reviewers_forms() {
@@ -18678,7 +18678,7 @@ git_bounded();";
         );
     }
 
-    // ── operator review-finding gate (x-f8d4) ────────────────────────────────
+    // ── operator review-finding gate ────────────────────────────────
 
     #[test]
     fn review_finding_open_then_resolved_clears() {
@@ -18818,7 +18818,7 @@ git_bounded();";
         assert_eq!(resolved_required_bots(&legacy), vec!["old-bot".to_string()]);
     }
 
-    // --- peers -> gate union (x-4baa US4) ---
+    // --- peers -> gate union (US4) ---
 
     #[test]
     fn parse_settings_peers_inline_scalars() {
@@ -19068,7 +19068,7 @@ git_bounded();";
         assert!(reviewers_all_attested(&events, &peer, "NEW"));
     }
 
-    // ---- same-model peer guard (x-c2e7) -----------------------------------
+    // ---- same-model peer guard -----------------------------------
 
     /// US5: effective model family resolution across bare providers, routes,
     /// malformed routes (fall back to provider), and unknown providers (None).
@@ -19315,7 +19315,7 @@ git_bounded();";
         assert_eq!(info.latest_ts, "2026-06-05T01:00:00Z");
     }
 
-    // ── clean-pass comments satisfy the required-bot gate too (x-e601 P1) ────
+    // ── clean-pass comments satisfy the required-bot gate too (P1) ────
     //
     // The coverage axis and the presence gate must agree about the same
     // comment. Before this, a clean-pass comment marked coverage reviewed
@@ -19863,7 +19863,7 @@ git_bounded();";
         assert_eq!(verdict, CoverageVerdict::Reviewed);
     }
 
-    // ── x-b167 nudge state ────────────────────────────────────────────────────
+    // ── nudge state ────────────────────────────────────────────────────
 
     fn nudge_cfg() -> NudgeConfig {
         NudgeConfig {
@@ -20051,7 +20051,7 @@ git_bounded();";
 
     #[test]
     fn compute_review_info_usage_limited_bot_blocks_gate() {
-        // x-9ab2: a required bot that posted only a usage-limit (quota) comment,
+        // a required bot that posted only a usage-limit (quota) comment,
         // never a review, is detected as rate-limited (moved to usage_limited,
         // out of missing_bots) AND must FAIL the gate closed: a quota bounce is
         // not a review, so all_required_passed is false and the PR does not

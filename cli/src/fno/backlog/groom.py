@@ -48,14 +48,14 @@ _GROOM_KEY_PREFIX = "groom"
 
 
 def groom_enabled() -> bool:
-    """Resolve whether the daily grooming worker spawn is armed (x-aaaf wave 2).
+    """Resolve whether the daily grooming worker spawn is armed (wave 2).
 
     ``config.groom.enabled`` defaults True (matches the spawner's prior,
     ungated behavior - it always ran). A malformed value degrades to True
     (GroomBlock's own fail-safe: this was never opt-in, so a typo must not
     silently disable it), but a config that fails to LOAD at all degrades to
     False - the global invariant that an unreadable config resolves every
-    gate to off, never to on (Failure Modes/Errors, x-aaaf design doc).
+    gate to off, never to on (Failure Modes/Errors, design doc).
 
     Also stops when ``config.autonomy.enabled`` (the wave-3 master panic
     switch) is off, checked first.
@@ -205,7 +205,7 @@ def _archive_leg_outcome(stdout: str) -> str:
     """Turn the archive leg's stdout into a receipt that names counts.
 
     Bare "ok" cannot tell a run that archived 500 nodes apart from one that
-    archived zero (x-a023) - exactly the ambiguity that let "archive: ok"
+    archived zero - exactly the ambiguity that let "archive: ok"
     read green every day since 2026-07-20 while 532 done nodes accumulated in
     the working graph, almost all of them held back rather than moved.
     """
@@ -216,7 +216,7 @@ def _archive_leg_outcome(stdout: str) -> str:
 
 
 def _reconcile_leg_outcome(stdout: str) -> str:
-    """Name the strand-heal count, mirroring ``_archive_leg_outcome`` (x-a31a).
+    """Name the strand-heal count, mirroring ``_archive_leg_outcome``.
 
     Bare "ok" reads the same whether the self-heal re-parented 38 stranded
     children or none.
@@ -271,7 +271,7 @@ def _spawn_groom_worker(brief: str, cwd: str, model: str, day: str) -> str:
 
     ``--substrate headless`` is explicit and load-bearing: a one-shot pass wants
     no pane and no placement prompt, and `-p` is only ever reachable through the
-    headless verb. The worker name is the x-84b2 ``gr-th-backlog-<day>``: the
+    headless verb. The worker name is the ``gr-th-backlog-<day>``: the
     groom source, the think verb, and the typed non-node ``backlog`` identity.
     """
     from fno import _subprocess_util
@@ -324,7 +324,7 @@ def run_groom(
     them too), then the judgment worker is dispatched. Returns a receipt whose
     ``status`` is one of ``dispatched`` | ``degraded`` (dispatched, but a
     mechanical leg did not come back clean) | ``already-ran`` | ``dry-run`` |
-    ``disabled`` (x-aaaf wave 2: ``config.groom.enabled`` is false) |
+    ``disabled`` (wave 2: ``config.groom.enabled`` is false) |
     ``failed``, carrying a ``mechanical`` map of per-leg outcomes. Never raises:
     a grooming pass is hygiene, so a failed dispatch reports and leaves the day
     retryable.

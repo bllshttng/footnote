@@ -51,7 +51,7 @@ class DeliverResult:
     terminated: str = "DoneAdvisory"
     # None when no node was in scope, or the bind succeeded. Set to the reason
     # when a node WAS in scope but the bind failed - the deliverable ships
-    # either way (x-953b: an unbound doc is the hole this closes, a lost
+    # either way (: an unbound doc is the hole this closes, a lost
     # deliverable would be a worse one).
     bind_warning: Optional[str] = None
 
@@ -132,7 +132,7 @@ def _bind_plan_path(node: str, brief_path: Path) -> Optional[str]:
     """Bind the shipped brief to `node` as its plan_path. Returns a warning
     string on failure, None on success.
 
-    x-953b: an advisory brief with no bound node is unreachable from the work
+    : an advisory brief with no bound node is unreachable from the work
     it answers - the exact hole a second, worse spike walked into. One
     `fno backlog update <id> --plan-path <doc>` call closes it, the same way
     it was closed by hand after the fact. Shells out to the CLI rather than a

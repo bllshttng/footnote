@@ -52,8 +52,8 @@ class Priority(str, Enum):
     p3 = "p3"
 
 
-# Lifecycle phases stamped into a node's append-only `sessions` list (x-b6e4).
-# `review` joined at x-4342 (operator ruling 2026-08-23): a spawned reviewer
+# Lifecycle phases stamped into a node's append-only `sessions` list.
+# `review` joined at (operator ruling 2026-08-23): a spawned reviewer
 # session that never holds the claim crossed no stamping chokepoint, so its
 # provenance row had no honest label. The single source of truth for phase
 # validation in store.append_session_record and the `session add` CLI.
@@ -75,7 +75,7 @@ def _derive_status(data: dict) -> str:
     if data.get("completed_at"):
         return "done"
     if data.get("superseded_by"):
-        # The superseded_by edge is the terminal fact (x-e8f3): supersession
+        # The superseded_by edge is the terminal fact: supersession
         # evidence lives in the record and the reconcile receipts, never in
         # status. Mirrors recompute_statuses answering superseded here.
         return "superseded"
@@ -204,7 +204,7 @@ class Node(BaseModel):
     # model_dump round-trips it and old graph.json entries (no children key)
     # parse without migration.
     children: list[dict] = Field(default_factory=list)
-    # Title-derived human handle (ab-f82e8083). Additive: leads display, but
+    # Title-derived human handle. Additive: leads display, but
     # `id` stays the canonical key. Assigned once when a node is first persisted
     # (store.ensure_slugs) and immutable thereafter; null until backfilled.
     slug: Optional[str] = None
@@ -253,7 +253,7 @@ class Node(BaseModel):
     details: Optional[str] = None
     cost_usd: Optional[float] = None
     cost_sessions: list[dict] = Field(default_factory=list)
-    # Delivery-unit containment (x-e957). Set when `decompose ... adopt:` folds
+    # Delivery-unit containment. Set when `decompose ... adopt:` folds
     # an existing node into a group child: this node's work ships inside the
     # named node's PR, so it is not separately dispatchable and not separately
     # costed. `plan == PR == node` holds for the delivery unit; a contained node
@@ -263,7 +263,7 @@ class Node(BaseModel):
     # nodes serializes byte-identically (the `dep`/`stub_against` pattern).
     contained_in: Optional[str] = None
     size: Optional[str] = None
-    # Optional per-node model pin (x-571f). A dispatcher appends `--model <m>`
+    # Optional per-node model pin. A dispatcher appends `--model <m>`
     # to the worker spawn it builds; null = provider default (no behavior
     # change). Validated as a single non-whitespace token at write time; the
     # no-whitespace rule protects MODEL_FLAG shell word-splitting in the loop
@@ -287,7 +287,7 @@ class Node(BaseModel):
     # so old graph.json entries parse without migration.
     additional_prs: list[dict] = Field(default_factory=list)
     merge_status: Optional[str] = None
-    # Causal links (W4 telemetry, x-f063): survival math needs a fix node to
+    # Causal links (W4 telemetry): survival math needs a fix node to
     # point back at what it fixes and a reverted ship to stop counting as a
     # survival. Writers: `backlog update --caused-by/--fixes-pr/--reverted`
     # (manual), retro-harvest node creation (auto caused_by), reconcile's
@@ -307,7 +307,7 @@ class Node(BaseModel):
     # compatibility; this record carries the proof state.
     supersession: Optional[dict] = None
 
-    # Parent-edge provenance (x-30f6). Declared first-class (typed, default
+    # Parent-edge provenance. Declared first-class (typed, default
     # None) so model_dump round-trips them and they validate as strings. The
     # store applies the same defaults on the raw-dict read path; the older
     # source_* fields stay extras (extra="allow") and are intentionally not
@@ -332,7 +332,7 @@ class Node(BaseModel):
     request_origin: Optional[str] = None
     origin_evidence: Optional[str] = None
 
-    # Append-only lifecycle provenance (x-b6e4): one {phase, harness, session_id,
+    # Append-only lifecycle provenance: one {phase, harness, session_id,
     # effort, at} record per phase boundary a session crossed. Unique per
     # (phase, harness, session_id); the same session may appear across phases and
     # a takeover appends another entry for the same phase. Written only through
@@ -349,7 +349,7 @@ class Node(BaseModel):
     @field_validator("rank", mode="before")
     @classmethod
     def _validate_rank(cls, v: object) -> Optional[float]:
-        """Reject bool / inf / NaN ranks at the model boundary (ab-6603350c).
+        """Reject bool / inf / NaN ranks at the model boundary.
 
         Live render/verb paths already guard these (``_rank_band`` finite-check
         + bool exclusion, ``_is_ranked`` bool exclusion) and the raw-dict path

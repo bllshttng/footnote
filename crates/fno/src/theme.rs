@@ -1,4 +1,4 @@
-//! Mux chrome themes (x-f75e): a named palette the chrome reads. `terminal` is
+//! Mux chrome themes : a named palette the chrome reads. `terminal` is
 //! the default and inherits the emulator's own colors, so every existing render
 //! path stays byte-identical (Default + the INVERSE/BOLD/DIM flags do the work,
 //! no color introduced). Named themes give the chrome (border, title, esc chip,

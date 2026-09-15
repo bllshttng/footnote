@@ -177,7 +177,7 @@ for skill in "${ALL_RETIRED[@]}"; do
 done
 
 # --- Renamed skills (old -> new) -------------------------------------------
-# A folder rename (e.g. skills/agents -> skills/agent, ab-12dd2a5d) leaves the
+# A folder rename (e.g. skills/agents -> skills/agent) leaves the
 # OLD name dead, but - unlike a cut - keeps a live sibling whose name is a
 # prefix of unrelated tokens: the `fno agents` plural mesh CLI and the
 # cli/src/fno/agents/ package path. The generic /<name> alternative used
@@ -222,7 +222,7 @@ for old in "${RENAMED_OLD_NAMES[@]}"; do
   fi
 done
 
-# --- Retired command surfaces (ab-cee91152) --------------------------------
+# --- Retired command surfaces --------------------------------
 # Messaging consolidated into the `fno agents mail` namespace: the `fno inbox <verb>`
 # surface and the `fno agents send` verb are deleted clean (no shim). A stale
 # caller in production code would break at runtime, so reject any surviving

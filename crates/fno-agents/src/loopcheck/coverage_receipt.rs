@@ -47,7 +47,7 @@ fn blind_to_reviewed_commits(rep: &CoverageReport) -> bool {
 /// string.
 const CAP_SPENT_TERMINAL_ACT: &str = "the configured rounds are spent: the review phase is complete; open findings stay in the PR conversation; merge on green CI; the operator lever is config.review.max_rounds";
 
-/// One-line coverage summary for the terminal message and receipts (x-0eaf
+/// One-line coverage summary for the terminal message and receipts (
 /// task 3.1). Printed from the coverage value at print time, never from a
 /// remembered gate verdict (receipts have lied before).
 ///
@@ -158,7 +158,7 @@ pub fn coverage_receipt_line(
                 .map(|v| v.name.as_str())
                 .collect();
             // Stale reviewers are NAMED too. Without this the receipt for the
-            // x-5b99 specimen reads "0 reviewed, 0 refused, 0 errored, 0
+            // specimen reads "0 reviewed, 0 refused, 0 errored, 0
             // absent" - four zeros describing a PR a bot really did review, at
             // an older commit. That is the absence-shaped lie the Stale variant
             // exists to delete, and dropping it from the one line a human reads
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn coverage_receipt_names_a_stale_reviewer_instead_of_four_zeros() {
-        // The receipt for the x-5b99 specimen used to read "0 reviewed, 0
+        // The receipt for the specimen used to read "0 reviewed, 0
         // refused, 0 errored, 0 absent" - four zeros over a PR codex really did
         // review, at an older commit - and then prescribed the local verb,
         // which is the one move that does NOT get the bot to re-read.

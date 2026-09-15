@@ -28,7 +28,7 @@ def _ts_now() -> str:
 # it as terminal. ``done`` (work shipped) and ``superseded`` (replaced by
 # another node) are the two terminal rungs; every other rung is still open and
 # may be dispatched. Imported from the status authority (statuses.TERMINAL_RUNGS)
-# so the closure vocabulary has one spelling everywhere (x-94f8).
+# so the closure vocabulary has one spelling everywhere.
 
 
 class GraphTracker:

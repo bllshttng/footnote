@@ -26,7 +26,7 @@ from fno.agents.registry import registry_rows_by_cwd
 def _load_registry() -> tuple[dict[str, tuple[str, str]], bool]:
     """Return cwd -> (name, status), preferring a live row, plus read status.
 
-    Builds on the ONE shared occupancy join (x-dead task 0.2); the best-row
+    Builds on the ONE shared occupancy join (task 0.2); the best-row
     selection below (live row outranks, then freshest timestamp) stays here
     because only the display leg needs it."""
     rows, ok = registry_rows_by_cwd()

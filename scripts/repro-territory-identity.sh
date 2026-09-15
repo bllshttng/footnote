@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Positive operational proof for x-e221: one territory = one list.
+# Positive operational proof for x-aaaa: one territory = one list.
 #
 # Builds a fresh throwaway fixture (isolated FNO_HOME + project dir), writes
 # the fixture graph through the store's own writer, then runs the resolver,
@@ -12,7 +12,7 @@
 #   nominated-review row staying visible on the board.
 set -u
 
-fail() { echo "repro-x-e221: FAIL: $1" >&2; exit 1; }
+fail() { echo "repro-x-aaaa: FAIL: $1" >&2; exit 1; }
 
 ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel 2>/dev/null) || ROOT=$(pwd)
 cd "$ROOT" || fail "cannot cd to repo root $ROOT"
@@ -21,7 +21,7 @@ cd "$ROOT" || fail "cannot cd to repo root $ROOT"
 CARGO=$(command -v cargo) || fail "cargo required (Rust cap reader + board marker)"
 UV=$(command -v uv) || fail "uv required (python test runner)"
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/repro-x-e221.XXXXXX") || fail "mktemp failed"
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/repro-x-aaaa.XXXXXX") || fail "mktemp failed"
 trap 'rm -rf "$TMP"' EXIT
 FNO_HOME_DIR="$TMP/fno-home"
 FIXTURE="$TMP/project"
@@ -162,7 +162,7 @@ for name in ("w1", "w2"):
     acquire_claim(
         f"worker:{name}",
         "repro-fixture",
-        reason="x-e221 repro fixture",
+        reason="x-aaaa repro fixture",
         ttl_ms=600000,
         pid_unavailable=True,
         root=root,
@@ -242,4 +242,4 @@ echo "== 6. cross-territory nominated review stays visible =="
   || fail "board nomination marker"
 echo "MARKER nominated-review: cross-territory PR demoted to out_of_scope, never hidden"
 
-echo "repro-x-e221: PASS (all markers asserted)"
+echo "repro-x-aaaa: PASS (all markers asserted)"

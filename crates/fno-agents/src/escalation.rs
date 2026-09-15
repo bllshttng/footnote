@@ -333,7 +333,7 @@ mod tests {
     const EXAMPLE: &str = r#"---
 class: irreversible
 status: open
-node: x-1234
+node: x-aaaa
 raised_by: king-a792
 raised_at: 2026-09-15T09:00:00Z
 deadline: 2026-09-16T09:00:00Z
@@ -364,7 +364,7 @@ The king waits. A force push cannot be undone.
         let e = parse(EXAMPLE);
         assert_eq!(e.class, "irreversible");
         assert_eq!(e.title, "Rewrite release history to remove a leaked token");
-        assert_eq!(e.node.as_deref(), Some("x-1234"));
+        assert_eq!(e.node.as_deref(), Some("x-aaaa"));
         assert_eq!(e.recommend, Some(2));
         assert!(problems(&e).is_empty(), "{:?}", problems(&e));
 
@@ -386,7 +386,7 @@ The king waits. A force push cannot be undone.
             body.contains("No answer by 2026-09-16T09:00:00Z: the king waits"),
             "{body}"
         );
-        assert!(!body.contains("x-1234"), "no id in the body: {body}");
+        assert!(!body.contains("x-aaaa"), "no id in the body: {body}");
     }
 
     #[test]

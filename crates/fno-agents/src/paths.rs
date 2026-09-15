@@ -197,7 +197,7 @@ impl AgentsHome {
         self.root.join("injection-gate.json")
     }
 
-    /// Machine-wide fleet incident breaker (`fleet-stop.json`, x-77db), next
+    /// Machine-wide fleet incident breaker (`fleet-stop.json`), next
     /// to `registry.json`. Written by `fleet-incident stop|clear`, read by
     /// every admission gate before its bypass branches; see
     /// [`crate::fleet_incident`].
@@ -205,7 +205,7 @@ impl AgentsHome {
         self.root.join("fleet-stop.json")
     }
 
-    /// Durable roster-progress sidecar (x-cdc7 SECOND HALF): per-row git
+    /// Durable roster-progress sidecar (SECOND HALF): per-row git
     /// evidence (last commit sha/age, branch-ahead, PR number) keyed by row
     /// name, refreshed by the reconcile sweep alongside `registry.json`. A
     /// sidecar, not new `RegistryEntry` fields, deliberately: ~20 existing
@@ -222,7 +222,7 @@ impl AgentsHome {
         self.root.join("events.jsonl")
     }
 
-    /// Directory of terminal-stop markers (x-fcbf). `finalize` drops one file
+    /// Directory of terminal-stop markers. `finalize` drops one file
     /// per fire-and-forget `claude --bg` session whose loop reached a terminal
     /// decision; the daemon sweep consumes it to `claude stop` the parked
     /// worker. Filename = the claude session uuid; content = the reason.
@@ -249,8 +249,8 @@ impl AgentsHome {
     }
 
     /// Sidecar advisory-lock file for the supervisor-socket singleton guard
-    /// (x-ef7f). Held exclusively, for the daemon's whole process lifetime, by
-    /// whichever process is entitled to bind `supervisor_sock()`. Since x-3498
+    ///. Held exclusively, for the daemon's whole process lifetime, by
+    /// whichever process is entitled to bind `supervisor_sock()`. Since
     /// the holder also writes `<pid> <pid_start_time>` into the content at
     /// bind time; see [`supervisor_lock_holder`].
     pub fn supervisor_lock(&self) -> PathBuf {
@@ -387,7 +387,7 @@ pub fn is_file_mode_0600(path: &Path) -> bool {
 /// linked worktree this returns the main checkout; from the main checkout it
 /// returns itself (so a `--fresh`-style redirect is a no-op there). Mirrors the
 /// Python `resolve_canonical_worktree` in `cli/src/fno/paths.py` so the two
-/// layers cannot drift (ab-77b691dc; review HIGH). Shared by the client `--fresh`
+/// layers cannot drift (; review HIGH). Shared by the client `--fresh`
 /// dispatch (`bin/client.rs`).
 ///
 /// A THIRD implementation of this question lives in `fno::digest_overlay`, which
@@ -654,7 +654,7 @@ pub fn ledger_path(cwd: &Path) -> PathBuf {
 /// The destination must be the source repository's own DURABLE space (the
 /// default state root - never a per-process `FNO_SPACES_DIR` pin): a move
 /// into a sandbox root strands the only copy where the repo's own readers
-/// never look again, behind a MOVED-TO pointer they do not follow (x-d2e9).
+/// never look again, behind a MOVED-TO pointer they do not follow.
 /// A source outside any checkout has no durable space to check against and
 /// keeps the old behavior.
 pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
@@ -887,7 +887,7 @@ mod tests {
         std::env::remove_var(HOME_ENV);
     }
 
-    // ── supervisor_lock_holder (x-3498) ─────────────────────────────────────
+    // ── supervisor_lock_holder ─────────────────────────────────────
 
     #[test]
     fn supervisor_lock_holder_parses_pid_and_start_time() {
@@ -930,7 +930,7 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
-    // ── canonical_repo_root (ab-77b691dc) ────────────────────────────────────
+    // ── canonical_repo_root ────────────────────────────────────
 
     #[test]
     fn canonical_repo_root_none_outside_git() {

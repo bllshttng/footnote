@@ -1,6 +1,6 @@
 """Native target resume: rebind the node claim to the resumed durable process.
 
-The sole writer for native target resumption (x-2ccd). A native harness can
+The sole writer for native target resumption. A native harness can
 resume the same durable conversation after the process that began the target run
 has exited. The immutable manifest still names the correct harness session and
 Footnote run; this primitive proves the ambient process belongs to that attempt

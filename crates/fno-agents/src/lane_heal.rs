@@ -1,4 +1,4 @@
-//! One owner for healing a registry row whose mux pane ref is dead (x-4a68).
+//! One owner for healing a registry row whose mux pane ref is dead.
 //!
 //! Eight readers key on the stored `mux` ref (`keystroke_lane`, `_deliver_live`,
 //! the codex thread predicates, resume). When the pane the ref names is gone

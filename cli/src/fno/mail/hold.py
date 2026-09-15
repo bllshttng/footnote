@@ -689,7 +689,7 @@ def cmd_notify_self() -> None:
 
     handle = canonical_handle(ident.session_id)
 
-    # Busy mode (x-481e): the hook fires on every UserPromptSubmit - an idle
+    # Busy mode: the hook fires on every UserPromptSubmit - an idle
     # hold re-arms, a wall hold keeps its policy live. Both calls WRITE, so a
     # hold failure must degrade to rendering the mail, never swallowing this turn.
     try:

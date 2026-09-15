@@ -1,4 +1,4 @@
-"""Shared gate_escape telemetry (x-f894 Tier-1 + x-91b5 Tier-2).
+"""Shared gate_escape telemetry (Tier-1 + Tier-2).
 
 One emit path for the autonomy-debt counter: reconcile's auto ``dead-bot``
 emit, the ``spawn-cap`` auto emit from both spawn gates, and the manual

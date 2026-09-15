@@ -137,7 +137,7 @@ def list_agents(
         live_map, augment_warnings = claude_mod.claude_agents_json()
         warnings.extend(augment_warnings)
 
-    # fno-truth status (x-4a48): a bg /target worker between turns reads Idle
+    # fno-truth status: a bg /target worker between turns reads Idle
     # even while CI/preflight run externally. Fill only the ambiguous Idle /
     # missing gap from the node claim + loop_check recency; never override a
     # harness Working / Needs input (Locked Decision 1). One tail read of the
@@ -201,7 +201,7 @@ def list_agents(
             last_activity_age_s=truth.get("last_activity_age_s"),
             provider_refusal=truth.get("provider_refusal"),
         )
-        # x-c672 (AC7): the STATUS word is served activity (writing | quiet |
+        # (AC7): the STATUS word is served activity (writing | quiet |
         # parked, + orphaned for a falsified row, refused for a provider-
         # refused row, unknown for an unanswered probe), rendered from the same
         # single truth reading above. The old `live` token is gone; `--status`
@@ -232,7 +232,7 @@ def list_agents(
         # ``--all``: a stopped/completed row now arrives in live_map instead
         # of being absent, and without this, its raw supervisor status would
         # silently win over the richer PR/CI-aware truth-status fallback.
-        # (x-d401, x-d4a6) A FIRED falsifier widens the gate: a stale
+        # A FIRED falsifier widens the gate: a stale
         # non-idle supervisor token standing against a confirmed-gone pid is
         # a self-contradicting row, so the richer truth reading runs for it
         # too. The supersession is not silent - the original word rides the
@@ -286,7 +286,7 @@ def list_agents(
         )
         rows.append(row)
 
-    # P1 (ab-098967b4): the discovered-live-sessions lane. Best-effort
+    # P1: the discovered-live-sessions lane. Best-effort
     # augmentation over Claude Code's on-disk session registry; it must never
     # crash `agents list` (US5/AC5-FR), so a broad catch here is intentional
     # (unlike the registered-agents path) — but the error surfaces as a WARN,
@@ -302,7 +302,7 @@ def list_agents(
             }
             # Projects-store rows key on full session_id (their short_id is the
             # uuid prefix, not the registry's hex handle), so exclude adopted
-            # sessions by cc_session_id too (x-a1d5: no double-listing).
+            # sessions by cc_session_id too (: no double-listing).
             registered_session_ids = {
                 e.cc_session_id for e in entries if e.cc_session_id
             }
@@ -458,7 +458,7 @@ def read_logs(
     # Codex / Gemini path — read the JSONL tee file if it exists. Retrieval is
     # implemented (see test_logs_codex_oneshot_parity); the only failure here is
     # a genuinely-absent log file, so report that honestly rather than the stale
-    # "ships in Phase 3 US4" stub that made codex look unsupported (ab-65c3e60d).
+    # "ships in Phase 3 US4" stub that made codex look unsupported.
     # Byte-parity with client_verbs.rs's matching branch. Check emptiness first:
     # Path("") is Path("."), which exists, so the old code mis-read an empty
     # log_path row as the cwd directory.

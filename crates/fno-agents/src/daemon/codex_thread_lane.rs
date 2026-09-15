@@ -48,7 +48,7 @@ pub(super) async fn spawn_codex_thread_lane(
     };
     let effort = req.params.get("effort").and_then(Value::as_str);
     let node = req.params.get("node").and_then(Value::as_str);
-    // Hop 2 of the state-root grant (x-f22f). Read the roots from the REQUEST,
+    // Hop 2 of the state-root grant. Read the roots from the REQUEST,
     // never from this process's environment. This daemon is long-lived and
     // shared across every thread on the machine, so its own env is not the
     // spawning client's - a `state_dirs_from_env()` call here would read
@@ -197,7 +197,7 @@ pub(super) async fn spawn_codex_thread_lane(
     // first follow-up ask STEERS into the seed turn instead of blocking
     // behind it (the daemon.rs:4077 mutex shape this replaces).
     //
-    // A seedless spawn takes WARMUP_SEED rather than no turn at all (x-296f).
+    // A seedless spawn takes WARMUP_SEED rather than no turn at all.
     // `thread/start` records a thread id but writes no rollout, and a harness
     // resolves a session to attach BY that rollout, so a worker with no turn
     // is a worker the operator cannot open: `codex resume` answers "no rollout

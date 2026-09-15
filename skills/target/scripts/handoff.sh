@@ -187,7 +187,7 @@ _parse_manifest_field() {
 # multiline /target input carrying a `graph_node_id:` line would otherwise be
 # read first (codex review, PR #531). When there is no second `^---`
 # (unterminated frontmatter) or the field is absent from the body, we fall back
-# to a whole-file scan so the ab-c2edd785 false-park modes stay fixed. Mirrors
+# to a whole-file scan so the false-park modes stay fixed. Mirrors
 # the placement-independent, shape-validated reader in
 # cli/src/fno/cost/_register.py.
 _parse_body_field() {
@@ -269,7 +269,7 @@ fi
 # Step 1: Preconditions (refuse = parked BEFORE any state mutation)
 # ---------------------------------------------------------------------------
 
-# Master switch check (x-aaaf wave 3 follow-up): config.autonomy.enabled
+# Master switch check (wave 3 follow-up): config.autonomy.enabled
 # outranks every spawner-specific gate, including this one, and is checked
 # first for the same reason autonomy_master_enabled() checks it first in
 # every Python resolver - a panic switch something else can bypass is not
@@ -387,7 +387,7 @@ _NODE_SLUG="$(fno backlog get "$NODE_ID" 2>/dev/null | jq -r '.slug // empty' 2>
 _NODE_SLUG="$(printf '%s' "$_NODE_SLUG" | tr '[:upper:]_' '[:lower:]-' \
   | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//' | cut -c1-48)"
 [ -n "$_NODE_SLUG" ] || _NODE_SLUG="work"
-# x-84b2: the child name is minted through the canonical bridge -
+# the child name is minted through the canonical bridge -
 # sh-t-<node>-<slug>-g<n>, the self-handoff source stamped so the successor
 # is distinguishable from a manual t- worker. The generation rides as the
 # never-shaved discriminator. A mint refusal parks the handoff loudly.
@@ -528,7 +528,7 @@ Successor name: ${CHILD_NAME}
 BRIEFEOF
 fi
 
-# Durable resume receipt (x-c3a2): write the typed, immutable, versioned
+# Durable resume receipt: write the typed, immutable, versioned
 # receipt alongside the brief. The brief is human-readable succession context;
 # the receipt is the machine-readable EVIDENCE a successor revalidates against
 # live claim/HEAD/worktree before any write. Best-effort: a receipt write
@@ -536,7 +536,7 @@ fi
 # handoff - the brief + `delegated` event remain the primary succession path.
 # The receipt reuses the event-journal reducers, so it stores no second copy.
 #
-# Task-context binding (x-59b0): when the attempt carries a declared binding,
+# Task-context binding: when the attempt carries a declared binding,
 # revalidate its required sources natively BEFORE the bound receipt is
 # prepared (the parent still holds authority here) and embed it in the
 # receipt. A refusal parks the handoff BEFORE any delegation commits: required
@@ -590,7 +590,7 @@ else
 fi
 rm -f "$_TMP_RECEIPT_ERR" 2>/dev/null || true
 
-# Builder crumb trail (x-4852): the shared journal carries multiple nodes, so
+# Builder crumb trail: the shared journal carries multiple nodes, so
 # select only crumbs correlated to this handoff's node. Summarize that tail for
 # the delegation receipt and append the last crumbs to the successor's brief so
 # it picks up from the trail instead of re-deriving. Best-effort: a missing,
@@ -732,7 +732,7 @@ echo "prepare: archived manifest and released node:$NODE_ID"
 # ---------------------------------------------------------------------------
 # Build command: inject the refusal flag when auto_merge_approved != true.
 # The flag is the attributable carrier in the command; the exported env var is
-# the MECHANICAL carrier (x-9d11): the successor's init folds TARGET_NO_MERGE
+# the MECHANICAL carrier: the successor's init folds TARGET_NO_MERGE
 # even if it never passes the flag through, so a post-compaction or thin-skinned
 # child cannot inherit merge authority the parent refused.
 SPAWN_FLAGS=""
@@ -905,7 +905,7 @@ fi
 _emit_event "session_satisfied" \
   "{\"source\":\"delegated\",\"reason\":\"do-phase delegated to $CHILD_NAME\",\"session_id\":\"$SESSION_ID\",\"gate_state_hash\":\"$_GATE_HASH\"}"
 
-# 8c. Delegating session's ledger session-record (step 6, ab-f8e5f214 / AC7-EDGE).
+# 8c. Delegating session's ledger session-record (step 6, / AC7-EDGE).
 # The manifest was archived in Step 4, so the stop-hook shim's finalize cannot
 # read it (and in fact the shim exits early on the now-missing manifest). Write
 # the paper-trail row HERE via the `finalize` verb against the ARCHIVED manifest,
@@ -1013,7 +1013,7 @@ rm -f "$FNO_DIR/.handoff-armed-$SESSION_ID"
 # ---------------------------------------------------------------------------
 # Step 8 complete: print delegated line (step 9 is the calling LLM's job)
 # ---------------------------------------------------------------------------
-# Crumb-trail annotation (x-4852): operator-visible, printed BEFORE the strict
+# Crumb-trail annotation: operator-visible, printed BEFORE the strict
 # `delegated ...` decision line so the parser (which keys on that prefix) is
 # unaffected. The successor inherits the same worktree events.jsonl + the brief.
 echo "$_CRUMB_SUMMARY"

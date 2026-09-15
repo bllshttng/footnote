@@ -1,4 +1,4 @@
-"""Plan fidelity as a gate decision (x-cbab).
+"""Plan fidelity as a gate decision.
 
 The fold (`fno.scoreboard.fold.build_plan_fidelity`) computes the planned-to-
 delivered join for TELEMETRY: an unjoined plan is unmeasurable, never 0%. That

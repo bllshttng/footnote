@@ -2,10 +2,10 @@
 # Resume Execution Protocol
 
 Two resume layers compose: the lightweight STATE.md wave/task trail (below) and
-the durable typed receipt (x-c3a2, the authority-safe layer). A successor reads
+the durable typed receipt (the authority-safe layer). A successor reads
 both; it WRITES only after the durable receipt revalidates against live state.
 
-## Durable typed resume receipts (x-c3a2)
+## Durable typed resume receipts
 
 A receipt is durable **evidence** of where a session left off, never write
 **authority**. The authority to resume is the live claim + liveness + git HEAD,

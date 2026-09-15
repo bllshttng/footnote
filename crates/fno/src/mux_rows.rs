@@ -1,4 +1,4 @@
-//! Sidecar readers for mux session rows (x-f188 change 4): the `.ver` wire
+//! Sidecar readers for mux session rows (change 4): the `.ver` wire
 //! stamp and the `.pid` stamp. Split out of mux_cli so the census-facing
 //! fields live beside the sidecars they read (proto.rs) without growing an
 //! over-budget file.
@@ -6,7 +6,7 @@
 use crate::proto;
 use std::path::Path;
 
-/// Read a session socket's `.ver` sidecar (x-1a85) and parse the stamped wire
+/// Read a session socket's `.ver` sidecar and parse the stamped wire
 /// version. `None` on any read/parse failure (absent sidecar = older server).
 pub(crate) fn read_wire_version(sock: &Path) -> Option<u32> {
     std::fs::read_to_string(proto::version_sidecar_path(sock))
@@ -27,7 +27,7 @@ pub(crate) fn pid_from_sidecar(name: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod pid_sidecar_tests {
-    // x-f188 change 4: the `ls --json` Live row's pid comes from the pid
+    // change 4: the `ls --json` Live row's pid comes from the pid
     // sidecar; absent or unparseable reads null, never a fault.
     use super::*;
 

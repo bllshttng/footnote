@@ -1,4 +1,4 @@
-"""Durable typed resume receipts (x-c3a2).
+"""Durable typed resume receipts.
 
 A receipt is durable EVIDENCE of where a target session left off, never write
 AUTHORITY. Authority to resume is the live claim + liveness + git HEAD,

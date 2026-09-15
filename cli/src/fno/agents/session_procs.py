@@ -1,4 +1,4 @@
-"""Resolve a registry/roster row to the process that IS the session (x-3f84 W2).
+"""Resolve a registry/roster row to the process that IS the session (W2).
 
 For a claude bg row the recorded pid names the PTY HOST (`claude bg-pty-host`),
 not the worker: measured 2026-08-22, row 55f9847a carried pid 98779 whose `ps`
@@ -95,7 +95,7 @@ def roster_pid_map() -> Optional[dict[str, Optional[int]]]:
     """The claude daemon roster as ``{8-hex jobId: host pid}``, or None when unreadable.
 
     The SECOND daemon-side oracle for a bg row the rv farm missed: a short_id in
-    neither map is a dead session (x-a457); a roster pid is the PTY HOST hosting
+    neither map is a dead session ; a roster pid is the PTY HOST hosting
     it. Missing file: {}; other failure: None. A held worker with no usable pid
     maps to None - the session exists, its key is not absence.
     """
@@ -121,7 +121,7 @@ def roster_pid_map() -> Optional[dict[str, Optional[int]]]:
 
 
 def codex_rollout_pid_map(session_ids: set[str], *, timeout: float = 5.0) -> dict[str, int]:
-    """codex session id -> pid of the process holding that thread's rollout (x-9958).
+    """codex session id -> pid of the process holding that thread's rollout.
 
     Codex threads have no claude-style roster, so the rollout fd IS the identity; the id is read from each rollout's own session_meta record, never the filename UUID, which is not always the session id. The walk stays inside codex-named processes because a whole-machine open-file scan prices every caller. Best-effort by design: psutil missing, a spent timeout, or an unreadable rollout all mean ``{}``, which undercounts - callers read that as unknown, never as no sessions.
     """

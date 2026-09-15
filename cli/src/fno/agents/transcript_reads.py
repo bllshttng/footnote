@@ -24,7 +24,7 @@ def cmd_newest_assistant_text(
     """Print the newest assistant turn's text from one transcript file.
 
     loopcheck's distress read routes here instead of keeping its own parser:
-    this is the one reader that speaks both harness shapes (x-6aca). Exit 1
+    this is the one reader that speaks both harness shapes. Exit 1
     when the file yields no assistant text.
     """
     from fno.agents.peek import newest_assistant_text

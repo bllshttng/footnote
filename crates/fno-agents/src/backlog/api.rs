@@ -584,7 +584,7 @@ pub fn node_update(
         // The status arm goes through the patch door: status is derived, so
         // the planner changes the facts and validates the readback. A
         // refusal (a done node, a plan-less ready, an owned transition)
-        // answers success:false with the rows untouched (x-665f, AC9).
+        // answers success:false with the rows untouched (AC9).
         if let Some(word) = &input.status {
             if crate::backlog::patch::plan_status_on_rows(rows, id, word).is_err() {
                 return Ok(false);

@@ -1,4 +1,4 @@
-"""fno.agents.nudge — P2 loop-boundary inbox nudge (ab-098967b4).
+"""fno.agents.nudge — P2 loop-boundary inbox nudge.
 
 An autonomous `/target` loop submits no user prompt and starts no new session
 between iterations, so neither the per-prompt nor the session-start inbox

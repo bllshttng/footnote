@@ -51,19 +51,19 @@ CHECKS: dict[str, str] = {
 }
 
 
-# x-71b6 In-N-Out menu ratchet: the advertised command surface stays small.
+# In-N-Out menu ratchet: the advertised command surface stays small.
 # These are the knobs a maintainer touches to widen a surface, on purpose, in
 # a one-line diff that shows up in review. New verbs default to hidden, but
 # hidden roots still consume the namespace cap.
 #
 # ROOT_NAMESPACE: 12 is the operator's ceiling ("10-12 max for fno",
 # d-cf2d6fe1). Today is ELEVEN - agents, backlog, config, do, doctor, help,
-# inbox, mux, update, version, whoami (x-6233 folds) - so exactly one slot
+# inbox, mux, update, version, whoami (folds) - so exactly one slot
 # of headroom remains. The next root verb is a deliberate act with a name
 # attached: fold or retire before raising this.
 MENU_CAP_ROOT_NAMESPACE = 12
 MENU_CAP_TOP_LEVEL = 10
-# x-77db allocates `mail team`, the operator's fleet announcement verb, as
+# allocates `mail team`, the operator's fleet announcement verb, as
 # mail's thirteenth advertised verb: an incident command hidden from the menu
 # is the wedged-lock failure mode again.
 MENU_CAP_SUB_APP = 13
@@ -79,7 +79,7 @@ SPAWN_SHAPE_ALLOWLIST = frozenset(
         "cli/src/fno/agents/dispatch.py",
         "cli/src/fno/agents/harnesses/claude.py",
         "cli/src/fno/agents/harnesses/codex.py",
-        # Canonical tool-less one-shot judgment seam; x-81ad consolidated the
+        # Canonical tool-less one-shot judgment seam; consolidated the
         # former inbox/graph/review call-site shapes here.
         "cli/src/fno/llm.py",
         "cli/src/fno/skill_diff/synthesize.py",
@@ -222,7 +222,7 @@ def graph_parity(
 
 
 # ---------------------------------------------------------------------------
-# state-roots: x-3d21 R4 (declared root) + R5 (a cache keyed on nothing)
+# state-roots: R4 (declared root) + R5 (a cache keyed on nothing)
 # ---------------------------------------------------------------------------
 
 STATE_ROOTS_BASELINE = "scripts/ci/state-roots-baseline.txt"
@@ -359,7 +359,7 @@ def _state_root_path_violations(repo_root: Path) -> list[tuple[str, str, str]]:
     ``/ ".fno"`` or ``".fno/``; Rust ``join(".fno``) on a line whose two-line
     window also names a ``filename`` from ``fno.paths.STATE_FILES``. It
     deliberately does NOT match ``config.toml``: config has its own documented
-    candidate chain with its own layering rules, that layering is x-79a6's, and
+    candidate chain with its own layering rules, that layering is, and
     folding it in here would fire on sites this gate has no remedy for.
     """
     from fno.paths import STATE_FILES
@@ -411,7 +411,7 @@ def _state_root_path_violations(repo_root: Path) -> list[tuple[str, str, str]]:
                         f"{rel}:{line_no}: hand-built state path '.fno/{filename}'\n"
                         f"    This file has ONE resolver: {owner}.\n"
                         "    A hand-built path consults nothing, so FNO_EVENTS_PATH, a guard, or\n"
-                        "    a refusal cannot reach it by construction (x-3d21 R4).\n"
+                        "    a refusal cannot reach it by construction (R4).\n"
                         "    Fix: call the resolver. If you hold a root already, pass it\n"
                         "    explicitly. If this site cannot move yet, add it to\n"
                         f"    {STATE_ROOTS_BASELINE} with the node that owns draining it.",
@@ -496,7 +496,7 @@ def _zero_arg_root_cache_violations(repo_root: Path) -> list[tuple[str, str, str
                     rel,
                     node.name,
                     f"{rel}:{node.lineno}: {node.name} is a zero-argument cache over a\n"
-                    f"    reader that resolves a state root (calls {read}) (x-3d21 R5).\n"
+                    f"    reader that resolves a state root (calls {read}) (R5).\n"
                     "    A zero-arg lru_cache is a global keyed on nothing: the first caller in\n"
                     "    the process fixes the answer for every caller after it, so the result\n"
                     "    depends on execution order, not on the root each caller declared.\n"
@@ -505,7 +505,7 @@ def _zero_arg_root_cache_violations(repo_root: Path) -> list[tuple[str, str, str
                     f"      def {node.name}_at(root: Path): ...\n"
                     f"      def {node.name}(): return {node.name}_at(default_root())\n"
                     "    Two working precedents in this repo: fleet_has_crown_at\n"
-                    "    (cli/src/fno/mail/envelope.py) and x-1571's claim_events_path_with.\n"
+                    "    (cli/src/fno/mail/envelope.py) and claim_events_path_with.\n"
                     "    An autouse cache_clear fixture is containment, not a fix.",
                 )
             )
@@ -557,7 +557,7 @@ def _read_state_roots_baseline(repo_root: Path) -> set[tuple[str, str, str]]:
 def state_roots() -> None:
     """Refuse a hand-built state path and a zero-argument cache over a root read.
 
-    Epic x-3d21 rules that every fno state access resolves against a DECLARED
+    Epic rules that every fno state access resolves against a DECLARED
     root and that ambient position may never select one. Four of that epic's
     five specimens were written by people who would have agreed with the rule,
     which is the whole argument for a machine.
@@ -1611,7 +1611,7 @@ def internal_refs() -> None:
 def stale_skill_refs() -> None:
     """Audit for stale references to cut, demoted, or merged skills.
 
-    Re-homed from the retired `fno consolidation audit` (x-71b6): a lint gate
+    Re-homed from the retired `fno consolidation audit` : a lint gate
     wearing a command costume belongs under `fno doctor lint`. Thin wrapper over the
     source-of-truth bash gate scripts/ci/check-no-stale-skill-refs.sh; exit code
     matches it (0 clean, 1 stale references, 2 script error).
@@ -1857,14 +1857,14 @@ def field_coverage(live: bool = False, as_json: bool = False) -> None:
 
 
 def registry(as_json: bool = False) -> None:
-    """Check every registry row against the resolvable-handle invariant (x-7bcd).
+    """Check every registry row against the resolvable-handle invariant.
 
     Read-only: never mutates the registry and never reaps a row (eviction is
-    x-e520's job). For each row, resolves each of the three legs FOR REAL, not
+ job). For each row, resolves each of the three legs FOR REAL, not
     just "is the field set": leg 1 (``pid`` + ``pid_start_time``) via a
     liveness probe with the pid-reuse check; leg 2 (``log_path``) via a stat;
     leg 3 (``harness`` + ``harness_session_id``) via a direct stat of the
-    resolved transcript path (upgrades to x-e520's ``harness_session_probe``
+    resolved transcript path (upgrades to ``harness_session_probe``
     once that lands). A row lands in exactly one of three buckets, because
     they have different fixes:
 

@@ -3,7 +3,7 @@
 
 Some shipped-session ledger rows carry a
 null ``graph_node_id`` even though the node id survives in the row's ``title``
-(e.g. ``ab-1a2b3c4d`` / ``x-1a2b``) or ``branch`` (e.g. ``feature/x-1a2b``),
+(e.g. ``ab-1a2b3c4d`` / ````) or ``branch`` (e.g. ``feature/``),
 which makes the scoreboard's node-level joins false-pessimistic.
 
 For each SHIP row (has a pr_number / pr_url) missing ``graph_node_id`` and not
@@ -39,7 +39,7 @@ from pathlib import Path
 LEDGER_LOCK_PATH = Path("/tmp/fno-ledger.lock")
 
 # A node-id-shaped token: a short alpha(+num) prefix, a dash, and 4-8 hex.
-# Covers the legacy ``ab-1a2b3c4d`` (8 hex) and the current ``x-1a2b`` (4 hex),
+# Covers the legacy ``ab-1a2b3c4d`` (8 hex) and the current ```` (4 hex),
 # and any config-driven prefix; the exact-match-against-graph guard below
 # rejects any coincidental hit that is not a real node.
 _TOKEN = re.compile(r"\b([a-z][a-z0-9]{0,9}-[0-9a-f]{4,8})\b")

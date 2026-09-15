@@ -1,7 +1,7 @@
 //! The machine_watch arm: one watcher reads the box, bands it, and escalates
 //! on its own.
 //!
-//! Python decides (x-d6ad LD3): `machine_pressure` in doctor_footprint.py
+//! Python decides (x-aaaa LD3): `machine_pressure` in doctor_footprint.py
 //! computes the verdict and the reason sentence. This arm reads
 //! `machine.verdict`/`machine.reason` verbatim from the same
 //! `fno doctor footprint --json --cause-only` payload the spawn gate already
@@ -18,8 +18,8 @@ use crate::paths::AgentsHome;
 
 /// Consecutive hot samples before a notice, and consecutive hot samples kept
 /// while the throttle holds. The `under_streak` shape from spawn_gate.rs
-/// (`CPU_ADMIT_SAMPLES`, x-7783 LD4): a band on a 300-second beat with no
-/// debounce is a pager that cries on a 60-second spike (x-d6ad LD6).
+/// (`CPU_ADMIT_SAMPLES`, LD4): a band on a 300-second beat with no
+/// debounce is a pager that cries on a 60-second spike (x-aaaa LD6).
 pub const MACHINE_HOT_SAMPLES: u32 = 2;
 
 /// The arm's own beat, matching its `KNOWN_ARMS` row (AC8).
@@ -420,7 +420,7 @@ mod tests {
         for (cpu, cmd) in [
             (
                 54.8,
-                "/Users/bb16/.fno/worktrees/footnote/x-d6ad/target/debug/fno-agents store-keeper",
+                "/Users/bb16/.fno/worktrees/footnote/x-aaaa/target/debug/fno-agents store-keeper",
             ),
             (38.8, "rustc --edition=2021"),
             (22.1, "sccache server"),
@@ -440,7 +440,7 @@ mod tests {
         let body = calls[0].clone();
         assert!(body.contains("machine 91.7%"), "{body}");
         assert!(
-            body.contains("worktrees/footnote/x-d6ad/target/debug/fno-agents"),
+            body.contains("worktrees/footnote/x-aaaa/target/debug/fno-agents"),
             "{body}"
         );
         assert!(body.contains("rustc --edition=2021 (38.8%)"), "{body}");

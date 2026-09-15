@@ -1,6 +1,6 @@
 <!doctype html>
 <!--
-  fno mux read-only web attach (x-6a14). Served inline by `fno mux serve --web`
+  fno mux read-only web attach. Served inline by `fno mux serve --web`
   via include_str! - no CDN, no external resource of any kind, so the strict CSP
   below (default-src 'none') can hold and the page works offline / airgapped.
 
@@ -10,7 +10,7 @@
   never sends a byte upstream; pane selection only changes which cached frame we
   draw locally.
 
-  NOT SCROLLBACK (x-ce65). A Frame is a composite of the CURRENT VISIBLE GRID
+  NOT SCROLLBACK. A Frame is a composite of the CURRENT VISIBLE GRID
   and the bridge caches only the latest one per pane, so no history reaches this
   page. What it does instead is RETAIN: it diffs consecutive frames, keeps the
   rows that scrolled off the top, and paints them above the live grid. That is
@@ -119,7 +119,7 @@
   let agents = [];            // from Layout
   let current = null;         // selected pane_id
   let upstreamUp = true;
-  // Retention (x-ce65), NOT scrollback: rows evicted off the top of the live
+  // Retention, NOT scrollback: rows evicted off the top of the live
   // grid, kept by this browser for the SELECTED pane only. The file header says
   // why the protocol cannot answer this and what the ceiling is.
   // The retained rows live in their OWN element, appended to and trimmed in
@@ -249,7 +249,7 @@
     return -1;
   }
 
-  // ---- fit to width (x-ce65), CLIENT SIDE ONLY ----
+  // ---- fit to width, CLIENT SIDE ONLY ----
   // A pane is as wide as its TERMINAL - 183 columns in the reported specimen -
   // and a phone shows roughly 45 of them at 13px. The fix shrinks the TYPE here
   // and never touches the terminal. It cannot do otherwise and must not try:
@@ -491,7 +491,7 @@
 
   // ---- websocket ----
   const token = new URLSearchParams(location.search).get("t") || "";
-  // A pasted per-pane link names its pane (x-b80d): pin the first paint to it
+  // A pasted per-pane link names its pane : pin the first paint to it
   // instead of whichever frame lands first, then clear the want so the operator
   // can still switch panes by hand afterwards. A want that never paints
   // (renumbered or dead pane) is dropped after 3s so the page still opens.

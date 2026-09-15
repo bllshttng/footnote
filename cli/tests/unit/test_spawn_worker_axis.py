@@ -39,7 +39,7 @@ def _node_row(
 _REAL_SUBPROCESS_RUN = advance.subprocess.run
 
 
-def _settings(*, stage_harness: str = "", legacy_harness: str = ""):
+def _settings(*, stage_harness: str = "", legacy_harness: str = "", allowed_verbs=()):
     """A settings stub whose stage table names `stage_harness` for /target."""
     profile = SimpleNamespace(provider=stage_harness)
     return SimpleNamespace(
@@ -48,7 +48,8 @@ def _settings(*, stage_harness: str = "", legacy_harness: str = ""):
             defaults=SimpleNamespace(permission_mode=""),
         ),
         dispatch=SimpleNamespace(
-            harness=legacy_harness, substrate="", command="", allowed_verbs=[]
+            harness=legacy_harness, substrate="", command="",
+            allowed_verbs=list(allowed_verbs),
         ),
         auto_merge=SimpleNamespace(grant=None),
     )
@@ -168,13 +169,20 @@ def test_launch_harness_disagreeing_with_the_surface_refuses(monkeypatch):
 
 
 def _resolve(monkeypatch, source):
-    monkeypatch.setattr("fno.config.load_settings", lambda: _settings())
+    monkeypatch.setattr(
+        "fno.config.load_settings", lambda: _settings(allowed_verbs=("target",))
+    )
     monkeypatch.setattr(
         advance, "_grid_lane_for", lambda node, **kw: (None, None, None, None, None)
     )
     from fno.agents.node_dispatch import resolve_node_spawn
 
-    return resolve_node_spawn("x-0000", None, "slug", source=source)
+    # the dispatcher refuses a node with no dict; the env seam under test
+    # still has to clear that gate, so hand it minimal verb evidence.
+    return resolve_node_spawn(
+        "x-0000", None, "slug", node={"dispatch_verb": "target"}, verb="target",
+        source=source,
+    )
 
 
 def test_machine_source_dispatch_carries_trigger_and_no_identity(monkeypatch):

@@ -90,7 +90,7 @@ pub struct Tab {
     pub id: TabId,
     pub root: Node,
     pub focus: PaneId,
-    /// Explicit user rename (`Command::RenameTab`, x-c150). `None` means the
+    /// Explicit user rename (`Command::RenameTab`). `None` means the
     /// display label derives from the focused pane's spawn-time facts
     /// (server-side); `serde(default)` keeps pre-rename serialized forms
     /// parseable.
@@ -409,7 +409,7 @@ fn split_node(
 }
 
 // ---------------------------------------------------------------------------
-// replace_leaf (open-here, x-9f75)
+// replace_leaf (open-here)
 // ---------------------------------------------------------------------------
 
 /// Repoint the leaf hosting `old` at `new`, leaving geometry (branch structure, ratios) untouched - only the
@@ -441,7 +441,7 @@ fn replace_leaf_node(node: &mut Node, old: PaneId, new: PaneId) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// move_leaf (drag-to-relocate + keyboard move-pane, x-aa95)
+// move_leaf (drag-to-relocate + keyboard move-pane)
 // ---------------------------------------------------------------------------
 
 /// Relocate the `mover` leaf to sit adjacent to `target` on its `dir` side.
@@ -860,14 +860,14 @@ fn graft_node(
 }
 
 // ---------------------------------------------------------------------------
-// replace_anchor_with_candidate (x-6928 local graft)
+// replace_anchor_with_candidate (local graft)
 // ---------------------------------------------------------------------------
 
 /// Pure anchor substitution: build a candidate tab root where `anchor_pid`'s
 /// leaf is REPLACED by `subtree` (in-place, unlike [`graft_subtree`]'s adjacent
 /// splice), then normalize and min-size-validate against `viewport`. Never
 /// mutates `tab`; returns the candidate root or the fit/anchor failure. The
-/// graft transaction (x-6928) builds and validates its candidate here before
+/// graft transaction builds and validates its candidate here before
 /// committing in one serialized server turn, so a refused graft leaves the
 /// source tree untouched.
 pub fn replace_anchor_with_candidate(
@@ -1798,7 +1798,7 @@ mod tests {
         check_invariants(&tab).unwrap();
     }
 
-    // -- set_seam_pos (x-d807) ------------------------------------------
+    // -- set_seam_pos ------------------------------------------
 
     /// A wide viewport so MIN_COLS is a small fraction and the clamp does not
     /// dominate the assertions. 2 children => 1 divider => 200 available.
@@ -2132,7 +2132,7 @@ mod tests {
         assert_eq!(tab, before);
     }
 
-    // -- replace_leaf (open-here, x-9f75) --------------------------------
+    // -- replace_leaf (open-here) --------------------------------
 
     #[test]
     fn tree_replace_leaf_lone_root_swaps_and_moves_focus() {
@@ -2214,7 +2214,7 @@ mod tests {
         assert_eq!(tab.focus, 1);
     }
 
-    // -- move_leaf (x-aa95) -------------------------------------------------
+    // -- move_leaf -------------------------------------------------
 
     /// Wider than [`VIEWPORT`] because a move concentrates panes into one row:
     /// three panes side by side need `3 * MIN_COLS` plus two divider cells, so

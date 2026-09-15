@@ -1,5 +1,5 @@
 """Failure-streak derivation + stranded-dependent surfacing for the
-failed-node cascade redesign (ab-5b7cf63a, #34).
+failed-node cascade redesign (#34).
 
 Pure, IO-light helpers shared by ``fno backlog maintain`` (the auto-defer
 apply-leg) and ``fno backlog triage health`` (the stranded-dependent section).

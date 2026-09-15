@@ -1,6 +1,6 @@
 """Ask the `mail-inject --lane-heal` mode about a row's pane binding.
 
-One Python shim over one Rust verdict mode (x-4a68): the door owns the
+One Python shim over one Rust verdict mode : the door owns the
 decision, this only shells it and parses the one JSON line.
 """
 from __future__ import annotations

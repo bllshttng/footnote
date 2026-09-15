@@ -1,4 +1,4 @@
-//! The needs-me-queue events-fold leg (x-feec): a bounded, fail-open shell-out
+//! The needs-me-queue events-fold leg : a bounded, fail-open shell-out
 //! to `fno-agents needs --json`, mirroring [`crate::digest_overlay`]'s idiom.
 //!
 //! The client owns the live badge leg (blocked/done-unseen rows from the
@@ -15,7 +15,7 @@ use std::time::Duration;
 const SHELLOUT_TIMEOUT: Duration = Duration::from_millis(800);
 
 /// One event-derived need, as emitted by `fno-agents needs --json`. The `live`
-/// bit is the claim-liveness stamp (x-feec 1.4): the client renders an item
+/// bit is the claim-liveness stamp (1.4): the client renders an item
 /// that joins no roster row only when it is `live`, so a dead session's stale
 /// stop never nags.
 #[derive(Debug, Clone, Deserialize)]
@@ -53,7 +53,7 @@ struct MineResponse {
 }
 
 /// One open operator question, as emitted by `fno inbox outstanding --json`'s
-/// `questions` array (x-7979's record: asker/options/blocks/liveness, already
+/// `questions` array (record: asker/options/blocks/liveness, already
 /// rank-ordered). Richer than the bare `operator_question` event the events
 /// leg carries - this is what the overlay renders and answers; the events leg
 /// still carries a plain `NeedKind::Question` badge for the roster.
@@ -319,13 +319,13 @@ mod tests {
 
     #[test]
     fn parses_required_mine_json() {
-        let json = br#"{"mine":[{"n":1,"text":"ship tonight","done":false,"node":null},{"n":2,"text":"cut verbs","done":true,"node":"x-c1b9"}]}"#;
+        let json = br#"{"mine":[{"n":1,"text":"ship tonight","done":false,"node":null},{"n":2,"text":"cut verbs","done":true,"node":"x-aaaa"}]}"#;
         let items = parse_mine(json).expect("valid mine response parses");
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].n, 1);
         assert_eq!(items[0].text, "ship tonight");
         assert!(!items[0].done);
-        assert_eq!(items[1].node.as_deref(), Some("x-c1b9"));
+        assert_eq!(items[1].node.as_deref(), Some("x-aaaa"));
     }
 
     #[test]

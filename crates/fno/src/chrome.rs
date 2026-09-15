@@ -1,4 +1,4 @@
-//! Modal chrome vocabulary (x-f75e): the border, title, esc chip, section tabs,
+//! Modal chrome vocabulary : the border, title, esc chip, section tabs,
 //! footer, and scrollbar every overlay wears. This is a FRAME FUNCTION over a
 //! laid-out block, not a field on `Popup`, because the mux has two overlay
 //! families with no code in common - `Popup` (structured rows, hit-testing) and
@@ -22,7 +22,7 @@ use crate::theme::{cell_style, Role, Theme};
 use unicode_width::UnicodeWidthChar;
 
 /// The display width of one char in terminal columns. A fullwidth glyph is one
-/// char and two cells (x-1b68); zero-width and control chars still occupy one
+/// char and two cells; zero-width and control chars still occupy one
 /// cell in the buffer model.
 pub(crate) fn char_cols(ch: char) -> usize {
     ch.width().unwrap_or(1).max(1)
@@ -88,7 +88,7 @@ impl Chrome {
         self.level
     }
 
-    /// (x-b465) Clamp the chrome's own text to an inner width the viewport can
+    /// Clamp the chrome's own text to an inner width the viewport can
     /// actually hold, eliding what does not fit.
     ///
     /// [`min_inner_w`](Self::min_inner_w) widens the frame to fit the subtitle
@@ -178,7 +178,7 @@ impl Chrome {
             Level::Full if self.title.is_empty() => ESC_INNER,
             Level::Full => str_cols(&self.title) + 9, // `─ {title} ─ esc `
         };
-        // (x-b465) The subtitle and footer are chrome the caller never sized:
+        // The subtitle and footer are chrome the caller never sized:
         // body lines arrive pre-padded to `body_w`, those two arrive raw. A
         // footer longer than the body used to overhang the right border by the
         // difference, so the box rendered one column ragged - visible the first
@@ -232,7 +232,7 @@ impl BodyLine {
 /// A laid-out, framed line: its text, one [`Role`] per char, and the hit spans
 /// (offsets now relative to the framed line's first char, i.e. past the left
 /// border) for mouse hit-testing. Most chrome rows carry no hits; the ones
-/// that render an esc chip (x-020d) carry exactly one, `ESC_CLOSE_HIT`.
+/// that render an esc chip carry exactly one, `ESC_CLOSE_HIT`.
 #[derive(Debug, Clone)]
 pub struct FramedLine {
     pub text: String,
@@ -327,7 +327,7 @@ pub fn frame(body: &[BodyLine], chrome: &Chrome, body_w: usize, scroll: Option<S
 }
 
 /// The hit target marking a chrome esc-close span - a footer's `esc close`
-/// words, or a title/border row's ` esc ` chip (x-020d): `usize::MAX` can
+/// words, or a title/border row's ` esc ` chip: `usize::MAX` can
 /// never collide with a body row's real target (an index).
 pub const ESC_CLOSE_HIT: usize = usize::MAX;
 
@@ -357,7 +357,7 @@ pub fn chrome_frame_width(body_w: usize, has_scroll: bool) -> usize {
 /// Paint one line's chars into the cell buffer starting at column `c0`,
 /// advancing by DISPLAY columns: a fullwidth glyph claims its lead cell plus a
 /// `WIDE_SPACER` continuation cell, which every renderer of the buffer skips so
-/// the glyph renders across both columns (x-1b68). Roles are one per char and
+/// the glyph renders across both columns. Roles are one per char and
 /// walk in lockstep with the text.
 #[allow(clippy::too_many_arguments)] // one shared loop for both painters
 pub(crate) fn paint_line(
@@ -528,7 +528,7 @@ fn esc_segs() -> Vec<Seg> {
         .collect()
 }
 
-/// (x-020d) Right-align an esc chip onto `inner` (whatever prefix the caller
+/// Right-align an esc chip onto `inner` (whatever prefix the caller
 /// already built - a title's segs for the Full top border, nothing for a
 /// Bare border), fill the gap with border rules, wrap with `edge_row`, and
 /// stamp the chip's `ESC_CLOSE_HIT` hit span. The ONE place both callers
@@ -560,7 +560,7 @@ fn top_border(chrome: &Chrome, inner_w: usize) -> FramedLine {
         // `┌─ Title ──── esc ─┐`: title left (after `─`), esc chip right. A
         // Left click on the chip closes the modal, identical to pressing esc
         // - the title bar's chip was decorative chrome; only the footer's
-        // ever carried a hit target (x-10ec fixed that one).
+        // ever carried a hit target (fixed that one).
         Level::Full => {
             let mut inner: Vec<Seg> = vec![('─', Role::Border)];
             if !chrome.title.is_empty() {
@@ -608,7 +608,7 @@ fn body_row(
             .is_some_and(|(off, len)| j >= off && j < off + len)
     };
     // Walk by DISPLAY columns: a wide char claims two of the `body_w` cells,
-    // so a row of N chars is not N columns (x-1b68). `sel_span` offsets are
+    // so a row of N chars is not N columns. `sel_span` offsets are
     // char-based (full-row spans from the popup), so the role walk stays
     // char-indexed while the cell walk is column-indexed.
     let mut col = 0usize;
@@ -699,7 +699,7 @@ mod tests {
 
     #[test]
     fn a_footer_wider_than_the_body_keeps_the_box_square() {
-        // (x-b465) Body lines reach `frame` pre-padded to `body_w`; the subtitle
+        // Body lines reach `frame` pre-padded to `body_w`; the subtitle
         // and footer arrive raw and were only ever PADDED, never truncated or
         // measured. So a footer longer than the body overhung the right border
         // by the difference and the box rendered ragged - caught the first time
@@ -869,7 +869,7 @@ mod tests {
         // Positive markers: the chip and title carry their own roles.
         assert!(top.roles.contains(&Role::Chip));
         assert!(top.roles.contains(&Role::Title));
-        // (x-020d) The chip is a hit target too, not just decoration: a Left
+        // The chip is a hit target too, not just decoration: a Left
         // click on it should close the modal like Esc does. The span lands on
         // the "esc" text itself.
         assert_eq!(top.hits.len(), 1);
@@ -886,7 +886,7 @@ mod tests {
         let bottom = framed.lines.last().unwrap();
         assert!(bottom.text.contains("esc"));
         assert!(bottom.roles.contains(&Role::Chip));
-        // (x-020d) Same clickable chip as the Full title bar.
+        // Same clickable chip as the Full title bar.
         assert_eq!(bottom.hits.len(), 1);
         let (t, off, len) = bottom.hits[0];
         assert_eq!(t, ESC_CLOSE_HIT);
@@ -900,7 +900,7 @@ mod tests {
         line.hits.push((0, 0, 5));
         let c = Chrome::new("T", Anchor::Center);
         let framed = frame(&[line], &c, 5, None);
-        // (x-020d) The title bar now carries its own (ESC_CLOSE_HIT) hit, so
+        // The title bar now carries its own (ESC_CLOSE_HIT) hit, so
         // find the row with the BODY's target (0) specifically, not just any
         // non-empty hits.
         let body = framed
@@ -925,7 +925,7 @@ mod tests {
             .find_map(|(i, _)| footer[i..].starts_with("esc close").then_some(i))
             .unwrap();
         let char_off = footer[..off].chars().count();
-        // (x-020d) The title bar's own chip now also carries an ESC_CLOSE_HIT
+        // The title bar's own chip now also carries an ESC_CLOSE_HIT
         // (a shorter, 3-char span), so find the footer's specifically by its
         // 9-char "esc close" span length rather than any non-empty hits.
         let row = framed
@@ -939,7 +939,7 @@ mod tests {
         assert_eq!(words, "esc close");
 
         // No words, no FOOTER target: a footer without "esc close"/"esc"
-        // carries none of its own (the title bar's chip still does, x-020d -
+        // carries none of its own (the title bar's chip still does, -
         // checked by its 3-char span, distinct from the footer's 9/3-char
         // word span, which is absent here entirely).
         let c = Chrome::new("t", Anchor::Center).footer("just some text");
@@ -1058,7 +1058,7 @@ mod tests {
 
     #[test]
     fn a_frame_with_fullwidth_glyphs_stays_square() {
-        // (x-1b68) U+FF0B is one char and TWO columns. The frame is sized in
+        // U+FF0B is one char and TWO columns. The frame is sized in
         // columns, so a row carrying it measures two columns more than its
         // char count and every row of the block must still agree.
         let wide = BodyLine::plain("add harness ＋ key");
@@ -1088,7 +1088,7 @@ mod tests {
     fn blit_paints_fullwidth_glyphs_across_two_cells() {
         // The lead cell carries the glyph, the next cell is a WIDE_SPACER the
         // terminal writer skips, and the char after the glyph lands two
-        // columns on - the alignment that was off by one before (x-1b68).
+        // columns on - the alignment that was off by one before.
         // Geometry for body "a＋b" in a 6-column body (empty title: the ESC
         // chip's minimum is 6, so body_w stays 6): col0 border, col1 'a',
         // col2 lead, col3 spacer, col4 'b', col5-6 padding, col7 border.
@@ -1119,7 +1119,7 @@ mod tests {
     fn a_scrolling_frame_counts_the_scrollbar_column_and_stays_square() {
         // Defaults make the Colors panel taller as well as wider: on overflow
         // a scrollbar column rides INSIDE the right border, and the width math
-        // must count it alongside any wide glyphs (x-1b68).
+        // must count it alongside any wide glyphs.
         let wide = BodyLine::plain("add model ＋");
         let c = Chrome::new("", Anchor::Center);
         let framed = frame(

@@ -1,4 +1,4 @@
-//! `fno-agents finalize` (control-plane step 6, ab-f8e5f214): the terminal-only
+//! `fno-agents finalize` (control-plane step 6, x-aaaa): the terminal-only
 //! WRITER the stop-hook shim invokes on a terminal-allow `loop-check` decision.
 //!
 //! It re-homes the mechanical session side-effects out of the skill's
@@ -11,13 +11,13 @@
 //!   by grouping ledger entries on `graph_node_id` (US7).
 //! - **Legacy ship** (`DonePRGreen` / `DoneAdvisory`): plan stamp + a mechanical
 //!   git-derived handoff artifact. A code ship (DonePRGreen) stamps `in_review`
-//!   only (done = merged, x-f34f; the flip happens at merge). An advisory ship
+//!   only (done = merged, ; the flip happens at merge). An advisory ship
 //!   (DoneAdvisory) has no merge event, so it also graduates to `done` here.
 //! - **Generic delivery** (`DoneDelivery`): consume the selected strict verdict,
 //!   stamp or safely graduate with its receipt, and write a generic handoff.
 //! - **`DonePRGreen` only**, when the manifest approves it: arm GitHub's native
 //!   auto-merge. This is the one terminal that means "green and reviewed", and
-//!   arming it HERE rather than at PR creation is the whole point (x-1951) -
+//!   arming it HERE rather than at PR creation is the whole point -
 //!   see `should_arm_auto_merge`.
 //!
 //! ## Why this does not break the read-only stop hook
@@ -58,7 +58,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Whether a completion eval fires for this termination reason (x-8fc0).
+/// Whether a completion eval fires for this termination reason.
 ///
 /// Before this, an eval only ran for `STUCK_REASONS` (then named
 /// `POSTMORTEM_REASONS`) - a failure-only sample that the autocorrect monthly
@@ -154,7 +154,7 @@ struct ManifestFields {
     /// identity-continuity input, passed through to the Python primitive.
     harness_session_id: Option<String>,
     /// HEAD at init: baseline for the `initial_head..HEAD` work-evidence range.
-    /// Absent on manifests minted before x-0469 -> the do stamp skips.
+    /// Absent on manifests minted before -> the do stamp skips.
     initial_head: Option<String>,
     /// Init instant: the author-date floor for work evidence, and the value the
     /// do row carries as `started_at` (the start of the implementation window).
@@ -166,9 +166,9 @@ struct ManifestFields {
     /// where every refusal outranks every grant). Gates arming GitHub's native
     /// auto-merge at a green terminal. `None` = the key was absent.
     auto_merge_approved: Option<bool>,
-    /// Which input set the posture (x-9d11): config | flag-no-merge |
+    /// Which input set the posture: config | flag-no-merge |
     /// env-target-auto-merge | default-off. `None` = pre-provenance manifest;
-    /// surfaced as `unknown`, never guessed. No longer advisory (x-01b9):
+    /// surfaced as `unknown`, never guessed. No longer advisory:
     /// `env-target-auto-merge` on an approved run satisfies the standing
     /// config arm on its own, exactly as init folded it and the docs promise.
     auto_merge_source: Option<String>,
@@ -292,12 +292,12 @@ fn parse_manifest_fields(content: &str) -> ManifestFields {
             // last-wins, so a trailing line cannot overwrite the canonical one
             // either. A line inside the `input` scalar is ignored outright: the
             // "arbitrary prose must never grant merge authority" rule init
-            // applies when it folds the posture (x-e938) has to hold here too,
+            // applies when it folds the posture has to hold here too,
             // or the fold is decorative.
             "auto_merge_approved" if !line_untrusted && m.auto_merge_approved.is_none() => {
                 m.auto_merge_approved = Some(v == "true")
             }
-            // Provenance (x-9d11): same untrusted-line rule as the posture
+            // Provenance: same untrusted-line rule as the posture
             // itself - prose inside the `input` scalar must not be able to
             // claim an origin either. Advisory, so no separate trust gate.
             "auto_merge_source" if !line_untrusted => set(&mut m.auto_merge_source, v),
@@ -366,7 +366,7 @@ fn prior_finalize_ship(project_events: &Path, session_id: &str) -> Option<bool> 
     seen
 }
 
-// ── a2a status-breakpoint run_summary (x-dbaf) ──────────────────────────────
+// ── a2a status-breakpoint run_summary ──────────────────────────────
 
 /// Payload cap for the run_summary `data` object (the schema's
 /// `limits.max_data_bytes`, which the daemon EventEmitter also enforces).
@@ -476,7 +476,7 @@ fn emit_run_summary(
     }
 }
 
-/// Push leg for run_summary (x-dbaf): notify the parent handle. run_summary
+/// Push leg for run_summary: notify the parent handle. run_summary
 /// emits natively above, so the push shells the Python resolver (`fno doctor event
 /// push-parent`) rather than reimplementing registry lookup + mail in Rust.
 /// Best-effort: a missing `fno` / no spawn lineage is a silent skip; the
@@ -640,7 +640,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     };
 
     // ── ALWAYS: rescue uncommitted work at the only terminal a worker gets
-    //    (x-cdc7 HALF ONE) ──────────────────────────────────────────────────
+    //    (HALF ONE) ──────────────────────────────────────────────────
     // A provider 429 (or any other hard stop) gives a worker no future
     // stop-hook fire to save it - this fire, whatever `reason` is, is the only
     // one it gets. A dirty worktree here is one GC/orphan sweep from gone
@@ -650,7 +650,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
 
     // ── SHIP ONLY: stamp (+ graduate for advisory) + handoff ───────────────
     // For a CODE ship (DonePRGreen) the plan is stamped `in_review` only: done now
-    // means MERGED (x-f34f), and the `in_review -> done` flip happens at merge via
+    // means MERGED, and the `in_review -> done` flip happens at merge via
     // the write-time status projection. An ADVISORY/doc ship (DoneAdvisory) has
     // NO merge event - ship IS its completion - so it must still graduate to
     // `done` here, else the plan is stranded at `in_review` on the active board
@@ -691,7 +691,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
             }
         }
 
-        // W6 verifier advisory (x-f063): AC-vs-diff verdict, recorded then
+        // W6 verifier advisory: AC-vs-diff verdict, recorded then
         // ignored. Log-only and never pushed to `failed` - an advisory must
         // never wedge the loop or hold session_finalized open for retry.
         // Events paths are forwarded so the module's per-session exactly-once
@@ -780,13 +780,13 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
-    // ── completion eval artifact, every terminal but NoWork (ab-1a92b677, x-8fc0) ──
+    // ── completion eval artifact, every terminal but NoWork ──
     // Originally re-homed the BLOCKED-postmortem generator the control-plane
     // wedge dropped, gated to stuck terminals only: NoProgress/Budget/
     // Interrupted/Aborted. That gate made the autocorrect monthly review's
     // input a failure-only sample, and a failure-only sample writes rules -
     // it never confirms what a clean session did right, so every lesson
-    // skewed toward caution nobody asked for (x-8fc0). `eval_should_fire`
+    // skewed toward caution nobody asked for. `eval_should_fire`
     // now fires this for every terminal reason except NoWork (nothing to
     // evaluate). `write_postmortem` branches its body on STUCK_REASONS so a
     // stuck session still gets the failure-triage prose; every other reason
@@ -813,7 +813,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
-    // ── STUCK ONLY: file an unanswered operator question (x-32f3 HALF TWO) ──
+    // ── STUCK ONLY: file an unanswered operator question (HALF TWO) ──
     // A worker that idles on an unanswered question and then dies (measured:
     // 7h idle, "awaiting operator's terminal/mux info", `fno inbox outstanding`
     // empty the whole time) takes the diagnosis it already completed down
@@ -836,7 +836,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
-    // ── bg worker terminal-stop marker (x-fcbf) ────────────────────────────
+    // ── bg worker terminal-stop marker ────────────────────────────
     // A fire-and-forget `claude --bg` /target|/think worker parks at its idle
     // prompt on a terminal loop decision and never exits (the stop hook allows
     // the TURN, not the PROCESS), piling up against agents.max_live. finalize
@@ -881,7 +881,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
-    // ── a2a status-breakpoint run_summary (x-dbaf) ──────────────────────────
+    // ── a2a status-breakpoint run_summary ──────────────────────────
     // One per-run terminal summary carrying task counts + termination reason,
     // in the extended envelope. Best-effort; the pull leg (events.jsonl) is
     // authoritative and the push leg (task 1.4) rides it. gh is shelled for the
@@ -898,7 +898,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     );
     push_run_summary_to_parent(&session_id, m.graph_node_id.as_deref(), &reason);
 
-    // ── node<->PR pr_number backstop stamp (x-280d) ────────────────────────
+    // ── node<->PR pr_number backstop stamp ────────────────────────
     // Runs in the always-run tail (first fire of every reason), so it stamps
     // even a non-ship/awaiting-merge terminal that left an open PR. Non-fatal;
     // deliberately not returned into `failed`.
@@ -906,7 +906,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         stamp_node_pr(&cwd, m.graph_node_id.as_deref());
     }
 
-    // ── guarded do-provenance backstop (x-0469) ────────────────────────────
+    // ── guarded do-provenance backstop ────────────────────────────
     // Same shape and same fatality as the stamp above: log-only, deliberately
     // not returned into `failed` (a guard skip must never wedge the loop).
     stamp_node_do(&cwd, &m, &reason);
@@ -920,7 +920,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         cancel_settle_claims(&cwd, &m);
     }
 
-    // ── arm auto-merge at the green gate, not at PR creation (x-1951) ──────
+    // ── arm auto-merge at the green gate, not at PR creation ──────
     // Last, so the plan stamp and both node<->PR stamps have already landed
     // before the merge is handed to GitHub. Same log-only fatality as the two
     // stamps above.
@@ -954,7 +954,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // approved" are the same silence, and the event's `auto_merge_armed: false`
     // cannot tell them apart either.
     if approved && !should_arm {
-        // x-0eaf: name the coverage reason when the autonomous path is declined.
+        // name the coverage reason when the autonomous path is declined.
         // The generic "not an arming terminal" hides WHY behind a vocabulary
         // term; an operator who armed auto-merge and sees it not fire needs to
         // learn the diff was unreviewed, not decode a terminal name.
@@ -977,19 +977,19 @@ pub fn run_finalize(args: &[String]) -> i32 {
         "postmortem_path": postmortem_path,
         "terminal_stop_marked": terminal_stop_marked,
         "graph_node_id": m.graph_node_id,
-        // Re-homed from `fno agents worker ship`'s return dict (x-1951): the fact now
+        // Re-homed from `fno agents worker ship`'s return dict: the fact now
         // belongs to the terminal that authorized it, not to PR creation.
         "auto_merge_armed": auto_merge_armed,
-        // Provenance (x-9d11): `unknown` when the manifest predates the field,
+        // Provenance: `unknown` when the manifest predates the field,
         // so an operator reading the event can always tell WHICH layer set the
         // posture - or that the manifest cannot say.
         "auto_merge_source": m.auto_merge_source.as_deref().unwrap_or("unknown"),
-        // x-cdc7 HALF ONE: the sha of the rescue commit, or null on a clean
+        // HALF ONE: the sha of the rescue commit, or null on a clean
         // tree / non-git dir / commit failure. `wip_branch` names the side
         // branch when the rescue refused to move the checked-out branch.
         "wip_commit_sha": wip.as_ref().map(|r| r.sha.clone()),
         "wip_branch": wip.as_ref().and_then(|r| r.branch.clone()),
-        // x-32f3 HALF TWO: whether an operator question was auto-filed this fire.
+        // HALF TWO: whether an operator question was auto-filed this fire.
         "outstanding_filed": outstanding_filed,
     });
     if let Some(blocked) = auto_merge_blocked_reason {
@@ -1130,7 +1130,7 @@ fn py_module(cwd: &Path) -> Command {
 
 /// A `cli/.venv/bin/python3` under `root`, but ONLY when `root` is genuinely a
 /// footnote source checkout (it also holds `cli/src/fno/__init__.py`). Gating on
-/// the co-located package guards two cases (codex review on the x-b74b PR): a
+/// the co-located package guards two cases (codex review on the PR): a
 /// foreign project `cwd` that happens to carry its own `cli/.venv` without `fno`
 /// installed, and a mis-derived canonical root from a nonstandard git-dir
 /// layout - either would otherwise hand back a venv where `import fno` fails and
@@ -1147,7 +1147,7 @@ fn footnote_venv(root: &Path) -> Option<String> {
 /// on the target PROJECT (`cwd`), NOT the running binary: the DEPLOYED
 /// fno-agents binary lives in `~/.local/bin`, whose ancestors hold no checkout,
 /// so a `current_exe()` walk found neither `cli/src` nor `cli/.venv` and every
-/// deployed-binary finalize dropped its ledger row (x-b74b). `cwd` is the
+/// deployed-binary finalize dropped its ledger row. `cwd` is the
 /// worktree, which tracks `cli/src`. Falls back to the canonical repo, then to a
 /// `current_exe()` walk (checkout-built binary run outside its repo). `None`
 /// when nothing resolves, so PYTHONPATH stays unset and an installed `fno` is
@@ -1184,7 +1184,7 @@ fn repo_cli_src(cwd: &Path) -> Option<String> {
 /// environment). Anchored on `cwd`, then the CANONICAL repo, then a
 /// `current_exe()` walk: a linked worktree has `cli/src` but NO `cli/.venv`, and
 /// bare Homebrew `python3` lacks fno's deps (pydantic, ...), so a worktree
-/// finalize must resolve the canonical checkout's venv (x-b74b) - PYTHONPATH
+/// finalize must resolve the canonical checkout's venv - PYTHONPATH
 /// alone would still fail on the missing dep.
 fn py_interpreter(cwd: &Path) -> String {
     for anc in cwd.ancestors() {
@@ -1306,7 +1306,7 @@ fn validate_stamped_frontmatter(cwd: &Path, plan_path: &str) {
 /// Stamp the plan `in_review` and, when `do_graduate`, flip it to `done`.
 ///
 /// For a CODE ship (`DonePRGreen`) the caller passes `do_graduate = false`: done
-/// means merged (x-f34f), so the `in_review -> done` flip happens later via the
+/// means merged, so the `in_review -> done` flip happens later via the
 /// write-time projection at merge, not here. For an ADVISORY ship
 /// (`DoneAdvisory`) there is no merge event, so the caller passes `true` and
 /// this graduates the plan now. `expected_url_count` is recorded either way for
@@ -1469,7 +1469,7 @@ fn write_handoff(
         .or_else(|| git_capture(cwd, &["log", "--oneline", "-10"]))
         .unwrap_or_else(|| "(log unavailable)".into());
     let cost = handoff_cost_line(cwd, transcript_uuid);
-    // Completed commit + idempotency keys (x-c3a2): a worker that died after
+    // Completed commit + idempotency keys: a worker that died after
     // shipping but before the terminal journal write is reconcilable from this
     // artifact. The keys are derived from the delivered HEAD so a resumed worker
     // checking them skips a replayed publish/PR-create/comment/merge.
@@ -1696,7 +1696,7 @@ pub(crate) fn resolve_vault_root(vault: &str, home: Option<&Path>) -> Option<Pat
 /// Read a dir from an env var, treating an empty or literal-"null" value as
 /// unset. emit_shell never emits "null", but a stale/hand-edited environment
 /// can, and trusting it verbatim is what wrote `./null/` inside the repo
-/// (x-54c2). Mirrors the same guard in read_path_setting.
+///. Mirrors the same guard in read_path_setting.
 fn env_dir_unless_null(key: &str) -> Option<PathBuf> {
     let v = std::env::var_os(key)?;
     // Only the string-decodable "null"/empty sentinel is filtered; a non-UTF-8
@@ -1714,7 +1714,7 @@ fn env_dir_unless_null(key: &str) -> Option<PathBuf> {
 
 /// Read a `paths.<key>` value (e.g. `handoffs_dir`, `postmortems_dir`) from a
 /// flat config.toml. A literal `"null"` string is treated as absent (the "use
-/// default" sentinel), so the caller falls through to `~/.fno/<dir>` (x-54c2).
+/// default" sentinel), so the caller falls through to `~/.fno/<dir>`.
 fn read_path_setting(path: &Path, key: &str) -> Option<String> {
     let t = load_config_toml(path)?;
     toml_string_at(&t, &["paths", key]).filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("null"))
@@ -1944,7 +1944,7 @@ fn gh_pr_url(cwd: &Path) -> Option<String> {
 }
 
 /// Resolve the branch's open PR as `(number, url)` for the node<->PR backstop
-/// stamp (x-280d). Returns None when gh fails/rate-limits, no PR exists, or the
+/// stamp. Returns None when gh fails/rate-limits, no PR exists, or the
 /// JSON is malformed - all of which the caller treats as "nothing to stamp".
 pub(crate) fn gh_pr_ref(cwd: &Path) -> Option<(u64, String)> {
     let payload = pr_info(cwd, None)?;
@@ -1964,8 +1964,8 @@ fn parse_pr_ref(stdout: &[u8]) -> Option<(u64, String)> {
     }
 }
 
-/// Deterministic node<->PR `pr_number` backstop (x-280d): the create-time skill
-/// stamp (pr-creator §5.5) is best-effort and was skipped for x-1829/#358,
+/// Deterministic node<->PR `pr_number` backstop: the create-time skill
+/// stamp (pr-creator §5.5) is best-effort and was skipped for /#358,
 /// leaving `pr_number` null so the derived `in_review` status never engaged.
 /// Gated on node-presence + PR-exists (NOT `ship`) so `DoneAwaitingMerge` - the
 /// exact terminal `in_review` covers - is included. Best-effort + non-fatal +
@@ -1998,7 +1998,7 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
     }
 }
 
-/// Whether this terminal fire should arm GitHub's native auto-merge (x-1951).
+/// Whether this terminal fire should arm GitHub's native auto-merge.
 ///
 /// Auto-merge used to be armed by `fno agents worker ship` at PR-CREATION time, gated
 /// only on the manifest's posture. That pre-authorized a merge before any gate
@@ -2072,7 +2072,7 @@ fn merge_gating_optout_block_reason() -> Option<String> {
 /// Return why configured optional-review evidence forbids native auto-merge,
 /// or `None` when arming may proceed.
 ///
-/// x-0eaf: coverage is the authority. When loop-check emitted a covered
+/// coverage is the authority. When loop-check emitted a covered
 /// `review_coverage` event, a local lane reviewed the diff and a quota-refused
 /// or silent optional App no longer withholds (that recreates the wedge this
 /// node exists to escape). Without such an event (e.g. finalize run with no
@@ -2094,7 +2094,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     if optional_apps.is_empty() {
         return None;
     }
-    // x-0eaf finding 1 (retraction): coverage bypasses ONLY the REFUSED case
+    // finding 1 (retraction): coverage bypasses ONLY the REFUSED case
     // (quota-limited), NOT the ABSENT case. An absent optional App (nothing
     // posted) must keep withholding, because unaddressed_findings is empty
     // (built from POSTED comments only) and cannot wait for a review that does
@@ -2158,7 +2158,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
         match verdict {
             crate::loopcheck::CoverageVerdict::Reviewed => continue,
             crate::loopcheck::CoverageVerdict::Refused => {
-                // x-0eaf finding 1 (retraction): a REFUSED optional App bypasses
+                // finding 1 (retraction): a REFUSED optional App bypasses
                 // the withhold ONLY when coverage is satisfied (a local lane
                 // reviewed). Without coverage, the refused bot still withholds.
                 if coverage_satisfied {
@@ -2178,7 +2178,7 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
 
 /// Whether the latest `review_coverage` event in the project log reports
 /// coverage satisfied (covered, count > 0). Used to defer the optional-app
-/// withhold to the coverage authority (x-0eaf). Missing/unreadable -> false
+/// withhold to the coverage authority. Missing/unreadable -> false
 /// (fall back to the per-app check).
 fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
     let path = crate::paths::events_path(cwd);
@@ -2186,7 +2186,7 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
         return false;
     };
     // Pin to the current HEAD: a coverage event for a prior commit doesn't
-    // describe what finalize is about to arm. (x-0eaf finding 2.)
+    // describe what finalize is about to arm. (finding 2.)
     let head = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(cwd)
@@ -2286,7 +2286,7 @@ fn is_do_stamp_terminal(reason: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Guarded `do` lifecycle stamp (x-0469). `/execute` Step 1.5 is the earlier truthful
+/// Guarded `do` lifecycle stamp. `/execute` Step 1.5 is the earlier truthful
 /// stamp, but most `/target` runs implement inline and never invoke `/execute`, so the
 /// phase was recorded twice across ~2800 nodes. This is the backstop: one record
 /// per implementing session, at its own finish line.
@@ -2513,14 +2513,14 @@ pub(crate) fn git_capture(cwd: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
-// ── WIP rescue commit (x-cdc7 HALF ONE) ────────────────────────────────────
+// ── WIP rescue commit (HALF ONE) ────────────────────────────────────
 
 /// If `cwd`'s worktree is dirty, rescue the uncommitted work. A linked
 /// worktree on a named feature branch gets today's WIP commit on that branch.
 /// The canonical checkout, a HEAD on the default branch, or a detached HEAD
 /// gets the work written to a `wip/<session>-<reason>-<sha8>` branch instead,
 /// leaving the checked-out branch, the index and the working tree untouched
-/// (x-a150: the canonical-main WIP commit that left canonical 1 ahead of
+/// (: the canonical-main WIP commit that left canonical 1 ahead of
 /// origin and blocked every fast-forward). Returns the rescue sha plus, for a
 /// branch rescue, its branch name; `None` on a clean tree / non-git dir /
 /// commit failure.
@@ -2632,7 +2632,7 @@ fn rescue_wip_to_branch(
     ));
     let message = format!(
         "WIP: session terminated ({reason}) with uncommitted work\n\n\
-         Auto-committed by the terminal WIP-commit gate (x-cdc7) so a killed \
+         Auto-committed by the terminal WIP-commit gate so a killed \
          worker never loses in-flight work. Not reviewed, not tested - treat \
          as a checkpoint, not a finished change.\n\n\
          Landed:\n{landed}"
@@ -2701,7 +2701,7 @@ fn rescue_wip_to_branch(
 fn commit_wip_in_place(cwd: &Path, reason: &str, landed: &str) -> Option<WipRescue> {
     let message = format!(
         "WIP: session terminated ({reason}) with uncommitted work\n\n\
-         Auto-committed by the terminal WIP-commit gate (x-cdc7) so a killed \
+         Auto-committed by the terminal WIP-commit gate so a killed \
          worker never loses in-flight work. Not reviewed, not tested - treat \
          as a checkpoint, not a finished change.\n\n\
          Landed:\n{landed}"
@@ -2754,7 +2754,7 @@ fn commit_wip_in_place(cwd: &Path, reason: &str, landed: &str) -> Option<WipResc
     }
 }
 
-// ── unanswered-question filing (x-32f3 HALF TWO) ────────────────────────────
+// ── unanswered-question filing (HALF TWO) ────────────────────────────
 
 /// Positive-marker detector for an operator-directed question left in a
 /// worker's last message: matches the phrase, never an absence
@@ -2840,7 +2840,7 @@ fn file_outstanding_question(cwd: &Path, question: &str, node: Option<&str>) -> 
     }
 }
 
-// ── completion eval artifact, every terminal but NoWork (ab-1a92b677, x-8fc0) ──
+// ── completion eval artifact, every terminal but NoWork ──
 
 /// Write a structured completion eval for this session to the postmortems
 /// dir, then best-effort append a corrections.log pointer so the autocorrect
@@ -2849,7 +2849,7 @@ fn file_outstanding_question(cwd: &Path, question: &str, node: Option<&str>) -> 
 /// on `STUCK_REASONS`: a stuck session gets failure-triage prose (unchanged
 /// from the original stuck-only artifact); every other reason gets a lighter
 /// eval prose - the corpus this feeds must see both what went wrong and what
-/// went right, not failures only (x-8fc0).
+/// went right, not failures only.
 #[allow(clippy::too_many_arguments)]
 fn write_postmortem(
     cwd: &Path,
@@ -2911,7 +2911,7 @@ fn write_postmortem(
             format!(
                 "A `{reason}` terminal means this session completed - a clean \
                  completion still belongs in the corpus the autocorrect monthly \
-                 review reads, not only a stuck one (x-8fc0: a failure-only \
+                 review reads, not only a stuck one (: a failure-only \
                  sample writes rules in a predictable, overcautious direction). \
                  Review the last message above for anything the pre-promise \
                  memory pass should have captured and check it against the \
@@ -3131,12 +3131,12 @@ mod tests {
         let content = "---\n\
             session_id: 20260607T220509Z-42092-ceefb9\n\
             plan_path: \"internal/fno/design/step6.md\"\n\
-            input: \"ab-f8e5f214 no-merge\"\n\
+            input: \"x-aaaa no-merge\"\n\
             claude_transcript_id: de977b03-aaaa\n\
             ---\n\
             # Target Session State\n\
-            graph_node_id: ab-f8e5f214\n\
-            target_claim_key: \"node:ab-f8e5f214\"\n";
+            graph_node_id: x-aaaa\n\
+            target_claim_key: \"node:x-aaaa\"\n";
         let m = parse_manifest_fields(content);
         assert_eq!(
             m.session_id.as_deref(),
@@ -3144,8 +3144,8 @@ mod tests {
         );
         assert_eq!(m.plan_path.as_deref(), Some("internal/fno/design/step6.md"));
         assert_eq!(m.claude_transcript_id.as_deref(), Some("de977b03-aaaa"));
-        assert_eq!(m.graph_node_id.as_deref(), Some("ab-f8e5f214"));
-        assert_eq!(m.input.as_deref(), Some("ab-f8e5f214 no-merge"));
+        assert_eq!(m.graph_node_id.as_deref(), Some("x-aaaa"));
+        assert_eq!(m.input.as_deref(), Some("x-aaaa no-merge"));
     }
 
     #[test]
@@ -3242,7 +3242,7 @@ mod tests {
         git_capture(dir, &["rev-parse", "HEAD"]).unwrap()
     }
 
-    // ── x-cdc7 HALF ONE: WIP-commit at every terminal ───────────────────────
+    // ── HALF ONE: WIP-commit at every terminal ───────────────────────
 
     #[test]
     fn commit_wip_if_dirty_rescues_a_dirty_tree() {
@@ -3250,7 +3250,7 @@ mod tests {
         // uncommitted work. Assert the work is ON THE BRANCH afterward, not
         // just that the function returns something. Runs in a LINKED worktree
         // on a feature branch: a bare `git init` dir is its own canonical
-        // checkout, so committing in place there is the x-a150 bug itself.
+        // checkout, so committing in place there is the bug itself.
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().join("base");
         std::fs::create_dir_all(&base).unwrap();
@@ -3292,7 +3292,7 @@ mod tests {
 
     #[test]
     fn commit_wip_if_dirty_rescues_canonical_main_to_a_branch() {
-        // x-a150's own specimen: a session terminating with cwd at the
+        // own specimen: a session terminating with cwd at the
         // canonical checkout committed 0134c5910 straight onto `main` and
         // blocked every fast-forward. The rescue must leave `main` unmoved.
         let tmp = tempfile::tempdir().unwrap();
@@ -3437,7 +3437,7 @@ mod tests {
         );
     }
 
-    // ── x-32f3 HALF TWO: mandatory outstanding-question filing ─────────────
+    // ── HALF TWO: mandatory outstanding-question filing ─────────────
 
     #[test]
     fn extract_operator_question_matches_the_measured_specimen() {
@@ -3569,7 +3569,7 @@ mod tests {
     #[test]
     fn do_stamp_args_carries_ended_at() {
         let args = do_stamp_args(
-            "x-2146",
+            "x-bbbb",
             "sess-1",
             Some("plan.md"),
             "2026-09-06T18:00:00Z",
@@ -3585,7 +3585,7 @@ mod tests {
     #[test]
     fn do_stamp_args_omits_guard_plan_when_absent() {
         let args = do_stamp_args(
-            "x-2146",
+            "x-bbbb",
             "sess-1",
             None,
             "2026-09-06T18:00:00Z",
@@ -3598,13 +3598,13 @@ mod tests {
 
     #[test]
     fn cancel_release_args_carries_stamp_do() {
-        let args = cancel_release_args("node:x-9d3b", "holder-s1");
+        let args = cancel_release_args("node:x-cccc", "holder-s1");
         // Joined, not a vec! of literals: the claim-release-authority guard
         // scans this file for a `"claim", "release", "node:..."` argv shape,
         // and a test's expected argv must not read as a release site.
         assert_eq!(
             args.join(" "),
-            "agents claim release node:x-9d3b --holder holder-s1 --stamp-do"
+            "agents claim release node:x-cccc --holder holder-s1 --stamp-do"
         );
     }
 
@@ -3613,9 +3613,9 @@ mod tests {
         // Both keys live in the manifest BODY, below the closing
         // `---`, so a frontmatter-only parse would miss them.
         let m = parse_manifest_fields(
-            "---\nsession_id: s1\n---\n# Target Session State\ngraph_node_id: x-9d3b\ntarget_claim_key: \"node:x-9d3b\"\ntarget_claim_holder: \"holder-s1\"\n",
+            "---\nsession_id: s1\n---\n# Target Session State\ngraph_node_id: x-cccc\ntarget_claim_key: \"node:x-cccc\"\ntarget_claim_holder: \"holder-s1\"\n",
         );
-        assert_eq!(m.target_claim_key.as_deref(), Some("node:x-9d3b"));
+        assert_eq!(m.target_claim_key.as_deref(), Some("node:x-cccc"));
         assert_eq!(m.target_claim_holder.as_deref(), Some("holder-s1"));
     }
 
@@ -3626,7 +3626,7 @@ mod tests {
         assert!(m.target_claim_holder.is_none());
     }
 
-    // ── x-1951: arm auto-merge at the green gate, not at PR creation ────────
+    // ──: arm auto-merge at the green gate, not at PR creation ────────
 
     #[test]
     fn opt_out_block_reason_names_claim_and_deliberate_path() {
@@ -3744,7 +3744,7 @@ mod tests {
              plan_path: plan.md\n\
              auto_merge_approved: false\n\
              ---\n\
-             graph_node_id: x-1a2b\n",
+             graph_node_id: x-dddd\n",
         );
         assert_eq!(
             injected.auto_merge_approved,
@@ -3757,7 +3757,7 @@ mod tests {
         ));
         // Keys after the scalar closes are still real, and so is the body.
         assert_eq!(injected.plan_path.as_deref(), Some("plan.md"));
-        assert_eq!(injected.graph_node_id.as_deref(), Some("x-1a2b"));
+        assert_eq!(injected.graph_node_id.as_deref(), Some("x-dddd"));
 
         // A single-line quoted input must NOT swallow the rest of the manifest.
         let normal = parse_manifest_fields(
@@ -3829,7 +3829,7 @@ mod tests {
             "session_id: s1\n\
              input: \"fix the C:\\\\path\\\\\"\n\
              plan_path: \"real.md\"\n\
-             graph_node_id: x-1a2b\n\
+             graph_node_id: x-dddd\n\
              auto_merge_approved: true\n",
         );
         assert_eq!(
@@ -3837,7 +3837,7 @@ mod tests {
             Some("real.md"),
             "an ambiguous scalar must never swallow a load-bearing field"
         );
-        assert_eq!(trailing_backslash.graph_node_id.as_deref(), Some("x-1a2b"));
+        assert_eq!(trailing_backslash.graph_node_id.as_deref(), Some("x-dddd"));
         // The scalar closed AT plan_path, so the canonical posture below it is
         // trusted and honored. The grant is real here, not withheld - the cost
         // of the ambiguity is one line of reduced trust, never a dropped field.
@@ -3920,7 +3920,7 @@ mod tests {
 
     #[test]
     fn done_planned_is_benign_terminal() {
-        // A plan-only terminal graduates nothing, but (x-8fc0) it DOES still
+        // A plan-only terminal graduates nothing, but it DOES still
         // get a completion eval - only NoWork is exempt from the eval.
         let planned = classify_legacy("DonePlanned").unwrap().projection();
         assert!(!planned.ship_reason);
@@ -4292,7 +4292,7 @@ mod tests {
     #[test]
     fn read_path_setting_null_is_absent() {
         // emit_shell writes `postmortems_dir: null` for an unset path; reading it
-        // as the literal "null" wrote `./null/` inside the repo (x-54c2). It must
+        // as the literal "null" wrote `./null/` inside the repo. It must
         // read as absent so resolve_*_dir falls through to the `~/.fno` default.
         let dir = std::env::temp_dir().join(format!("finalize-null-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
@@ -4324,7 +4324,7 @@ mod tests {
 
     #[test]
     fn eval_fires_on_every_reason_but_nowork() {
-        // x-8fc0: the trigger used to be STUCK_REASONS-only (a failure-only
+        // the trigger used to be STUCK_REASONS-only (a failure-only
         // sample). Verify by making it fail both ways - a successful
         // completion DOES get an eval, a stuck one still does too, and the
         // sole exclusion is NoWork (nothing happened, nothing to evaluate).
@@ -4429,7 +4429,7 @@ mod tests {
         let pmdir = dir.join("postmortems");
         let _ = fs::create_dir_all(&dir);
         let m = ManifestFields {
-            graph_node_id: Some("ab-1a92b677".into()),
+            graph_node_id: Some("x-eeee".into()),
             plan_path: Some("plan.md".into()),
             input: Some("a stuck feature".into()),
             ..Default::default()
@@ -4447,7 +4447,7 @@ mod tests {
         .expect("postmortem written");
         let body = fs::read_to_string(&path).unwrap();
         assert!(body.contains("termination: **NoProgress**"));
-        assert!(body.contains("ab-1a92b677"));
+        assert!(body.contains("x-eeee"));
         assert!(body.contains("a stuck feature"));
         assert!(body.contains("(transcript unavailable)"));
         let _ = fs::remove_dir_all(&dir);
@@ -4482,7 +4482,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ── project name resolution (x-44e7) ──────────────────────────────────
+    // ── project name resolution ──────────────────────────────────
 
     fn write_settings(dir: &Path, body: &str) {
         let cfg = dir.join(".fno");
@@ -4709,7 +4709,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // x-b74b: from a linked worktree (has cli/src, but cli/.venv is gitignored
+    // from a linked worktree (has cli/src, but cli/.venv is gitignored
     // so it is NOT checked out) the interpreter must resolve the CANONICAL
     // repo's venv, and cli/src must anchor on the worktree - neither via
     // current_exe(). Reproduces the deployed-binary anchor failure.
@@ -4797,7 +4797,7 @@ mod tests {
         );
     }
 
-    // ── x-dbaf run_summary ──────────────────────────────────────────────────
+    // ── run_summary ──────────────────────────────────────────────────
 
     #[test]
     fn count_run_tasks_correlates_on_run_and_flags_failures() {

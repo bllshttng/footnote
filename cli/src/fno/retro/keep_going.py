@@ -1,4 +1,4 @@
-"""Autonomous keep-going engine (x-3360): classify surviving carve-out
+"""Autonomous keep-going engine : classify surviving carve-out
 follow-ups into think/build/file arms and dispatch under a shared per-day
 firehose ceiling.
 
@@ -70,7 +70,7 @@ def keep_going_enabled(
 
     Precedence (mirrors ``spawn_think.think_spawn_enabled``):
       0. ``config.autonomy.enabled`` master panic switch off -> disabled,
-         checked before the env override even (x-aaaf wave 3).
+         checked before the env override even (wave 3).
       1. ``FNO_KEEP_GOING`` env override (explicit force on/off).
       2. ``config.keep_going.enabled`` from the repo settings (local > global).
       3. default False.
@@ -201,12 +201,12 @@ def _spawn_target_worker(node_id: str, cwd: Optional[str]) -> bool:
         cmd += ["--cwd", cwd]
     else:
         cmd += ["--fresh"]
-    # x-8151: the spelling comes from harness_map.AUTONOMOUS_COMMAND, never a
+    # the spelling comes from harness_map.AUTONOMOUS_COMMAND, never a
     # second hardcoded string that drifts.
     from fno.agents.harness_map import AUTONOMOUS_COMMAND
 
     cmd += ["--name", name, AUTONOMOUS_COMMAND.format(id=node_id)]
-    # x-9d11: the env carrier backs the hardcoded flag - a worker that drops
+    # the env carrier backs the hardcoded flag - a worker that drops
     # the flag post-compaction still folds the refusal at init (this lane does
     # not route through resolve_dispatch, so nobody else sets it).
     env = {**os.environ, "TARGET_NO_MERGE": "1"}

@@ -74,7 +74,7 @@ fn agy_yolo_flags() -> Vec<String> {
 /// `full_prompt` should already be built via [`inject_from_name`]. cwd is passed
 /// BOTH as `--add-dir` (agy's workspace) and via `Command::current_dir`.
 ///
-/// A user `--add-dir` (x-b6e2) is ADDITIVE: it appends a second `--add-dir
+/// A user `--add-dir` is ADDITIVE: it appends a second `--add-dir
 /// <dir>` after the internal cwd injection, never replacing it (Locked Decision
 /// 5). Empty/None leaves the argv byte-for-byte as before.
 pub fn build_argv_once(
@@ -412,7 +412,7 @@ fn run_agy(
     let started = Instant::now();
     let tee_fh = open_tee(output_path)?;
 
-    // QoS (x-c5cc): exec-wrap at background priority (identity when
+    // QoS: exec-wrap at background priority (identity when
     // worker_qos=off).
     let argv = crate::spawn_gate::qos_wrap(popen_cwd, argv.to_vec());
     let mut cmd = Command::new(&argv[0]);

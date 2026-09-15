@@ -278,7 +278,7 @@ def resolve_slot(
     """Which lane does this dispatch ride right now: the ONE slot resolver.
     Selection is Rust (``fno-agents route-slot``); chain strings come back
     verbatim, and a missing or failing binary is a named refusal. ``work_verb``
-    is the original dispatch command, audit-only since x-ebd2: the derived
+    is the original dispatch command, audit-only since : the derived
     verb IS the command, so it defaults to ``verb`` and never diverges. The
     third element is the walk's own verdict word: armed, unarmed, or a hold.
     Callers that need the structured refusal pass ``meta``; it is filled with
@@ -380,7 +380,7 @@ def _lanes_payload(lanes: Any) -> list[Any]:
             out.append(dict(lane))
         elif hasattr(lane, "provider") or hasattr(lane, "model"):
             payload: dict[str, Any] = {k: str(getattr(lane, k, "") or "") for k in fields}
-            # args is the lane's native-bundle vector (x-8975): opaque, passed
+            # args is the lane's native-bundle vector: opaque, passed
             # through verbatim, never one of the ranked fields.
             args = getattr(lane, "args", None)
             if args:
@@ -506,7 +506,7 @@ def _account_record_vendors(settings: object) -> dict[str, str]:
 
 def _slot_profiles_table(settings: object) -> dict[str, Any]:
     """Every verb slot_verbs reports, as JSON: the owner picks the EFFECTIVE
-    work kind's slot from this table (the derived verb owns the phase, x-ebd2).
+    work kind's slot from this table (the derived verb owns the phase).
     The readout and this table must read one verb set - a configured profile
     the table omitted got strict-refused with 'declares no lanes' while its
     lanes sat in config. A verb with no profile still gets a row: empty fields
@@ -560,7 +560,7 @@ def _slot_payload(
             "difficulty": node.get("difficulty"),
             "priority": node.get("priority"),
             # Audit evidence for the slot reader; the phase itself is decided
-            # by the derived verb (x-ebd2), never re-derived here.
+            # by the derived verb, never re-derived here.
             "plan_path": str(node.get("plan_path") or ""),
         }
     payload: dict[str, Any] = {

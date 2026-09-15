@@ -45,7 +45,7 @@ def _parse_duration_to_seconds(v: object) -> Optional[int]:
 class ActiveBacklogConfig(BaseModel):
     """Active backlog dispatcher settings (nested under 'config.active_backlog').
 
-    The opt-in for the always-on backlog drain daemon (node x-c070): when
+    The opt-in for the always-on backlog drain daemon (node): when
     enabled for a project, the per-user supervisor daemon continuously claims
     ready backlog nodes for that project and dispatches them one at a time
     through the existing megawalk loop primitive, sleeping between drains with
@@ -109,7 +109,7 @@ class ActiveBacklogConfig(BaseModel):
             return {str(k): _coerce_affirmative(val, False) for k, val in v.items()}
         if isinstance(v, str):
             # A quoted boolean is honored here but reads identically to a bare
-            # one in a readout, and only one is a boolean (x-338c).
+            # one in a readout, and only one is a boolean.
             warnings.warn(
                 f"config active_backlog.enabled is the quoted string {v!r}; "
                 "write a bare true/false so a readout cannot mislead",

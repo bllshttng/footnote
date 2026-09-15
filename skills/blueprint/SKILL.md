@@ -36,7 +36,7 @@ Each gate loads only when its trigger fires. The bodies (with verbatim scripts) 
 
 | Gate | Read its section when |
 |------|-----------------------|
-| Plan Claims Ingestion | the argument is an existing node id (`x-8af8` / `ab-<hex>`) - runs FIRST, before any classifier |
+| Plan Claims Ingestion | the argument is an existing node id (`` / `ab-<hex>`) - runs FIRST, before any classifier |
 | Plan-level dispatch hold | named evidence must exist before this plan dispatches or merges |
 | Answerer Enumeration Gate | the plan changes a read, write, or feed - step 2b-bis |
 | Consolidation Gate | always, between discovery grounding (2b) and the write (3) - step 2d |
@@ -158,7 +158,7 @@ fi
    ```
    If `fno` is unavailable or codemap's deps are missing, skip silently. Read `.fno/codemap.md` if it exists - use it to identify god nodes, module boundaries, and dependency flow before Grep/Glob exploration. Top files in the output are highest-importance; changes to these need extra phases.
 2a. **Verify the premise** - applies to node-seeded and raw-prose input; a supplied design doc already carries cited findings. Read the whole node with `fno backlog get <id>`, including `dispatch_brief` and `progress_notes`; a later correcting note wins over the details. Name the one claim the plan rests on (what a line does, a count, a stall). Measure it again at its source, with a positive control, before writing. When it holds, cite the reading in Context. When it does not, record the real reading with `fno backlog note <id> "<reading>"`, then plan the real defect or halt and say the node is wrong. A plan on a premise nobody re-measured sends a worker after a defect that does not exist.
-2a-bis. **The five questions** - answer them BEFORE designing, each as a named thing or the word `none`, into a `## Five questions` section: who hits this and what it costs them today (a named person, a sourced cost); which existing verb, skill or config it extends; which case the design will not cover; what could be deleted; which existing module already implements this or could be extended. For the last one, ask the code-index provider when one is registered (x-7a2e); otherwise run `rg` for the node's key symbols and read `docs/architecture/dual-implementation-inventory.md`. The schema lives in [references/quick-template.md](references/quick-template.md); the pass criteria stay with the grader (`evals/blueprint-judge/lenses.md`) and are never copied here - a plan must not learn to write to its judge. An answer that changes the deliverable changes the plan; that is the point of asking before designing. Step 3's judge call grades the answers.
+2a-bis. **The five questions** - answer them BEFORE designing, each as a named thing or the word `none`, into a `## Five questions` section: who hits this and what it costs them today (a named person, a sourced cost); which existing verb, skill or config it extends; which case the design will not cover; what could be deleted; which existing module already implements this or could be extended. For the last one, ask the code-index provider when one is registered ; otherwise run `rg` for the node's key symbols and read `docs/architecture/dual-implementation-inventory.md`. The schema lives in [references/quick-template.md](references/quick-template.md); the pass criteria stay with the grader (`evals/blueprint-judge/lenses.md`) and are never copied here - a plan must not learn to write to its judge. An answer that changes the deliverable changes the plan; that is the point of asking before designing. Step 3's judge call grades the answers.
 2c. **Schema citation gate** - When a `## Database Schema` section exists in the
    codemap, run the **Schema Citation Gate** ([references/blueprint-gates.md](references/blueprint-gates.md#schema-citation-gate-graduated-db-touching-plans)) before adopt.
    Quick mode is `-S`-class, so it WARNS on an uncited DB-touching task and
@@ -197,10 +197,10 @@ fi
      existing path unchanged - `mutate_doc.py` writes back to the same file
      (`os.replace` onto the resolved path), so an already-node-bearing name is
      preserved as-is and the `-<node-id>` suffix is never dropped or duplicated
-     into `…-x-8af8-x-8af8.md` (US4). Do NOT rename a supplied doc.
+     into `…--.md` (US4). Do NOT rename a supplied doc.
    - **Creating fresh** (no design doc): write to the path printed by
      `fno do plan path --slug "{slug}"`; when this is **node-seeded** (`$CLAIMS_ID` set,
-     e.g. a direct `/blueprint x-8af8` with no prior `/think`), pass the node too:
+     e.g. a direct `/blueprint ` with no prior `/think`), pass the node too:
      `fno do plan path --slug "{slug}" --node "$CLAIMS_ID"`. `/blueprint` is the first
      artifact author on the direct path and cannot lean on `/think`'s save rule,
      so it must produce the node-bearing name itself. First **reuse if claimed**:
@@ -273,7 +273,7 @@ fi
    already durably written, so intake failures never block the handoff
    message.
 
-   After `$NODE_ID` is minted, run the **Model Pin / Routing** and **Blueprint Provenance Stamp** gates ([references/blueprint-gates.md](references/blueprint-gates.md#model-pin-transcription-x-571f-when-a-plan-supplies-a-model)) when their triggers fire.
+   After `$NODE_ID` is minted, run the **Model Pin / Routing** and **Blueprint Provenance Stamp** gates ([references/blueprint-gates.md](references/blueprint-gates.md#model-pin-transcription--when-a-plan-supplies-a-model)) when their triggers fire.
 
    After successful adoption, close the blueprint phase before returning the completion message:
 
@@ -564,7 +564,7 @@ Finalize validates the proposed ready + `compiled-v1` contract and atomically st
 
 ## Ordered auto-launch nudge (advance, never a direct spawn)
 
-After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), nudge the ordered drain as the LAST action. Resolve the adopted node's parent first (`fno backlog get <node>` prints `parent`). `--source sob` (x-84b2) stamps spawn-on-blueprint into the dispatched worker's name, so an operator can tell it apart from a merge-triggered `ac-` dispatch:
+After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), nudge the ordered drain as the LAST action. Resolve the adopted node's parent first (`fno backlog get <node>` prints `parent`). `--source sob` stamps spawn-on-blueprint into the dispatched worker's name, so an operator can tell it apart from a merge-triggered `ac-` dispatch:
 
 - **live epic parent** → `fno backlog advance --epic <parent> --source sob`
 - **no parent** → `fno backlog advance --source sob`
@@ -592,7 +592,7 @@ A NON-path-shaped argument is a raw feature description, not a missing-doc case:
 Environment-specific traps that defy reasonable assumptions.
 
 - **A hand-typed planning prompt in the Agent tool is prompt drift: a rule typed into a prompt is the drift this token removes.** Use `/fno:blueprint subagent <node>` instead. On 2026-09-10 four such prompts produced plans that fail `validate-plan.sh`.
-- **A node-id argument must render `claims:` into the plan frontmatter, or intake DUPLICATES the node.** `/blueprint x-8af8` claims that node only if the plan writes a literal `claims: x-8af8` line; the template's commented `# claims:` is a doc note, not a substitute. The post-write refusal (Plan Claims Ingestion gate) halts before adoption when it is missing.
+- **A node-id argument must render `claims:` into the plan frontmatter, or intake DUPLICATES the node.** `/blueprint ` claims that node only if the plan writes a literal `claims: ` line; the template's commented `# claims:` is a doc note, not a substitute. The post-write refusal (Plan Claims Ingestion gate) halts before adoption when it is missing.
 - **A design-doc path with a typo must fail loud, never degrade to raw-description mode.** The path-shape classifier treats anything with `/`, `.md`, `~`, `./`, `../`, `/` as a path; a nonexistent one exits 1 with "file not found" rather than silently planning from the literal string.
 - **A malformed epic `max_children` (non-integer, `< 1`) is refused UP FRONT, before grouping** - not deferred to decompose, because a single-group collapse skips decompose entirely and would let the bad cap pass silently.
 - **`done_probes` must end in a predicate and assert freshness.** `... | tail -5` masks the real exit status (reads as a pass); `test -f <file>` passes vacuously against launch-day residue. Bound every probe in time.

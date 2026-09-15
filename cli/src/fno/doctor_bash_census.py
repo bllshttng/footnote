@@ -1,4 +1,4 @@
-"""``fno doctor bash-census`` (x-997a): thin wrapper over `fno-agents bash-census` (the fold lives in Rust)."""
+"""``fno doctor bash-census`` : thin wrapper over `fno-agents bash-census` (the fold lives in Rust)."""
 from __future__ import annotations
 
 import subprocess

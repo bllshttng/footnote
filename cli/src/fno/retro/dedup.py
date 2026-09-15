@@ -71,7 +71,7 @@ def cv_cite_needle(cv_id: str) -> str:
 
     ``build_body`` emits ``source `cv-XXXXXXXX``` inside a filed node's
     Source line - one shape, one writer. Ownership, not mention: a node whose
-    prose merely names a cv-id (x-6c67's descriptive citations) is not
+    prose merely names a cv-id (descriptive citations) is not
     tracking that work, and consuming its ledger row on a mention would
     silently drop work that never shipped.
     """
@@ -144,7 +144,7 @@ def dedup_candidates(
 
 
 def anchor_verdict(candidate: Candidate, scan_fn: Any) -> str:
-    """Filing-time anchor verdict (x-a7ab 1.1): is this finding's code still
+    """Filing-time anchor verdict (1.1): is this finding's code still
     broken, or already addressed (fixed-on-main)?
 
     Returns one of:
@@ -157,7 +157,7 @@ def anchor_verdict(candidate: Candidate, scan_fn: Any) -> str:
                        anchor-unverified note (AC5-EDGE); a false skip would lose
                        a real finding, a false mint costs one triage row.
 
-    Reuses the x-7624 dispatch-time scan (``scan_addressed_findings``) by building
+    Reuses the dispatch-time scan (``scan_addressed_findings``) by building
     a transient trailer-bearing entry from the candidate; the scan derives
     repo/comment_id from the review-comment URL embedded in the candidate body.
     """

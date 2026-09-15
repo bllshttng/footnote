@@ -1,5 +1,5 @@
 //! pi's session identity: where a session lives on disk, what names it, and
-//! what a duplicate looks like (x-c198).
+//! what a duplicate looks like.
 //!
 //! pi is a DUAL-LANE harness. `pi --mode rpc` is the driving lane, and a plain
 //! interactive `pi` on the same session id is the watching lane, which JOINS

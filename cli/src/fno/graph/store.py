@@ -1204,7 +1204,7 @@ def _finish_mutation(path: Path, outcome: dict) -> list[dict]:
         render_view_projections(outcome["entries"], configured, path)
     except Exception as exc:  # noqa: BLE001 - a render failure never fails the write
         print(f"Warning: post-publish render failed: {exc}", file=sys.stderr)
-    # Wake the active-backlog drain daemon (x-c070): best-effort, never
+    # Wake the active-backlog drain daemon: best-effort, never
     # wedges the mutation.
     try:
         from fno.active_backlog import touch_nudge
@@ -1402,7 +1402,7 @@ def append_progress_note(
 ) -> "tuple[bool, str | None]":
     """Append a ``{ts, text}`` progress note to a node's ``progress_notes``
     (append-only), returning ``(found, plan_path)``. Shared by ``fno backlog
-    note`` and the status-fanout backlog-progress adapter (x-2057).
+    note`` and the status-fanout backlog-progress adapter.
 
     ``entries_out`` is filled with the begin snapshot this call already read, so
     a caller that needs the graph next (the note verb, to resolve who to tell)
@@ -1414,7 +1414,7 @@ def append_progress_note(
     result = _run_op(Path(path), "append_progress_note", {"node_id": resolved, "note": note})
     if not result.get("found"):
         return False, result.get("plan_path")
-    # Same world-read gate as the wave append (x-6a2c): found=true from the op
+    # Same world-read gate as the wave append: found=true from the op
     # alone is the op's word, not the published file's.
     landed, _ = _confirm_note_landed(Path(path), resolved, note)
     return landed, result.get("plan_path")
@@ -1461,7 +1461,7 @@ def _confirm_note_landed(
 
     The op's word is not the world's: a layer that reports found=true and
     loses the publish would let the verb print a fold receipt over a no-op
-    (x-6a2c). A read-back that cannot answer (store read failed) refuses
+. A read-back that cannot answer (store read failed) refuses
     with the uncertainty named rather than asserting the note is absent.
     """
     row, answered = _readback_row(path, node_id)
@@ -1536,7 +1536,7 @@ def _run_op(path: Path, name: str, params: dict) -> dict:
     return result["op"]
 
 
-# Bounded ceiling for harness / session-id strings (x-b6e4).
+# Bounded ceiling for harness / session-id strings.
 _SESSION_STR_MAX = 200
 
 _SESSION_PHASES = ("think", "blueprint", "do", "review", "ship")
@@ -1625,7 +1625,7 @@ def append_session_record(
     merge_grant: "dict | None" = None,
 ) -> "tuple[bool, bool]":
     """Append a lifecycle record to a node's append-only ``sessions`` list,
-    returning ``(found, added)`` (x-b6e4).
+    returning ``(found, added)``.
 
     Idempotent under the store's lock: appends only when ``(phase, harness,
     session_id)`` is absent; a duplicate fills only timestamps it left open
@@ -1805,7 +1805,7 @@ def find_nodes_for_pr(
     path: Path, pr_number: int, *, repo: "str | None" = None
 ) -> "list[str]":
     """Node ids carrying ``pr_number``, optionally narrowed to one repo slug
-    (x-d5f9: pr_number is not unique across repos; the url is the only
+    (: pr_number is not unique across repos; the url is the only
     per-node field carrying the repo slug)."""
     entries = read_graph(Path(path))
     result = _query(entries, "find_for_pr", {"pr_number": pr_number, "repo": repo})
@@ -1825,7 +1825,7 @@ def stamp_session_for_pr(
     repo: "str | None" = None,
 ) -> "tuple[str | None, str]":
     """Resolve the UNIQUE node carrying ``pr_number`` and append a lifecycle
-    record, returning ``(node_id, status)`` (x-b6e4). ``status`` is ``added``
+    record, returning ``(node_id, status)``. ``status`` is ``added``
     | ``duplicate`` | ``no-node`` | ``ambiguous``; the last two leave the
     graph untouched (0 or >1 matches never fans out)."""
     matches = find_nodes_for_pr(path, pr_number, repo=repo)
@@ -1842,7 +1842,7 @@ def stamp_session_for_pr(
 
 
 def release_node_claim_at_closure(node_id: str, *, rung: str) -> None:
-    """Drop the ``node:<id>`` claim a closure just made moot (x-94f8).
+    """Drop the ``node:<id>`` claim a closure just made moot.
 
     Holder-agnostic: the closer is usually not the worker that holds the
     claim. Best-effort and loud: a release failure is a named stderr line,

@@ -6,7 +6,7 @@ This CLI exposes the bookkeeping subset of the old git-worktrees skill:
 listing active worktrees with target status, cleaning up stale ones, and
 archiving (remove directory, keep branch).
 
-`ensure` is the mechanical dispatch-time primitive (node x-73ca): the
+`ensure` is the mechanical dispatch-time primitive (node): the
 deterministic-isolation behaviour PR #29 gave the bash spawn path, exposed as
 a CLI verb so the two Rust-intercepted code-dispatch callers (`dispatch-node.sh`
 and `/execute`'s foreign-wave prose) can shell it. It lives here, NOT under
@@ -227,7 +227,7 @@ def archive(
     raise typer.Exit(code=_run_lifecycle(*args))
 
 
-# --- ensure: mechanical dispatch-time isolation primitive (x-73ca) ----------
+# --- ensure: mechanical dispatch-time isolation primitive ----------
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -295,7 +295,7 @@ def _fetch_failure(fetch: Optional[subprocess.CompletedProcess[str]]) -> str:
 def _continuation_base(
     repo: Path, name: str, base: str
 ) -> Optional[tuple]:
-    """What a re-dispatch should continue (x-28ff): origin/feature/<name>
+    """What a re-dispatch should continue : origin/feature/<name>
     ahead of base wins, then a salvage ref ahead of base (remote, then the
     local one a dead worker's hook wrote). Ahead-of-base by rev-list count,
     never name existence. Returns (kind, receipt_ref, count, create_target)."""
@@ -620,7 +620,7 @@ def policy(
     raise typer.Exit(0)
 
 
-# --- overlap telemetry (x-cd4d) -------------------------------------------
+# --- overlap telemetry -------------------------------------------
 
 
 @app.command("overlap-record", hidden=True)

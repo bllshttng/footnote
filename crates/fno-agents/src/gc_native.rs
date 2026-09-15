@@ -1,4 +1,4 @@
-//! Native retirement effects (x-70e1 task 3): the harness-native half of a
+//! Native retirement effects (task 3): the harness-native half of a
 //! retirement, applied through the transports each harness already owns and
 //! reported as typed per-effect outcomes.
 //!
@@ -73,11 +73,11 @@ impl CascadeOutcome {
     }
 }
 
-/// The typed effect record for the confirmed stop (x-5aef task 1.1). The
+/// The typed effect record for the confirmed stop (task 1.1). The
 /// stop seam answers a bare bool, so the vocabulary is two-valued: a
 /// confirmed stop reads `confirmed-removed`, anything else `failed` - and a
 /// `failed` stop holds the row for retry, never retires it. The `detail`
-/// (x-1b90) makes the record a measurement: the pane arm fills it with what
+/// makes the record a measurement: the pane arm fills it with what
 /// actually ran; every other caller passes `None` and keeps the two-valued
 /// vocabulary.
 pub(crate) fn stop_outcome_effect(confirmed: bool, detail: Option<String>) -> EffectRecord {
@@ -95,7 +95,7 @@ pub(crate) fn stop_outcome_effect(confirmed: bool, detail: Option<String>) -> Ef
 
 /// The one exception to law d-81c6da7e (remove needs no prior stop): a claude
 /// background thread. Every other live row's process is ended by the removal
-/// itself; only here does a stop run first - and since x-a33f, `rm` runs that
+/// itself; only here does a stop run first - and since, `rm` runs that
 /// stop itself rather than asking a caller to compose one. A row with no
 /// substrate stamp counts: adopted claude rows carry none, and the claude
 /// roster lists background sessions only.

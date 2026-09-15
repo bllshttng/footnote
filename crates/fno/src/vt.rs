@@ -21,7 +21,7 @@ use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb
 use crate::proto::{cell_flags, BlockDir, BlockMeta, BlockSel, Cell, Color, Frame};
 use serde::{Deserialize, Serialize};
 
-/// (x-d401) What the pane's own OSC 133 evidence says about its shell: a
+/// What the pane's own OSC 133 evidence says about its shell: a
 /// four-way reading, never a blind default. `Unmeasured` when no marker was
 /// ever seen (nothing here is knowable - the reading the old render folded
 /// into `Idle`), `Running` when a command block is open, `Empty` when the
@@ -129,14 +129,14 @@ pub struct Pane {
     max_retained_bytes: usize,
     /// Between `B` (command start) and `C` (output start): the block's start
     /// anchor row (see [`Pane::anchor_row`]) plus the command echo bytes, so the
-    /// command line is byte-captured (not grid-scraped, which x-122e retired) for
+    /// command line is byte-captured (not grid-scraped, which retired) for
     /// rerun. `None` outside that window.
     pending_cmd: Option<PendingCmd>,
     /// The block seq the keyboard block-selection walk (prefix+v) rests on.
     /// Cleared whenever the selection itself clears.
     selected_block: Option<u64>,
-    /// (v12, x-e780) The active in-scrollback search, or `None`. Each step
-    /// re-scans against the live grid (x-1e67: a frozen snapshot's `abs_row`
+    /// (v12) The active in-scrollback search, or `None`. Each step
+    /// re-scans against the live grid (: a frozen snapshot's `abs_row`
     /// anchors drift once scrollback saturates, landing the highlight on the
     /// wrong row). Shared per-pane (Locked 2) - every co-viewer sees the jump +
     /// highlight; only the initiator gets the `[i/n]` counter.
@@ -170,7 +170,7 @@ struct SearchMatch {
 #[derive(Debug, Clone)]
 struct SearchState {
     /// The query, kept so each step re-scans (anchors drift once scrollback
-    /// saturates, so a frozen snapshot highlights the wrong row - x-1e67).
+    /// saturates, so a frozen snapshot highlights the wrong row -).
     needle: Vec<char>,
     /// Matches for the current position, ascending `abs_row` (oldest -> newest).
     /// Rebuilt against the live grid on every step, so `abs_row` is always fresh.
@@ -309,7 +309,7 @@ impl Pane {
         self.osc_title.title.as_deref()
     }
 
-    /// (x-fbb1) True when this pane is a pristine, idle mux shell - safe to reap
+    /// True when this pane is a pristine, idle mux shell - safe to reap
     /// for `.`=here take-over. Requires positive OSC 133 evidence: markers are
     /// active (`saw_marker`, so the signal is trustworthy - an un-integrated
     /// shell reads false and is never reaped), NO command is running (`open` is
@@ -322,7 +322,7 @@ impl Pane {
         matches!(self.shell_activity(), ShellActivity::Empty)
     }
 
-    /// (x-d401) The pane's shell activity as a four-way reading. This is the
+    /// The pane's shell activity as a four-way reading. This is the
     /// ONE predicate the takeover gate and the sideline render both consume:
     /// `is_pristine_idle_shell` is `matches!(.., Empty)` over it, and the
     /// bare-pane sideline row carries it so a render can distinguish a live
@@ -463,7 +463,7 @@ impl Pane {
         viewport_to_point(self.display_offset(), Point::new(row, Column(col)))
     }
 
-    // -- Links (x-a2d0) --------------------------------------------------------
+    // -- Links --------------------------------------------------------
 
     /// The URL under viewport cell `(row, col)`, or `None`.
     ///
@@ -680,7 +680,7 @@ impl Pane {
         Some((text, points))
     }
 
-    // -- Block navigation (x-38c4) ---------------------------------------------
+    // -- Block navigation ---------------------------------------------
 
     /// A grid row as an offset from the TOP of retained scrollback:
     /// `grid_line + history_size`. This is the block navigation anchor. It is
@@ -832,7 +832,7 @@ impl Pane {
         target.cmd.clone()
     }
 
-    // -- In-scrollback search (x-e780, v12) ------------------------------------
+    // -- In-scrollback search (v12) ------------------------------------
 
     /// Scan the pane's whole retained buffer (history + live grid) for `query`
     /// as a case-insensitive plain substring (Locked 6: no regex, single
@@ -873,7 +873,7 @@ impl Pane {
 
     /// Walk the active search: `Prev` toward older (smaller `abs_row`), `Next`
     /// toward newer, resting at the ends (AC2-EDGE locked default). Re-scans the
-    /// live grid first (x-1e67: stored anchors drift once scrollback saturates,
+    /// live grid first (: stored anchors drift once scrollback saturates,
     /// so the frozen list would re-highlight the wrong row), then re-jumps and
     /// re-highlights. `None` only when no search is active. If every match has
     /// aged out of retained scrollback, the query now matches nothing: drop the
@@ -1312,7 +1312,7 @@ pub fn mode_diff(old: Modes, new: Modes) -> Vec<u8> {
         out.extend_from_slice(if new.app_keypad { b"\x1b=" } else { b"\x1b>" });
     }
     if new.kitty_flags != old.kitty_flags {
-        // "CSI = flags ; 1 u": set the given flags and unset the rest - the
+        // "CSI = flags; 1 u": set the given flags and unset the rest - the
         // stateless form, so no push/pop stack bookkeeping crosses the wire.
         out.extend_from_slice(format!("\x1b[={};1u", new.kitty_flags).as_bytes());
     }
@@ -1621,7 +1621,7 @@ impl BlockRead {
 // alacritty's ANSI processor silently drops OSC sequences it does not model, so
 // OSC 133 never reaches a handler we control (verified against the landed code).
 // Capture is therefore a pre-`advance` byte scanner: it walks the PTY stream, and
-// at each `ESC ] 133 ; <arg> (BEL | ST)` it emits a typed marker and STRIPS the
+// at each `ESC ] 133; <arg> (BEL | ST)` it emits a typed marker and STRIPS the
 // bytes (the Term would ignore them anyway; stripping keeps the grid canonical).
 // Everything else flows to the Term verbatim - nothing is ever swallowed. The
 // discipline mirrors `keys.rs`: a tiny state machine with a bounded accumulator,
@@ -1659,7 +1659,7 @@ enum ScanState {
     Esc,
     /// Saw `ESC ]`; matched `n` bytes of `133;`.
     Prefix(usize),
-    /// Matched `ESC ] 133 ;`; accumulating the arg until a terminator.
+    /// Matched `ESC ] 133;`; accumulating the arg until a terminator.
     Payload(Vec<u8>),
     /// In the payload, saw `ESC`; a following `\` closes the marker (ST).
     PayloadEsc(Vec<u8>),
@@ -1807,7 +1807,7 @@ impl Osc133Scanner {
                             self.state = ScanState::Prefix(n + 1);
                         }
                     } else {
-                        // Not a 133 OSC (e.g. a title `ESC ] 0 ;`). Hand back what
+                        // Not a 133 OSC (e.g. a title `ESC ] 0;`). Hand back what
                         // we held and let the Term parse the rest of this OSC.
                         plain.push(0x1b);
                         plain.push(0x5d);
@@ -2307,7 +2307,7 @@ mod tests {
 
     #[test]
     fn osc133_non_133_osc_passes_through() {
-        // A window-title OSC (`ESC ] 0 ; ...`) is not ours: passed through whole,
+        // A window-title OSC (`ESC ] 0; ...`) is not ours: passed through whole,
         // no marker (the Term consumes it as a title).
         let (markers, pass) = scan(b"\x1b]0;my title\x07hello");
         assert!(markers.is_empty());
@@ -2703,7 +2703,7 @@ mod tests {
         assert!(!pane.has_selection(), "selection cleared on resize");
     }
 
-    // -- Block navigation (x-38c4) ---------------------------------------------
+    // -- Block navigation ---------------------------------------------
 
     /// Feed one full command WITH a command echo between `B` and `C` (so the
     /// block captures a rerun-able command line), then multi-line output tall
@@ -2889,7 +2889,7 @@ mod tests {
 
     #[test]
     fn is_pristine_idle_shell_gates_takeover() {
-        // (x-fbb1) The `.`=here take-over reap gate. Only a shell that has drawn a prompt and run
+        // The `.`=here take-over reap gate. Only a shell that has drawn a prompt and run
         // nothing is safe to reap.
         // No markers yet (un-integrated / not-yet-prompted): not trustworthy -> refuse.
         let mut pane = Pane::new(6, 40);
@@ -2911,7 +2911,7 @@ mod tests {
 
     #[test]
     fn shell_activity_names_what_the_pane_knows() {
-        // (x-d401) One reading for four realities. A pane that never spoke OSC 133
+        // One reading for four realities. A pane that never spoke OSC 133
         // is UNMEASURED, never idle; an open command block is Running; a prompt
         // that ran nothing is Empty; a completed block is Idle. The takeover gate
         // is exactly the Empty reading - one predicate, no second copy to drift.
@@ -3087,7 +3087,7 @@ mod tests {
         assert_eq!(pane.read_block(BlockSel::Last).unwrap().seq, Some(1));
     }
 
-    // -- In-scrollback search (x-e780, v12) ------------------------------------
+    // -- In-scrollback search (v12) ------------------------------------
 
     #[test]
     fn search_jumps_scrolls_and_highlights_case_insensitively() {
@@ -3200,7 +3200,7 @@ mod tests {
 
     #[test]
     fn search_step_re_highlights_the_right_row_after_saturation() {
-        // x-1e67 (AC edge): saturate a tiny scrollback so history is already at
+        // (AC edge): saturate a tiny scrollback so history is already at
         // cap, open a search, then stream output that evicts lines the match
         // survives. A re-highlight (search_step) must land on the real match, not
         // a row `E` away - the frozen-snapshot `abs_row` drifted by the eviction
@@ -3230,7 +3230,7 @@ mod tests {
 
     #[test]
     fn search_step_re_anchors_when_older_matches_age_out() {
-        // x-1e67 (gemini/codex review): stepping must move relative to where the
+        // (gemini/codex review): stepping must move relative to where the
         // current match IS, not a stale ordinal. On match B in [A,B,C,D], when A
         // ages out the fresh list is [B,C,D]; `Next` must land on C (2/3), not
         // skip to D (3/3) by reusing the old index 1.

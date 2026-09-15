@@ -501,7 +501,7 @@ def env_cmd(
         sys.stdout.write(f"export {k}={shlex.quote(route[k])}\n")
 
 
-# ---- route-settings overlay files (x-5cc5): what exists, what references it ----
+# ---- route-settings overlay files: what exists, what references it ----
 #
 # The spawn path writes one content-addressed overlay per distinct route under
 # state_dir()/route-settings. The names are digests, so the only way to answer

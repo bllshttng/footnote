@@ -313,7 +313,7 @@ ORPHAN_LATCH="${LATCH_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
 FLUSH_LATCH="${LATCH_DIR}/.context-nudge-flush-latch-${TBASE}-${BAND}"
 # The foreign-writer refusal latches SEPARATELY from the flush latch: consuming
 # the flush latch on a refusal would silence the real nudge forever after the
-# foreign writer leaves (x-299b).
+# foreign writer leaves.
 FOREIGN_LATCH="${LATCH_DIR}/.context-nudge-flush-foreign-${TBASE}-${BAND}"
 # Static-HEAD tracking is band-independent (a turn-end is a turn-end at any
 # pressure), so it keys on the transcript alone, not the band.
@@ -575,7 +575,7 @@ if [[ -n "$_head" ]]; then
 fi
 if [[ "$FIRE_FLUSH" -eq 1 ]]; then
     # Whose dirt is this? A dirty count alone cannot tell this session's stale
-    # work from a live foreign writer rooted in the same checkout (x-299b: a
+    # work from a live foreign writer rooted in the same checkout (: a
     # codex worker edited canonical before entering its worktree and two kings
     # were urged to commit its 351 mid-flight lines). The measurement runs only
     # inside FIRE_FLUSH, which the thresholds make rare, so the per-turn-end

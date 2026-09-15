@@ -1,4 +1,4 @@
-"""Compute epic progress rollup counters from the graph (x-6c2b wave 2).
+"""Compute epic progress rollup counters from the graph (wave 2).
 
 An epic's plan doc carries glanceable counters describing its children, so "how
 is this epic going" is a read, not a graph walk. Metadata only: counters
@@ -14,7 +14,7 @@ from typing import Any
 # Derived `status` buckets. Everything not named here (ready/idea/deferred/
 # superseded) counts toward the total only.
 _DONE = "done"
-_IN_FLIGHT = frozenset({"in_progress", "claimed", "in_review"})  # claimed = pre-x-5d91
+_IN_FLIGHT = frozenset({"in_progress", "claimed", "in_review"})  # claimed = pre-change
 _BLOCKED = "blocked"
 
 ROLLUP_KEYS: tuple[str, ...] = (
@@ -36,7 +36,7 @@ def _direct_children(entries: list[dict[str, Any]], parent_id: str) -> list[dict
 def compute_waves(
     epic_id: str, entries: list[dict[str, Any]]
 ) -> tuple[dict[str, int], int]:
-    """Derive topological wave strata for an epic's DIRECT children (x-6c2b AC4).
+    """Derive topological wave strata for an epic's DIRECT children (AC4).
 
     A child with no INTRA-epic blocker is wave 0; otherwise its wave is
     ``1 + max(wave of its intra-epic blockers)`` (longest-path strata). Only
@@ -116,7 +116,7 @@ def compute_rollup(
     entries: list[dict[str, Any]],
     _seen: frozenset[str] | None = None,
 ) -> dict[str, Any]:
-    """Return the LEAF rollup counters for ``epic_id`` (x-6c2b wave 3).
+    """Return the LEAF rollup counters for ``epic_id`` (wave 3).
 
     A direct leaf child counts once by its derived ``status``; a direct child
     that is itself an epic recurses ONE level and folds its leaves in (so a

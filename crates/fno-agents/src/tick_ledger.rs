@@ -8,7 +8,7 @@
 //! last tick is older than twice the arm's interval. An arm whose journals
 //! hold no tick row at all reads UNOBSERVED, never STALE: the absence of a
 //! producer receipt cannot say whether a producer exists, and only an
-//! observed receipt is a measurement (x-6484).
+//! observed receipt is a measurement.
 //!
 //! The row shape is owned here; the Python arms mirror it through
 //! `cli/src/fno/control_plane.py` and `cli/src/fno/events/schema.yaml`, and a
@@ -166,7 +166,7 @@ pub fn emit_tick(
 /// `Unobserved` is evidence of nothing: no tick row was found, which cannot
 /// say whether a producer exists, started, or stopped before its first tick.
 /// It never upgrades to a staleness or failure verdict, and it never feeds
-/// cross-arm scheduler inference (x-6484).
+/// cross-arm scheduler inference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProducerEvidence {
@@ -410,7 +410,7 @@ fn str_field(data: &Value, field: &str) -> Option<String> {
 /// attention: no producer receipt was ever observed, or the newest observed
 /// receipt is stale or failed. The status payload publishes its selection as
 /// `arms_attention`; consumers print the rows and never re-derive the
-/// verdict from the legacy booleans (x-6484).
+/// verdict from the legacy booleans.
 pub fn needs_attention(row: &ArmStatus) -> bool {
     row.producer_evidence == ProducerEvidence::Unobserved || row.stale || row.failing
 }
@@ -422,7 +422,7 @@ pub fn needs_attention(row: &ArmStatus) -> bool {
 /// malformed or timed-out `backlog next`), `spawn-failed` (the dispatch it
 /// fired exited non-zero), and active_backlog's `env_broken` (the resolver
 /// shelled out and failed: no usable `fno`, non-zero exit, unreadable
-/// receipt - x-33b5): an arm that could not compute its input, or whose
+/// receipt -): an arm that could not compute its input, or whose
 /// action failed, has not skipped - it has failed. `degraded` is
 /// deliberately absent: it is emitted by an arm that ran and acted while one
 /// read came back thin, and one transient gh read failure must not turn a
@@ -441,7 +441,7 @@ const FAILURE_SKIPS: &[&str] = &[
 
 /// Skip reasons that mean the arm is OFF by configuration. Its silence is the
 /// config speaking, not a scheduler that died - no restart helps an arm whose
-/// switch is off (x-338c, the second half of the fleet-faq "one label for two
+/// switch is off (the second half of the fleet-faq "one label for two
 /// causes" entry this ships alongside `drain_disabled`).
 const CONFIGURED_OFF_SKIPS: &[&str] = &[
     "disabled",
@@ -463,7 +463,7 @@ pub enum DaemonFacts {
 /// journals the arm rows come from. A tick attempt newer than the last
 /// recorded merge row is a tick that STARTED and left the arm stale - the
 /// evidence that separates a completion fault from a scheduler that never
-/// fired (x-d211). Ages are against the same `now_unix` the arm read used.
+/// fired. Ages are against the same `now_unix` the arm read used.
 #[derive(Debug, Serialize, Default)]
 pub struct TickTrace {
     pub attempt_ts_unix: Option<u64>,
@@ -602,16 +602,16 @@ pub fn read_tick_trace_live(journals: &[PathBuf], rows: &[ArmStatus], now_unix: 
 }
 
 /// The cause token + hint for a stale launchd arm while pr_watch_merge is
-/// itself stale. `tick_overdue` (x-e3cc) is a state, never a cause: the
+/// itself stale. `tick_overdue` is a state, never a cause: the
 /// reader measured only that no completed tick stamp landed. The tick records
-/// say more when they can (x-d211): a tick attempt newer than the last
+/// say more when they can: a tick attempt newer than the last
 /// recorded merge row is a tick that started and did not complete, and the
 /// newest end record names the phase. Genuine silence states itself as "no
 /// tick stamp".
 fn tick_overdue_cause(pm_last_ts: Option<&str>, trace: Option<&TickTrace>) -> (String, String) {
     // The foreign registration is the most specific fact on the table: a
     // launchd tier can be stale because the job's plist was displaced by a
-    // registration from somewhere the installer would never write (x-63aa),
+    // registration from somewhere the installer would never write,
     // and no journal-side rule can see that. Name it before the tick-state
     // rules so the readout points at the actual cause.
     if let Some(p) = trace.and_then(|t| t.foreign_plist.as_deref()) {
@@ -766,7 +766,7 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
 /// Unobserved rows keep their seat in the silence vote (their interval still
 /// sets the floor) but cannot by themselves establish the verdict: a tier
 /// with no observed receipt is evidence of nothing, never a dead scheduler
-/// (x-6484 AC6).
+/// (AC6).
 fn down_schedulers(rows: &[ArmStatus]) -> HashSet<String> {
     let mut by_sched: HashMap<&str, Vec<&ArmStatus>> = HashMap::new();
     for row in rows.iter().filter(|r| r.interval_s > 0) {
@@ -1293,7 +1293,7 @@ mod tests {
     #[test]
     fn configured_off_skip_explains_as_configured_off() {
         // A stale row whose skip_reason says the arm is off in config must
-        // explain as configured_off, not as a dead scheduler (x-338c, AC6).
+        // explain as configured_off, not as a dead scheduler (AC6).
         let row = ArmStatus {
             arm: "active_backlog".to_string(),
             scheduler: Some("daemon".to_string()),
@@ -1318,7 +1318,7 @@ mod tests {
     #[test]
     fn env_broken_skip_fails_a_fresh_arm_row() {
         // env_broken means the resolver never produced a reading: the arm
-        // could not have acted. That is a failure, not a skip (x-33b5) - the
+        // could not have acted. That is a failure, not a skip - the
         // verdict must read FAIL and failing_for must age the break.
         let dir = temp_dir();
         let journal = dir.join("global.jsonl");
@@ -1925,7 +1925,7 @@ mod tests {
 
     #[test]
     fn explain_says_the_tick_started_and_did_not_complete_and_names_the_phase() {
-        // The x-d211 fault shape: launchd showed the job loaded and a tick
+        // The fault shape: launchd showed the job loaded and a tick
         // was running throughout, yet pr_watch_merge is stale because ticks
         // died before writing a merge row. The attempt + end records are the
         // evidence; the cause must name the phase, not blame the scheduler.
@@ -1986,7 +1986,7 @@ mod tests {
 
     #[test]
     fn a_foreign_registration_names_the_path_and_the_refresh_hint() {
-        // The x-63aa fault shape: the registered plist lives under a pytest
+        // The fault shape: the registered plist lives under a pytest
         // tempdir instead of the installer's LaunchAgents path. The cause must
         // name the foreign path and the refresh command, not a bare
         // tick_overdue that reads as "stale install".

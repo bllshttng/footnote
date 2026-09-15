@@ -1,4 +1,4 @@
-//! The codex transcript-store helpers (x-70e1): where codex lives on disk
+//! The codex transcript-store helpers : where codex lives on disk
 //! and what names a rollout file. Moved out of client_verbs.rs, which is
 //! shrink-only; the re-export there keeps every existing caller.
 

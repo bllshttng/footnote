@@ -45,10 +45,10 @@ from fno._lazy_group import make_lazy_group_cls
 # without importing the module.  When you change a sub-app's help, update
 # the matching entry here too.
 
-# Tier discipline (x-71b6, "In-N-Out menu"): `fno --help` advertises a small
+# Tier discipline ("In-N-Out menu"): `fno --help` advertises a small
 # curated menu; everything else is hidden (invocable, just not listed). The
 # advertised set is `help`, `backlog`, `agents`, `whoami`, `doctor`, `config`
-# (6; `setup` moved under `config` in unit 6 of the x-9d6c reorg, and moved
+# (6; `setup` moved under `config` in unit 6 of the reorg, and moved
 # spellings are excluded from the count by _HonestMenuGroup). `help` /
 # `review` are eager inline commands above and carry `hidden=True` on `review`;
 # `cost` moved under `whoami` and is a hidden lazy entry like its siblings.
@@ -88,7 +88,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     # Moved to `inbox` (VERB_MOVES). The old top-level registration stays for
     # one release - unreachable via resolve_command (the move intercepts
     # first) so menu-caps sees a hidden, not a phantom, root; the
-    # moved-spellings block no longer renders (x-6233), so the row teaches
+    # moved-spellings block no longer renders, so the row teaches
     # nothing and exists only for the release clock.
     "approvals": (
         "fno.approvals.cli:approvals_app",
@@ -110,7 +110,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Durable polled mailbox: send/unread/ack/reply/drain/status.",
         {"hidden": True},
     ),
-    # x-6233: the entries between this comment and `agents` below whose names
+    # the entries between this comment and `agents` below whose names
     # sit in VERB_MOVES are one-release shims kept reachable for muscle
     # memory; their canonical homes are the move destinations.
     "mcp": (

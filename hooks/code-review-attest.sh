@@ -11,7 +11,7 @@
 #      FORKED subagent. Inside a fork the code-review skill's own
 #      instructions can forbid calling ReportFindings ("this review's
 #      output contract is the JSON block above" - confirmed live by
-#      running this exact PR's own self-review, x-e97b, whose finding
+#      running this exact PR's own self-review, whose finding
 #      caught trigger 1 alone as dead on arrival for that path), so its
 #      result surfaces only in the subagent's final text.
 #
@@ -97,7 +97,7 @@ case "$event" in
     # THREE independent signals identify this as a code-review completion, any
     # one sufficient. Signals 1 and 3 are string matches on things the tool
     # does not mandate; signal 2 is the one that always holds, and it is why
-    # this branch stopped being decorative (x-bcb5).
+    # this branch stopped being decorative.
     #
     # Measured live on 2026-08-17, one `Skill(skill="code-review")` fork:
     # SubagentStop DOES fire (target-subagent-guard.sh logged its
@@ -154,7 +154,7 @@ case "$event" in
     fi
 
     # 3. The message's own shape: "## Review findings" OPENING the message, a
-    #    shape two live self-reviews produced (x-e97b). ReportFindings
+    #    shape two live self-reviews produced. ReportFindings
     #    mandates no header, so this was never sound on its own; it is kept
     #    because it costs nothing and still covers a harness that populates
     #    neither of the above. Opening-anchor, not line-anchor: an unrelated
@@ -220,7 +220,7 @@ else:
       # otherwise be mistaken for the review's findings.
       findings_payload="$findings"
     elif [[ -n "${message//[[:space:]]/}" ]]; then
-      # The fork ANSWERED, and its answer is not machine-readable (x-c446).
+      # The fork ANSWERED, and its answer is not machine-readable.
       #
       # Falling through to silence here made a review that found real bugs
       # byte-identical at the gate to a review that never ran, and four

@@ -1,4 +1,4 @@
-//! (x-aeab) The court block's sideline geometry and painting, split out of
+//! The court block's sideline geometry and painting, split out of
 //! `client.rs` because that file is over the line budget and shrink-only.
 //! A child module of `client`, so `View`'s private fields stay reachable
 //! without widening them.

@@ -1303,7 +1303,7 @@ else
     skip_rust_leg cargo-test:fno-agents-e2e "cargo test explicit integration targets --test-threads=1 (fno-agents)"
 fi
 
-# squads.json leak guard (x-e447 US3): snapshot the REAL store mtime around the
+# squads.json leak guard (US3): snapshot the REAL store mtime around the
 # crates/fno real-process integration leg. A test that bypasses run_hermetic's HOME redirect and
 # writes the real ~/.fno/squads.json would otherwise stay green; this is the
 # class-level assertion (PR #589's assert_writable closed the build-tree binary

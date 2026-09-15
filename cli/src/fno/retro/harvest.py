@@ -121,7 +121,7 @@ def harvest_carveouts(
         # slot, NOT generic retro triage. Skipping them here keeps them out of
         # the classified/landed node set AND out of the harvested-ids the caller
         # consumes, so they SURVIVE in the ledger for post-merge to read and
-        # resolve (ab-4a1a4fea, Group 3).
+        # resolve (Group 3).
         if rec.get("kind") == BACKFILL_KIND:
             continue
         items.append(
@@ -168,7 +168,7 @@ def harvest_reviews(
     ``author_login`` - the PR author's GitHub login. When set, any comment
     whose ``reviewer`` field matches (case-insensitive) is skipped entirely.
     This prevents the author's own "Fixed in <sha>" reply comments from being
-    re-filed as findings (ab-b4e0061a).
+    re-filed as findings.
 
     Each comment dict: {id, body, url?, reviewer?}.
     """
@@ -178,7 +178,7 @@ def harvest_reviews(
 
     # Union in the signal-based addressed ids when commit_dates are available.
     # This catches the "non-bot reply + fix commit but thread not manually resolved"
-    # pattern that addressed_ids_from_threads misses (ab-b4e0061a).
+    # pattern that addressed_ids_from_threads misses.
     if commit_dates is not None:
         addressed = addressed_ids_from_comments(comments, commit_dates)
         resolved = resolved | addressed
@@ -239,7 +239,7 @@ def fetch_review_comments(
     """
     warnings = warnings if warnings is not None else []
     # With an explicit repo use it; otherwise let gh resolve the current repo
-    # via its :owner/:repo placeholders.
+    # via its:owner/:repo placeholders.
     if repo:
         path = f"repos/{repo}/pulls/{pr_number}/comments"
     else:
@@ -303,7 +303,7 @@ def fetch_review_comments(
 # a non-bot in-thread reply AND (a commit landed AFTER the finding's timestamp
 # OR a reply body contains the marker "wontfix:"). This catches the "author
 # pushes a fix and replies but never clicks Resolve" pattern that thread-state
-# alone misses (ab-b4e0061a: "Fixed in <sha>" reply + fix commit -> addressed).
+# alone misses (: "Fixed in <sha>" reply + fix commit -> addressed).
 
 
 def _parse_ts(s: Optional[str]) -> Optional[datetime]:
@@ -344,7 +344,7 @@ def addressed_ids_from_comments(
       reply first (so an unrelated commit cannot bury a live human concern). A
       BOT reviewer's finding (``is_bot``) skips the reply requirement entirely -
       on an autonomously-merged PR the fixing agent commits and merges without
-      replying or clicking "Resolve", so the reply would never come (x-632c: the
+      replying or clicking "Resolve", so the reply would never come (: the
       fix landed 21 min after the codex comment, thread never touched). Work
       evidence alone addresses a bot finding.
 
@@ -397,7 +397,7 @@ def addressed_ids_from_comments(
         # finding (codex/gemini) never earns a reply or a "Resolve" click on an
         # autonomously-merged PR: the fixing agent commits and merges without
         # touching the thread. Requiring a reply there was the gap that filed
-        # already-fixed findings as live nodes (x-632c: the fix landed 21 min
+        # already-fixed findings as live nodes (: the fix landed 21 min
         # after the codex comment, yet the thread stayed unresolved, un-outdated,
         # and unreplied). So bot findings skip the reply requirement; work
         # evidence (a post-comment commit, or a wontfix reply) alone addresses
@@ -513,9 +513,9 @@ def fetch_pr_author(
 # stale comment survives a fix push. The thread's `isResolved` flag is the
 # LATEST state - a fix push (or a manual resolve) flips it. We treat every
 # comment in a RESOLVED thread as implemented and drop it from candidates,
-# which is what fixes "an IMPLEMENTED finding re-filed as a node" (ab-bb7fa74f).
+# which is what fixes "an IMPLEMENTED finding re-filed as a node".
 
-# GraphQL needs an explicit owner/name (no :owner/:repo placeholders), so the
+# GraphQL needs an explicit owner/name (no:owner/:repo placeholders), so the
 # caller must supply repo as "owner/name" (the sentinel carries it via pr_url).
 _REVIEW_THREADS_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!,$cursor:String){"
@@ -731,7 +731,7 @@ def addressed_ids_from_threads(threads: list[dict]) -> "set[str]":
 
     Outdated catches the case the resolved flag alone misses: an author pushes
     a fix for a Gemini/Codex finding WITHOUT clicking "Resolve", so the thread
-    stays unresolved but goes outdated (ab-158ab951: 7 already-implemented
+    stays unresolved but goes outdated (: 7 already-implemented
     findings re-queued exactly this way). Retro candidates are filed QUEUED
     behind a human `fno backlog pick` ack and the reviewer comment still lives
     on the PR, so biasing toward suppression trades a rare missed follow-up for
@@ -915,7 +915,7 @@ def harvest_deferred_findings(
     return items
 
 
-# ── postmortems (W6 6.2, x-f063) ─────────────────────────────────────────────
+# ── postmortems (W6 6.2) ─────────────────────────────────────────────
 
 # Two on-disk formats coexist: the legacy target-postmortem (YAML frontmatter
 # with `blocked_reason: {kind: ...}`) and the finalize.rs artifact (no

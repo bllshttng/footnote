@@ -1,5 +1,5 @@
 //! Per-pane worker identity: the `fno_id` join, the shared member-evidence
-//! fold the daemon sweeps consume, and the orphan verdict (v71, x-688b).
+//! fold the daemon sweeps consume, and the orphan verdict (v71).
 
 use super::*;
 
@@ -22,7 +22,7 @@ impl Core {
                 }
             }
         }
-        // (x-b029) The resume birthright. A pane the daemon itself re-homed
+        // The resume birthright. A pane the daemon itself re-homed
         // (workspace restore, `pane run --worker`) is recorded in
         // `worker_session_pane` with its (harness, session id) at spawn - the
         // same id the resume argv carries. The registry FILE's row can still
@@ -36,7 +36,7 @@ impl Core {
             }
         }
         if ids.is_empty() {
-            // (x-3ea6) A claude portal seat whose child no longer runs
+            // A claude portal seat whose child no longer runs
             // `attach <id>` has left its worker; the seat answers no identity,
             // so the `pane ls` / `pane read` joins read null and the callers
             // that join on fno_id refuse with no code of their own.
@@ -51,7 +51,7 @@ impl Core {
         (ids.len() == 1).then(|| ids.into_iter().next()).flatten()
     }
 
-    /// (x-3ea6) A claude portal seat whose child no longer runs `attach <id>`
+    /// A claude portal seat whose child no longer runs `attach <id>`
     /// has left its worker: someone detached the viewer (to agent view) or
     /// re-picked another row. Every programmatic keystroke refuses at this
     /// one choke point and the seat drops out of the fno_id join. `argv` is
@@ -151,7 +151,7 @@ impl Core {
                 ),
             });
         }
-        // (x-3ea6) A claude portal seat whose child lost `attach <id>` refuses
+        // A claude portal seat whose child lost `attach <id>` refuses
         // every send - raw or guarded, addressed or not - before any expected
         // identity is consulted: `/clear` typed into the wrong session cannot
         // be undone.
@@ -201,7 +201,7 @@ impl Core {
     /// member bound to `pid` (`member_pane`) is judged Dead by the evidence
     /// built from `agents` and the reap journal, and no registry row is live
     /// on this pane. A refused restore placeholder reads `true` too: the same
-    /// category with an earlier marker. (x-688b) A spawned-name pane - the
+    /// category with an earlier marker. A spawned-name pane - the
     /// entry carries the worker name the spawn captured, `FNO_AGENT_SELF`,
     /// but the registry join never resolved an id - reads `true` when that
     /// name is positively dead: the pane is fno's worker pane, not an
@@ -209,7 +209,7 @@ impl Core {
     /// bucket. The default prune closes such a tab; pristine stays the test
     /// for tabs that never hosted a worker.
     ///
-    /// (x-1b90) The release tier, LAST: a pane whose name's newest journal
+    /// The release tier, LAST: a pane whose name's newest journal
     /// fact is a resumable reap carries the marker that proves the work done
     /// (`release`). The receipt stays the resume path, so the tier holds
     /// unless the session wrote nothing after the reap - a transcript
@@ -275,7 +275,7 @@ impl Core {
                 release: None,
             };
         }
-        // (x-1b90) The reaped tier: name joined to a resumable reap marker
+        // The reaped tier: name joined to a resumable reap marker
         // in the session's own journal, no live registry row carrying that
         // name, and no transcript write after the reap. The markers live on
         // the journal, never on the evidence: the receipt stays the resume
@@ -301,7 +301,7 @@ impl Core {
     }
 }
 
-/// (x-688b) The name tier, pure so it is unit-testable without a live pty:
+/// The name tier, pure so it is unit-testable without a live pty:
 /// a pane entry carrying a spawned worker name that the shared fold judged
 /// dead (reaped row, exited row, or never-bound marker - each reuse-guarded
 /// upstream) is an orphaned worker pane. `None`/empty is a shell pane: no
@@ -313,7 +313,7 @@ pub(super) fn orphaned_by_spawned_name(
     name.is_some_and(|n| !n.is_empty() && evidence.is_dead_name(n))
 }
 
-/// (x-1b90) The per-pane orphan verdict plus its release evidence. `release`
+/// The per-pane orphan verdict plus its release evidence. `release`
 /// is `Some` only when the release tier fired: the pane's name joined to a
 /// resumable reap marker AND the session wrote nothing after the reap. A tab
 /// that closes on the tier prints the release in the prune receipt, so the
@@ -332,7 +332,7 @@ impl PaneOrphanVerdict {
     }
 }
 
-/// (x-1b90) The release proof for one reap marker: the reap receipt
+/// The release proof for one reap marker: the reap receipt
 /// `reap-receipts/<harness>-<session id>.json` is read back, and every
 /// EXISTING transcript it located must carry an mtime older than the reap
 /// `ts`. A write at or after the reap is someone resuming the session in

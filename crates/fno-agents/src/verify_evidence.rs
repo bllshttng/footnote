@@ -1,5 +1,5 @@
 //! `fno-agents verify-evidence` verb — Rust port of
-//! `scripts/lib/verify-event-evidence.sh` (packaging EPIC ab-8bdb4642,
+//! `scripts/lib/verify-event-evidence.sh` (packaging EPIC,
 //! eliminate-don't-vendor leg).
 //!
 //! Three sub-functions are exposed via a leading sub-token:

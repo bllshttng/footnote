@@ -132,13 +132,24 @@ check(env.get("CAP_MINUTES") == "${{ needs.changed-packet-size.outputs.timeout_m
       "CAP_MINUTES is the same sizer output the timeout consumes",
       f"CAP_MINUTES is {env.get('CAP_MINUTES')!r} - the cap now lives in two spellings")
 
-# The fit assertion: a packet that cannot fit its ceiling must fail a named
-# assertion instead of running until the cap kills it into a bare `cancelled`.
-fit = [ln for ln in changed_run.splitlines() if "ASSERTION" in ln]
-check(any("ESTIMATE_MINUTES" in ln and "CAP_MINUTES" in ln for ln in fit),
-      "an oversized packet fails a named assertion citing estimate and cap",
-      "no fit assertion compares ESTIMATE_MINUTES against CAP_MINUTES - "
+# The fit gate: a packet that cannot fit its ceiling must not run - the cap
+# kill would report a bare `cancelled`, and a partial packet earns no verdict.
+# The oversized branch takes the rc-20 exit: it prints the comparison and
+# defers to the full smoke job, which gates every PR. Whole-repo PRs (a
+# tree-wide cleanup, a mass rename) map most of the tree, and splitting the
+# PR changes nothing - each half still maps the same packet - so the old
+# fail-the-PR shape had no exit for work the repo needs.
+fit = [ln for ln in changed_run.splitlines()
+       if "ESTIMATE_MINUTES" in ln and "CAP_MINUTES" in ln]
+check(bool(fit),
+      "a named fit comparison cites estimate and cap before the packet runs",
+      "no fit comparison compares ESTIMATE_MINUTES against CAP_MINUTES - "
       "an oversized packet would die at the cap, reported as cancelled")
+deferred = [ln for ln in changed_run.splitlines() if "DEFERRED" in ln]
+check(bool(deferred),
+      "an oversized packet defers to the full smoke gate by name",
+      "the fit branch neither runs the packet nor names the full-gate deferral - "
+      "an oversized packet's outcome is unattributable")
 
 # --- the changed job runs the packet, with explicit revisions ---------------
 check("--changed" in changed_run, "changed-smoke invokes the --changed packet",

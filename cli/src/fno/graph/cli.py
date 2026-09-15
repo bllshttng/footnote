@@ -2021,7 +2021,7 @@ def cmd_decompose(
         for grp in norm:
             frag_path = child_plan_path(base, grp["slug"])
             sep_path = separate_plan_path(base, grp["slug"])
-            # Tolerant lookup: identity is the durable group_slug ( US2), so
+            # Tolerant lookup: identity is the durable group_slug (US2), so
             # a child born unlinked (no plan_path yet) is still found; the legacy
             # plan_path match (fragment or separate form) upserts a pre-field child
             # in place instead of duplicating (idempotent on slug across migration).
@@ -2060,7 +2060,7 @@ def cmd_decompose(
                 action = "created"
                 # Born UNLINKED (plan_path=None -> derives `idea`): linking the
                 # filled plan is the design-completion signal that flips the child
-                # `ready` ( US2, Locked Decision 4). group_slug is the durable
+                # `ready` (US2, Locked Decision 4). group_slug is the durable
                 # identity that survives the unlinked window.
                 node = _build_backlog_node(
                     title=grp["title"],
@@ -2091,7 +2091,7 @@ def cmd_decompose(
             slug_to_id[grp["slug"]] = node["id"]
             plan_to_group.append((node, grp))
 
-            # Adoption ( US2): re-parent each named node under this group
+            # Adoption (US2): re-parent each named node under this group
             # child, inside the same locked mutation. Nothing is minted for it
             # and nothing is deleted; membership rides the `parent` pointer.
             adopted: list[str] = []
@@ -2319,7 +2319,7 @@ def cmd_decompose(
                 canonical.parent.mkdir(parents=True, exist_ok=True)
                 # Seed the folded nodes (discovery children adopted into this one
                 # PR) as a coverage checklist, so a fresh-context builder sees
-                # every commitment the plan must address ( task 1.7).
+                # every commitment the plan must address (task 1.7).
                 adopted_nodes = [
                     (aid, (by_id.get(aid) or {}).get("title") or aid)
                     for aid in (grp.get("adopt") or [])
@@ -2496,7 +2496,7 @@ def cmd_decompose(
         for msg in downgrades:
             typer.echo(f"warning: {msg}", err=True)
 
-    # 4c. Name the epic children no group adopted ( US3). Emitted on BOTH
+    # 4c. Name the epic children no group adopted (US3). Emitted on BOTH
     #     report paths, not just the human one: a --json caller decomposing a
     #     populated epic needs this as much as an operator does, and stderr
     #     never pollutes the JSON on stdout.
@@ -3215,7 +3215,7 @@ def cmd_update(
         ),
     ),
 ) -> None:
-    # x-665f: the patch door first; lifecycle.forward_update_door owns the rest.
+    # the patch door first; lifecycle.forward_update_door owns the rest.
     door_args = list(ctx.args or [])
     from fno.graph.lifecycle import DOOR_FLAGS, forward_update_door, refuse_stray_update_flags
 
@@ -4042,7 +4042,7 @@ def _dispatch_node_summary(e) -> dict:
     are one thing spelled twice: the union of every field either surface
     carried, no filtering, no ordering. A key dropped here is dropped from
     every dispatch decision - the silent `dispatch_verb` loss this exists
-    to prevent (x-0961). Consumers read by key, so additions are safe.
+    to prevent. Consumers read by key, so additions are safe.
     """
     return {
         # slug leads () so a list / clipboard is readable; `id` stays the
@@ -4072,7 +4072,7 @@ def _dispatch_node_summary(e) -> dict:
         "mission_wave": e.get("mission_wave"),
         "mission_slug": e.get("mission_slug"),
         "mission_from_msg_id": e.get("mission_from_msg_id"),
-        # x-fe2c: age and rank ride too, so a dispatcher can order and
+        # age and rank ride too, so a dispatcher can order and
         # staleness-check without a second `backlog get` per node.
         "created_at": e.get("created_at"),
         "touched_at": e.get("touched_at"),
@@ -4374,9 +4374,9 @@ def cmd_next(
         if candidates:
             result[0] = _dispatch_node_summary(candidates[0])
 
-    # Zero-silent-starvation receipts ( G1): explain to stderr why nothing
+    # Zero-silent-starvation receipts (G1): explain to stderr why nothing
     # was picked - and, even when a winner WAS picked, which in-scope nodes
-    # are stranded under terminal parents (x-a31a). Advisory - stdout stays
+    # are stranded under terminal parents. Advisory - stdout stays
     # exactly the node-or-"null" contract `_next_node` parses, so a receipt
     # failure never breaks dispatch. Under an external backend the receipts
     # explain the ACTUAL joined denominator, never the local graph.
@@ -4612,7 +4612,7 @@ def cmd_dispatch_lanes(
     source: Optional[str] = typer.Option(
         None,
         "--source",
-        help="Dispatch origin for every lane worker's name (x-84b2): the daemon passes ab; an attended run passes nothing.",
+        help="Dispatch origin for every lane worker's name : the daemon passes ab; an attended run passes nothing.",
     ),
 ) -> None:
     """Spawn up to max_lanes isolated background lanes (parallel mode, group 3).
@@ -5378,7 +5378,7 @@ def cmd_provenance(
         _spawned_walk(entries, node_id) if spawned else ([], False, False)
     )
 
-    # Runtime-attempt projection ( wave 3): live/suspect/stale/interrupted
+    # Runtime-attempt projection (wave 3): live/suspect/stale/interrupted
     # attempts read off manifests + the claim, alongside the confirmed lifecycle
     # rows below. Never a confirmed `do` row; never a graph mutation.
     from fno.provenance.runtime_attempts import runtime_attempts
@@ -5473,7 +5473,7 @@ def cmd_provenance(
         if walk_truncated:
             lines.append(f"    note: depth cap {_SPAWNED_MAX_DEPTH} reached; walk truncated")
 
-    # Runtime attempts ( wave 3): live/suspect/stale/interrupted attempts
+    # Runtime attempts (wave 3): live/suspect/stale/interrupted attempts
     # projected from manifests + the claim. Rendered BEFORE lifecycle so an
     # operator sees the current/interrupted state first; explicitly labeled
     # unconfirmed so it is never mistaken for a confirmed `do` lifecycle row.
@@ -6817,9 +6817,9 @@ def cmd_pick(
     )
 
     # Tempfiles:
-    #   cands.tsv  : the immutable snapshot of candidates the picker reads
+    #   cands.tsv: the immutable snapshot of candidates the picker reads
     #   pending.txt: empty file the keybinds append intents to
-    #   awk.script : the renderer logic invoked by fzf reload
+    #   awk.script: the renderer logic invoked by fzf reload
     fd_cand, cand_path = tempfile.mkstemp(prefix="fno-pick-", suffix=".cands.tsv")
     fd_pend, pend_path = tempfile.mkstemp(prefix="fno-pick-", suffix=".pending.txt")
     fd_awk, awk_path = tempfile.mkstemp(prefix="fno-pick-", suffix=".awk")
@@ -7413,7 +7413,7 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
         _apply_completion_fields(parent)
         if not parent.get("completion_note"):
             parent["completion_note"] = _auto_closed_note(parent)
-        # Deactivate the mission ( K1): a kicked-off epic carries
+        # Deactivate the mission (K1): a kicked-off epic carries
         # mission_active=true for K2's drain loop; its last child landing closes
         # the epic here, so clear the marker in the same mutation. Durable
         # deactivation - the drain never keeps looping a done mission.
@@ -8513,7 +8513,7 @@ def cmd_advance(
     stop: bool = typer.Option(
         False, "--stop", help="With --epic: deactivate the mission (clear mission_active) and dispatch nothing.",
     ),
-    loose: bool = typer.Option(False, "--loose", help="With --project: drain the territory's loose ready nodes (x-e221)."),
+    loose: bool = typer.Option(False, "--loose", help="With --project: drain the territory's loose ready nodes."),
     continuation: bool = typer.Option(
         False, "--continuation", hidden=True,
         help="With --epic: K2 daemon-drain mode - never (re)activate the mission; retire an already-inactive one (dispatches nothing, reports deactivated).",
@@ -8550,7 +8550,7 @@ def cmd_advance(
     source: Optional[str] = typer.Option(
         None,
         "--source",
-        help="Dispatch origin for the worker name (x-84b2): ab daemon, ac merge continuation, sob blueprint. Omit when attended.",
+        help="Dispatch origin for the worker name : ab daemon, ac merge continuation, sob blueprint. Omit when attended.",
     ),
 ) -> None:
     """Dispatch a fresh /target --no-merge worker for the next now-unblocked node.
@@ -8569,7 +8569,7 @@ def cmd_advance(
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
 
-    _refuse_unknown_source("advance", source)  # x-84b2: refuse, never default.
+    _refuse_unknown_source("advance", source)  # refuse, never default.
 
     # --explain returns BEFORE every dispatch path, including the pin validation
     # below: it is a read, so an unparseable --model must not stop it from
@@ -8635,7 +8635,7 @@ def cmd_advance(
         if closed is not None or loose:
             typer.echo("advance: --epic is mutually exclusive with --closed/--loose", err=True)
             raise typer.Exit(code=2)
-        # One in flight per mission (x-ef2c); the key uses the CANONICAL id so
+        # One in flight per mission; the key uses the CANONICAL id so
         # both spellings of an epic are one scope. --stop is a control action
         # and never queues behind its own drain.
         canonical_epic = epic
@@ -8685,7 +8685,7 @@ def cmd_advance(
         except Exception:  # noqa: BLE001 - non-fatal; advance_deps fails closed on None
             closed_project = None
 
-    # One in flight for the board advance (x-ef2c): the merge event, a groom
+    # One in flight for the board advance: the merge event, a groom
     # leg and a manual run all fire this verb, and nothing used to stop two
     # of them from running at once.
     with advance_flight_scope(None, json_out=json_out) as ok:
@@ -8724,7 +8724,7 @@ def cmd_advance(
             # advance() is designed non-fatal (every path emits + returns), but the
             # CLI entrypoint must never traceback on an unforeseen escape: a dispatch
             # decision is not an error to whoever invoked the verb. Report on stderr
-            # and exit 0. x-4138: stdout also gets one verdict line - the detail
+            # and exit 0.: stdout also gets one verdict line - the detail
             # alone left stdout empty, byte-identical to a swallowed crash.
             typer.echo(f"advance: unexpected error (non-fatal): {exc}", err=True)
             typer.echo("advance: failed reason=unexpected-error")
@@ -8854,7 +8854,7 @@ def cmd_reconcile(
     from fno.backlog.single_flight import reconcile_gate
 
     # The mutual-exclusion refusal, the dry-run bypass, and the one-in-flight
-    # gate (x-ef2c) all live in single_flight.reconcile_gate.
+    # gate all live in single_flight.reconcile_gate.
     reconcile_gate(
         dry_run=dry_run,
         node=node,
@@ -8897,7 +8897,7 @@ def _reconcile_once(
     # only shape allowed to touch the whole graph: revert detection, the
     # stranded-epic self-heal, and an unbounded forward/reverse scan. A
     # `--pr-number` call names one specific PR and must stay bounded to it
-    # ( review fix - it used to fall through to a full sweep on every
+    # (review fix - it used to fall through to a full sweep on every
     # merge, since it left `node` at None just like the truly-bare case).
     _full_sweep = node is None and pr_number is None
 
@@ -8995,7 +8995,7 @@ def _reconcile_once(
     closure_refused: Optional[str] = None
     supersession_files_by_pr: dict[int, list[str]] = {}
     entries = wire_rows(path=_graph_path())
-    # : leftover model_tier rows read as no band everywhere now (the
+    #: leftover model_tier rows read as no band everywhere now (the
     # compat read died with the field), so the daily sweep names them until
     # the one-shot migration clears the key. Self-extinguishing: zero rows,
     # zero lines, and the migrated graph never trips it again. The split
@@ -9150,7 +9150,7 @@ def _reconcile_once(
 
     # A --pr-number call scans only what THIS PR could touch - its own
     # stamped ref plus every exact trailer claim - never the whole graph
-    # ( review fix: this used to fall through to an unscoped scan on
+    # (review fix: this used to fall through to an unscoped scan on
     # every merge, since `node` stays None for a --pr-number-only call, the
     # same shape as a truly bare sweep). An explicit --node still wins.
     _scan_scope: Optional[Union[str, set[str]]]
@@ -9324,7 +9324,7 @@ def _reconcile_once(
     # already-merged owner strands the node permanently. Full sweep only, for
     # the same reason as the epic sweep above.
     strandable_contained = _strandable_contained_ids(entries) if _full_sweep else set()
-    # Same self-heal role on the parent axis (x-a31a): gates the dry-run preview
+    # Same self-heal role on the parent axis: gates the dry-run preview
     # when no other leg has candidates; the mutator's sweep re-detects.
     strandable_orphans = _strandable_orphan_ids(entries) if _full_sweep else set()
     # A pending supersession whose successor closed outside this sweep is owed a
@@ -9408,7 +9408,7 @@ def _reconcile_once(
     # rewired to live successors, or held with a receipt naming why.
     blocked_by_settlement: list[dict] = []
     # Set below only on the dry-run simulate branch; epics_waiting reuses it
-    # ( review fix) so its "still open" read agrees with the same
+    # (review fix) so its "still open" read agrees with the same
     # preview `candidates`/`healed_epics` already report as would-close.
     _sim: Optional[list[dict]] = None
     # The post-lock graph exists only when the sweep mutated something; the
@@ -9603,7 +9603,7 @@ def _reconcile_once(
                         err=True,
                     )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
-                # Strand self-heal (x-a31a): re-parents live children stranded
+                # Strand self-heal: re-parents live children stranded
                 # under terminal parents by closes that predate the guard.
                 try:
                     reparented_acc.extend(_sweep_reparent_stranded_orphans(entries))
@@ -9668,7 +9668,7 @@ def _reconcile_once(
             from fno.backlog.advance import advance_dependents as _advance_deps
             from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
 
-            # Merge continuation stamps ac (x-84b2); de-stub stamps rd at the seam.
+            # Merge continuation stamps ac; de-stub stamps rd at the seam.
             _advance(closed_node_id=node_id, project=project, project_root=root, source="ac")
             _advance_deps(closed_node_id=node_id, closed_project=project, project_root=root, source="ac")
             dispatch_reconcile_for_blocker(closed_node_id=node_id, project_root=root)
@@ -9712,7 +9712,7 @@ def _reconcile_once(
             # closes a node once (AC4-EDGE).
             emit_human_touch_for_record(record)
 
-            # Ledger backstop ( US3): the ledger's only writer is the
+            # Ledger backstop (US3): the ledger's only writer is the
             # origin's own finalize, so a killed/reaped origin leaks its row.
             # Stamp a minimal row for the transcript-gone tail; the
             # direct-finalize rung's full row supersedes it via the collapse
@@ -9813,7 +9813,7 @@ def _reconcile_once(
         # only touches directly-closed records; the epic parents need this.
         _project_plans_from_graph([r.node_id for r in actually_closed] + list(cascade_closed_acc))
 
-        # : a cascade-closed parent epic unblocks its OWN dependents (a
+        #: a cascade-closed parent epic unblocks its OWN dependents (a
         # node blocked_by the epic), which the per-record loop above never
         # dispatched - run the same auto-continue for each cascade-closed
         # ancestor too. Deduped; read-only from the close-stable graph.
@@ -10014,7 +10014,7 @@ def _reconcile_once(
         if not json_out:
             typer.echo(f"warning: claim reap skipped: {_reap_exc}", err=True)
 
-    # : when this run's --pr-number closure claims land under a
+    #: when this run's --pr-number closure claims land under a
     # still-open parent epic, name exactly which sibling ship(s) keep it open -
     # else a PR that ships one of two required nodes reads as silent
     # (`closed=[thisone]`) and an operator cannot tell "genuinely unfinished"
@@ -11682,7 +11682,7 @@ def cmd_supersede(
     """Record that ``new_id`` proposes to replace ``replaces``.
 
     Sets the compatibility edge plus a structured evidence record on the old
-    node. The edge terminals the old row's status immediately (x-e8f3); the
+    node. The edge terminals the old row's status immediately ; the
     record stays unverified until a merged PR covers every declared surface,
     which reconcile reports as receipts. Refuses if ``replaces`` still has
     live children unless ``--force`` is given; under ``--force`` the live

@@ -214,7 +214,7 @@ def has_node_id_prefix(s: object) -> bool:
 def node_id_suffix(node_id: str) -> str:
     """Return the part of ``node_id`` after its first ``-`` (the hex tail).
 
-    ``ab-a3f9c1d2`` -> ``a3f9c1d2``; ``xy-a3f9`` -> ``a3f9``. Used to derive a
+    ```` -> ``a3f9c1d2``; ``xy-a3f9`` -> ``a3f9``. Used to derive a
     prefix-independent handle (e.g. a ``tgt-`` agent name) by stripping the
     configured prefix at the ``-`` boundary rather than a hardcoded ``[3:]``.
     """
@@ -263,7 +263,7 @@ def _archived_id_pool() -> set[str]:
     can observe it. Tests get distinct tmp paths, so the path half of the key
     separates fixtures.
 
-    A raw parse, not `read_graph` (x-f69b regression): `read_graph`'s
+    A raw parse, not `read_graph` (regression): `read_graph`'s
     corrupt-JSON path prints a stderr warning AND copies a `.bak` backup as a
     side effect before raising - fine for a deliberate `fno doctor`/`archive`
     invocation, but this call is an invisible side channel inside a hot path,
@@ -303,7 +303,7 @@ def mint_node_id(existing_ids) -> str:
     raises RuntimeError when the ID space is near exhaustion rather than
     looping forever (AC2-EDGE).
 
-    The archive read is best-effort (x-f69b): a sweep frees a working-graph id
+    The archive read is best-effort : a sweep frees a working-graph id
     for reuse, so minting against the working graph alone reissues an id that
     still names a different node in graph-archive.json. A bad archive read
     degrades to the working-graph-only pool rather than blocking every mint.
@@ -442,7 +442,7 @@ def write_canonical_difficulty(
 ) -> None:
     """Write the canonical band, drain the retired spelling, attribute.
 
-    The ONE canonical-write shape (x-baef): the drain must ride the write,
+    The ONE canonical-write shape : the drain must ride the write,
     because leaving ``model_tier`` behind manufactures a both-spellings row
     the migration refuses batch-wide, with no verb left that can remove the
     key (its flag is a tombstone). ``history_on``: ``"change"`` (update - a
@@ -460,11 +460,11 @@ def write_canonical_difficulty(
     if history_on == "always" or band != prior:
         append_difficulty_history(row, band, source, ts)
 
-# Tags (x-6c2b wave 1): lowercase-kebab only, so they mirror cleanly into
+# Tags (wave 1): lowercase-kebab only, so they mirror cleanly into
 # Obsidian frontmatter `tags:` and stay legible as Base/tag-search filters.
 TAG_CHARSET_RE = re.compile(r"^[a-z0-9-]+$")
 
-# Epic nesting cap (x-6c2b wave 3): mission -> epic -> leaf. Two epic levels
+# Epic nesting cap (wave 3): mission -> epic -> leaf. Two epic levels
 # keep rollup O(children) and the mental model flat; deeper nesting refuses.
 EPIC_NEST_MAX_DEPTH: int = 2
 

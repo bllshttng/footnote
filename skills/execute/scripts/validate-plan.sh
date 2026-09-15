@@ -363,7 +363,7 @@ else
 fi
 
 # -------------------------------------------------------------------
-# Check 1b: Group-child stub markers + why-digest (x-edf7 US1/US4)
+# Check 1b: Group-child stub markers + why-digest (US1/US4)
 # -------------------------------------------------------------------
 # A `blueprint decompose` child is scaffolded with placeholder stub markers and
 # an empty-why sentinel; it is born `status: idea` and MUST be inline-filled (or
@@ -391,7 +391,7 @@ if [[ -f "$PLAN_DIR" ]]; then
         fi
     done
 
-    # A born scaffold sits at the `idea` rung (spelled `stub` before x-3571, still
+    # A born scaffold sits at the `idea` rung (spelled `stub` before, still
     # read as `idea`). Refuse to pass one: the fill step must flip it to `ready`,
     # or the linked node derives `idea` and no dispatcher will ever pick it up.
     # The rung comes from `fno do plan rung` - this script does not parse `status:`.
@@ -972,7 +972,7 @@ def render(err, block):
             raw = entry.get("id") if isinstance(entry, dict) else entry
             return (
                 "consolidation entry id `%s` (%s) is not a node id "
-                "(expected <prefix>-<hex>, e.g. x-3bd3)" % (raw, section)
+                "(expected <prefix>-<hex>, e.g. x-aaaa)" % (raw, section)
             )
         if field == "decision_id":
             if kind == "missing":
@@ -1355,7 +1355,7 @@ fi
 # A bug fix under the allowance is legal, so this is a warn, never an error:
 # the CI gate refuses a size violation, this reminder speaks when the
 # /blueprint gate was skipped. A plan that writes cli/src/fno Python and
-# names no size remedy is the x-7b36 shape - a feature planned in the
+# names no size remedy is the shape - a feature planned in the
 # compatibility shell, discovered only at push time.
 check_python_tree_file() {
     local file="$1"
@@ -1785,10 +1785,10 @@ if [[ -n "$target_file" ]]; then
 fi
 
 # -------------------------------------------------------------------
-# Check 8: graph bind hint (x-f8b1)
+# Check 8: graph bind hint
 # -------------------------------------------------------------------
 # A plan that passes here has satisfied every check but one the validator
-# cannot perform: the graph still does not know it exists. x-7760 authored
+# cannot perform: the graph still does not know it exists. authored
 # its plan, ran this script, saw it pass, and stopped - nine seconds later
 # the session's last words were that the plan was saved, and the node has
 # been dispatchable-planless ever since. On a passing run, when the

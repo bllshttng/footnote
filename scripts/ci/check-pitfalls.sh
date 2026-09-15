@@ -319,7 +319,7 @@ PY
   done <<< "$STALE_REPORT"
 fi
 
-# Byte-budget awareness (x-62e1): the entry-count cap and the preamble byte
+# Byte-budget awareness: the entry-count cap and the preamble byte
 # ceiling measure the same SessionStart context cost in different units, and
 # only the byte ceiling binds against the real budget. An entry that passes the
 # count cap can still blow the byte ceiling, so the count alone advertised

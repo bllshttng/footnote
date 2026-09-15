@@ -1,4 +1,4 @@
-"""fno do pr ritual - the mechanical core of the post-merge ritual (x-bbde).
+"""fno do pr ritual - the mechanical core of the post-merge ritual.
 
 One idempotent verb runs the ~90% of ``skills/pr/references/merged.md`` that is
 pure CLI orchestration. Per leg it shells the existing fno verb, captures the
@@ -13,24 +13,24 @@ Decision 9).
 
 Why a verb, not the skill: the ritual wore a full LLM session for a ~117k-token
 birth payload to run a sequence of fno verbs, and its bash snippets carried a
-proven zsh/ugrep silent-misfire class (x-f47f: ``${VAR:+...}`` word-splitting,
+proven zsh/ugrep silent-misfire class (: ``${VAR:+...}`` word-splitting,
 empty-alternation grep). Python builds each argv explicitly, so that whole
 portability class is structurally gone and every leg's failure is loud - there
 is no ``|| true`` anywhere (Locked Decision 5).
 
 Absorbed bugs, each verified in this PR's tests:
 
-- x-c4ff - only real verbs are called (``skill-diff reconcile``, ``pr
+- - only real verbs are called (``skill-diff reconcile``, ``pr
   sync-canonical`` both exist); no dangling references survive.
-- x-fb99 - ``parking_lot_path`` is resolved against the CANONICAL root, never a
+- - ``parking_lot_path`` is resolved against the CANONICAL root, never a
   worktree cwd that may carry a stale override.
-- x-adf9 - canonical-sync pipes are closed + timeouted (see
+- - canonical-sync pipes are closed + timeouted (see
   ``_sync_canonical._default_shell_runner``) so a trailing ``fno agents restart``
   detached daemon cannot hold the pipe and wedge the ritual.
-- x-0d66 - the advance leg runs bounded with streamed progress lines instead of
+- x-aaaa - the advance leg runs bounded with streamed progress lines instead of
   hanging silent for minutes.
 
-The detector/dispatch cutover is the separate blocked child x-a35a; this verb
+The detector/dispatch cutover is the separate blocked child ; this verb
 honors the existing dedup apparatus (markers + claims) unchanged.
 """
 from __future__ import annotations
@@ -63,7 +63,7 @@ from fno.pr._proc import Result, ToolMissing, run as _run
 # concurrently. 15m bounds a run that finishes in 1-3 min; the TTL is the
 # crash backstop.
 _CLAIM_TTL = "15m"
-# x-0d66: bound the advance leg. advance dispatches successors inline and can
+# x-aaaa: bound the advance leg. advance dispatches successors inline and can
 # spend minutes with no output; a bounded run with progress lines surfaces
 # partial-dispatch state instead of wedging the ritual. Killing mid-dispatch is
 # safe: advance's `dispatch:<id>` reservations are TTL claims that survive the
@@ -129,8 +129,8 @@ def _canonical_root(cwd: Path) -> Optional[Path]:
 
     A lane worktree can carry a per-worktree ``parking_lot_path`` override and a
     real ``internal/`` dir; resolving config + paths against it would strand the
-    durable parking-lot write in a file archive-worktree.sh deletes (x-fb99,
-    x-071c). ``--git-common-dir`` points at the shared ``.git`` whose parent IS
+    durable parking-lot write in a file archive-worktree.sh deletes (
+). ``--git-common-dir`` points at the shared ``.git`` whose parent IS
     canonical; it may be relative, so resolve before taking the parent.
     """
     gcd = _git_text(["rev-parse", "--git-common-dir"], cwd)
@@ -152,7 +152,7 @@ def _worktree_root(cwd: Path) -> Path:
 
 # Anchored so a lookalike host or a github.com path segment cannot match: the
 # scheme and user@ are optional, then `github.com` must be the host (optionally
-# :port), then : or / . This is the exact semantics of the bash scan it replaces
+#:port), then: or / . This is the exact semantics of the bash scan it replaces
 # (AC9b resolves every GitHub remote form; AC9c rejects every lookalike).
 _ORIGIN_SLUG_RE = re.compile(
     r"^(?:[a-z][a-z0-9+.-]*://)?"
@@ -257,7 +257,7 @@ class Ritual:
         settings = load_settings_for_repo(canon) if canon else None
         # SettingsModel exposes post_merge/project directly - there is no
         # `.config` wrapper attribute, so the old `getattr(settings, "config")`
-        # was always None and the config leg failed on every run (x-bbde verb
+        # was always None and the config leg failed on every run (verb
         # shipped non-functional). The model IS the config root.
         cfg = settings
         pm = getattr(cfg, "post_merge", None) if cfg else None
@@ -326,7 +326,7 @@ class Ritual:
              timeout: float = _LEG_TIMEOUT_S) -> Result:
         """Run one best-effort leg; map exit code to ok/failed, never raise.
 
-        A non-zero exit is the load-bearing signal (x-f47f): the receipt names
+        A non-zero exit is the load-bearing signal : the receipt names
         the leg and the verb exits non-zero, so a failed leg is never readable
         as a no-op.
         """
@@ -381,7 +381,7 @@ class Ritual:
 
     def leg_stamp(self) -> None:
         """Step 2: close the merged node(s), reconcile plan status, stamp ship."""
-        # --pr-number (x-59a6): bind every node this PR's exact Backlog-Closure
+        # --pr-number: bind every node this PR's exact Backlog-Closure
         # trailer names to the PR BEFORE the drift scan the rest of reconcile
         # already ran unconditionally - a PR naming several nodes (only one of
         # which ever got individually stamped at creation) now closes all of
@@ -442,7 +442,7 @@ class Ritual:
                     )
                 elif held:
                     # Held open, not clean: the PR merged but the promise gate
-                    # did not clear the close (x-40be). status=ok detail=closed=0
+                    # did not clear the close. status=ok detail=closed=0
                     # covered "held seven nodes open"; deferred keeps the work
                     # visibly owed and names who holds it. The two causes are
                     # counted apart: an unmet promise owes the operator work, an
@@ -504,10 +504,10 @@ class Ritual:
         self._leg("retro", argv)
 
     def leg_advance(self) -> None:
-        """Step 3b: merge-triggered next dispatch, bounded + progress (x-0d66)."""
-        # --source ac (x-84b2): the merge continuation origin rides the name.
+        """Step 3b: merge-triggered next dispatch, bounded + progress."""
+        # --source ac: the merge continuation origin rides the name.
         argv = ["backlog", "advance", "-J", "--verbose", "--source", "ac"]
-        # x-59a6: no --closed here. `leg_stamp`'s reconcile call already ran
+        # no --closed here. `leg_stamp`'s reconcile call already ran
         # `_advance`/`advance_dependents` per CLOSED RECORD for every node this
         # PR's trailer bound, not only the first - `--closed` takes a SINGLE
         # id, so passing `self.ctx.node_ids[0]` on a multi-node PR would key
@@ -519,14 +519,14 @@ class Ritual:
         self._stream("advance", argv, _ADVANCE_TIMEOUT_S)
 
     def leg_skill_diff(self) -> None:
-        """Step 3c: close the skill-diff loop. x-c4ff: the real verb exists."""
+        """Step 3c: close the skill-diff loop. : the real verb exists."""
         self._leg(
             "skill-diff",
             ["doctor", "skill-diff", "reconcile", "--pr-number", str(self.ctx.pr)],
         )
 
     def leg_sync_canonical(self) -> None:
-        """Step 3d: x-adf9 fix lives in _sync_canonical._default_shell_runner."""
+        """Step 3d: fix lives in _sync_canonical._default_shell_runner."""
         if not getattr(self.ctx.pm, "sync_command", None):
             self._emit("sync-canonical", _SKIPPED, "not configured")
             return
@@ -610,7 +610,7 @@ class Ritual:
             session_id=None,
             harness=None,
             merged_at=self._merged_state()[2],
-            # x-84b2: always emit the exact candidates - a PR whose worktree
+            # x-bbbb: always emit the exact candidates - a PR whose worktree
             # path is gone still carries name-matched rows for the reaper.
             candidate_row_names=rows_for_cleanup(
                 worktree, self.ctx.node_ids, runner=self._sh
@@ -841,7 +841,7 @@ class Ritual:
         """ONE headless one-shot carrying only the two judgment steps.
 
         The prompt is the sole positional; ``pm-r-<node>-pr-<n>`` rides
-        ``--name`` (x-84b2; the old ``judgment-pr-<n>`` carried neither source
+        ``--name`` (x-bbbb; the old ``judgment-pr-<n>`` carried neither source
         nor node). A merged PR with no recovered node binding refuses the
         spawn rather than substituting the PR number as a fake node. The
         worker reads a diff and updates the backlog - routinely over a minute -
@@ -853,7 +853,7 @@ class Ritual:
             # a fabricated identity would orphan its own provenance.
             print(
                 f"post-merge judgment: skipped, PR {self.ctx.pr} binds no node; "
-                "no pm-r worker spawned (x-84b2)",
+                "no pm-r worker spawned ",
                 file=sys.stderr,
             )
             return False
@@ -1005,7 +1005,7 @@ class Ritual:
 
     def _dead_target_rows(self) -> list[str]:
         """Non-live rows for the nodes this ritual closed, by canonical parse
-        (x-84b2) with the legacy ``target-<node>-`` fallback. Delegates to
+ with the legacy ``target-<node>-`` fallback. Delegates to
         rows_for_cleanup, then keeps only non-live rows."""
         ids = [str(n) for n in self.ctx.node_ids]
         candidates = set(rows_for_cleanup(None, ids, runner=self._sh))
@@ -1031,12 +1031,12 @@ class Ritual:
             out.append(name)
         return out
 
-    # -- streaming leg (x-0d66) -------------------------------------------
+    # -- streaming leg -------------------------------------------
 
     def _stream(self, step: str, argv: list[str], timeout: float) -> None:
         """Run a verb, echoing each stdout line as progress; bounded by timeout.
 
-        The bound is enforced DURING the read (x-0d66), not just on ``wait()``:
+        The bound is enforced DURING the read, not just on ``wait()``:
         a hung verb with no output never closes its pipe, so a blocking read loop
         would wedge before ``wait`` ever ran. ``select`` with the remaining
         deadline lets us re-check the bound every tick and kill a silent hang.
@@ -1104,7 +1104,7 @@ class Ritual:
         from fno.config import autonomy_master_enabled
 
         if not autonomy_master_enabled(self.canon):
-            # x-aaaf wave 3: the master panic switch outranks post_merge.enabled
+            # wave 3: the master panic switch outranks post_merge.enabled
             # too - checked separately so the receipt names WHICH one fired.
             self._emit("config", _SKIPPED, "autonomy.enabled is false; ritual disabled")
             return 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/ci/check-plan-rung-authority.sh
 #
-# Path-uniqueness guard for plan readiness (x-3571).
+# Path-uniqueness guard for plan readiness.
 #
 # "Is this plan ready?" used to be answered in seven places across three
 # languages over four vocabularies, with two of the answers using opposite

@@ -1,5 +1,5 @@
 //! Row retirement, keyed by the reverse join through `node.sessions[]`
-//! (x-c672).
+//!.
 //!
 //! A worker's registry row leaves when its WORK is done and its transcript
 //! is quiet. WORK-done is the graph's `status == "done"` read through the
@@ -69,7 +69,7 @@ pub struct GcRow {
     pub planning: Option<Vec<(String, String)>>,
     /// The node ids THIS session actually closed on the planning lane: its
     /// own blueprint/think sessions[] row carrying a non-empty `ended_at`
-    /// (x-5aef task 1.2). Empty on any other row. An empty set never
+    /// (x-dddd task 1.2). Empty on any other row. An empty set never
     /// retires a planner: an assignment nobody closed stays outstanding.
     pub planning_closed: Vec<String>,
     /// Marker 2 (d-81c6da7e): the node ids where THIS session wrote the
@@ -87,31 +87,31 @@ pub struct GcRow {
     /// an assignment in flight. `blocked` (waiting on input) and `working`
     /// keep the planner hold.
     pub turn_ended: bool,
-    /// A hold computed beside the work verdict (x-5a62): the cascade's
+    /// A hold computed beside the work verdict: the cascade's
     /// conflict between witnesses, or the PR-state confirm contradicting a
     /// done node. Decided in the sweep where the route and the graph read
     /// live; relayed here so the keep is named by the policy, never silently
     /// dropped. `None` when nothing holds.
     pub confirm_hold: Option<KeepReason>,
     /// The harness-published terminal state for this session (`done`,
-    /// `stopped`, `failed`), when the harness publishes one (x-2774 change
+    /// `stopped`, `failed`), when the harness publishes one (change
     /// 1). `None` covers both "not terminal" and "no such instrument":
     /// neither is evidence.
     pub session_terminal: Option<String>,
     /// A LIVE newer registry row resolves the same node this row does
-    /// (x-2774 change 3), formatted `{name} (created {ts})`. The node's
+    /// (change 3), formatted `{name} (created {ts})`. The node's
     /// openness justifies that row, not this one.
     pub superseded_by_live_peer: Option<String>,
-    /// The open node's RECORDED `merge_status` reads `merged` (x-2774
+    /// The open node's RECORDED `merge_status` reads `merged` (
     /// change 6): the status field can lag the merge by minutes when
     /// reconcile is slow. Recorded evidence outranks the lagging status.
     pub node_merged: bool,
-    /// The row's own pid answered ESRCH (x-2774 change 8): a provably dead
+    /// The row's own pid answered ESRCH (change 8): a provably dead
     /// process. Death overrides transcript recency - a dead process writes
     /// nothing, so a fresh mtime without a living writer is an artifact -
     /// but an absent or unanswerable pid never does: only ESRCH is death.
     pub pid_gone: bool,
-    /// A `reap --release` ruling for THIS row (x-e3cc): the release lifts
+    /// A `reap --release` ruling for THIS row: the release lifts
     /// the transcript-unresolved gate, so an absent transcript age retires
     /// instead of holding. Set only when the verb's ruling matched the row;
     /// a missing age is never quiet on any other path.
@@ -129,7 +129,7 @@ pub struct GcRow {
 }
 
 impl GcRow {
-    /// The session-shaped release (x-2774): the ONE predicate the policy
+    /// The session-shaped release: the ONE predicate the policy
     /// arm and the sweep's obligation yields both read, so they cannot
     /// drift. A released row's own open do row is the stale record of work
     /// that moved on, never a live assignment.
@@ -163,7 +163,7 @@ pub const PLANNING_IDLE_RETIRE_SECS: i64 = 1200;
 
 /// Node statuses that are NOT active work. A parked or never-started node
 /// is not evidence that a session is alive, so it does not shield one
-/// (x-2774 change 6). `superseded` is deliberately absent: a superseded
+/// (change 6). `superseded` is deliberately absent: a superseded
 /// node's work moved elsewhere and the row's own supersession is a registry
 /// question, not a node-status one.
 pub const INACTIVE_NODE_STATUSES: [&str; 2] = ["deferred", "idea"];
@@ -180,23 +180,23 @@ pub enum KeepReason {
     /// Origin is not `spawn` (adopted, or nothing recorded): only a row fno
     /// itself spawned retires, whatever the work state says.
     NotSpawn { origin: String },
-    /// No declared source resolved a node for the session (x-5a62): the
+    /// No declared source resolved a node for the session: the
     /// reverse join, the registry field, the row name, and the transcript
     /// all answered nothing (d-bbcd48b5 recovers provenance from any
     /// declared source; nothing left to recover from is the one honest
     /// keep).
     NoProvenance,
-    /// Two provenance sources resolved DIFFERENT nodes (x-5a62): witnesses
+    /// Two provenance sources resolved DIFFERENT nodes: witnesses
     /// that disagree are not evidence, so the row is held rather than
     /// retired on a guess.
     NodeConflict { a: String, b: String },
-    /// The node reads done but its PR state contradicts (x-5a62): an open
+    /// The node reads done but its PR state contradicts: an open
     /// additional PR, or a RECORDED merge_status that is not `merged`. An
     /// absent merge_status does not hold - absence has three explanations
     /// and none is `unmerged` - and rides the basis as unrecorded instead.
     PrStateContradicts { node: String, detail: String },
     /// The node reads planning-complete, but THIS session holds neither
-    /// finished marker (x-5aef, d-81c6da7e): its own blueprint/think row
+    /// finished marker (x-dddd, d-81c6da7e): its own blueprint/think row
     /// carries no `ended_at`, and it did not write the node's plan. The
     /// completion belongs to an earlier assignment, so this quiet
     /// replanning worker keeps its row with the node and its status named.
@@ -299,7 +299,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // shipped (AC3-HP). One open node still parked at `idea` (or any
             // non-complete status) holds the row: the plan it was dispatched
             // to write never landed there.
-            // x-5aef task 1.2 binds that verdict to the CURRENT assignment:
+            // x-dddd task 1.2 binds that verdict to the CURRENT assignment:
             // every node must ALSO carry a finished marker - either this
             // session's own blueprint/think row on it carries `ended_at`,
             // or (d-81c6da7e) this session wrote the node's plan. A quiet
@@ -308,7 +308,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             // d-81c6da7e: a finished planner's quiet gate is 1200 s, not
             // the 900 s every other row takes. A released planner skipped
             // the marker question by ruling, so only its quiet gate is
-            // left. x-2774: the lane keeps precedence over the
+            // left.: the lane keeps precedence over the
             // session-shaped releases below, and an unfinished assignment
             // holds even when the node's status would free a non-planner.
             if let Some(assignments) = &row.planning {
@@ -359,7 +359,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                     );
                 }
             }
-            // x-2774 changes 1, 3, 6, 8: open NODE state alone is not
+            // changes 1, 3, 6, 8: open NODE state alone is not
             // evidence a SESSION is alive. Four positive facts say this
             // row's own story is over, and each falls through to the same
             // grace gate a done node takes (the transcript gates keep this
@@ -388,14 +388,14 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
 /// transcript and a transcript inside the grace window both keep the row.
 fn grace_gate(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>) {
     match row.transcript_age_s {
-        // x-e3cc: the release lifts this one gate for this one row. Every
+        // the release lifts this one gate for this one row. Every
         // other path reads absence as unresolved, never as quiet.
         None if row.release_quiet => (GcAction::Retire, None),
         None => (GcAction::Keep, Some(KeepReason::TranscriptUnresolved)),
-        // x-2774 change 8: a provably dead pid (ESRCH) overrides recency.
+        // change 8: a provably dead pid (ESRCH) overrides recency.
         // Recency without a living writer is not liveness; only ESRCH
         // revokes it, never an absent or unanswerable pid.
-        // x-b7f8: a terminal harness state overrides recency too. The
+        // a terminal harness state overrides recency too. The
         // live roster shows a between-turns session as working/idle, never
         // done - `done` is not a turn boundary, it is the finish line.
         Some(age) if age <= grace_secs && !row.pid_gone && row.session_terminal.is_none() => {
@@ -433,7 +433,7 @@ pub(crate) fn row_handle(e: &crate::state::RegistryEntry) -> String {
     }
 }
 
-/// The production transcript-age seam (x-54cf): the NEWEST TIMESTAMPED
+/// The production transcript-age seam: the NEWEST TIMESTAMPED
 /// transcript entry, read through the shared truth probe (one batched,
 /// single-flighted child per sweep) - not a file stat, whose untimestamped
 /// trailing records keep a dead file reading fresh (measured median +20 min,
@@ -548,7 +548,7 @@ pub fn gc_sweep(
 }
 
 /// `fno agents reap --release <row>`: the same production seams as
-/// [`gc_sweep`], with one release ruling riding the pass (x-e3cc). The
+/// [`gc_sweep`], with one release ruling riding the pass. The
 /// settle runs first exactly as the real sweep runs it, so a do row the
 /// batch can fill is already filled before the row pass reads the graph.
 pub fn gc_sweep_release(
@@ -914,7 +914,7 @@ pub fn unowned_sweeps(home: &AgentsHome, emitter: &EventEmitter, cwd: &std::path
 }
 
 /// The daemon idle tick's retirement-sweep arm, throttled to `interval`
-/// (x-d354). Before this guard the sweep was requested every 5s tick against
+///. Before this guard the sweep was requested every 5s tick against
 /// a 900s grace, its settle pass writing the graph before it knew whether
 /// there was any work: a continuous graph consumer wearing a cadence label,
 /// with the one-in-flight gate ensuring the copies never stacked but never
@@ -938,7 +938,7 @@ pub fn mux_prune_args(dry_run: bool, include_used_shells: bool) -> Vec<&'static 
     args
 }
 
-/// (x-91eb, moved from the manual verb) Shell out to the existing prune verb
+/// (moved from the manual verb) Shell out to the existing prune verb
 /// - one sweep body, reused, not reimplemented. Fail-closed: a spawn
 /// failure, a non-zero exit, or an unparsable receipt is `Unread`, never a
 /// measured zero.
@@ -1073,7 +1073,7 @@ mod tests {
 
     use super::*;
 
-    // --- the retirement sweep arm (x-d354) ---
+    // --- the retirement sweep arm ---
 
     fn retirement_sweep_tmp_home(tag: &str) -> (std::path::PathBuf, AgentsHome) {
         let dir = std::env::temp_dir().join(format!(
@@ -1964,11 +1964,11 @@ mod tests {
     fn ac3_hp_planner_on_ready_node_completes_at_plan_written() {
         let planner = GcRow {
             work: WorkState::Open {
-                node: "x-70e1".into(),
+                node: "x-cccc".into(),
                 status: "ready".into(),
             },
-            planning: Some(vec![("x-70e1".to_string(), "ready".to_string())]),
-            planning_closed: vec!["x-70e1".to_string()],
+            planning: Some(vec![("x-cccc".to_string(), "ready".to_string())]),
+            planning_closed: vec!["x-cccc".to_string()],
             transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
             ..retiring()
         };
@@ -1977,11 +1977,11 @@ mod tests {
         // not the implementer.
         let dispatched = GcRow {
             work: WorkState::Open {
-                node: "x-70e1".into(),
+                node: "x-cccc".into(),
                 status: "in_progress".into(),
             },
-            planning: Some(vec![("x-70e1".to_string(), "in_progress".to_string())]),
-            planning_closed: vec!["x-70e1".to_string()],
+            planning: Some(vec![("x-cccc".to_string(), "in_progress".to_string())]),
+            planning_closed: vec!["x-cccc".to_string()],
             ..planner.clone()
         };
         assert_eq!(gc_decide(&dispatched, GRACE), (GcAction::Retire, None));
@@ -2007,10 +2007,10 @@ mod tests {
     fn ac3_edge_planner_on_idea_node_stays_outstanding() {
         let planner = GcRow {
             work: WorkState::Open {
-                node: "x-70e1".into(),
+                node: "x-cccc".into(),
                 status: "idea".into(),
             },
-            planning: Some(vec![("x-70e1".to_string(), "idea".to_string())]),
+            planning: Some(vec![("x-cccc".to_string(), "idea".to_string())]),
             ..retiring()
         };
         assert_eq!(
@@ -2018,7 +2018,7 @@ mod tests {
             (
                 GcAction::Keep,
                 Some(KeepReason::PlanningUnclosed {
-                    node: "x-70e1".into(),
+                    node: "x-cccc".into(),
                     status: "idea".into(),
                 })
             )
@@ -2026,7 +2026,7 @@ mod tests {
 
         let unplannable = GcRow {
             work: WorkState::Open {
-                node: "x-70e1".into(),
+                node: "x-cccc".into(),
                 status: "ready".into(),
             },
             planning: Some(Vec::new()),
@@ -2037,14 +2037,14 @@ mod tests {
             (
                 GcAction::Keep,
                 Some(KeepReason::OpenWork {
-                    node: "x-70e1".into(),
+                    node: "x-cccc".into(),
                     status: "ready".into(),
                 })
             )
         );
     }
 
-    /// x-5aef AC4-HP: a `bp-` row whose node reads `ready` but which holds
+    /// x-dddd AC4-HP: a `bp-` row whose node reads `ready` but which holds
     /// NEITHER finished marker (no `ended_at` of its own, no written plan)
     /// keeps its row - the completion belongs to an earlier assignment, and
     /// the reason names the unclosed node and its status. Fail closed: an
@@ -2053,10 +2053,10 @@ mod tests {
     fn ac4_hp_ready_node_without_a_closed_assignment_holds_the_row() {
         let replanner = GcRow {
             work: WorkState::Open {
-                node: "x-5aef".into(),
+                node: "x-dddd".into(),
                 status: "ready".into(),
             },
-            planning: Some(vec![("x-5aef".to_string(), "ready".to_string())]),
+            planning: Some(vec![("x-dddd".to_string(), "ready".to_string())]),
             planning_closed: Vec::new(),
             ..retiring()
         };
@@ -2065,7 +2065,7 @@ mod tests {
             (
                 GcAction::Keep,
                 Some(KeepReason::PlanningUnclosed {
-                    node: "x-5aef".into(),
+                    node: "x-dddd".into(),
                     status: "ready".into(),
                 })
             )
@@ -2073,7 +2073,7 @@ mod tests {
         // The fail-closed twin: a different node closed, this one not.
         let partial = GcRow {
             planning: Some(vec![
-                ("x-5aef".to_string(), "ready".to_string()),
+                ("x-dddd".to_string(), "ready".to_string()),
                 ("x-9999".to_string(), "done".to_string()),
             ]),
             planning_closed: vec!["x-9999".to_string()],
@@ -2084,24 +2084,24 @@ mod tests {
             (
                 GcAction::Keep,
                 Some(KeepReason::PlanningUnclosed {
-                    node: "x-5aef".into(),
+                    node: "x-dddd".into(),
                     status: "ready".into(),
                 })
             )
         );
     }
 
-    /// x-5aef AC4-EDGE / d-81c6da7e marker 1: the same row retires once its
+    /// x-dddd AC4-EDGE / d-81c6da7e marker 1: the same row retires once its
     /// own blueprint row gains `ended_at` - past the 1200 s planner grace.
     #[test]
     fn ac4_edge_a_closed_assignment_releases_the_row() {
         let replanner = GcRow {
             work: WorkState::Open {
-                node: "x-5aef".into(),
+                node: "x-dddd".into(),
                 status: "ready".into(),
             },
-            planning: Some(vec![("x-5aef".to_string(), "ready".to_string())]),
-            planning_closed: vec!["x-5aef".to_string()],
+            planning: Some(vec![("x-dddd".to_string(), "ready".to_string())]),
+            planning_closed: vec!["x-dddd".to_string()],
             transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
             ..retiring()
         };
@@ -2116,11 +2116,11 @@ mod tests {
     fn a_planner_that_wrote_the_plan_retires_after_twenty_quiet_minutes() {
         let planner = GcRow {
             work: WorkState::Open {
-                node: "x-861c".into(),
+                node: "x-eeee".into(),
                 status: "ready".into(),
             },
-            planning: Some(vec![("x-861c".to_string(), "ready".to_string())]),
-            planning_plan_written: vec!["x-861c".to_string()],
+            planning: Some(vec![("x-eeee".to_string(), "ready".to_string())]),
+            planning_plan_written: vec!["x-eeee".to_string()],
             transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
             ..retiring()
         };
@@ -2142,10 +2142,10 @@ mod tests {
     fn a_released_planner_on_an_idea_node_retires_past_the_planner_grace() {
         let planner = GcRow {
             work: WorkState::Open {
-                node: "x-70e1".into(),
+                node: "x-cccc".into(),
                 status: "idea".into(),
             },
-            planning: Some(vec![("x-70e1".to_string(), "idea".to_string())]),
+            planning: Some(vec![("x-cccc".to_string(), "idea".to_string())]),
             planning_released: true,
             transcript_age_s: Some(PLANNING_IDLE_RETIRE_SECS + 1),
             ..retiring()
@@ -2282,7 +2282,7 @@ mod tests {
         let home = AgentsHome::at(&dir);
         home.ensure_root().unwrap();
         let entry = crate::state::RegistryEntry {
-            name: "target-x-07dc-worker".into(),
+            name: "target-x-ffff-worker".into(),
             cwd: dir.to_string_lossy().to_string(),
             harness: Some("claude".into()),
             ..Default::default()
@@ -2778,7 +2778,7 @@ mod tests {
         );
     }
 
-    // ── x-2774: the reaper asks the session, not only the node ──────────
+    // ──: the reaper asks the session, not only the node ──────────
 
     /// An open-work row that is quiet past the grace - the shape the old
     /// policy held forever.
@@ -2814,7 +2814,7 @@ mod tests {
         // level by x2774_terminal_harness_state_releases_an_open_work_row.
     }
 
-    /// x-b7f8: recency yields to a terminal harness state. An AllDone row
+    /// recency yields to a terminal harness state. An AllDone row
     /// inside the grace window retires when its roster state reads done and
     /// names the early fire when `working` or `blocked` - not terminal -
     /// keeps it under active, exactly as today.

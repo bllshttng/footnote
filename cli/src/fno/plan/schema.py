@@ -42,7 +42,7 @@ PlanStatus = enum.Enum(  # type: ignore[misc]
     type=str,
 )
 
-#: The date the difficulty requirement shipped (x-baef). 1190 of the 1196
+#: The date the difficulty requirement shipped. 1190 of the 1196
 #: plans that existed on 2026-08-26 carry no ``difficulty``, and backfilling
 #: would fabricate 1190 estimates nobody made; plans created on or before
 #: this date pass without one. The boundary is strictly-after, not
@@ -168,7 +168,7 @@ def difficulty_gate_error(
     )
 
 
-#: The date the Execution Strategy requirement shipped (x-a804). 268 of the
+#: The date the Execution Strategy requirement shipped. 268 of the
 #: 422 plans created in the fortnight before it carry no ``## Execution
 #: Strategy``, and 200 of the 232 flat quick-plans among them describe more
 #: than one numbered change, so backfilling would fabricate a wave topology
@@ -270,7 +270,7 @@ class ConsolidationEntry(BaseModel):
         from fno.graph._constants import is_wellformed_node_id
 
         if not is_wellformed_node_id(v):
-            raise ValueError("is not a node id (expected <prefix>-<hex>, e.g. x-3bd3)")
+            raise ValueError("is not a node id (expected <prefix>-<hex>, e.g. x-aaaa)")
         return v
 
 
@@ -366,7 +366,7 @@ class PlanFrontmatter(BaseModel):
     distinct historical keys, and this model deliberately does not police them.
     """
 
-    # Canonical keys (x-f34f US7): `node`, `created`, `blocked_by`, `type` are
+    # Canonical keys (US7): `node`, `created`, `blocked_by`, `type` are
     # the single authority per axis. Their legacy synonyms (`graph_node_id`,
     # `created_at`, `depends_on`, `kind`) are collapsed by `fno do plan
     # migrate-keys`; readers keep a one-release fallback (e.g. reconcile's
@@ -414,25 +414,25 @@ class PlanFrontmatter(BaseModel):
     consolidation: ConsolidationBlock | None = None
     updated: datetime | None = None
     # compiled-v1 marks a plan whose Acceptance Criteria Blueprint compiled and
-    # whose task acceptance references all resolve (x-f905). Absent on historical
+    # whose task acceptance references all resolve. Absent on historical
     # plans, which keep permissive legacy reads.
     acceptance_contract: Literal["compiled-v1"] | None = None
     completion: Literal["delivery"] | None = None
     shipped_at: datetime | None = None  # PR creation (implementation complete)
-    done_at: datetime | None = None  # PR merged (first-write-only; x-f34f)
+    done_at: datetime | None = None  # PR merged (first-write-only;)
     urls: list[str] = []
     session_ids: list[str] = []
     # >= 1 when present: graduate gates on `len(urls) >= expected`, so 0/negative
     # would graduate a plan with no URLs; the stamp/set-expected writers already
     # reject < 1, and this makes validate catch the same corrupt frontmatter.
     expected_url_count: int | None = Field(default=None, ge=1)
-    # Node-closure outcome probes (x-5d34), read by the three close verbs via
+    # Node-closure outcome probes, read by the three close verbs via
     # resolve_promise_evidence. Sibling to loop-check's `done_probes` (which
     # gates session termination); this gates node closure. Scalar or list, the
     # same permissive shape as `kill_criteria`, since the Rust runner parses the
     # raw frontmatter itself.
     close_probes: str | list[Any] | None = None
-    # Acceptance-evidence bindings (x-d098): maps a compiled AC id to the probe
+    # Acceptance-evidence bindings: maps a compiled AC id to the probe
     # index that measures it (`done_probes[n]` / `close_probes[n]`). Enforced by
     # the finalize validator and the Rust probe runner, not here; this field
     # only keeps the declaration from being dropped on frontmatter round-trips.

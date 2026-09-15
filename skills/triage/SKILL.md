@@ -356,7 +356,7 @@ hygiene without human attention, use the deterministic check:
 Exit code 4 indicates a threshold breach (idea pile, stale-ready,
 failure-prone, or collisions). Configurable via
 `config.health_monitor` in config.toml; full schema in
-[CLAUDE.md > Backlog Health Monitoring](../../CLAUDE.md#backlog-health-monitoring-2026-04-27-plan-ab-571c072b).
+the `config.health_monitor` schema notes in the maintainers' setup guide.
 The monitor is pull-based (poll every interval) and never auto-mutates
 the graph; breaches notify and the human (or a follow-up `/triage`)
 decides what to do.

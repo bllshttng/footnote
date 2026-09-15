@@ -1,5 +1,5 @@
 //! `fno-agents session-start-bytes --gate-bytes N [--cwd PATH]` -- the
-//! operator's TOTAL session-start byte count (x-997a), so preamble overload
+//! operator's TOTAL session-start byte count, so preamble overload
 //! is a number, not a feeling.
 //!
 //! `--gate-bytes` is required rather than re-derived: `check-preamble-budget.sh`

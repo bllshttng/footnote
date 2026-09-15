@@ -1,4 +1,4 @@
-//! The sideline's glyph legend (x-b5d1): what the header band's counts and
+//! The sideline's glyph legend : what the header band's counts and
 //! each row's leading glyph mean. Generated from the one lattice table the
 //! rows render (`lattice_style` -> `lattice_glyph` -> `SEVERITY_ORDER`),
 //! so the legend cannot drift from what the screen draws. A hand-written
@@ -8,7 +8,7 @@
 
 use super::{lattice_glyph, LatticeState, PopupRow, SEVERITY_ORDER};
 
-/// (x-b5d1) The one-line reading of a glyph. The strings restate the
+/// The one-line reading of a glyph. The strings restate the
 /// `LatticeState` enum docs' semantics; the exhaustive match keeps a new
 /// state a compile error here, the same lock every spelling of the table
 /// carries.

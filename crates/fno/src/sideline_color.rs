@@ -1,4 +1,4 @@
-//! (x-1b35) Lane-color resolution for the sideline agent rows.
+//! Lane-color resolution for the sideline agent rows.
 //!
 //! The operator asked "which row belongs to which lane?" - and the honest
 //! answer is the ROUTE (the vendor lane a row bills), not the harness alone:
@@ -226,7 +226,7 @@ pub fn reload_palette() {
 /// axis, the default thing that is colored), then harness-keyed. An axis
 /// absent here renders `Color::Default` - silence, never a wrong lane.
 /// Names (not indices) so the settings Colors tab can print what a key
-/// resolves to (x-1b68); `builtin_color` parses them back to `Color`.
+/// resolves to; `builtin_color` parses them back to `Color`.
 fn builtin_color_name(axis: Axis, value: &str) -> Option<&'static str> {
     match axis {
         Axis::Route => match value {
@@ -254,7 +254,7 @@ fn builtin_color(axis: Axis, value: &str) -> Option<Color> {
 /// The built-in defaults for one axis name ("harness" | "route" | "model" |
 /// "row"), as `(key, color-name)` pairs - the same table [`resolve_with`]
 /// falls back to, exposed for the settings Colors tab so an operator sees
-/// what every lane currently resolves to (x-1b68). Model and row are
+/// what every lane currently resolves to. Model and row are
 /// config-only keys (no built-in can know an operator's catalog), so they
 /// are empty here.
 pub fn builtin_defaults(axis: &str) -> &'static [(&'static str, &'static str)] {
@@ -677,10 +677,10 @@ mod tests {
         );
     }
 
-    // (x-e4f1) The settings UI reads the cached palette through the pub
+    // The settings UI reads the cached palette through the pub
     // accessor and invalidates it through reload_palette; both behave on the
     // module-scope cache.
-    // (x-1b68) The builtin table is stored as COLOR NAMES so the settings
+    // The builtin table is stored as COLOR NAMES so the settings
     // Colors tab can print what a key resolves to. Every name must parse back
     // to the exact Color the table always resolved to, or the UI and the
     // cascade would disagree.

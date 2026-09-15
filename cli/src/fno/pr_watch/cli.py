@@ -334,7 +334,7 @@ class ClaimAdapter:
         """
         try:
             info = claim_status(f"node:{node_id}")
-            # live OR suspect (x-ba4b): a suspect claim (TTL-unexpired, dead pid)
+            # live OR suspect: a suspect claim (TTL-unexpired, dead pid)
             # is a respawned worker's slot - treat as occupied, never re-dispatch.
             return info.get("state") in ("live", "suspect")
         except Exception as exc:
@@ -406,7 +406,7 @@ _STRANDED_FLOOR_S = 10.0
 #: Skipping under it costs nothing - the next tick starts the scan over.
 _RECOVERY_ROOT_FLOOR_S = 3.0
 
-#: Per-phase alarm caps (x-c79d): each phase runs under its own slice,
+#: Per-phase alarm caps : each phase runs under its own slice,
 #: min(cap, seconds left before the tick ceiling). watchdog is the one
 #: uncapped phase and stops itself at _WAKE_APPLY_FLOOR_S, because one
 #: unit of its work is long. The capped slices sum to 550s against the
@@ -581,7 +581,7 @@ def tick() -> None:
         except ValueError:
             pass
 
-        # One alarm per phase (x-c79d): every body runs under its own slice, so
+        # One alarm per phase: every body runs under its own slice, so
         # a slow phase loses its turn instead of aborting the phases after it.
         # The runner is the only place that catches TickDeadlineExceeded.
         def _run_phase(
@@ -612,7 +612,7 @@ def tick() -> None:
             else:
                 assert left is not None
                 slice_s = min(_PHASE_CAP_S.get(name, left), left)
-            # Which budget fired if the alarm does (x-d211): a cap below the
+            # Which budget fired if the alarm does: a cap below the
             # remaining wall starves one phase; the wall is the tick deadline.
             cap = _PHASE_CAP_S.get(name)
             wall_limited = (
@@ -653,13 +653,13 @@ def tick() -> None:
             nonlocal settings, cfg, tick_enabled
             settings = load_settings()
             cfg = settings.pr_watch
-            # x-aaaf wave 3: the master panic switch outranks pr_watch's own gate too.
+            # wave 3: the master panic switch outranks pr_watch's own gate too.
             tick_enabled = cfg.enabled and settings.autonomy.enabled
             ceiling_box["v"] = _resolve_tick_deadline(cfg)
 
         _run_phase("settings", _phase_settings)
 
-        # Phase order (x-c79d): PR legs first (sweep, king_wake, notify_watch, heal,
+        # Phase order: PR legs first (sweep, king_wake, notify_watch, heal,
         # stranded), then the fleet-health tail (recovery, watchdog) - per-phase slices removed the shared deadline that gave recovery a head-of-line pass.
         def _phase_recovery(_slice_s: float) -> None:
             assert settings is not None and cfg is not None
@@ -824,7 +824,7 @@ def tick() -> None:
                         provider_outages=provider_outages,
                     )
                     # Provider-outage handoff supervision moved to the
-                    # provider-cap actor (x-7e05); measure_provider_outages
+                    # provider-cap actor; measure_provider_outages
                     # stays as report lines only.
 
                     # Internal recovery, wake mode only. Session verdicts drive
@@ -851,7 +851,7 @@ def tick() -> None:
                                 provider_outage_fn=lambda: provider_outages,
                             )
                             if payload.get("refused"):
-                                # x-4c87: zero rows read is an instrument failure.
+                                # zero rows read is an instrument failure.
                                 # No events, no gates - the refusal reads loud.
                                 log.warning(
                                     "pr-watch: watchdog sweep refused: %s (%s)",
@@ -896,7 +896,7 @@ def tick() -> None:
                                         continue
                                     _wd_apply_and_emit(_wd, verdict, cwd=row.cwd, agent=row.agent, label="wake")
                                     acted += 1
-                            # SILENCE lane (x-c624): registry-scoped rows fleet_rows misses.
+                            # SILENCE lane: registry-scoped rows fleet_rows misses.
                             if (phase_seconds_left() or 0.0) < _WAKE_APPLY_FLOOR_S:
                                 log.warning("pr-watch: watchdog silence budget spent")
                             else:
@@ -1241,13 +1241,13 @@ def tick() -> None:
             else:
                 _emit_tick_row("king_wake", interval_s=kw_i, skip_reason="wake_disabled")
 
-        # The operator-notice sampler (x-87fb): one phase, always run; the
+        # The operator-notice sampler: one phase, always run; the
         # Rust arm answers notify_off itself when the [notify] signals list
         # is empty, so the readout shows the arm whether or not it is armed.
         def _phase_notify(_slice_s: float) -> None:
             _run_notify_watch_phase(_tick_roots())
 
-        # The heal drive loop (x-974c): nothing called the healer on a timer,
+        # The heal drive loop: nothing called the healer on a timer,
         # so every red open PR waited for a hand. The loop lives in Rust; this
         # phase is only the gate, before stranded so a PR healed this tick is
         # not reported stranded in the same breath. Guard first, import
@@ -1374,7 +1374,7 @@ def tick() -> None:
             "phase": cut[0] if cut else current_tick_phase(),
             "pid": os.getpid(),
         }
-        # Name which timeout mechanism fired (x-d211): wall outranks slice.
+        # Name which timeout mechanism fired: wall outranks slice.
         if timed_out:
             if "deadline_exceeded" in cut_whys.values():
                 end_data["why"] = "deadline_exceeded"
@@ -1438,7 +1438,7 @@ def install(
 
     Prints the full plist before writing.  Requires explicit confirmation
     before writing to ~/Library/LaunchAgents/, then runs ``launchctl load`` so
-    enabled means running (x-e106).  Pass ``--no-activate`` to write only.
+    enabled means running.  Pass ``--no-activate`` to write only.
     """
     from fno.pr_watch import _install as m
 

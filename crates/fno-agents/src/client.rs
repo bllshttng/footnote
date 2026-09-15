@@ -45,7 +45,7 @@ pub enum ClientError {
 }
 
 /// How long a client waits for the daemon's response frame before declaring it
-/// unresponsive (x-3498). An AF_UNIX connect succeeds into the listen backlog
+/// unresponsive. An AF_UNIX connect succeeds into the listen backlog
 /// whether or not anyone ever calls accept, so connect time cannot tell
 /// "saturated" from "serving"; only a bounded read can. The value must sit
 /// ABOVE the daemon's own legitimate worst-case handler budget: a `stop`
@@ -134,7 +134,7 @@ pub fn resolve_daemon_bin() -> PathBuf {
 /// True when no process currently holds the supervisor singleton lock, so
 /// there is no daemon entitled to this socket and starting one is legitimate.
 ///
-/// This is the positive marker a connect probe cannot be (x-ef7f): a busy
+/// This is the positive marker a connect probe cannot be: a busy
 /// holder still holds the lock, while a busy holder answers no connect. We take
 /// the lock only to ask the question and release it immediately -- the daemon
 /// we spawn takes it for real, for its whole lifetime.
@@ -311,7 +311,7 @@ pub async fn ensure_daemon(
     // The daemon outlives this client. Inheriting a caller's captured stdout or
     // stderr keeps `Command::output()` open after the client exits, so a
     // captured spawn/restart waits forever on a pipe the daemon owns. stderr
-    // still must not be discarded: the x-4c87 startup refusal prints its cause
+    // still must not be discarded: the startup refusal prints its cause
     // (registry path + divergence counts) to stderr and exits before binding,
     // and the try_wait branch below reports exactly that. A file keeps both
     // properties: no inherited pipe to hold open, and the diagnostic survives
@@ -326,7 +326,7 @@ pub async fn ensure_daemon(
         .unwrap_or(std::process::Stdio::null());
     cmd.stderr(stderr_sink);
     cmd.env("FNO_AGENTS_HOME", home.root());
-    // Name the home in argv too, not just the env (x-cd31): a bare
+    // Name the home in argv too, not just the env: a bare
     // `fno-agents-daemon` row in ps cannot be attributed to the home it
     // serves, which is how 78 of them accumulated unnoticed. The binary
     // refuses a --home that disagrees with the env rather than silently
@@ -352,7 +352,7 @@ pub async fn ensure_daemon(
         if UnixStream::connect(&sock).await.is_ok() {
             return Ok(());
         }
-        // A daemon that REFUSED startup (x-4c87: a divergent registry exits
+        // A daemon that REFUSED startup (: a divergent registry exits
         // nonzero before binding, having printed the path and both counts to
         // inherited stderr) must fail this verb immediately with its real
         // cause, not burn the full socket budget on a socket that will never
@@ -426,7 +426,7 @@ pub async fn call_if_running(home: &AgentsHome, req: &Request) -> Result<Respons
 }
 
 // ---------------------------------------------------------------------------
-// Binary-version drift detection + restart (ab-1891cdff).
+// Binary-version drift detection + restart.
 // ---------------------------------------------------------------------------
 
 /// Parse the daemon's reported running-exe fingerprint out of an `agent.status`
@@ -481,7 +481,7 @@ pub struct RestartOutcome {
     /// The pid of the freshly-started daemon now serving.
     pub new_pid: u32,
     /// A `--force` run SIGKILLed the holder rather than draining it; the
-    /// transcript must record that a process was killed (x-3498).
+    /// transcript must record that a process was killed.
     pub forced: bool,
     /// Something the operator should hear but that does not fail the verb
     /// (e.g. `--force` declined to signal a recycled pid and restarted
@@ -663,7 +663,7 @@ async fn start_fresh(home: &AgentsHome, daemon_bin: &Path) -> Result<u32, Restar
 ///   daemon's own start-time check before signalling, so a recycled pid is never
 ///   hit.
 ///
-/// `force` is the break-glass path (x-3498): a daemon that holds the singleton
+/// `force` is the break-glass path: a daemon that holds the singleton
 /// lock without serving cannot be reached by ANY of the steps above -- the
 /// `call_if_running` probe concludes DaemonNotRunning (a wedged listener either
 /// accepts into the backlog or answers ECONNREFUSED) and `start_fresh`'s
@@ -800,7 +800,7 @@ pub async fn restart_daemon(
     }
 
     // Terminate, escalate, verify: wait on the PID, not the socket. A socket
-    // that stops answering is an absence check with two failure modes (x-9627,
+    // that stops answering is an absence check with two failure modes (
     // the 2026-08-13 double-daemon): a daemon whose select loop starves the
     // SIGTERM arm keeps serving through the whole bound, and a daemon that
     // unlinked its socket but is still tearing down reads as gone while the
@@ -1056,7 +1056,7 @@ mod drift_restart_tests {
 
     #[tokio::test]
     async fn read_response_bounded_fails_not_hangs_on_a_silent_peer() {
-        // x-3498 AC: a peer that accepts (here: holds the duplex open) and
+        // AC: a peer that accepts (here: holds the duplex open) and
         // never replies must surface as DaemonUnresponsive WITHIN the deadline,
         // not hang forever. The end-to-end shape (a real wedged daemon) is
         // proven in tests/daemon_e2e.rs; this pins the bound itself, fast.

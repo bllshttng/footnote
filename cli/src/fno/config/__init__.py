@@ -506,7 +506,7 @@ class PostMergeBlock(BaseModel):
     maintainer_marker: Optional[str] = None
     enabled: bool = True
     self_reap: bool = False
-    # Canonical-sync (x-47be): all three default to the feature-off state so a
+    # Canonical-sync: all three default to the feature-off state so a
     # fresh install does nothing. sync_command is the project's whole sync
     # incantation (run via `bash -lc` from the canonical checkout); sync_paths
     # gates it on the merged file list (empty = always run); auto_run arms the
@@ -657,7 +657,7 @@ class ResearchBlock(BaseModel):
 class CrossModelBlock(BaseModel):
     """Cross-model review opt-in (nested under 'config.review.cross_model').
 
-    Gates the diversity axis of review (ab-6c8f4c61; the sigma panel it once
+    Gates the diversity axis of review (; the sigma panel it once
     routed is removed): when `enabled` is true, reviewer capacity
     may include a different provider (codex/gemini) than wrote the code,
     catching model-specific blind spots - the peer rung's substrate and the
@@ -738,7 +738,7 @@ class ReviewerDescriptor:
     invocations: Optional[Mapping[str, str]] = None
 
 
-# Reviewer names that have a `review_attestation` emit path (x-e703 Change 4).
+# Reviewer names that have a `review_attestation` emit path (Change 4).
 # config.review.reviewers must resolve to one of these keys ('/' stripped).
 # Kept in sync with the emit surfaces and the Rust-side invocation table by
 # scripts/ci/check-reviewer-descriptor-parity.sh, not by remembering.
@@ -783,7 +783,7 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
 def provider_limits_table(agents: object) -> Mapping[str, object]:
     """The per-provider budget table off an AgentsBlock-shaped object.
 
-    `provider_limits` since x-3f84 W5, with the legacy `max_lanes` spelling
+    `provider_limits` since x-aaaa W5, with the legacy `max_lanes` spelling
     honored for a pre-rename embedded settings object - without the fallback
     such an object reads as no table and silently un-caps. ONE accessor, not
     a getattr chain per reader: a chain per reader is how the scoreboard
@@ -807,7 +807,7 @@ def provider_subagent_budget(
     settings could not be read at all. Every one of them has to FAIL OPEN - the
     reader is route resolution, and refusing a review route because a config
     file was unreadable would wedge every session on the machine over a
-    resource question that only ever applied to one shared account (x-c703 LD3).
+    resource question that only ever applied to one shared account (LD3).
     """
     if not provider or provider == "unknown":
         return None
@@ -1260,7 +1260,7 @@ class ReviewBlock(BaseModel):
 
     `github_apps` is the must-have-reviewed list of GitHub App bot logins
     consumed by the `fno-agents loop-check` review gate (control-plane step 2,
-    ab-f1c5a9ed): a session terminates DonePRGreen only when every listed login
+): a session terminates DonePRGreen only when every listed login
     has at least one completed review pass and no unaddressed blocking finding.
 
     Semantics (mirrors the Rust-side parser in loopcheck.rs):
@@ -1308,7 +1308,7 @@ class ReviewBlock(BaseModel):
     # the env var holding that identity's PAT.
     peer_identity: Optional[str] = None
     peer_token_env: Optional[str] = None
-    # Reviewer logins honored-if-present but NOT required (x-4baa): the gate
+    # Reviewer logins honored-if-present but NOT required: the gate
     # never waits for them, but a blocking finding from one still holds it.
     # None resolves to DEFAULT_OPTIONAL_APPS via resolved_optional_apps;
     # explicit [] is a real opt-out; a non-empty list EXTENDS the default.
@@ -1330,7 +1330,7 @@ class ReviewBlock(BaseModel):
     # `coerce_and_resolve_reviewers` reads it off `ValidationInfo.data`,
     # which only carries fields pydantic has already validated.
     reviewer_registry: dict[str, ReviewerDescriptor] = Field(default_factory=dict)
-    # Local-attestation reviewers (x-e703, Phase 2): skill/agent/command names
+    # Local-attestation reviewers (Phase 2): skill/agent/command names
     # (sigma | /code-review | declare) that produce NO GitHub review object,
     # so loop-check accepts a head-pinned `review_attestation` event as gate
     # evidence. A leading '/' is stripped. An unresolvable name fails LOUD
@@ -1388,7 +1388,7 @@ class ReviewBlock(BaseModel):
     # disabled (callers treat no entries / all-"none" as off). read by
     # skills/pr/scripts/list-reviewers.sh.
     external_reviewers: list[str] = Field(default_factory=list)
-    # Per-agent HARNESS routing for the cross-model review panel (ab-6c8f4c61).
+    # Per-agent HARNESS routing for the cross-model review panel.
     # Map of agent-name -> harness (claude | codex | gemini | alternate).
     # Default empty: the curated correctness-subset default is computed in the
     # T2.1 resolver, NOT baked here, so an empty map stays a faithful empty map.
@@ -1574,7 +1574,7 @@ class ReviewBlock(BaseModel):
         # model - reject it at load, fail-closed. This static check is
         # Claude-centric (it over-rejects a claude peer for a codex/gemini
         # author); the symmetric author-aware coverage lives at gate time in
-        # loopcheck's same-model guard (x-c2e7).
+        # loopcheck's same-model guard.
         for e in self.peers:
             prov: object
             model: object
@@ -1782,7 +1782,7 @@ class HandoffBlock(BaseModel):
         return self
 
 class BlastConfig(BaseModel):
-    """Blast-radius router settings (nested under 'config.target.blast', x-518f).
+    """Blast-radius router settings (nested under 'config.target.blast').
 
     A deterministic blast read at `/target` init modulates the size profile
     BEFORE the immutable manifest is written: a high-blast surface can only
@@ -1856,7 +1856,7 @@ class TargetDefaultsBlock(BaseModel):
 class TargetConfig(BaseModel):
     """Target pipeline settings (nested under 'config.target').
 
-    `dedupe_dead_duplicates` (ab-f6625d1c, Component B) gates the stop hook's
+    `dedupe_dead_duplicates` (Component B) gates the stop hook's
     opt-in cleanup of provably-dead duplicate sibling target-state.md files.
     When two worktrees of one repo carry an IN_PROGRESS state bound to the same
     claude_transcript_id, enabling this lets the stop hook rename the
@@ -1893,7 +1893,7 @@ class TargetConfig(BaseModel):
 class InboxBlock(BaseModel):
     """Cross-session mail delivery-honesty settings (nested under 'config.inbox').
 
-    ``unclaimed_ttl`` (seconds, default 1800/30m, locked x-39a4) is the age
+    ``unclaimed_ttl`` (seconds, default 1800/30m, locked) is the age
     past which a sent-but-unclaimed bus message is surfaced back to its
     sender. ``landed_abandon_ttl`` (seconds, default 21600/6h) is the age past
     which an outstanding message drops off that nag entirely and is never
@@ -1924,7 +1924,7 @@ class SandboxBlock(BaseModel):
 class A2aBlock(BaseModel):
     """Agent-to-agent switchboard settings (nested under 'config.agents.a2a').
 
-    Governs the stream-json session-to-session switchboard (epic ab-d3a1ae3e,
+    Governs the stream-json session-to-session switchboard (epic,
     Group 2). `auto` is the A2A toggle: when true (the default), a switchboard
     `send A->B` runs the bounded literal-injection relay (B's reply becomes a
     user turn in A, A's reply relays back to B, ...) up to `turn_ceiling` total
@@ -1955,7 +1955,7 @@ class A2aBlock(BaseModel):
 class AgentProviderBlock(BaseModel):
     """Per-provider agent-runtime settings (nested under 'config.agents.<provider>').
 
-    `headless_yolo` (ab-994222ee, redefined by the bounded-posture amendment)
+    `headless_yolo` (redefined by the bounded-posture amendment)
     selects FULL yolo vs the BOUNDED posture for an autonomous (headless,
     MODE==exec) codex/gemini worker. Both postures never prompt (no hang); they
     differ on the sandbox:
@@ -1997,7 +1997,7 @@ from fno.config.spawn_blocks import (  # noqa: E402
 class SidelineColorsBlock(BaseModel):
     """Lane-color tables for the mux sideline (nested under 'config.sideline.colors').
 
-    (x-1b35) Every key names its axis explicitly - ``harness.<name>``,
+ Every key names its axis explicitly - ``harness.<name>``,
     ``route.<name>``, ``model."<model string>"``, ``row.<routing-row name>`` -
     because a bare key is ambiguous between account, route and model, and an
     axis is never inferred from a value. ``extra='forbid'`` is the refusal: a
@@ -2037,7 +2037,7 @@ class DispatchBlock(BaseModel):
     All three are empty ("") = unset, so a fresh install resolves exactly as the
     built-ins (harness=claude, per-harness substrate, `/target --no-merge {id}`).
 
-    No value validation here (config stays a leaf module, x-7fdd): the resolver
+    No value validation here (config stays a leaf module): the resolver
     validates the harness against the map and the substrate against the harness's
     capabilities at resolve time, fail-loud.
 
@@ -2049,7 +2049,7 @@ class DispatchBlock(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    # DEPRECATED (x-b2c7): the harness axis lives in the stage table
+    # DEPRECATED: the harness axis lives in the stage table
     # (`agents.profiles.<verb>.provider`); this key reads as the fallback rung
     # beneath it for one release. The fold runs at resolution time
     # (fno.agents.harness_map); the operator-facing surface is `fno config doctor`.
@@ -2061,11 +2061,11 @@ class DispatchBlock(BaseModel):
     verb_registry: dict[str, DispatchVerbDescriptor] = Field(default_factory=dict)
     # US3 verb allowlist: a node dispatch_verb must match or the resolver refuses.
     allowed_verbs: list[str] = Field(default_factory=lambda: list(_DEFAULT_DISPATCH_VERBS))
-    # DEPRECATED (x-4391/x-4be1): reads as `auto_merge.grant` for one release;
+    # DEPRECATED (/): reads as `auto_merge.grant` for one release;
     # every dispatch path reads the grant key now, no consumer reads this field.
     # An explicit --allow-merge/--no-merge flag always wins.
     auto_merge: bool = False
-    # x-0676: defer (default, byte-identical to today) or fail over to the next
+    # defer (default, byte-identical to today) or fail over to the next
     # healthy provider in the active combo; an unknown value degrades to "defer".
     on_exhaustion: str = "defer"
     # Proactive LOW cutover, opt-in, default 0 = off. Deliberately inverted from
@@ -2107,7 +2107,7 @@ def _positive_int(v: object) -> bool:
 # The per-provider budgets footnote ships. A provider absent from this table is
 # unbounded in every dimension, which is today's behavior for a dedicated
 # account. zai is here because the account is SHARED: `subagents = 1` is what
-# makes route resolution refuse to hand it a review panel (x-c703).
+# makes route resolution refuse to hand it a review panel.
 _BUILTIN_PROVIDER_BUDGETS: dict[str, dict[str, int]] = {
     "zai": {"lanes": 5, "subagents": 1},
 }
@@ -2120,7 +2120,7 @@ class ProviderBudget(BaseModel):
     a bare integer capping concurrent spawned workers. It carried one dimension
     while the account is spent on two - a worker also fans out subagents inside
     its own session, and a shared-quota account was spent eight subagents deep
-    on one review that returned nothing (x-c703).
+    on one review that returned nothing.
 
     `subagents` is that second dimension, and it is consumed by ROUTE
     RESOLUTION rather than by a guard: a native subagent is a harness-internal
@@ -2235,11 +2235,11 @@ class AgentsBlock(SweepKeys):
     auto_register_sessions: bool = False
     # Only routed Claude panes use this machine-local integration.
     happy_routed_panes: bool = False
-    # Row-retirement grace in SECONDS (x-c672). Full contract: FIELD_META.
+    # Row-retirement grace in SECONDS. Full contract: FIELD_META.
     retire_grace_s: int = Field(default=900, ge=0)
-    # Sweep cadence in SECONDS (x-d354); clamped under a third of the grace. Full contract: FIELD_META.
+    # Sweep cadence in SECONDS; clamped under a third of the grace. Full contract: FIELD_META.
     retire_interval_s: int = Field(default=300, ge=0)
-    # Reaper-hold escalation in SECONDS (x-e3cc). Full contract: FIELD_META.
+    # Reaper-hold escalation in SECONDS. Full contract: FIELD_META.
     hold_escalate_after_s: int = Field(default=5400, ge=0)
     reap_receipts: ReapReceiptsBlock = Field(default_factory=ReapReceiptsBlock)
     reap: ReapBlock = Field(default_factory=ReapBlock)
@@ -2248,11 +2248,11 @@ class AgentsBlock(SweepKeys):
     gemini: AgentProviderBlock = Field(default_factory=AgentProviderBlock)
     # Spawn-gate scalars degrade to safe defaults: max_live caps the roster
     # union as the BACKSTOP behind the RAM floor (min_free_gb) and the CPU
-    # axis (x-7783 LD1); provider_limits caps lanes and fan-out; admission
+    # axis (LD1); provider_limits caps lanes and fan-out; admission
     # decides on max_fleet_cpu_share every spawn; hard_max_load_per_cpu is the
     # absolute backstop on 15-minute load (max_load_per_cpu: deprecated LD2).
     max_live: int = 3
-    max_live_per_territory: int = 4  # x-e221 team cap; contract in the registry
+    max_live_per_territory: int = 4  # team cap; contract in the registry
     provider_limits: dict[str, ProviderBudget] = Field(
         default_factory=lambda: {
             k: ProviderBudget(**v) for k, v in _BUILTIN_PROVIDER_BUDGETS.items()
@@ -2260,7 +2260,7 @@ class AgentsBlock(SweepKeys):
     )
     pane_group_max: int = 4
     min_free_gb: float = 4.0
-    # x-8c8c: swap ceiling (percent used) beside min_free_gb; <= 0 disables.
+    # swap ceiling (percent used) beside min_free_gb; <= 0 disables.
     max_swap_pct: float = 90.0
     # Deprecated and ignored since 2026-09-09: admission decides on the
     # fleet's CPU share (max_fleet_cpu_share), never on a load trigger.
@@ -2331,7 +2331,7 @@ class AgentsBlock(SweepKeys):
     def _accept_legacy_max_lanes(cls, data: object) -> object:
         """Rename a legacy `[agents] max_lanes` table onto `provider_limits`.
 
-        The rename (x-3f84 W5) kills the leaf-name collision with
+        The rename (x-aaaa W5) kills the leaf-name collision with
         `parallel.max_lanes`, but a hard break would silently uncap a live
         provider budget - a billing failure, not a config failure - so the old
         spelling parses forever and prints ONE deprecation line naming the new
@@ -2356,7 +2356,7 @@ class AgentsBlock(SweepKeys):
         else:
             print(
                 "fno config: [agents] max_lanes is renamed provider_limits; "
-                "the legacy spelling still parses (x-3f84)",
+                "the legacy spelling still parses ",
                 file=_sys.stderr,
             )
             data = {**data, "provider_limits": data["max_lanes"]}
@@ -2418,7 +2418,7 @@ class AgentsBlock(SweepKeys):
 
     @model_validator(mode="after")
     def _warn_max_load_per_cpu_deprecated(self) -> "AgentsBlock":
-        """The retired trigger prints one deprecation line when set (x-7783 LD2).
+        """The retired trigger prints one deprecation line when set (LD2).
 
         The key parses so one release can pass, but nothing reads it: the
         value is IGNORED, never clamped, and the line names the decider so
@@ -2444,7 +2444,7 @@ class AgentsBlock(SweepKeys):
     @classmethod
     def _coerce_max_load_per_cpu(cls, v: object) -> object:
         """Coerce a non-numeric max_load_per_cpu to the default (8.0); never
-        raise. The key is deprecated and ignored (x-7783 LD2); it only needs
+        raise. The key is deprecated and ignored (LD2); it only needs
         to PARSE so one release can pass, so the coercion stays minimal."""
         return _finite_or(v, 8.0)
 
@@ -2523,7 +2523,7 @@ def _coerce_bool_default_true(v: object) -> bool:
 
 class AutonomyBlock(BaseModel):
     """The one master switch over every autonomous session-starting spawner
-    (nested under 'config.autonomy'). x-aaaf wave 3.
+    (nested under 'config.autonomy'). wave 3.
 
     ``enabled=False`` stops EVERY spawner - the merge-triggered ones
     (advance, dispatch_lanes, epic converge, reconcile_dispatch), spawn_think,
@@ -2559,7 +2559,7 @@ class AutonomyBlock(BaseModel):
 class AutoContinueBlock(BaseModel):
     """Merge-triggered auto-continue settings (nested under 'config.auto_continue').
 
-    The opt-in for merge-triggered auto-continue (node ab-3cd195b6): when
+    The opt-in for merge-triggered auto-continue (node): when
     enabled, a merge-detector (``fno backlog reconcile`` / the /pr merged skill)
     dispatches a fresh background ``/target --no-merge`` worker for the next
     now-unblocked backlog node after a PR merges, so a merge-gated epic walks
@@ -2604,7 +2604,7 @@ class AutoContinueBlock(BaseModel):
 class KeepGoingBlock(BaseModel):
     """Autonomous keep-going engine settings (nested under 'config.keep_going').
 
-    The opt-in for the autonomous keep-going engine (x-3360): when enabled, the
+    The opt-in for the autonomous keep-going engine : when enabled, the
     autonomous ``/fno:pr merged`` ritual classifies each surviving carve-out
     follow-up and DISPATCHES the next unit of work (a ``/think``, a ``/target``,
     or just a filed node) instead of only closing the merged node. This is what
@@ -2649,9 +2649,9 @@ class KeepGoingBlock(BaseModel):
 class ThinkSpawnBlock(BaseModel):
     """Context-carrying /think spawn settings (nested under 'config.think_spawn').
 
-    The opt-in for node x-6a10: when enabled, the node-birth path (``fno backlog
+    The opt-in for node : when enabled, the node-birth path (``fno backlog
     idea``) OFFERS a context-carrying ``/think`` thread for a generated organic
-    node (a birth trigger never auto-spawns - x-42c5), handing it the *resolved*
+    node (a birth trigger never auto-spawns -), handing it the *resolved*
     origin transcript pointer (not a paraphrase) so a later pickup starts from
     ground truth. A real spawn still happens for the explicit conversational
     verb, an armed lifecycle trigger (``on_work_start``/``on_retro``), or a
@@ -2681,7 +2681,7 @@ class ThinkSpawnBlock(BaseModel):
     enabled: bool = False
     max_per_run: int = 5
     idle_threshold_s: int = 0
-    # --- A2 lifecycle triggers (x-122a) ---
+    # --- A2 lifecycle triggers ---
     # Two non-birth dispatch moments, each behind its OWN sub-flag, default OFF
     # even when ``enabled`` is on (Open Question 1): ``on_work_start`` fires when
     # /target claims a node to work it; ``on_retro`` fires when ``fno backlog
@@ -2690,7 +2690,7 @@ class ThinkSpawnBlock(BaseModel):
     on_work_start: bool = False
     on_retro: bool = False
     daily_cap: int = 20
-    # x-3571: a third trigger of the same shape - fire at `fno backlog
+    # a third trigger of the same shape - fire at `fno backlog
     # decompose` for the epic's WAVE-0 children (those with no intra-epic
     # blocker). Default OFF and deliberately not on by `enabled` alone: one warm
     # context writing several coherent children is cheaper and more consistent
@@ -2703,8 +2703,8 @@ class ThinkSpawnBlock(BaseModel):
     # config.dispatch.substrate; this value is consulted only when that shared
     # setting is absent so upgrades preserve an operator's prior launch shape.
     substrate: Optional[str] = None
-    # B (x-5d51): how an attended session handles a born node. ``offer`` (default,
-    # byte-for-byte x-6a10) prints a copy-pasteable handoff line; ``spawn`` opts
+    # B: how an attended session handles a born node. ``offer`` (default,
+    # byte-for-byte) prints a copy-pasteable handoff line; ``spawn`` opts
     # into a real bg /think dispatch. Fail-safe to ``offer`` so a garbage value
     # never auto-spawns against operator intent.
     attended: str = "offer"
@@ -2842,7 +2842,7 @@ class AutoMergeBlock(BaseModel):
 
     The typed reader for what the bash ``scripts/lib/config.sh`` auto_merge
     helpers used to parse (``is_auto_merge_allowed_for`` / ``get_auto_merge_*``).
-    The ``fno do pr`` port (ab-d4c98550) reads these via :func:`load_settings`
+    The ``fno do pr`` port reads these via :func:`load_settings`
     instead of re-parsing settings.yaml in a subprocess, so the 4-tier
     precedence + caching live in one place.
 
@@ -2855,7 +2855,7 @@ class AutoMergeBlock(BaseModel):
 
     Scope-ordered to read like the AND chain ``fno do pr merge`` enforces:
     ``enabled`` is PROJECT scope (the standing arm, re-read live at merge and
-    arm time so an operator disarm mid-flight still withholds, x-2270);
+    arm time so an operator disarm mid-flight still withholds);
     ``grant`` is ACTOR scope (who may merge once ``enabled`` passes); the
     policy keys below only matter once both do.
 
@@ -2866,7 +2866,7 @@ class AutoMergeBlock(BaseModel):
     The fold withholds and it grants: a per-run refusal (``false``) outranks
     every grant at the merge gate (``pr/_merge.py``), and a
     ``TARGET_AUTO_MERGE=1`` grant (``env-target-auto-merge``) satisfies the
-    standing arm on its own (x-01b9). Scrubbed on runs carrying a mesh
+    standing arm on its own. Scrubbed on runs carrying a mesh
     identity (``FNO_AGENT_SELF``) or an unattended marker; an interactive
     session the operator launched carries neither and is the documented
     carrier of the grant, inside the operator's trust boundary, with the
@@ -2887,7 +2887,7 @@ class AutoMergeBlock(BaseModel):
     # change to either spelling set must move both readers and the
     # git-protection hook, or the gates split on exactly that spelling.
     enabled: bool = False
-    # ACTOR scope (x-4be1): who may merge once `enabled` passes. Replaces
+    # ACTOR scope: who may merge once `enabled` passes. Replaces
     # `dispatch.auto_merge`, which spelled the same decision in another table.
     #   none     - humans only, via `fno do pr merge`
     #   dispatch - autonomously dispatched /target workers may merge too
@@ -2977,7 +2977,7 @@ class PrWatchBlock(BaseModel):
 class GroomBlock(BaseModel):
     """Daily backlog-grooming pass settings (nested under 'config.groom').
 
-    x-aaaf wave 2: `fno backlog groom` (`_spawn_groom_worker`,
+ wave 2: `fno backlog groom` (`_spawn_groom_worker`,
     backlog/groom.py:204) previously spawned with no enable key at all, so it
     could not be turned off. Default ``True`` matches the spawner's CURRENT
     effective behavior (it always ran) - shipping this gate changes nothing
@@ -2997,8 +2997,8 @@ class GroomBlock(BaseModel):
 class RecoveryBlock(BaseModel):
     """Bg-session recovery sweep settings (nested under 'config.recovery').
 
-    Controls the Layer-2 sweep (x-f47c) that rides the ``pr_watch`` launchd
-    tick over footnote-launched bg sessions. Two actions survive the x-d93d
+    Controls the Layer-2 sweep that rides the ``pr_watch`` launchd
+    tick over footnote-launched bg sessions. Two actions survive the
     removal of the held socket nudge: provider failover on a swap-class death
     (rate-limit / quota / auth / 5xx; respawns a fresh ``claude --bg``), and
     close-surfacing for a session whose mission finished but whose process
@@ -3337,7 +3337,7 @@ class WorkBlock(BaseModel):
 class ParallelBlock(BaseModel):
     """Parallel-mode dispatch settings (nested under 'config.parallel').
 
-    Parallel mode (epic x-42d5) runs up to ``max_lanes`` independent bg
+    Parallel mode (epic) runs up to ``max_lanes`` independent bg
     worktree lanes concurrently, one per distinct backlog domain, to compress
     wall-clock time. The cap is the sole cost-bound lever (design Locked
     Decision #3): it trades CI minutes for throughput, never the reverse.
@@ -3346,7 +3346,7 @@ class ParallelBlock(BaseModel):
     ``config.local.toml`` override allowlist (:data:`WORKTREE_LOCAL_KEYS`,
     Locked Decision #10): a per-lane cap is meaningless - every lane must see
     one global ceiling or the cap does not bound anything. The allowlist is an
-    exact-match frozenset of ``{project.id}`` (x-071c narrowed it to this sole
+    exact-match frozenset of ``{project.id}`` (narrowed it to this sole
     key), so this key is excluded by construction; do NOT add
     ``config.parallel.max_lanes`` to it.
 
@@ -3448,7 +3448,7 @@ _LOOP_LEVELS = ("report", "assisted", "unattended")
 
 
 class LoopEntry(BaseModel):
-    """One named loop's level (``config.loops.<name>``, x-ce71).
+    """One named loop's level (``config.loops.<name>``).
 
     ``report`` (observe only) is the safest default, so a malformed or
     unrecognized level fails safe to it rather than raising - a standing
@@ -3458,7 +3458,7 @@ class LoopEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     level: Literal["report", "assisted", "unattended"] = "report"
-    # Aggregate per-run spend ceiling (x-57a5's observer harness is the first
+    # Aggregate per-run spend ceiling (observer harness is the first
     # consumer: config.loops.observer_harness.budget_usd_per_run). Generic on
     # LoopEntry rather than observer-specific so any future loop with its own
     # spend can reuse the same key. A non-positive/malformed value fails safe
@@ -3487,7 +3487,7 @@ class LoopEntry(BaseModel):
 
 
 class BatchBlock(BaseModel):
-    """Batch-lane settings (nested under 'config.batch', x-8cae).
+    """Batch-lane settings (nested under 'config.batch').
 
     The auto-target runner can coalesce N same-domain ready nodes onto one
     branch and open ONE PR per batch instead of one-per-node, cutting GitHub
@@ -3561,10 +3561,10 @@ class BatchBlock(BaseModel):
 
 
 class BranchBlock(BaseModel):
-    """Dispatch branch naming (nested under 'config.branch', x-ff83 W3).
+    """Dispatch branch naming (nested under 'config.branch', W3).
 
     ``prefix`` is the leading segment of a dispatched worktree branch:
-    ``<prefix>/<slug>-<node>`` (e.g. ``fno/plan-docs-...-x-ff83``). A legible
+    ``<prefix>/<slug>-<node>`` (e.g. ``fno/plan-docs-...-x-aaaa``). A legible
     branch that round-trips back to its node beats the opaque ``feature/<hex>``.
     """
 
@@ -3600,7 +3600,7 @@ class MuxRestoreBlock(BaseModel):
 class MuxBlock(BaseModel):
     """fno mux (terminal multiplexer) settings (nested under 'config.mux').
 
-    ``shell_integration`` (x-b63b) controls whether the mux auto-injects the
+    ``shell_integration`` controls whether the mux auto-injects the
     OSC 133 block-marker snippet into the shells it spawns, so command-block
     capture works with zero user config and WITHOUT touching the user's global
     shell rc. The injection happens ONLY in mux-spawned pane shells (temp
@@ -3620,7 +3620,7 @@ class MuxBlock(BaseModel):
     structural ``1``-``9`` tab range, or collides with another action, saying so
     in a notice rather than silently running the shipped default.
 
-    ``notify_on_blocked`` / ``notify_on_done`` (x-dd84) fire an OS notification
+    ``notify_on_blocked`` / ``notify_on_done`` fire an OS notification
     when a badge enters blocked / done. The Rust daemon reads these straight from
     config.toml (``agents_config.rs``, the same split-brain as
     ``config.agents.retire_grace_s``); modeling them here keeps every mux key
@@ -3639,7 +3639,7 @@ class MuxBlock(BaseModel):
 
     shell_integration: str = "mux-panes"
     restore: MuxRestoreBlock = Field(default_factory=MuxRestoreBlock)
-    # Which projects the backlog board renders (x-20f1). The graph is ONE
+    # Which projects the backlog board renders. The graph is ONE
     # store tagged by project, so an unscoped board shows every project's
     # work. `repo` (the default) scopes to this checkout's `project.id`,
     # resolved through git so every worktree layout agrees. `all` is the
@@ -3662,7 +3662,7 @@ class MuxBlock(BaseModel):
     notify_on_blocked: bool = True
     # Also notify on a terminal `done` hook transition. Off by default.
     notify_on_done: bool = False
-    # Catch-up digest on attach (x-4e2d): when a client attaches to a session it
+    # Catch-up digest on attach: when a client attaches to a session it
     # last left more than `attach_digest_threshold_min` ago, render a
     # "while you were gone" overlay (fold of events + ledger) instead of raw
     # scrollback. Read straight from settings.yaml by the interactive Rust mux
@@ -3673,7 +3673,7 @@ class MuxBlock(BaseModel):
     # attach (and the Rust reader parses it as u64, silently rejecting negatives
     # to the default), so pin the floor at 1 minute here.
     attach_digest_threshold_min: int = Field(default=10, ge=1)
-    # Focus-follows-mouse over coding panes (x-a496): hovering a pane makes it the
+    # Focus-follows-mouse over coding panes: hovering a pane makes it the
     # keyboard focus after a short settle. Read straight from settings.yaml by the
     # interactive Rust client (same split-brain as attach_digest); modeled here so
     # the off-switch is discoverable via `fno config get/set`.
@@ -3681,7 +3681,7 @@ class MuxBlock(BaseModel):
     # Show the mux status row. The interactive Rust client reads this directly
     # from config.toml, matching the `hover_focus` startup path.
     status_row: bool = True
-    # The mux chrome theme name (x-f75e): one of the shipped palettes the modal
+    # The mux chrome theme name: one of the shipped palettes the modal
     # chrome reads (`terminal`, `catppuccin`, `tokyo-night`, `gruvbox`). Read by
     # the interactive Rust client via the same config ladder as `hover_focus`;
     # an unknown name falls back to `terminal` WITH a notice, never silently.
@@ -3708,7 +3708,7 @@ class DevBlock(BaseModel):
 
     ``source`` is the machine-local pin the Rust bootstrap reads to re-provision
     from a checkout instead of the published PyPI wheel when its uv tool venv is
-    wiped (x-88b9). Unset (the default) keeps the frictionless PyPI self-provision
+    wiped. Unset (the default) keeps the frictionless PyPI self-provision
     for end users; a maintainer sets it to their checkout root to make recovery
     source-first, matching the repo's "unset = OSS-neutral, set = maintainer
     choice" pattern (``paths.worktrees_base``).
@@ -3775,7 +3775,7 @@ class QuotaBlock(BaseModel):
     """Quota-aware dispatch configuration (nested under 'config.accounts.quota').
 
     ``observe`` and ``defer_dispatch`` are two decisions, not one: looking at
-    quota and acting on it (x-763a). ``defer_dispatch`` implies ``observe``.
+    quota and acting on it. ``defer_dispatch`` implies ``observe``.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -3928,7 +3928,7 @@ class ConfigBlock(BaseModel):
         array) is WARNED, not silently dropped - that shape mistake is exactly
         the misconfiguration an operator most needs surfaced (they'd otherwise
         believe their sinks are wired). A well-formed list with a semantically-
-        invalid sink still raises (x-2057: loud config error)."""
+        invalid sink still raises (: loud config error)."""
         if isinstance(v, list):
             return v
         if v is not None:
@@ -4300,7 +4300,7 @@ class SettingsModel(ConfigBlock):
 # config.local.toml is flat, so no `config.` prefix.
 WORKTREE_LOCAL_KEYS: frozenset[str] = frozenset(
     {
-        # post_merge.parking_lot_path was removed (x-071c): the ritual is a
+        # post_merge.parking_lot_path was removed: the ritual is a
         # serial one-shot durable write, already safe on the shared canonical
         # file; a per-lane redirect only orphaned the prose.
         "project.id",
@@ -4731,7 +4731,7 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
             "use 'config.work' instead.",
         )
 
-    # --- dispatch.auto_merge -> auto_merge.grant (x-4be1) -------------------
+    # --- dispatch.auto_merge -> auto_merge.grant -------------------
     # Same concept, one table: the actor-scope grant moves into the
     # [auto_merge] block. Runs PER LAYER (the caller merges after), so
     # legacy-vs-canonical precedence across files is file-ordered, not
@@ -4919,7 +4919,7 @@ def agents_headless_yolo(provider: str) -> bool:
 
 def autonomy_master_enabled(project_root: Optional[Path] = None) -> bool:
     """Resolve ``config.autonomy.enabled``, the ONE panic switch over every
-    autonomous session-starting spawner (x-aaaf wave 3).
+    autonomous session-starting spawner (wave 3).
 
     Every spawner-specific resolver (``auto_continue_enabled``,
     ``think_spawn_enabled``, ``keep_going_enabled``, ``groom_enabled``,

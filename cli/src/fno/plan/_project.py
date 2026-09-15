@@ -129,13 +129,13 @@ def project_node_to_plan(
             fields[key] = value
             changed = True
 
-    # Epic rollup counters (x-6c2b): epic-only, injected by the converger. A key
+    # Epic rollup counters: epic-only, injected by the converger. A key
     # present => write it; absent (every leaf doc) => skip, so leaf frontmatter
     # stays clean. The frontmatter reader returns every scalar as a str, so
     # compare (and store) the str form or an int counter re-writes forever.
     # `children_total: 2` still serializes bareword, so Obsidian reads a number.
     # Derived epic fields: rollup counters, the epic `waves_total` summary, and
-    # a child's `wave` stratum (x-6c2b). All computed views, repainted every
+    # a child's `wave` stratum. All computed views, repainted every
     # projection, never hand-set. The converger passes an explicit None when a
     # key no longer applies (a node demoted out of epic-hood, a child orphaned
     # off its epic) so the stale value is CLEARED, not left to rot - the
@@ -254,7 +254,7 @@ def project_graph_nodes(
         return 0
     from fno.graph._intake import _find_node, repo_root
 
-    # Parent-repaint hop (x-6c2b wave 2): a child mutation must also repaint its
+    # Parent-repaint hop (wave 2): a child mutation must also repaint its
     # parent epic's doc so its rollup counters stay live. Walk one level up.
     ids = _expand_repaint_targets(entries, ids)
 
@@ -325,7 +325,7 @@ def _expand_repaint_targets(
 ) -> list[str]:
     """Add each projected node's ancestors AND its siblings so a child transition
     repaints the epic + mission rollup (walk up to the mission -> epic -> leaf
-    cap, two hops) and every sibling's derived wave (x-6c2b AC4: one child's
+    cap, two hops) and every sibling's derived wave (AC4: one child's
     blocked_by edit can restratify the whole epic). Order-preserving, deduped. A
     missing/dangling parent just stops the walk - a doc-less node is a later no-op.
     """

@@ -133,7 +133,7 @@ def _detect_harness() -> Harness:
     session env but no ``*_PLUGIN_ROOT``; sniffing plugin roots alone silently
     mislabeled those sessions as ``claude`` (the fail-open this fixes).
     """
-    # OWNED, not precedence (x-20f1): this value is written to the persisted
+    # OWNED, not precedence: this value is written to the persisted
     # manifest as `provider`, and an inherited marker mislabels the session for
     # the manifest's whole life. An ambiguous resolve falls through to the
     # plugin-root sniff below rather than stamping a stranger's harness.

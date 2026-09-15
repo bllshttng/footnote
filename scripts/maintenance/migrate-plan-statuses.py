@@ -119,7 +119,7 @@ def _classify(old: str, node_id: str | None, truth: dict[str, str]) -> str | Non
     if node_id and node_id in truth:
         new = truth[node_id]
         # A doc already AT the target rung under a retired spelling is not
-        # stale, and rewriting it would turn the x-3ad5 rename into a migration
+        # stale, and rewriting it would turn the rename into a migration
         # pass over the vault. The override still fixes a genuinely stale rung
         # (the `ready` doc whose node is done), which is what it exists for.
         return None if canonical_status(old) == new else new

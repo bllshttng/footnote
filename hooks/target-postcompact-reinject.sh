@@ -73,9 +73,9 @@ else
     [[ "$STATUS" == "IN_PROGRESS" ]] || exit 0
 fi
 
-# Extract key state fields. The manifest is inputs-only post-wedge (ab-d0337fbc):
+# Extract key state fields. The manifest is inputs-only post-wedge:
 # no current_phase / iteration / *_passed gate booleans live here anymore
-# (ab-88f0854d removed those dead reads). Progress is external now - git HEAD,
+# (removed those dead reads). Progress is external now - git HEAD,
 # PR/CI, the loop-check verb - surfaced via `fno whoami` / `fno whoami status`.
 GOAL=$(grep '^input:' "$STATE_FILE" 2>/dev/null | head -1 | sed 's/^input: *//' | sed 's/^"//' | sed 's/"$//')
 PLAN_PATH=$(grep '^plan_path:' "$STATE_FILE" 2>/dev/null | head -1 | sed 's/^plan_path: *//' | tr -d '"')
@@ -95,12 +95,12 @@ if [[ -n "$PLAN_PATH" && -d "$PLAN_PATH" ]]; then
 **Plan:** $PLAN_PATH ($TOTAL_TASKS tasks)"
 elif [[ -n "$PLAN_PATH" && -f "$PLAN_PATH" ]]; then
     # A single-FILE plan used to vanish here: only -d was tested, so compaction
-    # lost the plan path exactly when a flat quick plan was in play (x-59b0).
+    # lost the plan path exactly when a flat quick plan was in play.
     CONTEXT="${CONTEXT}
 **Plan:** $PLAN_PATH (single file)"
 fi
 
-# Task-context binding pointer (x-59b0): the current attempt's bound binding
+# Task-context binding pointer: the current attempt's bound binding
 # lives under the existing handoff artifact root, one slot per node
 # (task-context-<node>.json); each attempt's binding is immutable through its
 # digest, and receipts embed their own copies. The pointer and its declared

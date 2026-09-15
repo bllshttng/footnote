@@ -1,4 +1,4 @@
-//! The roster-side sweep (x-aad0, gap one): claude rows no fno registry row
+//! The roster-side sweep (gap one): claude rows no fno registry row
 //! names.
 //!
 //! Every removal door was keyed off an fno registry row, so a claude row
@@ -272,7 +272,7 @@ pub(crate) fn run(
         // phantom node, so weak provenance keeps even at `all`.
         // NoProvenance keeps at EVERY scope: an operator session names no
         // fno node, so this keep is by construction, not by default value.
-        // x-2774: open NODE state alone is not evidence a SESSION is alive.
+        // open NODE state alone is not evidence a SESSION is alive.
         // A terminal harness state on the row itself, a parked or
         // never-started node, or a recorded merge the status lags release
         // the open-work hold the same way they do in the registry sweep -
@@ -287,7 +287,7 @@ pub(crate) fn run(
             .source
             .map(|s| s.as_str())
             .unwrap_or("sessions");
-        // x-b7f8: the terminal read hoisted out of the Open arm. Every row
+        // the terminal read hoisted out of the Open arm. Every row
         // here is claude by construction, so `row.state` is in hand, and
         // recency must be able to yield to it exactly as the registry
         // sweep's grace_gate does.
@@ -393,12 +393,12 @@ pub(crate) fn run(
             }
         };
         // The quiet gate: an unresolved transcript is never quiet, and the
-        // age rides the reason so a keep is auditable. x-2774 change 8: a
+        // age rides the reason so a keep is auditable. change 8: a
         // provably dead pid (ESRCH) overrides recency here too, the same
         // override the registry sweep makes in grace_gate - recency without
-        // a living writer is not liveness. x-b7f8: a terminal harness state
+        // a living writer is not liveness.: a terminal harness state
         // overrides it the same way. The age rides the injected seam
-        // (x-54cf; production wires the shared probe): the newest timestamped
+        // (; production wires the shared probe): the newest timestamped
         // entry, not a file stat.
         let age = age(&entry);
         let pid_gone = row.pid.is_some_and(crate::daemon::pid_is_gone);
@@ -445,7 +445,7 @@ pub(crate) fn run(
                         // Name WHY the removal did not confirm, not just the
                         // outcome tag: the detail is what tells the operator
                         // whether the row is a race to re-run or a real
-                        // refusal (x-2774, sub-defect b).
+                        // refusal (sub-defect b).
                         let detail = outcome.detail().unwrap_or_else(|| "no detail".to_string());
                         summary.refused.push((
                             ident.clone(),
@@ -592,7 +592,7 @@ mod tests {
         dir
     }
 
-    /// The test age seam (x-54cf): the age answers from the staged transcript
+    /// The test age seam: the age answers from the staged transcript
     /// files' mtimes, exactly what the pre-probe stat read.
     fn mtime_age(paths: &[PathBuf]) -> Option<i64> {
         paths
@@ -668,7 +668,7 @@ mod tests {
         assert!(summary.retired.is_empty());
     }
 
-    // x-2774: a terminal harness state releases the open-work keep inside
+    // a terminal harness state releases the open-work keep inside
     // the population the scope allows. At `all` with strong provenance the
     // row retires naming the session state; at `provenanced` it keeps, and
     // the reason names the release so the operator sees what a wider scope
@@ -839,7 +839,7 @@ mod tests {
 
     // A fresh transcript does NOT save a row whose harness state reads
     // terminal: the roster's done is a finish line, not a turn boundary
-    // (x-b7f8). A working row inside grace still keeps.
+    //. A working row inside grace still keeps.
     #[test]
     fn fresh_transcript_does_not_save_a_terminal_roster_row() {
         let dir = tmpdir("fresh");
@@ -1234,7 +1234,7 @@ mod tests {
         let dir = tmpdir("scope-all-sessions");
         let transcript = quiet_transcript(&dir, "sid-1");
         // A non-terminal state: the widening itself is under test here. A
-        // done state would take the x-2774 session-terminal release instead
+        // done state would take the session-terminal release instead
         // (x2774_terminal_state_releases_open_work_inside_the_scope).
         let mut live = row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"));
         live.state = Some("working".into());
@@ -1360,7 +1360,7 @@ mod tests {
         path
     }
 
-    /// x-b7f8: the roster-side twin of the grace_gate conjunct. An AllDone
+    /// the roster-side twin of the grace_gate conjunct. An AllDone
     /// row reading done with a transcript 60s old retires and names the
     /// early fire; reading working it keeps with the active line.
     #[test]

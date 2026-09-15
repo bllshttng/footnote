@@ -120,7 +120,7 @@ SMEOF
     fi
 
     # Session-aware archival of stale gate artifacts (Phase 2 task 2.3 of
-    # loop-correctness-sweep, ab-83be25ea). Cross-session contamination:
+    # loop-correctness-sweep). Cross-session contamination:
     # if `.fno/artifacts/` carries gate artifacts whose session_id
     # frontmatter does NOT match the live state file's session_id, those
     # artifacts are stranded from a prior session. Move them to

@@ -1,5 +1,5 @@
 //! `fno-agents feed` - one projection joining questions, decisions and node
-//! lifecycle into an ordered feed (x-4433).
+//! lifecycle into an ordered feed.
 //!
 //! Three stores hold one timeline and nothing joined them:
 //!   - `~/.fno/questions.jsonl`: `operator_question` / `operator_question_closed`
@@ -651,12 +651,12 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
 mod tests {
     use super::*;
 
-    // The x-9223 shape: a blueprint row with only ended_at, a do row and a
+    // The x-aaaa shape: a blueprint row with only ended_at, a do row and a
     // ship row each with started_at, on a node carrying pr_number and
     // completed_at.
     fn graph_fixture() -> Vec<Value> {
         vec![serde_json::json!({
-            "id": "x-9223",
+            "id": "x-aaaa",
             "status": "done",
             "title": "feed marker node",
             "pr_number": 1395,
@@ -678,7 +678,7 @@ mod tests {
 
     fn questions_fixture() -> String {
         [
-            r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"target","data":{"question_id":"q-1","question":"line one\nline two","session_id":"s-ask","node":"x-9223"}}"#,
+            r#"{"ts":"2026-09-02T17:00:00Z","type":"operator_question","source":"target","data":{"question_id":"q-1","question":"line one\nline two","session_id":"s-ask","node":"x-aaaa"}}"#,
             r#"{"ts":"2026-09-02T19:00:00Z","type":"operator_question_closed","source":"operator","data":{"question_id":"q-1","answer":"ruling: yes\ndo it","closed_by":"s-op"}}"#,
             r#"{"ts":"2026-09-03T09:00:00Z","type":"operator_decision","source":"operator","data":{"decision_id":"d-1","decision":"strict equality stands","subject":"revert-dispute","decided_by":"s-op"}}"#,
         ]
@@ -697,7 +697,7 @@ mod tests {
             ["node_created", "node_started", "pr_created", "node_ended"]
         );
         let started = &p.rows[1];
-        assert_eq!(started.node.as_deref(), Some("x-9223"));
+        assert_eq!(started.node.as_deref(), Some("x-aaaa"));
         assert_eq!(started.session_id.as_deref(), Some("s-do"));
         let pr = &p.rows[2];
         assert_eq!(pr.session_id.as_deref(), Some("s-ship"));
@@ -725,7 +725,7 @@ mod tests {
         let asked = p.rows.iter().find(|r| r.kind == "question_asked").unwrap();
         assert_eq!(asked.r#ref.as_deref(), Some("q-1"));
         assert_eq!(asked.session_id.as_deref(), Some("s-ask"));
-        assert_eq!(asked.node.as_deref(), Some("x-9223"));
+        assert_eq!(asked.node.as_deref(), Some("x-aaaa"));
         assert_eq!(asked.title, "line one");
         let closed = p.rows.iter().find(|r| r.kind == "question_closed").unwrap();
         assert_eq!(closed.r#ref.as_deref(), Some("q-1"));
@@ -733,7 +733,7 @@ mod tests {
         // offers no attach target. The node comes from the asking row.
         assert_eq!(closed.session_id, None);
         assert_eq!(closed.actor.as_deref(), Some("s-op"));
-        assert_eq!(closed.node.as_deref(), Some("x-9223"));
+        assert_eq!(closed.node.as_deref(), Some("x-aaaa"));
         assert_eq!(closed.title, "ruling: yes");
         let decision = p
             .rows
@@ -798,8 +798,8 @@ mod tests {
     #[test]
     fn filter_node_session_and_limit_from_newest_end() {
         let p = project(&questions_fixture(), &graph_fixture(), &[]);
-        let node_rows = filter_rows(p.rows.clone(), Some("x-9223"), None, None, None, None);
-        // The fixture question carries node x-9223, so a node filter keeps it
+        let node_rows = filter_rows(p.rows.clone(), Some("x-aaaa"), None, None, None, None);
+        // The fixture question carries node x-aaaa, so a node filter keeps it
         // alongside the lifecycle rows - and its CLOSURE now too, because the
         // closure inherits the association from the row that asked.
         assert_eq!(
@@ -830,7 +830,7 @@ mod tests {
             created_at: "2026-09-04T10:00:00Z".into(),
             reaped_at: "2026-09-06T10:00:00Z".into(),
             resume: "claude --resume 00847995".into(),
-            ledger: Some(serde_json::json!({"graph_node_id": "x-9223"})),
+            ledger: Some(serde_json::json!({"graph_node_id": "x-aaaa"})),
             removed_by: None,
             schema_version: Some(2),
             identity: None,
@@ -900,7 +900,7 @@ mod tests {
             row.detail.as_deref(),
             Some("resume: claude --resume 00847995 - cwd /tmp/wt")
         );
-        assert_eq!(row.node.as_deref(), Some("x-9223"));
+        assert_eq!(row.node.as_deref(), Some("x-aaaa"));
         assert_eq!(
             row.session_id.as_deref(),
             Some("00847995-e0db-47c2-ab5b-24468ba1a4f5")
@@ -959,7 +959,7 @@ mod tests {
             .iter()
             .find(|r| r.kind == "node_created")
             .expect("created_at projects with no emitter");
-        assert_eq!(created.node.as_deref(), Some("x-9223"));
+        assert_eq!(created.node.as_deref(), Some("x-aaaa"));
         let started = p.rows.iter().find(|r| r.kind == "node_started").unwrap();
         assert_eq!(started.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(started.session_id.as_deref(), Some("s-do"));

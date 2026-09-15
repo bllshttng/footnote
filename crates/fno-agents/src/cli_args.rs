@@ -1,4 +1,4 @@
-//! Typed argv for the migrated `fno-agents` verbs (x-861c).
+//! Typed argv for the migrated `fno-agents` verbs.
 //!
 //! One derive declaration per flag: for the verbs it owns, this module IS the
 //! flag registry, and its help strings are the only copy. Parsers run through
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-/// The shared machine-output group (x-81b6 contracts build on this): one
+/// The shared machine-output group (contracts build on this): one
 /// declaration of `--json`/`-J`, flattened into every verb that emits it.
 #[derive(Args, Debug)]
 pub struct JsonOnly {
@@ -21,7 +21,7 @@ pub struct JsonOnly {
 
 /// `fno-agents restart`: swap a (possibly stale) daemon for the current
 /// binary. `--json` is the machine surface the Python adapter invokes with
-/// (x-67b8): text summaries stay on stdout, one JSON object replaces them.
+/// text summaries stay on stdout, one JSON object replaces them.
 #[derive(Parser, Debug)]
 #[command(name = "fno-agents restart", no_binary_name = true)]
 pub struct RestartArgs {
@@ -100,7 +100,7 @@ pub struct ReviewSummaryArgs {
 }
 
 /// The spawn head's axis flags, parsed once and consumed by both the client's
-/// spawn dispatch and the spawn-overlay inspection verb (x-861c): route,
+/// spawn dispatch and the spawn-overlay inspection verb: route,
 /// provider, harness, model, effort, account, substrate. Tokens before the
 /// provider argv fence that are not axis flags belong to the rest of the
 /// spawn grammar and are ignored here; tokens after the fence are opaque
@@ -289,7 +289,7 @@ mod tests {
 
     #[test]
     fn restart_parses_the_python_adapter_invocation() {
-        // x-67b8: this exact argv (post-verb) is what cli/src/fno/restart.py
+        // this exact argv (post-verb) is what cli/src/fno/restart.py
         // spawns; the dispatch strips the verb before the parser runs.
         let a = RestartArgs::try_parse_from(["--json"]).expect("--json parses");
         assert!(a.json.json);

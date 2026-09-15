@@ -1,4 +1,4 @@
-//! `fno-agents backlog-update` (x-665f): the one patch door for stored node
+//! `fno-agents backlog-update` : the one patch door for stored node
 //! fields, status included. Status is never a stored input - the derivation
 //! ladder rewrites it from facts on every write - so `--status X` changes the
 //! facts that derive X, recomputes, and refuses unless the readback agrees.
@@ -9,7 +9,7 @@
 //! the full plan-rung map -> recompute -> validate (old, new) -> commit with
 //! `base_version` (retry on conflict) -> emit the receipt from the READBACK,
 //! never from the intent. That readback is what makes the false-receipt family
-//! (x-e3c4: `Undeferred` printed while the node stayed superseded)
+//! (: `Undeferred` printed while the node stayed superseded)
 //! unconstructible here.
 
 use crate::backlog::model::Priority;
@@ -1255,9 +1255,9 @@ mod tests {
     fn status_idea_on_a_superseded_plan_less_node_clears_the_chain_in_one_write() {
         // Named: the TempDir must outlive the graph reads inside the test.
         let _dir = tempfile::tempdir().unwrap();
-        let replacer = node("x-aaaa", serde_json::json!({ "supersedes": ["x-3873"] }));
+        let replacer = node("x-aaaa", serde_json::json!({ "supersedes": ["x-bbbb"] }));
         let victim = node(
-            "x-3873",
+            "x-bbbb",
             serde_json::json!({
                 "superseded_by": "x-aaaa",
                 "supersession": {"cause": "moved", "session_id": "s1"},
@@ -1265,7 +1265,7 @@ mod tests {
             }),
         );
         let (_d, graph) = write_graph(&[replacer, victim]);
-        let receipt = apply(&graph, &req("x-3873", Some("idea"), &[])).expect("applied");
+        let receipt = apply(&graph, &req("x-bbbb", Some("idea"), &[])).expect("applied");
         assert!(!receipt.unchanged);
         assert_eq!(receipt.status.from, "superseded");
         assert_eq!(receipt.status.to, "idea");
@@ -1280,7 +1280,7 @@ mod tests {
             .find(|c| c.field == "supersedes")
             .expect("backref change");
         assert_eq!(backref.id, "x-aaaa");
-        assert_eq!(status_of(&graph, "x-3873"), "idea");
+        assert_eq!(status_of(&graph, "x-bbbb"), "idea");
         let rows = read_defaulted(&graph, false).unwrap();
         let repl = rows.iter().find(|e| field_eq(e, "id", "x-aaaa")).unwrap();
         assert_eq!(repl.get("supersedes"), Some(&json!([])));
@@ -1292,13 +1292,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plan = plan_file(&dir, "ready-plan.md", Some("ready"));
         let victim = node(
-            "x-3873",
+            "x-bbbb",
             serde_json::json!({ "superseded_by": "x-aaaa", "plan_path": plan }),
         );
-        let replacer = node("x-aaaa", serde_json::json!({ "supersedes": ["x-3873"] }));
+        let replacer = node("x-aaaa", serde_json::json!({ "supersedes": ["x-bbbb"] }));
         let (_d, graph) = write_graph(&[replacer, victim]);
         let before = graph_store::base_version(&graph).unwrap();
-        let message = refusal_of(&graph, &req("x-3873", Some("idea"), &[]));
+        let message = refusal_of(&graph, &req("x-bbbb", Some("idea"), &[]));
         assert!(message.contains("plan_path"), "{message}");
         assert!(message.contains("--plan-path null"), "{message}");
         assert_eq!(graph_store::base_version(&graph).unwrap(), before);

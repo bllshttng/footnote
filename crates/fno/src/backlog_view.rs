@@ -1,4 +1,4 @@
-//! Work-queue reader for the sideline backlog lane (x-6f77).
+//! Work-queue reader for the sideline backlog lane.
 //!
 //! Sibling of [`crate::agents_view`]: an off-loop interval task (in server.rs)
 //! parses `~/.fno/graph.json` and hands the core loop a board-ordered card set
@@ -54,7 +54,7 @@ pub fn graph_path() -> PathBuf {
 }
 
 /// The `(harness, harness_session_id)` pairs whose work the graph says is
-/// DONE (x-9052). A node is done when `status` names done, `merge_status`
+/// DONE. A node is done when `status` names done, `merge_status`
 /// names merged, or `completed_at` is set - the ship vocabulary's terminal
 /// states, never a liveness verdict (a merged node stays done when its
 /// sessions die). Pure so the restore gate is testable without files.
@@ -112,7 +112,7 @@ fn done_session_ids_in(entries: &[serde_json::Value]) -> HashSet<(String, String
 /// `nodes` read, so a legacy row the model would reject still counts. An
 /// unreachable store reads as EMPTY, not as "nothing is done" being asserted
 /// positively - restore keeps every worker (today's behavior) when the
-/// instrument cannot read (fail open, x-9052 AC2-EDGE).
+/// instrument cannot read (fail open, AC2-EDGE).
 pub fn done_session_ids() -> HashSet<(String, String)> {
     match crate::store_client::rows(&graph_path()) {
         Ok(rows) => done_session_ids_in(&rows),
@@ -212,7 +212,7 @@ fn priority_rank(p: &str) -> u8 {
     }
 }
 
-/// Which projects the board renders (x-20f1).
+/// Which projects the board renders.
 ///
 /// `All` is the historical behavior: every actionable card in the graph. The
 /// graph is ONE store tagged by project, so a person working in one checkout
@@ -437,7 +437,7 @@ pub fn derive_cards(raw: &str) -> Option<Vec<BacklogCard>> {
     derive_queue(raw, None, &BoardScope::All).map(|q| q.cards)
 }
 
-/// The card set plus the UNCAPPED per-lane counts it was cut from (x-1d91).
+/// The card set plus the UNCAPPED per-lane counts it was cut from.
 ///
 /// Both consumers of "how much work is really there" read these: the section's
 /// `+N more` (total minus what it shows) and the mini-kanban's per-lane headers.
@@ -482,7 +482,7 @@ fn lane_rank(lane: &str) -> usize {
 /// there is easy to mirror here.
 ///
 /// `claimed` folds the graph `status` and the live-lockfile claim together (a
-/// node another session drives may never write a graph status - x-4845);
+/// node another session drives may never write a graph status -);
 /// `underway` is [`in_progress_epics`] membership.
 pub(crate) fn kanban_column(
     e: &serde_json::Value,
@@ -577,7 +577,7 @@ impl Queue {
 /// [`derive_cards`] plus the uncapped lane counts. The single derivation;
 /// `derive_cards` is the cards-only view of it.
 ///
-/// `live` is the claim sweep's node-id -> holder map (x-54fa). It is folded in
+/// `live` is the claim sweep's node-id -> holder map. It is folded in
 /// HERE, not applied to the finished card list, so a claim reaches the lane
 /// counts too - those are computed over every queue node, and a card past the
 /// render cap would otherwise be counted in the wrong lane.
@@ -645,7 +645,7 @@ pub fn derive_queue(
         }
         let rank = e.get("rank").and_then(|v| v.as_f64());
         let created = e.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-        // The board's column authority (x-1d91). DERIVED, never read: no node
+        // The board's column authority. DERIVED, never read: no node
         // carries a column field - `_kanban_column` is a function of intent in
         // `graph/render.py`, and this mirrors it.
         let claimed = status == "claimed" || live.is_some_and(|l| l.contains_key(id));
@@ -668,7 +668,7 @@ pub fn derive_queue(
                 slug: slug.to_string(),
                 priority: priority.to_string(),
                 // A live lockfile claim marks a node in flight even when its
-                // graph `status` never says so (x-54fa / x-4845): the claim is
+                // graph `status` never says so (/): the claim is
                 // the fact, the status is a report.
                 state: if claimed { CardState::InFlight } else { state },
                 // Routes are a publish-time server join (panes/registry),
@@ -932,7 +932,7 @@ fn rank_band(rank: Option<f64>) -> u8 {
 
 /// Parse `fno-agents claim sweep --json` stdout into the live-claim map the
 /// overlay consumes: node id -> claim holder, for claims whose `state` is
-/// `"live"` under a `node:` / `dispatch:` key (x-54fa). Only `"live"` counts
+/// `"live"` under a `node:` / `dispatch:` key. Only `"live"` counts
 /// as in-flight (Locked 2); the sweep's other states (`stale`/`suspect`/...)
 /// never flip a card. `None` on unparseable output so the caller keeps its
 /// last-good sweep — a flaky tick must not downgrade in-flight cards.
@@ -973,12 +973,12 @@ pub fn live_claims_from_sweep(stdout: &str) -> Option<HashMap<String, String>> {
 /// sweep is a whole `fno-agents` process. Under load (parallel test runs)
 /// those subprocesses stretch toward their timeout, so pacing them is what
 /// keeps a busy machine from paying a spawn per second for an overlay that
-/// moves a few times an hour. Same reasoning as the x-4e30 client gate.
+/// moves a few times an hour. Same reasoning as the client gate.
 pub(crate) const SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Shell `fno-agents claim sweep --json`, bounded + fail-open (the digest
-/// idiom, x-4e2d): returns the live-claim map (node id -> holder) for the
-/// work-queue overlay (x-54fa), or `None` on missing binary / non-zero exit /
+/// idiom): returns the live-claim map (node id -> holder) for the
+/// work-queue overlay, or `None` on missing binary / non-zero exit /
 /// timeout / unparseable output - the caller keeps its last-good sweep, so a
 /// single flaky tick never downgrades an in-flight card.
 pub(crate) async fn run_claim_sweep() -> Option<HashMap<String, String>> {
@@ -1067,7 +1067,7 @@ pub struct ReaderState {
     /// stale marker still arrives.
     last_derive: Option<Option<Queue>>,
     last_derive_live: Option<Option<HashMap<String, String>>>,
-    /// Which projects this board renders (x-20f1). Fixed for the reader's life:
+    /// Which projects this board renders. Fixed for the reader's life:
     /// the server resolves it once at birth, so a card set never changes shape
     /// under a live board for a reason the operator cannot see.
     scope: BoardScope,
@@ -1099,7 +1099,7 @@ impl ReaderState {
     /// `live` is the last-good claim sweep (`None` = no sweep has ever
     /// succeeded: render un-overlaid, today's behavior). The overlay applies
     /// INSIDE the change gate so a claim appearing/releasing republishes even
-    /// when the graph file itself is untouched (x-54fa AC1-HP / AC1-EDGE).
+    /// when the graph file itself is untouched (AC1-HP / AC1-EDGE).
     pub fn tick(
         &mut self,
         stamp: Option<(i64, u64)>,
@@ -1269,7 +1269,7 @@ mod tests {
 
     #[test]
     fn done_sessions_collect_from_done_merged_and_completed_nodes() {
-        // x-9052 AC1-HP: the three terminal spellings all contribute, and a
+        // AC1-HP: the three terminal spellings all contribute, and a
         // live node contributes none.
         let doc = graph(
             r#"{"id":"a","status":"done","sessions":[{"harness":"codex","session_id":"s1"}]},
@@ -1296,7 +1296,7 @@ mod tests {
 
     #[test]
     fn done_sessions_fail_open_on_bad_shapes() {
-        // x-9052 AC2-EDGE: a torn document, a missing graph, a node without
+        // AC2-EDGE: a torn document, a missing graph, a node without
         // sessions, a string session - all read as EMPTY, never as a partial
         // truth restore would act on.
         assert!(done_session_ids_from("not json at all").is_empty());
@@ -1312,7 +1312,7 @@ mod tests {
     }
 
     /// The graph as five projects' work plus one unscoped node, the shape the
-    /// operator actually reads (x-20f1).
+    /// operator actually reads.
     fn multi_project_graph() -> String {
         graph(
             r#"{"id":"x-fno","slug":"f","priority":"p1","status":"ready","project":"fno"},
@@ -1881,7 +1881,7 @@ mod tests {
         );
     }
 
-    // ---- attribution, on-deck, and the uncapped total (x-1d91) -------------
+    // ---- attribution, on-deck, and the uncapped total -------------
 
     #[test]
     fn attribution_derives_the_column_it_never_reads() {
@@ -1922,7 +1922,7 @@ mod tests {
 
     #[test]
     fn a_live_claim_moves_the_node_to_now_and_takes_its_count_with_it() {
-        // x-4845: a node another session drives holds a live lockfile but may
+        // a node another session drives holds a live lockfile but may
         // never write a graph status. Folding the claim into the DERIVATION (not
         // onto the finished card list) is what keeps the lane counts honest - a
         // card past the render cap would otherwise be counted in the wrong lane.
@@ -2259,7 +2259,7 @@ mod tests {
         assert_eq!(out.unwrap().1.get("x-a"), Some(&42));
     }
 
-    // ---- claims overlay (x-54fa) -----------------------------------------
+    // ---- claims overlay -----------------------------------------
 
     fn live(ids: &[(&str, &str)]) -> HashMap<String, String> {
         ids.iter()

@@ -42,7 +42,7 @@ except Exception:
     _CACHE_FILE = Path.home() / ".fno" / "source-path"
 
 # Records the source git rev that the *current* install was built from, so
-# `fno doctor` can detect installed-vs-source skew (ab-5a1fc285). Sibling of
+# `fno doctor` can detect installed-vs-source skew. Sibling of
 # the source-path cache; monkeypatched in tests the same way as _CACHE_FILE.
 _INSTALLED_REV_FILE = _CACHE_FILE.parent / "installed-rev"
 
@@ -441,7 +441,7 @@ def running_components(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> "list[dict] | None":
     """One row per long-lived process from ``fno-agents census --json``
-    (x-f188; the walker lives in crates/fno-agents/src/census.rs). ``None``
+    (; the walker lives in crates/fno-agents/src/census.rs). ``None``
     when the census itself could not run: a dark census is not an empty machine."""
     try:
         from fno import rust_binary
@@ -463,7 +463,7 @@ def stale_mux_servers(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> list[str]:
     """Live mux sessions on a wire below the compatibility floor. The precise signal is the ``stale`` field
-    ``fno mux ls --json`` computes from each server's ``.ver`` sidecar (x-1a85); a
+    ``fno mux ls --json`` computes from each server's ``.ver`` sidecar ; a
     pre-sidecar server has no ``.ver`` and reads as stale, so the check works
     across the very upgrade that introduces it. This replaces the old
     ``socket mtime < binary mtime`` heuristic, which flagged EVERY server after
@@ -613,7 +613,7 @@ def _build_update_guidance(
     # to warn about, regardless of what else failed to fetch. Only take the
     # degraded branch when readiness itself is uncertain (a rev is unreadable) or
     # an update actually is pending.
-    # "Up to date" used to report no action while stale processes ran (x-f1f4).
+    # "Up to date" used to report no action while stale processes ran.
     if not update_ready and (revs_known or not degraded_reason):
         if running_stale > 0:
             return _current_but_stale(rev_label, running_stale, restartable, pane_kept)
@@ -730,7 +730,7 @@ def update_readiness(
     if resolved_source is not None and installed_rev and source_rev:
         changelog = _changelog_subjects(installed_rev, resolved_source, runner)
 
-    # Census rows (x-f188); never the name `running`: python_tool owns it.
+    # Census rows; never the name `running`: python_tool owns it.
     census_rows = running_components(runner)
     if census_rows is None:
         degraded.append("running-process census unavailable")

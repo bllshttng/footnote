@@ -115,7 +115,7 @@ def add(
 
     # Session id comes from the LIVE worktree's target-state.md; the ledger is
     # written under the CANONICAL root so a carve-out captured inside a linked
-    # worktree survives that worktree's archival (ab-44408b6e).
+    # worktree survives that worktree's archival.
     session_root = resolve_repo_root()
     storage_root = resolve_carveout_root()
     try:
@@ -197,7 +197,7 @@ def list_carveouts(
     `--kind backfill --pr-number <n> --json`, whose `sessions_resolved` (and,
     when empty, `reason`) drives the consume-vs-read-only branch - so that
     branch keys on verb output, never on an empty shell variable of unknowable
-    provenance (x-f47f US2).
+    provenance (US2).
     """
     if kind is not None and kind not in VALID_KINDS:
         typer.echo(

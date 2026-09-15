@@ -288,7 +288,7 @@ pub(crate) fn verdict_for(
 }
 
 /// One row per node whose plan artifacts hold an open prove-it FAIL
-/// (x-6d64): the verdict that used to route nowhere.
+/// the verdict that used to route nowhere.
 fn verdict_rows_from(outstanding: &Value) -> Vec<Value> {
     outstanding
         .get("verdicts")
@@ -402,13 +402,13 @@ pub(crate) struct BoardInputs {
     pub(crate) holder_activity: HashMap<String, crate::truth_probe::TruthProbe>,
     /// The truth batch's failure receipt: `Some` when the batch timed out or
     /// its reader panicked. The claim-dependent queues read unreadable
-    /// rather than rendering an absent measurement as a verdict (x-db9c).
+    /// rather than rendering an absent measurement as a verdict.
     pub(crate) holder_activity_error: Option<String>,
     pub(crate) prs: SourceRead,
     pub(crate) pr_nodes: SourceRead,
     /// The merge gate's verdict per candidate: `fno do pr status`'s
     /// `ready` + `ready_blockers`, one row per PR the listing called green
-    /// (x-b9e1). A candidate absent from here has no gate answer; build
+    ///. A candidate absent from here has no gate answer; build
     /// renders it not-actionable rather than trusting the listing alone.
     pub(crate) pr_gates: SourceRead,
     pub(crate) outstanding: SourceRead,
@@ -493,7 +493,7 @@ fn subtree_held(
 
 /// The aggregate the termination readers key on: a FLOOR, the rows the board
 /// can actually name. Blind actionable queues contribute nothing and are
-/// named in a warning instead (x-c911: +1 per blind queue read as one row
+/// named in a warning instead (: +1 per blind queue read as one row
 /// and a king went hunting rows that never existed). A blind REPORT-ONLY
 /// queue stays loud through unreadable and uncounted.
 pub(crate) fn actionable_tally(queues: &[Queue], warnings: &mut Vec<String>) -> i64 {
@@ -576,7 +576,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         }
     }
 
-    // x-db9c: a holder the probe batch never answered for is a hole in the
+    // a holder the probe batch never answered for is a hole in the
     // board's evidence, not a worker verdict. Name every hole in one warning
     // line so a partially-answered batch is visible in the payload, not only
     // through the rows its absence silently removed. The expected set is the
@@ -663,7 +663,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
                 .unwrap_or(true)
         })
         .filter(|node| {
-            // x-db9c: the ready feed drops claimed nodes it cannot see
+            // the ready feed drops claimed nodes it cannot see
             // (non-stale claims are excluded there, worked ids too), so the
             // driver join is the only read left. A node under ANY driver -
             // active, stalled, unmeasured, or a dead claim that belongs to
@@ -936,7 +936,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         }
     }
     // The gate verdict per candidate: the listing proves open+green, the
-    // gate proves fusable (x-b9e1). A candidate absent from the gate read
+    // gate proves fusable. A candidate absent from the gate read
     // (its call failed, or the slice ran out) carries `ready: null` and is
     // NOT actionable: a reader that cannot say what it did not read must not
     // offer a merge. Rows stay visible with their blockers rendered beside
@@ -999,7 +999,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         HashSet::new()
     };
     let mut undriven_rows: Vec<Value> = Vec::new();
-    // x-dead task 1.4b: the pr_nodes rows carry no `contained_in` (the field
+    // task 1.4b: the pr_nodes rows carry no `contained_in` (the field
     // lives on the graph entry), so node_driver's contained arm cannot fire
     // here on its own. Resolve it from the entries the board already holds.
     let contained_ids: HashSet<String> = inputs
@@ -1135,7 +1135,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
     }
 
     // One row per node whose plan artifacts hold an open prove-it FAIL
-    // (x-6d64): the verdict that used to route nowhere. An ok read with no
+    // the verdict that used to route nowhere. An ok read with no
     // verdicts key at all is a STALE Python leg, not a clean one -- the key is
     // unconditionally emitted since the leg shipped, so its absence must not
     // read as "zero FAILs".
@@ -1548,7 +1548,7 @@ mod tests {
 
     #[test]
     fn a_review_hold_renders_its_blockers_and_reads_not_actionable() {
-        // x-b9e1: the listing called the PR green and mergeable; the gate
+        // the listing called the PR green and mergeable; the gate
         // holds it. The row stays visible, names its blockers, and the
         // termination reader gets no next-action from it.
         let mut inputs = pr_board_inputs(
@@ -1689,7 +1689,7 @@ mod tests {
     fn an_open_prove_it_fail_becomes_a_failed_verdict_queue_row() {
         let outstanding = json!({
             "verdicts": {"total": 1, "error": null, "items": [{
-                "node": "x-70e1",
+                "node": "x-aaaa",
                 "report": "/plans/a.md.artifacts/coverage/REPORT.md",
                 "verdict": "FAIL",
                 "claim": "the probe rejects incomplete evidence",
@@ -1699,7 +1699,7 @@ mod tests {
         });
         let rows = verdict_rows_from(&outstanding);
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["node"], "x-70e1");
+        assert_eq!(rows[0]["node"], "x-aaaa");
         let q = queue(
             "failed_verdict",
             "src".to_string(),
@@ -1723,12 +1723,12 @@ mod tests {
         let lane = dir.path().join("my-priorities.md");
         std::fs::write(
             &lane,
-            "- [ ] ship the board -> x-25b8\n- [ ] park me -> parked: waiting\n- [x] done item\n- [ ] open item\nnot an item\n",
+            "- [ ] ship the board -> x-bbbb\n- [ ] park me -> parked: waiting\n- [x] done item\n- [ ] open item\nnot an item\n",
         )
         .unwrap();
         let items = parse_lane(&lane).unwrap();
         assert_eq!(items.len(), 4);
-        assert_eq!(items[0].node.as_deref(), Some("x-25b8"));
+        assert_eq!(items[0].node.as_deref(), Some("x-bbbb"));
         assert_eq!(items[0].text, "ship the board");
         assert_eq!(items[1].parked.as_deref(), Some("waiting"));
         assert!(items[2].done);
@@ -1752,7 +1752,7 @@ mod tests {
     #[test]
     fn read_blocked_rows_reads_the_x_eb79_specimen_and_skips_other_types() {
         // The Verification section's own replay: write a blocked row for
-        // x-eb79 into a fixture journal, read it back by name.
+        // x-cccc into a fixture journal, read it back by name.
         let dir = tempfile::tempdir().unwrap();
         let journal = dir.path().join("events.jsonl");
         std::fs::write(
@@ -1761,7 +1761,7 @@ mod tests {
                 "{}\n{}\n",
                 json!({
                     "ts": "2026-09-08T00:00:00Z", "v": 1, "type": "blocked",
-                    "source": "target", "run": "cx-eb79-run", "node": "x-eb79",
+                    "source": "target", "run": "cx-eb79-run", "node": "x-cccc",
                     "data": {"reason": "worktree-init-blocked", "evidence": "Operation not permitted"},
                 }),
                 json!({"ts": "2026-09-08T00:01:00Z", "type": "other", "run": "cx-eb79-run"}),
@@ -1771,7 +1771,7 @@ mod tests {
         let rows = read_blocked_rows(&journal).unwrap();
         assert_eq!(rows.len(), 1, "the non-blocked row must not appear");
         assert_eq!(rows[0].session, "cx-eb79-run");
-        assert_eq!(rows[0].node.as_deref(), Some("x-eb79"));
+        assert_eq!(rows[0].node.as_deref(), Some("x-cccc"));
         assert_eq!(rows[0].reason, "worktree-init-blocked");
         assert_eq!(rows[0].evidence.as_deref(), Some("Operation not permitted"));
     }

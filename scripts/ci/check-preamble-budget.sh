@@ -15,7 +15,7 @@ set -euo pipefail
 # documentation and activation logic in AGENTS.md.
 # Raised from 37415 to 38000 by two changes that landed together. The
 # citizens-vs-limbs spawn-primitive contract in skills/using-fno/SKILL.md
-# (x-af92) took 585 bytes: its value IS the SessionStart injection, the long
+# took 585 bytes: its value IS the SessionStart injection, the long
 # form lives out-of-preamble in docs/architecture/coordination.md, and the
 # prior preamble had 8B headroom so any meaningful contract required a raise.
 # The DoneUnreviewed terminal in the ship-vocabulary line took 45 more, since
@@ -158,7 +158,7 @@ set -euo pipefail
 # them was never in the one preamble every harness reads at session start.
 # The ceiling follows the measurement up, zero spare.
 # +89 (39551 -> 39640), measured 2026-09-04: reconciling this rebase's own
-# AGENTS.md "Large files" bullet (x-997a) against the +389 entry above. That
+# AGENTS.md "Large files" bullet against the +389 entry above. That
 # entry's math assumed origin's shorter wording for the same bullet; the
 # version this branch already had was 89 bytes longer, and the rebase kept
 # it (no conflict was flagged - the two hunks merged cleanly). Measured from
@@ -168,7 +168,7 @@ set -euo pipefail
 # its only session-start mention, the same shape as the workspace-restore and
 # demand-signal raises. The row was compressed to neighbor idiom first
 # ("Reign as the crowned king", -22 B). 55 is the measured residue, zero spare.
-# +16 (39695 -> 39711), measured 2026-09-06 (x-7198): the mesh-spawn row in
+# +16 (39695 -> 39711), measured 2026-09-06: the mesh-spawn row in
 # skills/using-fno/SKILL.md gained one clause naming the new unattended
 # `--permission-mode` built-in (agents.defaults.permission_mode collapsed the
 # old spawn_permission_mode key onto it) - the fact a verb-seeded spawn is no
@@ -186,20 +186,20 @@ set -euo pipefail
 # freed 11 bytes on this branch. Reclaimed rather than left, because
 # unreclaimed slack is how this file reached 55 bytes of headroom with no
 # commit to blame. Zero spare again.
-# Raised 40150 -> 41630 for x-74aa: the pitfalls corpus gains the READ-SIDE
+# Raised 40150 -> 41630 for: the pitfalls corpus gains the READ-SIDE
 # twin of the assert-a-positive-marker entry (a verdict that did not confirm
 # which store it read) and its graduates-to now names the
 # check-node-occupancy-readers gate. The entry the plan inlines IS the
 # session-start reach channel, so the preamble is its only legal home; the
 # corpus has no tradeable bytes left (see the refusal text), and HEAD sat 8
 # bytes under the old ceiling. Ceiling set at measured + band/2.
-# +109 (41630 -> 41739), measured 2026-09-12 (x-4810): the AGENTS.md file-budget
+# +109 (41630 -> 41739), measured 2026-09-12: the AGENTS.md file-budget
 # bullet now states the cli/src/fno tree allowance (net +100 per change) and
 # the crates-first remedy. That number decided a roughly 600-line language
-# choice (x-7b36) while living only in check-file-budget.sh, absent from every
+# choice while living only in check-file-budget.sh, absent from every
 # loaded surface. A first draft weighed 68; the style gate split it into four
 # short sentences, and 109 is the measured residue of the version that passes.
-# The raise spends exactly its delta and leaves the x-74aa bank above intact.
+# The raise spends exactly its delta and leaves the bank above intact.
 CEILING_BYTES=40216
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
@@ -460,7 +460,7 @@ while IFS= read -r candidate; do
   EXPECT_DESC=$((EXPECT_DESC + 1))
 done < <(
   { find "$REPO_ROOT/skills" -name 'SKILL.md' -type f 2>/dev/null || true; } \
-  ; { find "$REPO_ROOT/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null || true; }
+; { find "$REPO_ROOT/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null || true; }
 )
 
 if (( EXPECT_DESC != DESC_COUNT )); then

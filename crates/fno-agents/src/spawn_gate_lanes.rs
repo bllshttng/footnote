@@ -1,4 +1,4 @@
-//! The provider-lane axes of the spawn gate (x-6089): the per-provider live
+//! The provider-lane axes of the spawn gate : the per-provider live
 //! count, the king share, the registry schema guard and the account quota
 //! lock, ported from the Python gate (`cli/src/fno/agents/spawn_gate.py`)
 //! that this gate replaces.
@@ -667,7 +667,7 @@ pub(crate) fn share_reading(
     // The Python `_king_share` divisor expression (`crowned | {caller if
     // caller in crowned}`) is a set union that can never grow the set, so the
     // divisor is exactly the crown count. The caller folds in only when
-    // itself crowned - i.e. never as an extra vote (x-5283 LD2).
+    // itself crowned - i.e. never as an extra vote (LD2).
     let divisor = kings;
     let share = if divisor == 0 {
         1

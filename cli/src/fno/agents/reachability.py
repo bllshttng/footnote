@@ -40,10 +40,10 @@ SILENT = "silent"
 #: question's verdict on its own - a parked worker between turns holds its tree.
 PROCESS = "process"
 #: An active-looking state whose only age is a file mtime. Never positive
-#: evidence (x-dead): parse the records, take the max, never stat.
+#: evidence : parse the records, take the max, never stat.
 MTIME_ONLY = "mtime-only"
 
-#: The older wire vocabulary `--status` filtered on, before x-c672 replaced
+#: The older wire vocabulary `--status` filtered on, before replaced
 #: the `live` token with served activity. Kept only as the historical note for
 #: readers chasing an old `--status live` invocation; nothing renders these
 #: words anymore. `rendered_activity` below is the one status word now, and it
@@ -67,7 +67,7 @@ def rendered_activity(
     reachability: str,
     provider_refusal: Optional[str] = None,
 ) -> str:
-    """The STATUS word both ``fno agents list`` lanes render (x-c672, AC7).
+    """The STATUS word both ``fno agents list`` lanes render (AC7).
 
     Served activity, never a ``live`` token: ``writing`` (the transcript
     moved inside :data:`ACTIVITY_ATTENTION_S`), ``quiet`` (older), ``parked``
@@ -99,7 +99,7 @@ _ACTIVE_STATES = frozenset({"working", "watching", "your-move"})
 #: Transcript activity is positive evidence of liveness only while it is FRESH.
 #: Past this, an active-looking tail records that a session WAS active, not that
 #: it is now. Measured twice: a fleet of dead workers idle 20 to 58 minutes, all
-#: reporting live (the STALE_ATTENTION_S note in session_truth), and node x-52d2
+#: reporting live (the STALE_ATTENTION_S note in session_truth), and node
 #: wedged behind a transcript quiet for 83 minutes that still read ``working``.
 #: Deliberately not STALE_ATTENTION_S: that constant refuses to carry a
 #: decision, and this one is a decision.
@@ -170,7 +170,7 @@ def classify_reachability(
     its transcript is quiet; the NEGATIVE never rides this parameter, a dead
     pid arrives as a ``falsifier`` (``pid_falsifier``). Monotone order:
     falsifier, then positive evidence, then absence.
-    ``last_activity_basis="mtime"`` is never positive (x-dead: a file stamp
+    ``last_activity_basis="mtime"`` is never positive (: a file stamp
     moved 2h33m past its newest record); only a parsed record certifies
     liveness, so an active-looking state with an mtime age lands UNKNOWN.
     """
@@ -219,7 +219,7 @@ OPERATOR_TURN = "operator-turn"
 PROMISE = "promise"
 MODEL_REFUSED = "model-refused"
 #: The row's last assistant turn is a provider refusal the error taxonomy
-#: classifies (x-e594). Distinct from ``model-refused``: that one is read off
+#: classifies. Distinct from ``model-refused``: that one is read off
 #: observed-model evidence, this one off the transcript's own refusal text.
 PROVIDER_REFUSED = "provider-refused"
 
@@ -483,7 +483,7 @@ def reachability(
 
 
 # ---------------------------------------------------------------------------
-# (x-b029) The pane-identity cross-check
+# The pane-identity cross-check
 #
 # One verb, two mismatch directions, counts always printed. Direction 1 finds
 # a registry row whose mux ref points at a pane the listing cannot resolve to
@@ -568,7 +568,7 @@ def pane_identity_crosscheck(
     """Compare one mux session's pane listing against the registry, both ways.
 
     ``panes`` is the parsed ``pane ls --json`` rows (each carrying ``fno_id``
-    and, since x-b029, ``fno_id_state``); ``rows`` is the loaded registry.
+    and, since, ``fno_id_state``); ``rows`` is the loaded registry.
     Pure aside from the injectable ``argv_of`` probe, so both directions and
     the counts-compared contract are unit-testable on constructed rows; the
     live-mux reading is the operator's run of the verb.

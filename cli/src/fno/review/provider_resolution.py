@@ -1,4 +1,4 @@
-"""Per-agent provider resolution for the cross-model review panel (ab-6c8f4c61).
+"""Per-agent provider resolution for the cross-model review panel.
 
 Resolves which provider kind (``claude`` | ``codex`` | ``gemini``) each review
 agent runs on, given the operator's ``config.review.agent_harnesses`` map and
@@ -310,7 +310,7 @@ def available_provider_kinds(
         if not locked:
             kinds.append(kind)
 
-    # Quota-aware ordering (x-5d3e): stably demote a kind whose provider
+    # Quota-aware ordering: stably demote a kind whose provider
     # records are ALL exhausted below kinds that still have headroom, so an
     # `alternate` agent prefers a provider that can actually serve. UNKNOWN
     # keeps its place (no snapshot -> order unchanged, backward compatible).
