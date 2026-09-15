@@ -78,11 +78,14 @@ def _path_binary() -> Optional[Path]:
 
 
 def _cargo_dev_binary() -> Optional[Path]:
-    """Dev fallback: a ``cargo build --release`` artifact under the repo tree.
+    """Dev fallback: a ``cargo build`` artifact under the repo tree.
 
     ``__file__`` is ``cli/src/fno/rust_binary.py`` so the repo root is
     ``parents[3]``. Checks both a crate-local ``target/`` and a workspace
     ``target/`` so it works whether or not a workspace is introduced later.
+    Release outranks debug so a dev's optimized build wins, but a debug build
+    counts too: the CI smoke lanes build debug and strip ``FNO_*`` env, so
+    this finder is the only reader left for the footprint door there.
     """
     here = Path(__file__).resolve()
     try:
@@ -97,6 +100,8 @@ def _cargo_dev_binary() -> Optional[Path]:
     candidates = (
         repo_root / "crates" / "fno-agents" / "target" / "release" / BINARY_NAME,
         repo_root / "target" / "release" / BINARY_NAME,
+        repo_root / "crates" / "fno-agents" / "target" / "debug" / BINARY_NAME,
+        repo_root / "target" / "debug" / BINARY_NAME,
     )
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):

@@ -87,6 +87,7 @@ def test_front_env_is_honored_when_path_has_none(tmp_path, monkeypatch):
     export must still lose to a fresh install on PATH."""
     front = _make_exe(tmp_path / "built" / rust_binary.BINARY_NAME)
     monkeypatch.setenv("FNO_AGENTS_FRONT", str(front))
+    monkeypatch.delenv(rust_binary.BINARY_ENV, raising=False)
     monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
     monkeypatch.setattr(rust_binary, "_cargo_dev_binary", lambda: None)

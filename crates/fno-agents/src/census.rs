@@ -214,7 +214,7 @@ fn argv_of(pid: u32) -> Option<Vec<String>> {
 /// The macOS `KERN_PROCARGS2` buffer layout: an `i32` argc, the truncated
 /// exec path (NUL-terminated), NUL padding to alignment, then argc
 /// NUL-terminated strings (argv[0] is the path again), then the environment.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
     if buf.len() < 4 {
         return None;
@@ -833,6 +833,7 @@ mod process_table_tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn argv_copy_agrees_with_the_fno_crate_reader() {
         // The argv reader here is a verbatim copy of fno::pane_argv's (the
         // dev-only link blocks a shared call in production). Both readers
