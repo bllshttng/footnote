@@ -750,6 +750,76 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
         raise SystemExit(2)
 
 
+def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[List[str], Optional[str]]":
+    """Project the seam's facts to ``fno-agents node-seed`` and apply the
+    answer, before any lane is chosen (x-2c0d).
+
+    Only an explicit ``--node`` triggers the call: ``FNO_NODE`` is provenance
+    a child inherits, never a decision to route. Python projects the
+    lifecycle table's answer (never a copy of it), the seed-slot facts and
+    the crown/resume flags; the verb answers pass / profile / compose /
+    refuse, and this applies it verbatim: a refusal or an unavailable
+    binary exits 2 before ``inject_spawn_defaults`` runs; ``compose``
+    rewrites the seed slot; ``profile`` returns the derived verb so the
+    profile key routes by it. Returns ``(args, node_verb)``.
+    """
+    from fno.agents.node_dispatch import find_node_row, node_effective_verb
+    from fno.agents.spawn_defaults import _seed_slot
+
+    node = (_spawn_flag_value(args, "--node") or "").strip()
+    if not node:
+        return list(args), None
+
+    row = find_node_row(node)
+    derive_error: Optional[str] = None
+    effective_verb: Optional[str] = None
+    if row is not None:
+        try:
+            effective_verb = node_effective_verb(row)
+        except Exception as exc:  # noqa: BLE001 - the refusal names the derive failure
+            from fno.agents.harness_map import DispatchResolveError
+
+            derive_error = str(exc) if isinstance(exc, DispatchResolveError) else f"derivation failed: {exc}"
+    stored = (row or {}).get("dispatch_verb") or ""
+    if stored:
+        from fno.config._dispatch_verbs import canonical_verb_key
+
+        stored = canonical_verb_key(stored)
+
+    from fno.agents.harness_map import _TARGET_FAMILY_VERBS
+
+    slot = _seed_slot(list(args[1:]))
+    payload = {
+        "node": node,
+        "row_found": row is not None,
+        "effective_verb": effective_verb,
+        "stored_verb": stored or None,
+        "derive_error": derive_error,
+        "family": list(_TARGET_FAMILY_VERBS),
+        "crown": _is_crown_bearing_spawn("spawn", args),
+        "resume": _is_resume_bearing_spawn("spawn", args),
+        "argv": list(args),
+        "seed_index": (slot[0] + 1) if slot else None,
+        "seed_form": slot[1] if slot else None,
+    }
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        answer = verb_call("node-seed", payload, VerbUnavailable)
+    except VerbUnavailable as exc:
+        print(f"fno agents spawn: node-seed verb unavailable: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    action = answer.get("action")
+    if action == "refuse":
+        print(f"fno agents spawn: {answer.get('message', 'refused')}", file=sys.stderr)
+        raise SystemExit(2)
+    if action == "compose":
+        return [str(tok) for tok in answer.get("argv") or list(args)], None
+    if action == "profile":
+        return list(args), (answer.get("verb") or "").strip() or None
+    return list(args), None
+
+
 def _refuse_lost_verb_payload(args: "Sequence[str]") -> None:
     """Refuse a seed whose ``$fno:`` verb the calling shell ate, before any route.
 
@@ -1673,15 +1743,18 @@ def make_agents_group_cls() -> type:
                     if verb == "spawn":
                         from fno.agents.spawn_defaults import extract_existing_pane, inject_spawn_defaults
 
-                        try:
-                            args, existing_pane = extract_existing_pane(inject_spawn_defaults(args))
-                        except ValueError as exc:
-                            print(f"fno agents spawn: {exc}", file=sys.stderr)
-                            raise SystemExit(2) from exc
                         _refuse_codex_code_spawn_without_git_grant(args)
                         _refuse_seedless_thread_spawn(args)
                         _refuse_lost_verb_payload(args)
                         _refuse_unfireable_seed(args)
+                        try:
+                            args, node_verb = _node_seed_at_seam(args)
+                            args, existing_pane = extract_existing_pane(
+                                inject_spawn_defaults(args, node_verb=node_verb)
+                            )
+                        except ValueError as exc:
+                            print(f"fno agents spawn: {exc}", file=sys.stderr)
+                            raise SystemExit(2) from exc
                     _export_worker_dirs_at_seam(args)
                     if verb == "spawn":  # after the export: the probe needs its roots
                         _refuse_codex_spawn_with_unreachable_tools(args)
