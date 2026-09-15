@@ -228,9 +228,12 @@ fn run_claim_list(args: &[String]) -> i32 {
     };
     let (witness, witness_answer) = session_witness_primed_for(rows.iter());
     let witness: crate::claims::SessionWitness = &witness;
+    let session_index = std::cell::RefCell::new(None);
     let rows: Vec<Value> = rows
         .iter()
-        .map(|rec| claim_status_value_with_witness(rec, Some(witness), &witness_answer))
+        .map(|rec| {
+            claim_status_value_with_witness(rec, Some(witness), &witness_answer, &session_index)
+        })
         .collect();
     println!("{}", Value::Array(rows));
     0
@@ -239,7 +242,12 @@ fn run_claim_list(args: &[String]) -> i32 {
 fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
     let (witness, witness_answer) = default_session_witness();
     let witness: crate::claims::SessionWitness = &witness;
-    claim_status_value_with_witness(rec, Some(witness), &witness_answer)
+    claim_status_value_with_witness(
+        rec,
+        Some(witness),
+        &witness_answer,
+        &std::cell::RefCell::new(None),
+    )
 }
 
 /// `fno-agents claim release-stopped --name <n> [--session <sid>] --claims-dir <dir>`
@@ -324,7 +332,9 @@ fn claim_status_value_with_witness(
     rec: &crate::claims::ClaimRecord,
     witness: Option<crate::claims::SessionWitness<'_>>,
     witness_answer: &std::cell::RefCell<Option<&'static str>>,
+    session_index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
 ) -> Value {
+    let (holder_session, dispatched_by) = holder_session_fields(rec, session_index);
     let (state, basis) = match witness {
         Some(witness) => crate::claims::classify_with_basis_and_exclusivity(
             rec,
@@ -368,14 +378,20 @@ fn claim_status_value_with_witness(
     if let Some(harness) = &rec.harness {
         out.insert("harness".into(), Value::String(harness.clone()));
     }
-    if let Some(session) = &rec.session_id {
-        out.insert("session_id".into(), Value::String(session.clone()));
+    if let Some(session) = holder_session {
+        out.insert("session_id".into(), Value::String(session));
     }
     if let Some(answered) = witness_answer.borrow_mut().take() {
         out.insert("session_basis".into(), Value::String(answered.into()));
     }
-    if !rec.metadata.is_empty() {
-        out.insert("metadata".into(), Value::Object(rec.metadata.clone()));
+    let mut metadata = rec.metadata.clone();
+    if let Some(dispatcher) = dispatched_by {
+        metadata
+            .entry("dispatched_by_session".to_string())
+            .or_insert_with(|| Value::String(dispatcher));
+    }
+    if !metadata.is_empty() {
+        out.insert("metadata".into(), Value::Object(metadata));
     }
     Value::Object(out)
 }
@@ -519,6 +535,11 @@ fn claim_records_from_dir(dir: &Path) -> Vec<crate::claims::ClaimRecord> {
 /// record's own `session_id` is the dispatcher's, not the worker's.
 const HANDOVER_HOLDER_PREFIX: &str = "spawn-handover:";
 
+/// Witness basis for a session the registry's served `liveness` word answers
+/// alive. Lives here, not in `claims.rs`'s basis module: that file is
+/// shrink-only (4996 lines).
+const REGISTRY_SERVED_LIVE: &str = "registry-served-live";
+
 /// The production session witness (x-a613). Resolution order for the record's
 /// resolved subject session (the worker a handover holder names, else the
 /// record's own session id): (a) the fleet registry row keyed by `harness_session_id`, whose
@@ -625,10 +646,7 @@ pub(crate) fn session_witness_primed_for<'a>(
         subjects
             .into_iter()
             .filter(|(session, group)| {
-                !registry
-                    .by_session
-                    .get(session)
-                    .is_some_and(|&(pid, start)| crate::daemon::pid_is_ours(pid, Some(start)))
+                registry_session_live(registry, session).is_none()
                     && group.iter().any(|rec| may_consult_transcript(rec))
             })
             .map(|(session, _)| session)
@@ -640,7 +658,7 @@ pub(crate) fn session_witness_primed_for<'a>(
         for (session, probe) in &map {
             let answer = session_liveness_from_observations(
                 registry_known,
-                false,
+                None,
                 probe.reachability.as_deref(),
             );
             memo.borrow_mut().insert(session.clone(), answer);
@@ -673,6 +691,27 @@ fn resolve_subject_session(
         }
         None => rec.session_id.clone().filter(|s| !s.is_empty()),
     }
+}
+
+/// (holder session, dispatcher session) for a claim payload. A
+/// spawn-handover record stores the MINTER's session in `session_id`; the
+/// holder is the worker it names, joined through the registry. The
+/// minter is published as `metadata.dispatched_by_session` - the shape
+/// `compare_and_rebind` writes at target-init rebind - so the payload reads
+/// the same before and after the rebind.
+fn holder_session_fields(
+    rec: &crate::claims::ClaimRecord,
+    index: &std::cell::RefCell<Option<SessionRegistryIndex>>,
+) -> (Option<String>, Option<String>) {
+    if !rec.holder.starts_with(HANDOVER_HOLDER_PREFIX) {
+        return (rec.session_id.clone().filter(|s| !s.is_empty()), None);
+    }
+    let worker = resolve_subject_session(rec, index);
+    let dispatcher = rec
+        .session_id
+        .clone()
+        .filter(|s| !s.is_empty() && Some(s) != worker.as_ref());
+    (worker, dispatcher)
 }
 
 /// Whether this record's classification can still reach the transcript leg: a
@@ -720,6 +759,10 @@ struct SessionRegistryIndex {
     known: bool,
     by_session: std::collections::HashMap<String, (u32, u64)>,
     by_name: std::collections::HashMap<String, String>,
+    /// The row's served `liveness` word and its measurement stamp, keyed by
+    /// session id. No pid requirement: 33 of 33 thread rows carry pid None,
+    /// and the served pair is the only liveness evidence they carry.
+    served: std::collections::HashMap<String, (Option<String>, Option<String>)>,
 }
 
 fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistryIndex>>) {
@@ -729,6 +772,7 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
     }
     let mut by_session = std::collections::HashMap::new();
     let mut by_name = std::collections::HashMap::new();
+    let mut served = std::collections::HashMap::new();
     let path = crate::paths::AgentsHome::from_env().registry_json();
     let registry = crate::state::load_registry(&path);
     let known = registry.is_ok();
@@ -740,6 +784,10 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
             if let (Some(pid), Some(start)) = (e.pid, e.pid_start_time) {
                 by_session.insert(sid.to_string(), (pid, start));
             }
+            served.insert(
+                sid.to_string(),
+                (e.liveness.clone(), e.liveness_measured_at.clone()),
+            );
             // The registry's own name contract (state.rs row_for_token): a
             // name OR any prior alias resolves the row. A handover holder
             // carries the name from mint time, so a worker renamed inside its
@@ -758,7 +806,30 @@ fn load_session_registry_index(index: &std::cell::RefCell<Option<SessionRegistry
         known,
         by_session,
         by_name,
+        served,
     });
+}
+
+/// Registry evidence that `session` is alive, or None. The row's own pid
+/// proof wins; a pid-less thread row answers from the served `liveness`
+/// word, fresh only. A dead or stale word answers None, never Absent: the
+/// cached word can predate a resume, and Absent reaps a same-machine claim.
+fn registry_session_live(registry: &SessionRegistryIndex, session: &str) -> Option<&'static str> {
+    if registry
+        .by_session
+        .get(session)
+        .is_some_and(|&(pid, start)| crate::daemon::pid_is_ours(pid, Some(start)))
+    {
+        return Some(crate::claims::basis::REGISTRY_SESSION_LIVE);
+    }
+    registry
+        .served
+        .get(session)
+        .and_then(|(word, at)| {
+            crate::row_truth::served_fresh_liveness(word.as_deref(), at.as_deref())
+        })
+        .filter(|word| *word == "alive")
+        .map(|_| REGISTRY_SERVED_LIVE)
 }
 
 /// The uncached resolution: registry row first, then transcript.
@@ -772,14 +843,10 @@ fn session_liveness_answer_uncached(
         let registry = borrowed
             .as_ref()
             .expect("session registry index initialized");
-        let live = registry
-            .by_session
-            .get(session)
-            .is_some_and(|&(pid, start)| crate::daemon::pid_is_ours(pid, Some(start)));
-        (registry.known, live)
+        (registry.known, registry_session_live(registry, session))
     };
-    if registry_live {
-        return session_liveness_from_observations(registry_known, true, None);
+    if let Some(basis) = registry_live {
+        return crate::claims::SessionLiveness::Live(basis);
     }
     // The row is missing or its pid is stale (a resume leaves rows behind) -
     // the transcript still answers. Reachability is the liveness reading;
@@ -787,7 +854,7 @@ fn session_liveness_answer_uncached(
     let probe = crate::truth_probe::family1_truth_probe(session);
     session_liveness_from_observations(
         registry_known,
-        false,
+        None,
         probe
             .as_ref()
             .and_then(|probe| probe.reachability.as_deref()),
@@ -796,11 +863,11 @@ fn session_liveness_answer_uncached(
 
 fn session_liveness_from_observations(
     registry_known: bool,
-    registry_live: bool,
+    registry_live: Option<&'static str>,
     reachability: Option<&str>,
 ) -> crate::claims::SessionLiveness {
-    if registry_live {
-        return crate::claims::SessionLiveness::Live(crate::claims::basis::REGISTRY_SESSION_LIVE);
+    if let Some(basis) = registry_live {
+        return crate::claims::SessionLiveness::Live(basis);
     }
     match reachability {
         Some("reachable") => {
@@ -844,8 +911,14 @@ pub(crate) fn claim_sweep_payload_from_records(
     // sweep never classifies would re-add the per-session cost this exists to
     // delete.
     let (witness, witness_answer) = session_witness_primed_for(selected.iter().copied());
+    // No eager registry read: a handover-free record set (e.g. the empty
+    // claims dir the sweep fast-paths) keeps its zero-registry-read cost,
+    // and resolve_subject_session lazy-loads the index on the first
+    // handover holder that needs it.
+    let session_index = std::cell::RefCell::new(None);
     let mut claims: Vec<Value> = Vec::new();
     for rec in &selected {
+        let (holder_session, dispatched_by) = holder_session_fields(rec, &session_index);
         let identity = rec.machine_id.clone().unwrap_or_else(|| rec.host.clone());
         let pid_exclusive = full_scan
             .then(|| {
@@ -891,8 +964,8 @@ pub(crate) fn claim_sweep_payload_from_records(
             if let Some(harness) = &rec.harness {
                 fields.insert("harness".into(), Value::String(harness.clone()));
             }
-            if let Some(session) = &rec.session_id {
-                fields.insert("session_id".into(), Value::String(session.clone()));
+            if let Some(session) = holder_session {
+                fields.insert("session_id".into(), Value::String(session));
             }
             if let Some(answered) = session_basis {
                 fields.insert("session_basis".into(), Value::String(answered.into()));
@@ -910,8 +983,14 @@ pub(crate) fn claim_sweep_payload_from_records(
                     );
                 }
             }
-            if !rec.metadata.is_empty() {
-                fields.insert("metadata".into(), Value::Object(rec.metadata.clone()));
+            let mut metadata = rec.metadata.clone();
+            if let Some(dispatcher) = dispatched_by {
+                metadata
+                    .entry("dispatched_by_session".to_string())
+                    .or_insert_with(|| Value::String(dispatcher));
+            }
+            if !metadata.is_empty() {
+                fields.insert("metadata".into(), Value::Object(metadata));
             }
         }
         claims.push(row);
@@ -933,7 +1012,7 @@ mod tests {
     #[test]
     fn claim_session_absent_requires_a_readable_registry() {
         assert!(matches!(
-            session_liveness_from_observations(false, false, Some("unreachable")),
+            session_liveness_from_observations(false, None, Some("unreachable")),
             crate::claims::SessionLiveness::Unresolved
         ));
     }
@@ -1413,6 +1492,198 @@ mod tests {
             let answer = witness(&rec);
             std::env::set_var("PATH", old_path);
             assert!(matches!(answer, crate::claims::SessionLiveness::Unresolved));
+        });
+    }
+
+    // ---- the served-liveness tier ------------------------------------------
+
+    /// The 20-byte Z stamp `rfc3339_like_to_secs` accepts, generated at test
+    /// runtime: a hardcoded stamp ages past the 120-second window and the
+    /// suite turns red on a clock, not on a defect.
+    fn z_stamp(age_secs: i64) -> String {
+        (chrono::Utc::now() - chrono::Duration::seconds(age_secs))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string()
+    }
+
+    #[test]
+    fn served_alive_answers_a_pidless_thread_row_live() {
+        // AC1-HP: a thread row carries no pid, so the by-pid tier never
+        // answered it and every thread claim paid the transcript probe. The
+        // served pair is the cheap correct answer already on the wire.
+        with_registry(
+            serde_json::json!([{
+                "name": "w-thread",
+                "status": "live",
+                "cwd": "/w",
+                "created_at": "2026-09-15T00:00:00Z",
+                "harness_session_id": "s-worker",
+                "liveness": "alive",
+                "liveness_measured_at": z_stamp(10),
+            }]),
+            || {
+                let (witness, drain) = default_session_witness();
+                let rec = witness_rec("spawn-handover:w-thread", "s-king-elsewhere");
+                let answer = witness(&rec);
+                assert!(
+                    matches!(answer, crate::claims::SessionLiveness::Live(b) if b == REGISTRY_SERVED_LIVE),
+                    "fresh served alive must answer Live(registry-served-live), got {answer:?}"
+                );
+                assert_eq!(drain.borrow().as_ref(), Some(&REGISTRY_SERVED_LIVE));
+            },
+        );
+    }
+
+    #[test]
+    fn primed_wire_excludes_served_alive_and_keeps_a_stale_word_on_it() {
+        // AC1-HP + AC1-ERR: a fresh served word keeps the session off the
+        // probe wire; past the 120s window the word is withheld and the
+        // session rides the wire exactly as before this tier existed.
+        let td = tempfile::TempDir::new().unwrap();
+        let shim_dir = write_truth_shim(td.path(), &batch_shim_body());
+        let log_path = td.path().join("shim.log");
+        let uniq = std::process::id();
+        let s_fresh = format!("xa80a-fresh-{uniq}");
+        let s_stale = format!("xa80a-stale-{uniq}");
+        with_registry(
+            serde_json::json!([
+                {
+                    "name": "w-fresh",
+                    "status": "live",
+                    "cwd": "/w",
+                    "created_at": "2026-09-15T00:00:00Z",
+                    "harness_session_id": s_fresh,
+                    "liveness": "alive",
+                    "liveness_measured_at": z_stamp(10),
+                },
+                {
+                    "name": "w-stale",
+                    "status": "live",
+                    "cwd": "/w",
+                    "created_at": "2026-09-15T00:00:00Z",
+                    "harness_session_id": s_stale,
+                    "liveness": "alive",
+                    "liveness_measured_at": z_stamp(600),
+                },
+            ]),
+            || {
+                let old_path = std::env::var("PATH").unwrap_or_default();
+                std::env::set_var("X_A45C_SHIM_LOG", &log_path);
+                std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+                let records = vec![
+                    witness_rec("holder-fresh", &s_fresh),
+                    witness_rec("holder-stale", &s_stale),
+                ];
+                let (witness, _drain) = session_witness_primed_for(&records);
+                // Touch the witness so the primed answers are actually read.
+                let _ = witness(&records[0]);
+                let _ = witness(&records[1]);
+                std::env::set_var("PATH", old_path);
+                std::env::remove_var("X_A45C_SHIM_LOG");
+                let logged = std::fs::read_to_string(&log_path).unwrap();
+                let mine: Vec<&str> = logged
+                    .lines()
+                    .filter(|l| l.contains("--handles") && l.contains("xa80a-"))
+                    .collect();
+                assert_eq!(mine.len(), 1, "one batch, one interpreter: {logged:?}");
+                assert!(
+                    mine[0].contains(s_stale.as_str()),
+                    "a stale word never blocks the wire: {logged:?}"
+                );
+                assert!(
+                    !logged.contains(s_fresh.as_str()),
+                    "the fresh served word stays off the wire: {logged:?}"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn served_dead_word_never_reads_absent() {
+        // AC1-EDGE: a served `dead` only lowers the witness to the transcript
+        // leg - the cached word can predate a resume, and Absent reaps a
+        // same-machine claim. No transcript answer is Unresolved, not Absent.
+        let td = tempfile::TempDir::new().unwrap();
+        let shim_dir = write_truth_shim(td.path(), "exit 1");
+        with_registry(
+            serde_json::json!([{
+                "name": "w-dead",
+                "status": "live",
+                "cwd": "/w",
+                "created_at": "2026-09-15T00:00:00Z",
+                "harness_session_id": "s-worker",
+                "liveness": "dead",
+                "liveness_measured_at": z_stamp(10),
+            }]),
+            || {
+                let old_path = std::env::var("PATH").unwrap_or_default();
+                std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+                let (witness, _drain) = default_session_witness();
+                let rec = witness_rec("spawn-handover:w-dead", "s-king-elsewhere");
+                let answer = witness(&rec);
+                std::env::set_var("PATH", old_path);
+                assert!(matches!(answer, crate::claims::SessionLiveness::Unresolved));
+            },
+        );
+    }
+
+    #[test]
+    fn handover_payload_names_the_worker_and_keeps_the_dispatcher() {
+        // AC2-HP: the record stores the MINTER's session; the payload's
+        // session_id must name the WORKER and move the minter to
+        // dispatched_by_session - the shape compare_and_rebind writes at
+        // rebind - in both the status and the sweep payload.
+        with_registry(
+            serde_json::json!([{
+                "name": "w-worker",
+                "status": "live",
+                "cwd": "/w",
+                "created_at": "2026-09-15T00:00:00Z",
+                "harness_session_id": "s-worker",
+            }]),
+            || {
+                let td = tempfile::TempDir::new().unwrap();
+                let shim_dir = write_truth_shim(td.path(), "exit 1");
+                let old_path = std::env::var("PATH").unwrap_or_default();
+                std::env::set_var("PATH", format!("{}:{}", shim_dir.display(), old_path));
+                let cell = std::cell::RefCell::new(None);
+                let index_cell = std::cell::RefCell::new(None);
+                let rec = witness_rec("spawn-handover:w-worker", "s-king");
+                let out = claim_status_value_with_witness(&rec, None, &cell, &index_cell);
+                assert_eq!(out["session_id"], "s-worker");
+                assert_eq!(out["metadata"]["dispatched_by_session"], "s-king");
+
+                let sweep = claim_sweep_payload_from_records(
+                    std::slice::from_ref(&rec),
+                    Some("node:"),
+                    &[],
+                    false,
+                );
+                let row = &sweep["claims"][0];
+                assert_eq!(row["session_id"], "s-worker");
+                assert_eq!(row["metadata"]["dispatched_by_session"], "s-king");
+                std::env::set_var("PATH", old_path);
+            },
+        );
+    }
+
+    #[test]
+    fn handover_payload_without_a_worker_row_and_a_target_session_control() {
+        // AC2-EDGE: no registry row named w -> the payload names NO session
+        // but still publishes the minter. A non-handover claim keeps today's
+        // shape: session_id is the stored session, no dispatched_by_session.
+        with_registry(serde_json::json!([]), || {
+            let cell = std::cell::RefCell::new(None);
+            let index_cell = std::cell::RefCell::new(None);
+            let handover = witness_rec("spawn-handover:ghost", "s-king");
+            let out = claim_status_value_with_witness(&handover, None, &cell, &index_cell);
+            assert!(out.get("session_id").is_none());
+            assert_eq!(out["metadata"]["dispatched_by_session"], "s-king");
+
+            let plain = witness_rec("target-session:s1", "s1");
+            let out = claim_status_value_with_witness(&plain, None, &cell, &index_cell);
+            assert_eq!(out["session_id"], "s1");
+            assert!(out.get("metadata").is_none());
         });
     }
 }
