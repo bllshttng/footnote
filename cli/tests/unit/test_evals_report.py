@@ -13,10 +13,12 @@ from fno.evals.report import (
     GraduateError,
     build_report,
     compare_variants,
+    compare_windows,
     evals_health_summary,
     graduate_task_file,
     graduation_candidates,
     load_rows,
+    window_rows,
 )
 
 runner = CliRunner()
@@ -135,13 +137,16 @@ def test_evals_health_summary_none_without_history(tmp_path: Path) -> None:
 
 def test_evals_health_summary(tmp_path: Path) -> None:
     hp = tmp_path / "h.jsonl"
-    _history.append_row(hp, _row("r", "regression", True))
-    _history.append_row(hp, _row("r", "regression", False))
-    summary = evals_health_summary(hp)
+    # ts pinned: the summary's alarm reads the recent window (x-cf8f).
+    recent = _ts(_NOW - timedelta(hours=1))
+    _history.append_row(hp, {**_row("r", "regression", True), "ts": recent})
+    _history.append_row(hp, {**_row("r", "regression", False), "ts": recent})
+    summary = evals_health_summary(hp, now=_NOW)
     assert summary is not None
     assert summary["flake_count"] == 1
     assert summary["regression_pass_rate"] == 0.5
     assert summary["regression_alarm"] == ["r"]
+    assert summary["regressed"] == []
 
 
 # --- age fields (x-ab72): the demand side ---
@@ -331,3 +336,110 @@ def test_graduate_cli_unknown_id_exit_1(tmp_path: Path) -> None:
                                 encoding="utf-8")
     res = runner.invoke(evals_app, ["graduate", "nope", "--bank", str(d)])
     assert res.exit_code == 1
+
+
+# --- time axis: the windowed alarm and the trend (x-cf8f) ---
+
+def _ts_row(task_id: str, tier: str, passed: bool, ts: str) -> dict:
+    return {**_row(task_id, tier, passed), "ts": ts}
+
+
+def _days_ago(n: float) -> str:
+    return _ts(_NOW - timedelta(days=n))
+
+
+# AC1-HP: the 50-day-old 3-min flake no longer fires the windowed alarm,
+# while the all-rows long view still folds every run.
+def test_windowed_alarm_silent_when_all_rows_old() -> None:
+    day0 = _days_ago(49)
+    rows = ([_ts_row("r", "regression", False, day0)] * 3
+            + [_ts_row("r", "regression", True, day0)] * 20)
+    report = build_report(rows, now=_NOW, window_days=7)
+    assert report["regression_alarm"] == []
+    task = report["tasks"][0]
+    assert task["runs"] == 23 and task["passes"] == 20
+    assert task["pass_at_1"] == pytest.approx(20 / 23, abs=1e-4)
+
+
+# AC1-ERR: a real within-window drop fires the alarm, the trend and regressed.
+def test_compare_windows_regressed_and_windowed_alarm_names_it() -> None:
+    rows = ([_ts_row("r", "regression", True, _days_ago(10))] * 3
+            + [_ts_row("r", "regression", True, _days_ago(1))]
+            + [_ts_row("r", "regression", False, _days_ago(1))] * 2)
+    cmp = compare_windows(rows, window_days=7, now=_NOW)
+    assert cmp["tasks"]["r"]["verdict"] == "regressed"
+    assert cmp["regressed"] == ["r"]
+    report = build_report(rows, now=_NOW, window_days=7)
+    assert report["regression_alarm"] == ["r"]
+
+
+def test_window_rows_half_open_and_unparseable_ts_excluded() -> None:
+    inside = _days_ago(3)
+    end_edge = _ts(_NOW)                      # end inclusive
+    start_edge = _days_ago(7)                 # start exclusive
+    old = _days_ago(30)
+    rows = [_ts_row("t", "regression", True, s) for s in (inside, end_edge, start_edge, old)]
+    rows.append({**_row("t", "regression", True), "ts": "not-a-timestamp"})
+    got = window_rows(rows, _NOW - timedelta(days=7), _NOW)
+    assert [r["ts"] for r in got] == [inside, end_edge]
+
+
+# AC1-EDGE: recent-only task has no verdict; the bad-ts row counts nowhere.
+def test_compare_windows_missing_in_prior_and_bad_ts_counts_nowhere() -> None:
+    rows = [
+        _ts_row("u", "regression", True, _days_ago(1)),
+        {**_row("u", "regression", True), "ts": "not-a-timestamp"},
+    ]
+    cmp = compare_windows(rows, window_days=7, now=_NOW)
+    assert cmp["missing_in_prior"] == ["u"]
+    assert cmp["missing_in_recent"] == []
+    assert cmp["tasks"] == {}
+    assert cmp["regressed"] == []
+
+
+def test_compare_windows_unchanged_and_window_fields() -> None:
+    rows = ([_ts_row("r", "regression", True, _days_ago(10))] * 2
+            + [_ts_row("r", "regression", True, _days_ago(1))] * 2)
+    cmp = compare_windows(rows, window_days=7, now=_NOW)
+    t = cmp["tasks"]["r"]
+    assert t["verdict"] == "unchanged" and t["delta"] == 0.0
+    assert t["prior"] == {"runs": 2, "pass_at_1": 1.0}
+    assert t["recent"] == {"runs": 2, "pass_at_1": 1.0}
+    assert cmp["regressed"] == []
+    assert cmp["window_days"] == 7
+    assert cmp["prior_start"] == (_NOW - timedelta(days=14)).isoformat()
+    assert cmp["recent_start"] == (_NOW - timedelta(days=7)).isoformat()
+
+
+def test_compare_windows_missing_in_recent_no_verdict() -> None:
+    rows = [_ts_row("a", "regression", True, _days_ago(10)),
+            _ts_row("b", "regression", True, _days_ago(1))]
+    cmp = compare_windows(rows, window_days=7, now=_NOW)
+    assert cmp["missing_in_recent"] == ["a"]
+    assert cmp["missing_in_prior"] == ["b"]
+    assert cmp["tasks"] == {}
+
+
+def test_compare_windows_regressed_needs_regression_tier() -> None:
+    # A capability-tier drop trends but never names the alarm.
+    rows = ([_ts_row("cap", "capability", True, _days_ago(10))] * 3
+            + [_ts_row("cap", "capability", False, _days_ago(1))])
+    cmp = compare_windows(rows, window_days=7, now=_NOW)
+    assert cmp["tasks"]["cap"]["verdict"] == "regressed"
+    assert cmp["regressed"] == []
+
+
+def test_build_report_default_alarm_unchanged_without_window() -> None:
+    rows = [_ts_row("r", "regression", False, _days_ago(49))]
+    assert build_report(rows)["regression_alarm"] == ["r"]
+
+
+def test_health_summary_regressed_from_windows(tmp_path: Path) -> None:
+    hp = tmp_path / "h.jsonl"
+    for _ in range(3):
+        _history.append_row(hp, {**_row("r", "regression", True), "ts": _days_ago(10)})
+    _history.append_row(hp, {**_row("r", "regression", False), "ts": _days_ago(1)})
+    summary = evals_health_summary(hp, stale_days=7, now=_NOW)
+    assert summary is not None
+    assert summary["regressed"] == ["r"]
+    assert summary["regression_alarm"] == ["r"]

@@ -13,7 +13,7 @@ below 100%) and graduation (a capability task that passed its last N runs).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -82,8 +82,19 @@ def _stats(rows: list[dict[str, object]]) -> list[TaskStat]:
     return stats
 
 
-def build_report(rows: list[dict[str, object]]) -> dict[str, Any]:
-    """Fold *rows* into a JSON-friendly report dict."""
+def build_report(
+    rows: list[dict[str, object]],
+    *,
+    now: Optional[datetime] = None,
+    window_days: Optional[int] = None,
+) -> dict[str, Any]:
+    """Fold *rows* into a JSON-friendly report dict.
+
+    With both *now* and *window_days*, ``regression_alarm`` reads only the
+    recent window ``(now - window_days, now]`` - a 50-day-old fixed flake no
+    longer fires it. ``tiers``, ``tasks`` and ``flakes`` stay the all-rows
+    long view either way.
+    """
     stats = _stats(rows)
 
     tier_runs: dict[str, int] = {}
@@ -114,9 +125,15 @@ def build_report(rows: list[dict[str, object]]) -> dict[str, Any]:
         for s in stats
     ]
     flakes = [s.task_id for s in stats if s.flake]
-    # Regression alarm: any regression-tier task not at 100%.
+    # Regression alarm: any regression-tier task not at 100%. Windowed when a
+    # window is given; the tier-segment rule in _stats still holds inside it.
+    if now is not None and window_days is not None:
+        window = timedelta(days=window_days)
+        alarm_stats = _stats(window_rows(rows, now - window, now))
+    else:
+        alarm_stats = stats
     regression_alarm = [
-        s.task_id for s in stats if s.tier == "regression" and s.pass_at_1 < 1.0
+        s.task_id for s in alarm_stats if s.tier == "regression" and s.pass_at_1 < 1.0
     ]
     return {
         "no_data": not stats,
@@ -170,13 +187,9 @@ def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, A
             missing_in_variant.append(tid)
         if not b or not v:
             continue
-        b_p1 = sum(1 for r in b if r.get("pass") is True) / len(b)
-        v_p1 = sum(1 for r in v if r.get("pass") is True) / len(v)
-        delta = v_p1 - b_p1
-        verdict = "improved" if delta > 0 else "regressed" if delta < 0 else "unchanged"
-        tasks[tid] = {"baseline": {"runs": len(b), "pass_at_1": round(b_p1, 4)},
-                      "variant": {"runs": len(v), "pass_at_1": round(v_p1, 4)},
-                      "delta": round(delta, 4), "verdict": verdict}
+        score = _pair_verdict(b, v)
+        tasks[tid] = {"baseline": score["a"], "variant": score["b"],
+                      "delta": score["delta"], "verdict": score["verdict"]}
     return {
         "variant": variant,
         "tasks": tasks,
@@ -184,6 +197,79 @@ def compare_variants(rows: list[dict[str, object]], variant: str) -> dict[str, A
         "missing_in_baseline": missing_in_baseline,
         "baseline_rev": baseline_rev,
         "variant_rev": variant_rev,
+    }
+
+
+def _pair_verdict(a_rows: list[dict[str, object]],
+                  b_rows: list[dict[str, object]]) -> dict[str, Any]:
+    """Score one row list against another: runs and pass@1 per side, delta
+    (b - a) and the improved/regressed/unchanged verdict. Shared by
+    compare_variants (revision axis) and compare_windows (time axis)."""
+    a_p1 = sum(1 for r in a_rows if r.get("pass") is True) / len(a_rows)
+    b_p1 = sum(1 for r in b_rows if r.get("pass") is True) / len(b_rows)
+    delta = b_p1 - a_p1
+    verdict = "improved" if delta > 0 else "regressed" if delta < 0 else "unchanged"
+    return {"a": {"runs": len(a_rows), "pass_at_1": round(a_p1, 4)},
+            "b": {"runs": len(b_rows), "pass_at_1": round(b_p1, 4)},
+            "delta": round(delta, 4), "verdict": verdict}
+
+
+def window_rows(
+    rows: list[dict[str, object]], start: datetime, end: datetime
+) -> list[dict[str, object]]:
+    """Rows whose ``ts`` parses and falls in the half-open ``(start, end]``.
+
+    A row with no parseable ``ts`` lands in no window.
+    """
+    kept: list[dict[str, object]] = []
+    for r in rows:
+        dt = _parse_ts(r.get("ts"))
+        if dt is not None and start < dt <= end:
+            kept.append(r)
+    return kept
+
+
+def compare_windows(
+    rows: list[dict[str, object]], *, window_days: int, now: datetime
+) -> dict[str, Any]:
+    """Per-task trend: recent ``(now - W, now]`` against prior ``(now - 2W, now - W]``.
+
+    The time-axis twin of :func:`compare_variants`: weeks, not git refs.
+    ``regressed`` names regression-tier tasks (tier of each task's newest row)
+    whose verdict is ``regressed``.
+    """
+    window = timedelta(days=window_days)
+    prior = _by_task(window_rows(rows, now - 2 * window, now - window))
+    recent = _by_task(window_rows(rows, now - window, now))
+    tasks: dict[str, Any] = {}
+    missing_in_prior: list[str] = []
+    missing_in_recent: list[str] = []
+    for tid in sorted(set(prior) | set(recent)):
+        p = prior.get(tid, [])
+        r = recent.get(tid, [])
+        if not p:
+            missing_in_prior.append(tid)
+        if not r:
+            missing_in_recent.append(tid)
+        if not p or not r:
+            continue
+        score = _pair_verdict(p, r)
+        tasks[tid] = {"prior": score["a"], "recent": score["b"],
+                      "delta": score["delta"], "verdict": score["verdict"]}
+    newest_tier = {tid: str(task_rows[-1].get("tier", "unknown"))
+                   for tid, task_rows in _by_task(rows).items()}
+    regressed = [
+        tid for tid, t in tasks.items()
+        if t["verdict"] == "regressed" and newest_tier.get(tid) == "regression"
+    ]
+    return {
+        "window_days": window_days,
+        "prior_start": (now - 2 * window).isoformat(),
+        "recent_start": (now - window).isoformat(),
+        "tasks": tasks,
+        "missing_in_prior": missing_in_prior,
+        "missing_in_recent": missing_in_recent,
+        "regressed": regressed,
     }
 
 
@@ -210,10 +296,6 @@ def evals_health_summary(
     if not history_path.exists():
         return None
     rows = load_rows(history_path)
-    report = build_report(rows)
-    if report["no_data"]:
-        return None
-    reg = report["tiers"].get("regression")
     if stale_days is None:
         try:
             stale_days = int(load_settings().evals.stale_days)
@@ -221,6 +303,10 @@ def evals_health_summary(
             stale_days = 7
     if now is None:
         now = datetime.now(timezone.utc)
+    report = build_report(rows, now=now, window_days=stale_days)
+    if report["no_data"]:
+        return None
+    reg = report["tiers"].get("regression")
     reg_ts = [dt for r in rows if r.get("tier") == "regression"
               and (dt := _parse_ts(r.get("ts"))) is not None]
     newest_dt = max(reg_ts) if reg_ts else None
@@ -228,10 +314,17 @@ def evals_health_summary(
     age_days = None if newest_dt is None else round(
         (now - newest_dt).total_seconds() / 86400, 3)
     stale = never_ran is False and age_days is not None and age_days > stale_days
+    try:
+        regressed = compare_windows(
+            rows, window_days=stale_days, now=now
+        )["regressed"]
+    except Exception:  # noqa: BLE001 - the summary never raises
+        regressed = []
     return {
         "regression_pass_rate": reg["pass_rate"] if reg else None,
         "flake_count": len(report["flakes"]),
         "regression_alarm": report["regression_alarm"],
+        "regressed": regressed,
         "age_days": age_days,
         "stale": stale,
         "never_ran": never_ran,
