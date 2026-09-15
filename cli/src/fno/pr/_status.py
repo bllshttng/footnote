@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Collection, Optional, Sequence
 
@@ -137,41 +138,9 @@ def _fetch(pr: str, cwd: Optional[str]) -> "tuple[Optional[dict], str]":
 def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     """Pure verdict computation. Returns (verdict, exit_code, counts).
 
-    Classifies only the latest run per check name so a superseded CANCELLED run
-    (left in the rollup by a force/amend push) no longer yields a false red.
-    `counts["total"]` is the deduped count over the WHOLE rollup, which carries
-    two different kinds of row: GitHub check-runs (the `name` key, produced by
-    Actions and Checks-API apps) and commit StatusContexts (the `context` key,
-    posted to the statuses endpoint). `counts["check_runs"]` and
-    `counts["statuses"]` split that total, because a reader who compares
-    `total` against `gh api .../check-runs` sees a phantom gap otherwise: that
-    endpoint never returns statuses. Measured 2026-08-20 - the tally said 15,
-    the check-runs endpoint named 13 jobs, and the gap was fno's own statuses.
-    The coverage-context filter (`without_coverage_statuses`) feeds this
-    function, so the two review-coverage StatusContexts are already absent
-    from every count here. The two
-    sub-counts need not sum to `total`: a rollup row carrying neither key is
-    counted in neither (it is also never deduped).
-
-    `counts["fail_check_runs"]` and `counts["fail_statuses"]` split the fail
-    bucket the same way, and they are what lets a caller name a red honestly.
-    The VERDICT deliberately does not split: a failing StatusContext is a real
-    red (`stacked-base-guard` is one), so it must never read green. What the
-    split fixes is the ATTRIBUTION - see `_ready_blockers`.
-    `counts["unsettled"]` counts latest runs with NO settled marker (an absent
-    result: cancelled, stale, still running), and `settled` is derived from it
-    positively elsewhere - never from the absence of a pending run.
-    `counts["unsettled_fail"]` narrows that positive count to rows that also
-    classify as failures, so callers can distinguish a taken-away run from a
-    concluded failure without inferring either outcome from an absence.
-
-    A would-be-green tally is refused when NO entry is a real check-run (the
-    `name` key, produced by GitHub Actions/apps via the check-runs API) -
-    x-4271: a conflicting PR (mergeable_state dirty) gets zero workflow runs,
-    but fno's own self-published StatusContexts (review-coverage,
-    stacked-base-guard) still post and can all pass, so an all-`context`
-    rollup read as green with no CI having run at all. A fail or pending
-    StatusContext is still a real, actionable signal and stays red/pending.
+    Counts vocabulary, the attribution split, the settled-marker rule, and
+    the zero-real-check-run refusal are narrated in
+    docs/architecture/pr-status-verdict.md (`verdict_for`).
     """
     deduped = _latest_per_name(rollup)
     counts = {
@@ -208,28 +177,112 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     if counts["pending"]:
         return ("pending", 2, counts)
     if not counts["check_runs"]:
-        # Known tradeoff, not footnote's own blast radius: a repo whose ONLY
-        # real CI still rides the legacy commit-status API (no GitHub Actions,
-        # no Checks-API app) would never clear this and would hold forever
-        # under `require_checks_pass` (unknown holds, never fails - see the
-        # checks arm of `crates/fno-agents/src/authorized_merge.rs`). footnote's
-        # own workflows
-        # (guards.yml et al.) are all Actions/CheckRuns, so this repo never
-        # hits it; a fork that genuinely needs status-only CI as its sole
-        # signal should route around this via `require_checks_pass=false`.
+        # Zero real check-runs never reads green (docs/architecture/
+        # pr-status-verdict.md, `verdict_for` tradeoff paragraph).
         return ("unknown", 3, counts)
     return ("green", 0, counts)
 
 
-def coverage_recompute_note(coverage: dict) -> None:
-    """Print the coverage recompute note on stderr.
+# Conclusions that count as a real failed attempt. CANCELLED stays out: a
+# taken-away run is not a concluded failure (cf. `verdict_for`'s unsettled_fail).
+_RERUN_FAIL_CONCLUSIONS = ("failure", "timed_out", "startup_failure")
+_NO_RECOVERY: dict = {"recovered": False, "failed": []}
+_RERUN_MAX_RUNS = 20  # one status read must not become a hundred gh calls
 
-    Shared by the live read and the cache serve, so a degraded reason reaches
-    every terminal rather than only the one session whose read produced the
-    row. The bare success note stays silent: it adds nothing the coverage
-    line above does not already say, and a prefix that fires on every first
-    poll trains a reader to skip the line where a reason appears.
+
+def _recovery_from_run_rows(run_rows, attempts_of, failed_jobs_of) -> dict:
+    """Pure over pre-computed rows (no gh). Recovery = latest attempt passed,
+    an earlier attempt failed; `failed` names jobs, optional diagnostics."""
+    recovered = False
+    failed: list[str] = []
+    for row in run_rows:
+        if str(row.get("conclusion") or "") != "success":
+            continue  # only a run that now passes can have recovered
+        try:
+            latest = int(row.get("run_attempt") or 1)
+        except (TypeError, ValueError):
+            continue
+        run_id = str(row.get("id") or "").strip()
+        if latest <= 1 or not run_id:
+            continue  # a first-attempt pass never failed
+        for attempt in attempts_of(run_id):
+            try:
+                n = int(attempt.get("run_attempt") or 0)
+            except (TypeError, ValueError):
+                continue
+            if (
+                0 < n < latest
+                and str(attempt.get("conclusion") or "") in _RERUN_FAIL_CONCLUSIONS
+            ):
+                recovered = True
+                failed.extend(failed_jobs_of(run_id, n))
+    return {"recovered": recovered, "failed": failed}
+
+
+def rerun_recovery(pr_number, cwd: Optional[str] = None, sha: Optional[str] = None) -> dict:
+    """Rerun-recovery fact for a PR head: ``{recovered, failed}``.
+
+    A re-run-recovered failure reads green to `verdict_for`; this names it.
+    ANY read error fails open: a fact beside the verdict, never a second red.
+    `sha` skips the PR-info read when the caller already holds the head.
     """
+    try:
+        from fno.pr._proc import run
+        from fno.pr._rest import _slug_or_reason, fetch_pr_info_rest
+
+        slug, _why = _slug_or_reason(cwd)
+        sha = str(sha or "").strip()
+        if not sha and slug:
+            info, _reason = fetch_pr_info_rest(str(pr_number), cwd=cwd, repo=slug)
+            sha = str((info or {}).get("head_sha") or "").strip()
+        if not sha or not slug:
+            return dict(_NO_RECOVERY)
+
+        def _get(path: str):
+            res = run(["gh", "api", f"repos/{slug}{path}"], cwd=cwd)
+            return json.loads(res.stdout) if res.ok else None
+
+        rows = _get(f"/actions/runs?head_sha={sha}&per_page=100")
+        if isinstance(rows, dict):
+            rows = rows.get("workflow_runs")
+        if not isinstance(rows, list):
+            return dict(_NO_RECOVERY)
+
+        def _attempts(run_id: str) -> list:
+            data = _get(f"/actions/runs/{run_id}/attempts?per_page=100")
+            if isinstance(data, dict):
+                data = data.get("workflow_runs")
+            return data if isinstance(data, list) else []
+
+        def _failed_jobs(run_id: str, attempt: int) -> list:
+            data = _get(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+            jobs = data.get("jobs") if isinstance(data, dict) else data
+            return [
+                str(j["name"])
+                for j in jobs or []
+                if j.get("name")
+                and str(j.get("conclusion") or "") in _RERUN_FAIL_CONCLUSIONS
+            ]
+
+        return _recovery_from_run_rows(rows[:_RERUN_MAX_RUNS], _attempts, _failed_jobs)
+    except Exception:  # noqa: BLE001 - fail open: a fact, never a second red
+        return dict(_NO_RECOVERY)
+
+
+def rerun_recovery_note(payload: dict) -> None:
+    """Print the rerun-recovery warning from a payload (payload-keyed so the
+    cache serve replays it - docs/architecture/pr-status-verdict.md)."""
+    if payload.get("rerun_recovered"):
+        names = ", ".join(payload.get("recovered_failures") or ["unknown"])
+        sys.stderr.write(
+            "note: green on re-run; earlier failed attempt: " + names
+            + ". A passing re-run is a recovery, not proof the defect is gone.\n"
+        )
+
+
+def coverage_recompute_note(coverage: dict) -> None:
+    """Print the coverage recompute note on stderr (payload-keyed; shared
+    with the cache serve - docs/architecture/pr-status-verdict.md)."""
     import sys
 
     note = coverage.get("recompute")
@@ -238,13 +291,8 @@ def coverage_recompute_note(coverage: dict) -> None:
 
 
 def failures_note(payload: dict) -> None:
-    """Print the per-check failure notes on stderr.
-
-    Same discipline as `coverage_recompute_note`: the note reads the PAYLOAD,
-    never run_status locals, so the cache serve (`_cache._serve`) prints the
-    same failure detail the live read produced and every watcher sharing the
-    row sees why the PR is red without any of them re-reading the log.
-    """
+    """Print the per-check failure notes on stderr (payload-keyed; shared
+    with the cache serve - docs/architecture/pr-status-verdict.md)."""
     import sys
 
     for f in payload.get("failures") or []:
@@ -269,20 +317,8 @@ def failures_note(payload: dict) -> None:
 def verdict_line(payload: dict) -> str:
     """One human line for the payload `fno do pr status` prints as JSON.
 
-    The conclusion goes LAST and every slot before it is a fact, so a reader
-    who stops early holds facts and no verdict - never a verdict about a
-    different question. Each of the four misreadings this retires read a
-    subset of the JSON and answered confidently anyway: a state slot that is
-    always present cannot be omitted by the reader either, `verdict` and
-    `settled` now sit adjacent, a head mismatch carries both commits in one
-    line, and the mergeable slot states its own meaning instead of handing
-    the reader a word to interpret. Slots are fixed, always present, in one
-    order; a wrong value renders LOUD (capitals, parentheticals) so scanning
-    for trouble is a real reading strategy.
-
-    Keyed on the payload dict, never on run_status locals: `_cache._serve`
-    degrades a stale row IN PLACE, so a payload-keyed renderer tells the
-    degraded truth with no second code path.
+    Slot ordering, the four retired misreadings, and the payload-keyed
+    contract are narrated in docs/architecture/pr-status-verdict.md.
     """
     checks = payload.get("checks") or {}
     unsettled = checks.get("unsettled")
@@ -438,38 +474,9 @@ def _ready_blockers(
 ) -> list[str]:
     """Which conjuncts of ``ready`` fail, in a stable order.
 
-    A bare ``ready: false`` has one explanation per conjunct (a red check, an
-    unresolved optional finding, coverage unknown or uncovered) and a reader
-    cannot tell them apart; the list is the positive marker that names what is
-    holding. A red is split by the KIND of result: ``ci_red`` when a check-run
-    reached a failing conclusion, ``ci_cancelled_retrigger`` when every failure
-    is a taken-away run, and ``commit_status_red`` when a commit StatusContext
-    failed and no job failed at all.
-    ``unknown`` coverage blocks and is named as its own blocker: the
-    reason a read returned unknown is a separate question (x-b56a), this only
-    reports that the answer is missing. Fail-closed everywhere: an unset
-    unresolved count blocks as ``optional_reviews_unknown``, and the coverage
-    conjunct engages wherever the merge gate's coverage guard would
-    (``review_lane``; a repo with no review lane has no coverage answer to
-    fail).
-
-    The coverage conjuncts are the merge gate's own helpers, read through
-    them - one copy, never a restatement: ``covered_conjuncts`` names the
-    row conjuncts (uncovered, no_local_pass, stale_head). The configured
-    round cap is not a blocker here: at the cap the gate discharges the
-    review obligation and the PR merges on green CI, so a held PR is held
-    by its row conjuncts alone. So ``ready`` is a claim about those
-    conjuncts and nothing wider.
-
-    A TERMINAL PR (merged or closed) is exempt from the coverage conjunct: the
-    gate guards what would merge, and a PR merged out-of-band (UI, bare gh) has
-    no "would" left to guard. That exemption arrives as ``review_lane=False``
-    from the caller's terminal arm and needs no conjunct of its own here. It
-    had one - a ``merged`` flag - and it was decorative: ``merged`` is only
-    ever True inside the branch that already sets ``review_lane=False``, so it
-    never changed an outcome while reading like the protection its name
-    promised. A guard that cannot fire is worse than no guard, because the
-    next reader budgets for it.
+    The conjunct vocabulary, the red-kind split, the fail-closed arms, and
+    the terminal-PR exemption are narrated in
+    docs/architecture/pr-status-verdict.md (`_ready_blockers`).
     """
     blockers: list[str] = []
     # x-4271: `mergeable` is None only when the caller never asked (old test
@@ -698,13 +705,9 @@ def _merge_execution_projection(repo: str, pr: str) -> dict:
 def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
     """Print a one-line JSON verdict for PR `pr`; return the exit code.
 
-    The exit code is ALWAYS the CI verdict's code (0/1/2/3/4/127) - the review
-    fields are additive and advisory (optional stays advisory; an unresolved
-    optional finding on a green PR still exits 0). ``ready`` is the one field
-    that conjoins them all (CI green, optional findings resolved, coverage a
-    counted pass), with ``ready_blockers`` naming any conjunct that failed;
-    a caller branching on the exit code is untouched. ``review_reader`` is
-    injectable for tests; it defaults to the real time-boxed read.
+    The exit code is always the CI verdict's code; review fields are additive
+    and advisory, and `ready` conjoins them with `ready_blockers` naming the
+    failed conjuncts (docs/architecture/pr-status-verdict.md, `run_status`).
     """
     import sys
 
@@ -977,6 +980,26 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             )
             coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
     owner_guidance = _review_owner_guidance(coverage, activity.worktree)
+    # Rerun recovery, probed on every green read of a live PR (fail-open).
+    rerun = (
+        rerun_recovery(pr, cwd, sha=pr_json.get("headRefOid"))
+        if verdict == "green" and not is_terminal
+        else None
+    )
+    rerun_fields = (
+        {
+            "rerun_recovered": bool(rerun.get("recovered")),
+            "recovered_failures": list(rerun.get("failed") or []),
+        }
+        if rerun is not None
+        else {}
+    )
+    # The ready conjunct answers "may this merge", so it must agree with the
+    # merge gate: a rerun-recovered green is held there, and a status that
+    # says ready: true beside a held merge is the disagreement that cost a
+    # session its merge once already.
+    if rerun is not None and rerun.get("recovered"):
+        blockers.append("rerun_recovered_green")
     payload = {
         "pr": pr,
         # The commit this verdict describes, so a caller can pin the
@@ -998,6 +1021,8 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # reads, the failing step, its first error line, and the steps
         # fail-fast never reached (an unreached step is not a pass).
         **({"failures": failures} if failures is not None else {}),
+        # Present iff the probe ran: absent and probed-false are not one fact.
+        **rerun_fields,
         "optional_reviews": reviews.get("optional_reviews", "unknown"),
         "optional_reviews_unresolved": unresolved,
         "optional_reviews_resolved_unchanged": resolved_unchanged,
@@ -1086,6 +1111,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # note channel this function uses below.
     sys.stderr.write(verdict_line(payload) + "\n")
     sys.stdout.write(json.dumps(payload) + "\n")
+    rerun_recovery_note(payload)
     # Same discipline as the unresolved-findings note below: a number a human
     # would misread gets its instruction beside it, on stderr. An unsettled
     # entry has two distinct causes and they need distinct instructions: a
