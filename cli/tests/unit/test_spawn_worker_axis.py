@@ -174,7 +174,9 @@ def _resolve(monkeypatch, source):
     )
     from fno.agents.node_dispatch import resolve_node_spawn
 
-    return resolve_node_spawn("x-0000", None, "slug", source=source)
+    return resolve_node_spawn(
+        "x-0000", None, "slug", source=source, node=_node_row("x-0000")
+    )
 
 
 def test_machine_source_dispatch_carries_trigger_and_no_identity(monkeypatch):
