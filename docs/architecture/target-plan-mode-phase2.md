@@ -50,26 +50,11 @@ Locked behaviors:
 - **Fire-and-forget.** The dispatcher returns immediately and NEVER writes the planning session's `target-state.md`.
 - **No hard concurrency cap.** `--all-ready` surfaces the cost (`~Mx subscription quota while active`); quota is the throttle. `--max N` is an opt-in soft cap.
 
-### Layer 2: the ordered advance nudge (blueprint completion)
+### Layer 2: blueprint completion dispatches nothing
 
-```
-/blueprint finishes intake -> resolve the adopted node's parent
-        |
-        v  live epic parent ?  --yes--> fno backlog advance --epic <parent>
-        |                                       |
-        no                                      v
-        v                            advance applies epic rank, parent-scoped
-   fno backlog advance                child rank, blocked_by, join width,
-   (plain next-selection path)        spawn-gate headroom, claims, and the
-                                       auto-continue / autonomy gates
-                                                |
-                                                v
-                          receipt: dispatched <ids> | skipped reason=<why>
-```
+A blueprint writes its plan, closes its session row, and stops. It runs no `fno backlog advance` and no spawn. A ready node starts through a door that already exists: a king's `fno backlog advance --epic <epic>`, the merge continuation (`ac`), the active-backlog drain (`ab`, gated by `config.active_backlog.enabled`), or a manual `fno agents spawn --node <id>` or `/fno:target bg <node>`.
 
-Blueprint completion never spawns a worker itself. It issues exactly one `fno backlog advance` call and relays the receipt: the epic form for a live epic parent, the plain form for a parentless node. The advance verb is the sole launcher. The node that starts is the top-ranked unblocked child, which can be a different sibling than the plan just written. A disabled gate, no ready child, or zero spawn headroom holds with a named reason (`skipped reason=disabled` / `lane-cap` / `already-claimed`). The plan stays intact and the node stays `ready`.
-
-The retired launch-on-write hook (the deleted `autolaunch-on-ready.sh`, gated by a deleted `target` config leaf) dispatched the plan just written, ignoring rank, siblings, and headroom. Its tombstone lives in `scripts/ci/retired-config-leaves.txt`. The replacement is `fno backlog advance`.
+Two earlier lanes started work from inside the planning step, and both are gone. The launch-on-write hook (`autolaunch-on-ready.sh`) dispatched the plan just written. The blueprint-completion advance nudge ran `fno backlog advance` and drained the whole epic from the planning worker. The tombstones live in `scripts/ci/retired-commands.txt` and `scripts/ci/retired-config-leaves.txt`.
 
 ## Native-plan-mode auto-launch (Task 3.3a): no hook dispatch, and why
 
@@ -78,9 +63,7 @@ That capture-hook fix is in. The hook dispatch it was waiting for is closed unbu
 
 **At capture time there is nothing to dispatch.** The sidecar frontmatter is hook-generated (`captured_at`, `session_id`, `slug`, `source`, `status`) and carries no node id. A native plan has no `claims:` / `graph_node_id:`, and the sidecar path is not a plan the backlog knows. Nothing the hook has written is resolvable to a node, so a dispatch placed there has no node to launch. The plan is not executable at that moment either. `/blueprint` compiles acceptance criteria the native plan does not yet carry. The backfill that synthesizes them runs inside a later `/target`, long after the hook has exited. See the "Why synthesis precedes /blueprint" section of [target-plan-mode-integration.md](target-plan-mode-integration.md).
 
-**The native path inherits the ordered nudge for free.** The front door calls `/blueprint` on the enriched doc. `/blueprint` issues the advance nudge as its last action in every mode. An approved native plan reaches the same ordered dispatch the blueprint path uses, with no hook involvement.
-
-**That inheritance needed one guard, carried into the nudge.** `/blueprint` is called at front-door step 5, before the human is asked "Execute autonomously? [y/N]" at step 6. The retired hook parked a `source: claude-plan-mode` plan for exactly that reason. The nudge keeps that guard at the skill layer. When the plan frontmatter carries `source: claude-plan-mode`, blueprint completion skips the advance nudge. The front door owns the dispatch decision.
+**The front door owns the dispatch decision.** The front door calls `/blueprint` on the enriched doc at step 5 and asks "Execute autonomously? [y/N]" at step 6. Blueprint completion dispatches nothing, so a yes at step 6 is the only dispatch on this path.
 
 **Known residual: the confirm window is still open to other dispatchers.** During that window the node is `ready` and unclaimed. Anything that dispatches a ready node can still start work the human has not approved: the active-backlog drain, a direct `dispatch-node.sh`, another session's `/target`. Closing that properly means not leaving the node ready-and-unclaimed while the front door is still asking. That is a change to the front door, not to the nudge.
 
@@ -90,7 +73,6 @@ That capture-hook fix is in. The hook dispatch it was waiting for is closed unbu
 |---|---|
 | `skills/target/scripts/dispatch-node.sh` | Layer 1 dispatch primitive (US5) |
 | `skills/target/SKILL.md` (`### 0a. Background Dispatch`) | `/target bg <node...>` subcommand |
-| `skills/blueprint/SKILL.md` (tail) | issues the ordered advance nudge after intake in every mode |
 | `scripts/ci/retired-config-leaves.txt` | tombstone for the retired launch-on-write config leaf |
 | `tests/test-bg-dispatch.sh` | hermetic `/target bg` regression harness (mock `fno`) |
 | `tests/test-init-claim-wait.sh` | hermetic init claim-wait harness |
