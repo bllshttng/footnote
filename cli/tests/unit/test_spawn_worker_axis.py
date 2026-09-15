@@ -174,7 +174,11 @@ def _resolve(monkeypatch, source):
     )
     from fno.agents.node_dispatch import resolve_node_spawn
 
-    return resolve_node_spawn("x-0000", None, "slug", source=source)
+    # The dispatcher refuses a spawn with no node dict (the verb-evidence
+    # guard), so the fixture carries the minimal row.
+    return resolve_node_spawn(
+        "x-0000", None, "slug", node=_node_row("x-0000"), source=source
+    )
 
 
 def test_machine_source_dispatch_carries_trigger_and_no_identity(monkeypatch):
