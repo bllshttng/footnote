@@ -2092,6 +2092,10 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     # The dispatch takes a real node claim; keep it out of the user's global store.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{"id": "x-84a8", "slug": "s", "dispatch_verb": "/target", "difficulty": "low"}],
+    )
 
     res = CliRunner().invoke(
         agents_cli.agents_app,
