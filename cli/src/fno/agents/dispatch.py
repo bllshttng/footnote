@@ -1110,6 +1110,9 @@ def _lane_b_thread_spawn(
             "--",
             *argv,
         ]
+        # The spawn cause is captured BEFORE this env snapshot, so the
+        # keeper child never inherits it (the pane and bg lanes do the same).
+        spawn_trigger = _capture_spawn_trigger()
         env = dict(os.environ)
         # A spawned child inherits its parent's ROUTE but never its
         # IDENTITY; the keeper passes its own env through to the harness
@@ -1173,7 +1176,7 @@ def _lane_b_thread_spawn(
             spawned_by_session=_cx_session,
             spawned_by_harness=_cx_harness,
             spawned_by_cwd=_cx_cwd,
-            spawn_trigger=_capture_spawn_trigger(),
+            spawn_trigger=spawn_trigger,
             name=name,
             cwd=str(cwd),
             log_path=str(log_path),

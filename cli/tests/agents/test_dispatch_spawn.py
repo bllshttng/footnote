@@ -1134,3 +1134,39 @@ def test_opencode_serve_spawn_without_binary_exits_13(workdir, monkeypatch) -> N
     assert exc_info.value.exit_code == 13
     assert "--substrate pane" in str(exc_info.value)
     assert dispatch_mod._opencode_serve_spawn is _opencode_serve_spawn
+
+
+def test_keeper_lane_child_env_never_inherits_the_spawn_trigger(
+    workdir, monkeypatch
+) -> None:
+    """The keeper lane captures the spawn cause BEFORE its env snapshot: a
+    machine dispatch routed through a keeper thread must leave no
+    FNO_SPAWN_TRIGGER in the worker's ambient env, or the worker's own ask
+    events mislabel as dispatcher and its own spawns inherit the cause."""
+    from fno.agents import dispatch
+
+    monkeypatch.setattr(dispatch, "_lane_b_worker_binary", lambda: Path("/fake/worker"))
+    monkeypatch.setattr(dispatch, "_mint_thread_session_id", lambda *a, **k: "minted-1")
+    monkeypatch.setattr(
+        "fno.agents.harness_map.render_session_argv", lambda *a, **k: ["pi"]
+    )
+    monkeypatch.setattr(dispatch, "complete_launch_argv", lambda *a, **k: ["pi"])
+
+    captured: dict = {}
+
+    class _Boom(Exception):
+        pass
+
+    def _fake_popen(*args, **kwargs):
+        captured["env"] = kwargs["env"]
+        raise _Boom("stop before the keeper starts")
+
+    monkeypatch.setattr(dispatch.subprocess, "Popen", _fake_popen)
+    monkeypatch.setenv("FNO_SPAWN_TRIGGER", "dispatch:ac")
+
+    with pytest.raises(_Boom):
+        dispatch._lane_b_thread_spawn(
+            name="probe-trigger", harness="pi", cwd=str(workdir), lock_timeout=1.0
+        )
+
+    assert "FNO_SPAWN_TRIGGER" not in captured["env"]
