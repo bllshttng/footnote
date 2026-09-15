@@ -19,7 +19,6 @@ from fno.evals import history as _history
 from fno.evals.cli import evals_app
 from fno.evals.report import (
     GraduateError,
-    build_report,
     evals_health_summary,
     graduate_task_file,
     load_rows,
@@ -32,64 +31,9 @@ def _row(task_id: str, tier: str, passed: bool) -> dict:
     return {"task_id": task_id, "tier": tier, "pass": passed}
 
 
-# --- the all-rows fold that stayed in Python -------------------------------
-
-def test_pass_k_report() -> None:
-    rows = [_row("t", "capability", True), _row("t", "capability", False),
-            _row("t", "capability", True)]
-    report = build_report(rows)
-    task = report["tasks"][0]
-    assert task["runs"] == 3 and task["passes"] == 2
-    assert task["pass_at_1"] == pytest.approx(2 / 3, abs=1e-4)
-    assert task["pass_k"] is False
-    assert task["flake"] is True
-    assert "t" in report["flakes"]
-
-
-def test_regression_alarm_fires_below_100() -> None:
-    rows = [_row("r", "regression", True), _row("r", "regression", False)]
-    assert build_report(rows)["regression_alarm"] == ["r"]
-
-
-def test_regression_alarm_silent_at_100() -> None:
-    rows = [_row("r", "regression", True), _row("r", "regression", True)]
-    assert build_report(rows)["regression_alarm"] == []
-
-
-def test_graduated_task_excludes_pre_graduation_failures() -> None:
-    """codex P2: after a capability task graduates, its old capability failures
-    must NOT count in the regression pass rate / fire a false alarm."""
-    rows = [
-        _row("t", "capability", False),  # pre-graduation hill failure
-        _row("t", "capability", True),
-        _row("t", "capability", True),
-        _row("t", "regression", True),   # first post-graduation run, green
-    ]
-    report = build_report(rows)
-    assert report["regression_alarm"] == []
-    task = report["tasks"][0]
-    assert task["tier"] == "regression"
-    assert task["runs"] == 1 and task["passes"] == 1
-    assert report["tiers"]["regression"]["pass_rate"] == 1.0
-
-
-def test_regression_alarm_still_fires_on_real_post_graduation_failure() -> None:
-    rows = [
-        _row("t", "capability", True),
-        _row("t", "regression", True),
-        _row("t", "regression", False),
-    ]
-    assert build_report(rows)["regression_alarm"] == ["t"]
-
-
-def test_no_data() -> None:
-    assert build_report([])["no_data"] is True
-
-
-def test_tier_pass_rate() -> None:
-    rows = [_row("a", "regression", True), _row("b", "regression", False)]
-    report = build_report(rows)
-    assert report["tiers"]["regression"]["pass_rate"] == 0.5
+# The report FOLD lives native (fno-agents evals-trend) and is tested in
+# crates/fno-agents/src/evals_trend/tests.rs, denominators included. Python
+# keeps the row reader, graduation, and the health summary.
 
 
 def test_since_folds_recent_only(tmp_path: Path) -> None:
@@ -141,13 +85,14 @@ def _days_ago(n: float) -> str:
 def _quiet_native(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the native summary read so the test never spawns a binary."""
     monkeypatch.setattr(
-        "fno.evals.report._native_summary_reads", lambda _p, _d: ([], [])
+        "fno.evals.report._native_summary_reads", lambda _p, _d: ([], [], None, 0)
     )
 
 
 def test_evals_health_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "fno.evals.report._native_summary_reads", lambda _p, _d: (["r"], [])
+        "fno.evals.report._native_summary_reads",
+        lambda _p, _d: (["r"], [], 0.5, 1),
     )
     hp = tmp_path / "h.jsonl"
     recent = _ts(_NOW - timedelta(hours=1))
@@ -246,7 +191,8 @@ def test_health_summary_reads_the_native_pair(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "fno.evals.report._native_summary_reads", lambda _p, _d: (["r"], ["r"])
+        "fno.evals.report._native_summary_reads",
+        lambda _p, _d: (["r"], ["r"], 1.0, 0),
     )
     hp = tmp_path / "h.jsonl"
     _history.append_row(hp, {**_row("r", "regression", True), "ts": _days_ago(1)})
@@ -371,5 +317,7 @@ def test_fold_symbols_are_gone_from_python() -> None:
     import fno.evals.report as report_module
 
     for gone in ("compare_windows", "window_rows", "graduation_candidates",
-                 "compare_variants", "_pair_verdict", "_common_rev"):
+                 "compare_variants", "_pair_verdict", "_common_rev",
+                 "build_report", "_stats", "_by_task", "TaskStat"):
         assert not hasattr(report_module, gone)
+

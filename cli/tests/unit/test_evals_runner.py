@@ -274,6 +274,138 @@ def test_variant_bad_ref_is_graded_fail_with_ref_name(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# attempt identity + native verdict (x-ecda AC1-HP, AC1-EDGE)
+# --------------------------------------------------------------------------- #
+
+def test_attempt_row_carries_identity_obs_and_native_verdict(tmp_path, monkeypatch) -> None:
+    """Every attempt persists with a unique identity and structured
+    observations; the native verdict labels the row (here canned)."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    monkeypatch.setattr(_runner, "_native_verdict",
+                        lambda row: {"status": "graded", "retryable": False, "graded": True})
+    task = _task(grade=[GradeCheck("file-exists", path="seed.txt")])
+    results = run_task(task, repeat=2, repo_root=root, history_path=hp,
+                       spawn=_never_called_spawn)
+    assert [r.status for r in results] == ["graded", "graded"]
+    rows = [r for _, r in _history.iter_rows_tolerant(hp)]
+    assert len(rows) == 2
+    assert len({r["attempt_id"] for r in rows}) == 2  # unique per attempt
+    assert rows[0]["run_id"] == rows[1]["run_id"]  # same sweep
+    assert all(r["attempt_index"] == 0 for r in rows)
+    assert rows[0]["obs"] == {
+        "fixture_prepared": True, "worker_required": False,
+        "grader_ran": True, "grader_passed": True,
+    }
+    assert rows[0]["status"] == "graded" and rows[0]["retryable"] is False
+
+
+def test_infrastructure_failure_retries_and_persists_both_attempts(tmp_path, monkeypatch) -> None:
+    """AC1-HP: a fixture failure is retryable infrastructure evidence - the
+    retry runs, both attempts stay attributable, neither consumes the slot."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    monkeypatch.setattr(_runner, "_native_verdict",
+                        lambda row: {"status": "infrastructure", "retryable": True})
+    results = run_task(_task(), repeat=1, repo_root=root, history_path=hp,
+                       spawn=_never_called_spawn, variant="v1", variant_ref="no-such-ref",
+                       max_retries=1)
+    assert [r.attempt_index for r in results] == [0, 1]
+    rows = [r for _, r in _history.iter_rows_tolerant(hp)]
+    assert len(rows) == 2
+    assert all(r["obs"]["fixture_prepared"] is False for r in rows)
+    assert all(r["status"] == "infrastructure" for r in rows)
+    assert {r["attempt_id"] for r in rows} == {r.attempt_id for r in results}
+
+
+def test_spawn_failure_then_success_retry_then_pass(tmp_path, monkeypatch) -> None:
+    """AC3-EDGE seed: a failed launch retries, then passes; both attempts
+    remain attributable, the retry is not suppressed, the slot counts once."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    calls = {"n": 0}
+    verdicts = {"n": 0}
+
+    def verdict(row: dict) -> dict:
+        verdicts["n"] += 1
+        return {"status": "unavailable", "retryable": True} if verdicts["n"] == 1 else {
+            "status": "graded", "retryable": False, "graded": True}
+
+    monkeypatch.setattr(_runner, "_native_verdict", verdict)
+
+    def spawn(prompt: str, workdir: Path, timeout_s: int) -> SpawnResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SpawnResult(False, "spawn exit 1: provider down")
+        (workdir / "made.txt").write_text("ok\n", encoding="utf-8")
+        return SpawnResult(True)
+
+    task = _task(prompt="do the thing", grade=[GradeCheck("file-exists", path="made.txt")])
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp, spawn=spawn,
+                       max_retries=1)
+    assert [r.status for r in results] == ["unavailable", "graded"]
+    assert [r.attempt_index for r in results] == [0, 1]
+    rows = [r for _, r in _history.iter_rows_tolerant(hp)]
+    assert [r["status"] for r in rows] == ["unavailable", "graded"]
+    assert rows[0]["retryable"] is True
+    assert rows[1]["pass"] is True and rows[1]["attempt_index"] == 1
+
+
+def test_graded_failure_never_retries(tmp_path, monkeypatch) -> None:
+    """A valid task grade (pass or fail) is final: max_retries never repeats it."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    monkeypatch.setattr(_runner, "_native_verdict",
+                        lambda row: {"status": "graded", "retryable": False, "graded": False})
+    task = _task(grade=[GradeCheck("file-exists", path="missing.txt")])
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp,
+                       spawn=_never_called_spawn, max_retries=3)
+    assert len(results) == 1
+    assert results[0].status == "graded" and not results[0].passed
+    assert len([r for _, r in _history.iter_rows_tolerant(hp)]) == 1
+
+
+def test_unreachable_native_door_persists_unclassified_without_retry(tmp_path, monkeypatch) -> None:
+    """Binary absent: observations still persist (the read side re-asks
+    natively); no verdict means no retry, never a Python-side guess."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    monkeypatch.setattr(_runner, "_native_verdict", lambda row: None)
+    results = run_task(_task(), repeat=1, repo_root=root, history_path=hp,
+                       spawn=_never_called_spawn, max_retries=1)
+    assert results[0].status == ""
+    rows = [r for _, r in _history.iter_rows_tolerant(hp)]
+    assert len(rows) == 1
+    assert "status" not in rows[0]
+    assert rows[0]["obs"]["fixture_prepared"] is True
+    assert rows[0]["obs"]["grader_ran"] is True
+
+
+def test_gate_blocked_attempt_never_retries(tmp_path, monkeypatch) -> None:
+    """A gate refusal is deterministic: max_retries must not burn worktree
+    cycles re-attempting it inside the same sweep."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    monkeypatch.setattr(_runner, "_native_verdict",
+                        lambda row: {"status": "unavailable", "retryable": True})
+    monkeypatch.setattr(_runner, "evals_enabled", lambda: False)
+    task = _task(prompt="x", grade=[GradeCheck("file-exists", path="made.txt")])
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp, max_retries=2)
+    assert len(results) == 1  # no retry
+    assert results[0].status == "unavailable"
+    assert "config.evals.enabled is false" in results[0].reason
+
+
+def test_history_append_attempt_refuses_unattributable_rows(tmp_path) -> None:
+    hp = tmp_path / "h.jsonl"
+    with pytest.raises(ValueError, match="attempt row"):
+        _history.append_attempt(hp, {"task_id": "a", "pass": True})
+    row = {"attempt_id": "x", "run_id": "r", "obs": {"fixture_prepared": True}}
+    _history.append_attempt(hp, row)  # valid identity + evidence: persists
+    assert len([r for _, r in _history.iter_rows_tolerant(hp)]) == 1
+
+
+# --------------------------------------------------------------------------- #
 # small helpers
 # --------------------------------------------------------------------------- #
 

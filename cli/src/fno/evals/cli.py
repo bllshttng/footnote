@@ -136,6 +136,26 @@ def run_command(
     except Exception:  # noqa: BLE001
         repo_root = Path.cwd()
 
+    # A declared cohort split is validated BEFORE any worker call -
+    # membership (unknown ids), overlap, duplicates, and bank-rev staleness
+    # are all one native door call (bank.cohorts_gate).
+    from fno.evals.bank import cohorts_gate
+
+    gate = cohorts_gate(bank_dir, known_ids=[t.id for t in tasks], repo_root=repo_root)
+    if gate.get("ok") is False:
+        for err in gate.get("errors") or ["unknown native cohort door failure"]:
+            typer.echo(f"Error: cohort split refused: {err}", err=True)
+        raise typer.Exit(code=2)
+    if gate and gate.get("bank_unchanged") is False:
+        typer.echo(
+            "Error: cohort split is pinned to a bank rev the bank has changed since; "
+            "redeclare cohorts.yaml against the current bank.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if gate:
+        typer.echo(f"validated cohort split against {gate.get('bank_unchanged') and 'the current bank' or 'its pin'}")
+
     swept = sweep_orphans(repo_root)
     if swept:
         typer.echo(f"swept {swept} orphaned eval worktree(s) from a prior run")
@@ -258,6 +278,151 @@ def macro_command(ctx: typer.Context) -> None:
     if result.stderr:
         typer.echo(result.stderr, nl=False, err=True)
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def _argv_opt(args: list[str], name: str) -> Optional[str]:
+    """Read one ``--name value`` / ``--name=value`` token from a raw argv tail
+    (the x-72fc forwarder shape: transport leaves declare no typer.Options)."""
+    for i, a in enumerate(args):
+        if a == name and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(name + "="):
+            return a[len(name) + 1:]
+    return None
+
+
+@evals_app.command(
+    "export",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def export_command(ctx: typer.Context) -> None:
+    """Export train-cohort history for prompt tuning.
+
+    Argv: export --out FILE [--bank DIR] [--history FILE]. Refuses without a
+    declared, natively valid, bank-current split; writes ONLY train rows, so
+    held-out trajectories never enter a tuning view. The fold is native
+    (fno-agents evals-attempt --export-train).
+    Exit 0 exported / 1 no declared split / 2 refused or setup error."""
+    import json as _json
+    import subprocess as _subprocess
+
+    from fno.evals.bank import COHORTS_FILENAME, BankError, _door_binary, discover_bank
+    from fno.paths import evals_history, resolve_canonical_repo_root
+
+    argv = list(ctx.args)
+    out_val = _argv_opt(argv, "--out")
+    if not out_val:
+        typer.echo("Error: export requires --out FILE", err=True)
+        raise typer.Exit(code=2)
+    bank = Path(bank_val) if (bank_val := _argv_opt(argv, "--bank")) else None
+    history = Path(history_val) if (history_val := _argv_opt(argv, "--history")) else None
+
+    bank_dir = _resolve_bank_dir(bank)
+    if not (bank_dir / COHORTS_FILENAME).exists():
+        typer.echo(
+            f"Error: no declared cohort split in {bank_dir} ({COHORTS_FILENAME}): a tuning "
+            f"export must never be cut from an undeclared bank.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    binary = _door_binary()
+    if binary is None:
+        typer.echo("Error: fno-agents binary not found; the cohort door cannot run.", err=True)
+        raise typer.Exit(code=2)
+    try:
+        tasks = discover_bank(bank_dir)
+    except BankError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        repo_root = resolve_canonical_repo_root()
+    except Exception:  # noqa: BLE001
+        repo_root = Path.cwd()
+    known = _json.dumps([t.id for t in tasks])
+    proc = _subprocess.run(
+        [str(binary), "evals-attempt", "--export-train", "--out", out_val,
+         "--cohorts-yaml", str(bank_dir / COHORTS_FILENAME),
+         "--known-ids", known, "--repo", str(repo_root),
+         "--rows", str(history or evals_history())],
+        capture_output=True, text=True, timeout=60,
+    )
+    try:
+        payload = _json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        payload = {}
+    if payload.get("error"):
+        typer.echo(f"Error: {payload['error']}", err=True)
+        raise typer.Exit(code=2)
+    if proc.returncode != 0:
+        typer.echo(f"Error: export door failed ({proc.returncode})", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(
+        f"exported {payload.get('exported', 0)} train row(s) across "
+        f"{payload.get('train_tasks', 0)} declared task(s) -> {out_val}"
+    )
+
+
+@evals_app.command(
+    "qualify",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def qualify_command(ctx: typer.Context) -> None:
+    """Aggregate held-out qualification results.
+
+    Argv: qualify [--bank DIR] [--history FILE]. Counts and coverage only,
+    never a held-out prompt or trace. The fold is native (fno-agents
+    evals-attempt --aggregate). Reports `{"qualified": false, "reason": ...}`
+    (exit 0) when the split is absent, refused, stale, or has an empty
+    qualification list. Exit 2 = setup error."""
+    import json as _json
+    import subprocess as _subprocess
+
+    from fno.evals.bank import COHORTS_FILENAME, BankError, _door_binary, discover_bank
+    from fno.paths import evals_history, resolve_canonical_repo_root
+
+    argv = list(ctx.args)
+    bank = Path(bank_val) if (bank_val := _argv_opt(argv, "--bank")) else None
+    history = Path(history_val) if (history_val := _argv_opt(argv, "--history")) else None
+
+    bank_dir = _resolve_bank_dir(bank)
+    try:
+        tasks = discover_bank(bank_dir)
+    except BankError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    def _unqualified(reason: str) -> None:
+        typer.echo(_json.dumps({"qualified": False, "reason": reason}, ensure_ascii=False))
+        raise typer.Exit(code=0)
+
+    if not (bank_dir / COHORTS_FILENAME).exists():
+        _unqualified(f"no declared cohort split ({COHORTS_FILENAME})")
+    binary = _door_binary()
+    if binary is None:
+        typer.echo("Error: fno-agents binary not found; the cohort door cannot run.", err=True)
+        raise typer.Exit(code=2)
+    try:
+        repo_root = resolve_canonical_repo_root()
+    except Exception:  # noqa: BLE001
+        repo_root = Path.cwd()
+    proc = _subprocess.run(
+        [str(binary), "evals-attempt", "--aggregate",
+         "--cohorts-yaml", str(bank_dir / COHORTS_FILENAME),
+         "--known-ids", _json.dumps([t.id for t in tasks]),
+         "--repo", str(repo_root),
+         "--rows", str(history or evals_history())],
+        capture_output=True, text=True, timeout=60,
+    )
+    if proc.returncode != 0:
+        typer.echo(f"Error: qualify door failed ({proc.returncode})", err=True)
+        raise typer.Exit(code=2)
+    try:
+        payload = _json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        typer.echo("Error: qualify door returned unreadable output", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(_json.dumps(payload, ensure_ascii=False))
+    raise typer.Exit(code=0)
 
 
 @evals_app.command("graduate")

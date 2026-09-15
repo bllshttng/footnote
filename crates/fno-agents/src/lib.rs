@@ -101,6 +101,7 @@ pub mod distress;
 pub mod drift;
 pub mod envelope;
 pub mod escalation;
+pub mod eval_attempt;
 pub mod evals_arm;
 pub mod evals_macro;
 pub mod evals_trend;

@@ -15,6 +15,7 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +32,7 @@ class SpawnResult:
     ok: bool
     reason: str = ""
     worker_name: str = ""  # set on the real spawn; read back for observe()
+    timed_out: bool = False  # explicit observation; never inferred from reason text
 
 
 # spawn(prompt, workdir, timeout_s) -> SpawnResult
@@ -93,6 +95,9 @@ class RunResult:
     duration_s: float
     repeat_index: int
     variant: str = "baseline"
+    attempt_index: int = 0
+    attempt_id: str = ""
+    status: str = ""  # native verdict; empty when the binary was unreachable
 
 
 VARIANT_RE = re.compile(r"^(baseline|v[1-9]\d*)$")
@@ -177,7 +182,7 @@ def _default_spawn(
     except FileNotFoundError:
         return SpawnResult(False, "spawn failed: `fno` binary not found")
     except subprocess.TimeoutExpired:
-        return SpawnResult(False, f"spawn timed out after {timeout_s}s")
+        return SpawnResult(False, f"spawn timed out after {timeout_s}s", timed_out=True)
     except Exception as exc:  # noqa: BLE001 - any spawn error is a graded fail
         return SpawnResult(False, f"spawn error: {exc}")
     if proc.returncode != 0:
@@ -243,6 +248,21 @@ def sweep_orphans(repo_root: Path) -> int:
     return removed
 
 
+def _native_verdict(row: dict[str, object]) -> Optional[dict[str, object]]:
+    """Ask the native door (fno-agents evals-attempt, stdin classify) to
+    classify one attempt from its structured observations. None when the
+    door is unreachable - the row still persists with its observations, and
+    the read side re-asks natively over the batch. The verdict is NEVER
+    re-derived in Python."""
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        verdict = verb_call("evals-attempt", {"op": "classify", "row": row})
+    except VerbUnavailable:
+        return None
+    return verdict if isinstance(verdict, dict) else None
+
+
 def run_task(
     task: TaskSpec,
     *,
@@ -256,11 +276,15 @@ def run_task(
     lane: Optional[Any] = None,
     experiment_id: Optional[str] = None,
     observe: Optional[Callable[[str], Optional[dict]]] = None,
+    max_retries: int = 0,
 ) -> list[RunResult]:
-    """Run *task* ``repeat`` times, appending one history row per run.
-    Each run: fresh disposable worktree -> optional worker (skipped for a
-    grade-only task) -> mechanical grade -> history row -> worktree removed.
-    A worker-spawn failure is a graded fail; the remaining repeats still run.
+    """Run *task* ``repeat`` times, appending one history row per ATTEMPT.
+    Each attempt: fresh disposable worktree -> optional worker -> mechanical
+    grade -> history row -> worktree removed. Every attempt persists with a
+    unique identity and structured observations; the native verdict labels
+    it graded/infrastructure/unavailable/ungraded. A retryable verdict
+    consumes no completed (case, repeat) slot, so the slot retries up to
+    *max_retries* times; graded task failures never retry.
     A requested *lane* records the requested coordinate; *observe* (default
     _observe_worker) reads back what ran. *experiment_id* is an opaque
     cohort tag recorded on the row."""
@@ -285,62 +309,93 @@ def run_task(
     bank_rev = _git_rev(repo_root, checkout_ref)
     timeout_s = max(1, task.timeout_minutes * 60)
     results: list[RunResult] = []
+    run_id = uuid.uuid4().hex
 
     for i in range(repeat):
-        started = time.monotonic()
-        reason = ""
-        outcome: Optional[GradeOutcome] = None
-        workdir: Optional[Path] = None
-        worker_name = ""
-        spawned = False
-        try:
-            workdir = _make_disposable_worktree(repo_root, checkout_ref, task.id)
-        except subprocess.CalledProcessError as exc:
-            # Fixture checkout failed: graded fail with a drift hint, not a crash.
-            reason = f"fixture checkout failed ({checkout_ref}); fixture drift? {exc.stderr or ''}".strip()
+        for attempt_index in range(max_retries + 1):
+            started = time.monotonic()
+            reason = ""
+            gate_blocked = False
+            spawn_res: Optional[SpawnResult] = None
+            outcome: Optional[GradeOutcome] = None
+            workdir: Optional[Path] = None
+            worker_name = ""
+            spawned = False
+            try:
+                workdir = _make_disposable_worktree(repo_root, checkout_ref, task.id)
+            except subprocess.CalledProcessError as exc:
+                # Fixture checkout failed: graded fail with a drift hint, not a crash.
+                reason = f"fixture checkout failed ({checkout_ref}); fixture drift? {exc.stderr or ''}".strip()
 
-        if workdir is not None:
-            if task.prompt and spawn is None and not evals_enabled():
-                # x-aaaf wave 2: the gate only bites the REAL default spawn -
-                # an injected spawn_fn (tests, or a caller with its own
-                # worker) is an explicit invocation, not autonomous.
-                reason = "config.evals.enabled is false"
-            elif task.prompt:
-                spawn_res = spawn_fn(task.prompt, workdir, timeout_s)
-                worker_name = spawn_res.worker_name
-                if not spawn_res.ok:
-                    reason = spawn_res.reason
-                else:
-                    spawned = True
-            if not reason:
-                outcome = grade(task, workdir)
-                if not outcome.passed:
-                    reason = outcome.reason
-            _remove_worktree(repo_root, workdir)
+            if workdir is not None:
+                if task.prompt and spawn is None and not evals_enabled():
+                    # x-aaaf wave 2: the gate only bites the REAL default spawn -
+                    # an injected spawn_fn (tests, or a caller with its own
+                    # worker) is an explicit invocation, not autonomous.
+                    reason = "config.evals.enabled is false"
+                    gate_blocked = True
+                elif task.prompt:
+                    spawn_res = spawn_fn(task.prompt, workdir, timeout_s)
+                    worker_name = spawn_res.worker_name
+                    if not spawn_res.ok:
+                        reason = spawn_res.reason
+                    else:
+                        spawned = True
+                if not reason:
+                    outcome = grade(task, workdir)
+                    if not outcome.passed:
+                        reason = outcome.reason
+                _remove_worktree(repo_root, workdir)
 
-        observed = observe_fn(worker_name) if spawned and worker_name else None
-        lane_evidence = _lane_evidence(lane, observed, attempted=bool(task.prompt), spawned=spawned)
+            observed = observe_fn(worker_name) if spawned and worker_name else None
+            lane_evidence = _lane_evidence(lane, observed, attempted=bool(task.prompt), spawned=spawned)
 
-        duration = round(time.monotonic() - started, 3)
-        passed = outcome is not None and outcome.passed
-        results.append(RunResult(
-            task_id=task.id, tier=task.tier, passed=passed,
-            reason="" if passed else reason, duration_s=duration, repeat_index=i,
-            variant=variant,
-        ))
-        _history.append_row(history_path, {
-            "ts": _now_iso(),
-            "task_id": task.id,
-            "tier": task.tier,
-            "pass": passed,
-            "reason": "" if passed else reason,
-            "duration_s": duration,
-            "repeat_index": i,
-            "bank_rev": bank_rev,
-            "worker_provider": worker_provider,
-            "variant": variant,
-            "experiment_id": experiment_id,
-            **lane_evidence,
-        })
+            duration = round(time.monotonic() - started, 3)
+            passed = outcome is not None and outcome.passed
+            obs = {
+                "fixture_prepared": workdir is not None,
+                "worker_required": bool(task.prompt),
+                **({"worker_started": spawned} if task.prompt else {}),
+                **({"worker_timed_out": spawn_res.timed_out}
+                   if task.prompt and spawn_res is not None and not spawn_res.ok else {}),
+                **({"gate_blocked": True} if gate_blocked else {}),
+                "grader_ran": outcome is not None,
+                **({"grader_passed": outcome.passed} if outcome is not None else {}),
+            }
+            attempt_id = uuid.uuid4().hex
+            verdict = _native_verdict({"obs": obs, "bank_rev": bank_rev})
+            # The gate is deterministic within this process: retrying a
+            # gate-blocked attempt burns a worktree cycle and changes nothing.
+            retryable = bool(verdict and verdict.get("retryable") and not gate_blocked)
+            row = {
+                "ts": _now_iso(),
+                "task_id": task.id,
+                "tier": task.tier,
+                "pass": passed,
+                "reason": "" if passed else reason,
+                "duration_s": duration,
+                "repeat_index": i,
+                "attempt_index": attempt_index,
+                "attempt_id": attempt_id,
+                "run_id": run_id,
+                "obs": obs,
+                "bank_rev": bank_rev,
+                "worker_provider": worker_provider,
+                "variant": variant,
+                "experiment_id": experiment_id,
+                **lane_evidence,
+            }
+            if verdict is not None:
+                row["status"] = str(verdict.get("status"))
+                row["retryable"] = retryable
+            _history.append_attempt(history_path, row)
+            results.append(RunResult(
+                task_id=task.id, tier=task.tier, passed=passed,
+                reason="" if passed else reason, duration_s=duration, repeat_index=i,
+                variant=variant, attempt_index=attempt_index,
+                attempt_id=attempt_id, status=str(verdict.get("status")) if verdict else "",
+            ))
+            if not retryable or attempt_index >= max_retries:
+                break
 
     return results

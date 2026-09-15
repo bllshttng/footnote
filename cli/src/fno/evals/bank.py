@@ -29,7 +29,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 
@@ -219,6 +219,58 @@ def resolve_lane(name: str, *, settings: object = None):
     return row
 
 
+COHORTS_FILENAME = "cohorts.yaml"
+
+
+def _door_binary():
+    """The native door binary: this checkout's build outranks any installed copy."""
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    return find_dev_binary() or resolve_binary()
+
+
+def cohorts_gate(
+    bank_dir: Path,
+    *,
+    known_ids: Optional[list[str]] = None,
+    repo_root: Optional[Path] = None,
+) -> dict[str, Any]:
+    """One native door call for a run gate: load `cohorts.yaml`, validate
+    membership against *known_ids*, and (with *repo_root*) check the bank
+    rev. `None` = no declared split. Fail-closed: an unreachable door is a
+    refusal, never a silent pass."""
+    import json
+    import subprocess
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    path = bank_dir / COHORTS_FILENAME
+    if not path.exists():
+        return {}
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        return {"ok": False, "errors": ["native cohort door unreachable: fno-agents binary not found"]}
+    argv = [str(binary), "evals-attempt", "--cohorts-yaml", str(path)]
+    if known_ids is not None:
+        argv += ["--known-ids", json.dumps(known_ids)]
+    if repo_root is not None:
+        argv += ["--repo", str(repo_root)]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except Exception as exc:  # noqa: BLE001 - a failed door read refuses
+        return {"ok": False, "errors": [f"native cohort door failed: {exc}"]}
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "door failed").strip().splitlines()[-1:]
+        return {"ok": False, "errors": [f"native cohort door refused: {tail[0]}"]}
+    try:
+        verdict = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"ok": False, "errors": ["native cohort door returned unreadable output"]}
+    if not isinstance(verdict, dict) or "ok" not in verdict:
+        return {"ok": False, "errors": ["native cohort door returned an unexpected shape"]}
+    return verdict
+
+
 def discover_bank(bank_dir: Path) -> list[TaskSpec]:
     """Load every ``*.yaml`` under *bank_dir*, sorted by id.
 
@@ -229,6 +281,8 @@ def discover_bank(bank_dir: Path) -> list[TaskSpec]:
     _require(bank_dir.is_dir(), f"bank directory not found: {bank_dir}")
     tasks: dict[str, TaskSpec] = {}
     for yaml_path in sorted(bank_dir.glob("*.yaml")):
+        if yaml_path.name == COHORTS_FILENAME:
+            continue  # the cohort declaration is not a task
         task = load_task(yaml_path)
         if task.id in tasks:
             raise BankError(

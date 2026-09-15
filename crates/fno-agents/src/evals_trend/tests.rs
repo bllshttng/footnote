@@ -309,3 +309,114 @@ fn consecutive_alone_does_not_enable_graduation() {
 fn usage_error_exits_2() {
     assert_eq!(run_evals_trend(&[]), 2);
 }
+
+// --- attempt-aware denominators + the planned view (x-ecda) ----------------
+
+fn modern_row_json(task_id: &str, tier: &str, passed: bool, ts: &str, attempt: usize) -> String {
+    json!({
+        "ts": ts, "task_id": task_id, "tier": tier, "pass": passed,
+        "attempt_index": attempt,
+        "obs": {"fixture_prepared": true, "worker_required": false,
+                 "grader_ran": true, "grader_passed": passed},
+    })
+    .to_string()
+}
+
+fn infra_row_json(task_id: &str, tier: &str, ts: &str) -> String {
+    json!({
+        "ts": ts, "task_id": task_id, "tier": tier, "pass": false,
+        "obs": {"fixture_prepared": false, "worker_required": true},
+    })
+    .to_string()
+}
+
+#[test]
+fn report_infra_attempt_never_dilutes_the_pass_rate() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            modern_row_json("t", "regression", true, &ts_rfc(1.0, now), 0),
+            infra_row_json("t", "regression", &ts_rfc(1.1, now)),
+        ],
+    );
+    let rows = read_rows(&h, Some("baseline"), None);
+    let report = report_fold(&rows, 7, now, None, None);
+    let t = &report["tasks"][0];
+    assert_eq!(t["runs"], 2);
+    assert_eq!(t["grades"], 1);
+    assert_eq!(t["passes"], 1);
+    assert_eq!(t["pass_at_1"], serde_json::json!(1.0)); // not 0.5
+    assert_eq!(t["attempts"]["infrastructure"], 1);
+    assert_eq!(t["legacy_fold"], false);
+    assert!(report["regression_alarm"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn report_all_legacy_segment_keeps_the_boolean_fold() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            row_json("old", "regression", true, &ts_rfc(2.0, now)),
+            row_json("old", "regression", false, &ts_rfc(1.0, now)),
+        ],
+    );
+    let rows = read_rows(&h, Some("baseline"), None);
+    let report = report_fold(&rows, 7, now, None, None);
+    let t = &report["tasks"][0];
+    assert_eq!(t["runs"], 2);
+    assert_eq!(t["grades"], 0);
+    assert_eq!(t["passes"], 1);
+    assert_eq!(t["pass_at_1"], serde_json::json!(0.5));
+    assert_eq!(t["legacy_fold"], true);
+    // The old boolean fold still fires the regression alarm.
+    assert_eq!(report["regression_alarm"], serde_json::json!(["old"]));
+}
+
+#[test]
+fn report_planned_view_exposes_missing_attempts() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            modern_row_json("t", "regression", true, &ts_rfc(1.0, now), 0),
+            // planned q2 never ran
+        ],
+    );
+    let rows = read_rows(&h, Some("baseline"), None);
+    let mut planned = BTreeMap::new();
+    planned.insert("t".to_string(), 2usize);
+    planned.insert("q2".to_string(), 1usize);
+    let report = report_fold(&rows, 7, now, None, Some(&planned));
+    let tasks = report["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 1); // a rowless planned task stays visible only via --planned
+    let t = &tasks[0];
+    assert_eq!(t["expected_attempts"], 2);
+    assert_eq!(t["missing_attempts"], 1);
+    assert_eq!(t["completion"], serde_json::json!(0.5));
+}
+
+#[test]
+fn planned_bad_json_is_usage() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[row_json("t", "regression", true, &ts_rfc(1.0, now))],
+    );
+    let out = run_evals_trend(&[
+        "--history".into(),
+        h,
+        "--mode".into(),
+        "report".into(),
+        "--planned".into(),
+        "{not json".into(),
+        "--now".into(),
+        now.to_rfc3339(),
+    ]);
+    assert_eq!(out, 2);
+}
