@@ -163,6 +163,21 @@ fn main() {
     if args.first().map(String::as_str) == Some("context-run") {
         std::process::exit(fno_agents::context_run::run_context_run(&args[1..]));
     }
+    // `hook` (x-09d2): the per-turn hooks as native entries. Transport, not a
+    // client verb - dispatched here so the runtime never builds for a fire
+    // that answers in microseconds, and the verb-surface ratchet never sees
+    // it (shrink law d-fe66560a).
+    if args.first().map(String::as_str) == Some("hook") {
+        let code = match args.get(1).map(String::as_str) {
+            Some("king-guard") => fno_agents::hook::king_guard::run(&args[2..]),
+            Some("stop") => fno_agents::hook::stop::run(&args[2..]),
+            other => {
+                eprintln!("fno-agents hook: unknown entry {other:?}; expected king-guard or stop");
+                2
+            }
+        };
+        std::process::exit(code);
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

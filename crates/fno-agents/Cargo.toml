@@ -112,6 +112,10 @@ serde_yaml_ng = "0.10"
 # Typed argv for the migrated client verbs: one derive declaration
 # per flag replaces the per-verb hand-rolled scans.
 clap = { version = "4", features = ["derive"] }
+# The king guard's Bash write tokenizer (x-09d2): the same POSIX word split
+# the shell policy's Python `shlex.split` applied. Already in Cargo.lock
+# transitively, so no new build artifact.
+shlex = "1"
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }

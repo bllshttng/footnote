@@ -1561,7 +1561,7 @@ fn handoff_cost_line(cwd: &Path, transcript_uuid: &str) -> String {
 /// Pure-Rust resolution: it never shells `fno`, so the verb keeps its Python-CLI
 /// independence (it only ever runs the in-package metric modules via
 /// `python3 -m`).
-fn resolve_handoffs_dir(
+pub(crate) fn resolve_handoffs_dir(
     override_dir: Option<&Path>,
     settings_override: Option<&Path>,
     cwd: &Path,
@@ -1723,7 +1723,11 @@ fn read_path_setting(path: &Path, key: &str) -> Option<String> {
 /// Expand `~` and `{project}` in a handoffs_dir template. Returns None when the
 /// result still contains an unresolved `{...}` token (e.g. `{vault}`), so the
 /// caller falls back rather than writing to a literal-brace path.
-fn expand_handoffs_template(raw: &str, home: Option<&Path>, project: &str) -> Option<PathBuf> {
+pub(crate) fn expand_handoffs_template(
+    raw: &str,
+    home: Option<&Path>,
+    project: &str,
+) -> Option<PathBuf> {
     let mut s = raw.to_string();
     // Cannot expand a leading ~ without a home; return None so the caller falls
     // back to the default dir rather than writing to a literal "~..." path

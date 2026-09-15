@@ -136,6 +136,7 @@ pub mod graph_store;
 pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod heal;
+pub mod hook;
 pub mod honesty_sweep;
 mod identity;
 pub mod interrupt_classify;
