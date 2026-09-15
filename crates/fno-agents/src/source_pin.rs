@@ -702,14 +702,29 @@ fn parse_resolve_args(args: &[String]) -> Result<ResolveArgs, String> {
     };
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--override" => p.override_path = Some(require(args, i, "--override")?),
-            "--env-source" => p.env_source = Some(require(args, i, "--env-source")?),
-            "--cache" => p.cache = Some(require(args, i, "--cache")?),
-            "--candidate" => p.candidate_paths.push(require(args, i, "--candidate")?),
+        // A no-value flag advances by one; a value flag consumes two tokens.
+        let advance = match args[i].as_str() {
+            "--override" => {
+                p.override_path = Some(require(args, i, "--override")?);
+                2
+            }
+            "--env-source" => {
+                p.env_source = Some(require(args, i, "--env-source")?);
+                2
+            }
+            "--cache" => {
+                p.cache = Some(require(args, i, "--cache")?);
+                2
+            }
+            "--candidate" => {
+                p.candidate_paths.push(require(args, i, "--candidate")?);
+                2
+            }
+            // stdout is only the resolve JSON; the flag is accepted for parity.
+            "--json" | "-J" => 1,
             other => return Err(format!("unknown flag: {other}")),
-        }
-        i += 2;
+        };
+        i += advance;
     }
     Ok(p)
 }
@@ -1131,5 +1146,35 @@ mod tests {
         let m = base.path().join("pin.json");
         let err = record_from_str("{}", c.to_str().unwrap(), m.to_str().unwrap());
         assert!(err.is_err());
+    }
+
+    /// The resolve parser accepts the parity flag, and a no-value flag must
+    /// not swallow the token after it.
+    #[test]
+    fn resolve_parse_accepts_both_json_spellings() {
+        let p = parse_resolve_args(&["--cache".to_string(), "c.json".to_string()]).unwrap();
+        assert_eq!(p.cache.as_deref(), Some("c.json"));
+
+        let short = parse_resolve_args(&[
+            "-J".to_string(),
+            "--cache".to_string(),
+            "c.json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(short.cache.as_deref(), Some("c.json"));
+
+        let long = parse_resolve_args(&[
+            "--json".to_string(),
+            "--cache".to_string(),
+            "c.json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(long.cache.as_deref(), Some("c.json"));
+
+        let err = match parse_resolve_args(&["--bogus".to_string()]) {
+            Ok(_) => panic!("bogus flag parsed"),
+            Err(e) => e,
+        };
+        assert!(err.contains("unknown flag"), "err was {err}");
     }
 }

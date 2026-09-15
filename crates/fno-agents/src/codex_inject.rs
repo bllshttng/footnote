@@ -1034,6 +1034,8 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
                 audit_origin = it.next().cloned();
             }
             "--audit-self-send" => audit_self_send = true,
+            // stdout is only the delivery JSON; the flag is accepted for parity.
+            "--json" | "-J" => {}
             other => {
                 eprintln!("review-start: unknown flag: {other}");
                 return 2;
@@ -2185,6 +2187,15 @@ mod tests {
             result.unwrap_err(),
             ReviewStartError::Reason("not-confirmed")
         );
+    }
+
+    /// Parse layer only: with -J and --session missing, the refusal names the
+    /// missing argument, and the flag itself never reaches delivery.
+    #[tokio::test]
+    async fn review_start_accepts_the_json_flag_at_the_parse_layer() {
+        assert_eq!(run_review_start(&["-J".to_string()]).await, 2);
+        assert_eq!(run_review_start(&["--json".to_string()]).await, 2);
+        assert_eq!(run_review_start(&["--bogus".to_string()]).await, 2);
     }
 
     #[test]

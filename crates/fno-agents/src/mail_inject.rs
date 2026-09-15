@@ -316,6 +316,8 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 }
                 enter_delay_ms = Some(value);
             }
+            // stdout is only the outcome JSON; the flag is accepted for parity.
+            "--json" | "-J" => {}
             other => {
                 return Err((2, format!("mail-inject: unknown flag: {other}")));
             }
@@ -2413,6 +2415,17 @@ mod tests {
             2,
             "no --session is an error even with other flags"
         );
+    }
+
+    #[test]
+    fn parse_args_accepts_both_json_spellings() {
+        // stdout is only the outcome JSON, so the flag is a no-op arm; with a
+        // required argument missing the refusal names the argument, not -J.
+        assert!(parse_args(&argv(&["--session", "a1b2c3d4", "-J"])).is_ok());
+        let (code, msg) = parse_args(&argv(&["-J"])).unwrap_err();
+        assert_eq!(code, 2);
+        assert!(msg.contains("--session"), "msg was {msg}");
+        assert!(!msg.contains("-J"), "msg was {msg}");
     }
 
     #[test]

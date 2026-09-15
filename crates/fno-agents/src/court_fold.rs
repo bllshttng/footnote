@@ -612,6 +612,11 @@ pub fn run_court_fold(args: &[String]) -> i32 {
                 format = args[i + 1].clone();
                 i += 2;
             }
+            // -J and --format json select the same bytes.
+            "--json" | "-J" => {
+                format = "json".to_string();
+                i += 1;
+            }
             other => {
                 eprintln!("fno-agents court-fold: unknown flag {other}");
                 eprintln!(
@@ -1040,5 +1045,39 @@ mod tests {
         let nodes = fold["scope_nodes"]["e-1"]["nodes"].as_array().unwrap();
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[1]["id"], "x-1");
+    }
+
+    /// -J and `--format json` select the same bytes; the flag never reaches
+    /// the unknown-flag refusal.
+    #[test]
+    fn the_short_json_spelling_selects_the_json_format() {
+        let dir = tempfile::tempdir().unwrap();
+        // The run path resolves the state root; keep the test hermetic.
+        std::env::set_var(crate::paths::HOME_ENV, dir.path());
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::to_string(&json!({"entries": [
+                {"id": "e-1", "type": "epic", "status": "in_progress", "title": "Epic",
+                 "slug": "e-1", "priority": "p2", "created_at": "2026-09-11T00:00:00+00:00"}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let args = vec![
+            "--graph".to_string(),
+            graph.display().to_string(),
+            "--cwd".to_string(),
+            dir.path().display().to_string(),
+            "--crowns-json".to_string(),
+            "[]".to_string(),
+        ];
+        let mut short = args.clone();
+        short.push("-J".to_string());
+        let mut long = args;
+        long.push("--format".to_string());
+        long.push("json".to_string());
+        assert_eq!(run_court_fold(&short), 0);
+        assert_eq!(run_court_fold(&long), 0);
     }
 }
