@@ -391,12 +391,12 @@ fn r_escalations(cwd: &Path, folded: &Result<Value, String>) -> Result<Value, St
         if note.status != "open" {
             continue;
         }
-        open += 1;
         if let Some(node) = &note.node {
             if !scope_ids.contains(node.as_str()) {
                 continue;
             }
         }
+        open += 1;
         let state = if crate::escalation::overdue(&note, now) {
             overdue += 1;
             match (
@@ -405,14 +405,10 @@ fn r_escalations(cwd: &Path, folded: &Result<Value, String>) -> Result<Value, St
                 note.recommend,
             ) {
                 ("irreversible", _, _) => "overdue: waits (irreversible)".to_string(),
-                (_, "take-recommended", Some(n)) => {
+                (_, "take-recommended", Some(n)) if n >= 1 => {
                     format!("overdue: take option {n} and record it")
                 }
-                (_, "wait", _) => "overdue: waits (on_silence wait)".to_string(),
-                _ => format!(
-                    "overdue: take option {} and record it",
-                    note.recommend.unwrap_or(0)
-                ),
+                _ => "overdue: waits (on_silence wait)".to_string(),
             }
         } else {
             "open".to_string()
@@ -1505,13 +1501,25 @@ mod tests {
             std::fs::write(
                 dir.join("20260901-0901-b.md"),
                 escalation_note("x-2", "irreversible", "wait", 1, past),
-            );
+            )
+            .unwrap();
+            // Out of scope: counted and printed by neither.
+            std::fs::write(
+                dir.join("20260901-0902-c.md"),
+                escalation_note("x-outside", "money-security", "wait", 1, past),
+            )
+            .unwrap();
+            // A malformed note (take-recommended, no recommend) reads as a
+            // wait, never "take option 0".
+            let malformed = escalation_note("x-3", "money-security", "take-recommended", 2, past)
+                .replace("recommend: 2\n", "");
+            std::fs::write(dir.join("20260901-0903-d.md"), malformed).unwrap();
             let folded = Ok(json!({
-                "fold": {"nodes": [{"id": "x-1"}, {"id": "x-2"}]}
+                "fold": {"nodes": [{"id": "x-1"}, {"id": "x-2"}, {"id": "x-3"}]}
             }));
             let reading = r_escalations(&repo, &folded).unwrap();
-            assert_eq!(reading["open"], 2);
-            assert_eq!(reading["overdue"], 2);
+            assert_eq!(reading["open"], 3);
+            assert_eq!(reading["overdue"], 3);
             let rows = reading["rows"].as_array().unwrap();
             assert!(
                 rows.iter().any(|r| r["state"]
@@ -1524,6 +1532,23 @@ mod tests {
                 rows.iter()
                     .any(|r| r["state"].as_str().unwrap() == "overdue: waits (irreversible)"),
                 "{rows:?}"
+            );
+            assert!(
+                rows.iter()
+                    .any(|r| r["state"].as_str().unwrap() == "overdue: waits (on_silence wait)"),
+                "{rows:?}"
+            );
+            assert!(
+                !rows
+                    .iter()
+                    .any(|r| r["state"].as_str().unwrap().contains("option 0")),
+                "{rows:?}"
+            );
+            assert!(
+                !rows
+                    .iter()
+                    .any(|r| r["title"].as_str().unwrap().contains("outside")),
+                "out-of-scope notes print no row: {rows:?}"
             );
         });
         let _ = std::fs::remove_dir_all(&base);
