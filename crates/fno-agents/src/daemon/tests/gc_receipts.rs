@@ -4795,3 +4795,8 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
 /// fixtures above are the shared seams.
 #[path = "gc_receipts/blueprint_retirement.rs"]
 mod blueprint_retirement;
+
+/// The retirement-keeps-the-session families: the production active-surface
+/// seam runs for real against a fake `claude` on PATH.
+#[path = "gc_receipts/retire_keeps_session.rs"]
+mod retire_keeps_session;
