@@ -840,7 +840,7 @@ def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
     assert entry.get("pr_number") is None
 
 
-# -- Operator-authority audit tag (ab-0b230fd8) --
+# -- Superuser-authority audit tag (ab-0b230fd8) --
 #
 # The top-level `fno done` verb mirrors `graph/cli.py::cmd_done`: when an
 # operator holds a drive window, a fresh completion emits

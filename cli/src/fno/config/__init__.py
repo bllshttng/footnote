@@ -3878,7 +3878,7 @@ class ConfigBlock(BaseModel):
     context: ContextBlock = Field(default_factory=ContextBlock)
     # Repo-wide ship-gate probes join plan `done_probes`; both must pass. A
     # probe is an OBSERVATION running `sh -c` in the session cwd, so the list
-    # stays gitignored and operator-authored: a tracked one runs code on clone.
+    # stays gitignored and superuser-authored: a tracked one runs code on clone.
     done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
     test: TestBlock = Field(default_factory=TestBlock)

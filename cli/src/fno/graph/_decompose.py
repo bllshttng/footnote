@@ -54,7 +54,7 @@ class NormalizedGroup(TypedDict):
     dispatched `/think` + `/blueprint` design pass rather than inline-fill - set
     it for a group that owns a feasibility spike, carries unresolved epic Open
     Questions, or introduces a novel subsystem. The decompose invocation is the
-    operator consent for that spawn (Locked Decision 3); the RunState cap + daily
+    superuser consent for that spawn (Locked Decision 3); the RunState cap + daily
     ceiling still bound it.
     """
 

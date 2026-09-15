@@ -1090,7 +1090,7 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
 
 
 def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
-    """An explicit provider (or model) stays operator authority: the grid is a
+    """An explicit provider (or model) stays superuser authority: the grid is a
     default route only."""
     captured, fake_run = _fake_spawn_run("sid-pin1")
 

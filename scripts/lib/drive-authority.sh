@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/lib/drive-authority.sh
-# Operator-authority enforcement seam (Phase 6 Wave 8, cv-b36e32b1).
+# Superuser-authority enforcement seam (Phase 6 Wave 8, cv-b36e32b1).
 #
 # When an operator holds an interactive/step/paranoid drive window on any agent
 # (design LD3/LD29), the bytes flowing into that agent's PTY were authored by
@@ -44,7 +44,7 @@
 # cost of not refusing an operator-typed promise on a genuinely-driven session.
 
 # drive_authority_active
-#   rc 0  an operator authority window is open ON THIS SESSION'S AGENT
+#   rc 0  a superuser authority window is open ON THIS SESSION'S AGENT
 #         (a window whose short_id == $FNO_AGENTS_SELF_SHORT_ID)
 #   rc 1  no such window, OR self-identity unknown / fno|jq absent (fail-open)
 #

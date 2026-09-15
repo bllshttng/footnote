@@ -193,7 +193,7 @@ The daemon's `agent.watch` RPC is the subscription face of that registry. It ser
 
 ### Mail origin and crown are separate axes
 
-Mail `origin` is a channel claim and is floored to `peer` whenever the caller has an agent identity. A crown is ambient sender standing. The renderer uses the sender's full session ID to read its live registry row. The message cannot assert a crown with an origin value, body text, or flag. The trailer reports that verified rung and scope separately from the content's warrant. It never implies operator authority, and the recipient can still challenge the ruling. An unreadable registry grants no crown.
+Mail `origin` is a channel claim and is floored to `peer` whenever the caller has an agent identity. A crown is ambient sender standing. The renderer uses the sender's full session ID to read its live registry row. The message cannot assert a crown with an origin value, body text, or flag. The trailer reports that verified rung and scope separately from the content's warrant. It never implies superuser authority, and the recipient can still challenge the ruling. An unreadable registry grants no crown.
 
 ### Registry row removal is never silent
 

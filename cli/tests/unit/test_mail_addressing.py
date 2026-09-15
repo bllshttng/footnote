@@ -269,7 +269,7 @@ def test_the_cli_refuses_a_body_supplying_its_own_attribution(
     through untouched, so a guard that knew only the first let a handcrafted
     peer-attributed order be typed at a worker's pane with no envelope of ours
     and no audit row. The pane is where a forged attribution does the most
-    damage: it is indistinguishable there from an operator typing.
+    damage: it is indistinguishable there from a superuser typing.
 
     Case-insensitive, for the reason the fno_mail check already is: an
     exact-case guard falls to one capital letter.

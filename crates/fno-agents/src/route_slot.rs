@@ -1228,7 +1228,7 @@ fn resolve_slot_walk(payload: &Value) -> Value {
 
     chain.extend(prefix);
 
-    // A typed model/vendor/route flag is an operator pin (operator authority)
+    // A typed model/vendor/route flag is an operator pin (superuser authority)
     // and outranks the lanes under both grid and strict routing: it never
     // borrows a lane's harness or capacity. The check sits before the
     // empty-slot refusal so a pin on a laneless verb lands instead of

@@ -1972,7 +1972,7 @@ def _claim_marker(path):
 
     unlink() IS the claim, not a cleanup afterwards. Two concurrent hook
     processes both pass a plain exists()/stat check, so `missing_ok=True` would
-    let both authorize a merge from one operator approval - the loser here gets
+    let both authorize a merge from one superuser approval - the loser here gets
     ENOENT instead. Guarded because an unguarded raise out of a PreToolUse hook
     fails OPEN on the very gate it was protecting."""
     try:

@@ -2482,7 +2482,7 @@ def test_record_decision_refuses_agent_operator_authority_before_either_write(
     # the refusal-state contents below are meaningful rather than an unread probe.
     written = record_decision(
         subject="pr-923",
-        decision="operator-authored ruling",
+        decision="superuser-authored ruling",
         authority_source="operator",
         events_root=root,
     )
@@ -2587,7 +2587,7 @@ def test_backlog_decide_still_refuses_operator_authority_before_any_write(
             "--subject",
             "pr-923",
             "--decision",
-            "operator-authored ruling",
+            "superuser-authored ruling",
             "--authority",
             "operator",
         ],
@@ -2623,7 +2623,7 @@ def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
             "--subject",
             "pr-923",
             "--decision",
-            "claim operator authority",
+            "claim superuser authority",
             "--authority",
             "operator",
         ],
@@ -2648,7 +2648,7 @@ def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
             "--subject",
             "pr-923",
             "--decision",
-            "operator-authored ruling",
+            "superuser-authored ruling",
             "--authority",
             "operator",
         ],
@@ -2669,7 +2669,7 @@ def test_no_identity_explicit_operator_authority_records(
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Kept, with the terminal now pinned. The operator lane stays open to a
+    """Kept, with the terminal now pinned. The superuser lane stays open to a
     person who states their authority; only the silent inheritance closed."""
     from fno import decide as decide_mod
     monkeypatch.setattr(
@@ -3458,7 +3458,7 @@ def test_agent_session_is_still_refused_operator_authority(monkeypatch):
 
     This is the property x-4155 must not break while making law reachable. The
     mechanism that makes law unforgeable is the same one that made it feel
-    unreachable, so a later attempt to open up the operator lane will land in
+    unreachable, so a later attempt to open up the superuser lane will land in
     `_resolve_decider`. If this test goes green after such a change, the change
     forged law. Inverting the guard locally must make this fail.
     """

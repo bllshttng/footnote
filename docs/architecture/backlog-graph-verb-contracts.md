@@ -795,7 +795,7 @@ Spawn width-bounded joiners into a held node's worktree.
     difficulty to nothing precisely so it picks the lane HERE, where live
     capacity is readable - the spawned argv's explicit --harness can never
     trigger the spawn-CLI grid. Only a fully unpinned spawn defers (an explicit
-    model or provider stays operator authority); unknown capacity falls back to
+    model or provider stays superuser authority); unknown capacity falls back to
     the caller's defaults (Locked 10: routing degrades, never blocks a spawn).
     Dispatch sites that make HARNESS-KEYED decisions before spawning (lane
     worktree placement) must call this first and thread the result through
