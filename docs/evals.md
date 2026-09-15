@@ -83,16 +83,25 @@ The default report's regression alarm reads the recent window too. A 50-day-old 
 
 An **attempt** is one planned execution of a (task, repeat) slot. A **grade** is a valid task verdict: the grader ran and returned a result. They are separate things, and the report keeps them separate.
 
-Every attempt persists as one history row with a unique `attempt_id` and an `obs` block of structured observations (fixture prepared, worker started, grader ran, grader result). The `fno-agents evals-attempt` door classifies each row from those observations alone: `graded` (a valid task grade), `infrastructure` (fixture never prepared; retryable), `unavailable` (worker lost: spawn refused, timeout, cancellation, gate; retryable), `ungraded` (worker ran, no grader result; retryable), or `legacy` (no structured evidence). Legacy rows are never reinterpreted, and a task whose rows are all legacy keeps the pre-attempt boolean fold, so old history keeps its alarm semantics.
+Every attempt persists as one history row. The row carries a unique `attempt_id` and an `obs` block of structured observations: fixture prepared, worker started, grader ran, grader result. The `fno-agents evals-attempt` door classifies each row from those observations alone. The verdicts:
 
-Only infrastructure and unavailable verdicts are retryable (`run` retries via its `max_retries`). A graded failure is a final answer, not a plumbing problem: it never retries and never consumes a retry. Rows carry the raw `reason` strings; nothing classifies by text matching.
+- `graded` - a valid task grade, pass or fail
+- `infrastructure` - the fixture never prepared (retryable)
+- `unavailable` - the worker was lost: spawn refused, timeout, cancellation, or the gate (retryable)
+- `ungraded` - the worker ran but produced no grader result (retryable)
+- `legacy` - no structured evidence
 
-The report never lets a plumbing failure dilute the headline. A modern task's `pass@1` divides passes by **valid grades**; infrastructure, unavailable, and ungraded attempts stay visible in `attempts` and in `runs`. A task's rows are never dropped: with `--planned '{"task": N}'` the report also shows `expected_attempts`, `missing_attempts`, and `completion`, so unrun work can never improve the picture.
+Legacy rows are never reinterpreted. A task whose rows are all legacy keeps the pre-attempt boolean fold, so old history keeps its alarm semantics.
 
-**Declared cohorts** live in `evals/bank/cohorts.yaml`: `bank_rev` (the pinned revision) plus `train`, `validation`, and `qualification` id lists. The split is validated natively (existence against the bank, uniqueness, disjointness) before any worker call, and again at export and qualification time, fail-closed: an unreachable door refuses. When the bank files change after the pin, a split pinned to that rev is void. Redeclare it. Nothing infers a percentage split from a tiny bank: no declaration, no held-out claim.
+Only infrastructure and unavailable verdicts are retryable (`run` retries via its `max_retries`). A graded failure is a final answer, not a plumbing problem. It never retries and never consumes a retry. Rows carry the raw `reason` strings. Nothing classifies by text matching.
+
+The report never lets a plumbing failure dilute the headline. A modern task's `pass@1` divides passes by **valid grades**. Infrastructure, unavailable, and ungraded attempts stay visible in `attempts` and in `runs`. No task's rows are dropped: with `--planned '{"task": N}'` the report also shows `expected_attempts`, `missing_attempts`, and `completion`. Unrun work can never improve the picture.
+
+**Declared cohorts** live in `evals/bank/cohorts.yaml`: `bank_rev` (the pinned revision) plus `train`, `validation`, and `qualification` id lists. The split is validated natively before any worker call: existence against the bank, uniqueness, disjointness. Export and qualification validate again, fail-closed. An unreachable door refuses. When the bank files change after the pin, a split pinned to that rev is void. Redeclare it. Nothing infers a percentage split from a tiny bank: no declaration, no held-out claim.
 
 - `fno doctor evals export --out FILE` writes ONLY train-cohort rows (tagged `role: train`) for prompt tuning. It refuses without a declared, valid, bank-current split. Held-out prompts and trajectories never enter a tuning view.
-- `fno doctor evals qualify` prints the allowed aggregate projection for the qualification cohort: coverage (declared vs tasks with valid grades), passes over valid grades, attempt breakdown, and `wrong_rev`/`legacy` exclusions. A missing split, an empty qualification list, or a stale pin reports `{"qualified": false, "reason": ...}` honestly. It never prints a held-out prompt, trace, or per-attempt row.
+- `fno doctor evals qualify` prints the allowed aggregate projection for the qualification cohort: coverage, passes over valid grades, attempt breakdown, and `wrong_rev`/`legacy` exclusions. A missing split, an empty qualification list, or a stale pin reports `{"qualified": false, "reason": ...}` honestly. It never prints a held-out prompt, trace, or per-attempt row.
+
 ## Run cadence and demand
 
 A **lane** is a NAME joined against the existing `config.routing.models` inventory (harness, model, effort, route, account). `agents.profiles.*.lanes` already references these same rows. This is never a second model/effort enum. An unknown lane name refuses and lists the declared lanes. A lane that config never declared cannot be requested.
