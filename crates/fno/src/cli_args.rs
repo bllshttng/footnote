@@ -272,6 +272,12 @@ fn map_matches(m: &clap::ArgMatches, args: &[OsString]) -> FrontDoor {
         Some(("version", s)) => FrontDoor::Version {
             json: s.get_flag("json"),
         },
+        // Bare `fno` (no flags, no subcommand) is the attach the client runs:
+        // the picker when nothing is pinned, the nested guard otherwise.
+        None if args.is_empty() => FrontDoor::Attach {
+            name: None,
+            explicit_socket: false,
+        },
         _ => FrontDoor::Forward,
     }
 }
@@ -313,6 +319,20 @@ mod tests {
                 sub.get_name()
             );
         }
+    }
+
+    #[test]
+    fn bare_fno_is_the_attach() {
+        // No argv at all is the bare attach (the picker or the nested
+        // guard decides downstream); a bare `--` still forwards.
+        assert_eq!(
+            classify(&[]),
+            FrontDoor::Attach {
+                name: None,
+                explicit_socket: false
+            }
+        );
+        assert_eq!(classify(&os(&["--"])), FrontDoor::Forward);
     }
 
     #[test]
