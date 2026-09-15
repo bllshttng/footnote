@@ -439,5 +439,70 @@ else
   fail "an Edit, Write, or Bash activity payload returned non-zero"
 fi
 
+# Checkout staleness lines (AC2-*). A stub fno-agents keeps this test
+# independent of whether CI built the Rust change; the verb's own unit tests
+# cover the answer. The carrier is pointed at a temp main checkout through
+# CLAUDE_PROJECT_DIR, the same resolution the real hook gets from Claude.
+CHK_PROJECT="$TMP_DIR/chk-project"
+git init -q "$CHK_PROJECT"
+git -C "$CHK_PROJECT" commit -q --allow-empty -m init
+CHK_WT="$TMP_DIR/chk-worktree"
+git -C "$CHK_PROJECT" worktree add -q "$CHK_WT" -b chk-wt-branch
+CHK_SHIM_DIR="$TMP_DIR/fno-agents-shim"
+make_fno_agents_shim() {
+  mkdir -p "$CHK_SHIM_DIR"
+  cat >"$CHK_SHIM_DIR/fno-agents" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null 2>&1 || true
+printf '%s' '$1'
+EOF
+  chmod +x "$CHK_SHIM_DIR/fno-agents"
+}
+run_carrier_at() {
+  printf '{"cwd":"%s","session_id":"self-session"}' "$1" \
+    | FNO_HOME="$TMP_DIR/fno-home" PATH="$CHK_SHIM_DIR:$FNO_SHIM_DIR:$PATH" \
+        CLAUDE_PROJECT_DIR="$1" bash "$CARRIER" 2>/dev/null
+}
+
+reset_live
+touch "$LIVE_DIR/self-session"
+make_fno_agents_shim '{"default_branch":"main","head_branch":"main","behind":3,"blocking":["a.sh"],"dirty":["a.sh"]}'
+out="$(run_carrier_at "$CHK_PROJECT")"; rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"3 commit(s) behind origin/main"* \
+      && "$out" == *"[fno-checkout-behind]"* \
+      && "$out" == *"a.sh"* && "$out" == *"[fno-checkout-ff-blocked]"* ]]; then
+  pass "stale main checkout surfaces behind + fast-forward-blocked lines"
+else
+  fail "checkout staleness: rc=$rc out=[$out]"
+fi
+
+# A linked worktree is behind by design; the carrier stays silent about it.
+out="$(run_carrier_at "$CHK_WT")"; rc=$?
+if [[ "$rc" -eq 0 && "$out" != *"[fno-checkout-behind]"* \
+      && "$out" != *"[fno-checkout-ff-blocked]"* ]]; then
+  pass "linked worktree never surfaces checkout staleness lines"
+else
+  fail "worktree silence: rc=$rc out=[$out]"
+fi
+
+# behind 0: no line. fno-agents absent from PATH: silent and still exit 0.
+make_fno_agents_shim '{"default_branch":"main","head_branch":"main","behind":0,"blocking":[]}'
+out="$(run_carrier_at "$CHK_PROJECT")"; rc=$?
+if [[ "$rc" -eq 0 && "$out" != *"[fno-checkout-behind]"* \
+      && "$out" != *"[fno-checkout-ff-blocked]"* ]]; then
+  pass "behind 0 stays silent"
+else
+  fail "behind 0: rc=$rc out=[$out]"
+fi
+out="$(printf '{"cwd":"%s","session_id":"self-session"}' "$CHK_PROJECT" \
+  | FNO_HOME="$TMP_DIR/fno-home" PATH="$FNO_SHIM_DIR:$PATH" \
+      CLAUDE_PROJECT_DIR="$CHK_PROJECT" bash "$CARRIER" 2>/dev/null)"; rc=$?
+if [[ "$rc" -eq 0 && "$out" != *"[fno-checkout-behind]"* \
+      && "$out" != *"[fno-checkout-ff-blocked]"* ]]; then
+  pass "missing fno-agents stays silent and exits zero"
+else
+  fail "missing fno-agents: rc=$rc out=[$out]"
+fi
+
 printf '[worktree-peers] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
