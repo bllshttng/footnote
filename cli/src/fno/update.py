@@ -948,45 +948,16 @@ def _sync_triad(cargo_bin_dir: Path, *, dry_run: bool = False) -> None:
         typer.echo(f"fno doctor update: synced fno-agents triad -> {dest}")
 
 
-def _restart_drifted_daemon(*, dry_run: bool = False) -> None:
-    """Restart a drifted agents daemon onto the installed build, daemon only."""
-    try:
-        from fno import rust_binary
-        from fno.doctor import _daemon_drift_warning
-
-        warning = _daemon_drift_warning()
-        binary = rust_binary.resolve_installed_binary() if warning else None
-    except Exception:
-        return
-    if not warning:
-        return
-    typer.echo(f"fno doctor update: note: {warning}", err=True)
-    if binary is None:
-        return
-    cmd = [str(binary), "restart"]
+def _chained_restart_if_drifted(binary: Path, *, dry_run: bool = False) -> None:
+    """Chain the crate's drift-gated daemon swap; the verb is quiet on fresh or down."""
+    cmd = [str(binary), "restart", "--if-drifted"]
     if dry_run:
         typer.echo(f"Would run: {shlex.join(cmd)}")
         return
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    except (OSError, subprocess.SubprocessError) as exc:
-        typer.echo(f"fno doctor update: WARNING: daemon restart did not run ({exc}); "
-                   "run `fno agents restart`", err=True)
-        return
-    said = next(
-        (
-            line
-            for line in proc.stdout.splitlines()
-            if line.startswith(("restarted", "forced", "daemon was not running"))
-        ),
-        "",
-    )
-    if proc.returncode == 0:
-        typer.echo(f"fno doctor update: restarted the drifted agents daemon ({said or 'ok'})", err=True)
-    else:
-        tail = (proc.stderr.strip().splitlines() or [""])[-1]
-        typer.echo(f"fno doctor update: WARNING: daemon restart exited {proc.returncode} "
-                   f"({said or tail}); run `fno agents restart`", err=True)
+        subprocess.run(cmd, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = False) -> RefreshOutcome:
@@ -1061,7 +1032,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         # other install locations behind (AC2-FR). The gate's fresh verdict must
         # NOT short-circuit convergence.
         _sync_triad(installed_bin.parent, dry_run=dry_run)
-        _restart_drifted_daemon(dry_run=dry_run)
+        _chained_restart_if_drifted(installed_bin, dry_run=dry_run)
         return "fresh" if converged else "partial"
 
     # Derive the install root from the detected binary so the refresh lands in the
@@ -1160,7 +1131,7 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
     # client/daemon/worker stay a coherent set (the same-dir sibling contract).
     # After a successful cargo install the triad lives at <install_root>/bin.
     _sync_triad(install_root / "bin", dry_run=False)
-    _restart_drifted_daemon()
+    _chained_restart_if_drifted(install_root / "bin" / "fno-agents", dry_run=False)
 
     # Final proof: re-probe as finally deployed; an attempted build alone is
     # never freshness (an unproven component downgrades to partial).
@@ -1439,10 +1410,9 @@ def update_command(
 
     Picks up local CLI source changes by running ``uv tool install
     --reinstall-package fno`` (or ``pip install --user --force-reinstall`` if
-    uv is unavailable).
-
-    When the running agents daemon is an older build than the installed one,
-    it restarts the daemon (never a mux server).
+    uv is unavailable). When the running agents daemon is an older build than
+    the installed one, it chains the crate's drift-gated restart (never a mux
+    server).
     """
     # Normalize to plain bool: when called directly (not via CLI), Typer Option
     # defaults are OptionInfo objects, not False. Guard against both.

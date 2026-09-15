@@ -1044,7 +1044,7 @@ def test_ac1_err_stale_daemon_forces_rebuild(
     assert len(cargo_calls) >= 1, "stale daemon must force a cargo rebuild, not the fresh path"
 
 
-def test_refresh_rust_bins_probes_measured_daemon_drift_after_triad_sync(
+def test_refresh_rust_bins_chains_drift_gated_restart_after_triad_sync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     source = tmp_path / "cli"
@@ -1061,45 +1061,27 @@ def test_refresh_rust_bins_probes_measured_daemon_drift_after_triad_sync(
     monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda _binary, **_kwargs: "a" * 40)
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_bin.parent / "fno")
     monkeypatch.setattr(update, "_install_mux_front_door", lambda *args, **kwargs: None)
+    monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: events.append("sync"))
 
     events: list[str] = []
-    monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: events.append("sync"))
-    from fno import doctor
-
-    warning = (
-        "fno agents: the running daemon is an older build than the installed binary; "
-        "run `fno agents restart` to pick up the new build."
-    )
-
-    def measured_warning() -> str:
-        events.append("probe")
-        return warning
-
-    monkeypatch.setattr(doctor, "_daemon_drift_warning", measured_warning)
-    from fno import rust_binary
-
-    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: fake_bin)
-
     restart_calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
         restart_calls.append(list(cmd))
         events.append("restart")
-        return subprocess.CompletedProcess(
-            args=cmd, returncode=0, stdout="restarted: ok\n", stderr=""
-        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(update.subprocess, "run", fake_run)
 
     assert update._refresh_rust_bins(source) == "fresh"
-    assert events == ["sync", "probe", "restart"]
-    assert restart_calls == [[str(fake_bin), "restart"]]
-    err = capsys.readouterr().err
-    assert "fno doctor update: note: " + warning in err
-    assert "fno doctor update: restarted the drifted agents daemon (restarted: ok)" in err
+    assert events == ["sync", "restart"]
+    assert restart_calls == [[str(fake_bin), "restart", "--if-drifted"]]
+    captured = capsys.readouterr()
+    assert "Would run:" not in captured.out
+    assert "note:" not in captured.err
 
 
-def test_refresh_rust_bins_fresh_daemon_probe_stays_quiet(
+def test_refresh_rust_bins_restart_failure_does_not_fail_the_refresh(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     source = tmp_path / "cli"
@@ -1117,68 +1099,15 @@ def test_refresh_rust_bins_fresh_daemon_probe_stays_quiet(
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_bin.parent / "fno")
     monkeypatch.setattr(update, "_install_mux_front_door", lambda *args, **kwargs: None)
     monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: None)
-    from fno import doctor
-
-    calls: list[str] = []
-    monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: calls.append("probe") or None)
-    from fno import rust_binary
-
-    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: fake_bin)
-
-    restart_calls: list[list[str]] = []
-    monkeypatch.setattr(
-        update.subprocess,
-        "run",
-        lambda cmd, **kwargs: restart_calls.append(list(cmd))
-        or subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr=""),
-    )
-
-    assert update._refresh_rust_bins(source) == "fresh"
-    assert calls == ["probe"]
-    assert restart_calls == []
-    assert "OLD binary" not in capsys.readouterr().err
-
-
-def test_refresh_rust_bins_restart_failure_warns_and_keeps_outcome(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
-) -> None:
-    source = tmp_path / "cli"
-    source.mkdir()
-    (source.parent / "crates" / "fno-agents").mkdir(parents=True)
-    fake_bin = tmp_path / "cargo" / "bin" / "fno-agents"
-    fake_bin.parent.mkdir(parents=True)
-    fake_bin.write_text("x")
-    for name in update._triad_names():
-        (fake_bin.parent / name).write_text("x")
-
-    monkeypatch.setattr(update, "_cargo_installed_bin", lambda: fake_bin)
-    monkeypatch.setattr(update, "_rust_subtree_rev", lambda _source: "a" * 40)
-    monkeypatch.setattr(update, "_installed_bin_crates_rev", lambda _binary, **_kwargs: "a" * 40)
-    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_bin.parent / "fno")
-    monkeypatch.setattr(update, "_install_mux_front_door", lambda *args, **kwargs: None)
-    monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: None)
-    from fno import doctor, rust_binary
-
-    warning = (
-        "fno agents: the running daemon is an older build than the installed binary; "
-        "run `fno agents restart` to pick up the new build (it restarts the daemon only "
-        "and keeps PTY workers)."
-    )
-    monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: warning)
-    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: fake_bin)
 
     def exit_one(cmd, **kwargs):
         return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
 
-    def raises_oserror(cmd, **kwargs):
-        raise OSError("noexec")
+    monkeypatch.setattr(update.subprocess, "run", exit_one)
 
-    for scenario in (exit_one, raises_oserror):
-        monkeypatch.setattr(update.subprocess, "run", scenario)
-        assert update._refresh_rust_bins(source) == "fresh"
-        err = capsys.readouterr().err
-        assert "run `fno agents restart`" in err, scenario
-        assert "WARNING: daemon restart" in err, scenario
+    assert update._refresh_rust_bins(source) == "fresh"
+    captured = capsys.readouterr()
+    assert "WARNING" not in captured.err
 
 
 def test_refresh_rust_bins_dry_run_prints_restart_without_running_it(
@@ -1199,15 +1128,6 @@ def test_refresh_rust_bins_dry_run_prints_restart_without_running_it(
     monkeypatch.setattr(update, "_cargo_installed_mux", lambda: fake_bin.parent / "fno")
     monkeypatch.setattr(update, "_install_mux_front_door", lambda *args, **kwargs: None)
     monkeypatch.setattr(update, "_sync_triad", lambda *args, **kwargs: None)
-    from fno import doctor, rust_binary
-
-    warning = (
-        "fno agents: the running daemon is an older build than the installed binary; "
-        "run `fno agents restart` to pick up the new build (it restarts the daemon only "
-        "and keeps PTY workers)."
-    )
-    monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: warning)
-    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: fake_bin)
 
     restart_calls: list[list[str]] = []
     monkeypatch.setattr(
@@ -1219,7 +1139,7 @@ def test_refresh_rust_bins_dry_run_prints_restart_without_running_it(
 
     assert update._refresh_rust_bins(source, dry_run=True) == "fresh"
     assert restart_calls == []
-    assert "Would run:" in capsys.readouterr().out
+    assert "Would run: " + str(fake_bin) in capsys.readouterr().out
 
 
 def test_refresh_rust_bins_also_installs_mux_front_door(
