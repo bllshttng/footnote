@@ -851,8 +851,7 @@ mod tests {
     }
 
     /// AC2-HP: a current-contract receipt carrying the pre-gate op set
-    /// (everything but mux-member) refuses, names the missing op, and the
-    /// stale owner note is gone from the refusal.
+    /// (everything but mux-member) refuses, names the missing op.
     #[test]
     fn ac2_hp_a_receipt_without_the_mux_member_op_refuses() {
         let home = temp_home();
