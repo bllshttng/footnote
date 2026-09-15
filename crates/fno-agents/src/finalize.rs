@@ -1652,7 +1652,7 @@ fn read_obsidian_block(path: &Path) -> ObsidianBlock {
 /// `fno.config._deep_merge` semantics, NOT "first file with an opinion wins
 /// wholesale". Returns the vault name only when the merged `enabled` is true
 /// AND a `vault` value was found somewhere in the chain.
-fn resolve_obsidian_vault(candidates: &[PathBuf]) -> Option<String> {
+pub(crate) fn resolve_obsidian_vault(candidates: &[PathBuf]) -> Option<String> {
     let mut enabled: Option<bool> = None;
     let mut vault: Option<String> = None;
     for sp in candidates {
@@ -1677,7 +1677,7 @@ fn resolve_obsidian_vault(candidates: &[PathBuf]) -> Option<String> {
 /// Expand a vault name to its filesystem root - mirrors `paths.vault_root()`:
 /// a bare name (e.g. `c3po`) maps to `~/c3po`; an already-absolute or
 /// `~`-prefixed value is honored as-is.
-fn resolve_vault_root(vault: &str, home: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn resolve_vault_root(vault: &str, home: Option<&Path>) -> Option<PathBuf> {
     if let Some(rest) = vault.strip_prefix("~/") {
         return home.map(|h| h.join(rest));
     }
@@ -1872,7 +1872,7 @@ pub(crate) fn slug_from_git_remote(cwd: &Path) -> Option<String> {
 /// a missing/malformed settings file, an unset/`null` id, or no remote degrades
 /// to the basename, so unconfigured installs never break. Uses the SAME
 /// project-then-global candidate order the callers use for `config.paths.*_dir`.
-fn resolve_project_name(
+pub(crate) fn resolve_project_name(
     settings_override: Option<&Path>,
     home: Option<&Path>,
     cwd: &Path,

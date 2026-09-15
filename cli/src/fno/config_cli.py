@@ -1059,6 +1059,19 @@ def assert_subagent_budget_cmd(
     raise typer.Exit(0 if check.permitted else 1)
 
 
+@app.command("build-dir", hidden=True)
+def build_dir_cmd() -> None:
+    """Print the CARGO_BUILD_BUILD_DIR value: ``<base>/{workspace-path-hash}``.
+
+    The shell surface over fno.paths.cargo_build_dir_value(); the target stop
+    hook exports it for done_probes that run cargo (x-3227). Hidden: consumed
+    by the hook, not by operators.
+    """
+    from fno.paths import cargo_build_dir_value
+
+    typer.echo(cargo_build_dir_value())
+
+
 @app.command("get")
 def get_cmd(
     key: str = typer.Argument(

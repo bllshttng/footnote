@@ -45,9 +45,9 @@ Three caller states decide which of those get written, and the third fails close
 
 1. A session identity resolves. The handle is stamped into `decided_by`, and the row reads as coordination.
 2. No identity, and a terminal on stdin. `attested_by` is written, and `--authority operator` is accepted.
-3. No identity, and no terminal. Operator authority is REFUSED. `decided_by` says `unattributed-caller`.
+3. No identity, and no terminal. Superuser authority is REFUSED. `decided_by` says `unattributed-caller`.
 
-Law is never DEFAULTED, in any state. A caller who wants the operator lane passes `--authority operator`. Omit it at a terminal and the row records with no authority, which reads as `unattributed`.
+Law is never DEFAULTED, in any state. A caller who wants the superuser lane passes `--authority operator`. Omit it at a terminal and the row records with no authority, which reads as `unattributed`.
 
 State 3 exists because state 2 used to be everything that was not state 1. That made attendance an ABSENCE, and `env -u CLAUDE_CODE_SESSION_ID fno backlog decide --authority operator` was enough to forge an attested row in the law lane.
 
@@ -95,7 +95,7 @@ A failed PROJECTION does not fail the command at all. Both durable stores alread
 
 ## A ruling an agent makes about another node
 
-The decide verb refuses agent sessions. An agent that rules out another node's work records the verdict where that node's readers already look.
+Agents answer by default (ruling of 2026-09-14): an agent session records coordination decisions with `fno backlog decide` or `fno inbox outstanding clear <qid> --answer "..." --authority crown|agent`. Only the `operator` authority refuses an agent session, because the superuser lane is not an agent's to claim. An agent that rules out another node's work records the verdict where that node's readers already look.
 
 The plan frontmatter carries it. The blueprinter writes the rejected node and its reason under `consolidation.rejected`, beside the outcome. That key is the one store an agent session can still write a cross-node ruling into.
 
@@ -151,6 +151,10 @@ Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retract
 
 The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. JSON adds the canonical subject and a `current_law.status` of `single`, `conflict`, or `none`. Human output prints `CURRENT LAW`, `LAW CONFLICT`, or `NO CURRENT LAW`. Only `single` is an actionable current answer. Conflict never chooses the newest, and a damaged index is a nonzero read failure rather than `none`. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
 
+## Where law reaches a session
+
+No session loads law in bulk. The SessionStart law read is deleted (ruling of 2026-09-14): it read every live row, blew the hook's ten-second bound, and delivered nothing. A law reaches a session two ways, and neither loads all law. First, a law the superuser confirms graduates through the `graduation` field every law row carries. `enforced` with `doc:<rules file>=>marker:<text>` points at a rule file the harness loads whole. `enforced` with `gate:<cmd>=>marker:<text>` points at a refusal at the moment the law applies. Second, `ask` keeps reading law for one subject at ask time, so the law-match refusal still fires where the question is asked.
+
 ## Gates that consume current law
 
 The review-coverage gate is the reference consumer. Its merge predicate, its `fno do pr status` readiness read, and the Rust stop gate all resolve two subjects: the standing `review-coverage-waiver` and the head-scoped `review-coverage-waiver:<owner/repo>#<pr>@<head>`. Python imports the engine's law-lane live read. Rust shells the canonical query above and parses only `current_law.status` plus the single row's decision value. Only `single` waives, and only a row whose decision equals the affirmative value the coverage-waive command mints counts as that single. Row existence carries no polarity: a note or a denial recorded at a waiver subject is no waiver. A single row with no readable decision is malformed authority and answers unknown, never none. `none` leaves the ordinary predicate untouched. A conflict, a damaged row, or a failed query is UNKNOWN authority. The gate answers UNANSWERED with the probe named, never permission and never a quiet `none`. A recorded waiver is a law row like any other. Retraction, supersession, or head movement changes the verdict the next read returns, and a stale waiver green is replaced by the computed one. The full contract lives in [review-coverage-termination](review-coverage-termination.md).
@@ -191,4 +195,4 @@ The one-step door (`fno inbox law set`) has no staged proposal, no content hash,
 
 The cost of that trade, measured rather than assumed: `require_marked_caller` answers `chat_attested` off `resolve_self_identity`, which walks process ancestry. The door is not "a mail-injected slash command". It is ANY process descended from a harness session. That includes an agent's own Bash call with no user-shaped text anywhere. The narrower mail shape is the one that cannot be detected. Across every transcript in this machine's claude project directory, 2173 user turns carrying an `<fno_mail>` envelope were recorded with `promptSource: "typed"` and 2439 with `origin: {"kind": "human"}`. `fno agents mail send --raw` strips the envelope that is the one remaining marker. The door is the law LANE and never the `operator` VALUE: `_resolve_decider` still refuses an `operator` claim from a resolved session. The asymmetry buys honesty. A session can mint a law row and cannot retract one, because `retract_decision` requires `operator`.
 
-One family is closed to the chat door entirely: subjects under `review-coverage-waiver`, the merge gate's waiver evidence. These refuse every non-operator authority at the write chokepoint. A waiver asserts a person read the diff. No chat row can carry that fact. The attended `fno do pr coverage-waive` command is the only path.
+One family is closed to the chat door entirely: subjects under `review-coverage-waiver`, the merge gate's waiver evidence. These refuse every non-superuser authority at the write chokepoint. A waiver asserts a person read the diff. No chat row can carry that fact. The attended `fno do pr coverage-waive` command is the only path.

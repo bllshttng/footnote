@@ -275,52 +275,39 @@ fn model_provenance_of(e: &state::RegistryEntry) -> Option<serde_json::Value> {
     Some(out)
 }
 
-/// Stage the removal accounting for one row a write path is about to drop
-/// (x-a879): the receipt first, then the `registry_row_removed` event naming
+/// Stage the removal accounting for one row a write path is about to drop:
+/// the receipt first, then the `registry_row_removed` event naming
 /// the row, the remover and the reason. A receipt that cannot be built or
 /// persisted still announces the removal (`receipt_staged: false`, the build
-/// error as `reason`, the attempted harness-side outcome as `active_surface`):
-/// an unrecoverable removal that is announced is strictly better than a silent
-/// one, and refusing the write would turn an audit gap into an outage.
-/// Best-effort by contract - an emission failure never fails the write that
-/// triggered it.
+/// error as `reason`): an unrecoverable removal that is announced is strictly
+/// better than a silent one, and refusing the write would turn an audit gap
+/// into an outage. Best-effort by contract - an emission failure never fails
+/// the write that triggered it.
+///
+/// This choke point records and never acts on a harness. The harness session
+/// is the resume state the resume door replays, so the only door that deletes
+/// it is `fno agents rm`, which runs its own cascade BEFORE its write; the
+/// retirement sweep stages its receipt and runs its effects before the write
+/// too. A write that lands here finds both stories already on disk.
 pub fn stage_removal_accounting(
     home: &AgentsHome,
     entry: &state::RegistryEntry,
     remover: &str,
     emitter: &crate::events::EventEmitter,
 ) {
-    // The active-surface outcome outlives the receipt write on purpose. The
-    // harness-side removal happens BEFORE that write, so a write that fails
-    // leaves the harness row already gone with no receipt on disk - the event
-    // is then the only durable record of it, and must name it. `None` means
-    // no attempt was made, never "attempted, outcome unknown".
-    let mut active_surface: Option<&'static str> = None;
     let (receipt_staged, reason) = match build_reap_receipt(entry, None) {
         Ok(mut receipt) => {
             // A receipt already on disk for this session was staged moments
             // ago by the reap sweep (or the watchdog) BEFORE it dropped the
             // rows - rewriting it would stamp `removed_by` onto a pure reap
-            // receipt and change the x-b150 shape. The record on disk is
+            // receipt and change its shape. The record on disk is
             // already the recovery path; leave it byte-identical.
             if reap_receipt_path(home, &receipt).exists() {
                 (true, "receipt already staged for this session".to_string())
             } else {
-                // The door that dropped the row also removes the harness
-                // side, and its receipt records the attempt. The sweep's
-                // receipt already carries its own effects (left untouched
-                // above), so the sweep path never attempts twice.
-                let outcome = crate::gc_native::apply_active_surface_removal(entry);
-                active_surface = Some(outcome.as_str());
                 receipt.removed_by = Some(remover.to_string());
-                receipt
-                    .effects
-                    .push(outcome.effect_record("active-surface"));
                 match write_reap_receipt(home, &receipt) {
-                    Ok(()) => (
-                        true,
-                        format!("removed by an update_registry write ({})", outcome.as_str()),
-                    ),
+                    Ok(()) => (true, "removed by an update_registry write".to_string()),
                     Err(err) => (false, format!("receipt did not persist: {err}")),
                 }
             }
@@ -337,7 +324,6 @@ pub fn stage_removal_accounting(
             "remover": remover,
             "reason": reason,
             "receipt_staged": receipt_staged,
-            "active_surface": active_surface,
             "pid": std::process::id(),
         }),
     );
@@ -391,13 +377,12 @@ mod tests {
         assert_eq!(removal_keys, expected);
     }
 
-    /// A receipt write that fails leaves the harness-side removal already
-    /// done and nothing on disk to say so. The event is then the only record,
-    /// so it must still name the active-surface outcome. The row is
-    /// `opencode`, whose cascade is `not-applicable` and shells out to
-    /// nothing, so the assertion measures the reporting, not a harness.
+    /// A receipt write that fails leaves the removal unannounced on disk, so
+    /// the event must still announce it: `receipt_staged: false` and the
+    /// build error as the reason. The write choke point acts on no harness,
+    /// so the event carries no active-surface outcome at all.
     #[test]
-    fn a_failed_receipt_write_still_names_the_active_surface_outcome() {
+    fn a_failed_receipt_write_still_announces_the_removal() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("agents");
         std::fs::create_dir_all(&root).unwrap();
@@ -420,9 +405,9 @@ mod tests {
         let data = &event["data"];
         assert_eq!(event["type"], "registry_row_removed");
         assert_eq!(data["receipt_staged"], false, "the write was made to fail");
-        assert_eq!(
-            data["active_surface"], "not-applicable",
-            "the removal that already happened is named even with no receipt"
+        assert!(
+            data.get("active_surface").is_none(),
+            "the write path attempts no harness action: {data}"
         );
     }
 }

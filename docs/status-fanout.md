@@ -70,6 +70,10 @@ template = "fno [{project}] {data.title} - {data.body} ({data.pointer})"
 enabled = true
 ```
 
+The arm notices ride this sink too. `arm_watch`, the `notify_watch` board and main-CI lanes, and the `provider_cap` notices all land as `operator_notice` rows. `arm_watch` names arms broken past `[notify] arm_failing_after_s`, plus hung verbs and dead flight holders.
+
+In the Rust callers `--pointer` leads the argv: `fno inbox notify --pointer P TITLE BODY`. The Python group callback refuses an option after its positionals, so the trailing form exits 2 and writes no row. `arm_watch` counts a notice sent only on exit 0. A notice that died at the gate leaves the dedupe token unwritten, so the next tick retries.
+
 ### The ntfy recipe (self-hosted over Tailscale)
 
 The sink URL is `https://<host>:8443/<topic>` and the rendered template is the whole POST body. Keep `raw_body = true`. Measured on ntfy 2.28.0: any JSON envelope posted to a topic URL reaches the phone as literal JSON.

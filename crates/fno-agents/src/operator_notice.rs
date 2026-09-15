@@ -35,15 +35,25 @@ pub fn notify_operator(title: &str, body: &str, pointer: Option<&str>) -> bool {
     notify_operator_with(&fno, title, body, pointer)
 }
 
+/// The one argv shape for every send. `--pointer` LEADS, before the title
+/// and body: the Python callback is a Typer group with
+/// `invoke_without_command=True`, and an option after the positionals is
+/// parsed as a subcommand slot, which exits 2 with
+/// `Missing argument 'title'` and writes no row.
+fn notify_args(cmd: &mut std::process::Command, title: &str, body: &str, pointer: Option<&str>) {
+    cmd.args(["inbox", "notify"]);
+    if let Some(p) = pointer {
+        cmd.args(["--pointer", p]);
+    }
+    cmd.args([title, body]);
+}
+
 /// The same spawn with the binary handed in. Callers whose env seam is pinned
 /// by a test (`FNO_LOOPCHECK_FNO_BIN`) resolve their own binary and pass it
 /// here; the args array stays in this one place.
 pub fn notify_operator_with(bin: &OsStr, title: &str, body: &str, pointer: Option<&str>) -> bool {
     let mut cmd = std::process::Command::new(bin);
-    cmd.args(["inbox", "notify", title, body]);
-    if let Some(p) = pointer {
-        cmd.args(["--pointer", p]);
-    }
+    notify_args(&mut cmd, title, body, pointer);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -60,6 +70,29 @@ pub fn notify_operator_with(bin: &OsStr, title: &str, body: &str, pointer: Optio
             eprintln!(
                 "fno-agents: operator notice skipped ({} inbox notify): {e}",
                 bin.to_string_lossy()
+            );
+            false
+        }
+    }
+}
+
+/// The same send, confirmed: the child runs under a 15 s wall clock and the
+/// return is its exit status, not its spawn. A pager whose `true` commits a
+/// dedupe token (arm_watch, notify_watch) must call this, or a notice that
+/// died at the gate reads as delivered and the episode goes quiet. The
+/// detached badge path keeps `notify_operator`: `notify_transition` runs
+/// inside a registry write and must not block on the child.
+pub fn notify_operator_confirmed(title: &str, body: &str, pointer: Option<&str>) -> bool {
+    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
+    let mut cmd = std::process::Command::new(&fno);
+    notify_args(&mut cmd, title, body, pointer);
+    cmd.stdin(std::process::Stdio::null());
+    match crate::bounded_cmd::output_with_timeout(cmd, 15) {
+        Some(out) => out.status.success(),
+        None => {
+            eprintln!(
+                "fno-agents: operator notice unconfirmed ({} inbox notify)",
+                fno.to_string_lossy()
             );
             false
         }
@@ -308,7 +341,13 @@ pub fn run_notify_watch(
                     &format!("operator: {label}"),
                     &body,
                     Some(pointer),
-                    || notify_operator(&format!("operator: {label}"), &body, Some(pointer)),
+                    || {
+                        notify_operator_confirmed(
+                            &format!("operator: {label}"),
+                            &body,
+                            Some(pointer),
+                        )
+                    },
                 ));
                 acted += u64::from(verdict == "sent");
                 notes.push(format!("{key}:{verdict}"));
@@ -341,7 +380,7 @@ pub fn run_notify_watch(
                             "main CI",
                             &body,
                             Some(&pointer),
-                            || notify_operator("main CI", &body, Some(&pointer)),
+                            || notify_operator_confirmed("main CI", &body, Some(&pointer)),
                         ));
                         acted += u64::from(verdict == "sent");
                         notes.push(format!("{key}:{verdict}"));
@@ -903,5 +942,135 @@ mod tests {
         assert_eq!(percent_encode_ref("main"), "main");
         assert_eq!(percent_encode_ref("feature/x"), "feature%2Fx");
         assert_eq!(percent_encode_ref("rel-1.2_3~4"), "rel-1.2_3~4");
+    }
+
+    // A stub `fno` whose argv lands in a file, so a send's shape is asserted
+    // from the child's own record. The argv file path rides an env var the
+    // stub reads.
+    fn stub_fno(dir: &Path, name: &str, script: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/bash\n{script}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    fn argv_file(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(format!("{name}.argv"));
+        std::env::set_var("FNO_TEST_ARGV_FILE", &path);
+        path
+    }
+
+    /// Wait out the detached reap thread, then read the recorded argv.
+    fn wait_argv(path: &Path, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                return text.lines().map(|l| l.to_string()).collect();
+            }
+            if Instant::now() >= deadline {
+                panic!("argv file never appeared: {}", path.display());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn confirmed_send_false_on_exit_2() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_fno(dir.path(), "fno-exit2", "exit 2");
+        let bin = std::env::var_os("FNO_BIN");
+        std::env::set_var("FNO_BIN", &stub);
+        let ok = notify_operator_confirmed("T", "B", Some("P"));
+        match bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        assert!(!ok, "exit 2 is not a delivery");
+    }
+
+    #[test]
+    fn confirmed_send_bounds_a_sleeper() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let stub = stub_fno(dir.path(), "fno-sleep", "exec sleep 30");
+        let bin = std::env::var_os("FNO_BIN");
+        std::env::set_var("FNO_BIN", &stub);
+        let started = Instant::now();
+        let ok = notify_operator_confirmed("T", "B", None);
+        let elapsed = started.elapsed();
+        match bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        assert!(!ok, "a killed child is not a delivery");
+        assert!(elapsed < Duration::from_secs(16), "elapsed {elapsed:?}");
+    }
+
+    #[test]
+    fn pointer_leads_the_argv_through_the_real_spawn() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let argv = argv_file(dir.path(), "lead");
+        let stub = stub_fno(
+            dir.path(),
+            "fno-lead",
+            r#"printf '%s\n' "$@" > "$FNO_TEST_ARGV_FILE""#,
+        );
+        let recorded = {
+            let bin = std::env::var_os("FNO_BIN");
+            std::env::set_var("FNO_BIN", &stub);
+            notify_operator_with(stub.as_os_str(), "T", "B", Some("P"));
+            let args = wait_argv(&argv, Duration::from_secs(5));
+            match bin {
+                Some(v) => std::env::set_var("FNO_BIN", v),
+                None => std::env::remove_var("FNO_BIN"),
+            }
+            args
+        };
+        assert_eq!(
+            recorded,
+            vec![
+                "inbox".to_string(),
+                "notify".to_string(),
+                "--pointer".to_string(),
+                "P".to_string(),
+                "T".to_string(),
+                "B".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_pointer_keeps_the_plain_argv() {
+        let _lock = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let argv = argv_file(dir.path(), "plain");
+        let stub = stub_fno(
+            dir.path(),
+            "fno-plain",
+            r#"printf '%s\n' "$@" > "$FNO_TEST_ARGV_FILE""#,
+        );
+        let bin = std::env::var_os("FNO_BIN");
+        std::env::set_var("FNO_BIN", &stub);
+        notify_operator_with(stub.as_os_str(), "T", "B", None);
+        let recorded = wait_argv(&argv, Duration::from_secs(5));
+        match bin {
+            Some(v) => std::env::set_var("FNO_BIN", v),
+            None => std::env::remove_var("FNO_BIN"),
+        }
+        assert_eq!(
+            recorded,
+            vec![
+                "inbox".to_string(),
+                "notify".to_string(),
+                "T".to_string(),
+                "B".to_string()
+            ]
+        );
     }
 }

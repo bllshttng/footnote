@@ -35,7 +35,7 @@ AC9 delivery sentinel (echoed verbatim by a fresh worker, asserted by unit test)
 
 ### A capability probe delivered over the mail bus can only ever return yes
 
-`fno agents mail send` injects as user-shaped text, indistinguishable from operator typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent can make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
+`fno agents mail send` injects as user-shaped text, indistinguishable from superuser typing. So a "can the agent do X unprompted?" probe sent by mail tests the USER-TRIGGERED path and cannot fail. Reading that as proof of autonomy is the receipt-can-lie shape: a snapshot that a call was accepted, not that an agent can make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
 
 - specimens: 2026-08-05, a `/code-review` probe mailed to a worker succeeded and was read as proof of self-invocation; the mail was the user-shaped trigger.
 - graduates-to: a probe separating user-shaped injection from an autonomous tool call, or a lint demanding evidence beyond a mail probe.

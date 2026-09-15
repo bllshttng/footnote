@@ -636,7 +636,7 @@ def _default_resolver(short_id: str) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
-# Per-verb profile resolution (x-3d5b): a pure string rule over the seed's first
+# Per-verb profile resolution: a pure string rule over the seed's first
 # token selects `config.agents.profiles.<verb>`, layered over `agents.defaults`.
 # No content-based inference of any kind - only an explicit leading slash-verb.
 # --------------------------------------------------------------------------- #
@@ -653,33 +653,49 @@ _CROWN_VERBS = frozenset({"reign", "king-for-a-day", "fno-me"})
 SPAWN_PERMISSION_BUILTIN = "bypassPermissions"
 
 
-def _seed_of(toks: Sequence[str]) -> Optional[str]:
-    """The MESSAGE seed: the ``--message`` value, else the sole positional (the
-    name rides ``--name``). A bare ``--`` fence makes the first token after it
-    the seed - even when flag-shaped - ONLY in the legacy no-message idiom; a
-    positional message before the fence outranks the fenced tail (x-1caa).
-    Stops at the ``--argv`` payload boundary."""
+def _seed_slot(toks: Sequence[str]) -> Optional[tuple[int, str]]:
+    """Where the MESSAGE seed lives: ``(index, form)`` into ``toks``, or
+    None. One scan so the reader and the seam rewrite agree on the slot.
+    Same rules as :func:`_seed_of`: the ``--argv`` boundary ends the head,
+    and a bare ``--`` fence wins only in the legacy no-message idiom
+    ."""
     i = 0
     while i < len(toks):
         t = toks[i]
         if t == "--argv":
             break
         if t == "--":
-            # x-1caa: a positional MESSAGE before the fence outranks the fenced
-            # tail (click fills positionals in order); the first fenced token
-            # is the seed only in the legacy no-message idiom. Reading the
-            # fenced token here silently dropped the profile layer.
             head_pos = _positional_indices(toks[:i])
             if head_pos:
-                return toks[head_pos[0]]
-            return toks[i + 1] if i + 1 < len(toks) else None
+                return head_pos[0], "positional"
+            if i + 1 < len(toks):
+                return i + 1, "fenced"
+            return None
         if t == "--message":
-            return toks[i + 1] if i + 1 < len(toks) else None
+            if i + 1 < len(toks):
+                return i + 1, "message"
+            return None
         if t.startswith("--message="):
-            return t.split("=", 1)[1]
+            return i, "message_eq"
         i += 1
     pos = _positional_indices(toks)
-    return toks[pos[0]] if pos else None
+    if pos:
+        return pos[0], "positional"
+    return None
+
+
+def _seed_of(toks: Sequence[str]) -> Optional[str]:
+    """The MESSAGE seed: the ``--message`` value, else the sole positional
+    (the name rides ``--name``); a thin reader over :func:`_seed_slot`, so
+    reading and rewriting share one scan."""
+    slot = _seed_slot(toks)
+    if slot is None:
+        return None
+    i, form = slot
+    text = toks[i]
+    if form == "message_eq":
+        return text.split("=", 1)[1]
+    return text
 
 
 def _role_of(toks: Sequence[str]) -> Optional[str]:
@@ -907,9 +923,6 @@ def _permission_mappable(provider: str, mode: str, substrate: Optional[str]) -> 
         return False
 
 
-_LANE_FIELDS = frozenset(
-    {"provider", "model", "effort", "substrate", "permission_mode", "route", "account", "pane_group"}
-)
 
 
 def _lane_value(lane: object, name: str) -> str:
@@ -1078,6 +1091,7 @@ def inject_spawn_defaults(
     env: Optional[Mapping[str, str]] = None,
     stderr: Optional[IO[str]] = None,
     apply_permission_builtin: bool = True,
+    node_verb: Optional[str] = None,
 ) -> List[str]:
     """Return ``args`` with config spawn-defaults injected where absent.
 
@@ -1123,14 +1137,17 @@ def inject_spawn_defaults(
             return out
     agents = settings.agents  # type: ignore[attr-defined]
     defaults = agents.defaults
-    # Per-verb profile (x-3d5b): the seed's leading slash-verb selects a profile
-    # layered OVER defaults, resolved field-wise into one effective view BEFORE
-    # the injection below - so the provider-scoped model rule, effort degrade, and
-    # unknown-provider refusal all run once, on the merged fields.
+    # Per-verb profile: the seed's leading slash-verb selects a
+    # profile layered OVER defaults, resolved field-wise into one view. A
+    # verbless `--node` spawn routes by the node's derived verb, which the
+    # seam passes as ``node_verb``; the journal keeps the real seed.
     seed = _seed_of(out[1:])
     profiles = getattr(agents, "profiles", None) or {}
     known, roster_ok = _known_verb_keys(profiles, settings)
-    verb = _profile_key(seed, known if roster_ok else None)
+    profile_seed = seed
+    if seed is None and node_verb:
+        profile_seed = f"/{node_verb}"
+    verb = _profile_key(profile_seed, known if roster_ok else None)
     if verb is None:
         # x-413d: an unknown namespaced verb used to resolve crown silently.
         print(

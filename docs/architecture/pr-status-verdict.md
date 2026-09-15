@@ -1,6 +1,6 @@
 # PR status verdict: the narrative behind `fno do pr status`
 
-The docstrings in `cli/src/fno/pr/_status.py` carry one-line contracts and point here. This file holds the full reasoning those docstrings used to restate, moved under the file-budget gate's named remedy ("long prose belongs in docs/") so the tree number and the reasoning both survive.
+The docstrings in `cli/src/fno/pr/_status.py` and `cli/src/fno/pr/_cache.py` carry one-line contracts and point here. This file holds the reasoning those docstrings used to restate. The move rides the file-budget gate's named remedy: long prose belongs in docs/. The tree number and the reasoning both survive.
 
 ## `verdict_for`: pure verdict computation
 
@@ -39,3 +39,27 @@ Which conjuncts of `ready` fail, in a stable order. A bare `ready: false` has on
 The coverage conjuncts are the merge gate's own helpers, read through them - one copy, never a restatement: `covered_conjuncts` names the row conjuncts (uncovered, no_local_pass, stale_head). The configured round cap is not a blocker here: at the cap the gate discharges the review obligation and the PR merges on green CI, so a held PR is held by its row conjuncts alone. So `ready` is a claim about those conjuncts and nothing wider.
 
 A TERMINAL PR (merged or closed) is exempt from the coverage conjunct: the gate guards what would merge, and a PR merged out-of-band (UI, bare gh) has no "would" left to guard. That exemption arrives as `review_lane=False` from the caller's terminal arm and needs no conjunct of its own here. It had one - a `merged` flag - and it was decorative: `merged` is only ever True inside the branch that already sets `review_lane=False`, so it never changed an outcome while reading like the protection its name promised. A guard that cannot fire is worse than no guard, because the reader trusts the name.
+
+## `cached_status`: the coalescing chokepoint
+
+Every cached caller enters here: `fno do pr status`, `fno do pr wait` ticks, the king board gate read, `authorized_merge`, and the nudge ladder. They share one row per (repo, PR, head) under a per-key flock. The GraphQL quota is per-USER. The REST secondary limit counts request rate, so transport saves nobody. Only collapsing N reads into one helps. The head is part of the key because a verdict is a fact about one commit. A row cached for head A must never answer for head B. Head B's check set can still be empty. This is the operator's court zero-checks fail-open.
+
+One cheap REST read buys the current head on every call. The expensive reads collapse to one per TTL: check-runs, the runs listing, combined status, logs, reviews, coverage. Transient failures are NOT cached. A loud error must reach every caller, never be replayed from disk. A refused read writes nothing.
+
+### Why no row is served without the head read
+
+Outside a live fleet backoff, the head read fires on every call. A push is therefore noticed on the very next tick. `_serve` never fabricates. A row with no output reads as a miss. A corrupt exit code also reads as a miss. A concurrent fno install can write a different schema. The served line carries the time and the head the verdict was computed at. That is `cached_at`, `cached_age_seconds`, and `head`. `cached: true` alone is decorative. It says the answer is second-hand but gives no way to judge whether the staleness matters, so every consumer ignored it. There is deliberately no `cached_head`. It was a verbatim copy of `head` under a second name. One fact, two places to drift apart.
+
+### The backoff pre-check
+
+Whether GitHub is refusing the machine is the fleet budget ledger's question, not this cache's. `_quota.backoff_live` reads the machine-wide ledger. Inside a live backoff, the head read itself is a held call. Every waiter's tick then short-circuits to the newest cached row. A fixed-interval retry is exactly what sustains a refusal. The row serves in the mode the normal path chooses. Fresh serves VERBATIM. A loud first-read error row keeps its exit 4. Degrading it softens a refusal into an "unknown" nobody asked for. Stale serves degraded: `verdict: unknown`, `settled: false`, and the failure diagnosis dropped. A payload that declares the check set unreadable must not also print per-check notes. Those notes then assert a diagnosis the serve just called unverifiable. This is the fail-closed stale serve, the operator's court. A watcher grepping settled:true waits out the window instead of waking on unverifiable green. With no readable head at all, the newest existing row serves degraded the same way. With no row, the loud live read decides. `--refresh` is the sanctioned escape and a MANUAL verb. No row is served. The live read runs. It defeats the coalescing this module exists to do, so never put it in a watcher loop. It was built because a king who distrusted a cached verdict had no option except raw `gh api`. `--refresh` also clears the spend-note budget global. A note must never name a ledger probe the read did not make.
+
+### The miss lock
+
+Synchronized pollers queue under the per-key flock. The watcher fleet sleeps 60s in near-lockstep, and the TTL is 60s, so they all miss together. The winner refreshes while the losers wait. The losers then re-read the now-fresh row and serve it. That is the collapse the module exists to deliver. Without the lock, every one of them runs the full read. The row is replaced wholesale on success. A new head sha never merges into an old verdict. Superseded heads' rows and locks are pruned right there. A served verdict must describe the current head.
+
+### Reuse across reads of one head
+
+The row being refreshed rides back into `run_status` as `prior`. Its `failures` entries key on GitHub job ids. GitHub mints a new job id per attempt. A completed job's log never changes. When the rollup names the same job id, its entry is replayed. A re-run that replaced the job fetches only the new job's log. Reuse never crosses heads. The key that carries the row includes the sha. A new head has no prior row, and its first read fetches everything. On green, a prior payload at the same head and check count replays the rerun facts. Those facts are `rerun_recovered` and `recovered_failures`. A recovery is history of one head. A new attempt cannot fail and then recover between two reads without the verdict or the check count changing first. `rerun_recovery` accepts the workflow-run listing `fetch_pr_rest` already read for the workflow names. A miss therefore reads it once, not twice.
+
+Row guards keep the numbers alive inside a shared file. `json.loads` accepts a bare NaN or Infinity. A row carrying `"ts": Infinity` parses cleanly and survives `float()`. Every numeric read therefore goes through `finite_or_zero`. That guard once lived on one of two reachable paths, under a docstring claiming it covered both. `fno.graph.board` then crashed on the second path. Finite is necessary and NOT sufficient. `1e18` is perfectly finite and still raises out of `time.gmtime`. The timestamp conversion is guarded where it happens. `finite_or_zero` must not widen into a timestamp validator it is not.

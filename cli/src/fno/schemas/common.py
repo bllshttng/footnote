@@ -17,7 +17,6 @@ _SESSION_ID_RE = re.compile(r"^\d{8}T\d{6}Z-[a-z]{0,2}\d+-[0-9a-f]{6}$")
 _CODEX_THREAD_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
-_ISO8601_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2})?Z?)?$")
 
 STATUS_VALUES = {"IN_PROGRESS", "COMPLETE", "BLOCKED"}
 

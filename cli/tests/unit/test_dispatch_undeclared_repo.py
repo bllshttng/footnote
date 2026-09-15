@@ -201,6 +201,10 @@ def test_spawn_carries_ambient_policy_override_on_the_pane(tmp_path, monkeypatch
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     monkeypatch.setenv("FNO_WORKTREE_POLICY", "external")
     monkeypatch.setenv("FNO_REPO_ROOT", str(Path.cwd()))
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda: [{"id": "x-84a8", "slug": "s", "dispatch_verb": "/target", "difficulty": "low"}],
+    )
 
     res = CliRunner().invoke(
         agents_cli.agents_app,

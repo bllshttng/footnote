@@ -219,12 +219,20 @@ def _recovery_from_run_rows(run_rows, attempts_of, failed_jobs_of) -> dict:
     return {"recovered": recovered, "failed": failed}
 
 
-def rerun_recovery(pr_number, cwd: Optional[str] = None, sha: Optional[str] = None) -> dict:
+def rerun_recovery(
+    pr_number,
+    cwd: Optional[str] = None,
+    sha: Optional[str] = None,
+    runs: Optional[list] = None,
+) -> dict:
     """Rerun-recovery fact for a PR head: ``{recovered, failed}``.
 
     A re-run-recovered failure reads green to `verdict_for`; this names it.
     ANY read error fails open: a fact beside the verdict, never a second red.
     `sha` skips the PR-info read when the caller already holds the head.
+    `runs` is the head's `actions/runs` listing when the caller (run_status,
+    via fetch_pr_rest) already read it; the merge gate passes none and keeps
+    its own live read.
     """
     try:
         from fno.pr._proc import run
@@ -242,9 +250,11 @@ def rerun_recovery(pr_number, cwd: Optional[str] = None, sha: Optional[str] = No
             res = run(["gh", "api", f"repos/{slug}{path}"], cwd=cwd)
             return json.loads(res.stdout) if res.ok else None
 
-        rows = _get(f"/actions/runs?head_sha={sha}&per_page=100")
-        if isinstance(rows, dict):
-            rows = rows.get("workflow_runs")
+        rows = runs if isinstance(runs, list) else None
+        if rows is None:
+            rows = _get(f"/actions/runs?head_sha={sha}&per_page=100")
+            if isinstance(rows, dict):
+                rows = rows.get("workflow_runs")
         if not isinstance(rows, list):
             return dict(_NO_RECOVERY)
 
@@ -702,14 +712,25 @@ def _merge_execution_projection(repo: str, pr: str) -> dict:
     return projection
 
 
-def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
+def run_status(
+    pr: str, cwd: Optional[str] = None, *, review_reader=None, prior: Optional[dict] = None
+) -> int:
     """Print a one-line JSON verdict for PR `pr`; return the exit code.
 
     The exit code is always the CI verdict's code; review fields are additive
     and advisory, and `ready` conjoins them with `ready_blockers` naming the
     failed conjuncts (docs/architecture/pr-status-verdict.md, `run_status`).
+    `prior` is the same head's previous payload; detail and rerun facts are
+    reused within one head only (docs, `Reuse across reads of one head`).
     """
     import sys
+
+    prior_payload: dict = prior if isinstance(prior, dict) else {}
+    # A job id is minted per attempt, so a known id is the same completed job.
+    known: dict = {}
+    for f in prior_payload.get("failures") or []:
+        if isinstance(f, dict) and f.get("job_id"):
+            known[str(f["job_id"])] = f
 
     pr_json, reason = _fetch(pr, cwd)
     if pr_json is None:
@@ -757,7 +778,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
                 for c in _latest_per_name(generic_rollup)
                 if _classify(c) == "fail" and _has_settled_marker(c)
             ]
-            failures = collect_failures(failing_rows, cwd)
+            failures = collect_failures(failing_rows, cwd, known=known)
         except Exception:  # noqa: BLE001 - the verdict stays authoritative
             failures = None
 
@@ -981,11 +1002,27 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
     owner_guidance = _review_owner_guidance(coverage, activity.worktree)
     # Rerun recovery, probed on every green read of a live PR (fail-open).
-    rerun = (
-        rerun_recovery(pr, cwd, sha=pr_json.get("headRefOid"))
-        if verdict == "green" and not is_terminal
-        else None
-    )
+    # A recovery is history of one head (docs, `Reuse across reads of one
+    # head`); `runs` is the listing fetch_pr_rest already read.
+    rerun: Optional[dict] = None
+    if verdict == "green" and not is_terminal:
+        head_sha = pr_json.get("headRefOid")
+        prior_green = (
+            prior_payload.get("verdict") == "green"
+            and prior_payload.get("head") == head_sha
+            and "rerun_recovered" in prior_payload
+            and isinstance(prior_payload.get("checks"), dict)
+            and prior_payload["checks"].get("total") == counts["total"]
+        )
+        if prior_green:
+            rerun = {
+                "recovered": bool(prior_payload.get("rerun_recovered")),
+                "failed": list(prior_payload.get("recovered_failures") or []),
+            }
+        else:
+            rerun = rerun_recovery(
+                pr, cwd, sha=head_sha, runs=pr_json.get("workflowRuns")
+            )
     rerun_fields = (
         {
             "rerun_recovered": bool(rerun.get("recovered")),
@@ -1306,9 +1343,11 @@ def main(argv: Sequence[str]) -> int:
         # CLI path only - library callers read `_proc.GH_CALLS` directly.
         import sys
 
-        from fno.pr import _proc
+        from fno.pr import _proc, _quota
 
-        sys.stderr.write(f"note: {_proc.GH_CALLS} gh call(s) this invocation\n")
+        sys.stderr.write(
+            f"note: {_proc.GH_CALLS} gh call(s) this invocation{_quota.budget_note()}\n"
+        )
         return rc
     except ToolMissing:
         import sys

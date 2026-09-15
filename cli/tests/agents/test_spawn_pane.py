@@ -30,6 +30,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from typer.testing import CliRunner
+
 from fno.paths_testing import use_tmpdir
 from fno.agents.mux_spawn import MuxSpawnResult
 from tests.agents._fake_claude import stub_codex_sandbox_probe
@@ -2074,8 +2076,6 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
 ) -> None:
     """x-84a8: `fno agents spawn --node ... --slug ... --plan ...` resolves the
     provenance map and hands it to the bounded default pane dispatcher."""
-    from typer.testing import CliRunner
-
     import fno.agents.cli as agents_cli
     import fno.agents.mux_spawn as mux_spawn
 
@@ -2092,6 +2092,8 @@ def test_cmd_spawn_node_flag_resolves_and_passes_provenance(
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     # The dispatch takes a real node claim; keep it out of the user's global store.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setattr("fno.graph.load.load_graph",
+        lambda: [{"id": "x-84a8", "slug": "s", "dispatch_verb": "/target", "difficulty": "low"}])
 
     res = CliRunner().invoke(
         agents_cli.agents_app,
@@ -3445,10 +3447,7 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     tmp_path: Path, monkeypatch
 ) -> None:
     """The public flag reaches the existing safe happy launcher seam."""
-    from typer.testing import CliRunner
-
     import fno.agents.mux_spawn as mux_spawn
-    import fno.agents.spawn_gate as spawn_gate
     from fno.cli import app
     from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL
 

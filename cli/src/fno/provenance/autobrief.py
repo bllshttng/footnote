@@ -4,7 +4,7 @@
 dispatch call sites use in place of a bare ``node.get("dispatch_brief")``. It is
 a first-non-empty-rung priority chain:
 
-  1. ``node.dispatch_brief``  - operator-authored, verbatim. Over the 8 KB env
+  1. ``node.dispatch_brief``  - superuser-authored, verbatim. Over the 8 KB env
      budget it stays fail-closed DOWNSTREAM (harness_map raises), so it is
      returned unclamped here.
   2. sidecar brief            - ``has_brief`` + ``briefs_dir()/{id}.md``, the

@@ -294,6 +294,11 @@ impl ClaudeHome {
         Self { home: home.into() }
     }
 
+    /// The HOME-style root this resolver reads `.claude` under.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
     pub fn sessions_dir(&self) -> PathBuf {
         self.home.join(".claude").join("sessions")
     }
@@ -1062,6 +1067,77 @@ pub fn resolve_session_uuid(home: &ClaudeHome, short_id: &str) -> Option<String>
         }
     }
     fallback
+}
+
+/// Bulk [`resolve_session_uuid`]: one walk of the sessions dir resolving
+/// every jobId at once. Same live-socket preference as the single form: a
+/// supervisor whose socket is live wins, else the first bg match carrying a
+/// non-empty sessionId.
+pub fn resolve_session_uuids(
+    home: &ClaudeHome,
+    short_ids: &[&str],
+) -> std::collections::BTreeMap<String, String> {
+    let mut live: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut fallback: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    if short_ids.is_empty() {
+        return live;
+    }
+    let sessions = home.sessions_dir();
+    if !sessions.exists() {
+        return live;
+    }
+    let mut entries: Vec<PathBuf> = match std::fs::read_dir(&sessions) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "json").unwrap_or(false))
+            .collect(),
+        Err(_) => return live,
+    };
+    entries.sort();
+    for entry_path in entries {
+        let raw = match std::fs::read_to_string(&entry_path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !v.is_object() {
+            continue;
+        }
+        let Some(job) = v.get("jobId").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        if !short_ids.contains(&job) {
+            continue;
+        }
+        if v.get("kind").and_then(|x| x.as_str()) != Some("bg") {
+            continue;
+        }
+        let Some(sid) = v
+            .get("sessionId")
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        match v.get("messagingSocketPath").and_then(|x| x.as_str()) {
+            Some(s) if !s.is_empty() => {
+                live.insert(job.to_string(), sid.to_string());
+            }
+            _ => {
+                fallback
+                    .entry(job.to_string())
+                    .or_insert_with(|| sid.to_string());
+            }
+        }
+    }
+    for (job, sid) in fallback {
+        live.entry(job).or_insert(sid);
+    }
+    live
 }
 
 /// Best-effort full session-UUID resolution at spawn
@@ -3802,6 +3878,28 @@ mod tests {
         let home = tmpdir();
         let ch = ClaudeHome::at(&home);
         assert!(resolve_session_uuid(&ch, "7c5dcf5d").is_none());
+    }
+
+    #[test]
+    fn resolve_session_uuids_bulk_matches_the_single_form() {
+        let home = tmpdir();
+        let sessions = home.join(".claude").join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        write_session(&sessions, "111", "7c5dcf5d", "bg", None); // idle bg: resolves via fallback
+        write_session(&sessions, "222", "deadbeef", "bg", None); // in the ask-list, resolves
+        write_session(&sessions, "333", "cafe1111", "interactive", None); // wrong kind: skipped
+        let ch = ClaudeHome::at(&home);
+        let resolved = resolve_session_uuids(&ch, &["7c5dcf5d", "deadbeef"]);
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(
+            resolved.get("7c5dcf5d").map(String::as_str),
+            Some("sess-7c5dcf5d")
+        );
+        assert!(resolved.contains_key("deadbeef"));
+        assert!(
+            !resolved.contains_key("cafe1111"),
+            "non-bg rows never resolve"
+        );
     }
 
     #[test]

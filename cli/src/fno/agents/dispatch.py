@@ -741,6 +741,7 @@ def _codex_create_path(
         spawned_by_session=_cx_session,
         spawned_by_harness=_cx_harness,
         spawned_by_cwd=_cx_cwd,
+        spawn_trigger=_capture_spawn_trigger(),
         name=name,
         cwd=str(cwd),
         log_path=str(output_path),
@@ -845,19 +846,13 @@ def _reign_typed_message(
 
 
 def _capture_spawn_trigger() -> Optional[str]:
-    """The CAUSE of this spawn (x-42c5), distinct from :func:`_capture_parent_edge`.
+    """The CAUSE of this spawn, distinct from :func:`_capture_parent_edge`.
 
-    An automated dispatcher (today: think-spawn) sets ``FNO_SPAWN_TRIGGER`` in
-    the subprocess env before shelling out to ``fno agents spawn``; a human
-    running the command directly never sets it, so absence reads as "an
-    operator asked for this." Never raises.
-
-    Pops the var after reading it (one-shot, not just get): the create paths
-    downstream (e.g. claude.py's ``bg_create``) build the *new* worker's own
-    process env from a ``dict(os.environ)`` snapshot of this process, and
-    ``scrub_ambient_identity`` does not know about this marker. Left in place,
-    it would ride into the spawned session's environment and mislabel that
-    session's own later spawns with this spawn's cause.
+    A dispatcher (think-spawn, or a machine advance) sets ``FNO_SPAWN_TRIGGER``
+    in the subprocess env before shelling ``fno agents spawn``; a human running
+    the command directly never sets it, so absence reads as "an operator asked
+    for this." Never raises. Pops the var after reading it: a child never
+    inherits its parent's spawn cause, and the worker env floor drops it too.
     """
     return (os.environ.pop("FNO_SPAWN_TRIGGER", "") or "").strip() or None
 
@@ -1115,6 +1110,8 @@ def _lane_b_thread_spawn(
             "--",
             *argv,
         ]
+        # The spawn cause is captured BEFORE this env snapshot, so the keeper child never inherits it.
+        spawn_trigger = _capture_spawn_trigger()
         env = dict(os.environ)
         # A spawned child inherits its parent's ROUTE but never its
         # IDENTITY; the keeper passes its own env through to the harness
@@ -1178,6 +1175,7 @@ def _lane_b_thread_spawn(
             spawned_by_session=_cx_session,
             spawned_by_harness=_cx_harness,
             spawned_by_cwd=_cx_cwd,
+            spawn_trigger=spawn_trigger,
             name=name,
             cwd=str(cwd),
             log_path=str(log_path),

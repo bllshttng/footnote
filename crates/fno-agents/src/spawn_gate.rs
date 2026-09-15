@@ -28,7 +28,9 @@ use crate::claims;
 use crate::claude_roster::ClaudeRoster;
 use crate::daemon::pid_is_ours;
 use crate::spawn_gate_lanes;
-use crate::spawn_gate_lanes::{check_account_quota_lock, check_registry_schema};
+use crate::spawn_gate_lanes::{
+    check_account_quota_lock, check_lane_quota_lock, check_registry_schema,
+};
 use crate::state::{load_registry, Registry, RegistryEntry};
 use crate::AgentStatus;
 use std::collections::HashMap;
@@ -1200,6 +1202,26 @@ pub fn run_gate(
         let mut quota_warnings = Vec::new();
         check_account_quota_lock(config_cwd, account, &mut quota_warnings)?;
         for w in &quota_warnings {
+            eprintln!("{w}");
+        }
+    }
+
+    // The route axis of the same wall: a route-keyed spawn carries no
+    // account, so the check above never sees it. The daemon's lane snapshot
+    // is the provider-keyed lock (auto-continue launched d8996f9b 32 minutes
+    // before the reset through this hole), and it sits ahead of the force
+    // branch like the account check: a vendor quota window is not machine
+    // busy-ness.
+    if let Some(provider) = route_provider {
+        let mut lane_warnings = Vec::new();
+        check_lane_quota_lock(
+            registry_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new(".")),
+            provider,
+            &mut lane_warnings,
+        )?;
+        for w in &lane_warnings {
             eprintln!("{w}");
         }
     }
@@ -3201,6 +3223,71 @@ MemAvailable:    8000000 kB\n";
             elapsed < QUEUE_TIMEOUT,
             "must refuse fast, not queue: took {elapsed:?}"
         );
+    }
+
+    /// AC5-HP: a route spawn onto a provider whose lane snapshot shows a
+    /// fresh open wall refuses exit 78 even under --force, the way the
+    /// auto-continue specimen d8996f9b should have been refused.
+    #[test]
+    fn route_spawn_refuses_on_a_walled_lane_even_forced() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-lanequota-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\nmax_swap_pct = 0\n",
+        )
+        .unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            format!(
+                r#"{{"lanes":[{{"lane":"zai:default","provider":"zai","account":"default","reset_epoch":{},"reset_passed_epoch":null,"missing_reset_timezone":[],"state":"open","members":[]}}],"measured_at":"probe","measured_at_epoch":{}}}"#,
+                now + 600,
+                now
+            ),
+        )
+        .unwrap();
+
+        let got = run_gate(
+            &dir,
+            &dir.join("registry.json"),
+            GateInput {
+                name: "ac-t-f6c6-stop-hook-glm".into(),
+                substrate: "headless".into(),
+                flags: GateFlags {
+                    force: true,
+                    no_wait: true,
+                },
+                route_provider: Some("zai".into()),
+                account: Some(String::new()),
+                ..GateInput::default()
+            },
+        );
+
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_spawn_gate {
+            Some(value) => std::env::set_var("FNO_SPAWN_GATE", value),
+            None => std::env::remove_var("FNO_SPAWN_GATE"),
+        }
+        let refusal = got.err().expect("walled lane must refuse");
+        assert_eq!(refusal.exit_code, EXIT_PROVIDER_CAP);
+        assert_eq!(
+            refusal.receipt.as_ref().unwrap()["reason"],
+            "provider_quota_lock"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -110,7 +110,10 @@
 #      receipt: they resolve Claude Code's own ~/.claude/projects transcript
 #      tree to join a session's store existence and locator - read-only, the
 #      same category as claude_roster.rs/client_verbs.rs/daemon.rs, from
-#      which this code moved. Footnote stores nothing there.
+#      which this code moved. roster_reap.rs is the roster-side twin of the
+#      same census: it stages reap receipts and measures resume evidence off
+#      that transcript tree, and its test stages one under a tmp HOME.
+#      Footnote stores nothing there.
 #      scratch.rs (x-caf8) is the scratch-shape sweep: its whole subject IS
 #      Claude Code's own ~/.claude/jobs/<job>/tmp tree, read-only rglob for
 #      authored py/sh scratch; it writes only the global events journal
@@ -283,6 +286,7 @@ crates/fno-agents/src/plugin_install.rs
 crates/fno-agents/src/provider.rs
 crates/fno-agents/src/reclaim.rs
 crates/fno-agents/src/receipt.rs
+crates/fno-agents/src/roster_reap.rs
 crates/fno-agents/src/scratch.rs
 crates/fno-agents/src/session_start_bytes.rs
 crates/fno-agents/src/state.rs

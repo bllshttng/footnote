@@ -465,6 +465,67 @@ def test_spawn_trigger_does_not_leak_into_this_process_environment(monkeypatch):
     assert _capture_spawn_trigger() is None
 
 
+def _clear_all_parent_markers(monkeypatch) -> None:
+    for marker in (*_PARENT_MARKERS, "FNO_SPAWN_TRIGGER"):
+        monkeypatch.delenv(marker, raising=False)
+
+
+def test_machine_dispatch_env_records_no_parent_and_names_the_cause(
+    workdir_claude, captured_emits, monkeypatch
+):
+    """The env a machine dispatch builds (no identity marker, the trigger set)
+    mints a row with no parent session; the trigger names the cause."""
+    _clear_all_parent_markers(monkeypatch)
+    monkeypatch.setenv("FNO_SPAWN_TRIGGER", "dispatch:ac")
+
+    from fno.agents.cli import agents_app
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "test-dispatch-trigger", "-H", "claude", "do something", "--substrate", "bg"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+
+    entries = load_registry()
+    entry = next((e for e in entries if e.name == "test-dispatch-trigger"), None)
+    assert entry is not None
+    assert entry.spawned_by_session is None
+    assert entry.spawn_trigger == "dispatch:ac"
+
+    spawned_events = [(k, d) for k, d in captured_emits if k == "agent_spawned"]
+    assert len(spawned_events) == 1
+    assert spawned_events[0][1].get("spawned_by_session") is None
+
+
+def test_session_parent_without_trigger_keeps_edge_and_no_cause(
+    workdir_claude, captured_emits, monkeypatch
+):
+    """A session marker with no trigger is a session that asked: the row keeps
+    the parent edge and carries no cause."""
+    _clear_all_parent_markers(monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-1")
+
+    from fno.agents.cli import agents_app
+    from typer.testing import CliRunner
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "test-parent-no-trigger", "-H", "claude", "do something", "--substrate", "bg"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, f"exit {result.exit_code}\n{result.output}"
+
+    entries = load_registry()
+    entry = next((e for e in entries if e.name == "test-parent-no-trigger"), None)
+    assert entry is not None
+    assert entry.spawned_by_session == "parent-1"
+    assert entry.spawn_trigger is None
+
+
 # --- x-132c: the gaps the fleet measurement found (0 of 30 rows stamped) ------
 
 _PARENT_MARKERS = (
@@ -524,6 +585,46 @@ def test_codex_create_path_stamps_the_row_not_just_the_event(
     assert row.spawned_by_session == "parent-cx-1"
     assert row.spawned_by_harness == "codex"
     assert row.spawned_by_cwd
+
+
+def test_codex_create_path_records_the_trigger(
+    workdir_claude, captured_emits, monkeypatch
+):
+    """A machine dispatch through the codex lane names its cause on the row,
+    the same stamp the claude bg mint writes."""
+    from unittest.mock import MagicMock
+
+    from fno.agents.dispatch import DispatchAskResult, _codex_create_path
+    from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.harnesses.codex import CodexResult
+
+    class _Handle:
+        def detach(self):
+            pass
+
+    monkeypatch.setattr(
+        codex_mod,
+        "create",
+        MagicMock(return_value=CodexResult(
+            exit_code=0, session_id="codex-sid-abc", last_msg="hello", duration_ms=42,
+        )),
+    )
+    _only_marker(monkeypatch, "CODEX_SESSION_ID", "parent-cx-1")
+    monkeypatch.setenv("FNO_SPAWN_TRIGGER", "dispatch:rd")
+    result = _codex_create_path(
+        name="codex-trigger",
+        message="echo hello",
+        cwd=os.getcwd(),
+        from_name="fno",
+        yolo=False,
+        timeout_sec=10.0,
+        lock_handle=_Handle(),
+    )
+    assert isinstance(result, DispatchAskResult)
+
+    entries = load_registry()
+    row = next(e for e in entries if e.name == "codex-trigger")
+    assert row.spawn_trigger == "dispatch:rd"
 
 
 def test_register_operator_row_never_stamps_itself_as_parent(tmp_path, monkeypatch):

@@ -13,7 +13,7 @@ from typing import Callable, Mapping, Optional, Sequence
 
 from fno.agents.harness_map import (
     DispatchResolveError, capabilities, dispatch_command,
-    normalize_command, resolve_effective_verb,
+    normalize_command,
 )
 from fno.agents.mux_spawn import resolve_mux_session
 from fno.agents.naming import parse_many
@@ -279,25 +279,6 @@ def resolve_thread_viewport(
     raise RetaskTransportError("thread_view_join_missed")
 
 
-def _resolve_node_verb(node: str) -> str:
-    """The node's next lifecycle verb; an abstain (None) means ``target``.
-    Raises DispatchResolveError on a rung the table cannot answer."""
-    from fno.graph.ladder import plan_rung as node_plan_rung
-    from fno.graph.load import load_graph
-
-    rec = next(
-        (n for n in load_graph() if isinstance(n, dict) and n.get("id") == node), None
-    )
-    verb, _note = resolve_effective_verb(
-        verb=rec.get("dispatch_verb") if rec else None,
-        difficulty=rec.get("difficulty") if rec else None,
-        plan_rung=node_plan_rung(rec).value,
-        node_id=node,
-    )
-    # The table answers canonical "/blueprint"; probe and rename take the bare word.
-    return (verb or "target").lstrip("/") or "target"
-
-
 def resolve_target_coordinate(
     node: str,
     *,
@@ -306,7 +287,14 @@ def resolve_target_coordinate(
     effort: Optional[str] = None,
     env: Optional[Mapping[str, str]] = None,
 ) -> RetaskCoordinate:
-    verb = _resolve_node_verb(node)
+    # The node's next lifecycle verb; an abstain (None) means ``target``.
+    # The table answers canonical "/blueprint"; probe and rename take the
+    # bare word. One lookup and one wrapper, shared with the door.
+    from fno.agents.node_dispatch import find_node_row, node_effective_verb
+
+    verb = (node_effective_verb(find_node_row(node), node_id=node) or "target").lstrip(
+        "/"
+    ) or "target"
     args = ["spawn", "--name", "retask-probe"]
     if model is not None:
         args += ["--model", model]

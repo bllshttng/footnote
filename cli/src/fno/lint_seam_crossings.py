@@ -45,7 +45,6 @@ PY_DOOR_FILE = "cli/src/fno/rust_binary.py"
 # Every production Rust source under both crates. Tests live INSIDE these
 # files in `#[cfg(test)]` mod blocks (skipped) and in `crates/*/tests/`
 # (outside the seam surface by construction).
-_RUST_ROOTS = ("crates",)
 
 # A porcelain launch. Covers `Command::new("fno")` and the fully qualified
 # `std::process::Command::new("fno")` / `tokio::process::Command::new("fno")`.

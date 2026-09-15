@@ -43,38 +43,14 @@ pub struct WatchOutcome {
 /// One pass of the arm body, with the rows handed in and the send handed in. The overdue set, the token, the body and the store writes are all this function's; the caller owns the reads and the send. An empty set forgets the stored token and stays silent: recovery is the designed quiet, like the board lane.
 pub fn tick_arm_watch(
     rows: &[ArmStatus],
+    findings: &[crate::stuck_work::Finding],
     threshold_s: u64,
     store: &Path,
     now_unix: u64,
     send: impl FnOnce(&str, &str) -> bool,
 ) -> WatchOutcome {
-    let overdue: Vec<&ArmStatus> = rows
-        .iter()
-        .filter(|row| {
-            if row.arm == "arm_watch" {
-                // Its own death must not page about itself; its tick row is
-                // the evidence and the readout is the next reader's input.
-                return false;
-            }
-            let failing_overdue = row.failing && row.failing_for_s.is_none_or(|s| s >= threshold_s);
-            let stale_overdue = row.stale
-                && matches!(
-                    row.cause.as_deref(),
-                    Some("scheduler_down") | Some("tick_overdue")
-                )
-                && row.age_s.is_some_and(|s| s >= threshold_s);
-            // An unobserved periodic arm has no receipt to age, so no
-            // threshold applies: its journals hold no tick row at all, which
-            // is the dead-emitter shape the readout can only name, not age.
-            // Event-driven arms (interval 0) are exempt - quiet is their
-            // normal, and paging stop_hook for a machine with no recent
-            // session stops would cry wolf.
-            let unobserved_overdue =
-                row.interval_s > 0 && row.producer_evidence == ProducerEvidence::Unobserved;
-            failing_overdue || stale_overdue || unobserved_overdue
-        })
-        .collect();
-    if overdue.is_empty() {
+    let overdue = overdue_arms(rows, threshold_s);
+    if overdue.is_empty() && findings.is_empty() {
         crate::operator_notice::forget_at(store, SIGNAL_KEY);
         return WatchOutcome {
             acted: 0,
@@ -86,10 +62,11 @@ pub fn tick_arm_watch(
         .iter()
         .map(|row| format!("{}@{}", row.arm, anchor(row, now_unix)))
         .collect();
+    token_parts.extend(findings.iter().map(|f| f.key.clone()));
     token_parts.sort();
     let token = token_parts.join(",");
-    let title = "control plane: arm failing";
-    let body = notice_body(&overdue);
+    let title = "control plane: needs attention";
+    let body = notice_body(&overdue, findings);
     let verdict = crate::operator_notice::notify_signal_via(
         store,
         now_unix,
@@ -128,12 +105,15 @@ pub fn tick_arm_watch(
 /// One body line per overdue arm, then the pointer. Lines stop when the next
 /// one would push the body past the 600-char cap; the pointer is kept
 /// whatever the truncation cuts.
-fn notice_body(overdue: &[&ArmStatus]) -> String {
+fn notice_body(overdue: &[&ArmStatus], findings: &[crate::stuck_work::Finding]) -> String {
     const CAP: usize = 600;
     let pointer = "fno agents status";
     let mut body = String::new();
-    for row in overdue {
-        let line = row_line(row);
+    let lines = overdue
+        .iter()
+        .map(|row| row_line(row))
+        .chain(findings.iter().map(|f| f.line.clone()));
+    for line in lines {
         let sep = if body.is_empty() { "" } else { "\n" };
         if body.len() + sep.len() + line.len() + 1 + pointer.len() > CAP {
             break;
@@ -150,7 +130,7 @@ fn notice_body(overdue: &[&ArmStatus]) -> String {
 }
 
 /// The body line for one overdue row: FAIL names the skip reason and how long the arm has been failing; STALE names the cause and the row age; UNOBSERVED says the journals hold no receipt.
-fn row_line(row: &ArmStatus) -> String {
+pub fn row_line(row: &ArmStatus) -> String {
     if row.producer_evidence == ProducerEvidence::Unobserved {
         return format!("{} UNOBSERVED no producer receipt in the journals", row.arm);
     }
@@ -164,6 +144,37 @@ fn row_line(row: &ArmStatus) -> String {
     let cause = row.cause.as_deref().unwrap_or("stale");
     let age = row.age_s.unwrap_or(0);
     format!("{} STALE {cause} for {age}s", row.arm)
+}
+
+/// The overdue set: the arms failing, stale-past-cause, or receipt-less past
+/// the threshold. The tick and the king check-in read the same predicate, so
+/// a page and a check-in line can never disagree about who is overdue.
+pub fn overdue_arms(rows: &[ArmStatus], threshold_s: u64) -> Vec<&ArmStatus> {
+    rows.iter()
+        .filter(|row| {
+            if row.arm == "arm_watch" {
+                // Its own death must not page about itself; its tick row is
+                // the evidence and the readout is the next reader's input.
+                return false;
+            }
+            let failing_overdue = row.failing && row.failing_for_s.is_none_or(|s| s >= threshold_s);
+            let stale_overdue = row.stale
+                && matches!(
+                    row.cause.as_deref(),
+                    Some("scheduler_down") | Some("tick_overdue")
+                )
+                && row.age_s.is_some_and(|s| s >= threshold_s);
+            // An unobserved periodic arm has no receipt to age, so no
+            // threshold applies: its journals hold no tick row at all, which
+            // is the dead-emitter shape the readout can only name, not age.
+            // Event-driven arms (interval 0) are exempt - quiet is their
+            // normal, and paging stop_hook for a machine with no recent
+            // session stops would cry wolf.
+            let unobserved_overdue =
+                row.interval_s > 0 && row.producer_evidence == ProducerEvidence::Unobserved;
+            failing_overdue || stale_overdue || unobserved_overdue
+        })
+        .collect()
 }
 
 /// The token anchor: `now - failing_for_s` for a failing row (the newest ok run) and the row's `last_ts` for a stale row. Both stay constant while the episode lasts, so a quiet episode dedupes and a set change is a new token. A failing row with no ok run in the journals anchors on the constant 0: its last_ts is the newest FAILED run and advances per interval, which would re-page the same episode every rate floor.
@@ -224,9 +235,30 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         );
         let threshold = crate::agents_config::notify_arm_failing_after_s(&config_cwd);
         let store = crate::operator_notice::notify_signals_path();
-        let outcome = tick_arm_watch(&rows, threshold, &store, now_unix, |title, body| {
-            crate::operator_notice::notify_operator(title, body, Some("fno agents status"))
-        });
+        let (findings, stuck_note) = match crate::stuck_work::collect(&config_cwd) {
+            Ok(found) => (found, None),
+            Err(reason) => (Vec::new(), Some(format!("stuck work unread: {reason}"))),
+        };
+        let mut outcome = tick_arm_watch(
+            &rows,
+            &findings,
+            threshold,
+            &store,
+            now_unix,
+            |title, body| {
+                crate::operator_notice::notify_operator_confirmed(
+                    title,
+                    body,
+                    Some("fno agents status"),
+                )
+            },
+        );
+        if let Some(note) = stuck_note {
+            if !outcome.detail.is_empty() {
+                outcome.detail.push_str("; ");
+            }
+            outcome.detail.push_str(&note);
+        }
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),

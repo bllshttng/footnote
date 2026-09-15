@@ -133,8 +133,6 @@ def _backlog_sections_for(items: list[dict]) -> list[tuple[str, list[dict]]]:
     return [(name, groups[name]) for name in sorted(groups)]
 
 
-def _backlog_sections(entries: list[dict], project: str) -> list[tuple[str, list[dict]]]:
-    return _backlog_sections_for(public_backlog_entries(entries, project))
 
 
 def render_public_roadmap_html(

@@ -677,8 +677,6 @@ class OutageEvidence:
         return self.content_fingerprint
 
 
-def empty_report() -> dict[str, Any]:
-    return {"instrument": "measured", "breakers": [], "counts": {}, "refusals": []}
 
 
 def journal_path() -> Path:

@@ -94,7 +94,11 @@ EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
 # shellcheck source=../scripts/lib/events.sh
 [[ -r "$EVENTS_LIB" ]] && source "$EVENTS_LIB" 2>/dev/null || true
 LIVE_STATE_FILE=$(fno-agents state path target-state 2>/dev/null || true)
-[[ -z "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
+# The verb answers THIS cwd's spaces-layout slice whether or not a manifest
+# lives there; when that answer is not on disk, the manifest init wrote at the
+# workspace root is the one to gate on. agy fires Stop from unrelated cwds, so
+# an empty answer alone never fired this fallback (x-3227 review, T9).
+[[ -z "$LIVE_STATE_FILE" || ! -f "$LIVE_STATE_FILE" ]] && LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 TARGET_CWD="$ROOT"
 REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
@@ -422,6 +426,19 @@ verb_rc=0
 if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
     DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
 else
+    # x-3227 sibling: this adapter only ever gates target plans, so its
+    # done_probes get the session cargo build-dir env the same way the claude
+    # adapter exports it. The config surface's own answer, exported only when
+    # it reads as that answer; any failure leaves the env unset.
+    if [[ -z "${CARGO_BUILD_BUILD_DIR:-}" ]] && command -v fno >/dev/null 2>&1; then
+        _session_build_dir=$(fno config build-dir 2>/dev/null || true)
+        case "$_session_build_dir" in
+            */"{workspace-path-hash}")
+                export CARGO_BUILD_BUILD_DIR="$_session_build_dir"
+                ;;
+        esac
+        unset _session_build_dir
+    fi
     DECISION_JSON=$("$BIN" loop-check \
         --state "$STATE_FILE" \
         --transcript "$SYNTH" \

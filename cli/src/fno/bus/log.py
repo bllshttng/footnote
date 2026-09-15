@@ -181,11 +181,6 @@ def _now_iso() -> str:
 
 # Canonical key order. Always-present keys first, then optional tags, then body
 # last (bodies can be large; keeping them last keeps the line head scannable).
-_ALWAYS = ("v", "id", "ts", "thread", "from", "to", "kind")
-_OPTIONAL = (
-    "from_harness", "to_harness", "request_id", "in_reply_to", "delivery",
-    "from_session", "from_model", "to_kind", "word_count", "origin", "meta",
-)
 
 
 def to_json_line(env: Envelope) -> str:

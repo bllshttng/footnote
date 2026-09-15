@@ -49,7 +49,6 @@ class LegacyMessage:
     body: str
 
 
-_SEP = " · "
 _HEADER_RE = re.compile(
     r"^## (msg-[0-9a-zA-Z]{1,}) · (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) · from:(\S+) · kind:(\S+)(.*)?$"
 )

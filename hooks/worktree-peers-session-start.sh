@@ -232,11 +232,48 @@ else
   stranded_lines+=('- stranded sweep skipped: fno or jq unavailable. [fno-stranded-sweep-incomplete]')
 fi
 
+# Checkout staleness: the session's OWN checkout, only when it IS the
+# canonical one and sits behind origin. Every session in a stale checkout
+# runs old hooks, guards and fno source. The probe is wall-clock bounded (5s)
+# and network-free (no fetch: every worktree fetch updates the shared
+# origin/* refs); a timeout is the one failure that speaks, so an incomplete
+# read never looks clean. A linked worktree is behind by design and stays
+# silent.
+checkout_lines=()
+top="$(git -C "${CLAUDE_PROJECT_DIR:-$PWD}" rev-parse --show-toplevel 2>/dev/null)"
+if [[ -n "$top" ]] \
+  && [[ "$(git -C "$top" rev-parse --absolute-git-dir 2>/dev/null)" == "$(git -C "$top" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ]] \
+  && command -v fno-agents >/dev/null 2>&1 \
+  && command -v jq >/dev/null 2>&1; then
+  answer="$(jq -n --arg c "$top" '{canonical:$c}' | with_timeout 5 fno-agents canonical-check)"
+  checkout_rc=$?
+  if (( checkout_rc == 124 )); then
+    checkout_lines+=('- checkout staleness probe timed out. [fno-checkout-behind-unknown]')
+  elif (( checkout_rc == 0 )); then
+    head_branch="$(printf '%s' "$answer" | jq -r '.head_branch // empty' 2>/dev/null)"
+    default_branch="$(printf '%s' "$answer" | jq -r '.default_branch // empty' 2>/dev/null)"
+    behind="$(printf '%s' "$answer" | jq -r '.behind // 0' 2>/dev/null)"
+    if [[ -n "$head_branch" && "$head_branch" == "$default_branch" ]] && (( behind > 0 )); then
+      checkout_lines+=("- This checkout is ${behind} commit(s) behind origin/${default_branch}; its hooks, guards and fno source are ${behind} commit(s) old. Sync: git -C ${top} pull --ff-only [fno-checkout-behind]")
+    fi
+    blocking_line="$(printf '%s' "$answer" | jq -r '
+      .blocking as $b
+      | select(($b|type)=="array" and ($b|length)>0)
+      | "Fast-forward blocked by uncommitted: "
+        + ($b[0:5] | join(", "))
+        + (if ($b|length)>5 then ", (+" + (($b|length)-5|tostring) + " more)" else "" end)
+    ' 2>/dev/null)"
+    if [[ -n "$blocking_line" ]]; then
+      checkout_lines+=("- ${blocking_line}. Commit or stash them before the sync. [fno-checkout-ff-blocked]")
+    fi
+  fi
+fi
+
 # The `${arr[@]+"${arr[@]}"}` form, not a bare `"${arr[@]}"`: bash 3.2 (the
 # macOS system bash this hook runs under) treats element-expansion of an
 # EMPTY array as an unbound variable under `set -u`, and peer_lines is
 # routinely empty when there is no live peer.
-lines=("${peer_lines[@]+"${peer_lines[@]}"}" "${stranded_lines[@]+"${stranded_lines[@]}"}")
+lines=("${peer_lines[@]+"${peer_lines[@]}"}" "${stranded_lines[@]+"${stranded_lines[@]}"}" "${checkout_lines[@]+"${checkout_lines[@]}"}")
 (( ${#lines[@]} > 0 )) || exit 0
 
 if (( BODY_ONLY )); then

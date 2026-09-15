@@ -551,6 +551,8 @@ class AgentEntry:
     # and the Rust RegistryEntry mirrors it with #[serde(default,
     # skip_serializing_if=...)], so no schema bump.
     exited_at: Optional[str] = None
+    # fno's own stop (v32): ``{"by", "at", "reason"?}``; Rust stamps, Python custodies (X3).
+    stop: Optional[dict] = None
     # Mux hosting ref (4a-G2): ``{"session": <mux session>, "pane_id": <u64>}``
     # for an agent whose PTY is a mux pane (``fno agents spawn --substrate
     # pane``); ``None`` for daemon-worker, bg-thread, and headless rows. The
@@ -752,9 +754,7 @@ def mint_agent_entry(
 _DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
 _REGISTRY_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-_ACCEPTED_FORMS = (
-    "accepted forms: name, canonical handle, transport short id, or full session id"
-)
+_ACCEPTED_FORMS = "accepted forms: name, canonical handle, transport short id, or full session id"
 
 
 class AgentResolutionError(RuntimeError):

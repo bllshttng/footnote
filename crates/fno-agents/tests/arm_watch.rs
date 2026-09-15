@@ -66,14 +66,14 @@ fn a_failing_arm_past_threshold_sends_one_notice() {
     let store = temp_store("ac1");
     let rows = vec![failing(row("king_wake"), "timeout", 2000)];
     let mut sends: Vec<(String, String)> = Vec::new();
-    let out = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |title, body| {
+    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |title, body| {
         sends.push((title.to_string(), body.to_string()));
         true
     });
     assert_eq!(out.acted, 1);
     assert_eq!(out.skip_reason, None);
     assert_eq!(sends.len(), 1);
-    assert_eq!(sends[0].0, "control plane: arm failing");
+    assert_eq!(sends[0].0, "control plane: needs attention");
     assert!(sends[0].1.contains("king_wake"), "{}", sends[0].1);
     assert!(sends[0].1.contains("2000s"), "{}", sends[0].1);
     assert!(sends[0].1.contains("fno agents status"), "{}", sends[0].1);
@@ -87,12 +87,12 @@ fn the_same_set_three_hundred_seconds_later_is_deduped() {
     let store = temp_store("ac2");
     let mut sends = 0usize;
     let first = vec![failing(row("king_wake"), "timeout", 2000)];
-    tick_arm_watch(&first, 1800, &store, TS_UNIX, |_, _| {
+    tick_arm_watch(&first, &[], 1800, &store, TS_UNIX, |_, _| {
         sends += 1;
         true
     });
     let second = vec![failing(row("king_wake"), "timeout", 2300)];
-    let out = tick_arm_watch(&second, 1800, &store, TS_UNIX + 300, |_, _| {
+    let out = tick_arm_watch(&second, &[], 1800, &store, TS_UNIX + 300, |_, _| {
         sends += 1;
         true
     });
@@ -109,14 +109,14 @@ fn a_new_arm_joining_the_set_sends_after_the_rate_floor() {
     let store = temp_store("ac3");
     let now = real_now();
     let first = vec![failing(row("king_wake"), "timeout", 2000)];
-    let out1 = tick_arm_watch(&first, 1800, &store, now, |_, _| true);
+    let out1 = tick_arm_watch(&first, &[], 1800, &store, now, |_, _| true);
     assert_eq!(out1.acted, 1);
     let second = vec![
         failing(row("king_wake"), "timeout", 2000 + 1900),
         failing(row("notify_watch"), "timeout", 1900),
     ];
     let mut bodies: Vec<String> = Vec::new();
-    let out2 = tick_arm_watch(&second, 1800, &store, now + 1900, |_, body| {
+    let out2 = tick_arm_watch(&second, &[], 1800, &store, now + 1900, |_, body| {
         bodies.push(body.to_string());
         true
     });
@@ -138,7 +138,7 @@ fn below_threshold_sends_nothing_and_forgets_the_stored_token() {
     )
     .unwrap();
     let rows = vec![failing(row("king_wake"), "timeout", 600)];
-    let out = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |_, _| {
+    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| {
         panic!("no send below threshold")
     });
     assert_eq!(out.acted, 0);
@@ -160,7 +160,7 @@ fn a_dead_scheduler_names_all_its_arms_and_the_cause() {
         stale(row("watchdog"), "scheduler_down"),
     ];
     let mut bodies: Vec<String> = Vec::new();
-    let out = tick_arm_watch(&rows, 1800, &store, now, |_, body| {
+    let out = tick_arm_watch(&rows, &[], 1800, &store, now, |_, body| {
         bodies.push(body.to_string());
         true
     });
@@ -178,7 +178,7 @@ fn a_dead_scheduler_names_all_its_arms_and_the_cause() {
 fn an_unexplained_stale_row_is_not_in_the_set() {
     let store = temp_store("ac6");
     let rows = vec![stale(row("notify_watch"), "unexplained")];
-    let out = tick_arm_watch(&rows, 1800, &store, TS_UNIX + 2400, |_, _| {
+    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX + 2400, |_, _| {
         panic!("unexplained never pages")
     });
     assert_eq!(out.acted, 0);
@@ -191,13 +191,13 @@ fn an_unexplained_stale_row_is_not_in_the_set() {
 fn a_failed_send_stores_no_token_so_the_next_tick_retries() {
     let store = temp_store("ac7");
     let rows = vec![failing(row("king_wake"), "timeout", 2000)];
-    let out = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |_, _| false);
+    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| false);
     assert_eq!(out.acted, 0);
     assert_eq!(out.skip_reason.as_deref(), Some("notify_failed"));
     let text = std::fs::read_to_string(&store).unwrap_or_default();
     assert!(!text.contains("arm_failing"), "{text}");
     let mut sends = 0usize;
-    let out2 = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |_, _| {
+    let out2 = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| {
         sends += 1;
         true
     });
@@ -218,12 +218,12 @@ fn an_anchorless_failing_episode_pages_once_not_every_floor() {
     r.age_s = Some(30);
     let rows = vec![r];
     let mut sends = 0usize;
-    let first = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |_, _| {
+    let first = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| {
         sends += 1;
         true
     });
     assert_eq!(first.acted, 1);
-    let second = tick_arm_watch(&rows, 1800, &store, TS_UNIX + 300, |_, _| {
+    let second = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX + 300, |_, _| {
         sends += 1;
         true
     });
@@ -242,7 +242,7 @@ fn an_unobserved_periodic_arm_pages_and_then_dedupes() {
     unobserved.producer_evidence = fno_agents::tick_ledger::ProducerEvidence::Unobserved;
     let rows = vec![unobserved];
     let mut sends: Vec<(String, String)> = Vec::new();
-    let out = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |title, body| {
+    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |title, body| {
         sends.push((title.to_string(), body.to_string()));
         true
     });
@@ -250,7 +250,7 @@ fn an_unobserved_periodic_arm_pages_and_then_dedupes() {
     assert!(sends[0].1.contains("UNOBSERVED"), "{}", sends[0].1);
     assert!(!sends[0].1.contains("STALE"), "{}", sends[0].1);
 
-    let out2 = tick_arm_watch(&rows, 1800, &store, TS_UNIX + 900, |_, _| {
+    let out2 = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX + 900, |_, _| {
         sends.push(("x".into(), "x".into()));
         true
     });
@@ -269,12 +269,81 @@ fn an_unobserved_event_driven_arm_pages_nothing() {
     unobserved_stop_hook.interval_s = 0;
     let rows = vec![unobserved_stop_hook];
     let mut sends = 0usize;
-    let out = tick_arm_watch(&rows, 1800, &store, TS_UNIX, |_, _| {
+    let out = tick_arm_watch(&rows, &[], 1800, &store, TS_UNIX, |_, _| {
         sends += 1;
         true
     });
     assert_eq!(out.acted, 0);
     assert_eq!(out.detail, "no arm past threshold");
     assert_eq!(sends, 0);
+    std::fs::remove_file(&store).ok();
+}
+
+/// AC5-HP: a stuck-work finding alone pages, dedupes on the same finding,
+/// and folds its key into the token.
+#[test]
+fn a_stuck_finding_alone_pages_and_dedupes() {
+    let store = temp_store("ac5-hp");
+    let finding = fno_agents::stuck_work::Finding {
+        kind: "hung_verb",
+        key: "hung:66853@1788520000".to_string(),
+        line: "hung verb pid 66853 3h29m fno-py backlog advance --loose (over 1800s)".to_string(),
+    };
+    let findings = vec![finding];
+    let mut sends: Vec<(String, String)> = Vec::new();
+    let out = tick_arm_watch(&[], &findings, 1800, &store, TS_UNIX, |title, body| {
+        sends.push((title.to_string(), body.to_string()));
+        true
+    });
+    assert_eq!(out.acted, 1);
+    assert_eq!(sends.len(), 1);
+    assert_eq!(sends[0].0, "control plane: needs attention");
+    assert!(sends[0].1.contains("66853"), "{}", sends[0].1);
+    assert!(sends[0].1.contains("3h29m"), "{}", sends[0].1);
+    assert!(sends[0].1.contains("backlog advance"), "{}", sends[0].1);
+    let stored = std::fs::read_to_string(&store).unwrap();
+    assert!(stored.contains("hung:66853@"), "{stored}");
+    // Same finding on the next tick: deduped.
+    let out2 = tick_arm_watch(&[], &findings, 1800, &store, TS_UNIX + 300, |_, _| {
+        panic!("the same finding must dedupe")
+    });
+    assert_eq!(out2.acted, 0);
+    assert_eq!(out2.detail, "deduped");
+    std::fs::remove_file(&store).ok();
+}
+
+/// AC5-ERR: a failed send leaves the store unwritten.
+#[test]
+fn a_failed_send_on_a_finding_stores_nothing() {
+    let store = temp_store("ac5-err");
+    let findings = vec![fno_agents::stuck_work::Finding {
+        kind: "dead_holder",
+        key: "holder:flight:x@1".to_string(),
+        line: "dead holder flight:x holder h pid 9 absent held 10m".to_string(),
+    }];
+    let out = tick_arm_watch(&[], &findings, 1800, &store, TS_UNIX, |_, _| false);
+    assert_eq!(out.acted, 0);
+    assert_eq!(out.skip_reason.as_deref(), Some("notify_failed"));
+    let text = std::fs::read_to_string(&store).unwrap_or_default();
+    assert!(!text.contains("holder:flight:x"), "{text}");
+    std::fs::remove_file(&store).ok();
+}
+
+/// AC5-EDGE: empty arms and empty findings keep the clear path.
+#[test]
+fn empty_arms_and_empty_findings_stay_clear() {
+    let store = temp_store("ac5-edge");
+    std::fs::write(
+        &store,
+        r#"{"arm_failing": {"token": "stale@1", "ts": "2026-09-04T12:00:00Z"}}"#,
+    )
+    .unwrap();
+    let out = tick_arm_watch(&[], &[], 1800, &store, TS_UNIX, |_, _| {
+        panic!("nothing stuck never pages")
+    });
+    assert_eq!(out.acted, 0);
+    assert_eq!(out.skip_reason.as_deref(), Some("clear"));
+    let text = std::fs::read_to_string(&store).unwrap();
+    assert!(!text.contains("arm_failing"), "{text}");
     std::fs::remove_file(&store).ok();
 }

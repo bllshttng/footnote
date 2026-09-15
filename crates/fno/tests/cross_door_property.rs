@@ -365,7 +365,7 @@ exit 2
 static BUILD: Once = Once::new();
 
 #[test]
-fn every_removal_door_leaves_the_row_absent_from_all_three_stores() {
+fn every_retirement_door_drops_the_row_and_keeps_the_session() {
     let fleet = Fleet::new("full");
     fleet.seed();
     fleet.seed_roster_only_row();
@@ -438,13 +438,24 @@ exit 2
         !registry.contains(ROW1),
         "door 1: registry still holds the row"
     );
-    // Door 2: the roster sweep. The agent list drops the roster-only row.
+    // Door 2: the roster sweep. The row leaves the roster surface's dead
+    // population, and the SESSION STAYS: retirement stops the worker and
+    // keeps the harness session (only `fno agents rm` drains it), and the
+    // receipt it stages is the resume record for the roster-only row.
     let d2 = fleet.run(&shim_dir, &bin, &["roster-reap", "--apply"]);
     println!("door 2 (roster-reap): {d2}");
     let c2 = fleet.dir.join("claude-c2.json");
     assert!(
-        !c2.exists(),
-        "door 2: the agent list still holds the roster-only row"
+        c2.exists(),
+        "door 2: the roster sweep deleted the roster-only session"
+    );
+    let receipt2 = fleet
+        .agents_home()
+        .join("reap-receipts")
+        .join(format!("claude-{U2}.json"));
+    assert!(
+        receipt2.exists(),
+        "door 2: the roster sweep staged no recovery receipt for {U2}"
     );
     // Door 3: the squad prune. m1 reads dead through the receipt its
     // removal staged; m2 reads dead through the cascade (node-route).
@@ -536,8 +547,10 @@ impl Fleet {
         );
     }
 
-    /// The property, asserted after every door: the row is absent from all
-    /// three stores.
+    /// The property, asserted after every door: the row drops from the
+    /// registry and the squad store, and the harness session SURVIVES -
+    /// retirement stops the worker and keeps the session; `fno agents rm`
+    /// is the only door that drains the agent list.
     fn assert_property(&self, after: &str) {
         let registry = std::fs::read_to_string(self.agents_home().join("registry.json")).unwrap();
         assert!(
@@ -555,13 +568,10 @@ impl Fleet {
             ("claude-c3.json", S3),
         ] {
             let path = self.dir.join(marker);
-            if path.exists() {
-                let raw = std::fs::read_to_string(&path).unwrap();
-                assert!(
-                    !raw.contains(id),
-                    "{after}: the claude agent list still holds {id}: {raw}"
-                );
-            }
+            assert!(
+                path.exists(),
+                "{after}: a retirement door deleted the harness session {id} ({marker})"
+            );
         }
     }
 }
