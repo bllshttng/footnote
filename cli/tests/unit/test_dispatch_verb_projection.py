@@ -292,7 +292,7 @@ def test_field_absent_node_dict_refuses_naming_the_loss(iso, monkeypatch):
     assert not calls, "no worker may be spent on a lossy projection"
     assert res.decision == "failed"
     failed = [e for e in _events(iso.events) if e["type"] == "advance_failed"]
-    assert failed and "x-0961" in failed[0]["data"]["error"]
+    assert failed and "x-1111" in failed[0]["data"]["error"]
     assert "dispatch_verb" in failed[0]["data"]["error"]
 
 

@@ -2812,7 +2812,7 @@ def cmd_name(
     slug: str = typer.Option("", "--slug", help="Human-readable tail; the only expendable part."),
     qualifier: str = typer.Option("", "--qualifier", help="Lifecycle reason, e.g. retro."),
     discriminator: str = typer.Option("", "--discriminator", help="Uniqueness token; never shaved."),
-    source: str = typer.Option("", "--source", help="Dispatch source code ; omit when attended."),
+    source: str = typer.Option("", "--source", help="Dispatch source code; omit when attended."),
     verb: str = typer.Option("", "--verb", help="Verb code (t|bp|r|th|f) or a work verb the bridge maps."),
 ) -> None:
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
