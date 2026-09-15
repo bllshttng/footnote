@@ -4795,3 +4795,8 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
 /// fixtures above are the shared seams.
 #[path = "gc_receipts/blueprint_retirement.rs"]
 mod blueprint_retirement;
+
+/// The spawn-edge kind families (a PEER handoff never holds its spawner),
+/// split by the file budget; the fixtures above are the shared seams.
+#[path = "gc_receipts/lineage_kind.rs"]
+mod lineage_kind;

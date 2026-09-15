@@ -1,0 +1,161 @@
+//! The kind of a spawn edge. A CHILD edge means the spawner orchestrates
+//! and waits: a king over its court, a lead over its join workers. A PEER
+//! edge is a handoff: a blueprint launching its target, an advance dispatch
+//! starting the next node. A PEER spawner is done and waits on nothing.
+//!
+//! The kind is derived, never stored at mint time: a CHILD is a row with a
+//! joiner name, or a row whose spawner was crowned. Everything else reads
+//! PEER. This module is the rule's single owner; the reaper calls
+//! [`lineage_kind`] through [`live_child_of`] directly, and a later sweep
+//! stamps the derived word for readers that cannot call this crate.
+
+use crate::state::RegistryEntry;
+
+/// Whether a spawn edge means "waits on it" (Child) or "handed off to it"
+/// (Peer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineageKind {
+    Child,
+    Peer,
+}
+
+impl LineageKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LineageKind::Child => "child",
+            LineageKind::Peer => "peer",
+        }
+    }
+}
+
+/// The kind of the edge from `parent_crowned` to the row named
+/// `child_name`: crowned spawners hold their court, join workers
+/// (`jn-t-`, legacy `j-`) hold their lead, and every other edge is a
+/// handoff that holds nobody.
+pub fn lineage_kind(child_name: &str, parent_crowned: bool) -> LineageKind {
+    if parent_crowned || child_name.starts_with("jn-t-") || child_name.starts_with("j-") {
+        LineageKind::Child
+    } else {
+        LineageKind::Peer
+    }
+}
+
+/// The one live CHILD row `parent` waits on, if any. A row qualifies when
+/// its name differs, its `spawned_by_session` names the parent's harness
+/// session, the edge is CHILD, and the row can still hold a process: a
+/// liveish status whose served liveness word is not `dead`. A PEER row
+/// never qualifies, so a handoff holds its spawner for nothing.
+pub fn live_child_of<'a>(
+    parent: &RegistryEntry,
+    entries: &'a [RegistryEntry],
+) -> Option<&'a RegistryEntry> {
+    let sid = parent.harness_session_id.as_deref().unwrap_or("").trim();
+    if sid.is_empty() {
+        return None;
+    }
+    let sid_lower = sid.to_ascii_lowercase();
+    entries.iter().find(|child| {
+        child.name != parent.name
+            && child
+                .spawned_by_session
+                .as_deref()
+                .is_some_and(|s| s.trim().to_ascii_lowercase() == sid_lower)
+            && lineage_kind(&child.name, parent.crown_level.is_some()) == LineageKind::Child
+            && crate::spawn_gate::status_is_liveish(&child.status)
+            && crate::row_truth::served_fresh_liveness(
+                child.liveness.as_deref(),
+                child.liveness_measured_at.as_deref(),
+            ) != Some("dead")
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, sid: &str, spawned_by: Option<&str>) -> RegistryEntry {
+        let mut e = RegistryEntry::default();
+        e.name = name.into();
+        e.harness_session_id = Some(sid.into());
+        e.spawned_by_session = spawned_by.map(String::from);
+        e
+    }
+
+    #[test]
+    fn kind_table() {
+        assert_eq!(lineage_kind("jn-t-x-1-1", false), LineageKind::Child);
+        assert_eq!(lineage_kind("j-x-1-1", false), LineageKind::Child);
+        assert_eq!(lineage_kind("node-x-b3a8-g2", true), LineageKind::Child);
+        assert_eq!(lineage_kind("sob-t-x-2-glm", false), LineageKind::Peer);
+        assert_eq!(lineage_kind("ac-t-x-3-opus", false), LineageKind::Peer);
+        assert_eq!(lineage_kind("bp-x-4-repro", false), LineageKind::Peer);
+    }
+
+    #[test]
+    fn live_child_of_finds_a_live_child_by_session() {
+        let parent = row("t-x-a75f-lead", "s-lead", None);
+        let mut joiner = row("jn-t-x-a75f-1", "s-j1", Some("S-LEAD "));
+        joiner.status = crate::AgentStatus::Busy;
+        let entries = vec![parent.clone(), joiner];
+        let found = live_child_of(&parent, &entries).expect("the joiner holds the lead");
+        assert_eq!(found.name, "jn-t-x-a75f-1");
+    }
+
+    #[test]
+    fn a_peer_row_never_holds_its_spawner() {
+        let parent = row("bp-x-1", "s-bp", None);
+        let mut handoff = row("sob-t-x-1-glm", "s-t1", Some("s-bp"));
+        handoff.status = crate::AgentStatus::Busy;
+        let entries = vec![parent.clone(), handoff];
+        assert!(live_child_of(&parent, &entries).is_none());
+    }
+
+    #[test]
+    fn an_exited_or_dead_child_releases_its_parent() {
+        let parent = row("t-x-2-lead", "s-lead", None);
+        let mut exited = row("jn-t-x-2-1", "s-j1", Some("s-lead"));
+        exited.status = crate::AgentStatus::Exited;
+        let mut dead = row("jn-t-x-2-2", "s-j2", Some("s-lead"));
+        dead.status = crate::AgentStatus::Busy;
+        dead.liveness = Some("dead".into());
+        dead.liveness_measured_at = Some(chrono_now_rfc3339());
+        let entries = vec![parent.clone(), exited, dead];
+        assert!(live_child_of(&parent, &entries).is_none());
+    }
+
+    #[test]
+    fn a_stale_liveness_word_is_not_dead_evidence() {
+        let parent = row("t-x-3-lead", "s-lead", None);
+        let mut joiner = row("jn-t-x-3-1", "s-j1", Some("s-lead"));
+        joiner.status = crate::AgentStatus::Busy;
+        // A word with no stamp (never measured) withholds the served word
+        // entirely; the status decides.
+        joiner.liveness = Some("busy".into());
+        let entries = vec![parent.clone(), joiner];
+        assert!(live_child_of(&parent, &entries).is_some());
+    }
+
+    #[test]
+    fn an_empty_parent_session_never_matches() {
+        let parent = row("t-x-4-lead", "  ", None);
+        let mut joiner = row("jn-t-x-4-1", "s-j1", Some("s-lead"));
+        joiner.status = crate::AgentStatus::Busy;
+        let entries = vec![parent.clone(), joiner];
+        assert!(live_child_of(&parent, &entries).is_none());
+    }
+
+    #[test]
+    fn a_crowned_parent_reads_its_court_as_child() {
+        let mut king = row("king-x-5", "s-king", None);
+        king.crown_level = Some(1);
+        let mut court = row("node-x-b3a8-g2", "s-court", Some("s-king"));
+        court.status = crate::AgentStatus::Busy;
+        let entries = vec![king.clone(), court.clone()];
+        let found = live_child_of(&king, &entries).expect("the court row is a child");
+        assert_eq!(found.name, "node-x-b3a8-g2");
+    }
+
+    fn chrono_now_rfc3339() -> String {
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
+    }
+}

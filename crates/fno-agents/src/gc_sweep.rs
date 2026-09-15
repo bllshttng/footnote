@@ -79,12 +79,14 @@ pub struct GcSummary {
     /// `holder`, a live registry row not retiring this pass - the tree
     /// survives and the prune never runs.
     pub kept_shared_tree: Vec<(String, String)>,
-    /// `(row id, descendant)`: a live registry row names this row's session
-    /// in its own `spawned_by_session` - the parent is held, unretired,
-    /// until that child is gone. A parent whose own harness reports a
-    /// terminal state is not held: the lineage guard exists to keep a
-    /// running parent's surface alive for its children, and a terminal
-    /// parent has none.
+    /// `(row id, descendant)`: a live CHILD registry row names this row's
+    /// session in its own `spawned_by_session` - the parent is held,
+    /// unretired, until that child is gone. A CHILD is a join worker
+    /// (`jn-t-`, legacy `j-`) or a row a crowned session spawned; a handoff
+    /// (a blueprint's target, an advance dispatch) never holds its spawner.
+    /// A parent whose own harness reports a terminal state is not held: the
+    /// lineage guard exists to keep a running parent's surface alive for
+    /// its children, and a terminal parent has none.
     pub kept_live_descendants: Vec<(String, String)>,
     pub kept_operator: Vec<String>,
     pub kept_crowned: Vec<String>,
@@ -2100,24 +2102,18 @@ pub(crate) fn run_with_release(
             }
             continue;
         }
-        // A parent whose descendant is still live is never retired - the
-        // lineage field says who spawned whom, and this is the only site
-        // that consults it. Runs before staging so no active-surface
-        // removal ever touches a row a live child names.
-        // x-b7f8: one conjunct - a parent whose own harness reports a
-        // terminal state is not held. The guard's harm (a parent's native
-        // surface archived while children still run) needs a RUNNING
+        // A parent whose live CHILD descendant exists is never retired: a
+        // CHILD edge means the spawner orchestrates and waits (a king over
+        // its court, a lead over its join workers), so the parent's surface
+        // must outlive the child's. A PEER edge is a handoff (a blueprint's
+        // target, an advance dispatch); the spawner is done and waits on
+        // nothing, so it never holds. A parent whose own harness reports a
+        // terminal state is not held either: the guard's harm (a parent's
+        // native surface archived while children still run) needs a RUNNING
         // parent; the shared-worktree guard below still protects a live
         // child's tree.
         if !sid.is_empty() && row.session_terminal.is_none() {
-            let sid_lower = sid.to_ascii_lowercase();
-            if let Some(child) = registry.entries.iter().find(|other| {
-                other.name != e.name
-                    && other
-                        .spawned_by_session
-                        .as_deref()
-                        .is_some_and(|s| s.trim().to_ascii_lowercase() == sid_lower)
-            }) {
+            if let Some(child) = crate::spawn_edge::live_child_of(e, &registry.entries) {
                 summary.kept_live_descendants.push((id, row_handle(child)));
                 continue;
             }

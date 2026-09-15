@@ -219,6 +219,7 @@ pub mod session_start_bytes;
 pub mod single_flight;
 pub mod source_pin;
 pub mod spawn_axes;
+pub mod spawn_edge;
 pub mod spawn_gate;
 pub mod spawn_gate_lanes;
 pub mod spawn_gate_verb;
