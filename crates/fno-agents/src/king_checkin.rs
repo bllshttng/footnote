@@ -1764,8 +1764,9 @@ mod tests {
     fn prev_row() -> Value {
         json!({"ts": "2026-09-10T12:00:00Z", "type": "reign_checkin", "source": "loop",
             "data": {"scope": "x-a792", "change": "no change", "open_prs": 9,
-                     "free_claim_no_driver": 1, "blocked": 2, "active_nodes": 4,
-                     "live_workers": 3, "undelivered": 9}})
+                     "free_claim_no_driver": 1, "blocked": 2,
+                     "escalations_open": 0, "escalations_overdue": 0,
+                     "active_nodes": 4, "live_workers": 3, "undelivered": 9}})
     }
 
     #[test]
