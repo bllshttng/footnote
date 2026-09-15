@@ -2668,7 +2668,7 @@ event_types:
           type: string
 
   - name: event_payload_too_large
-    description: "A Rust-emitted event payload exceeded MAX_EVENT_PAYLOAD_BYTES (500). The oversized event is replaced by this meta-event so the intended_kind is still visible to auditors."
+    description: "A Rust-emitted event payload exceeded limits.max_data_bytes (65536). The oversized event is replaced by this meta-event so the intended_kind is still visible to auditors."
     sources: [daemon, subagent]
     data:
       required: []

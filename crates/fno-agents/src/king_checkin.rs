@@ -1129,6 +1129,22 @@ fn emit_row(ctx: &Ctx, data: &Map<String, Value>) -> bool {
         eprintln!("king-checkin: WARNING: no emit path, so the beat was not journalled");
         return false;
     };
+    // The store stamps a reign row's scope only when it is a canonical crown
+    // scope; emitting one that is not would be unfindable by --scope forever
+    // (the 2026-09-14 rendered-board corruption), so the one writer refuses.
+    let scope_canonical = !ctx.scope.is_empty()
+        && crate::territory::canonical_scope(&ctx.scope) == ctx.scope
+        && !ctx
+            .scope
+            .split(',')
+            .any(|m| m.is_empty() || m.chars().any(char::is_whitespace));
+    if !scope_canonical {
+        eprintln!(
+            "king-checkin: WARNING: reign_checkin row not emitted: scope {:?} is not a canonical crown scope",
+            ctx.scope
+        );
+        return false;
+    }
     let forbidden = ["crown", "crown_scope", "result"]
         .iter()
         .any(|k| data.contains_key(*k));
@@ -1568,5 +1584,47 @@ mod tests {
         let entries = faq_entries_for_scope(dir.path(), "x-a792");
         assert_eq!(entries.len(), 1);
         assert!(entries[0].starts_with("---"));
+    }
+
+    fn emit_ctx(dir: &tempfile::TempDir, scope: &str) -> (Ctx, PathBuf) {
+        let path = dir.path().join("events.jsonl");
+        (
+            Ctx {
+                scope: scope.into(),
+                level: Some(1),
+                events_paths: vec![path.clone()],
+                graph: PathBuf::from("nope.json"),
+                cwd: dir.path().to_path_buf(),
+                handoffs_dir: dir.path().to_path_buf(),
+                faqs_dir: None,
+                board_state: None,
+                emit_path: Some(path.clone()),
+                emit: true,
+            },
+            path,
+        )
+    }
+
+    #[test]
+    fn canonical_scope_row_is_emitted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, path) = emit_ctx(&dir, "x-a792");
+        let data = json!({"scope": "x-a792", "change": "beat"});
+        assert!(emit_row(&ctx, data.as_object().unwrap()));
+        let rows = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(rows.lines().count(), 1);
+        assert!(rows.contains("reign_checkin"));
+    }
+
+    #[test]
+    fn non_canonical_scope_refuses_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, path) = emit_ctx(&dir, "x-0c60 ready no build, x-8984 idea");
+        let data = json!({"scope": "x-0c60 ready no build, x-8984 idea", "change": "beat"});
+        assert!(!emit_row(&ctx, data.as_object().unwrap()));
+        assert!(
+            !path.exists() || std::fs::read_to_string(&path).unwrap().trim().is_empty(),
+            "the corrupted-scope row must not reach the journal"
+        );
     }
 }

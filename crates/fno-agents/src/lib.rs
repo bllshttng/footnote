@@ -102,6 +102,7 @@ pub mod envelope;
 pub mod evals_macro;
 pub mod events;
 pub mod events_limits;
+pub mod events_store;
 pub mod evidence;
 pub mod fallback_chain;
 pub mod feed;

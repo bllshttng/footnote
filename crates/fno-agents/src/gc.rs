@@ -1689,7 +1689,7 @@ mod tests {
         let payload = state_reap_event_payload(&live);
         let payload_len = serde_json::to_vec(&payload).unwrap().len();
         assert!(
-            payload_len <= crate::events::MAX_EVENT_PAYLOAD_BYTES,
+            payload_len <= crate::events_limits::max_data_bytes(),
             "live-sized state_reap payload is {payload_len}B: {payload}"
         );
         match prior_claims {

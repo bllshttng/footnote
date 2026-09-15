@@ -198,7 +198,7 @@ async fn rm_keeps_the_audit_event_compact_when_diagnostics_are_oversized() {
                 crate::claude_roster::ClaudeAgentRow::new("bbbb2223", Some("stopped")),
             ])
         },
-        &|_| Err("x".repeat(crate::events::MAX_EVENT_PAYLOAD_BYTES * 2)),
+        &|_| Err("x".repeat(crate::events_limits::max_data_bytes() * 2)),
         &|_| true,
         &|_, _| Ok(true),
         &|_, _| PaneProbe::Unknown,

@@ -49,9 +49,7 @@ A canonical handle addresses a session across harnesses as the bare first eight 
 | `blocked` | On a `RESULT: BLOCKED` return, or an in-session `<help>` distress. | `reason` (capped), `evidence` (capped). |
 | `run_summary` | At the loop terminal (finalize). Carries `outcome`. | `tasks_started`, `tasks_done`, `tasks_failed`, `termination_reason`, `pr_url`. |
 
-Free-text `data` strings (`title`, `reason`, `evidence`, `termination_reason`)
-are truncated to a 500-byte cap at emit time; an oversized `run_summary` payload
-is replaced by an `event_payload_too_large` meta-event on the Rust path.
+Free-text `data` strings (`title`, `reason`, `evidence`, `termination_reason`) are truncated at emit time (500 bytes for the run_summary text fields). A payload past `limits.max_data_bytes` (65536) is replaced by an `event_payload_too_large` meta-event on the Rust path.
 
 ## Push vs pull
 

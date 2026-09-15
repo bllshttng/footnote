@@ -29,7 +29,8 @@ One file per install. These belong at the root.
 | `ledger.json` | `paths.ledger_json()` | permanent |
 | `config.toml`, `.lock` | `paths.config_toml()` | permanent |
 | `settings.yaml`, `.lock` | `fno/config/__init__.py` loader | permanent |
-| `events.jsonl`, `.1` | `paths.global_events_json()`, rotated at 8 MB by `crates/fno-agents/src/events.rs` | rotated |
+| `events.jsonl`, `.1` | `paths.global_events_json()`, rotated at 8 MB by `crates/fno-agents/src/events.rs`; the rename happens only after `events_store::sync` ingested the file, so one generation on disk loses no durable row | rotated |
+| `events.db`, `.db-wal`, `.db-shm` | `crates/fno-agents/src/events_store.rs`, filled before every rotation and every history read | durable rows for 30 days |
 | `decisions.jsonl` | `paths.decisions_jsonl()`, written by `decide/__init__.py` | permanent |
 | `questions.jsonl` | `paths.questions_jsonl()`, written by `fno inbox outstanding` | permanent; a question does not expire |
 | `decisions.jsonl.corrupt` | `decide/__init__.py::_compact_index` | permanent; the only copy of a row whose source journal is gone |
@@ -216,7 +217,8 @@ Project state left the checkout. One space per repository, keyed on the CANONICA
 
 | Entry | Writer | Lifetime |
 |---|---|---|
-| `<space>/events.jsonl` | `paths.project_events_json()` and `fno-agents` journal writers | append-only per repository; rotated at 8 MB |
+| `<space>/events.jsonl` | `paths.project_events_json()` and `fno-agents` journal writers | append-only per repository; rotated at 8 MB, and only after `events_store::sync` ingested the file |
+| `<space>/events.db`, `.db-wal`, `.db-shm` | `crates/fno-agents/src/events_store.rs`, filled before every rotation and every history read | durable rows for 30 days |
 | `<space>/claims/` | `fno.claims` for repo-local keys (`walker:`, `review:`, `reap:`); global-id keys (`node:`, `dispatch:`, ...) stay at the global root | re-acquirable leases |
 | `<space>/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
 | `<space>/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |
