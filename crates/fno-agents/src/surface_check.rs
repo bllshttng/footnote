@@ -692,10 +692,20 @@ fn warn_no_symbol(out: &mut String, answers: &[&WalkAnswerer]) {
 
 /// The second `at:` token when it is a bare identifier:
 /// `path[:lines] symbol (note)`.
+fn ident_re() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap())
+}
+
 fn at_symbol(at_text: &str) -> Option<String> {
     let second = at_text.split_whitespace().nth(1)?;
-    let re = Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").ok()?;
-    if re.is_match(second) {
+    if !ident_re().is_match(second) {
+        return None;
+    }
+    // The same keep-rule every symbol source obeys: a prose word from a
+    // wordy `at:` note (`run and collect`) must not become a grep target.
+    let trimmed = second.trim_matches('_');
+    if trimmed.chars().count() >= 6 && trimmed.contains('_') {
         Some(second.to_string())
     } else {
         None
@@ -707,11 +717,13 @@ fn at_symbol(at_text: &str) -> Option<String> {
 /// call (`path.is_file(`) is skipped, and a `::` path still counts. A name
 /// survives only with >= 6 chars and an underscore once edge underscores are
 /// trimmed.
+fn call_re() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"([A-Za-z_][A-Za-z0-9_]*)\(").unwrap())
+}
+
 fn reads_calls(reads: &str) -> Vec<String> {
-    let re = match Regex::new(r"([A-Za-z_][A-Za-z0-9_]*)\(") {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
+    let re = call_re();
     let bytes = reads.as_bytes();
     let mut out = Vec::new();
     for cap in re.captures_iter(reads) {
@@ -835,12 +847,13 @@ fn strip_lines(token: &str) -> String {
 
 /// Drop test paths: anything under a test/fixtures dir, or named like a test
 /// file, never answers a production question.
+fn test_path_re() -> &'static Regex {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(^|/)(tests?|fixtures|testdata)/").unwrap())
+}
+
 fn is_test_path(path: &str) -> bool {
-    if Regex::new(r"(^|/)(tests?|fixtures|testdata)/")
-        .ok()
-        .map(|r| r.is_match(path))
-        .unwrap_or(false)
-    {
+    if test_path_re().is_match(path) {
         return true;
     }
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -1482,6 +1495,9 @@ mod tests {
         );
         assert_eq!(at_symbol("src/reader.py"), None);
         assert_eq!(at_symbol("src/reader.py:10"), None);
+        // Prose words from a wordy at: note never become grep targets.
+        assert_eq!(at_symbol("src/reader.py:1 run and collect"), None);
+        assert_eq!(at_symbol("src/reader.py:1 and"), None);
     }
 
     #[test]
