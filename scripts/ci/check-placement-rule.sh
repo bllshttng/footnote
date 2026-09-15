@@ -275,6 +275,7 @@ crates/fno-agents/src/claude_drive.rs
 crates/fno-agents/src/claude_roster.rs
 crates/fno-agents/src/client_verbs.rs
 crates/fno-agents/src/daemon.rs
+crates/fno-agents/src/daemon_tests.rs
 crates/fno-agents/src/finalize.rs
 crates/fno-agents/src/gc_inventory.rs
 crates/fno-agents/src/model_env_scrub.rs
