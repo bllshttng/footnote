@@ -752,17 +752,13 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
 
 def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[List[str], Optional[str]]":
     """Project the seam's facts to ``fno-agents node-seed`` and apply the
-    answer, before any lane is chosen (x-2c0d).
-
-    Only an explicit ``--node`` triggers the call: ``FNO_NODE`` is provenance
-    a child inherits, never a decision to route. Python projects the
-    lifecycle table's answer (never a copy of it), the seed-slot facts and
-    the crown/resume flags; the verb answers pass / profile / compose /
-    refuse, and this applies it verbatim: a refusal or an unavailable
-    binary exits 2 before ``inject_spawn_defaults`` runs; ``compose``
-    rewrites the seed slot; ``profile`` returns the derived verb so the
-    profile key routes by it. Returns ``(args, node_verb)``.
+    answer before any lane is chosen (x-2c0d). Only an explicit ``--node``
+    triggers the call (``FNO_NODE`` is inherited provenance, never a
+    decision); a refusal or an unavailable binary exits 2 before
+    ``inject_spawn_defaults`` runs; ``compose`` rewrites the seed slot;
+    ``profile`` returns the derived verb. Returns ``(args, node_verb)``.
     """
+    from fno.agents.harness_map import DispatchResolveError, _TARGET_FAMILY_VERBS
     from fno.agents.node_dispatch import find_node_row, node_effective_verb
     from fno.agents.spawn_defaults import _seed_slot
 
@@ -776,17 +772,15 @@ def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[List[str], Optional[str]
     if row is not None:
         try:
             effective_verb = node_effective_verb(row)
-        except Exception as exc:  # noqa: BLE001 - the refusal names the derive failure
-            from fno.agents.harness_map import DispatchResolveError
-
-            derive_error = str(exc) if isinstance(exc, DispatchResolveError) else f"derivation failed: {exc}"
+        except DispatchResolveError as exc:
+            derive_error = str(exc)
+        except Exception as exc:  # noqa: BLE001 - the refusal names the failure
+            derive_error = f"derivation failed: {exc}"
     stored = (row or {}).get("dispatch_verb") or ""
     if stored:
         from fno.config._dispatch_verbs import canonical_verb_key
 
         stored = canonical_verb_key(stored)
-
-    from fno.agents.harness_map import _TARGET_FAMILY_VERBS
 
     slot = _seed_slot(list(args[1:]))
     payload = {

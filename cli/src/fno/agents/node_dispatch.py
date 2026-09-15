@@ -463,9 +463,7 @@ class NodeSeed:
 
 def find_node_row(node: str) -> Optional[dict]:
     """The graph row for a node id or slug, or None on an unreadable graph.
-
-    One lookup so the door, the seam and retask read the SAME row: three
-    sites each re-walking load_graph() is how the projections drifted (x-2c0d)."""
+    One lookup so the door, the seam and retask read the SAME row (x-2c0d)."""
     try:
         from fno.graph.load import load_graph
 
@@ -481,10 +479,9 @@ def node_effective_verb(
     row: Optional[dict], *, node_id: Optional[str] = None
 ) -> Optional[str]:
     """The effective workflow verb for a node row, or None when the
-    lifecycle table abstains. One wrapper so every door derives ONE answer
-    per node. Accepts a None row (an id the graph does not carry) and
-    raises DispatchResolveError on an unanswerable node; the caller's
-    spawn-failure path owns it."""
+    lifecycle table abstains: one answer per node, shared by every door.
+    Accepts a None row and raises DispatchResolveError on an unanswerable
+    node; the caller's spawn-failure path owns it."""
     from fno.agents import harness_map
     from fno.graph.ladder import plan_rung
 
