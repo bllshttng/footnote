@@ -125,7 +125,7 @@ fn native_bound() -> Duration {
     let secs = std::env::var(NATIVE_BOUND_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|s| *s > 0.0)
+        .filter(|s| *s > 0.0 && s.is_finite())
         .unwrap_or(DEFAULT_NATIVE_BOUND_SECONDS);
     Duration::from_secs_f64(secs)
 }
