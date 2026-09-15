@@ -15,7 +15,7 @@
 # Usage:
 #   normalize.sh --input "<raw payload>" [--name <n>] [--harness <h>] [--allow-merge|--no-merge]
 #
-# --allow-merge / --no-merge: per-run merge posture (x-4391). Neither => posture
+# --allow-merge / --no-merge: per-run merge posture. Neither => posture
 #   from config.auto_merge.grant (default none = no-merge; fno absent => none).
 #
 # Emits key=value lines on stdout (one per line; values are NOT shell-quoted -
@@ -57,13 +57,13 @@ MODEL=""           # exact model name forwarded to `fno agents spawn --model`
 EFFORT=""          # reasoning effort forwarded to `fno agents spawn --effort`.
                    # Dashless: `effort <value>`; the CLI validates per provider.
 EFFORT_SET=0       # 1 = explicit --effort was passed, including an empty value.
-# x-4391 tri-state: "" = unset (resolve from config.auto_merge.grant after
+# tri-state: "" = unset (resolve from config.auto_merge.grant after
 # arg parse); 1 = allow (--allow-merge / dashless `merge`); 0 = no-merge
 # (--no-merge). Resolved to 0/1 before any read, so `allow_merge=` never emits "".
 ALLOW_MERGE=""
 YES=0              # 1 = -y/--yes: skip the confirm (consumed by the SKILL policy)
 MODE="exec"        # exec | interactive  (-i routes codex/gemini -> host)
-SUBSTRATE=""       # x-61df: ""|pane|thread|headless; `bg` is a deprecated
+SUBSTRATE=""       # ""|pane|thread|headless; `bg` is a deprecated
                    # alias for `thread`. Empty = the default `pane` (owned-PTY).
 YOLO=0             # 1 = full-auto (codex/gemini bypass); sandboxed default
 HANDOFF_MODE=0     # 1 = `handoff` verb: payload is a doc path -> continuation seed
@@ -72,15 +72,15 @@ PROJECT=""         # cross-project target: a registry project name/short_name to
 PROJECT_SET=0      # 1 = -C/--project was passed (empty value -> loud error, never
                    # a silent caller-cwd launch when a cross-project hop was asked)
 FORCE=0            # 1 = -f/--force: let --project win over a node's own cwd
-PERMISSION_MODE="" # x-dfa4: forwarded to spawn.sh --permission-mode (provider-native, CLI fails closed)
-ROLE=""            # x-d2fe: per-spawn model-routing role; forwarded to spawn.sh --role
+PERMISSION_MODE="" # forwarded to spawn.sh --permission-mode (provider-native, CLI fails closed)
+ROLE=""            # per-spawn model-routing role; forwarded to spawn.sh --role
 TIMEOUT=""         # per-spawn timeout seconds; forwarded to spawn.sh --timeout
 FRESH=0            # 1 = --fresh: resolve worker cwd to canonical main root
 HERE=0             # 1 = --here/--in-place: keep caller cwd (opt out of --fresh)
-ADD_DIR=""         # x-b6e2: extra writable dir; forwarded to spawn.sh --add-dir
-AGENT=""           # x-b6e2: sub-agent name; forwarded to spawn.sh --agent
-TOOLS=""           # x-b6e2: allowed-tools list; forwarded to spawn.sh --tools
-DENY_TOOLS=""      # x-b6e2: disallowed-tools list; forwarded to spawn.sh --deny-tools
+ADD_DIR=""         # extra writable dir; forwarded to spawn.sh --add-dir
+AGENT=""           # sub-agent name; forwarded to spawn.sh --agent
+TOOLS=""           # allowed-tools list; forwarded to spawn.sh --tools
+DENY_TOOLS=""      # disallowed-tools list; forwarded to spawn.sh --deny-tools
 
 emit_error() { printf 'status=error\nerror=%s\n' "$1"; exit 0; }
 
@@ -100,7 +100,7 @@ set_substrate() {
 # some keyboards, an en-dash (U+2013) - the same failure class as the smart
 # quotes below. Canonicalize a token-initial em/en-dash back to `--` before
 # flag matching so a phone-mangled `--yes` parses as the flag, not an unknown
-# argument. bash 3.2 safe: printf octal, no \u. (ab-27541df5 US1)
+# argument. bash 3.2 safe: printf octal, no \u. (US1)
 EMDASH=$(printf '\342\200\224')   # U+2014 em dash
 ENDASH=$(printf '\342\200\223')   # U+2013 en dash
 
@@ -162,7 +162,7 @@ msg="${msg%"${msg##*[![:space:]]}"}"
 # Boundary: an empty / whitespace-only payload is refused with no spawn.
 [[ -z "$msg" ]] && emit_error "empty task: nothing to dispatch"
 
-# ---- 1a. dashless trailing-run posture parse (ab-994222ee) -------------------
+# ---- 1a. dashless trailing-run posture parse -------------------
 # The documented grammar is dashless: `<task> [codex|gemini] [interactive|drive]
 # [yolo|auto] [as <name>] [merge]`. normalize.sh is the deterministic backstop:
 # it recognizes the closed posture vocabulary as a CONTIGUOUS TRAILING run,
@@ -264,7 +264,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]]; then
   # The trailing run may have consumed the whole payload (`codex yolo merge`
   # with no task) -> refuse with no spawn (Boundaries: empty task fails loud).
   [[ -z "$msg" ]] && emit_error "empty task: only posture modifiers, nothing to dispatch"
-  # Leading posture-word guard (x-ffc3): bare posture words (bg|headless) are
+  # Leading posture-word guard : bare posture words (bg|headless) are
   # TRAILING only (consumed right-anchored above). A LEADING posture word whose
   # remainder is a /command passthrough (e.g. `bg /goal ...`) is the user meaning
   # the substrate but mis-ordering it; left alone it is not consumed, the payload
@@ -310,10 +310,10 @@ fi
 # glued tokens ("tooltip--yes") pass untouched. The scan canonicalizes a COPY of
 # each token's leading em/en-dash to `--`; the message keeps the original text
 # verbatim. `set -f` disables globbing so an unquoted `*` in the task text cannot
-# expand to filenames during the word-split. (ab-27541df5 US1, Locked Decision 5)
+# expand to filenames during the word-split. (US1, Locked Decision 5)
 # The scan applies ONLY to a dispatched command - a passthrough (leading `/`) or
 # a node-id build - where a flag glued into the payload would corrupt the
-# /target-family command that runs. A free-text SEED (x-cbb0) is sent VERBATIM as
+# /target-family command that runs. A free-text SEED is sent VERBATIM as
 # the session's opening turn, so a flag-shaped token in it ("what does grep -i
 # do") is conversational content, not a mangled dispatch flag - exempt, exactly as
 # the retired `ask` verb and `handoff` are. The node-id check mirrors the tier-1
@@ -342,7 +342,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft
 fi
 set +f
 
-# x-4391: merge posture is resolved AFTER cross-project cwd resolution (section
+# merge posture is resolved AFTER cross-project cwd resolution (section
 # 2c below) so a `-C/--project` spawn reads the TARGET project's config, not the
 # caller's (codex P2). See the resolution block just after RESOLVED_CWD.
 
@@ -350,7 +350,7 @@ set +f
 # A backlog node id matches `^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$` (tier 1, exact) -
 # the shape parse-claims-arg.sh and graph-resolve.sh already use, so any
 # configured id_prefix/id_hex_width classifies, not just `ab-`. Two id-free entry
-# modes layer on top (ab-f82e8083):
+# modes layer on top :
 #   tier 2 - a single slug-shaped token is a slug CANDIDATE the SKILL resolves
 #            via `fno backlog get`, falling through to describe-it on a miss.
 #            Bare hex rides this lane too: the resolver is format-agnostic and
@@ -428,7 +428,7 @@ elif printf '%s' "$first_tok" | grep -qE '^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$'; t
 elif _normalize_is_family "$msg"; then
   # Unanchored extraction, so a hex-shaped prose word can match inside the
   # message. A verb + id message - exactly two tokens and the second IS the
-  # extracted id, so a path like plans/20260711-dark-mode-x-8af8.md does not
+  # extracted id, so a path like plans/20260711-dark-mode-x-aaaa.md does not
   # read as deliberate - is as deliberate as a bare id: spawning a worker
   # onto an id that does not exist just burns it.
   NODE="$(printf '%s' "$msg" | grep -oE '[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}' | head -1)"
@@ -480,7 +480,7 @@ resolve_project() {
   # is) - the mux resolves it at <uv tool dir>/fno/bin/fno-py
   # (crates/fno/src/bootstrap.rs), so mirror that rather than requiring fno-py on
   # PATH. Then fall back to `fno` itself when it is a python entrypoint (older
-  # single-binary installs). x-ab78 WAVE 2.
+  # single-binary installs). WAVE 2.
   py_entry=""
   if command -v fno-py >/dev/null 2>&1; then
     py_entry="$(command -v fno-py)"
@@ -573,7 +573,7 @@ if [[ -n "$PROJECT" ]]; then
   esac
 fi
 
-# x-4391/x-4be1: resolve merge posture when no explicit flag/word set it. Rung 2 =
+# / resolve merge posture when no explicit flag/word set it. Rung 2 =
 # config.auto_merge.grant; rung 3 = builtin no-merge. Read from the TARGET
 # project's cwd when a -C/--project cross-project spawn resolved one (RESOLVED_CWD),
 # so a caller repo's opt-in never leaks to a project that opted out, and vice
@@ -593,7 +593,7 @@ fi
 # ---- 3. agent-name derivation ------------------------------------------------
 # Explicit --name wins (sanitized). Otherwise the name is provenance-carrying so
 # the thread title reads at a glance: <verb>-<full-node-id>-<slug> for a node
-# (e.g. spawn-ab-4040eee8-cargo-bootstrapper), <verb>-<slug> for a free-form
+# (e.g. spawn-ab-11111111-cargo-bootstrapper), <verb>-<slug> for a free-form
 # feature, falling back to a deterministic CRC short-id when the slug is empty.
 # The leading <verb> is the launching verb (spawn | handoff), never a fixed
 # string, so a self-spawned worker is distinguishable from a handoff thread.
@@ -621,8 +621,8 @@ resolve_node_slug() {
   else
     _raw="$(fno backlog get "$_id" 2>/dev/null | jq -r '.slug // .title // empty' 2>/dev/null)"
   fi
-  # The whole slug rides; the canonical owner budgets it (x-3218). A local
-  # cap here would diverge from the mint's hyphen-aware cut (x-57fe).
+  # The whole slug rides; the canonical owner budgets it. A local
+  # cap here would diverge from the mint's hyphen-aware cut.
   sanitize_name "$_raw"
 }
 
@@ -631,7 +631,7 @@ if [[ "$NAME_SET" -eq 1 ]]; then
   [[ -z "$agent_name" ]] && emit_error "supplied --name normalized to empty"
 elif [[ -n "$NODE" ]]; then
   _node_slug="$(resolve_node_slug "$NODE")"
-  # x-3218: delegate to the canonical owner (`fno.agents.naming`) rather than
+  # delegate to the canonical owner (`fno.agents.naming`) rather than
   # assembling a fourth copy of the policy here. The owner budgets the ASSEMBLED
   # name against the runtime's 64-char limit and spends that budget on the slug,
   # which a local `cut -c1-64` cannot do.
@@ -777,19 +777,19 @@ fi
 # --yolo is the full-auto / no-gates bypass. codex/gemini have a literal --yolo
 # (codex --dangerously-bypass-approvals-and-sandbox / gemini --yolo inside `fno
 # agents spawn`/`host`), so YOLO stays 1 for them. claude has NO --yolo flag; its
-# "full auto, no gates" equivalent is --permission-mode bypassPermissions (x-dfa4:
+# "full auto, no gates" equivalent is --permission-mode bypassPermissions (:
 # default|acceptEdits|plan|bypassPermissions). Map it there rather than dropping
 # it, so a yolo'd claude thread worker actually runs gate-free instead of stalling on
 # a permission prompt. An explicit --permission-mode the user passed WINS (never
 # clobber it); then clear YOLO so the claude spawn is never handed an unknown
-# --yolo flag. Forwarded via permission_mode= (the x-019d plumbing).
+# --yolo flag. Forwarded via permission_mode= (the plumbing).
 if [[ "$YOLO" -eq 1 && "$provider" == "claude" ]]; then
   [[ -z "$PERMISSION_MODE" ]] && PERMISSION_MODE="bypassPermissions"
   YOLO=0
 fi
 
 # ---- 5. payload mode + provider-aware message assembly -----------------------
-# `spawn` means start a session with what you pass, nothing more (x-cbb0). Four
+# `spawn` means start a session with what you pass, nothing more. Four
 # modes, no shape inference:
 #   passthrough: payload is an explicit slash command (leading `/`). Rendered
 #                per-harness: claude/agy verbatim, opencode `/fno:verb`, codex
@@ -822,7 +822,7 @@ else
 fi
 
 # Command surface (slash|codex-skill|refused) from the packaged harness
-# capability table via `fno agents capabilities` (x-3873), the single source
+# capability table via `fno agents capabilities`, the single source
 # both spawn surfaces route through - so /agent spawn never re-encodes the
 # per-harness spelling and can't drift from the `/target` dispatch surface.
 # NO static fallback copy: a spawn cannot run when fno is unreachable, so a
@@ -874,7 +874,7 @@ case "$payload_mode" in
     ;;
   seed)
     # Free text sent VERBATIM as the session opening seed (default pane). No
-    # /target wrap, no build framing (what --discuss produced before x-cbb0). A
+    # /target wrap, no build framing (what --discuss produced before). A
     # seed beginning with `/` never reaches here - a leading `/` is passthrough.
     message="$msg"
     ;;
@@ -911,8 +911,8 @@ esac
 # verbatim seed or a handoff continuation seed that happens to contain `/target`
 # is NOT a build command (sigma-review finding 4), so it must never be
 # no-merge'd. The flag (never a free-text token) is the carrier: the fold does
-# not read prose (x-9d11). Family membership is asked of the single source
-# (x-8151); this file carries no hand-copied spelling list to drift.
+# not read prose. Family membership is asked of the single source
+# ; this file carries no hand-copied spelling list to drift.
 case "$payload_mode" in
   build|passthrough)
     if _normalize_is_family "$message" && [[ "$ALLOW_MERGE" -eq 0 && " $message " != *" --no-merge "* ]]; then
@@ -927,7 +927,7 @@ printf 'node=%s\n' "$NODE"
 # 1 only when the payload was NOTHING but the id, so VALIDATE can tell a
 # deliberately-named node from one inferred out of prose.
 printf 'node_bare=%s\n' "$NODE_BARE"
-# Resolution-tier classification (ab-f82e8083). The SKILL reads these to resolve
+# Resolution-tier classification. The SKILL reads these to resolve
 # the id-free entry modes: node_query is a slug candidate (resolve via `fno
 # backlog get`, fall through to describe-it on miss); spawn_next asks for the
 # top ready node via `fno backlog next`; next_scope is project (default) or all.
@@ -948,7 +948,7 @@ printf 'model=%s\n' "$MODEL"
 printf 'permission_mode=%s\n' "$PERMISSION_MODE"
 printf 'role=%s\n' "$ROLE"
 printf 'timeout=%s\n' "$TIMEOUT"
-# x-b6e2: Tier-3 harness-native passthrough (empty when unset). spawn.sh forwards
+# Tier-3 harness-native passthrough (empty when unset). spawn.sh forwards
 # a non-empty value; `fno agents spawn` maps or fails closed per provider.
 printf 'add_dir=%s\n' "$ADD_DIR"
 printf 'agent=%s\n' "$AGENT"
@@ -958,7 +958,7 @@ printf 'fresh=%s\n' "$FRESH"
 printf 'here=%s\n' "$HERE"
 printf 'effort=%s\n' "$EFFORT"
 printf 'mode=%s\n' "$MODE"
-# x-61df: the spawn substrate (empty=pane default). The SKILL forwards a
+# the spawn substrate (empty=pane default). The SKILL forwards a
 # non-empty value to `spawn.sh --substrate`; thread -> persistent thread,
 # bg -> deprecated alias for thread,
 # headless -> one-shot (claude -p / codex --exec / agy -p).

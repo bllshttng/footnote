@@ -8,7 +8,7 @@
 #
 #   - Python: _RESOLVABLE_REVIEWERS  in cli/src/fno/config/__init__.py
 #             (the config validator + the init capability refusal)
-#   - Rust : REVIEWER_INVOCATIONS   in crates/fno-agents/src/loopcheck.rs
+#   - Rust: REVIEWER_INVOCATIONS   in crates/fno-agents/src/loopcheck.rs
 #             (the stop gate's blocked reason)
 #
 # Compared per reviewer: the invocation string, whether it is a self-cert

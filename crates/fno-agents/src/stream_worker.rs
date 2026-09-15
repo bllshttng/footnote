@@ -301,7 +301,7 @@ fn extract_stream_event_delta(event: Option<&Value>) -> Option<String> {
 // Wire shape (verified against the Claude Agent SDK control protocol — the CLI
 // and SDK share it; the SDK's `SDKControlPermissionRequest` / control-response
 // construction are the source of truth):
-//   in : {"type":"control_request","request_id":"<id>",
+//   in: {"type":"control_request","request_id":"<id>",
 //          "request":{"subtype":"can_use_tool","tool_name":"Bash","input":{...}}}
 //   out allow: {"type":"control_response","response":{"subtype":"success",
 //          "request_id":"<id>","response":{"behavior":"allow","updatedInput":{...}}}}
