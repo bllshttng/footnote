@@ -84,4 +84,6 @@ One macOS recipe that works end to end:
 
 A notice is a pointer, never a second inbox. `data.pointer` names the verb that shows the durable state (`fno inbox outstanding`, `fno inbox board`). `data.body` carries counts, never queue rows. With no sink configured, nothing leaves the host.
 
+Badge notices. A blocked badge (a permission prompt or an idle wait) rides this lane, so it reaches the phone. A done badge is a turn end. With `mux.notify_on_done` on, it fires a local toast only and writes no `operator_notice` row. A crowned king's done sends nothing. `scripts/probes/phone-notice-noise-probe.sh` counts the notices in a window.
+
 Automatic sampling of the king board, the court and main CI is a planned follow-up; today the notice fires from the existing `notify` callers.

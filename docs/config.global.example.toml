@@ -77,7 +77,7 @@ shell_integration = "mux-panes"   # inject OSC 133 block markers into mux-spawne
 attach_digest = true              # 'while you were gone' catch-up overlay when you re-attach after an absence
 attach_digest_threshold_min = 10  # ...only after an absence longer than this many minutes
 notify_on_blocked = true          # OS notification when an agent badge enters 'blocked'
-notify_on_done = false            # ...and on a terminal 'done' (opt-in - flip to true to hear about finishes)
+notify_on_done = false            # ...and on a terminal 'done' (opt-in, a local toast only, never a status sink)
 
 # Read by hooks/worktree-setup.sh from the TOP-LEVEL [worktree] block (the hook
 # greps it; it never looks inside another table). Keep this key at top level.
