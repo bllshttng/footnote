@@ -380,6 +380,24 @@ fn claim_status_value_with_witness(
     Value::Object(out)
 }
 
+/// The verdict `fno agents claim status` prints for one record, computed with
+/// the production session witness (x-a613). `renew` (x-b445) and the
+/// watch-lease cause mapping read this same verdict, so a refused renewal
+/// names the answer the operator would see from `claim status`, never a
+/// second liveness opinion.
+pub(crate) fn status_verdict(
+    rec: &crate::claims::ClaimRecord,
+) -> (crate::claims::ClaimState, &'static str) {
+    let (witness, _answer) = default_session_witness();
+    crate::claims::classify_with_basis_and_exclusivity(
+        rec,
+        None,
+        &|pid| crate::claims::probe_pid(pid),
+        None,
+        Some(&witness),
+    )
+}
+
 /// `fno-agents claim sweep [--json] [--root <dir>]` — read matching claim
 /// lockfiles, classify each with the canonical [`crate::claims`] decision, and
 /// print ONE JSON object. The bare form keeps its historical `node:` /

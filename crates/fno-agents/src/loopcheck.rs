@@ -1543,7 +1543,7 @@ use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
-use watch_lease::{harness_can_idle, watch_window_ms, watching_harness_refusal};
+use watch_lease::{harness_can_idle, watch_window_ms};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -8687,6 +8687,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             // spend), so this idles on the tag + lease alone, only on a
             // harness that self-wakes, and the message says the state was not
             // verified. The watcher's exit re-evaluates with fresh quota.
+            let mut lease_note = String::new();
             if let Intent::Watching {
                 ref reason,
                 ref timeout,
@@ -8698,16 +8699,13 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     std::env::var("FNO_DRIVER_LIB").is_ok(),
                 ) {
                     let window_ms = watch_window_ms(timeout.as_deref());
-                    let renewed = match (
-                        scan_manifest_field(&manifest_content, "target_claim_key"),
-                        scan_manifest_field(&manifest_content, "target_claim_holder"),
-                    ) {
-                        (Some(key), Some(holder)) => matches!(
-                            crate::claims::renew(&key, &holder, window_ms, None),
-                            Ok(true)
-                        ),
-                        _ => false,
-                    };
+                    let claim = watch_lease::claim_pair(&manifest_content);
+                    let renew_outcome = claim
+                        .as_ref()
+                        .map(|(key, holder)| crate::claims::renew(key, holder, window_ms, None));
+                    let renewed = matches!(renew_outcome.as_ref(), Some(Ok(true)));
+                    lease_note =
+                        watch_lease::permanent_lease_note(claim.as_ref(), renew_outcome.as_ref());
                     if renewed {
                         // The tag's own `pr=`/`reason=` attributes are the only
                         // source here (the stand-down verifies nothing), so
@@ -8796,7 +8794,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                          review-thread read too, and REST shares the same secondary limit \
                          as GraphQL, so porting a read to REST alone does not escape a \
                          burst refusal). The next fire re-probes; a promise intent always \
-                         proceeds."
+                         proceeds.{lease_note}"
                     ),
                     0,
                     None,
@@ -9859,6 +9857,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
                     let blocker = if can_idle { observed_async_wait } else { None };
                     let claim = watch_lease::claim_pair(&manifest_content);
+                    let mut lease_cause: Option<watch_lease::RenewCause> = None;
                     if let Some(blocker) = blocker {
                         // Extend the node claim to cover the watch window BEFORE
                         // idling, or the idle opens a dispatcher-stampede gap.
@@ -9866,10 +9865,10 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         // shrinks the lease to 1min) and MUST return Ok(true)
                         // (holder match); anything else blocks (AC3-ERR).
                         let window_ms = watch_window_ms(timeout.as_deref());
-                        let renewed = claim.as_ref().is_some_and(|(key, holder)| {
-                            matches!(crate::claims::renew(key, holder, window_ms, None), Ok(true))
+                        let renew_outcome = claim.as_ref().map(|(key, holder)| {
+                            crate::claims::renew(key, holder, window_ms, None)
                         });
-                        if renewed {
+                        if matches!(renew_outcome.as_ref(), Some(Ok(true))) {
                             emit(
                                 "loop_check_watch_idle",
                                 serde_json::json!({
@@ -9908,25 +9907,23 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                                 allow_output("allow", None, &msg, this_fire, Some(fingerprint)),
                             );
                         }
+                        lease_cause =
+                            watch_lease::declined_cause(claim.as_ref(), renew_outcome.as_ref());
                         // renewal failed / holder mismatch -> fall through to the
                         // block below (AC3-ERR): never idle without a lease.
                     }
                     // Not an async-wait class, or a loop-run child: fall through
                     // with an explicit refusal before the real blocker.
-                    Some(if !can_idle {
-                        watching_harness_refusal(author_harness.as_deref(), is_loop_run_child)
-                    } else if blocker.is_none() && !pr_info.unaddressed_findings.is_empty() {
-                        format!(
-                            "watching ignored: {} unaddressed findings, this is not an async wait",
-                            pr_info.unaddressed_findings.len()
-                        )
-                    } else if blocker.is_none() {
-                        "watching ignored: PR is not in an async wait class".to_string()
-                    } else if claim.is_none() {
-                        watch_lease::NO_CLAIM_REFUSAL.to_string()
-                    } else {
-                        "watching ignored: watch lease could not be renewed".to_string()
-                    })
+                    let refusal = watch_lease::idle_refusal(
+                        can_idle,
+                        author_harness.as_deref(),
+                        is_loop_run_child,
+                        blocker.is_none(),
+                        pr_info.unaddressed_findings.len(),
+                        claim.is_some(),
+                        lease_cause.as_ref(),
+                    );
+                    Some((refusal.reason, refusal.kind))
                 } else {
                     None
                 };
@@ -10082,34 +10079,36 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // The refusal already said no watcher can help here, so the
                     // hint the classifier appended would contradict it inside
                     // one message. Cut the hint, keep the blocker.
-                    Some(ref refusal) if refusal == watch_lease::NO_CLAIM_REFUSAL => {
+                    Some(ref refusal) if watch_lease::refusal_is_permanent(&refusal.0) => {
                         let rest = watch_lease::without_arm_hint(&block_reason);
-                        format!("{refusal}; {rest}")
+                        format!("{}; {rest}", refusal.0)
                     }
-                    Some(refusal) => format!("{refusal}; {block_reason}"),
+                    Some(ref refusal) => format!("{}; {}", refusal.0, block_reason),
                     None => block_reason,
                 };
                 let reason = crate::nudge::append_inbox_nudge(&block_reason, &cwd, &session_id);
-                emit(
-                    "loop_check",
-                    serde_json::json!({
-                        "session_id": session_id,
-                        "fingerprint": fingerprint,
-                        "fires": this_fire,
-                        "consecutive_unchanged": consecutive_after,
-                        "streak_window_secs": streak_window,
-                        "decision": "block",
-                        "intent": if intent == Intent::Promise { "promise" } else { "none" },
-                        "intent_source": intent_source,
-                        "pr_state": pr_info.state.as_str(),
-                        "ci": pr_info.ci_conclusion.render(),
-                        "reviewed": pr_info.reviewed,
-                        "review_skipped": pr_info.review_skipped,
-                        "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                        "fp_read_failed": fp_read_failed,
-                        "done_probes": probe_results
-                    }),
+                let mut block_event = serde_json::json!({
+                    "session_id": session_id,
+                    "fingerprint": fingerprint,
+                    "fires": this_fire,
+                    "consecutive_unchanged": consecutive_after,
+                    "streak_window_secs": streak_window,
+                    "decision": "block",
+                    "intent": if intent == Intent::Promise { "promise" } else { "none" },
+                    "intent_source": intent_source,
+                    "pr_state": pr_info.state.as_str(),
+                    "ci": pr_info.ci_conclusion.render(),
+                    "reviewed": pr_info.reviewed,
+                    "review_skipped": pr_info.review_skipped,
+                    "unaddressed_blocking": pr_info.unaddressed_findings.len(),
+                    "fp_read_failed": fp_read_failed,
+                    "done_probes": probe_results
+                });
+                watch_lease::attach_watch_refusal(
+                    &mut block_event,
+                    watching_refusal.as_ref().map(|(_, kind)| *kind),
                 );
+                emit("loop_check", block_event);
                 return (
                     0,
                     allow_output("block", None, &reason, this_fire, Some(fingerprint)),
@@ -15385,11 +15384,11 @@ git_bounded();";
     #[test]
     fn watching_refusal_names_the_disqualifying_substrate() {
         assert_eq!(
-            watching_harness_refusal(Some("claude"), true),
+            watch_lease::watching_harness_refusal(Some("claude"), true),
             "watching ignored: loop-run child cannot idle"
         );
         assert_eq!(
-            watching_harness_refusal(Some("codex"), false),
+            watch_lease::watching_harness_refusal(Some("codex"), false),
             "watching ignored: harness codex cannot idle"
         );
     }
