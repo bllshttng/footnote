@@ -1381,9 +1381,7 @@ def node_seed(
     DISAGREEING family verb refuses (an unknown verb is not evidence of
     ``/target``); a verbless seed composes the node's resolved command in
     front of the prose. Full contract:
-    docs/architecture/backlog-graph-verb-contracts.md. The spawn seam skips
-    empty seeds so the door's node-seed render keeps the brief env and the
-    worktree ensure."""
+    docs/architecture/backlog-graph-verb-contracts.md."""
     text = (seed or "").strip()
     lead = _canonical_verb(text.split(maxsplit=1)[0]) if text else None
     if lead is not None and lead not in _TARGET_FAMILY_VERBS:
