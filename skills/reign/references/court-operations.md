@@ -35,10 +35,10 @@ Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king t
 
 ## Control surfaces
 
-Canonical implementation worker spawn. Laws d-b1a7afe2 (thread), d-20293d74 + d-94853e86 (glm), and d-fa1a58ee (one launcher). Still current? `fno backlog decisions retask-tier`; `fno backlog decisions spawn-substrate`.
+Canonical implementation worker spawn. Rules: spawn teammates on the thread substrate, never panes; implementation runs on zai glm-5.3-flash[1m]; every agent launch goes through `fno agents spawn`, no second launcher.
 
 ```bash
-# Blueprints do NOT use this line; law d-94853e86 runs them as native subagents on a non-glm model.
+# Blueprints do NOT use this line; they run as native subagents on the planning session's own non-glm model.
 fno agents spawn --name <node-name> "$payload" --harness claude --substrate thread \
   --provider zai --model 'glm-5.3-flash[1m]' --effort xhigh \
   --permission-mode bypassPermissions --cwd <checkout> 2>&1

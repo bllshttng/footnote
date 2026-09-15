@@ -61,7 +61,7 @@ consolidation:
   #                              # after intake: fno backlog defer <id> -K wont_do
   #                              # -R "rejected by <this node> in <plan path>".
   decisions_acknowledged: []     # one per graph.decisions row:
-  #  - decision_id: d-00000000
+  #  - decision_id: d-XXXXXXXX
   #    reason: <why this ruling does not close this work>
   # outcome: absorb - the other node is a wave of THIS deliverable. After
   # intake run: fno backlog supersede <this-node> --replaces <id> --cause "..." --surface <path>
@@ -86,7 +86,7 @@ consolidation:
 #                                 # references/answerer-enumeration.md.
 surface:
   question: "Which nodes need dispatch?"   # ONE line, phrased as a question
-  ruling: d-00000000                       # optional: the live law the question is quoted from
+  ruling: d-XXXXXXXX                       # optional: the live law the question is quoted from
   sweep: "rg -n 'plan_path' crates/fno-agents/src/king_board.rs"  # the exact command run; must return the control below
   control: crates/fno-agents/src/king_board.rs build_board  # an answerer known BEFORE the sweep ran
   answerers:

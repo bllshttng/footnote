@@ -118,7 +118,7 @@ over its absence.
 
 Trigger: a Files-to-Modify row, or a task `surface`, names a path under `cli/src/fno` ending `.py`.
 
-`cli/src/fno` is the compatibility shell and `crates/` is the product. The tree is shrink-only as a TREE, net: `scripts/ci/check-file-budget.sh` refuses a change whose net Python growth exceeds `PY_TREE_ALLOWANCE` (default 100). The allowance is sized so a bug fix never has to port a verb to land, while a feature does. Standing law d-4b39ad4c: the refusal is answered by refactoring in the same PR, never by raising the allowance and never by splitting the PR.
+`cli/src/fno` is the compatibility shell and `crates/` is the product. The tree is shrink-only as a TREE, net: `scripts/ci/check-file-budget.sh` refuses a change whose net Python growth exceeds `PY_TREE_ALLOWANCE` (default 100). The allowance is sized so a bug fix never has to port a verb to land, while a feature does. Standing law: the refusal is answered by refactoring in the same PR, never by raising the allowance and never by splitting the PR.
 
 State the expected net Python delta in the plan body, in one line. Over the allowance, the plan is planning a feature in the shell. Pick a remedy HERE rather than at push time. Land it in `crates/`, port the verb the change touches, or name the offsetting Python deletion the same PR makes. A plan that names none of these is the x-7b36 shape, where roughly 600 lines were written, reviewed and only then refused.
 
