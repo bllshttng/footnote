@@ -539,13 +539,16 @@ def shutdown_keeper(path: Path) -> None:
 
 
 def _recv_exact(stream: socket.socket, length: int) -> bytes:
-    data = b""
-    while len(data) < length:
-        chunk = stream.recv(length - len(data))
-        if not chunk:
+    # Preallocated buffer filled in place: `data += chunk` on bytes copies the
+    # whole buffer per chunk, which on a 16 MB graph reply cost ~6s (x-baa2).
+    buf, got = bytearray(length), 0
+    view = memoryview(buf)
+    while got < length:
+        n = stream.recv_into(view[got:])
+        if not n:
             raise StoreUnavailable(STATE_SILENT, "keeper closed the connection mid-frame")
-        data += chunk
-    return data
+        got += n
+    return bytes(buf)
 
 
 def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
