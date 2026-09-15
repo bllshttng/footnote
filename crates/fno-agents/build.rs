@@ -25,6 +25,7 @@ fn main() {
     // copies fresh.
     sync_harness_capabilities();
     sync_merge_posture();
+    sync_page_reload();
     sync_spawn_phase();
     sync_registry_schema();
     sync_events_limits();
@@ -200,6 +201,26 @@ fn sync_merge_posture() {
     };
     let Some(root) = repo_root() else { return };
     let cli_copy = root.join("cli/src/fno/agents/merge_posture.toml");
+    if !cli_copy.is_file() {
+        return;
+    }
+    write_if_different(&cli_copy, &bytes);
+}
+
+/// PRODUCE the downstream copy of the operator-page reload script.
+///
+/// The crate owns `src/page_reload.js` (`king_ledger.rs` `include_str!`s it),
+/// and the board renderer reads the byte copy
+/// `cli/src/fno/graph/page_reload.js` as package data. The cli-ci
+/// generated-copies step is the tripwire for a hand edit to the copy.
+fn sync_page_reload() {
+    println!("cargo:rerun-if-changed=src/page_reload.js");
+    let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/page_reload.js");
+    let Ok(bytes) = std::fs::read(&canonical) else {
+        return;
+    };
+    let Some(root) = repo_root() else { return };
+    let cli_copy = root.join("cli/src/fno/graph/page_reload.js");
     if !cli_copy.is_file() {
         return;
     }
