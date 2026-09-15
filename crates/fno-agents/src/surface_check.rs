@@ -611,8 +611,12 @@ fn cross_language_walk(plan_path: &str, repo: Option<&str>, base: Option<&str>, 
                 by_lang.entry(lang.name()).or_default().push(f);
             }
         }
+        // The cap is per symbol (the replay sized it against a symbol's total
+        // unlisted files), not per language group; the lines still name each
+        // tree's own count.
+        let wide = files.len() > WIDE_SYMBOL_FILES;
         for (lang_name, group) in &by_lang {
-            if group.len() > WIDE_SYMBOL_FILES {
+            if wide {
                 out.push_str(&format!(
                     "W\t`{sym}` is read in {lang_name} at {n} file(s) no answerer names. A \
                      symbol that wide is vocabulary, not one question's answerers: quote the \
@@ -1332,6 +1336,43 @@ mod tests {
         let out = run_walk(&plan, &repo);
         assert!(
             out.contains("W\t`row_ref_valid` is read in rust at 13 file(s)"),
+            "{out}"
+        );
+        assert!(!out.contains("X\t"), "{out}");
+    }
+
+    #[test]
+    fn wide_cap_triggers_on_the_symbol_total_across_trees() {
+        let mut extras = Vec::new();
+        for i in 0..6 {
+            extras.push((
+                format!("crates/x/src/r{i}.rs"),
+                format!("fn r{i}() {{ row_ref_valid({i}); }}\n"),
+            ));
+            extras.push((
+                format!("scripts/g{i}.sh"),
+                format!("# shell read\nrow_ref_valid {i}\n"),
+            ));
+        }
+        let refs: Vec<(&str, &str)> = extras
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+        let repo = walk_repo("walkw2", &refs);
+        let plan = write_plan(
+            &repo,
+            &surface_block("Is this row reachable?", ONE_DUAL, 1, 1),
+            "p.md",
+        );
+        let out = run_walk(&plan, &repo);
+        // 12 unlisted files total: over the cap per symbol, so W lines for
+        // both trees and no X line anywhere.
+        assert!(
+            out.contains("W\t`row_ref_valid` is read in rust at 7 file(s)"),
+            "{out}"
+        );
+        assert!(
+            out.contains("W\t`row_ref_valid` is read in shell at 6 file(s)"),
             "{out}"
         );
         assert!(!out.contains("X\t"), "{out}");
