@@ -236,23 +236,14 @@ pub fn run_king_escalation_text(args: &[String]) -> i32 {
 
 /// The escalation channel's per-king scope read: resolve the escalating
 /// session's registry row and return its `crown_scope`. Session ids compare
-/// under the Python `session_identity_key` contract this read ports -
-/// lowercase everything except opencode's `ses_` prefix - and a blank scope
-/// reads as None, keeping a malformed row on the legacy shared channel.
-fn identity_key(session_id: &str) -> String {
-    if session_id.starts_with("ses_") {
-        session_id.to_owned()
-    } else {
-        session_id.to_lowercase()
-    }
-}
-
+/// under the crate's one identity contract (`claims::same_session_id`), and
+/// a blank scope reads as None, keeping a malformed row on the legacy
+/// shared channel.
 fn escalation_scope(entries: &[crate::state::RegistryEntry], session_id: &str) -> Option<String> {
-    let needle = identity_key(session_id);
     let row = entries.iter().find(|e| {
         e.harness_session_id
             .as_deref()
-            .is_some_and(|sid| identity_key(sid) == needle)
+            .is_some_and(|sid| crate::claims::same_session_id(sid, session_id))
     })?;
     row.crown_scope
         .clone()

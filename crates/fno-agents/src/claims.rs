@@ -1927,7 +1927,7 @@ fn canonical_identity_from(
     (Some(session), Some(name), CanonicalDisposition::Complete)
 }
 
-fn same_session_id(left: &str, right: &str) -> bool {
+pub(crate) fn same_session_id(left: &str, right: &str) -> bool {
     if left.starts_with("ses_") || right.starts_with("ses_") {
         left == right
     } else {
