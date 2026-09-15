@@ -276,9 +276,13 @@ fn local_toast(title: &str, body: &str) {
         return;
     }
     let argv = toast_argv(std::env::consts::OS, title, body);
-    std::thread::spawn(move || {
-        let mut cmd = std::process::Command::new(&argv[0]);
-        cmd.args(&argv[1..]);
-        let _ = crate::bounded_cmd::output_with_timeout(cmd, 5);
-    });
+    // Builder, not spawn: spawn panics when the OS refuses the thread; a
+    // dropped toast must never take the caller down with it.
+    let _ = std::thread::Builder::new()
+        .name("badge-toast".to_string())
+        .spawn(move || {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]);
+            let _ = crate::bounded_cmd::output_with_timeout(cmd, 5);
+        });
 }

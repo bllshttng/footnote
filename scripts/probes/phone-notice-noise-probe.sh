@@ -92,7 +92,14 @@ if [ -z "$SINCE" ] && [ -z "$UNTIL" ]; then
         echo "probe: no daemon and no --since; pass --since <iso>" >&2
         exit 2
     fi
-    SINCE="$(date -u -r "$((start_us / 1000000))" +%Y-%m-%dT%H:%M:%SZ)"
+    epoch="$((start_us / 1000000))"
+    # GNU date takes -d "@<epoch>"; BSD date takes -r <epoch>. Either order.
+    SINCE="$(date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
+        date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+    if [ -z "$SINCE" ]; then
+        echo "probe: cannot convert the daemon start; pass --since <iso>" >&2
+        exit 2
+    fi
 fi
 
 if [ -z "$SPACE" ]; then
