@@ -668,6 +668,10 @@ fn fetch_native_manifest(
                 .unwrap_or("unobserved")
                 .to_string();
             errors.push(format!("{source_id}: {error}"));
+        } else if row.get("bytes").and_then(Value::as_u64).is_none() {
+            // The context sum reads only u64 bytes; an observed row without
+            // one would silently drop out of context_bytes. Flag it instead.
+            errors.push(format!("{source_id}: observed row has non-integer bytes"));
         }
         public_rows.push(json!({
             "source_id": source_id,
