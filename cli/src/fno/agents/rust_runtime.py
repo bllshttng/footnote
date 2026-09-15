@@ -282,7 +282,8 @@ RUST_CLIENT_VERBS = frozenset(
         "spawn-overlay",
         # The billing axes of the spawn seam (route/account/model): payload
         # JSON in, the {inject, applied, suppressed, messages} plan out;
-        # Python calls it via fno.agents.spawn_axes_client.
+        # Python calls it via fno.agents.spawn_axes_client. A `node_seed`
+        # field routes the payload to the node-seed decision instead.
         "spawn-axes",
         # The failover chain walk (x-8975 budget port): payload JSON in, the
         # {eligible} answer out; Python calls it via fno.rust_binary.verb_call.
@@ -543,7 +544,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "spawn-gate": "The ONE spawn gate: reads one stdin JSON payload, writes one {status: admitted, gate/worker keys} or {status: refused, exit_code, receipt, event} answer; gate and probe modes; invoked by the fno.agents.spawn_gate transport.",
     "blueprint-feed": "Territory feed for the backlog supervisor's blueprinter tick: --scope <s> prints the standing worker + unfed ideas as JSON; --deliver mails the window; --repair <r> records a failed delivery.",
     "spawn-overlay": "Harness-keyed spawn-defaults resolver: JSON payload on stdin, the {refusal, effective, bundle} answer on stdout; invoked by fno.agents.spawn_overlay_client, not `fno agents` routing.",
-    "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; invoked by fno.agents.spawn_axes_client, not `fno agents` routing.",
+    "spawn-axes": "Spawn-seam billing axes (route/account/model): JSON payload on stdin, the {inject, applied, suppressed, messages} plan on stdout; a `node_seed` field instead answers the node-verb check. Invoked by fno.agents.spawn_axes_client and the spawn seam, not `fno agents` routing.",
     "fallback-chain": "Failover chain walk: JSON payload on stdin, the {eligible} answer on stdout; invoked by fno.recovery, not `fno agents` routing.",
     "authorized-merge": "The one authorized merge operation: JSON payload on stdin, one receipt (merged|armed|authorized|held|refused|head_changed|unknown|failed) on stdout; invoked by fno.rust_binary.verb_call from the merge and verify verbs, not `fno agents` routing.",
     "census": "One JSON row per long-lived process (daemon, keepers, mux servers) with its build-drift verdict (x-f188); invoked by fno.update.running_components, not `fno agents` routing.",
@@ -743,6 +744,68 @@ def _refuse_seedless_thread_spawn(args: Sequence[str]) -> None:
     if refusal:
         print(f"fno agents spawn: {refusal}", file=sys.stderr)
         raise SystemExit(2)
+
+
+def _node_seed_at_seam(args: "Sequence[str]") -> "tuple[list[str], Optional[str]]":
+    """Project the seam's facts to ``fno-agents node-seed`` and apply the
+    answer before any lane is chosen. Only an explicit ``--node`` triggers
+    the call; a refusal exits 2 before ``inject_spawn_defaults`` runs.
+    Returns ``(args, node_verb)``: the verb word on a ``profile`` answer.
+    """
+    from fno.agents.harness_map import DispatchResolveError, _TARGET_FAMILY_VERBS
+    from fno.agents.node_dispatch import find_node_row, node_effective_verb
+    from fno.agents.spawn_defaults import _seed_slot
+
+    node = (_spawn_flag_value(args, "--node") or "").strip()
+    if not node:
+        return list(args), None
+
+    row = find_node_row(node)
+    derive_error: Optional[str] = None
+    effective_verb: Optional[str] = None
+    if row is not None:
+        try:
+            effective_verb = node_effective_verb(row)
+        except DispatchResolveError as exc:
+            derive_error = str(exc)
+        except Exception as exc:  # noqa: BLE001 - the refusal names the failure
+            derive_error = f"derivation failed: {exc}"
+    stored = (row or {}).get("dispatch_verb") or ""
+    if stored:
+        from fno.config._dispatch_verbs import canonical_verb_key
+
+        stored = canonical_verb_key(stored)
+
+    slot = _seed_slot(list(args[1:]))
+    payload = {
+        "node": node,
+        "row_found": row is not None,
+        "effective_verb": effective_verb,
+        "stored_verb": stored or None,
+        "derive_error": derive_error,
+        "family": list(_TARGET_FAMILY_VERBS),
+        "crown": _is_crown_bearing_spawn("spawn", args),
+        "resume": _is_resume_bearing_spawn("spawn", args),
+        "argv": list(args),
+        "seed_index": (slot[0] + 1) if slot else None,
+        "seed_form": slot[1] if slot else None,
+    }
+    from fno.rust_binary import VerbUnavailable, verb_call
+
+    try:
+        answer = verb_call("spawn-axes", {"node_seed": payload}, VerbUnavailable)
+    except VerbUnavailable as exc:
+        print(f"fno agents spawn: spawn-axes unavailable: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    action = answer.get("action")
+    if action == "refuse":
+        print(f"fno agents spawn: {answer.get('message', 'refused')}", file=sys.stderr)
+        raise SystemExit(2)
+    if action == "compose":
+        return [str(tok) for tok in answer.get("argv") or list(args)], None
+    if action == "profile":
+        return list(args), (answer.get("verb") or "").strip() or None
+    return list(args), None
 
 
 def _refuse_lost_verb_payload(args: "Sequence[str]") -> None:
@@ -1668,15 +1731,18 @@ def make_agents_group_cls() -> type:
                     if verb == "spawn":
                         from fno.agents.spawn_defaults import extract_existing_pane, inject_spawn_defaults
 
-                        try:
-                            args, existing_pane = extract_existing_pane(inject_spawn_defaults(args))
-                        except ValueError as exc:
-                            print(f"fno agents spawn: {exc}", file=sys.stderr)
-                            raise SystemExit(2) from exc
                         _refuse_codex_code_spawn_without_git_grant(args)
                         _refuse_seedless_thread_spawn(args)
                         _refuse_lost_verb_payload(args)
                         _refuse_unfireable_seed(args)
+                        try:
+                            args, node_verb = _node_seed_at_seam(args)
+                            args, existing_pane = extract_existing_pane(
+                                inject_spawn_defaults(args, node_verb=node_verb)
+                            )
+                        except ValueError as exc:
+                            print(f"fno agents spawn: {exc}", file=sys.stderr)
+                            raise SystemExit(2) from exc
                     _export_worker_dirs_at_seam(args)
                     if verb == "spawn":  # after the export: the probe needs its roots
                         _refuse_codex_spawn_with_unreachable_tools(args)

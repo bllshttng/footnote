@@ -85,7 +85,6 @@ def resolve_node_spawn(
         SpawnError,
         _grid_lane_for,
         _launch_harness_axis,
-        _node_effective_verb,
         _worker_agent_name,
     )
     from fno.agents.naming import verb_code_for
@@ -100,32 +99,27 @@ def resolve_node_spawn(
             )
         source = "rd"
     node_verb = (verb or "").strip() or None
-    # x-0961/x-ebd2: classify the RAW declaration from the DICT alone. A dict
-    # without the key is a lossy projection: REFUSE before anything is spent.
-    # A None node keeps its warning + path.
-    if isinstance(node, dict) and "dispatch_verb" not in node:
+    # The node dict IS the verb evidence. A missing dict or a dict without
+    # the key is a lossy projection: REFUSE before anything is spent.
+    if not isinstance(node, dict):
+        raise SpawnError(
+            f"refusing to dispatch {node_id}: {caller} passed no node dict; "
+            "the builtin path has no verb evidence."
+        )
+    if "dispatch_verb" not in node:
         raise SpawnError(
             f"refusing to dispatch {node_id}: the node dict {caller} passed "
             "carries no dispatch_verb key; the projection feeding this "
             "dispatcher is lossy (x-0961); fix the projection, not the node."
         )
-    if isinstance(node, dict):
-        verb_source = (
-            "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
-        )
-    else:
-        verb_source = "field-absent"
-        print(
-            f"advance: WARNING: dispatching {node_id} with no node dict "
-            f"({caller}); the builtin target path runs with no verb_source "
-            "evidence (x-0961).",
-            file=sys.stderr,
-        )
+    verb_source = (
+        "declared" if str(node.get("dispatch_verb") or "").strip() else "none-declared"
+    )
     # x-ebd2: the effective workflow verb. Reconcile bypasses (its explicit
     # command spells the de-stub pass).
     effective_verb: Optional[str] = None
-    if isinstance(node, dict) and not is_reconcile:
-        effective_verb = _node_effective_verb(node)
+    if not is_reconcile:
+        effective_verb = node_effective_verb(node)
     # x-84b2: the verb code resolves (and refuses) BEFORE the resolver.
     verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
     # --provider selects the account/record (or a bare kind like "claude"),
@@ -466,6 +460,38 @@ class NodeSeed:
         return ensure_launch_workdir(self.recorded_cwd, self.node_id, agent_name, harness)
 
 
+def find_node_row(node: str) -> Optional[dict]:
+    """The graph row for a node id or slug, or None on an unreadable graph.
+    One lookup so the door, the seam and retask read the SAME row."""
+    try:
+        from fno.graph.load import load_graph
+
+        for candidate in load_graph():
+            if candidate.get("id") == node or candidate.get("slug") == node:
+                return candidate
+    except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn
+        return None
+    return None
+
+
+def node_effective_verb(
+    row: Optional[dict], *, node_id: Optional[str] = None
+) -> Optional[str]:
+    """The lifecycle table's answer for a node row, or None on abstain:
+    one answer per node, shared by every door. Accepts a None row; raises
+    DispatchResolveError on an unanswerable node."""
+    from fno.agents import harness_map
+    from fno.graph.ladder import plan_rung
+
+    verb, _note = harness_map.resolve_effective_verb(
+        verb=((row or {}).get("dispatch_verb") or "").strip() or None,
+        difficulty=(row or {}).get("difficulty"),
+        plan_rung=plan_rung(row).value,
+        node_id=node_id if node_id is not None else (row or {}).get("id"),
+    )
+    return verb
+
+
 def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]:
     """Render a node's seed (verb command + brief env) for the spawn door.
 
@@ -477,15 +503,7 @@ def render_node_seed(node: str, *, harness: Optional[str]) -> Optional[NodeSeed]
     from fno.graph.ladder import plan_rung as _node_plan_rung
     from fno.provenance.autobrief import resolve_dispatch_brief
 
-    seed_rec: Optional[dict] = None
-    try:
-        from fno.graph.load import load_graph
-        for candidate in load_graph():
-            if candidate.get("id") == node or candidate.get("slug") == node:
-                seed_rec = candidate
-                break
-    except Exception:  # noqa: BLE001 - an unreadable graph cannot seed a spawn
-        seed_rec = None
+    seed_rec: Optional[dict] = find_node_row(node)
     seed_node_id = (seed_rec or {}).get("id") or node
     if not isinstance(seed_rec, dict) or not str(seed_rec.get("dispatch_verb") or "").strip():
         print(

@@ -37,6 +37,23 @@ FULL_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 
 @pytest.fixture(autouse=True)
+def _readable_node_row(monkeypatch):
+    """A graph row for NODE, so the verb seam's `--node` consult passes.
+
+    The seam refuses a `--node` spawn whose row it cannot read; these tests
+    drive the door for the session ROW, not the verb contract, so every test
+    sees one target-deriving row unless it stubs its own (the blueprint tests
+    re-stub with a medium row so the derived verb agrees with their seed)."""
+    row = {"id": NODE, "slug": "sess", "dispatch_verb": "/target", "difficulty": "low"}
+
+    def _load_graph():
+        return [dict(row)]
+
+    monkeypatch.setattr("fno.graph.load.load_graph", _load_graph)
+    yield row
+
+
+@pytest.fixture(autouse=True)
 def _isolated_claims_root(tmp_path, monkeypatch):
     """Pin the global claims root at the tmp home.
 
@@ -161,12 +178,12 @@ def test_spawn_with_node_and_review_verb_opens_row(workdir_claude, resolvable_uu
     assert row["effort"] == "xhigh"
 
 
-def test_spawn_with_prose_and_node_refuses_unlabeled(
+def test_spawn_with_prose_and_node_composes_a_labeled_seed(
     workdir_claude, resolvable_uuid
 ) -> None:
-    """Arbitrary prose is a label the spawn cannot guess: a --node spawn it
-    cannot label is refused before anything launches, never defaulted to a
-    lying row (x-007c)."""
+    """Arbitrary prose with a `--node` is no longer unlabelable: the verb
+    seam composes the node's command in front, so the seed names the verb
+    and the row stamps from it instead of refusing a lying default."""
     from fno.agents.cli import agents_app
 
     result = CliRunner().invoke(
@@ -177,9 +194,10 @@ def test_spawn_with_prose_and_node_refuses_unlabeled(
         ],
         catch_exceptions=False,
     )
-    assert result.exit_code == 2, result.output
-    assert _node_rows() == [], f"no row for prose: {_node_rows()!r}"
-    assert "No worker launched" in result.stderr
+    assert result.exit_code == 0, result.output
+    rows = _node_rows()
+    assert len(rows) == 1, f"one row for the composed seed: {_node_rows()!r}"
+    assert rows[0]["phase"] == "do"
 
 
 def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> None:
@@ -357,12 +375,25 @@ def test_spawn_unlabelable_verb_refuses_before_spawn(
         assert claim_status(key, root=claims_root_for(key)).get("holder") is None, key
 
 
+def _medium_row(monkeypatch) -> None:
+    """Re-stub the graph row so the seam derives /blueprint, matching the
+    blueprint seed this test types."""
+    row = {"id": NODE, "slug": "sess", "dispatch_verb": "", "difficulty": "medium"}
+
+    def _load_graph():
+        return [dict(row)]
+
+    monkeypatch.setattr("fno.graph.load.load_graph", _load_graph)
+
+
 def test_spawn_bare_blueprint_spelling_stamps_blueprint(
-    workdir_claude, resolvable_uuid
+    workdir_claude, resolvable_uuid, monkeypatch
 ) -> None:
     """AC3 (x-007c): the bare /blueprint spelling - what claude and agy
     autonomous dispatch render - stamps the blueprint row at dispatch time."""
     from fno.agents.cli import agents_app
+
+    _medium_row(monkeypatch)
 
     result = CliRunner().invoke(
         agents_app,
@@ -419,10 +450,12 @@ def test_spawn_think_verb_stamps_think(workdir_claude, resolvable_uuid) -> None:
     assert rows[0]["phase"] == "think"
 
 
-def test_spawn_blueprint_verb_stamps_blueprint(workdir_claude, resolvable_uuid) -> None:
+def test_spawn_blueprint_verb_stamps_blueprint(workdir_claude, resolvable_uuid, monkeypatch) -> None:
     """A /fno:blueprint worker names a blueprint planner: the row stamps the
     planning phase instead of skipping."""
     from fno.agents.cli import agents_app
+
+    _medium_row(monkeypatch)
 
     result = CliRunner().invoke(
         agents_app,
@@ -439,11 +472,13 @@ def test_spawn_blueprint_verb_stamps_blueprint(workdir_claude, resolvable_uuid) 
 
 
 def test_spawn_codex_blueprint_spelling_stamps_blueprint(
-    workdir_claude, resolvable_uuid
+    workdir_claude, resolvable_uuid, monkeypatch
 ) -> None:
     """The codex spelling travels on the normalized form: `$fno:blueprint`
     stamps the same planning row the slash spelling does."""
     from fno.agents.cli import agents_app
+
+    _medium_row(monkeypatch)
 
     result = CliRunner().invoke(
         agents_app,

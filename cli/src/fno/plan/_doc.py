@@ -73,7 +73,6 @@ class PlanDoc:
 # Internal parsing helpers
 # ---------------------------------------------------------------------------
 
-_FENCE_CHARS = frozenset({"```", "~~~"})
 
 
 def _split_frontmatter(text: str) -> tuple[str, str]:

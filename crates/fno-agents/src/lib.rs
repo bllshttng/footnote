@@ -171,6 +171,7 @@ pub mod naming;
 pub mod needs;
 pub mod node_origin;
 pub mod node_route;
+pub mod node_seed;
 pub mod nudge;
 pub mod opencode_ask;
 pub mod opencode_serve;

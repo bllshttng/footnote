@@ -740,9 +740,6 @@ def _read_open_captures_with_counts(root: Path) -> "tuple[list[Capture], int, in
     return captures, file_total, row_total
 
 
-def read_open_captures(root: Path) -> "list[Capture]":
-    """Return the open capture rows from the machine-wide project fold."""
-    return _read_open_captures_with_counts(root)[0]
 
 
 def collect(root: Path, *, lane: "LaneRead | None" = None) -> Outstanding:

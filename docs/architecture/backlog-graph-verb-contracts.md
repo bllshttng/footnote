@@ -890,6 +890,28 @@ Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
     DispatchResolveError on an unresolvable harness/substrate/verb (caught
     non-fatally by the caller), and SpawnError otherwise.
 
+## fno agents spawn --node
+
+Every node-bearing spawn passes the verb seam. The seam projects the
+    lifecycle table's ANSWER - never a copy of the table - plus the seed slot,
+    the crown/resume flags and the row facts to the ``spawn-axes`` action's
+    ``node_seed`` field, and applies its answer verbatim before any lane is
+    chosen. A seed that leads with ``/target`` or ``/blueprint`` must agree
+    with the node's derived verb; on disagreement the spawn refuses (exit 2,
+    ``fno agents spawn:`` prefix) before any lane slot, claim or worker is
+    spent, so callers stop writing the verb twice: drop it from the payload
+    and ``--node`` supplies it. An empty seed routes the profile by the
+    derived verb (``node_verb`` reaches ``inject_spawn_defaults``; the journal
+    keeps the real seed) and the door still renders the command, because
+    ``render_node_seed`` also carries the brief env and the worktree ensure. A
+    prose seed gains the node's command in front at its own slot. Everything
+    else passes unchanged: other verbs (``/think``, ``/pr``), ``--reconcile``,
+    crown and resume spawns. Only an explicit ``--node`` triggers the check -
+    ``FNO_NODE`` is provenance a child inherits, never a decision to route. An
+    unreadable node row, a derivation failure, or a node with no verb refuses
+    the same way (unknown is not evidence of ``/target``; the message names
+    ``fno backlog update <id> --dispatch-verb``).
+
 ## _classify_lane_candidate
 
 Classify one ready node for lane-fill. ``None`` = selectable, else a typed

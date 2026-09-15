@@ -578,6 +578,13 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
             return 2;
         }
     };
+    // A `node_seed` field routes the payload to the node-seed decision
+    // instead of the axes plan (law d-fe66560a: a field on an existing
+    // action, never a new action).
+    if let Some(seed) = parsed.get("node_seed") {
+        println!("{}", crate::node_seed::decide(seed));
+        return 0;
+    }
     println!("{}", decide(&parsed));
     0
 }

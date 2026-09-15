@@ -236,9 +236,6 @@ class PackRegistryStore:
     def owner_of_path(self, written_path: str) -> tuple[str, str] | None:
         return self.load().owner_of_path(written_path)
 
-    def peek_receipt(self, pack_id: str) -> ActivationReceipt | None:
-        """Read a receipt without removing it (for ordered deactivation)."""
-        return self.load().receipt_for(pack_id)
 
     def install(self, manifest: PackManifest, manifest_path: Path) -> InstalledPack:
         """Record (or refresh) a pack as installed and return its record."""
