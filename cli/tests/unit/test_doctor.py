@@ -642,9 +642,8 @@ def test_daemon_drift_probe_uses_installed_status_and_relays_canonical_warning(
 
     warning = (
         "fno agents: the running daemon (pid 91627) is an older build than the installed "
-        "binary; `fno agents restart` fixes it but restarts every worker on the shared "
-        "daemon, so it is an operator action - surface it to the operator instead of "
-        "running it from an agent session."
+        "binary; run `fno agents restart` to pick up the new build (it restarts the "
+        "daemon only and keeps PTY workers)."
     )
     calls: list[tuple[list[str], dict]] = []
     monkeypatch.setattr(
@@ -682,9 +681,8 @@ def test_daemon_drift_probe_appends_measured_process_age(
 
     warning = (
         "fno agents: the running daemon (pid 30324) is an older build than the installed "
-        "binary; `fno agents restart` fixes it but restarts every worker on the shared "
-        "daemon, so it is an operator action - surface it to the operator instead of "
-        "running it from an agent session."
+        "binary; run `fno agents restart` to pick up the new build (it restarts the "
+        "daemon only and keeps PTY workers)."
     )
     monkeypatch.setattr(
         rust_binary, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
@@ -718,9 +716,8 @@ def test_daemon_drift_probe_gates_on_structured_drift_field(
 
     warning = (
         "fno agents: the running daemon (pid 7) is an older build than the installed "
-        "binary; `fno agents restart` fixes it but restarts every worker on the shared "
-        "daemon, so it is an operator action - surface it to the operator instead of "
-        "running it from an agent session."
+        "binary; run `fno agents restart` to pick up the new build (it restarts the "
+        "daemon only and keeps PTY workers)."
     )
     monkeypatch.setattr(
         rust_binary, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
@@ -745,6 +742,56 @@ def test_daemon_drift_probe_gates_on_structured_drift_field(
         assert doctor._daemon_drift_warning() is None, drift_value
 
 
+@pytest.mark.parametrize(
+    "stderr,expected",
+    [
+        (
+            "fno agents: the running daemon (pid 7) is an older build than the installed "
+            "binary; run `fno agents restart` to pick up the new build (it restarts the "
+            "daemon only and keeps PTY workers).",
+            "relayed",
+        ),
+        (
+            "fno agents: the running daemon (pid 7) is an older build than the installed "
+            "binary; `fno agents restart` fixes it but restarts every worker on the shared "
+            "daemon, so it is an operator action - surface it to the operator instead of "
+            "running it from an agent session.",
+            "relayed",
+        ),
+        (
+            "fno agents: something else entirely",
+            None,
+        ),
+    ],
+)
+def test_daemon_drift_warning_regex_matches_remedy_tails(
+    monkeypatch: pytest.MonkeyPatch,
+    stderr: str,
+    expected: str | None,
+) -> None:
+    """The relay filter matches the stable state prefix, not the remedy tail;
+    the wording may change without silencing the relay that triggers the restart."""
+    from fno import rust_binary
+
+    monkeypatch.setattr(
+        rust_binary, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
+    )
+    monkeypatch.setattr(
+        doctor.subprocess,
+        "run",
+        lambda *args, **kwargs: type(
+            "Completed",
+            (),
+            {"returncode": 0, "stdout": '{"drift": "drifted", "daemon": {"pid": 7}}', "stderr": stderr},
+        )(),
+    )
+    warning = doctor._daemon_drift_warning()
+    if expected is None:
+        assert warning is None
+    else:
+        assert warning == stderr
+
+
 def test_daemon_drift_probe_uses_forced_runtime_binary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -752,9 +799,8 @@ def test_daemon_drift_probe_uses_forced_runtime_binary(
 
     warning = (
         "fno agents: the running daemon is an older build than the installed binary; "
-        "`fno agents restart` fixes it but restarts every worker on the shared daemon, "
-        "so it is an operator action - surface it to the operator instead of running it "
-        "from an agent session."
+        "run `fno agents restart` to pick up the new build (it restarts the daemon only "
+        "and keeps PTY workers)."
     )
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "rust")
     monkeypatch.setenv("FNO_AGENTS_BIN", "/custom/fno-agents")
@@ -786,18 +832,16 @@ def test_daemon_drift_probe_uses_forced_runtime_binary(
             0,
             "not json",
             "fno agents: the running daemon (pid 7) is an older build than the installed "
-            "binary; `fno agents restart` fixes it but restarts every worker on the shared "
-            "daemon, so it is an operator action - surface it to the operator instead of "
-            "running it from an agent session.",
+            "binary; run `fno agents restart` to pick up the new build (it restarts the "
+            "daemon only and keeps PTY workers).",
         ),
         (1, '{"daemon": {"pid": 7}}', "fno agents: transport failed"),
         (
             0,
             '{"drift": "fresh", "daemon": {"pid": 7}}',
             "fno agents: the running daemon (pid 7) is an older build than the installed "
-            "binary; `fno agents restart` fixes it but restarts every worker on the shared "
-            "daemon, so it is an operator action - surface it to the operator instead of "
-            "running it from an agent session.",
+            "binary; run `fno agents restart` to pick up the new build (it restarts the "
+            "daemon only and keeps PTY workers).",
         ),
     ],
 )
@@ -834,9 +878,8 @@ def test_doctor_reports_measured_daemon_drift_without_changing_verdict(
     )
     warning = (
         "fno agents: the running daemon is an older build than the installed binary; "
-        "`fno agents restart` fixes it but restarts every worker on the shared daemon, "
-        "so it is an operator action - surface it to the operator instead of running it "
-        "from an agent session."
+        "run `fno agents restart` to pick up the new build (it restarts the daemon only "
+        "and keeps PTY workers)."
     )
     monkeypatch.setattr(doctor, "_daemon_drift_warning", lambda: warning)
 
@@ -857,9 +900,8 @@ def test_daemon_drift_never_prints_unqualified_fresh_component_verdict(
     "N/N fresh" - the exact false evidence the incident shipped."""
     warning = (
         "fno agents: the running daemon (pid 30324) is an older build than the installed "
-        "binary; `fno agents restart` fixes it but restarts every worker on the shared "
-        "daemon, so it is an operator action - surface it to the operator instead of "
-        "running it from an agent session."
+        "binary; run `fno agents restart` to pick up the new build (it restarts the "
+        "daemon only and keeps PTY workers)."
     )
     _stub_signals(
         monkeypatch,
