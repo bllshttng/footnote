@@ -8704,12 +8704,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         .as_ref()
                         .map(|(key, holder)| crate::claims::renew(key, holder, window_ms, None));
                     let renewed = matches!(renew_outcome.as_ref(), Some(Ok(true)));
-                    if !renewed {
-                        lease_note = watch_lease::permanent_lease_note(
-                            claim.as_ref(),
-                            renew_outcome.as_ref(),
-                        );
-                    }
+                    lease_note =
+                        watch_lease::permanent_lease_note(claim.as_ref(), renew_outcome.as_ref());
                     if renewed {
                         // The tag's own `pr=`/`reason=` attributes are the only
                         // source here (the stand-down verifies nothing), so
