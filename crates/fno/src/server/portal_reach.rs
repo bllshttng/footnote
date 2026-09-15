@@ -404,7 +404,9 @@ pub(super) struct PendingThreadReply {
 /// index-aware: a focus on a portal keyed by the attach id (the TUI door)
 /// reached through the registry name (this door) is a landing, not a
 /// refusal, and landing in a DIFFERENT index would be a refusal reported as
-/// success.
+/// success. A focus of the portal that already shows the row counts as
+/// landed too: the caller's index stayed empty because the door focused the
+/// existing viewer instead.
 fn portal_reply(landed: bool, landing: Option<String>, name: &str, portal: u8) -> ServerMsg {
     match (landed, landing) {
         (true, Some(text)) => ServerMsg::Notice { text },
@@ -544,21 +546,11 @@ impl Core {
         // so the second viewer's insert overwrites the first and leaves a live
         // pane no row points at - the duplicate-viewer problem this epic exists
         // to remove, re-created one layer down.
-        if let Some((other_idx, other_seat, other_tab)) = self
-            .portals
-            .iter()
-            .find(|(idx, portal)| {
-                **idx != portal_idx
-                    && row_matches_portal_key(&row, key, &portal.row_key)
-                    // A stand-in shell is not a viewer of the row: its portal
-                    // is free to be repointed, so it never blocks this reach.
-                    && self
-                        .panes
-                        .get(&portal.seat)
-                        .is_some_and(|entry| entry.cmd.is_some())
-            })
-            .map(|(idx, portal)| (*idx, portal.seat, portal.tab))
-        {
+        if let Some(other_idx) = self.live_viewer_portal(&row, key, portal_idx) {
+            let (other_seat, other_tab) = {
+                let portal = &self.portals[&other_idx];
+                (portal.seat, portal.tab)
+            };
             match self.session.find_pane(other_seat) {
                 Some((sid, _)) => {
                     // (x-9b60) This focus ignores caller geometry; saying so
@@ -1128,18 +1120,53 @@ impl Core {
         landing
     }
 
+    /// One-row-one-viewer, shared by the reach and the landed check: the
+    /// index of a portal other than `skip` whose key matches `row` under
+    /// `key` and whose seat runs a live viewer. A stand-in shell is not a
+    /// viewer of the row: its portal is free to be repointed, so it never
+    /// blocks a reach and never counts as a landing.
+    fn live_viewer_portal(&self, row: &RegistryAgent, key: &str, skip: u8) -> Option<u8> {
+        self.portals
+            .iter()
+            .find(|(idx, portal)| {
+                **idx != skip
+                    && row_matches_portal_key(row, key, &portal.row_key)
+                    && self
+                        .panes
+                        .get(&portal.seat)
+                        .is_some_and(|entry| entry.cmd.is_some())
+            })
+            .map(|(idx, _)| *idx)
+    }
+
     /// Row-aware landed check for the portal the caller NAMED: a slot keyed
     /// by the name or by the row's attach id, never a landing reported from
     /// some other index.
-    fn portal_landed(&self, name: &str, portal: u8) -> bool {
-        self.portals.get(&portal).is_some_and(|p| {
+    ///
+    /// A focus of the portal that already shows the row is also a landing:
+    /// the caller's index stayed empty because the door focused the existing
+    /// viewer instead, so the named slot reads empty while the reach landed.
+    /// A fresh open reported at an index the caller did not get is still a
+    /// refusal.
+    pub(super) fn portal_landed(&self, name: &str, portal: u8) -> bool {
+        let named_slot = self.portals.get(&portal).is_some_and(|p| {
             let k = p.row_key.as_str();
             k == name
                 || self.agents.iter().any(|a| {
                     (a.attach_id.as_deref() == Some(k) && a.name == name)
                         || (a.name == k && a.attach_id.as_deref() == Some(name))
                 })
-        })
+        });
+        if named_slot {
+            return true;
+        }
+        self.agents
+            .iter()
+            .filter(|a| row_answers_key(a, name))
+            .any(|row| {
+                self.live_viewer_portal(row, name, portal)
+                    .is_some_and(|idx| self.session.find_pane(self.portals[&idx].seat).is_some())
+            })
     }
 
     /// Finish a parked control-door reach: harvest what the replayed reach
