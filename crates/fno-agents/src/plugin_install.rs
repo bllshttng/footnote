@@ -853,7 +853,7 @@ mod tests {
     fn new_repo(dir: &Path) {
         fs::create_dir_all(dir).unwrap();
         git_in(dir, &["init", "-b", "main", "-q"]);
-        fs::create_dir_all(dir.join("hooks"));
+        fs::create_dir_all(dir.join("hooks")).unwrap();
         fs::write(
             dir.join("hooks/hooks.json"),
             "{\"hooks\":[{\"command\":\"${CLAUDE_PLUGIN_ROOT}/hooks/live.sh\"}]}",

@@ -2680,7 +2680,12 @@ def _guard_env(
     monkeypatch.setattr(
         update,
         "os",
-        types.SimpleNamespace(getpid=lambda: 424242, execvp=lambda *a, **k: exec_calls.append(a)),
+        types.SimpleNamespace(
+            name="posix",
+            getpid=lambda: 424242,
+            environ={},
+            execvp=lambda *a, **k: exec_calls.append(a),
+        ),
     )
     return exec_calls, marker, rust_calls
 

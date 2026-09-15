@@ -2875,6 +2875,7 @@ def test_plugin_cache_directory_marketplace_stage_stale(tmp_path, monkeypatch):
         lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
     )
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
     monkeypatch.setattr(doctor, "_run_stage_check", lambda argv: (3, _STAGE_STALE_JSON, ""))
 
     report = doctor._plugin_cache_report()
@@ -2940,6 +2941,7 @@ def test_plugin_cache_stage_check_transport_failure_is_unknown(tmp_path, monkeyp
         lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
     )
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "fno-agents-stub")
     monkeypatch.setattr(doctor, "_run_stage_check", lambda argv: (-1, "", "timeout expired"))
 
     report = doctor._plugin_cache_report()
@@ -2948,6 +2950,28 @@ def test_plugin_cache_stage_check_transport_failure_is_unknown(tmp_path, monkeyp
     assert report["status"] == "unknown"
     assert "timeout expired" in (report.get("detail") or "")
     assert doctor._blockers({"plugin_cache": report}) == []
+
+
+def test_plugin_cache_stage_check_needs_a_cargo_binary(tmp_path, monkeypatch):
+    """No cargo fno-agents on the machine -> unknown naming the gap, never a
+    false fresh (CI runners carry no ~/.cargo/bin)."""
+    repo, _old, _head = _plugin_repo_with_two_commits(tmp_path)
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_shaless_registry(tmp_path)
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_known_marketplaces_path",
+        lambda: _write_stage_marketplace(tmp_path, tmp_path / "stage" / "fno"),
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: None)
+
+    report = doctor._plugin_cache_report()
+
+    assert report["kind"] == "stage"
+    assert report["status"] == "unknown"
+    assert "no cargo fno-agents binary" in (report.get("detail") or "")
 
 
 def test_plugin_cache_non_directory_marketplace_keeps_registry_answer(tmp_path, monkeypatch):
