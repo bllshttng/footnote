@@ -562,11 +562,13 @@ _TRANSIENT_4XX = frozenset((401, 403, 408, 429))
 
 def _deliver(
     url: str,
-    body: Optional[dict[str, Any]],
+    body: dict[str, Any],
     fanout: StatusFanoutConfig,
     raw: Optional[str] = None,
 ) -> "tuple[str, str]":
     """Retry/failure-class driver shared by the webhook adapters.
+
+    ``raw`` mode posts the raw text and ignores ``body``.
 
     - 4xx except 401/403/408/429 -> DROPPED immediately (permanent; advance past it).
     - connect-class / 5xx / 401 / 403 / 408 / 429 -> bounded retry, then
@@ -720,7 +722,7 @@ def _dispatch_text_webhook(
     if sink.field != "content":
         rendered = rendered.replace("<!", "&lt;!")
     if sink.raw_body:
-        return _deliver(url, None, fanout, raw=rendered)
+        return _deliver(url, {}, fanout, raw=rendered)
     body: dict[str, Any] = {sink.field: rendered}
     if sink.field == "content":
         body["allowed_mentions"] = {"parse": []}
