@@ -25,6 +25,20 @@ import time
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "cli" / "src"))
 
+
+def _reexec_into_venv() -> None:
+    # fno.paths pulls the cli package's deps; a bare interpreter re-execs
+    # into the repo venv once, before the import.
+    try:
+        import tomli_w  # noqa: F401
+    except ModuleNotFoundError:
+        venv = REPO_ROOT / "cli" / ".venv" / "bin" / "python"
+        if venv.exists():
+            os.execv(str(venv), [str(venv), *sys.argv])
+
+
+_reexec_into_venv()
+
 from fno import paths  # noqa: E402
 
 SLEEPER_KEY = "flight:probe-stuck-work"
