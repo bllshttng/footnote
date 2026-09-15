@@ -5,7 +5,6 @@ surface; ``Entry`` is its legacy alias until task 17.1).
 """
 from __future__ import annotations
 
-import datetime as _dt
 import math
 from enum import Enum
 from typing import Optional, Self
@@ -64,10 +63,6 @@ SESSION_PHASES: frozenset[str] = frozenset({"think", "blueprint", "do", "review"
 # Re-export the canonical PRIORITY_ORDER from _constants so this module
 # stays in sync without a parallel literal.
 from fno.graph._constants import PRIORITY_ORDER  # noqa: E402,F401
-
-
-def _ts_now() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _derive_status(data: dict) -> str:
@@ -379,11 +374,13 @@ class Node(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _check_status_drift(cls, data: object) -> object:
-        """Drop persisted status; emit graph_status_drift event if it differs
-        from the computed value so forensic audit can track legacy graph.json.
+        """Drop the persisted status; keep it beside the derived one.
 
-        Best-effort: event emit failures are swallowed so deserialization
-        never crashes on a telemetry error.
+        The store settles drift itself: every write op re-derives status, so a
+        persisted row disagrees with the derivation only until its next write.
+        The graph_status_drift journal event is retired - its read-side emitter
+        fired on every deserialize, so the journal cost scaled with reads, not
+        with drift (2,241 rows for 23 ids in 35 minutes, measured 2026-09-15).
         """
         if not isinstance(data, dict):
             return data
@@ -399,41 +396,6 @@ class Node(BaseModel):
         # single-entry approximation this model computes on `status`.
         if persisted is not None:
             data["persisted_status"] = persisted
-        if persisted is None:
-            return data
-
-        computed = _derive_status(data)
-        if persisted != computed:
-            # Fix 1 (Locked Decision #2): suppress the known single-entry-vs-cascade
-            # approximation gap. recompute_statuses resolves nodes whose blocked_by
-            # siblings are all completed to "ready"/"in_progress" and writes that to disk.
-            # On reload, _derive_status still sees a non-empty blocked_by list and
-            # returns "blocked" -- a single-entry approximation, not a real drift.
-            # Emitting graph_status_drift here would be a false positive; the cascade
-            # in recompute_statuses is authoritative for that case.
-            if computed == "blocked" and persisted in {"ready", "design", "in_progress", "idea"}:
-                return data
-
-            try:
-                from fno.events import append_event  # local import avoids circularity
-
-                event = {
-                    "ts": _ts_now(),
-                    "type": "graph_status_drift",
-                    "source": "migration",
-                    "data": {
-                        "entry_id": data.get("id", ""),
-                        "persisted": persisted,
-                        "computed": computed,
-                    },
-                }
-                append_event(event)
-            except (OSError, ImportError):
-                # Fix 4: narrowed from broad except Exception. OSError covers transient
-                # filesystem failures writing events.jsonl; ImportError covers installs
-                # where the fno.events module is absent. Real bugs (ValidationError,
-                # SchemaUnavailableError, KeyError, AttributeError) must propagate loudly.
-                pass
         return data
 
     @model_validator(mode="after")

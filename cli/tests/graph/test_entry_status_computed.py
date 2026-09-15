@@ -14,11 +14,6 @@ Precedence (single-entry, matching recompute_statuses):
 """
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -158,64 +153,6 @@ def test_ac1_fr_legacy_stale_status_computed_wins(tmp_path):
     )
 
 
-def test_ac1_fr_drift_event_emitted_on_stale_status(tmp_path):
-    """model_validate emits graph_status_drift event when persisted status
-    differs from computed value.
-
-    Required event fields: entry_id, persisted, computed.
-    """
-    events_path = tmp_path / "events.jsonl"
-
-    raw = {
-        "id": "ab-fr-drift",
-        "completed_at": "2026-05-15T00:00:00Z",
-        "plan_path": "/p",
-        "status": "ready",  # stale
-    }
-
-    # Patch append_event to capture calls
-    captured = []
-
-    def fake_append(event, events_path=None, **kwargs):
-        captured.append(event)
-
-    with patch("fno.events.append_event", fake_append):
-        entry = Entry.model_validate(raw)
-
-    assert entry.status == "done"
-
-    drift_events = [e for e in captured if e.get("type") == "graph_status_drift"]
-    assert len(drift_events) == 1, (
-        f"Expected 1 graph_status_drift event, got {len(drift_events)}: {captured}"
-    )
-
-    data = drift_events[0]["data"]
-    assert data["entry_id"] == "ab-fr-drift"
-    assert data["persisted"] == "ready"
-    assert data["computed"] == "done"
-
-
-def test_ac1_fr_no_drift_event_when_status_matches(tmp_path):
-    """No drift event when persisted status matches computed value."""
-    captured = []
-
-    def fake_append(event, events_path=None, **kwargs):
-        captured.append(event)
-
-    raw = {
-        "id": "ab-no-drift",
-        "plan_path": "/p",
-        "status": "ready",  # matches computed (plan_path set, no lifecycle)
-    }
-
-    with patch("fno.events.append_event", fake_append):
-        entry = Entry.model_validate(raw)
-
-    assert entry.status == "ready"
-    drift_events = [e for e in captured if e.get("type") == "graph_status_drift"]
-    assert len(drift_events) == 0, f"Unexpected drift events: {drift_events}"
-
-
 # ---------------------------------------------------------------------------
 # AC1-UI: model_dump round-trip preserves status key
 # ---------------------------------------------------------------------------
@@ -246,49 +183,6 @@ def test_ac1_ui_round_trip_preserves_status():
         assert rebuilt.status == expected, (
             f"Round-trip failed for {expected}: got {rebuilt.status!r}"
         )
-
-
-# ---------------------------------------------------------------------------
-# Fix 1: _check_status_drift suppresses false-positive "blocked" events
-# ---------------------------------------------------------------------------
-
-
-def test_ac1_fr_no_drift_event_for_blocked_cascade_approximation():
-    """No drift event emitted when computed=='blocked' but persisted is in
-    {'ready', 'design', 'in_progress', 'idea'} -- the known single-entry-vs-cascade
-    approximation gap (Locked Decision #2).
-
-    recompute_statuses resolves nodes with all-completed blockers to 'ready'
-    or 'in_progress', writing that to disk. On reload, _derive_status still sees
-    a non-empty blocked_by and returns 'blocked'. This mismatch is NOT a real
-    drift -- it is an expected gap between single-entry approximation and the
-    cascade. Emitting graph_status_drift for this case would be a false positive.
-    """
-    captured = []
-
-    def fake_append(event, events_path=None, **kwargs):
-        captured.append(event)
-
-    # blocked_by is non-empty, but status was written as "ready" by recompute_statuses
-    # (all blockers completed). Single-entry computed value is "blocked"; cascade
-    # authoritative value is "ready". No drift event should fire.
-    raw = {
-        "id": "ab-x",
-        "blocked_by": ["ab-y"],
-        "status": "ready",
-    }
-
-    with patch("fno.events.append_event", fake_append):
-        entry = Entry.model_validate(raw)
-
-    # computed value is still "blocked" (single-entry sees non-empty blocked_by)
-    assert entry.status == "blocked"
-
-    drift_events = [e for e in captured if e.get("type") == "graph_status_drift"]
-    assert len(drift_events) == 0, (
-        f"Expected 0 graph_status_drift events for blocked/ready cascade approximation, "
-        f"got {len(drift_events)}: {captured}"
-    )
 
 
 # ---------------------------------------------------------------------------
