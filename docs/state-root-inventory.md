@@ -96,7 +96,7 @@ Every subfolder and file below was found in the real root unnamed at the 2026-09
 | `nudge-cursors/` | `cli/src/fno/agents/nudge.py` | one cursor per nudge target, overwritten |
 | `announce-cursors/` | `fno-agents announce` (`crates/fno-agents/src/announce.rs`) | one seen-id set per session; pruned to ids still on retained bus segments |
 | `observer-reports/` | the observer fold, via the `paths` accessor | one report per observation run |
-| `operator-capture/` | `cli/src/fno/inbox/operator_turns.py` | raw operator turns awaiting `fno inbox operator ack` |
+| `operator-capture/` | `cli/src/fno/inbox/operator_turns.py` writes `<session-id>.jsonl`, the ack ledger and receipt; `fno-agents compaction operator-turns` (`crates/fno-agents/src/operator_turns.rs`) writes `<session-id>.scan.json` | per session, the ack ledger is permanent. The scan cursor cache is safe to delete, the next read rescans from byte 0 |
 | `postmortems/` | the retro routine and stuck-terminal postmortem writer, via the `paths` accessor | permanent |
 | `provider-runtime-state.json`, `.update.lock` | `cli/src/fno/adapters/providers/runtime_state.py` via the `paths` accessor | permanent; the update lock lives for one write |
 | `providers/` | `cli/src/fno/adapters/providers/managed.py`, `staging.py` | permanent managed provider configs |

@@ -14,6 +14,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from fno.rust_binary import find_dev_binary
+
+#: The three real-pipeline tests reach the binary; the stub-exit tests do not.
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
 REPO_ROOT = Path(__file__).parents[3]
 HOOK = REPO_ROOT / "hooks" / "operator-capture-nudge.sh"
 
@@ -67,9 +77,12 @@ def _queue_env(tmp_path: Path, rows: list[dict]) -> dict[str, str]:
         "FNO_OPERATOR_SESSION_ID": "s-hook-test",
         "FNO_OPERATOR_TRANSCRIPT": str(transcript),
         "FNO_OPERATOR_CAPTURE_DIR": str(tmp_path / "operator-capture"),
+        # The checkout's own build answers, so a stale installed binary cannot.
+        "FNO_AGENTS_BIN": str(find_dev_binary()),
     }
 
 
+@requires_rust
 def test_silent_at_depth_zero(tmp_path):
     """AC: depth 0 writes nothing to stdout and exits 0."""
     bin_dir = tmp_path / "bin"
@@ -84,6 +97,7 @@ def test_silent_at_depth_zero(tmp_path):
     assert result.stdout == ""
 
 
+@requires_rust
 def test_speaks_with_literal_count_at_depth_three(tmp_path):
     """AC + positive control: three prose turns -> the literal 3 and the oldest excerpt in stdout."""
     bin_dir = tmp_path / "bin"
@@ -124,6 +138,7 @@ def test_other_failed_read_is_reported_never_silent(tmp_path):
     assert "could not be read" in result.stdout
 
 
+@requires_rust
 def test_reports_skipped_machine_turns_next_to_depth(tmp_path):
     """AC: machine rows do not raise depth and the nudge names what capture skipped."""
     bin_dir = tmp_path / "bin"

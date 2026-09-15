@@ -282,14 +282,15 @@ pub fn run_compaction(args: &[String]) -> i32 {
     match args.split_first() {
         Some((action, rest)) if action == "mark" => compaction_mark(&home, rest),
         Some((action, rest)) if action == "status" => compaction_status(&home, rest),
+        Some((action, rest)) if action == "operator-turns" => crate::operator_turns::run(rest),
         _ => {
-            eprintln!("usage: compaction mark --session <id> | status --harness <h> --session <id> [--transcript <path>] [--json]");
+            eprintln!("usage: compaction mark --session <id> | status --harness <h> --session <id> [--transcript <path>] [--json] | operator-turns --session <id> --transcript <path> --capture-dir <dir>");
             2
         }
     }
 }
 
-fn flag_value(args: &[String], flag: &str) -> Option<String> {
+pub(crate) fn flag_value(args: &[String], flag: &str) -> Option<String> {
     args.iter()
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
