@@ -48,7 +48,7 @@ if [[ -n "${CLAIMS_ID:-}" ]]; then
 fi
 ```
 
-**Halt release.** When `OPENED_HOLDER` is set, every halt after this block and before `session close` runs `fno agents claim release "node:$CLAIMS_ID" --holder "$OPENED_HOLDER"`. Never pass `--stamp-do`. The halts in scope are the Consolidation Gate halt, the validate-and-finalize failure, and the post-write claims refusal.
+**Halt release.** With `OPENED_HOLDER` set, every halt after this block and before `session close` runs `fno agents claim release "node:$CLAIMS_ID" --holder "$OPENED_HOLDER"`. Never pass `--stamp-do`. The halts in scope are the Consolidation Gate halt, the validate-and-finalize failure, and the post-write claims refusal.
 
 After resolution, the plan body proceeds as if the user had pasted the
 node's title plus details directly. The classifier below sees a raw
