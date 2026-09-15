@@ -102,6 +102,8 @@ def worker_environment(base: Mapping[str, str]) -> dict[str, str]:
     from fno.harness_identity import scrub_ambient_identity
 
     scrub_ambient_identity(env)
+    # A child never inherits its parent's spawn cause.
+    env.pop("FNO_SPAWN_TRIGGER", None)
     # Seed provenance is inherited the same way and for the same reason it must
     # not be (node x-3a64): these fields name WHO SENT THIS CHILD ITS SEED, so a
     # child that inherits them attributes its own first message to whoever

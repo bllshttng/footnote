@@ -31,7 +31,7 @@ The `agent_spawned` event (`cli/src/fno/events/schema.yaml`) carries the same `s
 
 **Node birth** (`cli/src/fno/graph/cli.py`, `_session_provenance`, merged in `_build_backlog_node`). Reads the running session's env and `.fno/target-state.md`. Centralized in the shared builder, so `add`, `idea`, and `decompose` all self-describe. `source_node_id` / `source_plan_path` resolve only when manifest ownership is proven: the manifest's `claude_transcript_id` must equal `CLAUDE_CODE_SESSION_ID`, mirroring `fno.agents.whoami.find_held_node`, so a stale, reused, or foreign-worktree manifest never leaks a node the session does not hold. Node + plan resolution is claude-only (the only proven transcript-resolver lane); codex/gemini stamp session + harness and degrade the rest.
 
-**Worker spawn** (`cli/src/fno/agents/dispatch.py`, `_capture_parent_edge`, wired into the claude create path). `fno agents spawn` runs as a subprocess of the spawning session, so the parent's `CLAUDE_CODE_SESSION_ID` / `CODEX_SESSION_ID` / `GEMINI_SESSION_ID` and `PWD` are inherited in `os.environ`. The triple is recorded on the new `AgentEntry` and emitted on exactly one `agent_spawned` event after the registry write. Harness precedence is claude > codex > gemini.
+**Worker spawn** (`cli/src/fno/agents/dispatch.py`, `_capture_parent_edge`, wired into the claude create path). `fno agents spawn` runs as a subprocess of the spawning session, so the parent's `CLAUDE_CODE_SESSION_ID` / `CODEX_SESSION_ID` / `GEMINI_SESSION_ID` and `PWD` are inherited in `os.environ`. The triple is recorded on the new `AgentEntry` and emitted on exactly one `agent_spawned` event after the registry write. `_capture_parent_edge` refuses markers from two harness families rather than ranking them. A machine dispatcher (`ac`, `rd`, `ab`) sets `FNO_SPAWN_TRIGGER=dispatch:<source>` and strips the identity markers from the spawn env. The row then records the dispatcher in `spawn_trigger` and no parent session. The ask event reads `caller_kind` `dispatcher`.
 
 Both helpers trim env values and coerce empty/whitespace to `None`. Neither raises: a missing env or absent manifest degrades every field to null and the create path proceeds unchanged.
 
@@ -41,13 +41,14 @@ Do not fill this field from `source_session_id`. They answer different questions
 
 The stamp refuses rather than half-writes. No node, no write. No proven parent session, no write, because a triple with a null session on a durable node asserts a launch nobody can trace. An existing edge is never overwritten: launch is the FIRST launch, so a second worker on the node does not rewrite who started it.
 
-**Reading a null parent.** `spawned_by_session` is null for more than one reason, and the harness half says which:
+**Reading a null parent.** `spawned_by_session` is null for more than one reason, and the harness half plus `spawn_trigger` say which:
 
-| session | harness | means |
-|---|---|---|
-| set | set | full lineage |
-| null | set | a harness process spawned it; its session id could not be proved |
-| null | null | no harness ancestor: a human shell or a daemon |
+| session | harness | spawn_trigger | means |
+|---|---|---|---|
+| set | set | - | full lineage |
+| null | set | - | a harness process spawned it; its session id could not be proved |
+| null | null | - | no harness ancestor: a human shell or a daemon |
+| null | set | `dispatch:<source>` | a dispatcher chose this spawn; the session that ran it did not ask |
 
 When the spawning process carries NO identity marker at all, `_capture_parent_edge` takes the harness from the process-tree walk and leaves the session id null. The walk is the prover, and a harness ancestor cannot be a stranger the way an inherited marker can. The fallback is gated on an empty marker set, not on a missing harness. A marker that IS present and resolved to nothing is a contradiction, and a contradiction attributes nothing. The `agent_spawned` event carries the `lineage_reason` in every case.
 
