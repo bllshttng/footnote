@@ -34,7 +34,7 @@
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub(crate) const REIGN_CHECKIN: &str = "reign_checkin";
 pub(crate) const FORBIDDEN_ALIASES: [&str; 3] = ["crown", "crown_scope", "result"];
@@ -828,6 +828,7 @@ fn render_verdict(payload: &Value) -> String {
 mod verdict_tests {
     use super::*;
     use std::io::Write;
+    use std::path::Path;
 
     fn readings() -> VerdictReadings {
         VerdictReadings {
