@@ -400,7 +400,7 @@ fn parse_send_args(args: &[String]) -> Result<SendArgs, String> {
 fn send_usage() -> &'static str {
     "usage: fno-agents announce send --scope <all|kings|<crown>|project:<p>> \
      [--subject S] [--expires 24h] [--urgent] --from <sender> \
-     --sender-kind <operator|agent> [--from-session <id>] [--json]  (body on stdin)"
+     --sender-kind <operator|agent> [--from-session <id>] [--json|-J]  (body on stdin)"
 }
 
 fn crown_holder(rows: &[Value], sender: &str) -> bool {
@@ -946,7 +946,7 @@ pub(crate) fn run_announce_status(args: &[String], paths: &AnnouncePaths) -> i32
         }
     }
     if id.is_empty() {
-        eprintln!("usage: fno-agents announce status <id> [--json]");
+        eprintln!("usage: fno-agents announce status <id> [--json|-J]");
         return 2;
     }
 

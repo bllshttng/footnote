@@ -119,7 +119,7 @@ enum PopSpec {
     },
 }
 
-const USAGE: &str = "usage: fno-agents honesty-sweep [--json] \
+const USAGE: &str = "usage: fno-agents honesty-sweep [--json|-J] \
 [--population harness-capabilities|king-manifests] \
 [--rows-json <path|->] [--rows-key <key>] [--name <label>]
 populations repeat; each named population is swept in turn. \

@@ -259,7 +259,7 @@ fn render(payload: &Value) -> String {
     lines.join("\n")
 }
 
-/// `king-history --scope SCOPE --events-path PATH [--events-path PATH ...] [--json]`
+/// `king-history --scope SCOPE --events-path PATH [--events-path PATH ...] [--json|-J]`
 ///
 /// rc 0 read (any match count), 1 a store that cannot be opened or synced
 /// (the message names the store path), 2 usage failure.
@@ -286,7 +286,7 @@ pub fn run_king_history(args: &[String]) -> i32 {
                 eprintln!("fno-agents king-history: unknown flag {other}");
                 eprintln!(
                     "fno-agents king-history: --scope SCOPE --events-path PATH \
-                     [--events-path PATH ...] [--json]"
+                     [--events-path PATH ...] [--json|-J]"
                 );
                 return 2;
             }

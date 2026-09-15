@@ -772,7 +772,7 @@ pub fn run_plugin_install(args: &[String]) -> i32 {
         }
         None => {
             eprintln!("usage: fno-agents plugin-install <claude|codex|opencode|agy> [--force]");
-            eprintln!("       fno-agents plugin-install --check [--stage <dir>] [--source <dir>] [--json]");
+            eprintln!("       fno-agents plugin-install --check [--stage <dir>] [--source <dir>] [--json|-J]");
             eprintln!("       fno-agents plugin-install --restage [--source <dir>]");
             2
         }

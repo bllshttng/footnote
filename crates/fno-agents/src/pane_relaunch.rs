@@ -753,7 +753,7 @@ pub fn run_resume_argv(rest: &[String]) -> i32 {
     }
     if positional.len() != 2 {
         eprintln!(
-            "usage: fno-agents resume-argv <harness> <session-id> [--cwd <path>] [--cd] [--json]"
+            "usage: fno-agents resume-argv <harness> <session-id> [--cwd <path>] [--cd] [--json|-J]"
         );
         return 2;
     }
