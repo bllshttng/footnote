@@ -43,7 +43,10 @@ from fno import paths  # noqa: E402
 from fno.rust_binary import resolve_binary  # noqa: E402
 
 SLEEPER_KEY = "flight:probe-stuck-work"
-POLL_BUDGET_S = 12 * 60
+# The notice rides notify_signal_via's rate floor ([notify] min_interval_s,
+# default 1800): a token that changed inside the floor is HELD, not sent, so
+# the poll must outlive the floor plus one arm_watch tick plus fanout.
+POLL_BUDGET_S = 45 * 60
 FANOUT_GRACE_S = 90
 
 
@@ -132,7 +135,9 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
     started_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     sleeper = subprocess.Popen(
-        ["bash", "-c", 'exec -a fno-py python3 -c "import time; time.sleep(900)" --timeout 20s'],
+        # The sleeper must outlive the poll: once it dies its finding
+        # leaves the set, and the required row names its pid.
+        ["bash", "-c", 'exec -a fno-py python3 -c "import time; time.sleep(3600)" --timeout 20s'],
         cwd=cwd,
     )
     holder_pid: int | None = None
@@ -155,7 +160,7 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
             # Config-noise lines lead stderr; the verdict is the tail.
             return fail("flight-acquire", (err.strip().splitlines() or ["?"])[-1][:200])
 
-        budget = POLL_BUDGET_S
+        budget = POLL_BUDGET_S  # noqa: F841 - kept for the log line below
         found = None
         while budget > 0:
             # Re-resolved per tick: a mid-poll rotation moves rows into a
