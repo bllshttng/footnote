@@ -137,7 +137,6 @@ def test_graph_unreadable_degrades(env, monkeypatch):
     tmp_path, g = env
     _seed(g, [{"id": "x-0001", "slug": "s", "plan_path": str(g), "priority": "p1"}])
 
-    import fno.graph.store as gs
 
     def _boom(_path):
         raise OSError("transient")
