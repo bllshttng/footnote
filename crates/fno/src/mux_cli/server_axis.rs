@@ -6,8 +6,6 @@
 //! The shared `--server <s>` / `--json` flag prefix every small verb parses
 //! rides here too, beside the resolver it feeds.
 
-use std::ffi::OsString;
-
 use crate::proto::DEFAULT_SESSION;
 
 /// The mux server axis, ruled 2026-09-10 (x-f209): a server is one socket and
@@ -64,37 +62,4 @@ pub fn resolve_session(explicit: Option<&str>, env: Option<&str>) -> String {
         }
     }
     resolved
-}
-
-/// Read the value of a `--flag value` pair, advancing `i` past the value.
-pub fn flag_value(args: &[OsString], i: &mut usize, flag: &str) -> Result<String, String> {
-    *i += 1;
-    args.get(*i)
-        .and_then(|a| a.to_str())
-        .map(str::to_string)
-        .ok_or_else(|| format!("{flag} needs a value"))
-}
-
-/// Split off a leading `--session <s>` / `--json` prefix shared by the small
-/// `tab`/`layout` verbs, returning the rest for verb-specific parsing.
-pub fn take_common_flags(args: &[OsString]) -> Result<(Option<String>, bool, Vec<String>), String> {
-    let mut session = None;
-    let mut json = false;
-    let mut rest = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let tok = args[i]
-            .to_str()
-            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
-        match tok {
-            "--json" => json = true,
-            "--server" | "--session" => {
-                note_server_flag(tok);
-                session = Some(flag_value(args, &mut i, tok)?)
-            }
-            other => rest.push(other.to_string()),
-        }
-        i += 1;
-    }
-    Ok((session, json, rest))
 }

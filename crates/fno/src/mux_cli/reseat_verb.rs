@@ -187,13 +187,14 @@ pub(crate) fn clear_mux_refs(
 /// seated pane is answered, not moved twice, and an already-cleared ref is
 /// left alone.
 pub fn reseat(args: &[OsString], env_session: Option<&str>) -> i32 {
-    let (session_flag, _json, rest) = match take_common_flags(args) {
+    let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("fno mux thread reseat: {e}");
             return EXIT_USAGE;
         }
     };
+    let (session_flag, _json) = (common.server.or(common.session), common.json);
     let mut portal: Option<u8> = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut it = rest.iter();

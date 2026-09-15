@@ -138,9 +138,9 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
                         .collect()
                 })
                 .unwrap_or_default();
-            let refs: Vec<&str> = toks.iter().map(String::as_str).collect();
+            let (axes, _) = crate::cli_args::SpawnAxes::scan(&toks)?;
             let vendor = resolve_lane_vendor(
-                &refs,
+                &axes,
                 payload.get("harness").and_then(Value::as_str),
                 payload.get("env_harness").and_then(Value::as_str),
                 payload.get("argv_head").and_then(Value::as_str),
@@ -416,28 +416,6 @@ fn resolve_overlay(payload: &Value) -> Result<Value, String> {
     }))
 }
 
-/// One flag's value from a pre-fence head (`--flag v`, `--flag=v`); stops at
-/// the `--argv` payload boundary and the bare `--` fence.
-fn flag_value(toks: &[&str], names: &[&str]) -> Option<String> {
-    let mut i = 0;
-    while i < toks.len() {
-        let t = toks[i];
-        if t == "--argv" || t == "--" {
-            return None;
-        }
-        for name in names {
-            if let Some(rest) = t.strip_prefix(&format!("{name}=")) {
-                return Some(rest.to_string());
-            }
-            if t == *name {
-                return toks.get(i + 1).map(|s| s.to_string());
-            }
-        }
-        i += 1;
-    }
-    None
-}
-
 fn implied_vendor(model: Option<&str>) -> Option<String> {
     let model = model?;
     let lower = model.to_lowercase();
@@ -468,12 +446,12 @@ fn implied_vendor(model: Option<&str>) -> Option<String> {
 /// by contract: the model-vendor mismatch check needs a lane answer that the
 /// model token did not inform, or it could never flag the model.
 fn resolve_lane_vendor_by_lane(
-    toks: &[&str],
+    axes: &crate::cli_args::SpawnAxes,
     harness: Option<&str>,
     env_harness: Option<&str>,
     argv_head: Option<&str>,
 ) -> Option<String> {
-    if let Some(route) = flag_value(toks, &["--route"]) {
+    if let Some(route) = &axes.route {
         let normalized = route.replace(',', "/");
         let vendor = normalized
             .split('/')
@@ -487,7 +465,7 @@ fn resolve_lane_vendor_by_lane(
             Some(vendor)
         };
     }
-    if let Some(v) = flag_value(toks, &["--provider", "-P"]) {
+    if let Some(v) = &axes.provider {
         let v = v.trim().to_lowercase();
         return if v.is_empty() { None } else { Some(v) };
     }
@@ -496,7 +474,9 @@ fn resolve_lane_vendor_by_lane(
         .map(str::to_lowercase)
         .unwrap_or_default();
     if resolved.is_empty() {
-        resolved = flag_value(toks, &["--harness", "-H"])
+        resolved = axes
+            .harness
+            .as_deref()
             .map(|s| s.trim().to_lowercase())
             .unwrap_or_default();
     }
@@ -521,13 +501,13 @@ fn resolve_lane_vendor_by_lane(
         }
     }
     if resolved == "opencode" {
-        return implied_vendor(flag_value(toks, &["--model", "-m"]).as_deref());
+        return implied_vendor(axes.model.as_deref());
     }
     None
 }
 
 fn resolve_lane_vendor(
-    toks: &[&str],
+    axes: &crate::cli_args::SpawnAxes,
     harness: Option<&str>,
     env_harness: Option<&str>,
     argv_head: Option<&str>,
@@ -536,14 +516,13 @@ fn resolve_lane_vendor(
     // answer. A routeless glm spawn answered the harness default (anthropic),
     // minted a row under it, and died on the default endpoint's first
     // inference; the model's own spelling is the only voice that named z.ai.
-    let vendor_pinned = flag_value(toks, &["--route"]).is_some()
-        || flag_value(toks, &["--provider", "-P"]).is_some();
+    let vendor_pinned = axes.route.is_some() || axes.provider.is_some();
     if !vendor_pinned {
-        if let Some(vendor) = implied_vendor(flag_value(toks, &["--model", "-m"]).as_deref()) {
+        if let Some(vendor) = implied_vendor(axes.model.as_deref()) {
             return Some(vendor);
         }
     }
-    resolve_lane_vendor_by_lane(toks, harness, env_harness, argv_head)
+    resolve_lane_vendor_by_lane(axes, harness, env_harness, argv_head)
 }
 
 fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
@@ -556,24 +535,24 @@ fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
                 .collect()
         })
         .unwrap_or_default();
-    let refs: Vec<&str> = toks.iter().map(String::as_str).collect();
     let harness = payload.get("harness").and_then(Value::as_str);
     let head = payload.get("argv_head").and_then(Value::as_str);
     let model_source = payload
         .get("model_source")
         .and_then(Value::as_str)
         .map(String::from);
-    let model = flag_value(&refs, &["--model", "-m"]);
+    let (axes, _) = crate::cli_args::SpawnAxes::scan(&toks)?;
+    let model = axes.model.clone();
     let implied = match implied_vendor(model.as_deref()) {
         Some(v) => v,
         None => return Ok(json!({"verdict": "ok", "message": Value::Null, "event": Value::Null})),
     };
-    if flag_value(&refs, &["--route"]).is_some() {
+    if axes.route.is_some() {
         // Explicit route: a deliberate lane choice beside a deliberate model.
         return Ok(json!({"verdict": "ok", "message": Value::Null, "event": Value::Null}));
     }
     let lane = match resolve_lane_vendor_by_lane(
-        &refs,
+        &axes,
         harness,
         payload.get("env_harness").and_then(Value::as_str),
         head,
@@ -593,9 +572,11 @@ fn resolve_model_vendor(payload: &Value) -> Result<Value, String> {
         .get("harness_typed")
         .and_then(Value::as_bool)
         .unwrap_or(true);
+    let node_typed = toks
+        .iter()
+        .any(|t| t == "--node" || t.starts_with("--node="));
     let refusing =
-        (model_source.is_some() || !harness_typed || flag_value(&refs, &["--node"]).is_some())
-            && flag_value(&refs, &["--account"]).is_none();
+        (model_source.is_some() || !harness_typed || node_typed) && axes.account.is_none();
     let model_str = model.clone().unwrap_or_default();
     let remedy = match harness_for_vendor(&implied) {
         Some(h) => format!("-H {h}"),

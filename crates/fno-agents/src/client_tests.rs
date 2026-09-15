@@ -2,6 +2,7 @@
 //! because the file-budget gate makes that file shrink-only.
 
 use super::*;
+use fno_agents::client::{RestartError, RestartOutcome};
 use fno_agents::{emit_schema_json, state::AgentState, AgentStatus, KNOWN_EVENT_KINDS};
 use std::path::Path;
 
@@ -729,7 +730,7 @@ fn format_success_unknown_verb_returns_none() {
 #[test]
 fn render_restart_reports_old_to_new() {
     // AC2-HP: a swap reports `restarted: pid OLD -> NEW` on stdout, exit 0.
-    let (out, err, code) = render_restart(&Ok(RestartOutcome {
+    let (out, err, code) = fno_agents::restart_run::render_restart(&Ok(RestartOutcome {
         old_pid: Some(91627),
         new_pid: 91999,
         forced: false,
@@ -743,7 +744,7 @@ fn render_restart_reports_old_to_new() {
 #[test]
 fn render_restart_forced_says_killed() {
     // x-3498: a --force swap must read as a KILL, not a drain.
-    let (out, err, code) = render_restart(&Ok(RestartOutcome {
+    let (out, err, code) = fno_agents::restart_run::render_restart(&Ok(RestartOutcome {
         old_pid: Some(91627),
         new_pid: 91999,
         forced: true,
@@ -757,7 +758,7 @@ fn render_restart_forced_says_killed() {
 #[test]
 fn render_restart_note_rides_stderr_at_zero() {
     // --force declining a recycled pid is a report, not a failure.
-    let (out, err, code) = render_restart(&Ok(RestartOutcome {
+    let (out, err, code) = fno_agents::restart_run::render_restart(&Ok(RestartOutcome {
         old_pid: Some(7),
         new_pid: 9,
         forced: false,
@@ -775,7 +776,7 @@ fn render_restart_note_rides_stderr_at_zero() {
 #[test]
 fn render_restart_reports_fresh_when_down() {
     // AC2-EDGE: no daemon was running -> started fresh, no error, exit 0.
-    let (out, err, code) = render_restart(&Ok(RestartOutcome {
+    let (out, err, code) = fno_agents::restart_run::render_restart(&Ok(RestartOutcome {
         old_pid: None,
         new_pid: 42,
         forced: false,
@@ -794,7 +795,7 @@ fn render_restart_escalated_says_escalated() {
     // AC1-HP: an escalation after a starved SIGTERM reads as a restart that
     // had to kill, with the note on stderr, exit 0.
     let note = "pid 91627 kept serving 30s after SIGTERM; escalated to SIGKILL".to_string();
-    let (out, err, code) = render_restart(&Ok(RestartOutcome {
+    let (out, err, code) = fno_agents::restart_run::render_restart(&Ok(RestartOutcome {
         old_pid: Some(91627),
         new_pid: 91999,
         forced: true,
@@ -812,10 +813,11 @@ fn render_restart_escalated_says_escalated() {
 fn render_restart_failure_is_loud() {
     // AC2-FR: a SIGTERM failure carries a stderr line naming the pid + reason
     // and a nonzero exit; no false "restarted" on stdout.
-    let (out, err, code) = render_restart(&Err(RestartError::SigtermFailed {
-        pid: 91627,
-        reason: "Operation not permitted (os error 1)".to_string(),
-    }));
+    let (out, err, code) =
+        fno_agents::restart_run::render_restart(&Err(RestartError::SigtermFailed {
+            pid: 91627,
+            reason: "Operation not permitted (os error 1)".to_string(),
+        }));
     assert_eq!(out, None);
     let err = err.expect("failure has a stderr line");
     assert!(err.contains("91627"), "names the pid");
@@ -823,7 +825,8 @@ fn render_restart_failure_is_loud() {
     assert_ne!(code, 0, "failure exits nonzero");
 
     // A daemon that survives even the SIGKILL is equally loud and names the pid.
-    let (_o, err2, code2) = render_restart(&Err(RestartError::DidNotDie { pid: 5 }));
+    let (_o, err2, code2) =
+        fno_agents::restart_run::render_restart(&Err(RestartError::DidNotDie { pid: 5 }));
     assert!(err2.unwrap().contains("survived SIGKILL"));
     assert_ne!(code2, 0);
 }

@@ -26,6 +26,7 @@ from fno.test_cmd import (
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "cli-ci.yml"
 _RUST_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "rust-ci.yml"
+_CLI_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "cli-ci.yml"
 _SMOKE_SETUP = _REPO_ROOT / ".github" / "actions" / "smoke-setup" / "action.yml"
 
 # `--only 'a,b'` / `--skip 'a'`, quoted or bare, as the workflow writes them.
@@ -229,7 +230,9 @@ def test_smoke_setup_cleans_fno_agents_before_building_cached_artifacts() -> Non
 
 
 def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
-    workflow = yaml.safe_load(_RUST_WORKFLOW.read_text())
+    # The heavy cargo job moved to cli-ci.yml (x-861c): the shards must gate
+    # it, so the clean-before-test order is asserted there.
+    workflow = yaml.safe_load(_CLI_WORKFLOW.read_text())
     steps = workflow["jobs"]["test"]["steps"]
     names = [step.get("name", "") for step in steps]
     clean = names.index("Clean cached Rust package artifacts")

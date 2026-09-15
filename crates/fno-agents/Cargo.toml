@@ -109,6 +109,9 @@ sha2 = "0.10"
 # serde_yaml_ng is the maintained serde_yaml fork; transitive tree is
 # unsafe-libyaml (pure Rust), no C toolchain.
 serde_yaml_ng = "0.10"
+# Typed argv for the migrated client verbs (x-861c): one derive declaration
+# per flag replaces the per-verb hand-rolled scans.
+clap = { version = "4", features = ["derive"] }
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }

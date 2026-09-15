@@ -7,13 +7,14 @@ use super::*;
 
 pub fn retire_session(args: &[OsString], env_session: Option<&str>) -> i32 {
     let _ = env_session;
-    let (session_flag, json, rest) = match take_common_flags(args) {
+    let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("fno mux retire-session: {e}");
             return EXIT_USAGE;
         }
     };
+    let (session_flag, json) = (common.server.or(common.session), common.json);
     // The host session is the first positional; --server stays the override
     // spelling every verb shares.
     let mut parsed = rest.iter();

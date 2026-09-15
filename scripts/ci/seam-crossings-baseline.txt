@@ -7,7 +7,7 @@ crossing	crates/fno-agents/src/attach.rs	28	let output = std::process::Command::
 crossing	crates/fno-agents/src/authorized_merge.rs	590	let out = Command::new("fno")
 crossing	crates/fno-agents/src/bin/client.rs	1774	let out = std::process::Command::new(fno_agents::scrape::fno_bin())
 crossing	crates/fno-agents/src/bin/client.rs	1829	let err = std::process::Command::new(fno_agents::scrape::fno_bin())
-crossing	crates/fno-agents/src/bin/client.rs	3293	match std::process::Command::new(fno_agents::scrape::fno_bin())
+crossing	crates/fno-agents/src/restart_run.rs	129	match std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/bin/client.rs	4557	let mut cmd = Command::new(fno_agents::scrape::fno_bin());
 crossing	crates/fno-agents/src/blueprint_judge.rs	69	return match Command::new("fno").args(["help", "--all"]).output() {
 crossing	crates/fno-agents/src/blueprint_judge.rs	165	let out = Command::new("fno")

@@ -7,10 +7,11 @@
 //! minimum that exercises every Wave 3 daemon verb end-to-end; the rich flag
 //! surface (`--stream`, `--watch`, ...) lands with its verbs in later waves.
 
+use clap::Parser as _;
+use fno_agents::cli_args::{refusal_line, RestartArgs, SpawnAxes};
 use fno_agents::client::resolve_daemon_bin;
 use fno_agents::client::{
-    call, call_if_running, check_daemon_drift, drift_from_status, restart_daemon, ClientError,
-    RestartError, RestartOutcome,
+    call, call_if_running, check_daemon_drift, drift_from_status, ClientError,
 };
 use fno_agents::drift::{drift_warning, DriftState};
 use fno_agents::paths::AgentsHome;
@@ -944,14 +945,14 @@ async fn run(args: Vec<String>) -> i32 {
     }
 
     if verb == "restart" {
-        let force = match fno_agents::restart_args::parse_restart_args(&args[1..]) {
-            Ok(force) => force,
-            Err(msg) => {
-                eprintln!("{msg}");
+        let parsed = match RestartArgs::try_parse_from(&args[1..]) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}", refusal_line("fno-agents restart", &e));
                 return 2;
             }
         };
-        return run_restart(force).await;
+        return fno_agents::restart_run::run_restart(parsed.force, parsed.json.json).await;
     }
 
     // `reap` is the manual dead-row GC (x-b1aa): the SAME sweep the daemon runs
@@ -3182,146 +3183,6 @@ fn run_node_route(rest: &[String]) -> i32 {
     0
 }
 
-/// Render a restart outcome into (stdout line, optional stderr line, exit code).
-/// Pure so the observable states (swapped / forced / was-down / failed) are unit
-/// testable without spawning a daemon. A failure always carries a stderr line
-/// and a nonzero code (Locked Decision: a failed restart is loud, never a silent
-/// "restarted"); the forced arm records that a process was KILLED, not drained,
-/// and a note (e.g. --force declining a recycled pid) rides on stderr at exit 0.
-fn render_restart(
-    outcome: &Result<RestartOutcome, RestartError>,
-) -> (Option<String>, Option<String>, i32) {
-    match outcome {
-        Ok(RestartOutcome {
-            old_pid: Some(old),
-            new_pid,
-            forced: false,
-            note,
-        }) => (
-            Some(format!("restarted: pid {old} -> {new_pid}")),
-            note.clone(),
-            0,
-        ),
-        Ok(RestartOutcome {
-            old_pid: Some(old),
-            new_pid,
-            forced: true,
-            note: Some(note),
-        }) => (
-            // Escalated graceful restart: `forced: true` + a note only arises
-            // here, so the note is the discriminator.
-            Some(format!("restarted (escalated): pid {old} -> {new_pid}")),
-            Some(note.clone()),
-            0,
-        ),
-        Ok(RestartOutcome {
-            old_pid: Some(old),
-            new_pid,
-            forced: true,
-            note: None,
-        }) => (
-            Some(format!("forced: killed pid {old} -> {new_pid}")),
-            None,
-            0,
-        ),
-        Ok(RestartOutcome {
-            old_pid: None,
-            new_pid,
-            forced: _,
-            note,
-        }) => (
-            Some(format!(
-                "daemon was not running; started fresh (pid {new_pid})"
-            )),
-            note.clone(),
-            0,
-        ),
-        Err(e) => (None, Some(format!("fno-agents: {e}")), 1),
-    }
-}
-
-/// Dispatch `fno-agents restart`: swap a (possibly stale) daemon for one built
-/// from the current binary. SIGTERM the running daemon (graceful drain; PTY
-/// workers survive), wait for the socket to clear, lazy-start fresh. With
-/// `force`, SIGKILL the lockfile holder first and lazy-start fresh (x-3498).
-async fn run_restart(force: bool) -> i32 {
-    let home = AgentsHome::from_env();
-    let daemon_bin = resolve_daemon_bin();
-    let outcome = restart_daemon(&home, &daemon_bin, force).await;
-    let (out, err, code) = render_restart(&outcome);
-    if let Some(line) = out {
-        println!("{line}");
-    }
-    if let Some(line) = err {
-        eprintln!("{line}");
-    }
-    if code != 0 {
-        return code;
-    }
-    // x-f188 change 6: cycle the stale store keepers. A store cycle ends
-    // nothing a person can see (the graph on disk survives; the next read
-    // respawns the keeper on this binary), so this leg is not behind
-    // --force/--mux gating. Spared keepers fail the verb: a spared keeper
-    // was NOT healed.
-    let (cycled, stale_panes) = fno_agents::census::cycle_stale_store_keepers().await;
-    for c in &cycled {
-        if c.result == "cycled" {
-            println!(
-                "fno agents restart: store keeper {} pid {:?} shut down (stale build; respawns on next read).",
-                c.graph.as_deref().unwrap_or("unknown graph"),
-                c.old_pid
-            );
-        } else {
-            eprintln!(
-                "fno agents restart: store keeper {} {}; it was NOT refreshed.",
-                c.graph.as_deref().unwrap_or("unknown graph"),
-                c.result
-            );
-        }
-    }
-    if stale_panes > 0 {
-        println!(
-            "fno agents restart: {stale_panes} pane keeper(s) run an older build; kept with their panes, current when each pane ends."
-        );
-    }
-    // The pr-watch LaunchAgent embeds an absolute binary path that a daemon
-    // swap never re-renders (`fno agents restart` reaches no launchd job);
-    // re-render and bounce it, the same tail `fno doctor update` appends.
-    // The verb self-gates on pr_watch.enabled and prints its own skip line
-    // then, so this is not behind --force, matching the keeper cycle above.
-    // Receipt lands BEFORE the summary, which stays the last stdout line.
-    match std::process::Command::new(fno_agents::scrape::fno_bin())
-        .args(["do", "pr", "watch", "refresh"])
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            let said = if out.stderr.is_empty() {
-                String::from_utf8_lossy(&out.stdout)
-            } else {
-                String::from_utf8_lossy(&out.stderr)
-            };
-            let said = said.trim();
-            if said.is_empty() {
-                println!("fno agents restart: pr-watch refreshed.");
-            } else {
-                println!("fno agents restart: {said}");
-            }
-        }
-        Ok(out) => eprintln!(
-            "fno agents restart: pr-watch refresh failed (rc={}); run `fno do pr watch refresh` by hand.",
-            out.status.code().unwrap_or(-1)
-        ),
-        Err(e) => eprintln!("fno agents restart: pr-watch refresh not run: {e}."),
-    }
-    // Machine-readable summary; the LAST stdout line, so an orchestrator
-    // parses it without guessing.
-    let summary = json!({"store_keepers": cycled.iter().map(|c| serde_json::json!({
-            "graph": c.graph, "old_pid": c.old_pid, "result": c.result,
-        })).collect::<Vec<_>>(), "pane_keepers_stale": stale_panes});
-    println!("fno agents restart: keepers {summary}");
-    u8::from(cycled.iter().any(|c| c.result != "cycled")) as i32
-}
-
 /// Mint a random UUID (RFC-4122 v4) to pin an interactive claude `--session-id`.
 /// The daemon refuses an interactive claude host without a pinned session id
 /// (the single-writer claim + transcript discovery key on it); a fresh host
@@ -3518,10 +3379,22 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
         normalized.push(tok.clone());
     }
 
+    // x-861c: on spawn the head's axis flags parse ONCE through the shared
+    // SpawnAxes schema (the same parser the spawn-overlay verb runs), and the
+    // axis tokens leave the loop's input below. The values seed the same
+    // params and fields the old axis arms fed, after the loop.
+    let axes = if verb == "spawn" {
+        let (axes, fence) = SpawnAxes::scan(&normalized)?;
+        normalized = SpawnAxes::strip_axes(&normalized, fence);
+        Some(axes)
+    } else {
+        None
+    };
     // x-6de8: three orthogonal axes. --harness/-H names the CLI binary,
     // --provider/-P the model VENDOR, --model the model at that vendor. The vendor
     // is held aside so a harness name typed there fails closed after the loop
     // (the historical confusion) rather than launching the wrong binary.
+    // (Non-spawn verbs still collect --harness/--provider through the loop.)
     let mut harness_val: Option<String> = None;
     let mut vendor_val: Option<String> = None;
     let mut it = normalized.into_iter().peekable();
@@ -3869,6 +3742,49 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
     }
     if let Some(v) = harness_val {
         params.insert("provider".into(), Value::String(v));
+    }
+    if let Some(axes) = &axes {
+        if let Some(v) = &axes.provider {
+            let v = v.trim().to_string();
+            if KNOWN_PROVIDERS.contains(&v.as_str()) || v == "agy" || v == "opencode" {
+                return Err(format!(
+                    "{v} is a harness, not a provider; use --harness {v}"
+                ));
+            }
+            return Err(format!(
+                "--provider {v} names a model vendor; routing is applied by the fno \
+                 CLI (`fno agents spawn ... --provider {v} --model <m>`), not by \
+                 fno-agents directly"
+            ));
+        }
+        if let Some(h) = &axes.harness {
+            params.insert("provider".into(), Value::String(h.clone()));
+        }
+        if let Some(m) = &axes.model {
+            params.insert("model".into(), Value::String(m.clone()));
+        }
+        if let Some(e) = &axes.effort {
+            params.insert("effort".into(), Value::String(e.clone()));
+        }
+        if let Some(a) = &axes.account {
+            params.insert("account".into(), Value::String(a.clone()));
+        }
+        if let Some(sx) = &axes.substrate {
+            // if/else, not a match: an inner `"word" =>` arm reads as a
+            // phantom verb to the Python parity parser's arm scan.
+            if sx == "pane" || sx == "thread" || sx == "headless" {
+                params.insert("substrate".into(), Value::String(sx.clone()));
+            } else if sx == "bg" {
+                eprintln!(
+                    "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
+                );
+                params.insert("substrate".into(), Value::String("thread".into()));
+            } else {
+                return Err(format!(
+                    "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {sx})"
+                ));
+            }
+        }
     }
 
     if let Some(av) = argv {

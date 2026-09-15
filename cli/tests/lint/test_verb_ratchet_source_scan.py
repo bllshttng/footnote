@@ -46,6 +46,10 @@ def _mux(tmp: Path) -> Path:
     return tmp / RUST_SOURCES[1]
 
 
+def _pane(tmp: Path) -> Path:
+    return tmp / RUST_SOURCES[2]
+
+
 def test_scan_reflects_the_real_tree(rust_tree: Path) -> None:
     """Baseline for the mutations below: the families are read, not invented."""
     _tops, families = scan_rust_source(rust_tree)
@@ -58,7 +62,7 @@ def test_added_match_arm_is_seen(rust_tree: Path) -> None:
     This is the acceptance criterion in its behavioural form. A hardcoded list
     cannot pass it: the verb exists in no constant anywhere.
     """
-    path = _mux(rust_tree)
+    path = _pane(rust_tree)
     src = path.read_text()
     anchor = '        "release" => PaneCmd::Release {'
     assert anchor in src, "the pane dispatcher moved; re-anchor this test"
@@ -75,7 +79,7 @@ def test_removed_match_arm_is_lost(rust_tree: Path) -> None:
     satisfied by a union with a stale constant, and a dropped verb then keeps a
     baseline line forever with nothing behind it.
     """
-    path = _mux(rust_tree)
+    path = _pane(rust_tree)
     src = path.read_text()
     anchor = '        "kill" => PaneCmd::Kill {'
     assert anchor in src, "the pane dispatcher moved; re-anchor this test"
@@ -139,7 +143,7 @@ def test_catch_all_arm_shape_does_not_change_the_answer(rust_tree: Path) -> None
     the cause. Asserting equality across the two shapes is what pins it: a scan
     that can only read one of them cannot pass this.
     """
-    path = _mux(rust_tree)
+    path = _pane(rust_tree)
     src = path.read_text()
     flat = '        other => return Err(format!("unknown pane verb: {other} ({PANE_VERBS})")),'
     assert flat in src, "the pane catch-all moved; re-anchor this test"
