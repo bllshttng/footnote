@@ -1,4 +1,4 @@
-"""Migration for the retired `agents.spawn_permission_mode` key ; split
+"""Migration for the retired `agents.spawn_permission_mode` key; split
 out of `config/__init__.py` to stay inside its shrink-only file budget."""
 
 from __future__ import annotations

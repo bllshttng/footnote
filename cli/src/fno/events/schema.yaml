@@ -5747,7 +5747,7 @@ event_types:
           description: "Free text, especially for reason=other; retro flags an empty detail as low-signal (optional)."
         dedup_key:
           type: string
-          description: "PR-less dedup bucket (reason:session:day) for a spawn-cap/manual escape with no `pr`. Collapses a looped intervention to one count ; not consumed by retro (optional)."
+          description: "PR-less dedup bucket (reason:session:day) for a spawn-cap/manual escape with no `pr`. Collapses a looped intervention to one count; not consumed by retro (optional)."
     consumers: [fno backlog retro run]
 
   - name: executor_resolved

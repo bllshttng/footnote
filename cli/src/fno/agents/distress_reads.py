@@ -1,4 +1,4 @@
-"""Watchdog-verdict lookup for blocked_child ; registered like transcript_reads.py."""
+"""Watchdog-verdict lookup for blocked_child; registered like transcript_reads.py."""
 
 from __future__ import annotations
 
