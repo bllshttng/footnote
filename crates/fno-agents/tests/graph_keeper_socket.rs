@@ -865,7 +865,6 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     // a hangup BEFORE any publish.
     let mut late_ok = 0;
     for i in 0..2 {
-        let id = format!("late-app-{i}");
         let late = UnixStream::connect(&sock);
         match late {
             Err(_) => continue, // socket already unlinked: hangup by refusal
