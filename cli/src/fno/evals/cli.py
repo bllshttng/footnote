@@ -136,6 +136,34 @@ def run_command(
     except Exception:  # noqa: BLE001
         repo_root = Path.cwd()
 
+    # x-ecda: a declared cohort split is validated BEFORE any worker call -
+    # membership (unknown ids), overlap, duplicates, and bank-rev staleness.
+    from fno.evals.bank import CohortError, bank_unchanged_since, cohorts_verdict, load_cohorts
+
+    decl = None
+    try:
+        decl = load_cohorts(bank_dir)
+    except CohortError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    if decl is not None:
+        verdict = cohorts_verdict(decl, known_ids=[t.id for t in tasks])
+        if not verdict.get("ok"):
+            for err in verdict.get("errors") or ["unknown native cohort door failure"]:
+                typer.echo(f"Error: cohort split refused: {err}", err=True)
+            raise typer.Exit(code=2)
+        if not bank_unchanged_since(decl, repo_root):
+            typer.echo(
+                f"Error: cohort split is pinned to bank rev {decl.bank_rev[:12]} but the "
+                f"bank changed since; redeclare cohorts.yaml against the current bank.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        typer.echo(
+            f"validated cohort split: train={len(decl.train)} validation={len(decl.validation)} "
+            f"qualification={len(decl.qualification)} (pinned {decl.bank_rev[:12]})"
+        )
+
     swept = sweep_orphans(repo_root)
     if swept:
         typer.echo(f"swept {swept} orphaned eval worktree(s) from a prior run")
@@ -258,6 +286,215 @@ def macro_command(ctx: typer.Context) -> None:
     if result.stderr:
         typer.echo(result.stderr, nl=False, err=True)
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+@evals_app.command("export")
+def export_command(
+    out: Path = typer.Option(..., "--out", help="Output JSONL path for the train-only rows."),
+    bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
+    history: Optional[Path] = typer.Option(None, "--history", help="History JSONL (default: the evals history)."),
+) -> None:
+    """Export train-cohort history for prompt tuning (x-ecda AC2-HP).
+
+    Refuses without a declared, natively valid, bank-current split, then
+    writes ONLY train-task rows - held-out trajectories and prompts never
+    enter a tuning view.
+
+    Exit codes:
+      0  exported
+      1  no declared cohort split
+      2  split refused (unknown id, overlap, stale pin) or door unreachable
+    """
+    import json as _json
+
+    from fno.evals.bank import (
+        COHORTS_FILENAME,
+        BankError,
+        CohortError,
+        bank_unchanged_since,
+        cohorts_verdict,
+        discover_bank,
+        load_cohorts,
+    )
+    from fno.evals.report import load_rows
+    from fno.paths import evals_history, resolve_canonical_repo_root
+
+    bank_dir = _resolve_bank_dir(bank)
+    try:
+        decl = load_cohorts(bank_dir)
+    except CohortError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    if decl is None:
+        typer.echo(
+            f"Error: no declared cohort split in {bank_dir} ({COHORTS_FILENAME}): a tuning "
+            f"export must never be cut from an undeclared bank.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        tasks = discover_bank(bank_dir)
+    except BankError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    verdict = cohorts_verdict(decl, known_ids=[t.id for t in tasks])
+    if not verdict.get("ok"):
+        for err in verdict.get("errors") or ["unknown native cohort door failure"]:
+            typer.echo(f"Error: cohort split refused: {err}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        repo_root = resolve_canonical_repo_root()
+    except Exception:  # noqa: BLE001
+        repo_root = Path.cwd()
+    if not bank_unchanged_since(decl, repo_root):
+        typer.echo(
+            f"Error: cohort split is pinned to bank rev {decl.bank_rev[:12]} but the bank "
+            f"changed since; redeclare cohorts.yaml against the current bank.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    rows = load_rows(history or evals_history(), variant=None)
+    train = set(decl.train)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with out.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            if row.get("task_id") in train:
+                fh.write(_json.dumps({"role": "train", **row}, separators=(",", ":"),
+                                     ensure_ascii=False) + "\n")
+                count += 1
+    typer.echo(f"exported {count} train row(s) across {len(train)} declared task(s) -> {out}")
+
+
+@evals_app.command("qualify")
+def qualify_command(
+    bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
+    history: Optional[Path] = typer.Option(None, "--history", help="History JSONL (default: the evals history)."),
+) -> None:
+    """Aggregate held-out qualification results (x-ecda AC2-HP/AC2-EDGE).
+
+    The allowed aggregate projection: counts and coverage only - never a
+    held-out prompt, trace, or per-attempt trajectory. Reports unqualified
+    (exit 0, `qualified: false`) when the split is absent, refused, or the
+    qualification cohort is empty; a small bank reports insufficiency
+    honestly instead of inventing a split.
+
+    Exit codes:
+      0  aggregate computed (the JSON carries `qualified`)
+      2  a malformed declaration or an unreadable bank (setup error)
+    """
+    import json as _json
+
+    from fno.evals import history as _history
+    from fno.evals.bank import (
+        COHORTS_FILENAME,
+        BankError,
+        CohortError,
+        bank_unchanged_since,
+        cohorts_verdict,
+        discover_bank,
+        load_cohorts,
+    )
+    from fno.paths import evals_history, resolve_canonical_repo_root
+
+    bank_dir = _resolve_bank_dir(bank)
+    try:
+        tasks = discover_bank(bank_dir)
+    except BankError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+
+    def _unqualified(reason: str) -> None:
+        typer.echo(_json.dumps({"qualified": False, "reason": reason}, ensure_ascii=False))
+        raise typer.Exit(code=0)
+
+    try:
+        decl = load_cohorts(bank_dir)
+    except CohortError as exc:
+        raise typer.Exit(code=2) from exc
+    if decl is None:
+        _unqualified(f"no declared cohort split ({COHORTS_FILENAME})")
+    assert decl is not None  # _unqualified raised otherwise
+    if not decl.qualification:
+        _unqualified("no declared qualification cohort")
+    verdict = cohorts_verdict(decl, known_ids=[t.id for t in tasks],
+                              task_ids=[t.id for t in tasks])
+    if not verdict.get("ok"):
+        _unqualified("cohort split refused: " + "; ".join(
+            verdict.get("errors") or ["unknown native cohort door failure"]))
+    try:
+        repo_root = resolve_canonical_repo_root()
+    except Exception:  # noqa: BLE001
+        repo_root = Path.cwd()
+    if not bank_unchanged_since(decl, repo_root):
+        _unqualified(f"bank changed since the pinned rev {decl.bank_rev[:12]}")
+
+    roles: dict = verdict.get("roles") or {}
+    qual_ids = {tid for tid, role in roles.items() if role == "qualification"}
+
+    rows = [(ln, row) for ln, row in
+            _history.iter_rows_tolerant(history or evals_history())
+            if row.get("task_id") in qual_ids]
+
+    # The batch native verdict decides which rows are eligible evidence;
+    # classify_rows numbers lines exactly like iter_rows_tolerant does.
+    import subprocess as _subprocess
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    verdicts: dict[int, dict] = {}
+    if binary is not None and rows:
+        try:
+            proc = _subprocess.run(
+                [str(binary), "evals-attempt", "--rows", str(history or evals_history()),
+                 "--expected-rev", decl.bank_rev],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode == 0:
+                parsed = _json.loads(proc.stdout.strip().splitlines()[-1])
+                verdicts = {v["line"]: v for v in parsed}
+        except Exception:  # noqa: BLE001 - an unreadable batch verdict degrades to legacy
+            verdicts = {}
+
+    by_status: dict[str, int] = {}
+    valid = 0
+    passes = 0
+    covered_tasks: set = set()
+    wrong_rev = 0
+    legacy = 0
+    for ln, row in rows:
+        v = verdicts.get(ln)
+        if not isinstance(v, dict):
+            v = {}
+        status = str(v.get("status") or "legacy")
+        rev_match = v.get("rev_match")
+        if rev_match is False:
+            wrong_rev += 1
+            continue
+        if status == "legacy":
+            legacy += 1
+            continue
+        by_status[status] = by_status.get(status, 0) + 1
+        if status == "graded":
+            valid += 1
+            passes += bool(v.get("graded"))
+            covered_tasks.add(row.get("task_id"))
+    declared = len(qual_ids)
+    typer.echo(_json.dumps({
+        "qualified": True,
+        "bank_rev": decl.bank_rev,
+        "declared_tasks": declared,
+        "tasks_with_valid_grades": len(covered_tasks),
+        "missing_tasks": declared - len(covered_tasks),
+        "valid_grades": valid,
+        "passes": passes,
+        "attempts": by_status,
+        "excluded": {"wrong_rev": wrong_rev, "legacy": legacy},
+    }, ensure_ascii=False))
+    raise typer.Exit(code=0)
 
 
 @evals_app.command("graduate")

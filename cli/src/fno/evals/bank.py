@@ -26,10 +26,11 @@ The two disciplines this enforces at load time (develop-tests.md):
 """
 from __future__ import annotations
 
+import subprocess
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 
@@ -219,6 +220,142 @@ def resolve_lane(name: str, *, settings: object = None):
     return row
 
 
+class CohortError(ValueError):
+    """A cohort declaration is missing, malformed, stale, or fails native
+    validation - qualification and tuning exports refuse on it."""
+
+
+COHORTS_FILENAME = "cohorts.yaml"
+
+
+@dataclass(frozen=True)
+class CohortDecl:
+    """A declared train/validation/qualification split, pinned to a bank rev.
+
+    Stored exactly as declared (lists default empty when a role key is
+    absent); the NATIVE door is the semantic authority on membership rules -
+    load_cohorts only parses the YAML shape.
+    """
+
+    bank_rev: str
+    train: list[str] = field(default_factory=list)
+    validation: list[str] = field(default_factory=list)
+    qualification: list[str] = field(default_factory=list)
+    source_path: Optional[Path] = None
+
+
+def load_cohorts(bank_dir: Path) -> Optional[CohortDecl]:
+    """Load ``cohorts.yaml`` from *bank_dir*; None = no declared split.
+
+    Raises :class:`CohortError` on a malformed file (not a mapping, or a
+    non-string ``bank_rev`` / non-list role key).
+    """
+    path = bank_dir / COHORTS_FILENAME
+    if not path.exists():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise CohortError(f"cannot read {path}: {exc}") from exc
+    except yaml.YAMLError as exc:
+        raise CohortError(f"malformed YAML in {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise CohortError(f"{path}: top level must be a mapping")
+    bank_rev = raw.get("bank_rev")
+    if not isinstance(bank_rev, str) or not bank_rev.strip():
+        raise CohortError(f"{path}: 'bank_rev' must be a non-empty string (the pinned revision)")
+    roles: dict[str, list[str]] = {}
+    for role in ("train", "validation", "qualification"):
+        val = raw.get(role, [])
+        if not isinstance(val, list) or not all(isinstance(t, str) for t in val):
+            raise CohortError(f"{path}: '{role}' must be a list of task ids")
+        roles[role] = val
+    return CohortDecl(
+        bank_rev=bank_rev,
+        train=roles["train"],
+        validation=roles["validation"],
+        qualification=roles["qualification"],
+        source_path=path,
+    )
+
+
+def bank_unchanged_since(decl: CohortDecl, repo_root: Path) -> bool:
+    """True when every bank task file is unchanged from *decl*'s pinned rev.
+
+    The split pins the BANK, not the whole repo: an unrelated commit since
+    the pin keeps the split valid; any change under the bank dir voids it.
+    An unreadable pin (unknown rev) voids it too.
+    """
+    try:
+        verify = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"{decl.bank_rev}^{{commit}}"],
+            cwd=str(repo_root), capture_output=True, text=True, timeout=10,
+        )
+        if verify.returncode != 0:
+            return False
+        diff = subprocess.run(
+            ["git", "diff", "--quiet", f"{decl.bank_rev}", "HEAD", "--", "evals/bank"],
+            cwd=str(repo_root), capture_output=True, text=True, timeout=10,
+        )
+    except Exception:  # noqa: BLE001 - an unreadable git state never certifies the bank
+        return False
+    return diff.returncode == 0
+
+
+def _door_binary():
+    """The native door binary: this checkout's build outranks any installed copy."""
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    return find_dev_binary() or resolve_binary()
+
+
+def cohorts_verdict(
+    decl: CohortDecl,
+    *,
+    known_ids: Optional[list[str]] = None,
+    task_ids: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """One native membership/eligibility decision shared by run and report
+    consumers: `{"ok", "errors", "roles"}`. Fail-closed - an unreachable
+    native door is itself a refusal, never a silent pass.
+
+    *known_ids* validates every declared id against the loaded bank;
+    *task_ids* resolves each into its cohort role (null when unlisted).
+    """
+    import json
+    import subprocess
+
+    binary = _door_binary()
+    if binary is None:
+        return {"ok": False, "errors": ["native cohort door unreachable: fno-agents binary not found"],
+                "roles": {}}
+    payload = json.dumps({
+        "bank_rev": decl.bank_rev,
+        "train": decl.train,
+        "validation": decl.validation,
+        "qualification": decl.qualification,
+    })
+    argv = [str(binary), "evals-attempt", "--cohorts", payload]
+    if known_ids is not None:
+        argv += ["--known-ids", json.dumps(known_ids)]
+    if task_ids is not None:
+        argv += ["--task-ids", json.dumps(task_ids)]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except Exception as exc:  # noqa: BLE001 - a failed door read refuses
+        return {"ok": False, "errors": [f"native cohort door failed: {exc}"], "roles": {}}
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "door failed").strip().splitlines()[-1:]
+        return {"ok": False, "errors": [f"native cohort door refused: {tail[0]}"], "roles": {}}
+    try:
+        verdict = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"ok": False, "errors": ["native cohort door returned unreadable output"], "roles": {}}
+    if not isinstance(verdict, dict) or "ok" not in verdict:
+        return {"ok": False, "errors": ["native cohort door returned an unexpected shape"], "roles": {}}
+    return verdict
+
+
 def discover_bank(bank_dir: Path) -> list[TaskSpec]:
     """Load every ``*.yaml`` under *bank_dir*, sorted by id.
 
@@ -229,6 +366,8 @@ def discover_bank(bank_dir: Path) -> list[TaskSpec]:
     _require(bank_dir.is_dir(), f"bank directory not found: {bank_dir}")
     tasks: dict[str, TaskSpec] = {}
     for yaml_path in sorted(bank_dir.glob("*.yaml")):
+        if yaml_path.name == COHORTS_FILENAME:
+            continue  # the cohort declaration is not a task
         task = load_task(yaml_path)
         if task.id in tasks:
             raise BankError(
