@@ -313,9 +313,9 @@ consolidation:
 surface:
   question: "Does the semantic execution contract validate?"
   sweep: "bash tests/test-validate-plan.sh"
-  control: skills/blueprint/scripts/validate-plan.sh
+  control: skills/blueprint/scripts/validate-plan.sh:166 _semantic_validate
   answerers:
-    - at: skills/blueprint/scripts/validate-plan.sh
+    - at: skills/blueprint/scripts/validate-plan.sh:166 _semantic_validate
       disposition: dual-logic
       reads: "_semantic_validate delegates to fno do plan validate --execution"
       feed: "fno do plan validate --execution"
@@ -528,6 +528,13 @@ fi
 echo ""
 echo "--- AC10: Answerer Enumeration ---"
 
+# The shape check shells the fno-agents binary. The literal
+# `target/debug/fno-agents` is the marker `_needs_rust_binary`
+# (cli/src/fno/test_cmd.py) reads to schedule the build step, so CI has a
+# fresh binary before this section runs.
+FNO_AGENTS_BIN="$SCRIPT_DIR/../crates/fno-agents/target/debug/fno-agents"
+export FNO_AGENTS_BIN
+
 # The passing base: post-gate, non-quick, consolidation + a well-formed
 # surface block. Every variant below derives from one of these two fixtures.
 PLAN_SURFACE="$TMPDIR_BASE/surface.md"
@@ -730,6 +737,106 @@ if [[ $EXIT_CODE -eq 0 ]] && grep -q "control \`src/reader.py:10\` returned by t
     pass "AC10k: A matching control prints its own receipt"
 else
     fail "AC10k: Matching control receipt missing (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# The cross-language walk: a Rust reader a Python answerer does not name.
+# The fixture lives in a committed temp git repo so the walk greps a real
+# tree; the validator runs from inside it.
+WALK_DIR="$TMPDIR_BASE/walkrepo"
+mkdir -p "$WALK_DIR/src" "$WALK_DIR/crates/x/src"
+printf 'def row_ref_valid(row):\n    return bool(row)\n' > "$WALK_DIR/src/reader.py"
+printf 'fn go(row: i32) -> bool {\n    row_ref_valid(row)\n}\n' > "$WALK_DIR/crates/x/src/reader.rs"
+git -C "$WALK_DIR" init -q
+git -C "$WALK_DIR" add .
+git -C "$WALK_DIR" -c user.name=t -c user.email=t@t commit -qm init
+
+PLAN_WALK="$WALK_DIR/plan.md"
+cat > "$PLAN_WALK" <<'HEREDOC'
+---
+status: ready
+created: 2026-09-20
+project: fno
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+surface:
+  question: "Is this row reachable?"
+  sweep: "rg -n 'row_ref_valid' src/"
+  control: src/reader.py:1 row_ref_valid
+  answerers:
+    - at: src/reader.py:1 row_ref_valid
+      disposition: dual-logic
+      reads: "row_ref_valid(row)"
+      emits: "bool per row"
+  count: 1
+  count_after: 1
+---
+
+# Cross-language walk fixture
+HEREDOC
+OUTPUT=$(cd "$WALK_DIR" && bash "$VALIDATE" "$PLAN_WALK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "is read in rust" <<< "$OUTPUT" && grep -q "crates/x/src/reader.rs" <<< "$OUTPUT"; then
+    pass "AC10l: An unlisted Rust reader of a changed Python symbol refuses"
+else
+    fail "AC10l: Cross-language reader should refuse (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# The same reader, disposed out-of-scope with a reason: the walk's receipt
+# names both trees and nothing is unlisted.
+PLAN_WALK_COVERED="$WALK_DIR/plan_covered.md"
+cat > "$PLAN_WALK_COVERED" <<'HEREDOC'
+---
+status: ready
+created: 2026-09-20
+project: fno
+consolidation:
+  outcome: proceed_alone
+  proceed_alone_against: []
+surface:
+  question: "Is this row reachable?"
+  sweep: "rg -n 'row_ref_valid' src/"
+  control: src/reader.py:1 row_ref_valid
+  answerers:
+    - at: src/reader.py:1 row_ref_valid
+      disposition: dual-logic
+      reads: "row_ref_valid(row)"
+      emits: "bool per row"
+    - at: crates/x/src/reader.rs:1
+      disposition: out-of-scope
+      reason: "calls the Python verdict, never reads the row itself"
+  count: 2
+  count_after: 2
+---
+
+# Covered walk fixture
+HEREDOC
+OUTPUT=$(cd "$WALK_DIR" && bash "$VALIDATE" "$PLAN_WALK_COVERED" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "readers by tree python 1, rust 1" <<< "$OUTPUT"; then
+    pass "AC10m: A disposed reader passes with a receipt naming both trees"
+else
+    fail "AC10m: Covered reader should pass naming trees (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# Graduation: the same unlisted reader on a pre-gate plan warns only.
+PLAN_WALK_OLD="$WALK_DIR/plan_old.md"
+sed 's/created: 2026-09-20/created: 2026-09-01/' "$PLAN_WALK" > "$PLAN_WALK_OLD"
+OUTPUT=$(cd "$WALK_DIR" && bash "$VALIDATE" "$PLAN_WALK_OLD" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "is read in rust" <<< "$OUTPUT"; then
+    pass "AC10n: A pre-gate plan's unlisted reader warns and proceeds"
+else
+    fail "AC10n: Pre-gate walk finding should warn-only (exit $EXIT_CODE): $OUTPUT"
+fi
+
+# No reachable binary: unset env, no build under the source root, nothing on
+# PATH. The copied validator finds no cli/src/fno from the temp scripts dir.
+WALK_NOBIN="$TMPDIR_BASE/nobin"
+mkdir -p "$WALK_NOBIN/scripts"
+cp "$VALIDATE" "$WALK_NOBIN/scripts/validate-plan.sh"
+OUTPUT=$(cd "$WALK_NOBIN" && env -u FNO_AGENTS_BIN PATH=/usr/bin:/bin FNO_PYTHON=/usr/bin/python3 bash "$WALK_NOBIN/scripts/validate-plan.sh" "$PLAN_SURFACE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 0 ]] && grep -q "surface block NOT CHECKED (no fno-agents binary)" <<< "$OUTPUT" && ! grep -q "surface block (step 2b-bis gate): question" <<< "$OUTPUT"; then
+    pass "AC10o: No reachable binary warns NOT CHECKED with no pass receipt"
+else
+    fail "AC10o: Missing binary should warn-only without a receipt (exit $EXIT_CODE): $OUTPUT"
 fi
 
 # --- AC11: Python tree allowance warn ---

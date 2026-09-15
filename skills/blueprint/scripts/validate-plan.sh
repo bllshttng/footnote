@@ -143,6 +143,24 @@ _plan_created_date() {
     printf '%s' "$created"
 }
 
+# Echo the fno-agents binary the Rust-backed checks shell out to, resolved
+# with the stop hook's order: an explicit executable $FNO_AGENTS_BIN, a build
+# under the source root, then PATH. Empty means no binary: callers warn NOT
+# CHECKED rather than pass.
+resolve_agents_bin() {
+    local source_root=""
+    source_root=$(_fno_source_root)
+    if [[ -n "${FNO_AGENTS_BIN:-}" && -x "${FNO_AGENTS_BIN}" ]]; then
+        printf '%s' "$FNO_AGENTS_BIN"
+    elif [[ -n "$source_root" && -x "$source_root/crates/fno-agents/target/release/fno-agents" ]]; then
+        printf '%s' "$source_root/crates/fno-agents/target/release/fno-agents"
+    elif [[ -n "$source_root" && -x "$source_root/crates/fno-agents/target/debug/fno-agents" ]]; then
+        printf '%s' "$source_root/crates/fno-agents/target/debug/fno-agents"
+    elif command -v fno-agents >/dev/null 2>&1; then
+        command -v fno-agents
+    fi
+}
+
 # Echo `<python>|<source_root>` for a checkout that can import the fno CLI, or
 # nothing. Shared by _plan_rung, _semantic_validate, and the consolidation gate
 # so the "which fno runs?" question has ONE answer here.
@@ -1236,6 +1254,9 @@ check_surface_file() {
     local file="$1"
     local label="$2"
     local surface_gate_date="2026-09-03"
+    # The day the cross-language walk gate's PR opens. Plans created after it
+    # refuse an X line; quick and older plans warn.
+    local surface_tree_gate_date="2026-09-14"
     # Own counter, for the same reason check_consolidation_file keeps one: the
     # receipt must print even when an earlier check already failed.
     local c_errors=0
@@ -1266,206 +1287,19 @@ check_surface_file() {
         return 0
     fi
 
-    # Shape check: same ladder and the same lesson as the consolidation gate -
-    # this used to be a shape bash could own, and the one YAML model is the
-    # only implementation that cannot drift from itself.
-    local _src="" python_bin="" source_root="" delegate_out="" delegate_rc=0
-    _src="$(_fno_source_python)"
-    if [[ -n "$_src" ]]; then
-        python_bin="${_src%%|*}"
-        source_root="${_src##*|}"
-    else
-        source_root=$(_fno_source_root)
-    fi
-    if [[ -z "$source_root" ]]; then
-        warn "$label: surface block NOT CHECKED (no fno source checkout to import the shape model from) - not a pass"
+    # Shape check: the ONE YAML model is the Rust verb. The Python heredoc
+    # that used to live here parsed the surface: block while the
+    # cross-language walk (the port made it necessary) parses the same block
+    # in Rust, and principle 9 bars a dual implementation - so the shell only
+    # resolves the binary and graduates the lines it prints.
+    local bin
+    bin=$(resolve_agents_bin)
+    if [[ -z "$bin" ]]; then
+        warn "$label: surface block NOT CHECKED (no fno-agents binary) - not a pass"
         return 0
     fi
-    local surface_prog
-    surface_prog=$(cat <<'PYEOF'
-import sys
-
-try:
-    import yaml
-except Exception as exc:  # missing PyYAML on this interpreter
-    sys.stdout.write("U\t" + " ".join(str(exc).split())[:160] + "\n")
-    raise SystemExit(0)
-
-DISPOSITIONS = ("dual-logic", "shared-vocabulary", "generated-artifact", "out-of-scope")
-CHANGED = ("dual-logic", "shared-vocabulary")
-
-
-def frontmatter(path):
-    """The text between the first two `---` lines - the same rule every
-    other check in this script applies."""
-    lines = open(path, encoding="utf-8").read().splitlines()
-    opened = None
-    for i, line in enumerate(lines):
-        if line.startswith("---"):
-            if opened is None:
-                opened = i
-            else:
-                return "\n".join(lines[opened + 1:i])
-    return None
-
-
-def is_int(value):
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def nonempty_str(value):
-    return isinstance(value, str) and bool(value.strip())
-
-
-path = sys.argv[1]
-text = frontmatter(path)
-if text is None:
-    sys.stdout.write("U\tno closed --- frontmatter block\n")
-    raise SystemExit(0)
-try:
-    loaded = yaml.safe_load(text)
-except yaml.YAMLError as exc:
-    # The frontmatter YAML check above already reported this; do not double-report.
-    sys.stdout.write("U\t" + " ".join(str(exc).split())[:160] + "\n")
-    raise SystemExit(0)
-
-block = (loaded or {}).get("surface")
-if not isinstance(block, dict):
-    sys.stdout.write(
-        "E\tsurface: must be a block of keys (question, sweep, answerers, count, "
-        "count_after), not `%s`\n" % (block,)
-    )
-    raise SystemExit(0)
-
-undisposed = []
-
-question = block.get("question")
-if not nonempty_str(question):
-    sys.stdout.write("E\tsurface.question is empty - phrase the question in one line\n")
-    raise SystemExit(0)
-question_text = question.strip()
-if not question_text.endswith("?"):
-    sys.stdout.write(
-        "E\tsurface.question `%s` does not end in a question mark - phrase the unit "
-        "as a question, never a noun phrase\n" % question_text
-    )
-    raise SystemExit(0)
-
-if not nonempty_str(block.get("sweep")):
-    sys.stdout.write(
-        "E\tsurface.sweep is empty - an empty sweep is the I-never-looked case this "
-        "field exists to distinguish from I-looked-and-found-one\n"
-    )
-    raise SystemExit(0)
-
-answerers = block.get("answerers")
-if not isinstance(answerers, list) or not answerers:
-    sys.stdout.write(
-        "E\tsurface.answerers is empty or missing - a question with zero answerers "
-        "is not answered by this repo, and the block exists to prove the looking\n"
-    )
-    raise SystemExit(0)
-
-undisposed = []
-for idx, entry in enumerate(answerers, start=1):
-    if not isinstance(entry, dict):
-        undisposed.append("<answerer %d: not a mapping>" % idx)
-        continue
-    at = entry.get("at")
-    at_text = at.strip() if nonempty_str(at) else "<answerer %d>" % idx
-    disposition = entry.get("disposition")
-    if not nonempty_str(disposition) or disposition not in DISPOSITIONS:
-        undisposed.append(
-            "%s (disposition `%s` is not one of %s)"
-            % (at_text, disposition, " | ".join(DISPOSITIONS))
-        )
-        continue
-    if disposition == "out-of-scope" and not nonempty_str(entry.get("reason")):
-        undisposed.append("%s (out-of-scope with no reason)" % at_text)
-
-for idx, entry in enumerate(answerers, start=1):
-    if not isinstance(entry, dict):
-        continue
-    at = entry.get("at")
-    if not nonempty_str(at):
-        sys.stdout.write(
-            "E\tsurface.answerers entry %d has no `at:` - name the site so a reviewer "
-            "can open it\n" % idx
-        )
-        continue
-    disposition = entry.get("disposition")
-    if disposition in CHANGED and not (nonempty_str(entry.get("reads")) and nonempty_str(entry.get("emits"))):
-        sys.stdout.write(
-            "E\tPlan changes %s but names no feed for it. Quote the expression it "
-            "evaluates, with its line, and what that feed emits, measured.\n" % at.strip()
-        )
-
-if undisposed:
-    sys.stdout.write(
-        "E\tQuestion %s has %d answerers; the plan disposes of %d. Every answerer is "
-        "dual-logic, shared-vocabulary, generated-artifact, or out-of-scope with a "
-        "reason. Undisposed: %s.\n"
-        % (question_text, len(answerers), len(answerers) - len(undisposed), "; ".join(undisposed))
-    )
-
-count = block.get("count")
-if not is_int(count):
-    sys.stdout.write(
-        "E\tsurface.count is `%s` - an integer stating the PR estimate is the whole "
-        "point of the block\n" % (count,)
-    )
-    raise SystemExit(0)
-if count != len(answerers):
-    sys.stdout.write(
-        "E\tsurface.count is %d but the block lists %d answerer(s) - the count is the "
-        "estimate and must match what was found\n" % (count, len(answerers))
-    )
-    raise SystemExit(0)
-
-count_after = block.get("count_after")
-if not is_int(count_after):
-    sys.stdout.write(
-        "E\tsurface.count_after is `%s` - state in a number how many answerers survive "
-        "this plan, even when the number equals count\n" % (count_after,)
-    )
-    raise SystemExit(0)
-if count_after > count:
-    sys.stdout.write(
-        "E\tsurface.count_after (%d) exceeds count (%d) - a plan cannot leave more "
-        "answerers than it found\n" % (count_after, count)
-    )
-    raise SystemExit(0)
-
-control = block.get("control")
-if nonempty_str(control):
-    ats = [entry.get("at") for entry in answerers if isinstance(entry, dict)]
-    if control.strip() not in [a.strip() for a in ats if nonempty_str(a)]:
-        sys.stdout.write(
-            "E\tsurface.control `%s` names no listed answerer - a control that is not an "
-            "answerer is a typo or a lie\n" % control.strip()
-        )
-    else:
-        sys.stdout.write("O\tcontrol `%s` returned by the sweep\n" % control.strip())
-sys.stdout.write(
-    "O\tquestion `%s`, %d answerer(s), count %d, count_after %d\n"
-    % (question_text, len(answerers), count, count_after)
-)
-PYEOF
-    )
-    if [[ -n "$python_bin" ]]; then
-        delegate_out=$(PYTHONPATH="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-            "$python_bin" -c "$surface_prog" "$file" 2>&1) || delegate_rc=$?
-    fi
-    if [[ -z "$python_bin" || "$delegate_out" == U$'\t'* ]] \
-            && command -v uv >/dev/null 2>&1; then
-        delegate_rc=0
-        delegate_out=$(uv run --project "$source_root/cli" \
-            python -c "$surface_prog" "$file" 2>&1) || delegate_rc=$?
-    fi
-    if [[ -z "$delegate_out" && "$delegate_rc" -eq 0 ]]; then
-        warn "$label: surface block NOT CHECKED (no interpreter with PyYAML importable at $source_root) - not a pass"
-        return 0
-    fi
+    local delegate_out="" delegate_rc=0
+    delegate_out=$("$bin" surface-check "$file") || delegate_rc=$?
     if [[ "$delegate_rc" -ne 0 ]]; then
         warn "$label: surface block NOT CHECKED (the shape check failed to run: ${delegate_out##*$'\n'}) - not a pass"
         return 0
@@ -1478,6 +1312,21 @@ PYEOF
             E) c_error "$label: $payload" ;;
             O) surface_receipts+=("$payload") ;;
             U) warn "$label: surface block NOT CHECKED ($payload) - not a pass"; return 0 ;;
+            W) warn "$label: $payload" ;;
+            X)
+                if _is_quick_plan; then
+                    warn "$label: $payload (quick plan)"
+                else
+                    local created_x
+                    created_x=$(_plan_created_date "$file")
+                    if [[ ! "$created_x" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                        c_error "$label: $payload (and no readable created: date to tell this plan from a pre-gate one)"
+                    elif [[ "$created_x" > "$surface_tree_gate_date" ]]; then
+                        c_error "$label: $payload"
+                    else
+                        warn "$label: $payload (created $created_x, not after the $surface_tree_gate_date tree gate)"
+                    fi
+                fi ;;
         esac
     done <<< "$delegate_out"
 
