@@ -291,17 +291,8 @@ fn ask_answer(req: &AskRequest) -> AskAnswer {
 /// a law subject with two or more parts is in the question words). Order is
 /// shared-token count, then newest question.
 /// The pure core: existing tests pin `lines` exactly, so the near-law read
-/// rides in as a parameter and the verb-level wrapper below does the disk
-/// read.
-/// The verb-level entry: the near-law read rides the disk here, so the body
-/// below stays the pure function the existing tests pin.
-#[cfg(test)]
-fn law_answer(req: &LawRequest) -> LawAnswer {
-    let near = near_law_lines(&req.law);
-    law_answer_with(req, near)
-}
-
-/// The pure body: near-law lines arrive as a parameter.
+/// The pure body: near-law lines arrive as a parameter, and the tests pin it
+/// directly so they stay hermetic against the machine index.
 fn law_answer_with(req: &LawRequest, near: Vec<String>) -> LawAnswer {
     let law_tokens = tokens(req.law.subject.as_deref().unwrap_or(""));
     let mut cands: Vec<(usize, &OpenQuestion, Vec<String>)> = Vec::new();
