@@ -29,4 +29,10 @@
 # v31: additive `harness_args` - the fenced `--` tokens a codex thread spawn
 # carried, re-parsed onto thread/resume after a daemon restart. Rationale
 # lives beside the column in state.rs / registry.py.
-version = 31
+#
+# v32: additive `lineage_kind` - a served fact, `child` or `peer`, derived
+# by `spawn_edge::lineage_kind` and written only by the liveness sweep, so
+# readers that cannot link fno-agents render the edge without re-deriving
+# it. Absent on rows with no spawn edge. Rationale lives beside the column
+# in state.rs / registry.py.
+version = 32

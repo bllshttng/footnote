@@ -6,8 +6,9 @@
 //! The kind is derived, never stored at mint time: a CHILD is a row with a
 //! joiner name, or a row whose spawner was crowned. Everything else reads
 //! PEER. This module is the rule's single owner; the reaper calls
-//! [`lineage_kind`] through [`live_child_of`] directly, and a later sweep
-//! stamps the derived word for readers that cannot call this crate.
+//! [`lineage_kind`] through [`live_child_of`] directly, and the liveness
+//! sweep stamps the derived word onto rows through [`stamp_lineage_kinds`]
+//! for readers that cannot call this crate.
 
 use crate::state::RegistryEntry;
 
@@ -67,6 +68,38 @@ pub fn live_child_of<'a>(
                 child.liveness_measured_at.as_deref(),
             ) != Some("dead")
     })
+}
+
+/// Stamp the derived kind onto every row with a spawn edge, for readers
+/// outside this crate (the sideline links crate `fno`, which cannot depend
+/// on fno-agents). The liveness sweep calls this inside its lock window;
+/// nothing else writes the field.
+pub(crate) fn stamp_lineage_kinds(r: &mut crate::state::Registry) {
+    let crowned: std::collections::HashSet<String> = r
+        .entries
+        .iter()
+        .filter(|e| e.crown_level.is_some())
+        .filter_map(|e| {
+            e.harness_session_id
+                .as_deref()
+                .map(|s| s.trim().to_ascii_lowercase())
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+    for row in r.entries.iter_mut() {
+        let Some(edge) = row
+            .spawned_by_session
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let kind = lineage_kind(&row.name, crowned.contains(&edge.to_ascii_lowercase()));
+        if row.lineage_kind.as_deref() != Some(kind.as_str()) {
+            row.lineage_kind = Some(kind.as_str().to_string());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -153,6 +186,49 @@ mod tests {
         let entries = vec![king.clone(), court.clone()];
         let found = live_child_of(&king, &entries).expect("the court row is a child");
         assert_eq!(found.name, "node-x-b3a8-g2");
+    }
+
+    #[test]
+    fn stamp_writes_child_peer_and_leaves_edgeless_rows_silent() {
+        let mut r = crate::state::Registry::default();
+        let mut king = row("king-x-6", "s-king", None);
+        king.crown_level = Some(1);
+        let mut court = row("node-x-b3a8-g2", "s-court", Some("s-king"));
+        court.status = crate::AgentStatus::Busy;
+        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead"));
+        joiner.status = crate::AgentStatus::Busy;
+        let mut handoff = row("sob-t-x-2-glm", "s-t", Some(" s-lead "));
+        handoff.status = crate::AgentStatus::Busy;
+        let orphan = row("sob-t-x-3-glm", "s-t3", Some("s-gone"));
+        let plain = row("solo-x-7", "s-solo", None);
+        r.entries = vec![king, court, joiner, handoff, orphan, plain];
+        stamp_lineage_kinds(&mut r);
+        let kinds: Vec<Option<&str>> = r
+            .entries
+            .iter()
+            .map(|e| e.lineage_kind.as_deref())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                None,
+                Some("child"),
+                Some("child"),
+                Some("peer"),
+                Some("peer"),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn stamp_is_idempotent_and_never_lowers_a_written_word() {
+        let mut r = crate::state::Registry::default();
+        let mut handoff = row("sob-t-x-4-glm", "s-t4", Some("s-lead"));
+        handoff.lineage_kind = Some("peer".into());
+        r.entries = vec![handoff];
+        stamp_lineage_kinds(&mut r);
+        assert_eq!(r.entries[0].lineage_kind.as_deref(), Some("peer"));
     }
 
     fn chrono_now_rfc3339() -> String {

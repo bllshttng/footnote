@@ -885,7 +885,9 @@ def test_us2_schema_version_is_three() -> None:
     # a bounded Codex thread.
     # v31: additive `harness_args` - the fenced codex thread tokens a daemon
     # restart re-parses onto thread/resume.
-    assert SCHEMA_VERSION == 31
+    # v32: additive `lineage_kind` - the served CHILD/PEER word the liveness
+    # sweep stamps on rows with a spawn edge.
+    assert SCHEMA_VERSION == 32
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2322,7 +2324,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 31
+    assert SCHEMA_VERSION == 32
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2388,7 +2390,7 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 31
+    assert SCHEMA_VERSION == 32
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",
@@ -2893,3 +2895,28 @@ def test_thread_ref_backfill_needs_a_session_id(tmp_path: Path, monkeypatch) -> 
     loaded = load_registry(path=registry_path)
 
     assert loaded[0].fno_id is None
+
+
+def test_v32_lineage_kind_round_trip(tmp_path: Path, monkeypatch) -> None:
+    """A v32 registry whose rows carry lineage_kind reads back and the
+    field survives a load/write round trip."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    entry = AgentEntry(
+        name="sob-t-x-1-glm",
+        harness="zai",
+        cwd="/tmp",
+        log_path="/tmp/sob.log",
+        lineage_kind="peer",
+    )
+
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    write_registry([entry], path=registry_path)
+
+    loaded = load_registry(path=registry_path)
+    assert loaded[0].lineage_kind == "peer"
+
+    write_registry(loaded, path=registry_path)
+    reloaded = load_registry(path=registry_path)
+    assert reloaded[0].lineage_kind == "peer"
