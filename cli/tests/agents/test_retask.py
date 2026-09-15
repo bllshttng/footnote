@@ -1424,6 +1424,99 @@ def test_planless_blueprint_node_retasks_an_opus_claude_worker(tmp_path, monkeyp
     ).format(id="x-bdb9")
 
 
+def _fake_parse_many(names):
+    rows = []
+    for name in names:
+        parts = (name or "").split("-")
+        verb = parts[1] if len(parts) > 2 else ""
+        node = parts[2] if len(parts) > 2 else ""
+        rows.append(naming.DispatchName(name, parts[0] if parts else "", verb, node, ""))
+    return rows
+
+
+def _bp_graph() -> dict:
+    return {
+        "x-e1": {"parent": None},
+        "x-aaaa": {
+            "parent": "x-e1",
+            "sessions": [{"phase": "blueprint", "ended_at": "2026-09-15T00:31:00Z"}],
+        },
+        "x-bbbb": {"parent": "x-e1"},
+        "x-e2": {"parent": None},
+        "x-cccc": {"parent": "x-e2", "sessions": [{"phase": "blueprint", "ended_at": "2026-09-15T00:31:00Z"}]},
+    }
+
+
+def _eligible_row(**overrides) -> AgentEntry:
+    values = dict(
+        name="ac-bp-x-aaaa-slug",
+        substrate="thread",
+        inside_leg={"state": "done", "received_at": "2026-09-15T00:30:00Z"},
+        node="x-aaaa",
+    )
+    values.update(overrides)
+    return _row(**values)
+
+
+def _pick(graph, rows, node_id="x-bbbb"):
+    import fno.agents.retask as retask
+
+    return retask.finished_planner(
+        rows,
+        node_id=node_id,
+        graph=graph,
+        project_id="proj",
+        project_of=lambda cwd: "proj" if cwd == "/repo" else "other",
+    )
+
+
+def test_finished_planner_picks_the_earliest_finished_row_on_the_epic(monkeypatch):
+    monkeypatch.setattr("fno.agents.retask.parse_many", _fake_parse_many)
+    late = _eligible_row(
+        name="sob-bp-x-aaaa-late",
+        inside_leg={"state": "done", "received_at": "2026-09-15T01:00:00Z"},
+    )
+    early = _eligible_row()
+    got = _pick(_bp_graph(), [late, early])
+    assert got is not None and got.name == "ac-bp-x-aaaa-slug"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"status": "exited"}, id="status-exited"),
+        pytest.param(
+            {"inside_leg": {"state": "working", "received_at": "2026-09-15T00:30:00Z"}},
+            id="state-working",
+        ),
+        pytest.param(
+            {"inside_leg": {"state": "blocked", "received_at": "2026-09-15T00:30:00Z"}},
+            id="state-blocked",
+        ),
+        pytest.param({"name": "cl-t-x-aaaa-slug"}, id="verb-t"),
+        pytest.param({"name": "ac-bp-x-cccc-slug", "node": "x-cccc"}, id="other-epic"),
+        pytest.param({"cwd": "/elsewhere"}, id="other-project"),
+    ],
+)
+def test_finished_planner_skips_every_row_that_fails_one_filter(monkeypatch, overrides):
+    monkeypatch.setattr("fno.agents.retask.parse_many", _fake_parse_many)
+    assert _pick(_bp_graph(), [_eligible_row(**overrides)]) is None
+
+
+def test_finished_planner_skips_rows_the_graph_filters_refuse(monkeypatch):
+    monkeypatch.setattr("fno.agents.retask.parse_many", _fake_parse_many)
+    graph = _bp_graph()
+    # Dispatched node with no epic parent: nothing is reusable.
+    graph["x-bbbb"] = {"parent": None}
+    assert _pick(graph, [_eligible_row()]) is None
+    # Candidate's node carries a blueprint session that never ended.
+    graph = _bp_graph()
+    graph["x-aaaa"]["sessions"] = [{"phase": "blueprint", "ended_at": None}]
+    assert _pick(graph, [_eligible_row()]) is None
+    # Candidate row IS the dispatched node.
+    assert _pick(_bp_graph(), [_eligible_row()], node_id="x-aaaa") is None
+
+
 def test_ready_target_node_keeps_the_zai_lane_and_refuses_an_opus_row(
     tmp_path, monkeypatch
 ):

@@ -16,6 +16,7 @@ from fno.agents.harness_map import (
     normalize_command, resolve_effective_verb,
 )
 from fno.agents.mux_spawn import resolve_mux_session
+from fno.agents.naming import parse_many
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -348,6 +349,45 @@ def resolve_target_coordinate(
         account=_flag_value(resolved, "--account"),
         verb=verb,
     )
+
+
+def finished_planner(
+    entries: Sequence[AgentEntry],
+    *,
+    node_id: str,
+    graph: Mapping[str, dict],
+    project_id: str,
+    project_of: Callable[[str], str],
+) -> Optional[AgentEntry]:
+    """The earliest-finished live blueprint worker on the same epic, else None."""
+    parent = (graph.get(node_id) or {}).get("parent")
+    if not parent:
+        return None
+    parsed_rows = parse_many([e.name for e in entries])
+    candidates: list[tuple[str, AgentEntry]] = []
+    for entry, parsed in zip(entries, parsed_rows):
+        if entry.status != "live" or entry.substrate not in {"pane", "thread"}:
+            continue
+        if parsed is None or parsed.verb != "bp":
+            continue
+        inside = entry.inside_leg or {}
+        if inside.get("state") != "done":
+            continue
+        if project_of(entry.cwd) != project_id:
+            continue
+        row_node = entry.node or (parsed.node if parsed is not None else None)
+        if not row_node or row_node == node_id:
+            continue
+        row_rec = graph.get(row_node) or {}
+        if row_rec.get("parent") != parent:
+            continue
+        sessions = [s for s in row_rec.get("sessions") or [] if isinstance(s, dict)]
+        if not any(s.get("phase") == "blueprint" and s.get("ended_at") for s in sessions):
+            continue
+        candidates.append((inside.get("received_at") or "", entry))
+    if not candidates:
+        return None
+    return min(candidates, key=lambda pair: pair[0])[1]
 
 
 def detect_retask(
