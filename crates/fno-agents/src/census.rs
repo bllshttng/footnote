@@ -769,39 +769,13 @@ mod process_table_tests {
     use super::{process_table, ps_text};
 
     #[test]
-    fn process_table_reads_the_spinning_thread() {
-        // Eight tight, non-yielding spinners so the row's reading clears the
-        // bar even on a saturated box, where one runnable thread may get
-        // under 25% of a core. `yield_now` donates the quantum and the
-        // reading collapses; a busy loop keeps it. Read WHILE they spin.
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let spinners: Vec<_> = (0..8)
-            .map(|_| {
-                let spin_flag = stop.clone();
-                std::thread::spawn(move || {
-                    while !spin_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        std::hint::spin_loop();
-                    }
-                })
-            })
-            .collect();
-        std::thread::sleep(std::time::Duration::from_millis(2500));
+    fn process_table_reads_its_own_row() {
         let (table, _unreadable) = process_table();
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        for spinner in spinners {
-            spinner.join().ok();
-        }
-
         let me = std::process::id();
         let row = table
             .iter()
             .find(|row| row.pid == me)
             .expect("the test process reads its own row");
-        assert!(
-            row.cpu_pct >= 25.0,
-            "a spinning thread must read as CPU: {}",
-            row.cpu_pct
-        );
         assert_eq!(row.ppid, unsafe { libc::getppid() } as u32);
         assert!(row.rss_kb > 0, "resident memory reads nonzero");
         let exe_name = std::env::current_exe()
@@ -812,6 +786,47 @@ mod process_table_tests {
             row.command.contains(&exe_name),
             "the command holds the test binary name: {} (want {exe_name})",
             row.command
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn process_table_reads_a_spinning_child_like_ps_does() {
+        // The CPU reading is a lifetime average, so the bar needs a process
+        // whose lifetime IS the spin: a young busy-loop child. Read `ps %cpu`
+        // for the same pid as the ground truth the table must agree with.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("while :; do :; done")
+            .spawn()
+            .expect("spawn the spinner child");
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        let (table, _unreadable) = process_table();
+        let row = table
+            .iter()
+            .find(|row| row.pid == child.id())
+            .expect("the spinning child reads a row");
+        let ps_row = std::process::Command::new("ps")
+            .args(["-o", "%cpu=", "-p", &child.id().to_string()])
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+        child.kill().ok();
+        child.wait().ok();
+
+        assert!(
+            row.cpu_pct >= 15.0,
+            "a young full-spin child reads as CPU: {}",
+            row.cpu_pct
+        );
+        let ps_cpu: f64 = ps_row
+            .and_then(|text| text.parse().ok())
+            .expect("ps answers %cpu for a live child");
+        assert!(
+            (row.cpu_pct - ps_cpu).abs() <= 20.0,
+            "the table and ps disagree on the same child: table {} vs ps {}",
+            row.cpu_pct,
+            ps_cpu
         );
     }
 
