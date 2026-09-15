@@ -2155,15 +2155,21 @@ pub(crate) fn run_with_release(
             // turn hook and every codex thread turn phase, so a seq that has
             // not moved since classification says no turn report arrived -
             // quiet - where the timed-out probe answer would read active.
-            let fresh_seq = state::load_registry(&home.registry_json())
-                .ok()
-                .and_then(|fresh| {
-                    fresh
-                        .entries
-                        .iter()
-                        .find(|row| row.name == e.name)
-                        .and_then(|row| row.inside_leg.as_ref().map(|leg| leg.seq))
-                });
+            // The load rides the witness's precondition: an ANSWERED probe
+            // leaves both uses below unreachable, so no row pays the read.
+            let fresh_seq = if fresh_age.is_none() {
+                state::load_registry(&home.registry_json())
+                    .ok()
+                    .and_then(|fresh| {
+                        fresh
+                            .entries
+                            .iter()
+                            .find(|row| row.name == e.name)
+                            .and_then(|row| row.inside_leg.as_ref().map(|leg| leg.seq))
+                    })
+            } else {
+                None
+            };
             let quiet_witness = fresh_age.is_none()
                 && age.is_some()
                 && e.inside_leg.is_some()
@@ -2484,12 +2490,10 @@ pub(crate) fn run_with_release(
                         .find(|(_, s)| crate::gc::PLANNING_MOVED_ON_STATUSES.contains(&s.as_str()))
                     {
                         format!("planning finished on {node}: node {moved_status}")
-                    } else if probed.planning_released {
+                    } else if probed.planning_released || !probed.turn_ended {
                         format!("planning finished on {node}: released")
-                    } else if probed.turn_ended {
-                        format!("planning halted on {node}: turn ended with no plan")
                     } else {
-                        format!("planning finished on {node}: released")
+                        format!("planning halted on {node}: turn ended with no plan")
                     }
                 } else if let Some(peer) = &probed.superseded_by_live_peer {
                     format!("superseded on {node} by live peer {peer}")
