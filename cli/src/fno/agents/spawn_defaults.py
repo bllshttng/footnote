@@ -684,10 +684,8 @@ def _seed_slot(toks: Sequence[str]) -> Optional[Tuple[str, int]]:
 
 def _seed_of(toks: Sequence[str]) -> Optional[str]:
     """The MESSAGE seed: the ``--message`` value, else the sole positional (the
-    name rides ``--name``). A bare ``--`` fence makes the first token after it
-    the seed - even when flag-shaped - ONLY in the legacy no-message idiom; a
-    positional message before the fence outranks the fenced tail (x-1caa).
-    Stops at the ``--argv`` payload boundary."""
+    name rides ``--name``). A positional before a ``--`` fence outranks the
+    fenced tail (x-1caa). Stops at the ``--argv`` payload boundary."""
     slot = _seed_slot(toks)
     if slot is None:
         return None
