@@ -3,15 +3,13 @@
 A king terminating ``NoProgress`` exits quietly: work pending, nothing moving,
 nobody told. The escalation is the telling, a question in the operator queue
 because the queue survives the next turn. Idempotence keys on the stalled id
-SET - a respawned king meeting the same board records no second question,
-while a different board is the SAME ask, re-measured: the channel supersedes
-the stale row and asks once on the new reading. The board churns; the
-question does not.
+set within the king's own channel: a respawned king meeting the same board
+records no second question, and a changed board supersedes only that king's
+stale row.
 
-The operator-facing text is rendered in the ``fno-agents`` crate
-(``king-escalation-text``, x-ff27): a question states only a reading its
-producer passed, and the renderer refuses an empty set as data. This module
-keeps the fold (dedupe, supersede, delivery) and the liveness read.
+The operator-facing text renders in the ``fno-agents`` crate
+(``king-escalation-text``, x-ff27); this module keeps the fold and the
+liveness read.
 """
 from __future__ import annotations
 
@@ -51,9 +49,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
              unknown_reason: "str | None" = None) -> "tuple[str, str]":
     """Record one operator question for this stalled set.
 
-    Returns ``(outcome, question_id)``; raises on a store failure or a
-    renderer refusal. A quiet failure would put the king back in the
-    silence this verb exists to break.
+    Returns ``(outcome, question_id)``; raises rather than failing quiet.
     """
     from fno.agents.stale_escalate import dedupe_key, reconcile_channel
     from fno.harness_identity import canonical_handle
@@ -90,8 +86,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
 
 
 def _escalation_channel(session_id: "str | None", key: str) -> "tuple[str, str]":
-    """The ask's marker and render key, scoped by the crate to the king's
-    crown scope; any unreadable answer keeps the legacy shared channel."""
+    """The ask's marker and render key from the crate; legacy on failure."""
     if not session_id:
         return MARKER, key
     try:
