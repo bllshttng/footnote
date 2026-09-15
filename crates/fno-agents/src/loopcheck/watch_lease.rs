@@ -395,4 +395,100 @@ mod tests {
         attach_watch_refusal(&mut bare, None);
         assert!(bare.get("watch_refusal").is_none());
     }
+
+    /// A pid the OS does not report, so the claim reads as a corpse.
+    fn dead_pid() -> u32 {
+        let mut candidate = 999_999u32;
+        while std::path::Path::new(&format!("/proc/{candidate}")).exists()
+            || unsafe { libc::kill(candidate as i32, 0) } == 0
+        {
+            candidate += 1;
+        }
+        candidate
+    }
+
+    #[test]
+    fn renew_extends_an_expired_bg_job_claim_whose_witness_says_live() {
+        // x-aad7: a claude BACKGROUND-JOB session holds a node claim (ee2edef3
+        // on x-3954, PR 2010), arms the sanctioned watcher, and idles past the
+        // claim TTL. The job's supervisor pid is gone by the next stop, but the
+        // session itself is alive: the witness answers from the registry row
+        // keyed by the bg-job session id. Pre-x-b445 renew refused every
+        // expired claim, and the stop hook rejected the watching tag 32 times
+        // with the transient "could not be renewed" text. This pins the
+        // bg-job shape: expired + a LIVE verdict through a session id means
+        // renew extends and re-anchors to the live row pid.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let td = tempfile::TempDir::new().unwrap();
+        let home = td.path().join("agents-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let saved_home = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", &home);
+
+        let live = std::process::id();
+        let entry = crate::state::RegistryEntry {
+            name: "t-3227-bgjob".into(),
+            harness: Some("claude".into()),
+            harness_session_id: Some("t-3227-bgjob-session".into()),
+            pid: Some(live),
+            pid_start_time: crate::daemon::process_start_time(live),
+            created_at: "2026-09-15T00:00:00Z".into(),
+            ..Default::default()
+        };
+        let registry = crate::state::Registry {
+            entries: vec![entry],
+            ..Default::default()
+        };
+        let registry_path = crate::paths::AgentsHome::at(&home).registry_json();
+        std::fs::write(&registry_path, serde_json::to_string(&registry).unwrap()).unwrap();
+
+        let opts = crate::claims::AcquireOpts {
+            root: Some(td.path().to_path_buf()),
+            ttl_ms: Some(60_000),
+            pid: Some(dead_pid()),
+            ..Default::default()
+        };
+        let _ = crate::claims::acquire("node:x-3227-bglease", "target-session:me", opts);
+        let path = crate::claims::claim_path("node:x-3227-bglease", Some(td.path())).unwrap();
+        let mut rec = crate::claims::read_claim_file(&path).unwrap();
+        rec.session_id = Some("t-3227-bgjob-session".into());
+        rec.expires_at = Some(crate::claims::now_ms() - 1);
+        crate::claims::atomic_replace(&path, &crate::claims::serialize_claim(&rec).unwrap())
+            .unwrap();
+
+        let live_rec = crate::claims::read_claim_file(&path).unwrap();
+        let (state, basis) = crate::claim_verbs::status_verdict(&live_rec);
+        assert_eq!(
+            state,
+            crate::claims::ClaimState::Live,
+            "fixture must read LIVE through the bg-job witness or AC proves nothing"
+        );
+        assert_eq!(
+            basis,
+            crate::claims::basis::REGISTRY_SESSION_LIVE,
+            "{basis}"
+        );
+
+        let result = crate::claims::renew(
+            "node:x-3227-bglease",
+            "target-session:me",
+            120_000,
+            Some(td.path()),
+        );
+        match saved_home {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        assert_eq!(result, Ok(true));
+
+        let after = crate::claims::read_claim_file(&path).unwrap();
+        assert_eq!(
+            after.pid,
+            Some(live as i32),
+            "the anchor must MOVE to the live bg-job row pid"
+        );
+        assert_eq!(after.expires_at.unwrap() > crate::claims::now_ms(), true);
+    }
 }
