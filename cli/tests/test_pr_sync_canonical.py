@@ -106,6 +106,47 @@ def test_lock_held_skips(tmp_path, capsys, monkeypatch):
     assert shell.calls == []
 
 
+def test_sync_lease_is_stamped_holder_process(tmp_path):
+    # The writer is the only party that knows its pid is the whole hold: the
+    # lock must carry the holder-process stamp so a dead sync process never
+    # outlives its lease through the writer session's witness.
+    import os
+
+    import yaml
+
+    from fno.claims.io import claim_path
+
+    seen: list[str] = []
+
+    def reading_shell(command: str, cwd: str) -> Result:
+        seen.append(claim_path("post-merge-sync", root=tmp_path).read_text())
+        return Result(returncode=0, stdout="", stderr="")
+
+    rc = _run(tmp_path, shell_runner=reading_shell)
+    assert rc == 0
+    assert len(seen) == 1
+    rec = yaml.safe_load(seen[0])
+    assert rec["pid_provenance"] == "holder-process"
+    assert rec["pid"] == os.getpid()
+
+
+def test_lock_held_skip_names_holder_and_expiry(tmp_path, capsys):
+    from fno import claims
+
+    claims.acquire_claim(
+        "post-merge-sync", "sync-canonical:99", ttl_ms=60_000, root=tmp_path,
+        pid_provenance=claims.HOLDER_PROCESS,
+    )
+    shell = _Shell()
+    rc = _run(tmp_path, shell_runner=shell)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "in progress elsewhere" in out
+    assert "held by sync-canonical:99" in out
+    assert "expires 20" in out  # an ISO timestamp, year 20xx
+    assert shell.calls == []
+
+
 def test_path_gate_skip_writes_marker(tmp_path, capsys):
     shell = _Shell()
     rc = _run(

@@ -32,6 +32,7 @@ MAX_KEY_LENGTH = 256
 MAX_ENCODED_FILENAME_BYTES = 240  # 240 + ".lock" suffix = 245 bytes
 MIN_TTL_MS = 60_000        # 1 minute
 MAX_TTL_MS = 86_400_000    # 24 hours
+HOLDER_PROCESS = "holder-process"  # pid_provenance: the pid holds the lease for the whole hold
 
 
 def now_ms() -> int:
@@ -86,7 +87,10 @@ class Claim(BaseModel):
         reason: optional human-readable context string.
         pid_provenance: how ``pid`` was resolved at write time. "session-prover"
             = the process-tree prover resolved it from the acquiring session's
-            own anchor; "ambient" = everything else (caller-supplied, resolved
+            own anchor; "holder-process" = the pid is the process that holds
+            the lease for the whole hold, so an expired lease reads that pid
+            as its verdict and a dead process never outlives its own lease;
+            "ambient" = everything else (caller-supplied, resolved
             through an ambient harness marker, or the default transient
             subprocess pid). The expired-TTL hybrid arm in the native classifier
             reads it: a live pid keeps an expired claim LIVE only when it was
