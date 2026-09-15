@@ -228,7 +228,10 @@ fn run_machine(
         return 1;
     }
     if parsed.wave {
-        set_refresh_marker(graph, node_id);
+        if let Err(e) = set_refresh_marker(graph, node_id) {
+            eprintln!("fno-agents backlog-note: refresh marker write failed: {e}");
+            return 1;
+        }
     }
     if parsed.json_out {
         println!(
@@ -246,33 +249,32 @@ fn run_machine(
     0
 }
 
-/// Set the bounded `state_needs_refresh` marker in the row extras.
-fn set_refresh_marker(graph: &std::path::Path, node_id: &str) {
-    // x-385e: stamp the base BEFORE the read, so an interleaved writer makes
-    // the publish Conflict instead of blessing stale rows.
-    let base = graph_store::base_version(graph).unwrap_or_default();
-    let Ok(rows) = graph_store::read_defaulted(graph, false) else {
-        return;
-    };
-    let mut working = rows;
-    for row in working.iter_mut() {
-        if graph_store::entry_id(row) == Some(node_id) {
+/// Set the bounded `state_needs_refresh` marker in the row extras. Runs the
+/// shared optimistic cycle (x-385e): the marker now fails loud instead of a
+/// dropped Result on a lost race.
+fn set_refresh_marker(
+    graph: &std::path::Path,
+    node_id: &str,
+) -> Result<(), graph_store::StoreError> {
+    graph_store::mutate_rows(
+        graph,
+        std::time::Duration::from_secs(5),
+        None,
+        None,
+        |rows| {
+            let Some(row) = rows
+                .iter_mut()
+                .find(|r| graph_store::entry_id(r) == Some(node_id))
+            else {
+                return Ok(false);
+            };
             if let Some(obj) = row.as_object_mut() {
                 obj.insert("state_needs_refresh".into(), json!(true));
             }
-            break;
-        }
-    }
-    let _ = graph_store::locked_mutate(
-        graph,
-        graph_store::MutateInput {
-            entries: working,
-            canonical_path: None,
-            base_version: base,
-            plan_rungs: None,
+            Ok(true)
         },
-        std::time::Duration::from_secs(5),
-    );
+    )
+    .map(|_| ())
 }
 
 /// The human path: resolve readers, refuse before write when nobody is bound

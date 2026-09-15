@@ -6,7 +6,7 @@
 //! first (see `note_history`), so the hot node holds one current state and
 //! every prior stays readable.
 use crate::backlog::note_history;
-use crate::graph_store::{self, MutateInput, StoreError};
+use crate::graph_store::{self, StoreError};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -195,73 +195,39 @@ pub fn history_page(
 }
 
 /// Replace (or first-write) one node's `current_state`, revision-checked,
-/// with the exact pre-image journaled before publication. Budget and conflict
-/// checks run inside the publication lock, so two writers with one base
-/// revision produce exactly one commit and one conflict.
+/// with the exact pre-image journaled before publication. The whole cycle
+/// runs through `graph_store::mutate_rows`: row lookup, budget and revision
+/// checks judge a FRESH read each attempt, and the publish carries the
+/// attempt's base version, so two writers with one base revision produce
+/// exactly one commit and one retry.
 pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateReceipt, StateError> {
     let body = normalize_prose(&input.body);
     if body.is_empty() {
         return Err(StateError::EmptyBody);
     }
-    // x-385e: stamp the base BEFORE the read, so a writer that lands between
-    // the two makes the publish Conflict instead of blessing stale rows.
-    let base = graph_store::base_version(graph)?;
-    let rows = read_rows_for(graph)?;
     let node_id = input.node_id.as_str();
-    let row = rows
-        .iter()
-        .find(|r| graph_store::entry_id(r) == Some(node_id))
-        .ok_or_else(|| StateError::NoNode(node_id.to_string()))?;
-
-    // Budget fast-fail with the exact accounting the ACs name. The seam
-    // re-enforces it under the lock for every writer.
-    let details = count_prose(row.get("details").and_then(Value::as_str).unwrap_or(""));
-    let state = body.chars().count();
-    if details + state > PROSE_LIMIT {
-        return Err(StateError::Store(StoreError::Invalid(budget_message(
-            node_id,
-            &json!({
-                STATE_KEY: {"body": body},
-                "details": row.get("details").and_then(Value::as_str).unwrap_or(""),
-            }),
-        ))));
-    }
-
-    // Optimistic concurrency: the caller-submitted revision must equal the
-    // revision we can see outside the lock; the hook re-checks inside it.
-    let fetched = row_revision(row);
+    // An explicit stale --if-revision is a caller error, not a race: refuse
+    // at once, never retry (note_cli exits 3 on this variant).
     if let Some(submitted) = input.if_revision {
-        if submitted != fetched {
+        let current = current_revision(graph, node_id)?;
+        if submitted != current {
             return Err(StateError::Conflict {
-                current_revision: fetched,
+                current_revision: current,
                 submitted_revision: submitted,
             });
         }
     }
-    let expected = input.if_revision.unwrap_or(fetched);
-
     let session = input.source_session_id.clone();
     let harness = input.source_harness.clone();
     let journaled_flag = std::sync::atomic::AtomicBool::new(false);
-    // The sibling fields the candidate carries from the outside-the-lock
-    // read: if another writer changed them meanwhile, publishing the stale
-    // candidate would clobber them, so the hook refuses instead. Snapshots
-    // come from the RAW file (the hook sees raw rows too); the defaulted
-    // read synthesizes status for rows that lack one, which would read as a
-    // phantom change.
-    let raw_rows = match graph_store::read_raw(graph)? {
-        graph_store::RawRead::Entries(v) => v,
-        _ => Vec::new(),
-    };
-    let raw_row = raw_rows
-        .iter()
-        .find(|r| graph_store::entry_id(r) == Some(node_id));
-    let snapshot_details: Option<Value> = raw_row.and_then(|r| r.get("details")).cloned();
-    let snapshot_status: Option<Value> = raw_row.and_then(|r| r.get("status")).cloned();
-
-    // Under the publication lock: re-verify the row revision against the raw
-    // snapshot, journal the exact pre-image, then allow publication. Any
-    // history failure refuses the whole mutation.
+    // apply and the hook agree on the attempt's own read through these; Cell
+    // keeps both closures shared-borrow.
+    let seen = std::cell::Cell::new(None::<(usize, u64)>);
+    let expected_cell = std::cell::Cell::new(0u64);
+    // Under the publication lock: re-verify the row revision, journal the
+    // exact pre-image, then allow publication. Any history failure refuses
+    // the whole mutation. (x-385e: the old details/status snapshot check is
+    // gone; the base version refuses any foreign change to any row.)
     let mut hook = |raw: &[Value]| -> Result<(), StoreError> {
         let row = raw
             .iter()
@@ -269,19 +235,12 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
             .ok_or_else(|| {
                 StoreError::Invalid(format!("state write target vanished: {node_id}"))
             })?;
+        let expected = expected_cell.get();
         let current = row_revision(row);
         if current != expected {
             return Err(StoreError::Invalid(format!(
                 "state-conflict: current revision {current} != submitted {expected}"
             )));
-        }
-        if row.get("details") != snapshot_details.as_ref()
-            || row.get("status") != snapshot_status.as_ref()
-        {
-            return Err(StoreError::Invalid(
-                "state-conflict: the node changed while this write was in flight; re-read and resubmit"
-                    .to_string(),
-            ));
         }
         if let Some(pre_state) = row.get(STATE_KEY) {
             note_history::append(
@@ -299,78 +258,84 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
         }
         Ok(())
     };
-
-    let mut working = rows.clone();
-    for row in working.iter_mut() {
-        if graph_store::entry_id(row) != Some(node_id) {
-            continue;
-        }
-        let obj = row.as_object_mut().unwrap();
-        let mut state = json!({
-            "body": body,
-            "revision": expected + 1,
-            "updated_at": graph_store::now_isoformat(),
-            "source_session_id": session,
-            "source_harness": harness,
-        });
-        if let Some(reads) = &input.reads {
-            if let Some(state_obj) = state.as_object_mut() {
-                state_obj.insert("reads".into(), reads.clone());
-            }
-        }
-        obj.insert(STATE_KEY.into(), state);
-        break;
-    }
-    graph_store::locked_mutate_with_hook(
+    graph_store::mutate_rows(
         graph,
-        MutateInput {
-            entries: working,
-            canonical_path: None,
-            base_version: base,
-            plan_rungs: None,
-        },
         std::time::Duration::from_secs(5),
+        None,
         Some(&mut hook),
+        |rows| {
+            let Some(row) = rows
+                .iter_mut()
+                .find(|r| graph_store::entry_id(r) == Some(node_id))
+            else {
+                return Err(StoreError::Invalid(format!(
+                    "state write target vanished: {node_id}"
+                )));
+            };
+            let details = count_prose(row.get("details").and_then(Value::as_str).unwrap_or(""));
+            let state = body.chars().count();
+            if details + state > PROSE_LIMIT {
+                return Err(StoreError::Invalid(budget_message(
+                    node_id,
+                    &json!({
+                        STATE_KEY: {"body": body},
+                        "details": row.get("details").and_then(Value::as_str).unwrap_or(""),
+                    }),
+                )));
+            }
+            let expected = row_revision(row);
+            let obj = row.as_object_mut().unwrap();
+            let mut state_obj = json!({
+                "body": body,
+                "revision": expected + 1,
+                "updated_at": graph_store::now_isoformat(),
+                "source_session_id": session,
+                "source_harness": harness,
+            });
+            if let Some(reads) = &input.reads {
+                if let Some(obj) = state_obj.as_object_mut() {
+                    obj.insert("reads".into(), reads.clone());
+                }
+            }
+            obj.insert(STATE_KEY.into(), state_obj);
+            expected_cell.set(expected);
+            seen.set(Some((details, expected)));
+            Ok(true)
+        },
     )?;
     let journaled = journaled_flag.load(std::sync::atomic::Ordering::Relaxed);
+    let (details, expected) = seen.take().expect("apply ran at least once");
     Ok(StateReceipt {
         node_id: node_id.to_string(),
         revision: expected + 1,
-        total_prose: details + state,
+        total_prose: details + body.chars().count(),
         journaled,
     })
 }
 
 /// The named clear action: journals the exact outgoing state, then removes
-/// `current_state` from the row. Revision-checked like a replacement.
+/// `current_state` from the row. Revision-checked like a replacement, on a
+/// fresh read every attempt.
 pub fn clear_state(
     graph: &Path,
     node_id: &str,
     if_revision: Option<u64>,
 ) -> Result<(), StateError> {
-    // x-385e: stamp the base BEFORE the read (see replace_state).
-    let base = graph_store::base_version(graph)?;
-    let rows = read_rows_for(graph)?;
-    let row = rows
-        .iter()
-        .find(|r| graph_store::entry_id(r) == Some(node_id))
-        .ok_or_else(|| StateError::NoNode(node_id.to_string()))?;
-    let fetched = row_revision(row);
+    // An explicit stale --if-revision refuses at once, never retries (see
+    // replace_state). Also covers NoNode and nothing-to-clear up front.
+    let current = current_revision(graph, node_id)?;
     if let Some(submitted) = if_revision {
-        if submitted != fetched {
+        if submitted != current {
             return Err(StateError::Conflict {
-                current_revision: fetched,
+                current_revision: current,
                 submitted_revision: submitted,
             });
         }
     }
-    let expected = if_revision.unwrap_or(fetched);
-    if fetched == 0 {
+    if current == 0 {
         // Nothing to clear.
         return Ok(());
     }
-    let session: Option<String> = None;
-    let harness: Option<String> = None;
     let mut hook = |raw: &[Value]| -> Result<(), StoreError> {
         let row = raw
             .iter()
@@ -378,10 +343,10 @@ pub fn clear_state(
             .ok_or_else(|| {
                 StoreError::Invalid(format!("state write target vanished: {node_id}"))
             })?;
-        let current = row_revision(row);
-        if current != expected {
+        let row_current = row_revision(row);
+        if row_current != current {
             return Err(StoreError::Invalid(format!(
-                "state-conflict: current revision {current} != submitted {expected}"
+                "state-conflict: current revision {row_current} != submitted {current}"
             )));
         }
         if let Some(pre_state) = row.get(STATE_KEY) {
@@ -389,37 +354,34 @@ pub fn clear_state(
                 graph,
                 node_id,
                 note_history::REASON_STATE_CLEARED,
-                Some(current),
+                Some(row_current),
                 None,
                 pre_state,
-                session.as_deref(),
-                harness.as_deref(),
+                None,
+                None,
             )
             .map_err(|e| StoreError::Invalid(format!("history write failed: {e}")))?;
         }
         Ok(())
     };
 
-    let mut working = rows.clone();
-    for row in working.iter_mut() {
-        if graph_store::entry_id(row) != Some(node_id) {
-            continue;
-        }
-        if let Some(obj) = row.as_object_mut() {
-            obj.remove(STATE_KEY);
-        }
-        break;
-    }
-    graph_store::locked_mutate_with_hook(
+    graph_store::mutate_rows(
         graph,
-        MutateInput {
-            entries: working,
-            canonical_path: None,
-            base_version: base,
-            plan_rungs: None,
-        },
         std::time::Duration::from_secs(5),
+        None,
         Some(&mut hook),
+        |rows| {
+            let Some(row) = rows
+                .iter_mut()
+                .find(|r| graph_store::entry_id(r) == Some(node_id))
+            else {
+                return Ok(false);
+            };
+            if let Some(obj) = row.as_object_mut() {
+                obj.remove(STATE_KEY);
+            }
+            Ok(true)
+        },
     )?;
     Ok(())
 }
