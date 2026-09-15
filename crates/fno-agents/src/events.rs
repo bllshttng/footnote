@@ -177,7 +177,7 @@ impl EventEmitter {
         let target: &Path = ephemeral_target.as_deref().unwrap_or(&self.path);
 
         // The retention class is also the durability boundary: a durable
-        // target's rotation must ingest first (x-1e71); an ephemeral target's
+        // target's rotation must ingest first; an ephemeral target's
         // rotation stays ingest-free, those rows are disposable by design.
         self.maybe_rotate(target, ephemeral_target.is_none())?;
         if let Some(parent) = target.parent() {

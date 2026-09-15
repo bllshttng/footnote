@@ -1,4 +1,4 @@
-//! The durable event store: one SQLite database beside each journal (x-1e71).
+//! The durable event store: one SQLite database beside each journal.
 //!
 //! A durable row's journal keeps one rotation generation, so history died at
 //! every 8 MiB rename. This module is the record: [`sync`] ingests the
@@ -7,8 +7,15 @@
 //! sha256 of the line so replays, gc rewrites and mirrored rows dedupe.
 //!
 //! The journal stays the write path; the store is only ever filled from
-//! complete journal lines. Ephemeral sibling journals are refused: x-add3
-//! declares those rows disposable and the store does not overrule that.
+//! complete journal lines. Ephemeral sibling journals are refused: the
+//! retention schema already declares those rows disposable, and the store
+//! does not overrule that.
+//!
+//! ponytail: sync reads a whole file into memory, so one sync's memory scales
+//! with the file size. Bounded in practice by the rotation threshold; only a
+//! long deferred-rotation window (broken store) grows past it, and that window
+//! already screams on stderr per emit. Upgrade path: stream from the cursor
+//! offset with a BufReader and carry the partial tail line.
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -160,10 +167,11 @@ fn ingest_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let content = String::from_utf8_lossy(&bytes).into_owned();
+    // Offsets are BYTE offsets into the raw file, never into a lossy string:
+    // a conversion that resizes bytes would desync the stored cursor.
     let head_hash: Vec<u8> = {
-        let first = content.split('\n').next().unwrap_or("");
-        Sha256::digest(first.as_bytes()).to_vec()
+        let first = bytes.split(|&b| b == b'\n').next().unwrap_or(&[]);
+        Sha256::digest(first).to_vec()
     };
     let (dev, ino, len) = (meta.dev() as i64, meta.ino() as i64, meta.len());
     let resume: Option<(Vec<u8>, i64)> = tx
@@ -181,25 +189,28 @@ fn ingest_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, 
         if head == head_hash
             && offset >= 0
             && (offset as u64) <= len
-            && (offset as usize) <= content.len()
+            && (offset as usize) <= bytes.len()
         {
             start = offset as usize;
         }
     }
     // Only complete lines: a tail without its newline belongs to the next sync.
-    let complete_end = content.rfind('\n').map_or(0, |i| i + 1);
+    let complete_end = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
     let mut tally = FileTally::default();
-    for line in content[start..complete_end].split('\n') {
-        let line = line.trim_end_matches('\r');
-        if line.is_empty() {
+    for line_bytes in bytes[start..complete_end].split(|&b| b == b'\n') {
+        let line_bytes = line_bytes.strip_suffix(b"\r").unwrap_or(line_bytes);
+        if line_bytes.is_empty() {
             continue;
         }
-        tally.read_bytes += line.len() as u64 + 1;
-        let (ts_ms, ty, source, scope, reject) = map_row(line, now_ms);
+        tally.read_bytes += line_bytes.len() as u64 + 1;
+        let row_hash = Sha256::digest(line_bytes).to_vec();
+        // An invalid-UTF-8 line is stored as evidence; the byte cursor above
+        // stays exact regardless.
+        let line = String::from_utf8_lossy(line_bytes).into_owned();
+        let (ts_ms, ty, source, scope, reject) = map_row(&line, now_ms);
         if reject == Some("corrupt json") {
             tally.corrupt += 1;
         }
-        let row_hash = Sha256::digest(line.as_bytes()).to_vec();
         let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO events
