@@ -88,3 +88,23 @@ fn pane_run_payload_stays_verbatim() {
         other => panic!("run expected, got {other:?}"),
     }
 }
+
+#[test]
+fn pane_send_reads_flag_shaped_values() {
+    // A flag VALUE that spells a common flag is text to send, not a flag to
+    // strip: a fence-less pre-pass would have left --text valueless.
+    use fno::mux_cli::{parse_pane_args, PaneCmd, SendSource};
+    let argv: Vec<OsString> = ["send", "45", "--text", "--json"]
+        .iter()
+        .map(OsString::from)
+        .collect();
+    let parsed = parse_pane_args(&argv).expect("flag-shaped value reads");
+    assert!(parsed.session.is_none());
+    assert!(!parsed.json);
+    match parsed.cmd {
+        PaneCmd::Send { source, .. } => {
+            assert_eq!(source, SendSource::Text("--json".into()))
+        }
+        other => panic!("send expected, got {other:?}"),
+    }
+}

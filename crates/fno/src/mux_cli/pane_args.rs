@@ -52,6 +52,15 @@ no fno evidence at all; `unresolved:spawned-name` / `unresolved:name-as-id` mean
 session id never resolved. Whether a pane is idle or reusable is `fno mux pane wait --quiet-ms <n>` \
 (or the `pristine_idle_shell` field in --json), never this column.";
 
+/// The pane loops' token strings: a non-UTF-8 token is the old refusal,
+/// never a silent drop.
+fn sargs_of(args: &[OsString]) -> Result<Vec<String>, String> {
+    args.iter()
+        .map(|a| a.to_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "non-UTF-8 argument".to_string())
+}
+
 pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args
         .first()
@@ -120,11 +129,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         let mut session = None;
         let mut json = false;
         let mut fit = false;
-        let sargs: Vec<String> = args
-            .iter()
-            .map(|a| a.to_str().map(str::to_string))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| "non-UTF-8 argument".to_string())?;
+        let sargs = sargs_of(args)?;
         let mut i = 1;
         while i < sargs.len() {
             let tok = sargs[i].as_str();
@@ -286,11 +291,13 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     }
 
     // Every other verb: a single flag/positional pass (no embedded argv).
-    // The common grammar rides MuxCommon::take; this pass keeps the verbs'
-    // own flags and positionals.
-    let (common, verb_args) = MuxCommon::take(args)?;
-    let mut session = common.server.or(common.session);
-    let json = common.json;
+    // The common flags stay loop arms (not MuxCommon::take) for the same
+    // reason run has them inline: the verbs' flag VALUES are arbitrary text,
+    // and a fence-less pre-pass would strip a value that spells
+    // --json/--server/--session instead of reading it.
+    let mut session = None;
+    let mut json = false;
+    let sargs = sargs_of(args)?;
     let mut lines = None;
     let mut text = None;
     let mut stdin = false;
@@ -312,13 +319,13 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut fno_id = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut i = 1;
-    while i < verb_args.len() {
-        let tok = verb_args[i].as_str();
+    while i < sargs.len() {
+        let tok = sargs[i].as_str();
         // One value read for a value-carrying flag; names the flag in the
         // refusal, the same voice the shared group uses.
         macro_rules! value_of {
             () => {
-                match verb_args.get(i + 1) {
+                match sargs.get(i + 1) {
                     Some(v) => {
                         i += 1;
                         v.clone()
@@ -328,6 +335,15 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             };
         }
         match tok {
+            "--json" => json = true,
+            "--server" | "--session" => {
+                note_server_flag(tok);
+                let Some(v) = sargs.get(i + 1) else {
+                    return Err(format!("{tok} needs a value"));
+                };
+                session = Some(v.clone());
+                i += 1;
+            }
             // (x-d865) split/break/ls flags.
             "--direction" | "-d" => {
                 let v = value_of!();
