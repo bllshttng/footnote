@@ -800,14 +800,40 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
     // Pre-stage six commit_rows requests on separate connections. Each
     // handler thread holds an inflight guard from handling through the reply
     // write, so a Shutdown that acks proves every reply was already written.
+    // A connection whose request never entered handling is cut legally: it
+    // records as a hangup outcome, never a panic.
     let staged_sock = sock.clone();
+    let (staged_tx, staged_rx) = std::sync::mpsc::channel::<()>();
     let staged = std::thread::spawn(move || {
         let mut conns: Vec<(UnixStream, String)> = Vec::new();
+        let mut outcomes: Vec<(String, bool)> = Vec::new();
         for i in 0..6 {
-            let mut s = UnixStream::connect(&staged_sock).unwrap();
-            let begin = ok_result(rpc(&mut s, i, "begin", json!({})));
-            let version = begin["version"].as_str().unwrap().to_string();
+            let mut s = match UnixStream::connect(&staged_sock) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
             let id = format!("m-app-{i:04}");
+            write_frame(
+                &mut s,
+                TAG_REQUEST,
+                &serde_json::to_vec(&json!({"id": i, "method": "begin", "params": {}})).unwrap(),
+            );
+            let (tag, payload) = match read_frame(&mut s) {
+                Some(frame) => frame,
+                None => {
+                    // Cut before the begin was served: a hangup outcome.
+                    outcomes.push((id, false));
+                    continue;
+                }
+            };
+            assert_eq!(tag, TAG_RESPONSE);
+            let reply: Value = serde_json::from_slice(&payload).unwrap();
+            if reply.get("ok") != Some(&json!(true)) {
+                outcomes.push((id, false));
+                continue;
+            }
+            let begin = &reply["result"];
+            let version = begin["version"].as_str().unwrap_or_default().to_string();
             let row = json!({
                 "id": id,
                 "slug": format!("slug-{id}"),
@@ -834,8 +860,11 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
             s.flush().unwrap();
             conns.push((s, id));
         }
+        // Signal main BEFORE reading replies: every commit frame is staged
+        // and every handler that took one is mid-drain, which is the exact
+        // window the contract is about.
+        let _ = staged_tx.send(());
         // Read every staged reply with its outcome kind.
-        let mut outcomes: Vec<(String, bool)> = Vec::new();
         for (mut s, id) in conns {
             match read_frame(&mut s) {
                 Some((tag, payload)) => {
@@ -848,8 +877,8 @@ fn a_shutdown_mid_commit_never_loses_an_ok_reply() {
         }
         outcomes
     });
-    // Let staging finish, then shut down while the replies drain.
-    std::thread::sleep(Duration::from_millis(800));
+    // Shut down while the staged handlers drain.
+    let _ = staged_rx.recv_timeout(Duration::from_secs(30));
     let mut s = UnixStream::connect(&sock).unwrap();
     write_frame(&mut s, TAG_SHUTDOWN, &[]);
     let (tag, payload) = read_frame(&mut s).expect("shutdown reply");
