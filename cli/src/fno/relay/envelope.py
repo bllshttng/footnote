@@ -10,7 +10,7 @@ bus fields:
 - ``msg_id``      -> bus ``id``           (idempotent dedup key).
 - ``from``/``to`` -> bus ``from_``/``to`` (addresses; ``from_session`` is the id).
 - ``hop_count`` + ``ttl`` -> bus ``meta`` (cycle termination; relay-private).
-- ``provenance``  -> derived from ``from_session`` / ``provider_from`` /
+- ``provenance``  -> derived from ``from_session`` / ``from_harness`` /
   ``from_model`` and serialized to the ``<fno_mail ...>`` wire tag below.
 
 Provenance wire format (node x-1f23: the relay is the SINGLE-LINE transport
@@ -57,7 +57,7 @@ _TAG_RE = re.compile(
 )
 
 
-def frame(from_session: str, body: str) -> str:
+def frame(from_session: str, body: str, harness: Optional[str] = None) -> str:
     """Serialize one peer message to the single-line ``<fno_mail ...>`` wire line.
 
     The body is collapsed to a single line (Enter submits the TUI turn, so an
@@ -79,7 +79,7 @@ def frame(from_session: str, body: str) -> str:
             "frames peer mail; a body cannot contain one."
         )
     one_line = " ".join(body.split())
-    return f"{fno_mail_open(from_=from_session)} {one_line}"
+    return f"{fno_mail_open(from_=from_session, harness=harness)} {one_line}"
 
 
 def parse(line: str) -> Optional[dict]:
@@ -103,16 +103,16 @@ def is_framed(line: str) -> bool:
 
 def frame_envelope(env: Envelope) -> Optional[str]:
     """Frame a relay bus envelope for injection, or ``None`` if it cannot be
-    framed (missing provenance -- no ``from_session`` or no ``provider_from`` --
+    framed (missing provenance -- no ``from_session`` or no ``from_harness`` --
     or a forged body that :func:`frame` refused).
 
     A ``None`` return is the structural signal that the message is unframeable;
     the daemon refuses to deliver it through any vehicle rather than inject an
     unframed or forged body (AC5-FR)."""
-    if not env.from_session or not env.provider_from:
+    if not env.from_session or not env.from_harness:
         return None
     try:
-        return frame(env.from_session, env.body)
+        return frame(env.from_session, env.body, harness=env.from_harness)
     except ForgedEnvelopeError:
         return None
 
@@ -140,7 +140,7 @@ def make_relay_envelope(
     from_session: str,
     to: str,
     body: str,
-    provider_from: str,
+    from_harness: str,
     from_model: Optional[str] = None,
     hop_count: int = 0,
     ttl: int = DEFAULT_TTL,
@@ -157,7 +157,7 @@ def make_relay_envelope(
         to=to,
         kind=RELAY_KIND,
         body=body,
-        provider_from=provider_from,
+        from_harness=from_harness,
         from_session=from_session,
         from_model=from_model,
         to_kind=to_kind,

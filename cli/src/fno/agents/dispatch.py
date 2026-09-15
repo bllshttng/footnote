@@ -5102,6 +5102,7 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
     return wrap_fno_mail(
         cur,
         from_=ctx.from_,
+        harness=ctx.harness,
         node=ctx.node,
         to=ctx.to,
         from_session=ctx.from_session,
@@ -7115,6 +7116,7 @@ def _deliver_live(
         wrapped = wrap_fno_mail(
             body,
             from_=mail.from_,
+            harness=mail.harness,
             node=mail.node,
             to=mail.to,
             id=mail.id,
@@ -7301,6 +7303,7 @@ def _deliver_live(
             # the recipient-crown line reads A's session (mail.from_session).
             relay_ctxs[entry.name] = _MailCtx(
                 from_=mail.to,
+                harness=entry.harness,
                 model="unknown",
                 to=mail.from_,
                 from_session=entry.harness_session_id or None,
@@ -7424,14 +7427,14 @@ def _queue_durable_fallback(
 
     msg_id = msg_id or generate_msg_id()
     if mail_ctx is None:
-        provider_from, from_session = _sender_provenance(
+        from_harness, from_session = _sender_provenance(
             _resolve_sender_entry(entries, from_name), from_name
         )
-        _loud_sender_provenance(from_name, provider_from, from_session)
+        _loud_sender_provenance(from_name, from_harness, from_session)
         mail_ctx = _build_mail_ctx(
             from_name,
             from_session,
-            provider_from,
+            from_harness,
             # Never the short_id fallback the caller-built ctx uses: the
             # refusal above already proved durable_recipient is not None here.
             to=durable_recipient,
@@ -7442,13 +7445,14 @@ def _queue_durable_fallback(
     else:
         # Reuse the caller's provenance: the envelope body and the structured
         # thread row must name the same sender.
-        provider_from = mail_ctx.provider
+        from_harness = mail_ctx.harness
         from_session = mail_ctx.from_session
     # No `to_session`: a durable body is read whenever the recipient next
     # drains, so a crown baked into it outlives its own reading.
     durable_body = wrap_fno_mail(
         message,
         from_=mail_ctx.from_,
+        harness=mail_ctx.harness,
         node=mail_ctx.node,
         to=mail_ctx.to,
         id=mail_ctx.id,
@@ -7465,8 +7469,8 @@ def _queue_durable_fallback(
             body=durable_body,
             msg_id=msg_id,
             to_kind="session",
-            provider_to=entry.harness,
-            provider_from=provider_from,
+            to_harness=entry.harness,
+            from_harness=from_harness,
             from_session=from_session,
             # The envelope no longer renders the model (x-d7cf); the durable
             # row carries it, matching what the live hosted path records.
@@ -7859,10 +7863,10 @@ def dispatch_send(
                 # daemon would attribute the stranger. Floor it to unproven,
                 # which is also what the old exact-name lookup left here.
                 sender_entry = None
-            provider_from, from_session = _sender_provenance(
+            from_harness, from_session = _sender_provenance(
                 sender_entry, from_name, self_proof
             )
-            _loud_sender_provenance(from_name, provider_from, from_session)
+            _loud_sender_provenance(from_name, from_harness, from_session)
             # A `fno agents mail send <name>` is always directed -> stamp the selected
             # session's canonical handle as the envelope `to`. A transport short
             # id is retained only for hosted delivery when the legacy row has no
@@ -7880,7 +7884,7 @@ def dispatch_send(
             mail_ctx = _build_mail_ctx(
                 from_name,
                 from_session,
-                provider_from,
+                from_harness,
                 to=(durable_recipient or existing.short_id or None),
                 id=msg_id,
                 origin=origin,
@@ -7999,6 +8003,7 @@ def dispatch_send(
                         hosted_body = wrap_fno_mail(
                             message,
                             from_=mail_ctx.from_,
+                            harness=mail_ctx.harness,
                             node=mail_ctx.node,
                             to=mail_ctx.to,
                             id=mail_ctx.id,
@@ -8014,8 +8019,8 @@ def dispatch_send(
                                 sender=mail_ctx.from_,
                                 recipient=durable_recipient or existing.short_id,
                                 body=hosted_body,
-                                provider_from=provider_from,
-                                provider_to=existing.harness,
+                                from_harness=from_harness,
+                                to_harness=existing.harness,
                                 from_session=from_session,
                                 from_model=mail_ctx.model,
                                 to_kind="session",
@@ -8221,17 +8226,17 @@ def dispatch_send(
                 from fno.inbox.store import generate_msg_id
 
                 msg_id = generate_msg_id()
-                provider_from, from_session = _sender_provenance(
+                from_harness, from_session = _sender_provenance(
                     _resolve_sender_entry(timeout_entries, from_name), from_name
                 )
-                _loud_sender_provenance(from_name, provider_from, from_session)
+                _loud_sender_provenance(from_name, from_harness, from_session)
                 timeout_recipient = canonical_handle(
                     timeout_entry.harness_session_id
                 )
                 timeout_mail_ctx = _build_mail_ctx(
                     from_name,
                     from_session,
-                    provider_from,
+                    from_harness,
                     to=timeout_recipient,
                     id=msg_id,
                     origin=origin,
@@ -8544,13 +8549,13 @@ def dispatch_send_to_project(
     # sender identity is best-effort - exclusion falls back to the from_ name.
     from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
 
-    from_session = provider_from = None
+    from_session = from_harness = None
     try:
         from fno.agents.registry import load_registry as _load_reg
 
         _se = next((e for e in _load_reg() if e.name == from_name), None)
         if _se is not None:
-            provider_from = _se.harness
+            from_harness = _se.harness
             from_session = (
                 getattr(_se, "harness_session_id", None)
                 or getattr(_se, "short_id", None)
@@ -8578,7 +8583,7 @@ def dispatch_send_to_project(
             msg_id=msg_id,
             to_kind="project",
             from_session=from_session,
-            provider_from=provider_from,
+            from_harness=from_harness,
             word_count=_pstyle.word_count(message),
             # US6: an explicit --to-project note deliberately chose the durable
             # project-inbox lane; the project's own drain owns it.

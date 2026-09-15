@@ -72,16 +72,16 @@ def _sender_provenance(
 
 
 def warn_sender_provenance_miss(
-    from_name: str, provider_from: Optional[str], from_session: Optional[str]
+    from_name: str, from_harness: Optional[str], from_session: Optional[str]
 ) -> None:
     """Say it when sender provenance floors to nothing.
 
     A from_name matching no registry row and no ambient identity ships an
-    envelope every reader renders as harness=unknown with no from_session.
+    envelope with no harness attribute and no from_session.
     Delivery still proceeds - an unattended note must not die for lack of an
     attributable sender - but the miss is no longer silent.
     """
-    if provider_from is not None or from_session is not None:
+    if from_harness is not None or from_session is not None:
         return
     from fno.agents import events
 

@@ -148,7 +148,7 @@ def route_message(
             # bare id would be parsed as a name lookup and miss.
             to=f"session:{env.from_session or env.from_}",
             body=reply,
-            provider_from=res.provider,
+            from_harness=res.provider,
             hop_count=hops + 1,
             ttl=ttl,
             thread=env.thread,

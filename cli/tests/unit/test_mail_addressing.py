@@ -40,14 +40,14 @@ def test_two_v7_siblings_collide_on_the_display_handle():
 
 
 def test_the_envelope_carries_the_full_session_when_given_one():
-    tag = fno_mail_open(from_="01a025f8", from_session=V7_A)
-    assert f'from_session="{V7_A}"' in tag
-    assert tag.startswith('<fno_mail from="01a025f8"')
+    # x-f1f0 D2: `from` IS the full session id; one attribute, one address.
+    tag = fno_mail_open(from_=V7_A)
+    assert f'from="{V7_A}"' in tag
+    assert "from_session" not in tag
 
 
 def test_an_envelope_without_it_is_byte_unchanged():
-    """Additive, and rendered last, so every pre-existing producer emits exactly
-    the bytes it emitted before."""
+    """A sender with no resolvable session still renders the compact handle."""
     assert fno_mail_open(from_="a") == ('<fno_mail from="a">')
 
 

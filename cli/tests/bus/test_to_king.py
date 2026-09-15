@@ -182,12 +182,12 @@ def test_durable_floor_carries_no_recipient_crown(env, tmp_path, monkeypatch):
 
     threads = read_all_threads(canonical_handle("session-king"))
     body = threads[0].messages[0].body
-    assert "your crown" not in body
+    assert "to_rank" not in body
 
     # Positive control on the same fleet and the same recipient: the live
     # envelope DOES stamp it, so the absence above is the rule and not a
     # crownless fleet or an unresolvable row.
-    assert "-- your crown: L1 fno" in envelope.wrap_fno_mail(
+    assert 'to_rank="L1 fno"' in envelope.wrap_fno_mail(
         "ping",
         from_="peer",
         to_session="session-king",

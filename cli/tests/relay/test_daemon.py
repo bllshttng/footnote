@@ -56,7 +56,7 @@ class _Recorder:
 
 def test_ac3_daemon_routes_with_no_human(bus, events):
     e = env.make_relay_envelope(from_session="A", to="session:B", body="hi B",
-                                provider_from="claude", from_model="opus")
+                                from_harness="claude", from_model="opus")
     append(e)
     rec = _Recorder()
     results = daemon.run_once(deliver=rec, index=_idx(), events_path=events, seen=set())
@@ -69,7 +69,7 @@ def test_ac3_daemon_routes_with_no_human(bus, events):
 
 def test_run_once_advances_cursor_so_restart_does_not_redeliver(bus, events):
     append(env.make_relay_envelope(from_session="A", to="session:B", body="x",
-                                   provider_from="claude"))
+                                   from_harness="claude"))
     rec = _Recorder()
     daemon.run_once(deliver=rec, index=_idx(), events_path=events, seen=set())
     # Second pass with a FRESH seen set: cursor already advanced -> nothing redelivered.
@@ -81,7 +81,7 @@ def test_run_once_advances_cursor_so_restart_does_not_redeliver(bus, events):
 
 def test_ac4_ttl_exhausted_drops_and_does_not_deliver(bus, events):
     e = env.make_relay_envelope(from_session="A", to="session:B", body="loop",
-                                provider_from="claude", hop_count=8, ttl=8)
+                                from_harness="claude", hop_count=8, ttl=8)
     rec = _Recorder()
     res = daemon.route_message(e, deliver=rec, index=_idx(), events_path=events, seen=set())
     assert res.status == "dropped" and res.reason == "ttl-exhausted"
@@ -97,7 +97,7 @@ def test_ac4_self_cycling_pair_terminates_at_ttl(bus, events):
         "B": RegistryEntry(session_id="B", provider="claude", pid=2, inject_handle="pty:2"),
     }
     append(env.make_relay_envelope(from_session="A", to="session:B", body="start",
-                                   provider_from="claude", ttl=4))
+                                   from_harness="claude", ttl=4))
     rec = _Recorder(reply="and you?")  # every recipient replies -> a -> b -> a -> b ...
     seen: set[str] = set()
     for _ in range(20):  # bounded poll; must converge well inside this
@@ -111,15 +111,17 @@ def test_ac4_self_cycling_pair_terminates_at_ttl(bus, events):
 
 def test_ac5_claude_hop_carries_peer_stamp(bus, events):
     e = env.make_relay_envelope(from_session="A", to="session:B", body="ping",
-                                provider_from="claude", from_model="opus")
+                                from_harness="claude", from_model="opus")
     rec = _Recorder()
     daemon.route_message(e, deliver=rec, index=_idx(), events_path=events, seen=set())
     _, framed = rec.calls[0]
     parsed = env.parse(framed)
-    # node x-1f23: the relay tag converged to <fno_mail>. x-d7cf: the tag
-    # carries the compact from/id attrs only; the harness stays on the bus row.
+    # node x-1f23: the relay tag converged to <fno_mail>. x-f1f0: the tag
+    # carries the harness again, spelled through harness_for_provider; the
+    # model stays on the bus row only.
     assert parsed["from_session"] == "A" and parsed["body"] == "ping"
-    assert "harness=" not in framed  # not impersonating the user: explicit peer tag
+    assert 'harness="claude-code"' in framed  # explicit peer tag, wire vocabulary
+    assert "model=" not in framed
 
 
 # ---- AC5-FR: unframed cross-provider refused -------------------------------
@@ -141,7 +143,7 @@ def test_ac5fr_unframed_cross_provider_refused(bus, events):
 # ---- Invariants: dedup, unroutable, no-handle ------------------------------
 
 def test_dedup_delivers_once_per_msg_id(bus, events):
-    e = env.make_relay_envelope(from_session="A", to="session:B", body="x", provider_from="claude")
+    e = env.make_relay_envelope(from_session="A", to="session:B", body="x", from_harness="claude")
     seen: set[str] = set()
     rec = _Recorder()
     r1 = daemon.route_message(e, deliver=rec, index=_idx(), events_path=events, seen=seen)
@@ -151,7 +153,7 @@ def test_dedup_delivers_once_per_msg_id(bus, events):
 
 
 def test_unroutable_target_is_surfaced_not_swallowed(bus, events):
-    e = env.make_relay_envelope(from_session="A", to="session:ghost", body="x", provider_from="claude")
+    e = env.make_relay_envelope(from_session="A", to="session:ghost", body="x", from_harness="claude")
     rec = _Recorder()
     res = daemon.route_message(e, deliver=rec, index=_idx(), events_path=events, seen=set())
     assert res.status == "dropped" and res.reason == "unroutable"
@@ -161,7 +163,7 @@ def test_unroutable_target_is_surfaced_not_swallowed(bus, events):
 
 
 def test_recipient_without_inject_handle_refused(bus, events):
-    e = env.make_relay_envelope(from_session="A", to="session:B", body="x", provider_from="claude")
+    e = env.make_relay_envelope(from_session="A", to="session:B", body="x", from_harness="claude")
     rec = _Recorder()
     res = daemon.route_message(e, deliver=rec, index=_idx(handle=None),
                                events_path=events, seen=set())
@@ -180,7 +182,7 @@ def test_non_relay_bus_traffic_is_ignored(bus, events):
 # ---- Errors: a raising deliver is surfaced, not silently swallowed ---------
 
 def test_deliver_failure_surfaces_event_and_does_not_crash(bus, events):
-    e = env.make_relay_envelope(from_session="A", to="session:B", body="x", provider_from="claude")
+    e = env.make_relay_envelope(from_session="A", to="session:B", body="x", from_harness="claude")
 
     def _boom(res, framed):
         raise RuntimeError("no live PTY peer for B")
@@ -198,7 +200,7 @@ def test_failed_then_recovered_delivery_is_retried_not_swallowed(bus, events):
     # A peer that is down on pass 1 (deliver raises) then up on pass 2 must NOT
     # be permanently lost: the message is recorded seen only at a terminal
     # success, so the retry delivers it.
-    append(env.make_relay_envelope(from_session="A", to="session:B", body="x", provider_from="claude"))
+    append(env.make_relay_envelope(from_session="A", to="session:B", body="x", from_harness="claude"))
     rec = _Recorder()
     calls = {"n": 0}
 
@@ -212,7 +214,7 @@ def test_failed_then_recovered_delivery_is_retried_not_swallowed(bus, events):
     daemon.run_once(deliver=_flaky, index=_idx(), events_path=events, seen=seen)
     # Cursor advanced past the failed message, so re-append simulates next-pass
     # retry of the SAME id only if not yet seen -> route it directly again.
-    e2 = env.make_relay_envelope(from_session="A", to="session:B", body="x", provider_from="claude")
+    e2 = env.make_relay_envelope(from_session="A", to="session:B", body="x", from_harness="claude")
     daemon.route_message(e2, deliver=_flaky, index=_idx(), events_path=events, seen=seen)
     assert len(rec.calls) == 1  # eventually delivered, not swallowed
 
@@ -223,15 +225,15 @@ def test_rotated_out_cursor_resyncs_without_replay(bus, events):
     from fno.bus import cursor as buscursor
     # Two old relay messages, then point the cursor at an id NOT in the log
     # (simulating the real id having rotated out of retention).
-    append(env.make_relay_envelope(from_session="A", to="session:B", body="old1", provider_from="claude"))
-    append(env.make_relay_envelope(from_session="A", to="session:B", body="old2", provider_from="claude"))
+    append(env.make_relay_envelope(from_session="A", to="session:B", body="old1", from_harness="claude"))
+    append(env.make_relay_envelope(from_session="A", to="session:B", body="old2", from_harness="claude"))
     buscursor.write_cursor(daemon.CURSOR_NAME, "msg-rotated-away")
     rec = _Recorder()
     results = daemon.run_once(deliver=rec, index=_idx(), events_path=events, seen=set())
     assert results == [] and rec.calls == []  # stale backlog NOT re-injected
     assert any(x["kind"] == "relay_cursor_resync" for x in _read_events(events))
     # And the cursor is now at head, so genuinely-new traffic flows next pass.
-    append(env.make_relay_envelope(from_session="A", to="session:B", body="fresh", provider_from="claude"))
+    append(env.make_relay_envelope(from_session="A", to="session:B", body="fresh", from_harness="claude"))
     daemon.run_once(deliver=rec, index=_idx(), events_path=events, seen=set())
     assert len(rec.calls) == 1 and "fresh" in rec.calls[0][1]
 
@@ -411,7 +413,7 @@ def test_route_message_delivers_to_codex_worker(bus, events):
     # The no-inject-handle gate passes for a worker:<id> handle and a framed
     # cross-harness turn delivers exactly once (US1).
     e = env.make_relay_envelope(from_session="A", to="session:B", body="hi codex",
-                                provider_from="claude", from_model="opus")
+                                from_harness="claude", from_model="opus")
     append(e)
     rec = _Recorder()
     results = daemon.run_once(deliver=rec, index=_codex_idx(), events_path=events, seen=set())
@@ -426,7 +428,7 @@ def test_route_message_refuses_unframed_cross_harness(bus, events):
     # refused, never injected unframed -- the spike's contested-relay failure made
     # impossible by construction.
     e = env.make_relay_envelope(from_session="A", to="session:B", body="x",
-                                provider_from="")  # no provider -> unframable
+                                from_harness="")  # no provider -> unframable
     rec = _Recorder()
     res = daemon.route_message(e, deliver=rec, index=_codex_idx(), events_path=events, seen=set())
     assert res.status == "dropped" and res.reason == "unframed-cross-provider"

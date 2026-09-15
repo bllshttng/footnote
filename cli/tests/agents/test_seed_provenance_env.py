@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import pytest
 
+from types import SimpleNamespace
+
 from fno.agents.mux_spawn import SEED_PROVENANCE_KEYS, _mesh_env_wrapper
 from fno.mail.seed_provenance import (
     ENV_FROM_SESSION,
+    ENV_HARNESS,
     ENV_SEED_B64,
     MAX_SEED_BYTES,
     build_env,
@@ -83,7 +86,43 @@ def test_render_quotes_the_seed_verbatim_and_says_not_to_run_it():
     assert SEED in rendered
     assert "do not execute this copy" in rendered
     assert rendered.rstrip().endswith("</fno_mail>")
-    assert f'from_session="{SENDER_SESSION}"' in rendered
+    # x-f1f0 D2: `from` IS the full session id; the retired from_session
+    # attribute renders nowhere.
+    assert f'from="{SENDER_SESSION}"' in rendered
+    assert "from_session" not in rendered
+
+
+def test_build_env_stamps_the_raw_harness_and_renders_the_wire_vocabulary(monkeypatch):
+    # x-f1f0 D6: the sidecar carries the RAW harness from the whoami
+    # resolver; the tag spells it through harness_for_provider.
+    ident = SimpleNamespace(session_id=SENDER_SESSION, harness="claude")
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity", lambda *a, **k: ident
+    )
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_session_id", lambda *a, **k: SENDER_SESSION
+    )
+    env = build_env(SEED)
+    assert env[ENV_HARNESS] == "claude"
+    rendered = render_from_env(env)
+    assert rendered is not None
+    assert 'harness="claude-code"' in rendered
+
+
+def test_an_unresolvable_harness_omits_the_attribute(monkeypatch):
+    # x-7e16: no guess, and never `cli` or `unknown` on the wire.
+    ident = SimpleNamespace(session_id=SENDER_SESSION, harness=None)
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity", lambda *a, **k: ident
+    )
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_session_id", lambda *a, **k: SENDER_SESSION
+    )
+    env = build_env(SEED)
+    assert ENV_HARNESS not in env
+    rendered = render_from_env(env)
+    assert rendered is not None
+    assert "harness=" not in rendered
 
 
 def test_no_sidecar_renders_nothing():

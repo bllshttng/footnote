@@ -21,19 +21,19 @@ class _MailCtx:
     # which keeps that envelope byte-identical.
     id: Optional[str] = None
     origin: Optional[str] = None
-    # The raw sender provider behind `harness`, which is the one-way wire
-    # spelling, so a durable write reusing this ctx stamps provider_from with the
-    # value the envelope was built from rather than resolving a second time.
-    provider: Optional[str] = None
+    # The raw sender harness, stamped onto the envelope tag (spelled through
+    # harness_for_provider) and the bus row's from_harness alike, so a durable
+    # write reusing this ctx does not resolve a second time.
+    harness: Optional[str] = None
     # The RECIPIENT's full session id, rendering its own live crown into
-    # the envelope trailer. Live delivery only; None omits the line.
+    # the envelope header as to_rank. Live delivery only; None omits it.
     to_session: Optional[str] = None
 
 
 def _build_mail_ctx(
     from_name: str,
     from_session: Optional[str],
-    provider_from: Optional[str],
+    from_harness: Optional[str],
     to: Optional[str] = None,
     id: Optional[str] = None,
     origin: Optional[str] = None,
@@ -62,6 +62,6 @@ def _build_mail_ctx(
         to=to or None,
         id=id or None,
         from_session=from_session,
-        provider=provider_from,
+        harness=from_harness,
         to_session=to_session or None,
     )

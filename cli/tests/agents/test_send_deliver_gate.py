@@ -1887,7 +1887,8 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     import re
 
     framed = inject_calls[0]["text"]
-    assert re.match(r'^<fno_mail from="[0-9a-f]{8}"', framed), framed
+    # x-f1f0 D2: `from` holds the full session id when the sender resolved one.
+    assert re.match(r'^<fno_mail from="[0-9a-f-]{16,}"', framed), framed
     assert framed.rstrip().endswith("</fno_mail>"), framed
     assert "reach me on control" in framed
     assert ' session="' not in framed
@@ -1941,8 +1942,8 @@ def test_relay_continuation_into_crowned_session_carries_its_crown(monkeypatch) 
         recipient_identities=_sb_identities("alice", "bob"),
     )
     body = calls[0]["body"]
-    assert body.startswith('<fno_mail from="bbbb2222"'), body
-    assert "-- your crown: L1 fno" in body, body
+    assert body.startswith('<fno_mail from="session-bob"'), body
+    assert 'to_rank="L1 fno"' in body, body
 
 
 def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
@@ -1964,7 +1965,7 @@ def test_relay_continuation_with_unresolved_session_renders_no_crown_line(
     )
     wrapped = _wrap_relay_body("bob says hi", ctx)
     assert wrapped.startswith('<fno_mail from="bbbb2222"'), wrapped
-    assert "your crown" not in wrapped, wrapped
+    assert "to_rank" not in wrapped, wrapped
 
 
 # ---------------------------------------------------------------------------

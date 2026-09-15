@@ -40,6 +40,7 @@ from typing import Mapping, Optional
 ENV_SEED_B64 = "FNO_SEED_PROV_SEED_B64"
 ENV_FROM = "FNO_SEED_PROV_FROM"
 ENV_FROM_SESSION = "FNO_SEED_PROV_FROM_SESSION"
+ENV_HARNESS = "FNO_SEED_PROV_HARNESS"
 ENV_NODE = "FNO_SEED_PROV_NODE"
 ENV_MSG_ID = "FNO_SEED_PROV_MSG_ID"
 
@@ -51,6 +52,7 @@ SEED_PROVENANCE_KEYS: tuple[str, ...] = (
     ENV_SEED_B64,
     ENV_FROM,
     ENV_FROM_SESSION,
+    ENV_HARNESS,
     ENV_NODE,
     ENV_MSG_ID,
 )
@@ -87,6 +89,7 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
     sidecar or none, and it has no stake in the work being launched.
     """
     from fno.agents.self_stamp import (
+        resolve_self_identity,
         resolve_self_session_id,
         stamp_from,
     )
@@ -125,12 +128,20 @@ def build_env(seed: str, *, node: Optional[str] = None) -> dict[str, str]:
 
     from fno.inbox.store import generate_msg_id
 
+    # The raw harness from the whoami resolver; a None omits the attribute,
+    # never renders a guess (x-7e16).
+    try:
+        sender_harness = resolve_self_identity().harness
+    except Exception:  # noqa: BLE001 - an unresolvable harness is omitted
+        sender_harness = None
     env = {
         ENV_SEED_B64: base64.b64encode(raw).decode("ascii"),
         ENV_FROM: stamp_from(None),
         ENV_FROM_SESSION: from_session,
         ENV_MSG_ID: generate_msg_id(),
     }
+    if sender_harness:
+        env[ENV_HARNESS] = sender_harness
     if node:
         env[ENV_NODE] = node
     return env
@@ -176,6 +187,7 @@ def render_from_env(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
         return wrap_fno_mail(
             body,
             from_=(env.get(ENV_FROM) or "").strip() or "fno",
+            harness=(env.get(ENV_HARNESS) or "").strip() or None,
             node=(env.get(ENV_NODE) or "").strip() or None,
             id=(env.get(ENV_MSG_ID) or "").strip() or None,
             from_session=from_session,

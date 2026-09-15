@@ -285,7 +285,7 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     assert result.delivery == "hosted"
     assert len(captured) == 1
     envelope = captured[0]
-    assert f'from_session="{sender_session}"' in envelope
+    assert f'from="{sender_session}"' in envelope
 
 
 def test_dispatch_send_self_proof_beats_same_bucket_registry_sibling(
@@ -365,7 +365,7 @@ def test_dispatch_send_self_proof_beats_same_bucket_registry_sibling(
     assert result.delivery == "hosted"
     assert len(captured) == 1
     envelope = captured[0]
-    assert f'from_session="{own_session}"' in envelope
+    assert f'from="{own_session}"' in envelope
     assert stranger_session not in envelope
 
 
@@ -442,7 +442,7 @@ def test_dispatch_send_switchboard_identity_floored_on_self_proof_mismatch(
     args, kwargs = switchboard_calls[0]
     wrapped = args[2]
     assert kwargs["from_identity"] is None
-    assert f'from_session="{own_session}"' in wrapped
+    assert f'from="{own_session}"' in wrapped
     assert stranger_session not in wrapped
 
 
@@ -516,7 +516,7 @@ def test_dispatch_send_durable_fallback_resolves_sender_once(
     assert result.delivery == "durable"
     assert proof_calls == [canonical_handle(sender_session)]
     record = next(m for m in iter_messages() if m.id == result.msg_id)
-    assert f'from_session="{sender_session}"' in record.body
+    assert f'from="{sender_session}"' in record.body
 
 
 @pytest.mark.parametrize(
@@ -586,7 +586,7 @@ def test_dispatch_send_durable_fallback_preserves_sender_provenance(
 
     assert result.delivery == "durable"
     record = next(message for message in iter_messages() if message.id == result.msg_id)
-    assert f'from_session="{sender_session}"' in record.body
+    assert f'from="{sender_session}"' in record.body
 
 
 def test_dispatch_send_keeps_unknown_for_unprovable_sender(
@@ -1300,10 +1300,8 @@ def test_dispatch_send_200kb_body_round_trip(tmp_path: Path, monkeypatch) -> Non
     # round-trips intact inside the paired envelope.
     assert stored_body.startswith("<fno_mail "), stored_body[:40]
     assert stored_body.rstrip().endswith("</fno_mail>")
-    from fno.mail.envelope import FNO_MAIL_TRAILER
 
     inner = stored_body.split("\n", 1)[1].rsplit("\n", 1)[0]
-    inner = inner.removesuffix(f"\n{FNO_MAIL_TRAILER}")
     assert inner == body, f"Round-trip mismatch: got {len(inner)} chars"
 
 
@@ -1730,10 +1728,8 @@ def test_dispatch_send_queues_to_selected_session_when_live_miss_restamps(
     assert result.delivery == "durable"
     original_threads = read_all_threads(canonical_handle(original_id))
     assert len(original_threads) == 1
-    from fno.mail.envelope import FNO_MAIL_TRAILER
-
     assert original_threads[0].messages[0].body.endswith(
-        f"secret for A\n{FNO_MAIL_TRAILER}\n</fno_mail>"
+        "secret for A\n</fno_mail>"
     )
     assert f'to="{canonical_handle(original_id)}"' in original_threads[0].messages[0].body
     assert read_all_threads(canonical_handle(replacement_id)) == []
