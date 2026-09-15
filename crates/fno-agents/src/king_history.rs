@@ -22,7 +22,7 @@
 //! history is a measurement, not an absence. A store that cannot be opened
 //! is an error (rc 1), never an empty history.
 //!
-//! `king-verdict` reads the same journals as a tenure verdict: the bounds
+//! `king-history --verdict` reads the same journals as a tenure verdict: the bounds
 //! declared on the crown manifest (iterations, respawns, compactions, the
 //! recorded block cap) plus the inherited-scope delivery trend, judged as
 //! ONE set. Each bound alone looked correctly configured while a reign sat
@@ -324,7 +324,7 @@ pub fn run_king_history(args: &[String]) -> i32 {
     }
 }
 
-// ---- king-verdict: the tenure bounds read as one set ----
+// ---- the --verdict mode: the tenure bounds read as one set ----
 
 const KING_LOOP_CHECK: &str = "king_loop_check";
 const TERMINATION: &str = "termination";
@@ -658,14 +658,14 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
                 cwd = Some(PathBuf::from(&args[i + 1]));
                 i += 2;
             }
-            "--json" => {
+            "--json" | "-J" => {
                 as_json = true;
                 i += 1;
             }
             other => {
-                eprintln!("fno-agents king-verdict: unknown flag {other}");
+                eprintln!("fno-agents king-history --verdict: unknown flag {other}");
                 eprintln!(
-                    "fno-agents king-verdict: [--scope SCOPE] [--manifest PATH] \
+                    "fno-agents king-history --verdict: [--scope SCOPE] [--manifest PATH] \
                      --cwd DIR --events-path PATH [--events-path ...] [--json]"
                 );
                 return 2;
@@ -673,11 +673,11 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         }
     }
     let Some(cwd) = cwd else {
-        eprintln!("fno-agents king-verdict: --cwd and --events-path are required");
+        eprintln!("fno-agents king-history --verdict: --cwd and --events-path are required");
         return 2;
     };
     if events_paths.is_empty() {
-        eprintln!("fno-agents king-verdict: --cwd and --events-path are required");
+        eprintln!("fno-agents king-history --verdict: --cwd and --events-path are required");
         return 2;
     }
     let registry = crate::paths::AgentsHome::from_env().registry_json();
@@ -690,7 +690,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     ) {
         Ok(inputs) => inputs,
         Err(msg) => {
-            eprintln!("fno-agents king-verdict: {msg}");
+            eprintln!("fno-agents king-history --verdict: {msg}");
             return 1;
         }
     };
@@ -706,7 +706,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     ) {
         Ok(x) => x,
         Err(msg) => {
-            eprintln!("fno-agents king-verdict: {msg}");
+            eprintln!("fno-agents king-history --verdict: {msg}");
             return 1;
         }
     };
