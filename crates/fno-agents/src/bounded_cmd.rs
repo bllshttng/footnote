@@ -83,12 +83,15 @@ mod tests {
         // grandchild inherits the piped stdout and extends the reader join.
         let elapsed = started.elapsed();
         assert!(!out.status.success(), "killed child must read failed");
-        assert!(elapsed < std::time::Duration::from_secs(3), "elapsed {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "elapsed {elapsed:?}"
+        );
     }
 
     #[test]
     fn missing_binary_is_an_err_not_none() {
-        let mut cmd = std::process::Command::new("/nonexistent/fno-binary-for-tests");
+        let cmd = std::process::Command::new("/nonexistent/fno-binary-for-tests");
         let err = output_with_timeout_result(cmd, 5).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
