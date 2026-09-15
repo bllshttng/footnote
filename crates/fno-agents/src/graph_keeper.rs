@@ -2342,7 +2342,7 @@ fn classify_deferred_reason(reason: &str) -> Option<&'static str> {
     crate::backlog::patch::classify_deferred_reason(reason)
 }
 
-fn node_carries_pr(node: &Value, pr_number: i64, repo: Option<&str>) -> bool {
+pub(crate) fn node_carries_pr(node: &Value, pr_number: i64, repo: Option<&str>) -> bool {
     let primary = node.get("pr_number").and_then(Value::as_i64) == Some(pr_number);
     let urls: Vec<String> = {
         let mut v = Vec::new();

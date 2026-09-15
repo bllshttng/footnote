@@ -776,8 +776,7 @@ def status(
     if isinstance(scan, dict):
         typer.echo(
             f"Merge scan:   completed_at={scan.get('completed_at')} "
-            f"scanned={scan.get('scanned')} eligible={scan.get('eligible')} "
-            f"attempted={scan.get('attempted')}"
+            f"scanned={scan.get('scanned')}"
         )
     else:
         typer.echo("Merge scan:   (no scan receipt from a merge_scan-capable tick)")
@@ -883,8 +882,6 @@ def _tick_watermarks(events_path: Optional[Path]) -> dict:
                     marks["merge_scan"] = {
                         "completed": scan.get("completed") is True,
                         "completed_at": ev.get("ts"),
-                        "eligible": scan.get("eligible"),
-                        "attempted": scan.get("attempted"),
                         "scanned": scan.get("scanned"),
                     }
                 completed = _valid_completed_tick(

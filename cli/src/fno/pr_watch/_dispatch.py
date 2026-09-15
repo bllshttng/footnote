@@ -19,7 +19,7 @@ import os
 import subprocess
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
@@ -86,8 +86,6 @@ class TickResult:
     # The preflight RAN but the budget was unreadable: the tick proceeded on
     # an absent instrument rather than reading the absence as a low budget.
     quota_unknown: bool = False
-    # Durable-grant executions handed to the merge phase (see run_execute_queue).
-    execute_queue: list = field(default_factory=list)
 
 
 # Receipts chunk below the authoritative event ceiling (fno.events reads it
@@ -831,14 +829,8 @@ def _run_tick(
 
     acted = 0
     skipped = 0
-    # The merge-scan receipt: the completed tick's proof the grant scan RAN.
-    # attempted = executions handed to the merge phase; a scan that saw
-    # nothing is still a scan that ran (AC12-HP).
-    merge_scan_eligible = 0
-    merge_scan_attempted = 0
-    execute_queue: list[tuple[Any, str, dict[str, Any]]] = []
     # Rich reads completed: separates "the scan reached nothing" from "the
-    # scan found nothing granted" (eligible=0 alone cannot).
+    # scan found nothing" (scanned=0 alone cannot).
     merge_scan_scanned = 0
 
     # GraphQL budget preflight. The dispatch pass below spends gh pr view,
@@ -1019,18 +1011,6 @@ def _run_tick(
                 except Exception as exc:
                     log.warning("pr-watch: post_merge_readiness failed for PR #%d: %s", pr, exc)
 
-            # The durable-grant arm (OPEN PRs only): one typed resolve per
-            # candidate per tick - graph, claim liveness, and standing config
-            # are all local reads. The verdict's grant fields ride the
-            # execution events for attribution.
-            grant_verdict = None
-            if obs.state == "OPEN":
-                from fno.pr._merge_grant import resolve_durable_grant
-
-                grant_verdict = resolve_durable_grant(pr, str(cand.repo_dir))
-                if grant_verdict.merge_eligible:
-                    merge_scan_eligible += 1
-
             decision = decide(
                 obs,
                 watermark=entry,
@@ -1038,9 +1018,6 @@ def _run_tick(
                 merge_ready=merge_ready,
                 now_iso=now_iso,
                 max_age_days=max_age_days,
-                durable_grant_eligible=bool(
-                    grant_verdict is not None and grant_verdict.merge_eligible
-                ),
             )
 
             if decision.kind == "noop":
@@ -1173,20 +1150,6 @@ def _run_tick(
                 emit("pr_watch_skipped", {"pr": pr, "reason": "fire-budget"})
                 skipped += 1
 
-            elif decision.kind == "execute":
-                # Queued, never run here: the merge phase owns the call (see
-                # run_execute_queue and the merge-phase doc).
-                grant = grant_verdict.grant if (
-                    grant_verdict is not None and isinstance(grant_verdict.grant, dict)
-                ) else {}
-                grant_fields = {
-                    k: grant.get(k) for k in ("source", "recorded_by", "recorded_at")}
-
-                execute_queue.append((cand, key, grant_fields))
-                merge_scan_attempted += 1
-                entry["last_polled_at"] = now_iso
-                store.set(key, entry)
-
             entry["last_seen_state"] = obs.state
             if obs.state in ("MERGED", "CLOSED"):
                 _drop_cached_terminal(state, dropped, key, obs.state)
@@ -1221,16 +1184,14 @@ def _run_tick(
         "failed": sorted(failed),
         "sweep_failures": sweep_failures,
         "listing_api": "rest",
-        # The grant scan's positive receipt: this tick LOOKED, and here is
-        # what it saw. completed=true always - it rides a completed sweep,
-        # and the quota-skip arm above returns before here precisely so a
-        # skipped tick mints no scan receipt (AC12-HP: counts are coherent,
-        # integer, and include zero).
+        # The scan receipt: this tick LOOKED, and here is how many rich reads
+        # completed. completed=true always - it rides a completed sweep, and
+        # the quota-skip arm above returns before here precisely so a skipped
+        # tick mints no scan receipt (AC12-HP: counts are coherent, integer,
+        # and include zero).
         "merge_scan": {
             "completed": True,
             "scanned": merge_scan_scanned,
-            "eligible": merge_scan_eligible,
-            "attempted": merge_scan_attempted,
         },
     }
     _emit_tick_receipt(emit, receipt)
@@ -1240,12 +1201,11 @@ def _run_tick(
         skipped=skipped,
         sweep_failures=sweep_failures,
         quota_unknown=quota_unknown,
-        execute_queue=execute_queue,
     )
 
 
 def run_execute_queue(
-    result: TickResult,
+    queue: list,
     *,
     store_path: Optional[Path] = None,
     emit: Callable[[str, dict], Optional[bool]],
@@ -1253,11 +1213,11 @@ def run_execute_queue(
     max_retries: int,
     claim: Any,
 ) -> tuple[int, int]:
-    """Run the sweep's queued durable-grant merges; returns ``(executed,
+    """Drain the merge phase's granted rows; returns ``(executed,
     skipped)``. Contract: docs/architecture/pr-watch-merge-phase.md."""
     from fno.pr_watch._state import WatermarkStore
 
-    if not result.execute_queue:
+    if not queue:
         return (0, 0)
     holder = f"pr-watch-merge:{os.getpid()}"
 
@@ -1269,7 +1229,7 @@ def run_execute_queue(
     store = WatermarkStore(path=store_path)
     executed = 0
     skipped = 0
-    for cand, key, grant_fields in result.execute_queue:
+    for cand, key, grant_fields in queue:
         pr = cand.pr_number
         pr_lock_key = f"pr-watch:{cand.repo_slug or 'unknown'}:{pr}"
         try:
@@ -1280,8 +1240,10 @@ def run_execute_queue(
             continue
         try:
             entry = store.get(key)
-            if not isinstance(entry, dict) or entry.get("merge_dispatched"):
-                continue  # an overlapping tick already merged it (doc: contract)
+            # A parked row never retries from the queue, and an overlapping
+            # tick's merge_dispatched keeps the first attempt the only one.
+            if not isinstance(entry, dict) or entry.get("merge_dispatched") or entry.get("parked"):
+                continue
             left = phase_seconds_left()
             if left is not None and left < _FIRE_FLOOR_S:
                 emit("pr_watch_skipped", {"pr": pr, "reason": "execute-budget"})
