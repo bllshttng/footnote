@@ -103,25 +103,22 @@ def _escalation_scope(session_id: "str | None") -> "str | None":
 
     The channel is keyed by the king as well as the marker: two reigning
     kings measure different stuck sets on their own beats, and a marker-only
-    channel lets each one's ask close the other's question. A scopeless
-    caller stays on the legacy shared channel.
+    channel lets each one's ask close the other's question. The registry
+    read lives in the fno-agents crate (`king-escalation-scope`); an
+    unreadable answer never blocks the ask and falls back to the legacy
+    shared channel.
     """
     if not session_id:
         return None
     try:
-        from fno.agents.registry import load_registry
-        from fno.harness_identity import session_identity_key
+        from fno.rust_binary import verb_call
 
-        needle = session_identity_key(session_id)
-
-        def _keyed(r: object) -> "str | None":
-            sid = getattr(r, "harness_session_id", None)
-            return session_identity_key(sid) if sid else None
-
-        row = next((r for r in load_registry() if _keyed(r) == needle), None)
-    except Exception:  # noqa: BLE001 - an unreadable registry never blocks the ask
+        answer = verb_call("king-escalation-scope", {"session_id": session_id})
+    except Exception:  # noqa: BLE001 - an unreadable crate answer never blocks the ask
         return None
-    scope = getattr(row, "crown_scope", None) if row is not None else None
+    if not answer.get("ok"):
+        return None
+    scope = answer.get("scope")
     return scope if isinstance(scope, str) and scope.strip() else None
 
 

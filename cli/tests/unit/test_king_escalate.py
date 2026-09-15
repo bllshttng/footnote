@@ -53,6 +53,21 @@ def crate_render_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("fno.king.escalate._render", _fake_render)
 
 
+@pytest.fixture(autouse=True)
+def crate_scope_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The scope read lives in the fno-agents crate (`king-escalation-scope`);
+    tests stub the seam, as crate_render_stub stubs the renderer, and the
+    scope tests install their own channel map."""
+    monkeypatch.setattr("fno.king.escalate._escalation_scope", lambda sid: None)
+
+
+def _channel_map(monkeypatch, scopes: "dict[str, str | None]") -> None:
+    monkeypatch.setattr(
+        "fno.king.escalate._escalation_scope",
+        lambda sid: scopes.get(sid),
+    )
+
+
 def _run(root: Path, ids: list[str], reason: str = "NoProgress") -> tuple[str, str]:
     return escalate(ids, reason=reason, root=root, session_id="k-test", cwd=root)
 
@@ -411,27 +426,8 @@ def test_mail_presiding_king_true_only_on_a_zero_exit(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _two_courts(tmp_path: Path, monkeypatch) -> None:
-    _prepare_court(
-        monkeypatch,
-        tmp_path,
-        [
-            _entry(
-                "king-a",
-                status="busy",
-                crown_level=1,
-                crown_scope="fno",
-                harness_session_id="king-a-session",
-            ),
-            _entry(
-                "king-b",
-                status="busy",
-                crown_level=1,
-                crown_scope="reaper",
-                harness_session_id="king-b-session",
-            ),
-        ],
-    )
+def _two_channels(monkeypatch) -> None:
+    _channel_map(monkeypatch, {"king-a-session": "fno", "king-b-session": "reaper"})
 
 
 def _escalate_as(root: Path, session: str, ids: "list[str]") -> "tuple[str, str]":
@@ -448,7 +444,7 @@ def test_two_reigning_kings_never_close_each_others_question(
     2026-09-15 because the channel keyed on the marker alone; a king's ask
     must match on the king too, or the operator never sees a stable question.
     """
-    _two_courts(tmp_path, monkeypatch)
+    _two_channels(monkeypatch)
     reaper_set = ["unheld_progress:x-9"]
 
     first_a = _escalate_as(tmp_path, "king-a-session", STALLED)
@@ -472,7 +468,7 @@ def test_a_kings_changed_set_supersedes_only_its_own_question(
     tmp_path: Path, monkeypatch
 ) -> None:
     """A changed board still supersedes, within the king's own channel."""
-    _two_courts(tmp_path, monkeypatch)
+    _two_channels(monkeypatch)
 
     first_a = _escalate_as(tmp_path, "king-a-session", STALLED)
     first_b = _escalate_as(tmp_path, "king-b-session", ["unheld_progress:x-9"])
@@ -496,19 +492,7 @@ def test_a_crowned_ask_never_sweeps_the_uncrowned_shared_channel(
     """A scopeless caller stays on the legacy shared marker, and a crowned
     ask never closes its row: the scoped sweep cannot match the unscoped
     prefix. Legacy rows open at deploy time linger until a human answers."""
-    _prepare_court(
-        monkeypatch,
-        tmp_path,
-        [
-            _entry(
-                "king-a",
-                status="busy",
-                crown_level=1,
-                crown_scope="fno",
-                harness_session_id="king-a-session",
-            ),
-        ],
-    )
+    _channel_map(monkeypatch, {"king-a-session": "fno"})
     legacy = _escalate_as(tmp_path, "k-test", STALLED)
     crowned = _escalate_as(tmp_path, "king-a-session", ["undispatched:x-1"])
 

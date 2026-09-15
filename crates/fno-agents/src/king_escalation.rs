@@ -234,6 +234,73 @@ pub fn run_king_escalation_text(args: &[String]) -> i32 {
     0
 }
 
+/// The escalation channel's per-king scope read: resolve the escalating
+/// session's registry row and return its `crown_scope`. Session ids compare
+/// under the Python `session_identity_key` contract this read ports -
+/// lowercase everything except opencode's `ses_` prefix - and a blank scope
+/// reads as None, keeping a malformed row on the legacy shared channel.
+fn identity_key(session_id: &str) -> String {
+    if session_id.starts_with("ses_") {
+        session_id.to_owned()
+    } else {
+        session_id.to_lowercase()
+    }
+}
+
+fn escalation_scope(entries: &[crate::state::RegistryEntry], session_id: &str) -> Option<String> {
+    let needle = identity_key(session_id);
+    let row = entries.iter().find(|e| {
+        e.harness_session_id
+            .as_deref()
+            .is_some_and(|sid| identity_key(sid) == needle)
+    })?;
+    row.crown_scope
+        .clone()
+        .filter(|scope| !scope.trim().is_empty())
+}
+
+/// `fno-agents king-escalation-scope`: the crate side of the per-king
+/// escalation channel. One JSON request on stdin (`{"session_id": "..."}`),
+/// one JSON answer on stdout (`{"ok": true, "scope": <string|null>}`). An
+/// unreadable registry answers `scope: null`, never a failure - the ask must
+/// not block, and Python falls back to the legacy shared channel. Exit 2 on
+/// malformed args or an unreadable request.
+pub fn run_king_escalation_scope(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("usage: fno-agents king-escalation-scope (one JSON request on stdin)");
+        return 0;
+    }
+    if !args.is_empty() {
+        eprintln!(
+            "fno-agents king-escalation-scope: unexpected arguments; the request rides stdin"
+        );
+        return 2;
+    }
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        eprintln!("fno-agents king-escalation-scope: could not read stdin");
+        return 2;
+    }
+    #[derive(Deserialize)]
+    struct ScopeRequest {
+        session_id: String,
+    }
+    let req: ScopeRequest = match serde_json::from_str(&input) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("fno-agents king-escalation-scope: bad request: {e}");
+            return 2;
+        }
+    };
+    let path = crate::paths::AgentsHome::from_env().registry_json();
+    let scope = crate::state::load_registry(&path)
+        .map(|registry| escalation_scope(&registry.entries, &req.session_id))
+        .unwrap_or(None);
+    let answer = serde_json::json!({ "ok": true, "scope": scope });
+    println!("{answer}");
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -475,5 +542,47 @@ mod tests {
         let mail = ans.mail.expect("ok case carries mail");
         assert!(mail.contains("A crown under yours stopped on a quiet board:"));
         assert!(mail.contains("Reason given: NoProgress"));
+    }
+
+    // --- the per-king scope read ---
+
+    fn registry_row(sid: &str, scope: Option<&str>) -> crate::state::RegistryEntry {
+        crate::state::RegistryEntry {
+            name: "king".to_owned(),
+            harness_session_id: Some(sid.to_owned()),
+            crown_scope: scope.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scope_resolution_returns_the_crowned_rows_scope() {
+        let rows = vec![
+            registry_row("King-A-Session", Some("fno")),
+            registry_row("king-b-session", Some("reaper")),
+        ];
+        assert_eq!(
+            escalation_scope(&rows, "king-a-session").as_deref(),
+            Some("fno")
+        );
+        assert_eq!(
+            escalation_scope(&rows, "KING-B-SESSION").as_deref(),
+            Some("reaper")
+        );
+    }
+
+    #[test]
+    fn scope_resolution_reads_blank_scope_and_unknown_session_as_none() {
+        let rows = vec![
+            registry_row("plain-session", Some("  ")),
+            registry_row("crowned-session", Some("fno")),
+            registry_row("ses_kept1", Some("reaper")),
+        ];
+        assert!(escalation_scope(&rows, "plain-session").is_none());
+        assert!(escalation_scope(&rows, "no-such-session").is_none());
+        assert_eq!(
+            escalation_scope(&rows, "ses_kept1").as_deref(),
+            Some("reaper")
+        );
     }
 }
