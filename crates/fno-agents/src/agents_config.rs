@@ -659,6 +659,47 @@ pub fn territory_max_live(cwd: &Path) -> u32 {
     }
 }
 
+/// Blueprint thread cap defaults (operator law, x-d8bc): no more than five
+/// blueprint threads at once, one per territory - one for each king. The
+/// spawn gate refuses past either; the remedy is a native subagent.
+pub const DEFAULT_BLUEPRINT_MAX_LIVE: u32 = 5;
+pub const DEFAULT_BLUEPRINT_MAX_LIVE_PER_TERRITORY: u32 = 1;
+
+/// Read `agents.profiles.blueprint.<key>` through the same table walk the
+/// other spawn-gate knobs use. `None` when no candidate config carries it.
+fn blueprint_profile_value(cwd: &Path, key: &str) -> Option<u32> {
+    resolve(cwd, |t| {
+        t.get("agents")?
+            .as_table()?
+            .get("profiles")?
+            .as_table()?
+            .get("blueprint")?
+            .as_table()?
+            .get(key)?
+            .as_integer()
+            .and_then(|i| u32::try_from(i).ok())
+    })
+}
+
+/// Resolve `agents.profiles.blueprint.max_live`, default
+/// [`DEFAULT_BLUEPRINT_MAX_LIVE`] — a value below 1 coerces, so a typo can
+/// never wall off planning entirely.
+pub fn blueprint_max_live(cwd: &Path) -> u32 {
+    match blueprint_profile_value(cwd, "max_live") {
+        Some(v) if v >= 1 => v,
+        _ => DEFAULT_BLUEPRINT_MAX_LIVE,
+    }
+}
+
+/// Resolve `agents.profiles.blueprint.max_live_per_territory`, default
+/// [`DEFAULT_BLUEPRINT_MAX_LIVE_PER_TERRITORY`].
+pub fn blueprint_territory_max_live(cwd: &Path) -> u32 {
+    match blueprint_profile_value(cwd, "max_live_per_territory") {
+        Some(v) if v >= 1 => v,
+        _ => DEFAULT_BLUEPRINT_MAX_LIVE_PER_TERRITORY,
+    }
+}
+
 /// Resolve `agents.min_free_gb`. `<= 0` is a VALID value (guard disabled); only
 /// an unparseable value falls back to [`DEFAULT_MIN_FREE_GB`].
 pub fn min_free_gb(cwd: &Path) -> f64 {
@@ -1172,6 +1213,29 @@ mod tests {
         assert!(!dead_path.is_dir());
         assert_eq!(max_live(&dead_path), 7);
         std::env::remove_var("FNO_AGENTS_HOME");
+        clear_config_env();
+    }
+
+    /// x-d8bc AC6-EDGE (config side): default, a configured value, and the
+    /// 0-coercion on both blueprint cap readers.
+    #[test]
+    fn blueprint_caps_default_configure_and_coerce() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("bp-default", "schema_version = 1\n");
+        assert_eq!(blueprint_max_live(&cwd), DEFAULT_BLUEPRINT_MAX_LIVE);
+        assert_eq!(
+            blueprint_territory_max_live(&cwd),
+            DEFAULT_BLUEPRINT_MAX_LIVE_PER_TERRITORY
+        );
+        let cwd = write_project_settings(
+            "bp-configured",
+            "[agents.profiles.blueprint]\nmax_live = 8\nmax_live_per_territory = 2\n",
+        );
+        assert_eq!(blueprint_max_live(&cwd), 8);
+        assert_eq!(blueprint_territory_max_live(&cwd), 2);
+        let cwd = write_project_settings("bp-zero", "[agents.profiles.blueprint]\nmax_live = 0\n");
+        assert_eq!(blueprint_max_live(&cwd), DEFAULT_BLUEPRINT_MAX_LIVE);
         clear_config_env();
     }
 

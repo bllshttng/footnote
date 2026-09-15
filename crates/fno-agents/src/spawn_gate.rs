@@ -45,6 +45,10 @@ pub const EXIT_NO_WAIT: i32 = 76;
 /// was unreadable. The team cap is the one permanent, non-queueable machine
 /// refusal with its own number, so a caller never retries it as capacity.
 pub const EXIT_TERRITORY_CAP: i32 = 86;
+/// The blueprint thread cap (x-d8bc): more than
+/// `agents.profiles.blueprint.max_live` live `bp` threads, or more than one
+/// per territory, refuses the spawn and teaches the subagent path.
+pub const EXIT_BLUEPRINT_CAP: i32 = 88;
 pub const EXIT_RAM_REFUSED: i32 = 77;
 pub const EXIT_PROVIDER_CAP: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
@@ -641,6 +645,104 @@ fn territory_refusal(receipt: &str) -> Refusal {
         .ev("axis", serde_json::json!("territory"))
 }
 
+/// The blueprint thread cap (x-d8bc): the machine axis counts live rows whose
+/// names parse to verb `bp`; the territory axis counts the ones working the
+/// spawn's territory. Refuses, never queues, beside the machine cap - and
+/// `--force` does not excuse it, the same posture as the territory cap. The
+/// receipt names the live rows so a blocked king sees what holds the slot.
+pub(crate) fn check_blueprint_cap(
+    config_cwd: &Path,
+    registry_path: &Path,
+    name: &str,
+    node: Option<&str>,
+    live: &[RegistryEntry],
+) -> Result<(), String> {
+    if !crate::naming::is_blueprint_name(name) {
+        return Ok(());
+    }
+    let blueprint_rows: Vec<&RegistryEntry> = live
+        .iter()
+        .filter(|r| crate::naming::is_blueprint_name(&r.name))
+        .collect();
+    let remedy = {
+        let named_node = node
+            .map(str::to_string)
+            .or_else(|| crate::naming::parse_dispatch_agent_name(Some(name)).and_then(|p| p.node))
+            .unwrap_or_else(|| "<node>".to_string());
+        format!(
+            "plan it in a native subagent: /fno:blueprint subagent {named_node} (law d-94853e86)"
+        )
+    };
+    let max = agents_config::blueprint_max_live(config_cwd);
+    if blueprint_rows.len() as u32 >= max {
+        return Err(serde_json::json!({
+            "status": "refused",
+            "reason": "blueprint_cap",
+            "count": blueprint_rows.len(),
+            "max_live": max,
+            "live_blueprints": blueprint_rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            "remedy": remedy,
+        })
+        .to_string());
+    }
+    let Some(node) = node else {
+        return Ok(());
+    };
+    let territory_cap = agents_config::blueprint_territory_max_live(config_cwd);
+    let mut warnings = Vec::new();
+    let state = territory_of_node(config_cwd, registry_path, node, &mut warnings);
+    for w in &warnings {
+        eprintln!("{w}");
+    }
+    let Some((scope, members)) = state else {
+        return Err(serde_json::json!({
+            "status": "refused",
+            "reason": "territory_unknown",
+            "node": node,
+            "max_live_per_territory": territory_cap,
+        })
+        .to_string());
+    };
+    let territory_rows: Vec<&RegistryEntry> = blueprint_rows
+        .iter()
+        .copied()
+        .filter(|r| {
+            r.node
+                .as_deref()
+                .map(|n| members.contains(n))
+                .unwrap_or(false)
+        })
+        .collect();
+    if territory_rows.len() as u32 >= territory_cap {
+        return Err(serde_json::json!({
+            "status": "refused",
+            "reason": "blueprint_territory_cap",
+            "territory": scope,
+            "count": territory_rows.len(),
+            "max_live_per_territory": territory_cap,
+            "live_blueprints": territory_rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            "remedy": remedy,
+        })
+        .to_string());
+    }
+    Ok(())
+}
+
+/// The blueprint refusal as data, mirroring [`territory_refusal`]: the
+/// receipt's own reason word rides the event, the axis is `blueprint`.
+fn blueprint_refusal(receipt: &str) -> Refusal {
+    let parsed = serde_json::from_str::<serde_json::Value>(receipt)
+        .unwrap_or(serde_json::json!({"status": "refused", "reason": "blueprint_cap"}));
+    let reason = parsed
+        .get("reason")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("blueprint_cap")
+        .to_string();
+    Refusal::with_receipt(EXIT_BLUEPRINT_CAP, parsed)
+        .ev("reason", serde_json::json!(reason))
+        .ev("axis", serde_json::json!("blueprint"))
+}
+
 /// `fno-agents territory-verdict --node <id>`: the per-territory cap verdict
 /// for one node as JSON on stdout. The single counting leg: the Python gate
 /// passes the node through this door and recomputes nothing. Exit is 0 for
@@ -1051,6 +1153,25 @@ pub fn run_gate(
                 return Err(territory_refusal(&receipt));
             }
         }
+        // The blueprint axis refuses under --force too (x-d8bc): force speaks
+        // for the machine being busy, never for one king holding every
+        // planning lane.
+        {
+            let mut warnings = Vec::new();
+            let live = live_rows(registry_path, &mut warnings);
+            if let Err(receipt) = check_blueprint_cap(
+                config_cwd,
+                registry_path,
+                name,
+                gate_node().as_deref(),
+                &live,
+            ) {
+                eprintln!("{receipt}");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                return Err(blueprint_refusal(&receipt));
+            }
+        }
         eprintln!("spawn-gate: forced past cap, RAM floor, and load ceiling (--force)");
         if substrate == "headless" {
             // fail_closed=false: this arm cannot fault, only warn.
@@ -1420,6 +1541,19 @@ pub fn run_gate(
                                     eprintln!("{receipt}");
                                     return Err(territory_refusal(&receipt));
                                 }
+                            }
+                            // The blueprint axis beside it (x-d8bc): a full
+                            // planning lane refuses, never queues.
+                            if let Err(receipt) = check_blueprint_cap(
+                                config_cwd,
+                                registry_path,
+                                name,
+                                gate_node().as_deref(),
+                                &live,
+                            ) {
+                                guard.release();
+                                eprintln!("{receipt}");
+                                return Err(blueprint_refusal(&receipt));
                             }
                             if substrate == "headless" {
                                 if let Err(fault) = acquire_worker_slot(
@@ -3511,5 +3645,164 @@ MemAvailable:    8000000 kB\n";
             );
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// x-d8bc AC6-HP: with five live `bp` rows and default config, a sixth
+    /// blueprint spawn refuses with `blueprint_cap`, the receipt naming the
+    /// five live rows, the cap, and the subagent remedy. A non-bp spawn and
+    /// a spawn under the cap admit.
+    #[test]
+    fn a_sixth_blueprint_spawn_refuses_with_the_live_rows_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let fnodir = dir.path().join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(fnodir.join("config.toml"), "schema_version = 1\n").unwrap();
+        let reg = dir.path().join("registry.json");
+        std::fs::write(&reg, r#"{"schema_version":1,"entries":[]}"#).unwrap();
+        let live: Vec<RegistryEntry> = ["bp-x-1-a", "bp-x-2-b", "bp-x-3-c", "bp-x-4-d", "bp-x-5-e"]
+            .iter()
+            .map(|n| bp_entry(n, None))
+            .collect();
+        let err = check_blueprint_cap(dir.path(), &reg, "bp-x-9-slug", None, &live).unwrap_err();
+        let parsed: serde_json::Value = serde_json::from_str(&err).unwrap();
+        assert_eq!(parsed["reason"], serde_json::json!("blueprint_cap"));
+        assert_eq!(parsed["max_live"], serde_json::json!(5));
+        assert_eq!(
+            parsed["live_blueprints"].as_array().map(|a| a.len()),
+            Some(5),
+            "{parsed}"
+        );
+        assert!(
+            parsed["remedy"]
+                .as_str()
+                .unwrap()
+                .contains("/fno:blueprint subagent"),
+            "{parsed}"
+        );
+        // A non-bp spawn is never counted or refused on this axis.
+        assert!(check_blueprint_cap(dir.path(), &reg, "t-x-9-slug", None, &live).is_ok());
+        // Under the cap a bp spawn admits.
+        assert!(check_blueprint_cap(dir.path(), &reg, "bp-x-9-slug", None, &live[..4]).is_ok());
+    }
+
+    /// x-d8bc AC6-ERR: one live blueprint row on a node, a second blueprint
+    /// spawn for the same territory refuses with `blueprint_territory_cap`
+    /// and names the live row.
+    #[test]
+    fn a_second_blueprint_in_a_territory_refuses() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        // A project-scoped graph so the loose-territory fallback answers.
+        std::fs::write(
+            dir.path().join("graph.json"),
+            serde_json::json!({"entries": [{"id": "x-1", "project": "proj", "status": "idea"}]})
+                .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("FNO_HOME", dir.path());
+        let reg = dir.path().join("registry.json");
+        std::fs::write(&reg, r#"{"schema_version":1,"entries":[]}"#).unwrap();
+        let live = vec![bp_entry("bp-x-1-a", Some("x-1"))];
+        let err =
+            check_blueprint_cap(dir.path(), &reg, "bp-x-2-slug", Some("x-1"), &live).unwrap_err();
+        std::env::remove_var("FNO_HOME");
+        let parsed: serde_json::Value = serde_json::from_str(&err).unwrap();
+        assert_eq!(
+            parsed["reason"],
+            serde_json::json!("blueprint_territory_cap")
+        );
+        assert_eq!(parsed["territory"], serde_json::json!("loose:proj"));
+        assert_eq!(
+            parsed["live_blueprints"],
+            serde_json::json!(["bp-x-1-a"]),
+            "{parsed}"
+        );
+        assert!(
+            parsed["remedy"]
+                .as_str()
+                .unwrap()
+                .contains("/fno:blueprint subagent"),
+            "{parsed}"
+        );
+    }
+
+    /// x-d8bc AC6-ERR (force): the force branch refuses the same blueprint
+    /// spawn - force never excuses the blueprint axis.
+    #[test]
+    fn the_force_branch_refuses_a_capped_blueprint_spawn() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let fnodir = dir.path().join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(fnodir.join("config.toml"), "schema_version = 1\n").unwrap();
+        std::fs::write(
+            dir.path().join("graph.json"),
+            serde_json::json!({"entries": [{"id": "x-1", "project": "proj", "status": "idea"}]})
+                .to_string(),
+        )
+        .unwrap();
+        std::env::set_var("FNO_HOME", dir.path());
+        std::env::set_var("FNO_NODE", "x-1");
+        let prior_claims = std::env::var_os("FNO_CLAIMS_ROOT");
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.path().join("claims-root"));
+        let prior_spawn_gate = std::env::var_os("FNO_SPAWN_GATE");
+        std::env::remove_var("FNO_SPAWN_GATE");
+        let reg = dir.path().join("registry.json");
+        let mut e = RegistryEntry::default();
+        e.name = "bp-x-1-a".into();
+        e.node = Some("x-1".into());
+        e.pid = Some(std::process::id());
+        e.status = AgentStatus::Busy;
+        e.pid_start_time = crate::daemon::process_start_time(std::process::id());
+        crate::state::update_registry(&reg, |r| r.entries.push(e)).unwrap();
+        let got = run_gate(
+            dir.path(),
+            &reg,
+            GateInput {
+                name: "bp-x-2-slug".into(),
+                substrate: "bg".into(),
+                flags: GateFlags {
+                    force: true,
+                    no_wait: false,
+                },
+                ..Default::default()
+            },
+        );
+        std::env::remove_var("FNO_HOME");
+        std::env::remove_var("FNO_NODE");
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        if let Some(v) = prior_claims {
+            std::env::set_var("FNO_CLAIMS_ROOT", v);
+        }
+        if let Some(v) = prior_spawn_gate {
+            std::env::set_var("FNO_SPAWN_GATE", v);
+        }
+        let refusal = got.err().expect("the spawn must refuse");
+        assert_eq!(
+            refusal.exit_code, EXIT_BLUEPRINT_CAP,
+            "{:?}",
+            refusal.receipt
+        );
+        let receipt = refusal.receipt.clone().unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            receipt["reason"],
+            serde_json::json!("blueprint_territory_cap"),
+            "{receipt}"
+        );
+    }
+
+    /// A live blueprint registry row for the cap tests: pid is this
+    /// process, so `live_rows`' liveness filter admits it.
+    fn bp_entry(name: &str, node: Option<&str>) -> RegistryEntry {
+        let mut e = RegistryEntry::default();
+        e.name = name.into();
+        e.node = node.map(str::to_string);
+        e.pid = Some(std::process::id());
+        e.status = AgentStatus::Busy;
+        e
     }
 }
