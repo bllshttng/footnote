@@ -1372,4 +1372,56 @@ mod tests {
         drop(connection);
         drop(dir);
     }
+
+    #[test]
+    fn flipgate_child_extras_note_reads_key_survives_the_roundtrip() {
+        // AC4-HP: a progress note carrying an unknown key keeps it through
+        // save + export, so the two legs agree.
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let mut rows = raw_rows(&graph);
+        rows[0]["progress_notes"] =
+            serde_json::json!([{"ts": "2026-09-14T00:00:00+00:00", "text": "note", "reads": [42]}]);
+        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&rows)).unwrap();
+        shadow_sync(&graph, &[], &rows, "sha256:seed").unwrap();
+        let reloaded = read_entries(&graph).unwrap();
+        let notes = reloaded[0]
+            .get("progress_notes")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(notes[0]["reads"], serde_json::json!([42]));
+        let report = parity(&graph).unwrap();
+        assert_eq!(
+            report.divergent, 0,
+            "flipgate_child_extras_note_reads_key_survives_the_roundtrip: {report:?}"
+        );
+    }
+
+    #[test]
+    fn flipgate_child_extras_migration_adds_column_and_keeps_rows() {
+        // AC5-EDGE: a db whose comments table lost the extras column is
+        // migrated back on the next open, and legacy rows load with empty
+        // extras.
+        let (dir, graph) = fixture("graph.json");
+        open(&graph).unwrap();
+        let db = database_path(&graph);
+        let connection = Connection::open(&db).unwrap();
+        connection
+            .execute_batch("ALTER TABLE comments DROP COLUMN extras;")
+            .unwrap();
+        drop(connection);
+        let connection = open(&graph).unwrap();
+        let has: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('comments') WHERE name = 'extras'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(has, 1, "the open re-added the extras column");
+        let comments = crate::backlog::comments::load(&connection, "ab-one").unwrap();
+        assert!(comments.is_empty(), "imported rows load fine: {comments:?}");
+        drop(connection);
+        drop(dir);
+    }
 }
