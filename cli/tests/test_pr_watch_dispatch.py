@@ -2670,13 +2670,14 @@ class TestTickRecordsAndDeadline:
 
         def _record_queue(queue, **_kw):
             drained.append(list(queue))
-            return (1, 0)
+            return {"executed": 1, "held": 0, "failed": 0, "skipped": 0}
 
         monkeypatch.setattr("fno.pr_watch._dispatch.run_execute_queue", _record_queue,
                             raising=True)
         grant_queue = {
             "candidates": 2,
             "verdicts": {"granted": 1, "held": 1},
+            "elapsed_ms": 812,
             "queue": [{
                 "node_id": "x-abc12345", "pr": 1, "repo_slug": "owner/repo",
                 "cwd": str(tmp_path),
@@ -2692,12 +2693,15 @@ class TestTickRecordsAndDeadline:
         assert cand.pr_number == 1
         assert key == "owner/repo#1"
         assert grant["recorded_by"] == "spawner-session"
+        rotate_payloads = [p for p in self._verb_calls if p.get("op") == "grant-queue"]
+        assert rotate_payloads, self._verb_calls
+        assert isinstance(rotate_payloads[0].get("rotate"), int)
         rows = [d for t, d in events if t == "control_plane_tick"]
         merge_rows = [d for d in rows if d.get("arm") == "pr_watch_merge"]
         assert merge_rows and merge_rows[-1].get("acted") == 1
         assert merge_rows[-1].get("skip_reason") is None
         assert merge_rows[-1]["detail"] == (
-            "merge sweep=cut candidates=2 granted=1 executed=1 skipped=0"
+            "merge sweep=cut candidates=2 granted=1 executed=1 held=0 failed=0 skipped=0 read_ms=812"
         )
         ends = [d for t, d in events if t == "pr_watch_tick_end"]
         assert ends and ends[-1].get("cut") == ["sweep"]

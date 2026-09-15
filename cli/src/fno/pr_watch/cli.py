@@ -1144,7 +1144,10 @@ def tick() -> None:
             try:
                 # Durable grants, never the sweep's result: a cut sweep leaves
                 # no result, and a completed one reads few PRs under load.
+                # rotate is the tick index: Rust rotates the queue head by it,
+                # so a slow head never starves the tail.
                 out = verb_call("authorized-merge", {"op": "grant-queue",
+                                "rotate": int(time.time() // interval),
                                 "cwd": str(roots[0] if roots else Path.cwd())}, timeout=60)
                 if out.get("error"):
                     raise VerbUnavailable(str(out["error"]))
@@ -1159,16 +1162,17 @@ def tick() -> None:
                 _emit_tick_row("pr_watch_merge", interval_s=interval, skip_reason="error",
                                detail=f"{head} grant queue unreadable ({exc})")
                 return
-            executed, skipped = run_execute_queue(
+            counts = run_execute_queue(
                 queue, emit=_emit_event,
                 notify=lambda message, **_kw: _notify_parked(message),
                 max_retries=cfg.retries, claim=ClaimAdapter(),
             )
             verdicts = out.get("verdicts") or {}
-            detail = (f"{head} candidates={out.get('candidates', 0)} "
-                      f"granted={verdicts.get('granted', 0)} executed={executed} skipped={skipped}")
-            typer.echo(f"pr-watch merge phase: {detail}")
-            _emit_tick_row("pr_watch_merge", interval_s=interval, acted=executed, detail=detail)
+            detail = (f"{head} candidates={out.get('candidates', 0)} granted={verdicts.get('granted', 0)} "
+                      + " ".join(f"{k}={v}" for k, v in counts.items())
+                      + f" read_ms={out.get('elapsed_ms', -1)}")
+            _emit_tick_row("pr_watch_merge", interval_s=interval,
+                           acted=counts["executed"], detail=detail)
 
 
         # Stranded-worktree recovery, same arming gate as the fleet
