@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -64,12 +63,13 @@ def no_worker_roots(monkeypatch):
 def _fake_runner(
     monkeypatch, ps_output: str, roster: list[dict], calls: list[list[str]]
 ):
-    """Fake the ``ps`` snapshot and pin the live roster the count reads.
+    """Fake the process-table door (``fno-agents census --ps``) and pin the
+    live roster the count reads.
 
     The roster used to arrive over a ``fno agents list`` subprocess and now
-    comes from an in-process registry read, so the fake moves with it. A
-    subprocess other than ``ps`` is an assertion failure rather than a
-    silently faked roster: that is what proves the shell-out is gone.
+    comes from an in-process registry read, so the fake moves with it. The
+    table itself rides the same door, so the fake records the door calls a
+    test wants to count.
     """
     from types import SimpleNamespace
 
@@ -78,14 +78,11 @@ def _fake_runner(
         lambda: [SimpleNamespace(status="live", **row) for row in roster],
     )
 
-    def run(argv, **kwargs):
-        calls.append(list(argv))
-        if argv[0] == "ps":
-            kwargs["stdout"].write(ps_output)
-            return subprocess.CompletedProcess(argv, 0)
-        raise AssertionError(f"unexpected subprocess in a footprint run: {argv}")
+    def door(verb, args=(), **kwargs):
+        calls.append([verb, *args])
+        return (None, {"ps": ps_output, "unreadable": 0})
 
-    return run
+    monkeypatch.setattr(doctor_footprint, "call_binary_json", door)
 
 
 def _pin_load(
@@ -133,15 +130,16 @@ def _pin_capacity(monkeypatch, cores: int):
 def test_ac9_edge_ps_timeout_is_unavailable(monkeypatch) -> None:
     from fno import doctor_footprint
 
-    def timed_out(argv, **kwargs):
-        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-
-    monkeypatch.setattr(doctor_footprint.subprocess, "run", timed_out)
+    monkeypatch.setattr(
+        doctor_footprint,
+        "call_binary_json",
+        lambda verb, args=(), **kwargs: ("timed out after 5.0s", None),
+    )
 
     output, error = doctor_footprint._read_ps(timeout=5.0)
 
     assert output is None
-    assert error == "ps unavailable: timed out after 5.0s"
+    assert error == "process table unavailable: timed out after 5.0s"
 
 
 def test_ac9_edge_default_ps_timeout_refuses_with_exit_four(monkeypatch) -> None:
@@ -149,17 +147,17 @@ def test_ac9_edge_default_ps_timeout_refuses_with_exit_four(monkeypatch) -> None
 
     calls: list[float | None] = []
 
-    def timed_out(argv, **kwargs):
+    def timed_out(verb, args=(), **kwargs):
         calls.append(kwargs.get("timeout"))
-        raise subprocess.TimeoutExpired(argv, kwargs.get("timeout"))
+        return ("timed out after 5.0s", None)
 
-    monkeypatch.setattr(doctor_footprint.subprocess, "run", timed_out)
+    monkeypatch.setattr(doctor_footprint, "call_binary_json", timed_out)
 
     output, error = doctor_footprint._read_ps()
 
     assert calls == [doctor_footprint.PS_TIMEOUT_SECONDS]
     assert output is None
-    assert error == "ps unavailable: timed out after 5.0s"
+    assert error == "process table unavailable: timed out after 5.0s"
 
 
 def test_ac9_edge_ps_timeout_caller_refuses_with_exit_four(monkeypatch) -> None:
@@ -168,14 +166,14 @@ def test_ac9_edge_ps_timeout_caller_refuses_with_exit_four(monkeypatch) -> None:
     monkeypatch.setattr(
         doctor_footprint,
         "_read_ps",
-        lambda **_kwargs: (None, "ps unavailable: timed out after 5.0s"),
+        lambda **_kwargs: (None, "process table unavailable: timed out after 5.0s"),
     )
 
     result = runner.invoke(app, ["doctor", "footprint", "--json"])
 
     assert result.exit_code == 4, result.output
     assert json.loads(result.stdout) == {
-        "error": "ps unavailable: timed out after 5.0s",
+        "error": "process table unavailable: timed out after 5.0s",
         "exit_code": 4,
     }
 
@@ -1048,7 +1046,7 @@ def test_ac1_hp_live_rows_read_the_registry_in_process(monkeypatch) -> None:
     def no_subprocess(*_args, **_kwargs):
         raise AssertionError("the roster count must not shell out")
 
-    monkeypatch.setattr(doctor_footprint.subprocess, "run", no_subprocess)
+    monkeypatch.setattr(doctor_footprint, "call_binary_json", no_subprocess)
 
     rows, error = doctor_footprint.live_registry_rows()
 
@@ -1095,19 +1093,24 @@ def test_ac1_edge_unreadable_registry_degrades_with_a_named_reason(
 
 
 def test_ac9_edge_ps_output_with_invalid_utf8_degrades_not_crashes(monkeypatch) -> None:
-    # A process's argv may legally carry non-UTF-8 bytes; one such byte in the
-    # snapshot must degrade that command string, not kill the verb.
-    from types import SimpleNamespace
-
+    # A process's argv may legally carry non-UTF-8 bytes; one undecodable byte
+    # in the table must degrade that command string, not kill the verb.
     from fno import doctor_footprint
 
-    def raw_bytes_ps(argv, **kwargs):
-        with open(kwargs["stdout"].name, "wb") as raw:
-            raw.write(b"PID PPID ELAPSED %CPU RSS COMMAND\n"
-                      b"100 1 01:00:00 86.0 1024 fno-agents-worker --run \xff\xfe\n")
-        return SimpleNamespace(returncode=0, stderr="")
-
-    monkeypatch.setattr(doctor_footprint.subprocess, "run", raw_bytes_ps)
+    monkeypatch.setattr(
+        doctor_footprint,
+        "call_binary_json",
+        lambda verb, args=(), **kwargs: (
+            None,
+            {
+                "ps": (
+                    "PID PPID STAT ELAPSED %CPU RSS COMMAND\n"
+                    "100 1 S 01:00:00 86.0 1024 fno-agents-worker --run \N{REPLACEMENT CHARACTER}\n"
+                ),
+                "unreadable": 0,
+            },
+        ),
+    )
 
     output, error = doctor_footprint._read_ps()
 
@@ -1178,20 +1181,16 @@ def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(
     from fno import doctor_footprint
 
     _pin_load(monkeypatch, status="within")
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID PPID ELAPSED %CPU RSS COMMAND
-            100 1 01:00:00 20.0 1024 fno-agents-worker --run
-            101 100 00:00:05 80.0 1024 cargo test -p fno
-            200 1 01:00:00 100.0 1024 unrelated-build
-            """,
-            [{"name": "worker-a"}],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        100 1 01:00:00 20.0 1024 fno-agents-worker --run
+        101 100 00:00:05 80.0 1024 cargo test -p fno
+        200 1 01:00:00 100.0 1024 unrelated-build
+        """,
+        [{"name": "worker-a"}],
+        [],
     )
 
     result = runner.invoke(app, ["doctor", "footprint", "--json"])
@@ -1270,21 +1269,17 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
         "_live_root_pids",
         lambda **_kwargs: (set(), None),
     )
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            f"""\
-            PID PPID ELAPSED %CPU RSS COMMAND
-            {observer_pid} 1 01:00:00 20.0 1024 fno-py doctor footprint
-            999 {observer_pid} 01:00:00 80.0 1024 ps -Ao pid,ppid
-            100 1 01:00:00 20.0 1024 fno-agents-worker --run
-            101 100 01:00:00 80.0 1024 cargo test -p fno
-            """,
-            [],
-            calls,
-        ),
+    _fake_runner(
+        monkeypatch,
+        f"""\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        {observer_pid} 1 01:00:00 20.0 1024 fno-py doctor footprint
+        999 {observer_pid} 01:00:00 80.0 1024 ps -Ao pid,ppid
+        100 1 01:00:00 20.0 1024 fno-agents-worker --run
+        101 100 01:00:00 80.0 1024 cargo test -p fno
+        """,
+        [],
+        calls,
     )
 
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
@@ -1294,9 +1289,9 @@ def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
     assert payload["process_count"] == 2
     assert payload["fleet_cpu_cores"] == pytest.approx(1.0)
     # Git calls the config-root resolver may shell are not the cause-only
-    # contract's subject; what it promises is ONE ps read and no roster walk.
-    assert [call for call in calls if call[0] == "ps"] == [
-        ["ps", "-Ao", "pid,ppid,state,etime,%cpu,rss,command"]
+    # contract's subject; what it promises is ONE table read and no roster walk.
+    assert [call for call in calls if call[0] == "census"] == [
+        ["census", "--ps"]
     ]
     assert not [call for call in calls if "agents" in call]
 
@@ -1311,20 +1306,16 @@ def test_ac6_edge_cause_only_seeds_live_detached_registry_root(
         "_live_root_pids",
         lambda **_kwargs: ({100}, None),
     )
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID PPID ELAPSED %CPU RSS COMMAND
-            100 1 01:00:00 20.0 1024 opencode serve --detach
-            101 100 01:00:00 80.0 1024 cargo test -p fno
-            200 1 01:00:00 90.0 1024 cargo test -p unrelated
-            """,
-            [],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        100 1 01:00:00 20.0 1024 opencode serve --detach
+        101 100 01:00:00 80.0 1024 cargo test -p fno
+        200 1 01:00:00 90.0 1024 cargo test -p unrelated
+        """,
+        [],
+        [],
     )
 
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
@@ -1345,18 +1336,14 @@ def test_ac6_edge_cause_only_refuses_root_missing_from_snapshot(
         "_live_root_pids",
         lambda **_kwargs: ({999}, None),
     )
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID PPID ELAPSED %CPU RSS COMMAND
-            100 1 01:00:00 20.0 1024 fno-agents-worker --run
-            """,
-            [],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        100 1 01:00:00 20.0 1024 fno-agents-worker --run
+        """,
+        [],
+        [],
     )
 
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
@@ -1383,11 +1370,7 @@ def test_ac1_hp_one_bad_row_keeps_the_reading_and_the_gate_admits(
         good,
         "9999 1 - 20.0 1024 /bin/echo oops",
     )
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(monkeypatch, ps_output, [], []),
-    )
+    _fake_runner(monkeypatch, ps_output, [], [])
     monkeypatch.setattr(os, "getloadavg", lambda: (1.0, 1.0, 1.0))
     monkeypatch.setattr("fno.agents.spawn_gate._load_cpus", lambda: 12)
 
@@ -1418,11 +1401,7 @@ def test_ac1_edge_all_bad_rows_still_refuse_and_name_the_rows(
         "second bad row here",
         "third bad row here",
     )
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(monkeypatch, ps_output, [], []),
-    )
+    _fake_runner(monkeypatch, ps_output, [], [])
 
     reading, error = doctor_footprint.cause_reading()
 
@@ -1443,11 +1422,7 @@ def test_ac2_hp_the_refusal_names_the_masked_row_and_the_failing_field(
         "PID PPID ELAPSED %CPU RSS COMMAND",
         "12345 1 00:01 - 4096 /usr/bin/true",
     )
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(monkeypatch, ps_output, [], []),
-    )
+    _fake_runner(monkeypatch, ps_output, [], [])
 
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
 
@@ -1471,11 +1446,7 @@ def test_ac1_root_a_bad_row_on_a_discovered_root_refuses(monkeypatch) -> None:
         "500 1 - 0.0 1024 fno-agents-worker --run",
         "501 1 01:00:00 0.0 1024 /usr/bin/tool",
     )
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(monkeypatch, ps_output, [], []),
-    )
+    _fake_runner(monkeypatch, ps_output, [], [])
 
     reading, error = doctor_footprint.cause_reading()
 
@@ -1498,11 +1469,7 @@ def test_ac2_sec_no_argv_token_reaches_any_render(
     secret_row = (
         "12345 1 00:01 - 4096 /usr/bin/curl -H Authorization:Bearer SUPERSECRET1234"
     )
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(monkeypatch, ps(secret_row + "\n200 1 - 0.0 1024 tool"), [], []),
-    )
+    _fake_runner(monkeypatch, ps(secret_row + "\n200 1 - 0.0 1024 tool"), [], [])
     # The refusal renders twice: json error payload and text readout.
     for argv in (
         ["doctor", "footprint", "--json", "--cause-only"],
@@ -1514,15 +1481,11 @@ def test_ac2_sec_no_argv_token_reaches_any_render(
             assert secret not in result.output, argv
 
     # The surviving reading renders twice: json payload and text readout.
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            ps(secret_row + "\n200 1 01:00:00 0.0 1024 /usr/bin/tool"),
-            [],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        ps(secret_row + "\n200 1 01:00:00 0.0 1024 /usr/bin/tool"),
+        [],
+        [],
     )
     for argv in (
         ["doctor", "footprint", "--json", "--cause-only"],
@@ -1549,11 +1512,7 @@ def test_ac3_hp_two_bad_rows_print_as_samples_under_the_count(
         "201 1 - 0.0 1024 fno-agents-worker --run",
         "202 1 ??:??:?? 0.0 1024 fno-agents-worker --run",
     )
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(monkeypatch, ps_output, [], []),
-    )
+    _fake_runner(monkeypatch, ps_output, [], [])
 
     result = runner.invoke(app, ["doctor", "footprint", "--cause-only"])
 
@@ -1598,19 +1557,15 @@ def test_ac7_edge_short_lived_descendant_counts_in_fleet_cpu(
     _pin_load(monkeypatch, status="within")
     _pin_admission(monkeypatch)
     _pin_capacity(monkeypatch, 12)
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID PPID ELAPSED %CPU RSS COMMAND
-            100 1 01:00:00 20.0 1024 fno-agents-worker --run
-            101 100 00:00:05 100.0 1024 cargo test -p fno
-            """,
-            [{"name": "worker-a"}],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        100 1 01:00:00 20.0 1024 fno-agents-worker --run
+        101 100 00:00:05 100.0 1024 cargo test -p fno
+        """,
+        [{"name": "worker-a"}],
+        [],
     )
 
     result = runner.invoke(app, ["doctor", "footprint"])
@@ -1625,20 +1580,16 @@ def test_ac8_edge_descendants_do_not_consume_direct_process_threshold(
 ) -> None:
     from fno import doctor_footprint
 
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID PPID ELAPSED %CPU RSS COMMAND
-            100 1 01:00:00 20.0 1024 fno-agents-worker --run
-            101 100 01:00:00 20.0 1024 cargo test -p fno
-            102 101 01:00:00 20.0 1024 rustc --crate-name fno
-            """,
-            [{"name": "worker-a"}],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        100 1 01:00:00 20.0 1024 fno-agents-worker --run
+        101 100 01:00:00 20.0 1024 cargo test -p fno
+        102 101 01:00:00 20.0 1024 rustc --crate-name fno
+        """,
+        [{"name": "worker-a"}],
+        [],
     )
 
     _pin_load(monkeypatch, status="within")
@@ -1657,18 +1608,14 @@ def test_ac9_edge_cpu_share_uses_constrained_capacity(
 
     monkeypatch.setattr(doctor_footprint.os, "cpu_count", lambda: 64)
     monkeypatch.setattr(doctor_footprint.os, "process_cpu_count", lambda: 2, raising=False)
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID PPID ELAPSED %CPU RSS COMMAND
-            100 1 01:00:00 100.0 1024 fno-agents-worker --run
-            """,
-            [],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID PPID ELAPSED %CPU RSS COMMAND
+        100 1 01:00:00 100.0 1024 fno-agents-worker --run
+        """,
+        [],
+        [],
     )
 
     result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
@@ -1694,19 +1641,15 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     # order-independent.
     monkeypatch.setenv("FNO_REPO_ROOT", str(Path(__file__).resolve().parents[3]))
     monkeypatch.setattr(doctor_footprint, "_footprint_cpu_override", lambda: None)
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID ELAPSED %CPU RSS COMMAND
-            101 01:00:00 20.0 1024 fno mux serve
-            102 00:00:01 92.0 1024 fno --version
-            """,
-            [{"name": "worker-a"}, {"name": "worker-b"}],
-            calls,
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID ELAPSED %CPU RSS COMMAND
+        101 01:00:00 20.0 1024 fno mux serve
+        102 00:00:01 92.0 1024 fno --version
+        """,
+        [{"name": "worker-a"}, {"name": "worker-b"}],
+        calls,
     )
 
     result = runner.invoke(app, ["doctor", "footprint"])
@@ -1716,10 +1659,10 @@ def test_ac3_hp_reports_both_thresholds_and_exits_zero(
     assert "processes: 2" in result.stdout
     assert "unexplained processes: 0 (2 direct, roster explains 3)" in result.stdout
     assert "transient calls: 1" in result.stdout
-    # ps is the only subprocess left: the roster count reads the registry
-    # in process, so there is no second shell-out to budget.
+    # The census door is the only exec left: the roster count reads the
+    # registry in process, so there is no second shell-out to budget.
     assert [call for call in calls] == [
-        ["ps", "-Ao", "pid,ppid,state,etime,%cpu,rss,command"],
+        ["census", "--ps"],
     ]
 
 
@@ -1734,19 +1677,15 @@ def test_ac4_edge_capacity_over_exits_three_and_names_top_consumers(
     _pin_load(monkeypatch, status="within", load=110.4, load_15m=500.0)
     _pin_admission(monkeypatch)
     _pin_capacity(monkeypatch, 12)
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID ELAPSED %CPU RSS COMMAND
-            201 02:00:00 80.0 1024 fno mux serve
-            202 01:00:00 40.0 2048 fno-agents-daemon --serve
-            """,
-            [],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID ELAPSED %CPU RSS COMMAND
+        201 02:00:00 80.0 1024 fno mux serve
+        202 01:00:00 40.0 2048 fno-agents-daemon --serve
+        """,
+        [],
+        [],
     )
 
     result = runner.invoke(app, ["doctor", "footprint"])
@@ -1770,19 +1709,15 @@ def test_ac4_edge_unexplained_processes_get_their_own_exit(
     _pin_load(monkeypatch, status="within")
     _pin_admission(monkeypatch)
     _pin_capacity(monkeypatch, 4)
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID ELAPSED %CPU RSS COMMAND
-            211 02:00:00 10.0 1024 fno worker-a
-            212 02:00:00 10.0 1024 fno worker-b
-            """,
-            [],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID ELAPSED %CPU RSS COMMAND
+        211 02:00:00 10.0 1024 fno worker-a
+        212 02:00:00 10.0 1024 fno worker-b
+        """,
+        [],
+        [],
     )
 
     result = runner.invoke(app, ["doctor", "footprint"])
@@ -1805,22 +1740,23 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     still prints, with the threshold degraded away and the reason named. The
     old contract killed the whole report (exit 4, no reading)."""
     # A cold HOME sends config resolution climbing to the canonical root,
-    # whose resolver shells `git worktree list` through the SAME global
-    # subprocess module this test pins. Pin the root so the startup probe is
-    # an env read, and the pinned budget below stays the verdict's alone.
+    # whose resolver shells `git worktree list`. Pin the root so the startup
+    # probe is an env read, and the pinned budget below stays the verdict's
+    # alone.
     monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
     from fno import doctor_footprint
 
     calls: list[list[str]] = []
 
-    def ps_only(argv, **kwargs):
-        calls.append(list(argv))
-        if argv[0] == "ps":
-            kwargs["stdout"].write(
-                "PID ELAPSED %CPU RSS COMMAND\n101 01:00:00 20.0 1024 fno daemon\n"
-            )
-            return subprocess.CompletedProcess(argv, 0)
-        raise AssertionError(f"unexpected subprocess in a footprint run: {argv}")
+    def ps_only(verb, args=(), **kwargs):
+        calls.append([verb, *args])
+        return (
+            None,
+            {
+                "ps": "PID ELAPSED %CPU RSS COMMAND\n101 01:00:00 20.0 1024 fno daemon\n",
+                "unreadable": 0,
+            },
+        )
 
     def unreadable_registry():
         raise OSError("registry is a directory")
@@ -1837,10 +1773,10 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
         load_settings()
     _pin_admission(monkeypatch)
     monkeypatch.setattr(doctor_footprint, "_footprint_cpu_override", lambda: None)
-    monkeypatch.setattr(doctor_footprint.subprocess, "run", ps_only)
+    monkeypatch.setattr(doctor_footprint, "call_binary_json", ps_only)
     monkeypatch.setattr("fno.agents.registry.load_registry", unreadable_registry)
-    # ps is the only subprocess this report may spend. The roster is not the
-    # only enrichment anymore: repo-root and worktree attribution also shell
+    # The census door is the only exec this report may spend. The roster is
+    # not the only enrichment: repo-root and worktree attribution also shell
     # out when their declarations are cold, so pin both seams hermetic.
     monkeypatch.setenv("FNO_REPO_ROOT", str(os.getcwd()))
     import fno.paths as _paths
@@ -1856,8 +1792,8 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     assert "unexplained processes: unknown" in result.stdout
     assert "processes:" in result.stdout
     assert "degraded: roster unavailable" in result.stdout
-    # The roster no longer costs a subprocess: ps is the only one left.
-    assert [call[0] for call in calls] == ["ps"]
+    # The roster no longer costs a subprocess: the census door is the only exec.
+    assert [call[0] for call in calls] == ["census"]
 
 
 def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
@@ -1867,18 +1803,14 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
 
     _pin_load(monkeypatch, status="within")
     _pin_capacity(monkeypatch, 10)
-    monkeypatch.setattr(
-        doctor_footprint.subprocess,
-        "run",
-        _fake_runner(
-            monkeypatch,
-            """\
-            PID ELAPSED %CPU RSS COMMAND
-            301 00:00:01 92.0 1024 fno --version
-            """,
-            [{"name": "worker-a"}],
-            [],
-        ),
+    _fake_runner(
+        monkeypatch,
+        """\
+        PID ELAPSED %CPU RSS COMMAND
+        301 00:00:01 92.0 1024 fno --version
+        """,
+        [{"name": "worker-a"}],
+        [],
     )
 
     result = runner.invoke(app, ["doctor", "footprint", "--json"])

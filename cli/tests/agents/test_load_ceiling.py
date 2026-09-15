@@ -49,11 +49,11 @@ def _pin_load15(monkeypatch, value: float):
 
 def test_unreadable_instrument_refuses_with_the_error_text():
     admission = spawn_gate._cpu_axis(
-        (None, "footprint unavailable: ps unavailable: timed out after 5.0s")
+        (None, "footprint unavailable: process table unavailable: timed out after 5.0s")
     )
     assert admission.verdict == "refuse"
     assert admission.axis == "cpu_instrument"
-    assert "ps unavailable: timed out after 5.0s" in admission.reason
+    assert "process table unavailable: timed out after 5.0s" in admission.reason
     assert "--force to bypass" in admission.reason
 
 

@@ -6,9 +6,7 @@ import json
 import math
 import os
 import re
-import subprocess
 import sys
-import tempfile
 import time
 from functools import lru_cache
 from datetime import datetime, timezone
@@ -18,6 +16,7 @@ from typing import Any, NamedTuple, NoReturn
 import typer
 
 from fno.footprint import Admission, Footprint, parse_footprint, top_consumers
+from fno.rust_binary import call_binary_json
 
 
 #: The sustained-CPU threshold derives from measured capacity at this fraction
@@ -27,7 +26,6 @@ from fno.footprint import Admission, Footprint, parse_footprint, top_consumers
 SUSTAINED_CPU_CAPACITY_FRACTION = 0.1
 SUSTAINED_CPU_FLOOR_CORES = 0.25
 DAEMON_ALLOWANCE = 1
-_PS_COLUMNS = "pid,ppid,state,etime,%cpu,rss,command"
 PS_TIMEOUT_SECONDS = 5.0
 _NO_LOAD_SNAPSHOT = object()
 #: Exit codes. A capacity breach keeps 3 (existing readers depend on it); the
@@ -672,43 +670,16 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
 
 
 def _read_ps(*, timeout: float = PS_TIMEOUT_SECONDS) -> tuple[str | None, str | None]:
-    path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            # errors="replace": ps command lines legally carry non-UTF-8 bytes
-            # (any process's argv may); one undecodable byte must degrade a
-            # command string, not kill the reading with a traceback.
-            mode="w+",
-            encoding="utf-8",
-            errors="replace",
-            prefix=".fno-footprint-",
-            delete=False,
-        ) as output:
-            path = Path(output.name)
-            run_kwargs: dict[str, Any] = {
-                "stdout": output,
-                "stderr": subprocess.PIPE,
-                "text": True,
-                "check": False,
-                "timeout": timeout,
-            }
-            result = subprocess.run(["ps", "-Ao", _PS_COLUMNS], **run_kwargs)
-            if result.returncode != 0:
-                detail = (result.stderr or "").strip() or f"exit {result.returncode}"
-                return None, f"ps unavailable: {detail}"
-            output.flush()
-            output.seek(0)
-            return output.read(), None
-    except subprocess.TimeoutExpired:
-        return None, f"ps unavailable: timed out after {timeout:.1f}s"
-    except OSError as exc:
-        return None, f"ps unavailable: {exc}"
-    finally:
-        if path is not None:
-            try:
-                path.unlink()
-            except OSError:
-                pass
+    """The process table over the Rust door: `fno-agents census --ps` keeps
+    the table in memory, so a seatbelt that refuses the setuid `ps` exec
+    still gets a reading, and a read-only sandbox needs no temp file."""
+    error, payload = call_binary_json("census", ["--ps"], timeout=timeout)
+    if error is not None or not isinstance(payload, dict):
+        return None, f"process table unavailable: {error or 'census --ps returned no table'}"
+    table = payload.get("ps")
+    if not isinstance(table, str):
+        return None, "process table unavailable: census --ps returned no table"
+    return table, None
 
 
 def _snapshot_pids(ps_output: str) -> set[int]:

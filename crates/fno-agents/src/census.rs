@@ -22,46 +22,329 @@ const TAG_IDENTIFY_GRAPH: u8 = 3; // graph_keeper.rs
 const TAG_IDENTIFY_PANE: u8 = 4; // pane_keeper.rs Frame::Identify
 const TAG_REPLY: u8 = 5; // both keepers
 
-/// (pid, args) for every process `ps` will name, one entry per pid.
-fn ps_table() -> Vec<(u32, String)> {
-    let out = std::process::Command::new("ps")
-        .args(["-axo", "pid=,args="])
-        .output();
-    let Ok(out) = out else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim_start();
-            let (pid, rest) = line.split_once(' ')?;
-            Some((pid.parse().ok()?, rest.trim().to_string()))
-        })
-        .collect()
+/// One row of the process table: the columns `ps -Ao
+/// pid,ppid,state,etime,%cpu,rss,command` reports, read without exec'ing
+/// `ps` (setuid on macOS, so a sandboxed caller's seatbelt refuses it).
+pub struct ProcRow {
+    pub pid: u32,
+    pub ppid: u32,
+    pub state: char,
+    pub elapsed_s: u64,
+    pub cpu_pct: f64,
+    pub rss_kb: u64,
+    pub command: String,
 }
 
-/// Seconds the process has been alive, from a `ps` etime string
-/// ([[dd-]hh:]mm:ss). The day prefix is not a base-60 digit; split it off
-/// before the fold or every process older than a day reads unparseable.
-fn parse_etime(text: &str) -> Option<f64> {
-    let (days, clock) = match text.split_once('-') {
-        Some((d, rest)) => (d.parse::<f64>().ok()?, rest),
-        None => (0.0, text),
-    };
-    let mut secs = 0.0;
-    for part in clock.split(':') {
-        secs = secs * 60.0 + part.trim().parse::<f64>().ok()?;
+/// The process table plus the count of pids whose row could not be read.
+pub fn process_table() -> (Vec<ProcRow>, usize) {
+    #[cfg(target_os = "macos")]
+    {
+        process_table_libproc()
     }
-    Some(secs + days * 86_400.0)
+    #[cfg(not(target_os = "macos"))]
+    {
+        process_table_ps()
+    }
 }
 
-/// Seconds the process has been alive, from `ps` etime.
-fn etime_secs(pid: u32) -> Option<f64> {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "etime=", "-p", &pid.to_string()])
+#[cfg(target_os = "macos")]
+fn process_table_libproc() -> (Vec<ProcRow>, usize) {
+    use std::mem;
+    // libc has no PROC_PIDLISTTHREADS constant.
+    const PROC_PIDLISTTHREADS: libc::c_int = 6;
+
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return (Vec::new(), 0);
+    }
+    let mut pids = vec![0u32; count as usize + 64];
+    let filled = unsafe {
+        libc::proc_listallpids(
+            pids.as_mut_ptr().cast::<libc::c_void>(),
+            (pids.len() * mem::size_of::<u32>()) as libc::c_int,
+        )
+    };
+    if filled <= 0 {
+        return (Vec::new(), 0);
+    }
+    let now = epoch_now();
+    let mut rows: Vec<ProcRow> = Vec::new();
+    let mut unreadable = 0usize;
+    for &pid in &pids[..filled as usize] {
+        let mut bsd: libc::proc_bsdinfo = unsafe { mem::zeroed() };
+        let bsd_size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut bsd as *mut _ as *mut libc::c_void,
+                bsd_size,
+            )
+        };
+        // A short write is a pid that exited mid-walk or a kernel task:
+        // neither belongs in the table, but both count as unreadable.
+        if written != bsd_size {
+            unreadable += 1;
+            continue;
+        }
+        let zombie = bsd.pbi_status == 5; // SZOMB
+        let mut rss_kb = 0u64;
+        let mut usage_sum = 0i64;
+        let mut state = if zombie { 'Z' } else { 'S' };
+        if !zombie {
+            let mut task: libc::proc_taskinfo = unsafe { mem::zeroed() };
+            let task_size = mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+            let got_task = unsafe {
+                libc::proc_pidinfo(
+                    pid as libc::c_int,
+                    libc::PROC_PIDTASKINFO,
+                    0,
+                    &mut task as *mut _ as *mut libc::c_void,
+                    task_size,
+                )
+            };
+            if got_task == task_size {
+                rss_kb = task.pti_resident_size / 1024;
+                let mut handles = vec![0u64; task.pti_threadnum.max(0) as usize];
+                let got = unsafe {
+                    libc::proc_pidinfo(
+                        pid as libc::c_int,
+                        PROC_PIDLISTTHREADS,
+                        0,
+                        handles.as_mut_ptr().cast::<libc::c_void>(),
+                        (handles.len() * mem::size_of::<u64>()) as libc::c_int,
+                    )
+                };
+                if got > 0 {
+                    let mut any_running = false;
+                    let mut any_stopped = false;
+                    let mut any_uninterruptible = false;
+                    for handle in &handles[..got as usize / mem::size_of::<u64>()] {
+                        let mut thread: libc::proc_threadinfo = unsafe { mem::zeroed() };
+                        let thread_size = mem::size_of::<libc::proc_threadinfo>() as libc::c_int;
+                        let thread_written = unsafe {
+                            libc::proc_pidinfo(
+                                pid as libc::c_int,
+                                libc::PROC_PIDTHREADINFO,
+                                *handle,
+                                &mut thread as *mut _ as *mut libc::c_void,
+                                thread_size,
+                            )
+                        };
+                        if thread_written != thread_size {
+                            continue;
+                        }
+                        usage_sum += thread.pth_cpu_usage as i64;
+                        match thread.pth_run_state {
+                            1 => any_running = true,
+                            2 => any_stopped = true,
+                            4 => any_uninterruptible = true,
+                            _ => {}
+                        }
+                    }
+                    state = if any_running {
+                        'R'
+                    } else if any_stopped {
+                        'T'
+                    } else if any_uninterruptible {
+                        'U'
+                    } else {
+                        'S'
+                    };
+                }
+            }
+        }
+        let command = argv_of(pid)
+            .map(|argv| argv.join(" "))
+            .unwrap_or_else(|| comm_string(&bsd.pbi_comm));
+        rows.push(ProcRow {
+            pid,
+            ppid: bsd.pbi_ppid,
+            state,
+            elapsed_s: now.saturating_sub(bsd.pbi_start_tvsec),
+            // pth_cpu_usage sums in TH_USAGE_SCALE (1000) units of one
+            // thread; /10 reads percent, the number `ps %cpu` reports.
+            cpu_pct: usage_sum as f64 / 10.0,
+            rss_kb,
+            command,
+        });
+    }
+    (rows, unreadable)
+}
+
+/// The live argv of `pid` from `KERN_PROCARGS2`, `None` when unreadable.
+/// Mirrors `fno::pane_argv::process_argv`; that crate is a dev-only link
+/// here, so the read lives beside its only production caller.
+#[cfg(target_os = "macos")]
+fn argv_of(pid: u32) -> Option<Vec<String>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size: libc::size_t = 0;
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+        || size < 4
+    {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast::<libc::c_void>(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
+        return None;
+    }
+    parse_procargs2(&buf[..size])
+}
+
+/// The macOS `KERN_PROCARGS2` buffer layout: an `i32` argc, the truncated
+/// exec path (NUL-terminated), NUL padding to alignment, then argc
+/// NUL-terminated strings (argv[0] is the path again), then the environment.
+#[cfg(target_os = "macos")]
+fn parse_procargs2(buf: &[u8]) -> Option<Vec<String>> {
+    if buf.len() < 4 {
+        return None;
+    }
+    let argc = i32::from_ne_bytes(buf[0..4].try_into().ok()?) as usize;
+    if argc == 0 {
+        return None;
+    }
+    let mut i = 4;
+    while i < buf.len() && buf[i] != 0 {
+        i += 1;
+    }
+    if i >= buf.len() {
+        return None;
+    }
+    while i < buf.len() && buf[i] == 0 {
+        i += 1;
+    }
+    let mut args = Vec::with_capacity(argc);
+    while args.len() < argc && i < buf.len() {
+        let start = i;
+        while i < buf.len() && buf[i] != 0 {
+            i += 1;
+        }
+        args.push(String::from_utf8_lossy(&buf[start..i]).into_owned());
+        i += 1;
+    }
+    (args.len() == argc).then_some(args)
+}
+
+#[cfg(target_os = "macos")]
+fn comm_string(comm: &[libc::c_char]) -> String {
+    let bytes: Vec<u8> = comm
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn epoch_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// The `ps` leg for platforms where `ps` is not setuid: exec and parse the
+/// same columns the native read returns.
+#[cfg(not(target_os = "macos"))]
+fn process_table_ps() -> (Vec<ProcRow>, usize) {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-Ao", "pid,ppid,state,etime,%cpu,rss,command"])
         .output()
-        .ok()?;
-    parse_etime(String::from_utf8_lossy(&out.stdout).trim())
+    else {
+        return (Vec::new(), 0);
+    };
+    let mut rows = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines().skip(1) {
+        if let Some(row) = parse_ps_row(line) {
+            rows.push(row);
+        }
+    }
+    (rows, 0)
+}
+
+/// One `ps -Ao pid,ppid,state,etime,%cpu,rss,command` data line. Not
+/// cfg-gated: the Linux leg only runs on Linux, so the parse keeps a test
+/// that runs everywhere.
+fn parse_ps_row(line: &str) -> Option<ProcRow> {
+    // ps right-aligns the numeric columns, so tokens must split on
+    // whitespace RUNS - a per-char split yields empty fields and every
+    // aligned column reads as a parse failure.
+    let mut fields = line.trim().split_whitespace();
+    let (Some(pid), Some(ppid), Some(state), Some(etime), Some(cpu), Some(rss)) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    ) else {
+        return None;
+    };
+    // A pid that fails to parse is a torn line, not pid 0; keep a real
+    // pid-0 row (the swapper, where a ps dialect lists it).
+    let pid = pid.parse().ok()?;
+    Some(ProcRow {
+        pid,
+        ppid: ppid.parse().unwrap_or(0),
+        state: state.chars().next().unwrap_or('?'),
+        elapsed_s: crate::gc::parse_etime(etime).unwrap_or(0),
+        cpu_pct: cpu.parse().unwrap_or(0.0),
+        rss_kb: rss.parse().unwrap_or(0),
+        command: fields.collect::<Vec<_>>().join(" "),
+    })
+}
+
+fn format_elapsed(secs: u64) -> String {
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let d = secs / 86_400;
+    if d > 0 {
+        format!("{d:02}-{h:02}:{m:02}:{s:02}")
+    } else if h > 0 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+/// The table as the `ps -Ao pid,ppid,state,etime,%cpu,rss,command` text the
+/// Python footprint reader already parses.
+pub fn ps_text(rows: &[ProcRow]) -> String {
+    let mut out = String::from("PID PPID STAT ELAPSED %CPU RSS COMMAND\n");
+    for row in rows {
+        out.push_str(&format!(
+            "{} {} {} {} {:.1} {} {}\n",
+            row.pid,
+            row.ppid,
+            row.state,
+            format_elapsed(row.elapsed_s),
+            row.cpu_pct,
+            row.rss_kb,
+            row.command
+        ));
+    }
+    out
 }
 
 fn started_epoch(etime: Option<f64>) -> Option<f64> {
@@ -156,10 +439,16 @@ fn row(
 /// lane from the argv flag, socket and session from argv. Keepers sharing
 /// one socket are listed as duplicates (change 2 retires them).
 fn keeper_rows() -> Vec<Value> {
+    let (table, _) = process_table();
+    keeper_rows_from(&table)
+}
+
+fn keeper_rows_from(table: &[ProcRow]) -> Vec<Value> {
     let mut rows = Vec::new();
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
-    for (pid, args) in ps_table() {
-        let argv: Vec<&str> = args.split_whitespace().collect();
+    for proc_row in table {
+        let pid = proc_row.pid;
+        let argv: Vec<&str> = proc_row.command.split_whitespace().collect();
         let Some(argv0) = argv.first() else {
             continue;
         };
@@ -188,7 +477,7 @@ fn keeper_rows() -> Vec<Value> {
         let name = session
             .clone()
             .or_else(|| sock.as_ref().map(|s| s.display().to_string()));
-        let started = started_epoch(etime_secs(pid));
+        let started = started_epoch(Some(proc_row.elapsed_s as f64));
         let mut store_graph: Option<String> = None;
         let (verdict, evidence) = match sock.as_deref() {
             None => ("unknown", "argv declares no socket"),
@@ -307,29 +596,14 @@ async fn daemon_row() -> Value {
     )
 }
 
-#[cfg(test)]
-mod etime_tests {
-    use super::parse_etime;
-
-    #[test]
-    fn parse_etime_reads_every_ps_shape() {
-        assert_eq!(parse_etime("30"), Some(30.0));
-        assert_eq!(parse_etime("05:30"), Some(330.0));
-        assert_eq!(parse_etime("02:03:04"), Some(7384.0));
-        assert_eq!(parse_etime("1-02:03:04"), Some(93_784.0));
-    }
-
-    #[test]
-    fn parse_etime_refuses_junk_and_empty() {
-        assert_eq!(parse_etime(""), None);
-        assert_eq!(parse_etime("not-a-time"), None);
-        assert_eq!(parse_etime("x-02:03"), None);
-    }
-}
-
 /// Mux server rows from the front door's own `ls --json`; the pid sidecar
 /// field (change 4) is what the census classifies.
-fn mux_rows() -> Vec<Value> {
+fn mux_rows(table: &[ProcRow]) -> Vec<Value> {
+    let elapsed: BTreeMap<u32, u64> = table
+        .iter()
+        .map(|proc_row| (proc_row.pid, proc_row.elapsed_s))
+        .collect();
+    let started_of = |pid: u32| started_epoch(elapsed.get(&pid).map(|&secs| secs as f64));
     let Some(fno) = resolve_fno() else {
         return Vec::new();
     };
@@ -361,7 +635,7 @@ fn mux_rows() -> Vec<Value> {
         let pid = r.get("pid").and_then(Value::as_u64).map(|p| p as u32);
         let (verdict, evidence) = match pid {
             Some(pid) => {
-                let started = started_epoch(etime_secs(pid));
+                let started = started_of(pid);
                 if started_before_rewrite(started, Some(&fno)) {
                     ("stale", "predates build self-report")
                 } else if started.is_some() {
@@ -377,7 +651,7 @@ fn mux_rows() -> Vec<Value> {
             pid,
             Some(session.to_string()),
             Some(fno.display().to_string()),
-            started_epoch(etime_secs(pid.unwrap_or(0))),
+            started_of(pid.unwrap_or(0)),
             verdict,
             evidence,
         );
@@ -421,18 +695,20 @@ fn home_dir() -> PathBuf {
 /// subprocess carries a timeout, so a wedged keeper delays one row, never
 /// the census.
 pub async fn census() -> Vec<Value> {
+    let (table, _) = process_table();
     let mut rows = vec![daemon_row().await];
-    rows.extend(keeper_rows());
-    rows.extend(mux_rows());
+    rows.extend(keeper_rows_from(&table));
+    rows.extend(mux_rows(&table));
     rows
 }
 
 /// Walk the keeper rows synchronously (tests, and callers already holding no
 /// daemon context).
 pub fn census_blocking() -> Vec<Value> {
+    let (table, _) = process_table();
     let mut rows = Vec::new();
-    rows.extend(keeper_rows());
-    rows.extend(mux_rows());
+    rows.extend(keeper_rows_from(&table));
+    rows.extend(mux_rows(&table));
     rows
 }
 
@@ -496,4 +772,115 @@ pub async fn cycle_stale_store_keepers() -> (Vec<CycledKeeper>, usize) {
 /// Send one Shutdown frame and read the reply (tag 2 out, response tag 4).
 fn shutdown_reply(sock: &Path) -> Option<Value> {
     frame_round_trip(sock, [2, 0, 0, 0, 0], 4)
+}
+
+#[cfg(test)]
+mod process_table_tests {
+    use super::{process_table, ps_text};
+
+    #[test]
+    fn process_table_reads_its_own_row() {
+        let (table, _unreadable) = process_table();
+        let me = std::process::id();
+        let row = table
+            .iter()
+            .find(|row| row.pid == me)
+            .expect("the test process reads its own row");
+        assert_eq!(row.ppid, unsafe { libc::getppid() } as u32);
+        assert!(row.rss_kb > 0, "resident memory reads nonzero");
+        let exe_name = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .expect("current_exe resolves");
+        assert!(
+            row.command.contains(&exe_name),
+            "the command holds the test binary name: {} (want {exe_name})",
+            row.command
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn process_table_reads_a_spinning_child_like_ps_does() {
+        // The CPU reading is a lifetime average, so the bar needs a process
+        // whose lifetime IS the spin: a young busy-loop child. Read `ps %cpu`
+        // for the same pid as the ground truth the table must agree with.
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("while :; do :; done")
+            .spawn()
+            .expect("spawn the spinner child");
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        let (table, _unreadable) = process_table();
+        let row = table
+            .iter()
+            .find(|row| row.pid == child.id())
+            .expect("the spinning child reads a row");
+        let ps_row = std::process::Command::new("ps")
+            .args(["-o", "%cpu=", "-p", &child.id().to_string()])
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+        child.kill().ok();
+        child.wait().ok();
+
+        assert!(
+            row.cpu_pct >= 15.0,
+            "a young full-spin child reads as CPU: {}",
+            row.cpu_pct
+        );
+        let ps_cpu: f64 = ps_row
+            .and_then(|text| text.parse().ok())
+            .expect("ps answers %cpu for a live child");
+        assert!(
+            (row.cpu_pct - ps_cpu).abs() <= 20.0,
+            "the table and ps disagree on the same child: table {} vs ps {}",
+            row.cpu_pct,
+            ps_cpu
+        );
+    }
+
+    #[test]
+    fn ps_leg_parses_right_aligned_columns() {
+        let row = super::parse_ps_row("  1234  2556 S 02:03  1.5  10240 /bin/sleep 37")
+            .expect("an aligned ps row parses");
+        assert_eq!(row.pid, 1234);
+        assert_eq!(row.ppid, 2556);
+        assert_eq!(row.state, 'S');
+        assert_eq!(row.elapsed_s, 123);
+        assert!((row.cpu_pct - 1.5).abs() < f64::EPSILON);
+        assert_eq!(row.rss_kb, 10240);
+        assert_eq!(row.command, "/bin/sleep 37");
+        assert!(super::parse_ps_row("").is_none(), "a torn line drops");
+    }
+
+    #[test]
+    fn ps_text_emits_the_footprint_columns() {
+        let rows = vec![super::ProcRow {
+            pid: 100,
+            ppid: 1,
+            state: 'R',
+            elapsed_s: 3600,
+            cpu_pct: 86.0,
+            rss_kb: 1024,
+            command: "fno-agents-worker --run".into(),
+        }];
+        assert_eq!(
+            ps_text(&rows),
+            "PID PPID STAT ELAPSED %CPU RSS COMMAND\n100 1 R 01:00:00 86.0 1024 fno-agents-worker --run\n"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn argv_copy_agrees_with_the_fno_crate_reader() {
+        // The argv reader here is a verbatim copy of fno::pane_argv's (the
+        // dev-only link blocks a shared call in production). Both readers
+        // parsing this process's live argv pins the copies together: a
+        // layout drift fails here, not silently in the census.
+        let mine = super::argv_of(std::process::id()).expect("own argv readable");
+        let theirs = fno::pane_argv::process_argv(std::process::id())
+            .expect("fno crate reads the same argv");
+        assert_eq!(mine, theirs);
+    }
 }

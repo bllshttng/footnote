@@ -961,6 +961,17 @@ async fn run(args: Vec<String>) -> i32 {
     // staleness read that doctor/restart/update render. Composes the daemon
     // status (in-process), a ps walk of keepers, and `fno mux ls --json`.
     if verb == "census" {
+        if args[1..].iter().any(|a| a == "--ps") {
+            let (rows, unreadable) = fno_agents::census::process_table();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ps": fno_agents::census::ps_text(&rows),
+                    "unreadable": unreadable,
+                })
+            );
+            return 0;
+        }
         let rows = fno_agents::census::census().await;
         println!(
             "{}",

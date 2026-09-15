@@ -12,7 +12,7 @@ Not for: process-level facts about one worker (is it alive, what holds its pane)
 
 The meter needs `macmon` on PATH. Install it with `brew install macmon`. It is Apple Silicon only and needs no sudo. fno core does not depend on it. If it is absent, nothing breaks, and `config.resource_meter.enabled` ships false. Turn the meter on with `fno config set resource_meter.enabled true`, or in the settings modal's general tab beside the status-row toggle.
 
-One threshold now has a runtime consumer without the meter. `resource_meter.thresholds.cpu_busy_fraction` (default 0.9) is the band the `machine_watch` arm and the `machine` payload object band whole-machine CPU against. The arm reads `ps` and the load average through the footprint payload, so it works on every machine. It does not read `resource_meter.enabled`, and it has no enable key of its own: `reap` and `retire` carry none either. The throttle key `resource_meter.notifications.throttle_minutes` (default 60) spaces its repeat notices.
+One threshold now has a runtime consumer without the meter. `resource_meter.thresholds.cpu_busy_fraction` (default 0.9) is the band the `machine_watch` arm and the `machine` payload object band whole-machine CPU against. The arm reads the `fno-agents census --ps` process table and the load average through the footprint payload, so it works on every machine. It does not read `resource_meter.enabled`, and it has no enable key of its own: `reap` and `retire` carry none either. The throttle key `resource_meter.notifications.throttle_minutes` (default 60) spaces its repeat notices.
 
 ## What you get without macmon
 

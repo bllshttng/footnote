@@ -78,11 +78,14 @@ def _path_binary() -> Optional[Path]:
 
 
 def _cargo_dev_binary() -> Optional[Path]:
-    """Dev fallback: a ``cargo build --release`` artifact under the repo tree.
+    """Dev fallback: a ``cargo build`` artifact under the repo tree.
 
     ``__file__`` is ``cli/src/fno/rust_binary.py`` so the repo root is
     ``parents[3]``. Checks both a crate-local ``target/`` and a workspace
     ``target/`` so it works whether or not a workspace is introduced later.
+    Release outranks debug so a dev's optimized build wins, but a debug build
+    counts too: the CI smoke lanes build debug and strip ``FNO_*`` env, so
+    this finder is the only reader left for the footprint door there.
     """
     here = Path(__file__).resolve()
     try:
@@ -97,6 +100,8 @@ def _cargo_dev_binary() -> Optional[Path]:
     candidates = (
         repo_root / "crates" / "fno-agents" / "target" / "release" / BINARY_NAME,
         repo_root / "target" / "release" / BINARY_NAME,
+        repo_root / "crates" / "fno-agents" / "target" / "debug" / BINARY_NAME,
+        repo_root / "target" / "debug" / BINARY_NAME,
     )
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
@@ -104,8 +109,23 @@ def _cargo_dev_binary() -> Optional[Path]:
     return None
 
 
+def _front_binary() -> Optional[Path]:
+    """The checkout-scoped front binary CI and the doctor tooling export
+    (``$FNO_AGENTS_FRONT``, from the smoke-setup action). Sits behind PATH so
+    a stale export never outranks a fresh install, but ahead of the cargo dev
+    walk so a lane that built the binary and exported only the FRONT name
+    stays readable - the footprint door now resolves through this finder, and
+    a resolver blind to FRONT refuses every dispatch on those lanes.
+    """
+    raw = (os.environ.get("FNO_AGENTS_FRONT") or "").strip()
+    if not raw:
+        return None
+    candidate = Path(raw).expanduser()
+    return candidate if candidate.is_file() and os.access(candidate, os.X_OK) else None
+
+
 def resolve_binary() -> Optional[Path]:
-    """Locate ``fno-agents``: env override -> bundled -> sibling -> PATH -> cargo dev.
+    """Locate ``fno-agents``: env override -> bundled -> sibling -> PATH -> FRONT -> cargo dev.
 
     Bundled beats PATH so a ``pip install fno`` wheel is self-contained even when
     a different (older) ``fno-agents`` happens to be on PATH. The launcher-sibling
@@ -118,6 +138,7 @@ def resolve_binary() -> Optional[Path]:
         _bundled_binary,
         _sibling_binary,
         _path_binary,
+        _front_binary,
         _cargo_dev_binary,
     ):
         found = finder()
@@ -126,13 +147,13 @@ def resolve_binary() -> Optional[Path]:
     return None
 
 
-def call_binary_json(verb: str, args: Sequence[str] = ()) -> tuple[Optional[str], Any]:
+def call_binary_json(verb: str, args: Sequence[str] = (), *, timeout: float = 60) -> tuple[Optional[str], Any]:
     """Run one direct ``fno-agents`` client verb and parse its JSON stdout.
 
     Returns ``(error, parsed)``: ``error`` is None on success; a missing
-    binary, non-zero exit, or unparseable stdout yields a short error text and
-    a None payload. Callers keep the failure shape theirs (refuse closed,
-    raise, or exit) - this seam only standardizes the door.
+    binary, non-zero exit, timeout, or unparseable stdout yields a short error
+    text and a None payload. Callers keep the failure shape theirs (refuse
+    closed, raise, or exit) - this seam only standardizes the door.
     """
     import json
     import subprocess
@@ -142,8 +163,10 @@ def call_binary_json(verb: str, args: Sequence[str] = ()) -> tuple[Optional[str]
         return ("fno-agents binary not found", None)
     try:
         proc = subprocess.run(
-            [str(binary), verb, *args], capture_output=True, text=True, timeout=60
+            [str(binary), verb, *args], capture_output=True, text=True, timeout=timeout
         )
+    except subprocess.TimeoutExpired:
+        return (f"timed out after {timeout:.1f}s", None)
     except OSError as exc:
         return (str(exc)[:200], None)
     if proc.returncode != 0:
