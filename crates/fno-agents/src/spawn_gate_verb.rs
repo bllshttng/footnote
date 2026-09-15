@@ -227,35 +227,26 @@ mod probe {
                     out,
                 );
             }
-            // Memory terms: the same two the gate refuses on (x-8c8c).
-            let avail = spawn_gate::available_ram_gb();
-            let swap = spawn_gate::swap_used_pct();
-            ram_row = Some(ram_floor_row(avail, floor_gb, swap, swap_cap));
-            if let Some(avail) = avail {
-                if avail < floor_gb {
-                    return refuse_with(
-                        "ram_floor",
-                        format!(
-                            "available RAM {avail:.1}GB below the min_free_gb floor {floor_gb:.1}GB"
-                        ),
-                        json!({"available_gb": avail, "min_free_gb": floor_gb}),
-                        &make_rows(None, slots, cap, ram_row, Vec::new()),
-                        out,
-                    );
-                }
-            }
-            if let Some(pct) = swap {
-                if swap_cap > 0.0 && pct >= swap_cap {
-                    return refuse_with(
-                        "swap_pressure",
-                        format!(
-                            "swap {pct:.1}% used is at or above the max_swap_pct cap {swap_cap:.0}%"
-                        ),
-                        json!({"swap_used_pct": pct, "max_swap_pct": swap_cap}),
-                        &make_rows(None, slots, cap, ram_row, Vec::new()),
-                        out,
-                    );
-                }
+            // Memory terms: the SAME call the gate makes, so the probe and
+            // the gate cannot disagree about what refuses.
+            let mem = spawn_gate::read_memory(floor_gb, swap_cap);
+            let mem_term =
+                spawn_gate::ram_floor_term(mem.avail, floor_gb, mem.swap, mem.swapin_bps, swap_cap);
+            ram_row = Some(ram_floor_row(&mem, floor_gb, swap_cap, &mem_term));
+            if let Some((reason, term)) = mem_term {
+                return refuse_with(
+                    reason,
+                    term,
+                    json!({
+                        "available_gb": mem.avail,
+                        "min_free_gb": floor_gb,
+                        "swap_used_pct": mem.swap,
+                        "max_swap_pct": swap_cap,
+                        "swapin_mib_per_s": mem.swapin_bps.map(|r| r / spawn_gate::MIB),
+                    }),
+                    &make_rows(None, slots, cap, ram_row, Vec::new()),
+                    out,
+                );
             }
             // CPU axis: one footprint reading feeds the verdict and the rows.
             let (prefetched, probe_err) = match spawn_gate::footprint_cause_raw() {
@@ -499,18 +490,41 @@ fn make_rows(
     rows
 }
 
-fn ram_floor_row(avail: Option<f64>, floor_gb: f64, swap: Option<f64>, swap_cap: f64) -> Value {
+fn ram_floor_row(
+    mem: &spawn_gate::MemoryReading,
+    floor_gb: f64,
+    swap_cap: f64,
+    term: &Option<(&'static str, String)>,
+) -> Value {
+    let avail_word = if floor_gb <= 0.0 {
+        "off".to_string()
+    } else {
+        mem.avail
+            .map(|v| format!("{v:.1}GB"))
+            .unwrap_or_else(|| "unreadable".into())
+    };
+    let swap_word = if swap_cap <= 0.0 {
+        "off".to_string()
+    } else {
+        mem.swap
+            .map(|v| format!("{v:.1}%"))
+            .unwrap_or_else(|| "unreadable".into())
+    };
+    let swapin_word = if swap_cap <= 0.0 {
+        "off".to_string()
+    } else if mem.swap.is_none_or(|s| s < swap_cap) {
+        "not sampled (under cap)".to_string()
+    } else {
+        mem.swapin_bps
+            .map(|r| format!("{:.1} MiB/s", r / spawn_gate::MIB))
+            .unwrap_or_else(|| "unreadable".into())
+    };
     let mut row = Map::new();
     row.insert("name".into(), json!("ram-floor"));
     row.insert(
         "measured".into(),
         json!(format!(
-            "{} / swap {}",
-            avail
-                .map(|v| format!("{v:.1}GB"))
-                .unwrap_or_else(|| "unreadable".into()),
-            swap.map(|v| format!("{v:.1}%"))
-                .unwrap_or_else(|| "unreadable".into()),
+            "{avail_word} / swap {swap_word} / swap-in {swapin_word}"
         )),
     );
     row.insert(
@@ -519,11 +533,12 @@ fn ram_floor_row(avail: Option<f64>, floor_gb: f64, swap: Option<f64>, swap_cap:
     );
     row.insert(
         "verdict".into(),
-        json!(match (avail, swap) {
-            (Some(a), _) if floor_gb > 0.0 && a < floor_gb => "refuse",
-            (_, Some(s)) if swap_cap > 0.0 && s >= swap_cap => "refuse",
-            (None, None) => "skipped: RAM and swap unreadable",
-            _ => "pass",
+        json!(if term.is_some() {
+            "refuse"
+        } else if floor_gb <= 0.0 && swap_cap <= 0.0 {
+            "skipped: RAM and swap unchecked"
+        } else {
+            "pass"
         }),
     );
     row.insert(
@@ -706,28 +721,68 @@ fn lanes_answer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::spawn_gate::SWAPIN_REFUSE_BYTES_PER_S;
 
-    /// x-8c8c: a disabled term (`<= 0`) never renders refuse, whatever the
-    /// machine reads.
-    #[test]
-    fn ram_floor_row_disabled_cap_never_refuses() {
-        for verdict in [
-            ram_floor_row(Some(35.0), 4.0, Some(40.0), 0.0)["verdict"]
-                .as_str()
-                .unwrap(),
-            ram_floor_row(None, 0.0, Some(5.0), 90.0)["verdict"]
-                .as_str()
-                .unwrap(),
-        ] {
-            assert_eq!(verdict, "pass");
+    fn mem(
+        avail: Option<f64>,
+        swap: Option<f64>,
+        swapin_bps: Option<f64>,
+    ) -> spawn_gate::MemoryReading {
+        spawn_gate::MemoryReading {
+            avail,
+            swap,
+            swapin_bps,
         }
     }
 
-    /// x-8c8c: an enabled cap still refuses at the ceiling.
+    /// A disabled term (`<= 0`) never renders refuse, whatever the machine
+    /// reads, and a disabled reading renders `off`, never `unreadable`.
+    #[test]
+    fn ram_floor_row_disabled_cap_never_refuses() {
+        let cases = [
+            (
+                mem(Some(35.0), Some(40.0), Some(SWAPIN_REFUSE_BYTES_PER_S)),
+                4.0,
+                0.0,
+            ),
+            (mem(None, Some(5.0), None), 0.0, 90.0),
+        ];
+        for (reading, floor, cap) in cases {
+            let row = ram_floor_row(&reading, floor, cap, &None);
+            assert_eq!(row["verdict"].as_str().unwrap(), "pass");
+        }
+        // Disabled cap: swap and swap-in render off.
+        let row = ram_floor_row(&mem(Some(35.0), None, None), 4.0, 0.0, &None);
+        assert!(
+            row["measured"].as_str().unwrap().contains("off"),
+            "a disabled term renders off"
+        );
+    }
+
+    /// An enabled cap still refuses at the ceiling: over-cap swap beside a
+    /// live swap-in rate.
     #[test]
     fn ram_floor_row_refuses_at_the_ceiling() {
-        let row = ram_floor_row(Some(35.0), 4.0, Some(94.0), 90.0);
+        let reading = mem(Some(35.0), Some(94.0), Some(SWAPIN_REFUSE_BYTES_PER_S));
+        let term =
+            spawn_gate::ram_floor_term(reading.avail, 4.0, reading.swap, reading.swapin_bps, 90.0);
+        let row = ram_floor_row(&reading, 4.0, 90.0, &term);
         assert_eq!(row["verdict"].as_str().unwrap(), "refuse");
+    }
+
+    /// Over-cap allocation with no swap-ins renders pass, and the measured
+    /// word carries the swap-in reading.
+    #[test]
+    fn ram_floor_row_admits_allocated_swap_with_no_swapins() {
+        let reading = mem(Some(35.0), Some(94.7), Some(0.0));
+        let term =
+            spawn_gate::ram_floor_term(reading.avail, 4.0, reading.swap, reading.swapin_bps, 90.0);
+        let row = ram_floor_row(&reading, 4.0, 90.0, &term);
+        assert_eq!(row["verdict"].as_str().unwrap(), "pass");
+        assert!(
+            row["measured"].as_str().unwrap().contains("0.0 MiB/s"),
+            "the measured word carries the swap-in reading"
+        );
     }
 
     /// AC6-HP: the probe answer names the rows behind the slot count in every
@@ -752,8 +807,8 @@ mod tests {
         std::fs::write(
             fnodir.join("config.toml"),
             // max_swap_pct 0 disables the swap term: the machine this runs on
-            // may genuinely sit above the default 90 percent cap (x-8c8c),
-            // which would refuse the probe before the assertions.
+            // may genuinely sit above the default 90 percent cap, which
+            // would refuse the probe before the assertions.
             "[agents]\nmax_live = 28\nmin_free_gb = 0\nmax_swap_pct = 0\n",
         )
         .unwrap();

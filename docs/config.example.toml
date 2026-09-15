@@ -305,7 +305,7 @@ provider_limits = { zai = { lanes = 5, subagents = 1 } }
 pane_group_max = 4
 # Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4). Set it to what the OS needs to stay out of swap: 2 on an 8 GB box, 3 on 16 GB, 4 above.
 min_free_gb = 4.0
-# Swap-pressure ceiling in percent used for spawn preflight, checked beside agents.min_free_gb on EVERY spawn; spawn refuses at or above it (<= 0 disables; default 90). The RAM floor cannot see swap: available counts reclaimable pages, so a machine paging at 93% swap can read six times its floor. The receipt names the failing term; raising min_free_gb does not fix a swap refusal.
+# Swap-pressure ceiling in percent used for spawn preflight, checked beside agents.min_free_gb on EVERY spawn; spawn refuses when swap used is at or above the cap AND the machine swaps in at 1 MiB/s or more over a 1 s sample (<= 0 disables; default 90). macOS keeps swap allocated after pressure ends, so allocation alone refused every spawn with 69 percent of RAM free and no paging. The receipt names the failing term; raising min_free_gb does not fix a swap refusal.
 max_swap_pct = 90.0
 # DEPRECATED and ignored since 2026-09-09: admission decides on the fleet's CPU share (agents.max_fleet_cpu_share) on every spawn, never on a load trigger - the 1-minute load moved 101 points in three minutes with no change in real work. The key parses for one release and prints one deprecation line when set; delete it.
 max_load_per_cpu = 8.0
