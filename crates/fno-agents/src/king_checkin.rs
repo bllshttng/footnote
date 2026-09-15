@@ -1571,11 +1571,13 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     }
 
     let emitted = if ctx.emit {
-        let Some(path) = ctx.emit_path.as_ref() else {
-            eprintln!("king-checkin: WARNING: no emit path, so the beat was not journalled");
-            return 0;
-        };
-        emit_row(path, "loop", &data)
+        match ctx.emit_path.as_ref() {
+            Some(path) => emit_row(path, "loop", &data),
+            None => {
+                eprintln!("king-checkin: WARNING: no emit path, so the beat was not journalled");
+                false
+            }
+        }
     } else {
         false
     };
