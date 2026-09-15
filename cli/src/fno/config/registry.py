@@ -136,6 +136,7 @@ FIELD_META: dict[str, Meta] = {
         "mutation re-renders each {path, scope, projection=local|backlog|roadmap} "
         "target; public targets use the leak gate and local is full-detail.",
     ),
+    "backlog.page_reload_s": Meta("advanced", "Seconds an open local board or reign.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off)."),
     # --- config.batch.* ---
     "batch.enabled": Meta("advanced", "Coalesce same-domain nodes into one batch PR (opt-in)."),
     "batch.max_nodes": Meta("advanced", "Nodes per batch before it closes (default 3)."),

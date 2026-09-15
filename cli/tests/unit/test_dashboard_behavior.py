@@ -389,3 +389,16 @@ def test_the_node_id_is_copyable_from_the_keyboard(tmp_path: Path):
         f"{out.get('copyIdTag')!r}"
     )
     assert out["after"]["copied"] == ["ab-16000004"], out["after"]["copied"]
+
+
+def test_group_heads_expose_aria_expanded(tmp_path: Path):
+    """AC7-HP: the reload script restores collapsed groups through
+    aria-expanded, so every head must carry the state and keep it current
+    across a click."""
+    out = _run(
+        tmp_path,
+        [_entry("ab-17000001")],
+        BOARD_ACTION="toggleGroup:uncategorized",
+    )
+    assert out["groups"][0]["expanded"] == "true", out["groups"]
+    assert out["after"]["groups"][0]["expanded"] == "false", out["after"]["groups"]

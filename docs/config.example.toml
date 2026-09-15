@@ -117,6 +117,8 @@ id_hex_width = 8
 staleness_days = 21
 # Auto-rendered projections (GLOBAL config file only): every graph mutation re-renders each {path, scope, projection=local|backlog|roadmap} target; public targets use the leak gate and local is full-detail.
 render_targets = []
+# Seconds an open local board or reign.html tab waits, visible and untouched, before it reloads itself (default 60; 0 is off).
+page_reload_s = 60
 
 [backlog.maintain]
 # Age (days) before an idea is flagged stale.
