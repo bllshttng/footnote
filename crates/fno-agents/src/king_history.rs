@@ -625,7 +625,7 @@ fn scan_readings(
 ///
 /// rc 0 verdict read (any verdict), 1 refused or unreadable input (the
 /// message names the failed reading), 2 usage failure. The read assembles
-/// its own inputs (x-5952): crown, manifest, config, graph scope, window,
+/// its own inputs: crown, manifest, config, graph scope, window,
 /// and delivery split come from `king_verdict_inputs`; accepting
 /// precomputed facts on the argv would keep the split owner this port
 /// removes. `--verdict` selects this mode of the king-history action (law
@@ -903,7 +903,7 @@ mod verdict_tests {
             std::slice::from_ref(&path),
             "kg1",
             "hs1",
-            "x-a792",
+            "x-bbbb",
             "2026-09-10T00:00:00Z",
         )
         .unwrap();
@@ -1007,7 +1007,7 @@ mod verdict_tests {
             json!({"ts": "2026-09-10T10:05:00Z", "type": "loop_check_config", "source": "loop",
                    "data": {"session_id": "kg1", "block_cap": 9, "block_cap_source": "default"}}),
             json!({"ts": "2026-09-10T10:06:00Z", "type": "king_context_nudge", "source": "hook",
-                   "data": {"used_pct": 60, "trigger": 40, "crown_level": 0, "crown_scope": "x-a792"}}),
+                   "data": {"used_pct": 60, "trigger": 40, "crown_level": 0, "crown_scope": "x-bbbb"}}),
         ];
         for row in rows {
             writeln!(fh, "{row}").unwrap();
@@ -1017,7 +1017,7 @@ mod verdict_tests {
             std::slice::from_ref(&path),
             "kg1",
             "hs1",
-            "x-a792",
+            "x-bbbb",
             "2026-09-01T00:00:00Z",
         )
         .unwrap();
@@ -1062,7 +1062,7 @@ mod verdict_tests {
             std::slice::from_ref(&path),
             "kg1",
             "hs1",
-            "x-a792",
+            "x-bbbb",
             "2026-09-01T00:00:00Z",
         )
         .unwrap();
@@ -1089,7 +1089,7 @@ mod verdict_tests {
             std::slice::from_ref(&path),
             "kg1",
             "",
-            "x-a792",
+            "x-bbbb",
             "2026-09-01T00:00:00Z",
         )
         .unwrap();
@@ -1141,18 +1141,18 @@ mod verdict_tests {
         std::fs::write(
             &graph,
             json!({"entries": [
-                {"id": "x-a792", "type": "epic", "project": "fno", "created_at": "2026-09-01T00:00:00Z"},
-                {"id": "x-old", "parent": "x-a792", "created_at": "2026-09-05T00:00:00Z"},
-                {"id": "x-new", "parent": "x-a792", "created_at": "2026-09-12T00:00:00Z"}
+                {"id": "x-bbbb", "type": "epic", "project": "fno", "created_at": "2026-09-01T00:00:00Z"},
+                {"id": "x-old", "parent": "x-bbbb", "created_at": "2026-09-05T00:00:00Z"},
+                {"id": "x-new", "parent": "x-bbbb", "created_at": "2026-09-12T00:00:00Z"}
             ]})
             .to_string(),
         )
         .unwrap();
-        let manifest = root.join("kings/x-a792.md");
+        let manifest = root.join("kings/x-bbbb.md");
         std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
         std::fs::write(
             &manifest,
-            "---\nfno_id: kg1\nscope: x-a792\nharness_session_id: hs1\ncreated_at: 2026-09-10T00:00:00Z\nbudget_max_iterations: 2\nrespawn_count: 0\nrespawn_ceiling: 4\n---\nbody\n",
+            "---\nfno_id: kg1\nscope: x-bbbb\nharness_session_id: hs1\ncreated_at: 2026-09-10T00:00:00Z\nbudget_max_iterations: 2\nrespawn_count: 0\nrespawn_ceiling: 4\n---\nbody\n",
         )
         .unwrap();
         let journal = root.join("events.jsonl");
@@ -1178,7 +1178,7 @@ mod verdict_tests {
             "--cwd".to_string(),
             root.display().to_string(),
             "--scope".to_string(),
-            "x-a792".to_string(),
+            "x-bbbb".to_string(),
             "--manifest".to_string(),
             manifest.display().to_string(),
             "--events-path".to_string(),
@@ -1215,7 +1215,7 @@ mod verdict_tests {
         assert_eq!(run_king_verdict(&["--cwd".into(), "/tmp".into()]), 2);
         assert_eq!(run_king_verdict(&["--nope".into()]), 2);
         // The precomputed facts are gone on purpose: passing one is a usage
-        // failure, never a silently accepted input (x-5952).
+        // failure, never a silently accepted input.
         assert_eq!(
             run_king_verdict(&["--inherited-undelivered".into(), "5".into()]),
             2

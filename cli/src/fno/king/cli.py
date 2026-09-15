@@ -812,7 +812,7 @@ def escalate_cmd(
         live, unknown_reason = state.live, state.unknown_reason
     except Exception as exc:  # noqa: BLE001 - escalation must still fire
         live, unknown_reason = None, f"reign_state unreadable: {exc}"
-    # The reign verdict (x-4d4f): the native owner resolves everything; a
+    # The reign verdict: the native owner resolves everything; a
     # failed read still records, "verdict unreadable".
     summary = None
     verdict_scope = None

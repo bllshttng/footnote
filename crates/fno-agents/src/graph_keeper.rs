@@ -2262,7 +2262,7 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
             let kind = opt_str(p, "kind")
                 .map(str::to_string)
                 .or_else(|| classify_deferred_reason(reason).map(str::to_string));
-            // The shared defer leg : the blank-reason refusal and the
+            // The shared defer leg: the blank-reason refusal and the
             // kind vocabulary live in the patch planner, so the mux op and
             // the CLI door cannot disagree.
             crate::backlog::patch::defer_facts(entries, node_id, reason, kind.as_deref())?;

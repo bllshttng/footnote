@@ -100,7 +100,7 @@ pub struct ReviewSummaryArgs {
 }
 
 /// The spawn head's axis flags, parsed once and consumed by both the client's
-/// spawn dispatch and the spawn-overlay inspection verb : route,
+/// spawn dispatch and the spawn-overlay inspection verb: route,
 /// provider, harness, model, effort, account, substrate. Tokens before the
 /// provider argv fence that are not axis flags belong to the rest of the
 /// spawn grammar and are ignored here; tokens after the fence are opaque

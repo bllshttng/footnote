@@ -111,7 +111,7 @@ impl Refusal {
     }
 }
 
-/// The first admission boundary of the native gate : a durable
+/// The first admission boundary of the native gate: a durable
 /// incident stop or an unreadable incident state refuses before the
 /// `FNO_SPAWN_GATE=0` operator bypass, before `--force`, and before any
 /// capacity math. Mail stays ungated so the incident can be announced and
@@ -1367,7 +1367,7 @@ pub fn run_gate(
             if now.duration_since(since) >= MUTEX_WAIT_BUDGET {
                 if fail_closed {
                     // Contention is a peer or a corpse, never a full cap. The
-                    // takeover asks THE single reap decision : force
+                    // takeover asks THE single reap decision: force
                     // only a provably-dead holder, queue past anything else.
                     match takeover_dead_gate_mutex(root.as_deref()) {
                         Takeover::Freed => {
@@ -2220,7 +2220,7 @@ fn footprint_probe_argv() -> Option<Vec<String>> {
 }
 
 /// The status footer's reading and the store keeper's path note, from ONE
-/// footprint probe : `(machine line, keeper note)`. Both best-effort
+/// footprint probe: `(machine line, keeper note)`. Both best-effort
 /// - a machine whose footprint cannot be read yields `(None, None)`, never a
 /// stale or fabricated line.
 pub fn machine_reading_notes() -> (Option<String>, Option<String>) {
@@ -3769,7 +3769,7 @@ MemAvailable:    8000000 kB\n";
         );
     }
 
-    /// AC1-FR : the Rust gate and the Python mirror must return the same
+    /// AC1-FR: the Rust gate and the Python mirror must return the same
     /// slot count for the same synthetic registry+roster. Both suites read this
     /// ONE fixture; a divergence in either gate's counting rule (e.g. re-adding
     /// the roster to the slot count) fails its own assertion. A populated roster

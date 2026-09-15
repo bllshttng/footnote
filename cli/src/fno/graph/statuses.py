@@ -76,7 +76,7 @@ def node_is_done(entry: object) -> bool:
     """The one WORK-done read: the node's stored ruling, nothing else.
 
     Every Python reader that asks "is this node's work done" calls this
-    ; ``completed_at`` spellings are retired from that question
+  ; ``completed_at`` spellings are retired from that question
     (measured 0 divergence in graph and archive). Superseded is deliberately
     absent - a superseded node's WORK is not done, it was replaced, and only
     rebindability reads it that way.

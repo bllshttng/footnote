@@ -49,7 +49,7 @@ pub struct EscalationRequest {
     pub unknown_reason: Option<String>,
     /// The reign verdict summary whose FIRST word is the verdict name
     /// (`stalled ...`, `degraded ...`). Anything else is a failed read and
-    /// is recorded as `verdict unreadable` - never silent (x-4d4f).
+    /// is recorded as `verdict unreadable` - never silent.
     #[serde(default)]
     pub verdict: Option<String>,
     /// The scope the verdict was read for; names the handoff offer's crown.
@@ -157,7 +157,7 @@ fn closing_for(live: Option<bool>, unknown_reason: Option<&str>, rows: bool) -> 
     closing
 }
 
-/// x-4d4f: the reign verdict rides the question. `stalled`/`degraded` append
+/// the reign verdict rides the question. `stalled`/`degraded` append
 /// the spawn `--succeed` handoff offer; `unreadable` is a failed verdict
 /// read, and it is named - escalation never goes silent on it. Any other
 /// verdict (a converging reign stops on an actionable-board escalation)
@@ -527,7 +527,7 @@ mod tests {
         assert!(dead.contains("act on this reading or crown a new king"));
     }
 
-    // --- AC4: the verdict rides the question, never silent (x-4d4f) ---
+    // --- AC4: the verdict rides the question, never silent ---
 
     fn with_verdict(
         mut r: EscalationRequest,
@@ -544,11 +544,11 @@ mod tests {
         let text = question(&with_verdict(
             req(IDS.to_vec(), Some(true)),
             "stalled 16, 13, 10: undelivered is not falling",
-            Some("x-a792"),
+            Some("x-bbbb"),
         ));
         assert!(text.starts_with(&format!("[{MARKER}:{KEY}]")));
         assert!(text.contains("Verdict stalled 16, 13, 10: undelivered is not falling."));
-        assert!(text.contains("run fno agents spawn --crown x-a792 --succeed"));
+        assert!(text.contains("run fno agents spawn --crown x-bbbb --succeed"));
     }
 
     #[test]
@@ -556,20 +556,20 @@ mod tests {
         let text = question(&with_verdict(
             req(IDS.to_vec(), Some(false)),
             "degraded 2 bounds breached",
-            Some("x-a792"),
+            Some("x-bbbb"),
         ));
         assert!(text.contains("Verdict degraded 2 bounds breached."));
-        assert!(text.contains("--crown x-a792 --succeed"));
+        assert!(text.contains("--crown x-bbbb --succeed"));
     }
 
     #[test]
     fn the_quiet_reading_names_the_handoff_scope_when_none_is_explicit() {
         let text = question(&with_verdict(
-            req(vec!["reading:undelivered:x-a792+x-1111"], Some(true)),
+            req(vec!["reading:undelivered:x-bbbb+x-1111"], Some(true)),
             "stalled undelivered 9",
             None,
         ));
-        assert!(text.contains("--crown x-a792,x-1111 --succeed"));
+        assert!(text.contains("--crown x-bbbb,x-1111 --succeed"));
     }
 
     #[test]
@@ -587,7 +587,7 @@ mod tests {
         let text = question(&with_verdict(
             req(IDS.to_vec(), Some(true)),
             "unreadable registry unreadable: disk",
-            Some("x-a792"),
+            Some("x-bbbb"),
         ));
         assert!(text.contains("verdict unreadable: registry unreadable: disk."));
         assert!(!text.contains("--succeed"));
@@ -598,7 +598,7 @@ mod tests {
         let text = question(&with_verdict(
             req(IDS.to_vec(), Some(true)),
             "converging undelivered 16, 13, 10, 8, 7",
-            Some("x-a792"),
+            Some("x-bbbb"),
         ));
         assert!(text.contains("Verdict converging undelivered 16, 13, 10, 8, 7."));
         assert!(!text.contains("--succeed"));

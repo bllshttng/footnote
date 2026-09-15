@@ -625,9 +625,9 @@ mod tests {
     fn the_quiet_board_reading_id_shape_is_stable() {
         // The quiet-board terminal escalates this one reading id; its
         // stability is what keeps reconcile at one question per crown, not
-        // one per count. The mint lives in king_escalation (x-ff27).
-        let scope = "x-a792";
+        // one per count. The mint lives in king_escalation.
+        let scope = "x-aaaa";
         let row = crate::king_escalation::reading_undelivered(scope);
-        assert_eq!(row, "reading:undelivered:x-a792");
+        assert_eq!(row, "reading:undelivered:x-aaaa");
     }
 }
