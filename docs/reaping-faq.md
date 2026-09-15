@@ -144,7 +144,7 @@ Marker one: the session's own blueprint or think row on the node carries a non-e
 
 Marker two: the session wrote the node's plan. The node's `plan_path` names a file that exists, and no other planner's row on the node started earlier (`gc_sweep.rs:645-682`).
 
-Two facts finish an assignment with neither marker. A node whose status reads `deferred` or `superseded` has moved on: nothing is left to plan (`gc.rs:153-158`). And a halted planner, one whose latest inside-leg report reads `done`, has ended its turn with no plan on the node; it is waiting on nothing (`gc.rs:82-89`). A planner waiting on input reads `blocked`, and a mid-turn planner reads `working` - both keep the hold.
+Two facts finish an assignment with neither marker. A node whose status reads `deferred` or `superseded` has moved on: nothing is left to plan (`gc.rs:153-158`). A halted planner's latest inside-leg report reads `done`. Its turn ended with no plan on the node, and it waits on nothing (`gc.rs:82-89`). A planner waiting on input reads `blocked`, and a mid-turn planner reads `working` - both keep the hold.
 
 A finished planner retires once its transcript is quiet for 1200 s, not the default grace (`gc.rs:162`).
 
@@ -228,7 +228,7 @@ A clean and merged tree prunes, and the branch stays (`gc.rs:206-207`). The remo
 
 Three lines mean the sweep acted on a retire decision and hit a refusal.
 
-- `kept {id} (stop refused: {reason})`: the confirmed stop refused, so the row stays for retry on the next pass (`gc_sweep.rs:112-114`). On a claude row with no death evidence, the reason names the missing evidence (`gc_sweep.rs:1256-1267`). After `claude stop` exits 0, the stop arm polls both witnesses, the daemon roster and the `claude agents` state, once a second for up to 15 s before it concedes (`gc_claude_stop.rs:73-103`), so a supervisor that tears the session down a beat late no longer wedges the row for a whole tick.
+- `kept {id} (stop refused: {reason})`: the confirmed stop refused, so the row stays for retry on the next pass (`gc_sweep.rs:112-114`). On a claude row with no death evidence, the reason names the missing evidence (`gc_sweep.rs:1256-1267`). After `claude stop` exits 0, the arm polls two witnesses for up to 15 s (`gc_claude_stop.rs:73-103`). The witnesses are the daemon roster and the `claude agents` state. A supervisor that tears the session down late no longer wedges the row for a whole tick.
 - `prune failed {id} ({reason})`: the tree removal did not confirm (`gc_sweep.rs:55-59`).
 - `settle refused {node} ({reason})`: the settle write refused, named and never silent (`gc_sweep.rs:103-104`).
 
