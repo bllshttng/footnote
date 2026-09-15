@@ -275,33 +275,43 @@ fn process_table_ps() -> (Vec<ProcRow>, usize) {
     };
     let mut rows = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines().skip(1) {
-        let mut fields = line.trim_start().splitn(7, char::is_whitespace);
-        let (Some(pid), Some(ppid), Some(state), Some(etime), Some(cpu), Some(rss)) = (
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-            fields.next(),
-        ) else {
-            continue;
-        };
-        // A pid that fails to parse is a torn line, not pid 0; keep a real
-        // pid-0 row (the swapper, where a ps dialect lists it).
-        let Ok(pid) = pid.parse() else {
-            continue;
-        };
-        rows.push(ProcRow {
-            pid,
-            ppid: ppid.parse().unwrap_or(0),
-            state: state.chars().next().unwrap_or('?'),
-            elapsed_s: crate::gc::parse_etime(etime).unwrap_or(0),
-            cpu_pct: cpu.parse().unwrap_or(0.0),
-            rss_kb: rss.parse().unwrap_or(0),
-            command: fields.next().unwrap_or("").trim().to_string(),
-        });
+        if let Some(row) = parse_ps_row(line) {
+            rows.push(row);
+        }
     }
     (rows, 0)
+}
+
+/// One `ps -Ao pid,ppid,state,etime,%cpu,rss,command` data line. Not
+/// cfg-gated: the Linux leg only runs on Linux, so the parse keeps a test
+/// that runs everywhere.
+fn parse_ps_row(line: &str) -> Option<ProcRow> {
+    // ps right-aligns the numeric columns, so tokens must split on
+    // whitespace RUNS - a per-char split yields empty fields and every
+    // aligned column reads as a parse failure.
+    let mut fields = line.trim().split_whitespace();
+    let (Some(pid), Some(ppid), Some(state), Some(etime), Some(cpu), Some(rss)) = (
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+        fields.next(),
+    ) else {
+        return None;
+    };
+    // A pid that fails to parse is a torn line, not pid 0; keep a real
+    // pid-0 row (the swapper, where a ps dialect lists it).
+    let pid = pid.parse().ok()?;
+    Some(ProcRow {
+        pid,
+        ppid: ppid.parse().unwrap_or(0),
+        state: state.chars().next().unwrap_or('?'),
+        elapsed_s: crate::gc::parse_etime(etime).unwrap_or(0),
+        cpu_pct: cpu.parse().unwrap_or(0.0),
+        rss_kb: rss.parse().unwrap_or(0),
+        command: fields.collect::<Vec<_>>().join(" "),
+    })
 }
 
 fn format_elapsed(secs: u64) -> String {
@@ -828,6 +838,20 @@ mod process_table_tests {
             row.cpu_pct,
             ps_cpu
         );
+    }
+
+    #[test]
+    fn ps_leg_parses_right_aligned_columns() {
+        let row = super::parse_ps_row("  1234  2556 S 02:03  1.5  10240 /bin/sleep 37")
+            .expect("an aligned ps row parses");
+        assert_eq!(row.pid, 1234);
+        assert_eq!(row.ppid, 2556);
+        assert_eq!(row.state, 'S');
+        assert_eq!(row.elapsed_s, 123);
+        assert!((row.cpu_pct - 1.5).abs() < f64::EPSILON);
+        assert_eq!(row.rss_kb, 10240);
+        assert_eq!(row.command, "/bin/sleep 37");
+        assert!(super::parse_ps_row("").is_none(), "a torn line drops");
     }
 
     #[test]
