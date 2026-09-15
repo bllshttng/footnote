@@ -708,8 +708,12 @@ pub fn min_free_gb(cwd: &Path) -> f64 {
         .unwrap_or(DEFAULT_MIN_FREE_GB)
 }
 
-/// Resolve `agents.max_swap_pct` (x-8c8c). `<= 0` is a VALID value (guard
-/// disabled); an unparseable value falls back to [`DEFAULT_MAX_SWAP_PCT`].
+/// Resolve `agents.max_swap_pct`: spawn refuses when swap used is at or above
+/// this cap AND the machine swaps in at 1 MiB/s or more over a 1 s sample.
+/// macOS keeps swap allocated after pressure ends, so allocation alone
+/// refused every spawn with 69 percent of RAM free and no paging. `<= 0` is a
+/// VALID value (guard disabled); an unparseable value falls back to
+/// [`DEFAULT_MAX_SWAP_PCT`].
 pub fn max_swap_pct(cwd: &Path) -> f64 {
     resolve_agents_value(cwd, "max_swap_pct")
         .and_then(|raw| raw.parse::<f64>().ok())
