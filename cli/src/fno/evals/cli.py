@@ -207,7 +207,14 @@ def _forward_evals_native(extra: list[str], mode: str) -> None:
         "--stale-days", str(stale_days),
         *extra,
     ]
-    result = subprocess.run(argv, check=False)
+    result = subprocess.run(argv, check=False, capture_output=True, text=True)
+    # Re-echo through typer so CliRunner-backed tests (and any caller that
+    # wraps stdout) see the fold's output; the binary's trailing newline is
+    # preserved with nl=False.
+    if result.stdout:
+        typer.echo(result.stdout, nl=False)
+    if result.stderr:
+        typer.echo(result.stderr, nl=False, err=True)
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
@@ -242,7 +249,14 @@ def macro_command(ctx: typer.Context) -> None:
     if not any(a == "--events" or a.startswith("--events=") for a in args):
         for path in event_journals():
             argv += ["--events", str(path)]
-    result = subprocess.run(argv, check=False)
+    result = subprocess.run(argv, check=False, capture_output=True, text=True)
+    # Re-echo through typer so CliRunner-backed tests (and any caller that
+    # wraps stdout) see the fold's output; the binary's trailing newline is
+    # preserved with nl=False.
+    if result.stdout:
+        typer.echo(result.stdout, nl=False)
+    if result.stderr:
+        typer.echo(result.stderr, nl=False, err=True)
     raise typer.Exit(code=propagate_returncode(result.returncode))
 
 

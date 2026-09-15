@@ -291,7 +291,7 @@ def _forwarder_fakes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, returnc
     monkeypatch.setattr(rust_binary, "resolve_binary", lambda: tmp_path / "fno-agents")
     captured: dict = {}
 
-    def fake_run(argv, check=False):
+    def fake_run(argv, check=False, **kw):
         captured["argv"] = argv
         return subprocess.CompletedProcess(argv, returncode)
 

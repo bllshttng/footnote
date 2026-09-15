@@ -124,7 +124,9 @@ def test_variant_flags_pass_through_to_run_task(tmp_path: Path, monkeypatch) -> 
     assert "a [v2]" in res.stdout  # the summary line names the round
 
 
-def test_report_compare_cli(tmp_path: Path) -> None:
+@requires_rust
+def test_report_compare_cli(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     hp = tmp_path / "h.jsonl"
     _history_append(hp, {"task_id": "t", "tier": "regression", "pass": True,
                          "variant": "baseline", "bank_rev": "aaa"})
@@ -139,8 +141,11 @@ def test_report_compare_cli(tmp_path: Path) -> None:
     assert "git diff aaa bbb" in res.stdout
 
 
-def test_report_compare_json_cli(tmp_path: Path) -> None:
+@requires_rust
+def test_report_compare_json_cli(tmp_path: Path, monkeypatch) -> None:
     import json
+
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
 
     hp = tmp_path / "h.jsonl"
     _history_append(hp, {"task_id": "t", "tier": "regression", "pass": True,
@@ -155,7 +160,9 @@ def test_report_compare_json_cli(tmp_path: Path) -> None:
     assert payload["tasks"]["t"]["verdict"] == "regressed"
 
 
-def test_report_compare_rejects_bad_name(tmp_path: Path) -> None:
+@requires_rust
+def test_report_compare_rejects_bad_name(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     res = runner.invoke(evals_app, ["report", "--history", str(tmp_path / "h.jsonl"),
                                     "--compare", "round2"])
     out = res.stdout + (res.stderr or "")
@@ -163,8 +170,11 @@ def test_report_compare_rejects_bad_name(tmp_path: Path) -> None:
     assert "must be 'baseline' or 'v<N>', got 'round2'" in out
 
 
-def test_report_compare_honors_since(tmp_path: Path) -> None:
+@requires_rust
+def test_report_compare_honors_since(tmp_path: Path, monkeypatch) -> None:
     import json
+
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
 
     hp = tmp_path / "h.jsonl"
     _history_append(hp, {"task_id": "t", "tier": "regression", "pass": False,
@@ -249,7 +259,7 @@ def _capture_child_stdout(monkeypatch) -> list[str]:
     real_run = subprocess.run
     outputs: list[str] = []
 
-    def run_capture(argv, check=False):
+    def run_capture(argv, check=False, **kw):
         proc = real_run(argv, check=check, capture_output=True, text=True)
         outputs.append(proc.stdout)
         return proc
