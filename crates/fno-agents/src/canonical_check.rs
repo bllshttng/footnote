@@ -250,6 +250,15 @@ fn blocking_paths(files: &[String], p: &Probe) -> Vec<String> {
     blocking
 }
 
+/// Display cap shared by every path list the verb prints; the stash
+/// pathspec keeps every path.
+fn show_cap(paths: &[String]) -> String {
+    match paths.len() {
+        n if n > SHOW_CAP => format!("{}, (+{} more)", paths[..SHOW_CAP].join(", "), n - SHOW_CAP),
+        _ => paths.join(", "),
+    }
+}
+
 fn build_refusal(
     canonical: &Path,
     files: &[String],
@@ -262,16 +271,7 @@ fn build_refusal(
     let mut blocks: Vec<String> = Vec::new();
 
     if !blocking.is_empty() {
-        let shown = match blocking.len() {
-            n if n > SHOW_CAP => {
-                format!(
-                    "{}, (+{} more)",
-                    blocking[..SHOW_CAP].join(", "),
-                    n - SHOW_CAP
-                )
-            }
-            _ => blocking.join(", "),
-        };
+        let shown = show_cap(&blocking);
         let date = chrono::Utc::now().format("%Y-%m-%d");
         let pr = pr.map(|n| n.to_string()).unwrap_or_else(|| "0".into());
         let sha12: String = sha
@@ -354,31 +354,13 @@ fn build_answer(payload: &Value) -> Value {
         ));
     }
     if !p.dirty.is_empty() {
-        let shown = match p.dirty.len() {
-            n if n > SHOW_CAP => {
-                format!(
-                    "{}, (+{} more)",
-                    p.dirty[..SHOW_CAP].join(", "),
-                    n - SHOW_CAP
-                )
-            }
-            _ => p.dirty.join(", "),
-        };
+        let shown = show_cap(&p.dirty);
         notes.push(format!("canonical dirty: {shown}"));
     }
 
     let blocking = blocking_paths(&files, &p);
     if !blocking.is_empty() {
-        let shown = match blocking.len() {
-            n if n > SHOW_CAP => {
-                format!(
-                    "{}, (+{} more)",
-                    blocking[..SHOW_CAP].join(", "),
-                    n - SHOW_CAP
-                )
-            }
-            _ => blocking.join(", "),
-        };
+        let shown = show_cap(&blocking);
         notes.push(format!("fast-forward blocked by: {shown}"));
     }
 
