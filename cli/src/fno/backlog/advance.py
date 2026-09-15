@@ -3224,8 +3224,8 @@ def advance(
     (Locked Decision 1); absent, the node's ``model``/``provider`` keys are used.
 
     ``source`` stamps the worker's name: the merge-triggered
-    continuation passes ``ac``, the blueprint terminal ``sob``; a bare
-    attended call passes nothing and the name carries no source segment.
+    continuation passes ``ac``; a bare attended call passes nothing and the
+    name carries no source segment.
 
     Invoked ONLY after the node-close write commits (keyed by ``closed_node_id``,
     AC1-RACE), so within one reconcile/post-merge run the closed node is already

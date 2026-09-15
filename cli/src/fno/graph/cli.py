@@ -8550,7 +8550,7 @@ def cmd_advance(
     source: Optional[str] = typer.Option(
         None,
         "--source",
-        help="Dispatch origin for the worker name : ab daemon, ac merge continuation, sob blueprint. Omit when attended.",
+        help="Dispatch origin for the worker name: ab daemon, ac merge continuation. Omit when attended.",
     ),
 ) -> None:
     """Dispatch a fresh /target --no-merge worker for the next now-unblocked node.

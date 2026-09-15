@@ -164,7 +164,7 @@ def self_test() -> int:
     ok, why, rows = run_probe_window(good, now - dt.timedelta(hours=2))
     assert ok and len(rows) == 1 and rows[0]["name"] == "bp-x-1", why or rows
     assert not is_blueprint_name("t-x-4-slug"), "non-bp names never parse as blueprint"
-    assert is_blueprint_name("sob-bp-x-2-slug"), "sourced bp names parse"
+    assert is_blueprint_name("ac-bp-x-2-slug"), "sourced bp names parse"
 
     # Condition 1 missing: no retire_holds row.
     no_holds = [good[0], good[2]]

@@ -143,8 +143,8 @@ def test_dispatch_name_canonical_and_manual_forms():
 
 def test_dispatch_name_carries_the_model_tag():
     # Known model: the table's code, last before any discriminator.
-    assert dispatch_agent_name("sob", "bp", "x-57fe", slug="250ms-read-floor", model="glm-5.3-flash[1m]") == (
-        "sob-bp-57fe-250ms-read-glm"
+    assert dispatch_agent_name("ab", "bp", "x-57fe", slug="250ms-read-floor", model="glm-5.3-flash[1m]") == (
+        "ab-bp-57fe-250ms-read-glm"
     )
     # Unknown model squeezes; blank model vanishes.
     assert dispatch_agent_name(None, "t", "x-1", model="Kimi K2 Thinking") == (
@@ -165,6 +165,8 @@ def test_dispatch_slug_cap_cuts_at_a_hyphen():
 def test_dispatch_name_refuses_unknown_codes():
     with pytest.raises(AgentNameError, match="unknown dispatch source"):
         dispatch_agent_name("xx", "t", "x-1")
+    with pytest.raises(AgentNameError, match="unknown dispatch source"):
+        dispatch_agent_name("sob", "bp", "x-1")
     with pytest.raises(AgentNameError, match="unknown dispatch verb"):
         dispatch_agent_name("ab", "target", "x-1")
 
@@ -190,9 +192,9 @@ def test_parse_canonical_and_manual_names():
 
 
 def test_parse_hex_names_resolve_through_the_graph():
-    parsed = parse_dispatch_agent_name("sob-bp-57fe-250ms-read-glm")
+    parsed = parse_dispatch_agent_name("ab-bp-57fe-250ms-read-glm")
     assert parsed is not None
-    assert (parsed.source, parsed.verb, parsed.tail) == ("sob", "bp", "250ms-read-glm")
+    assert (parsed.source, parsed.verb, parsed.tail) == ("ab", "bp", "250ms-read-glm")
     # The bare hex resolves to a full id only when the graph holds exactly one
     # `<prefix>-<hex>` node; an isolated name under a fake graph store keeps
     # the hex bare rather than inventing an id.
