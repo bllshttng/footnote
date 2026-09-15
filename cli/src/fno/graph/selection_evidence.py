@@ -15,13 +15,16 @@ class OccupancyUnavailable(RuntimeError):
     """A strict occupancy source could not be read; selection must refuse."""
 
 
-def read_occupancy(entries: list[dict], claimed_reader) -> tuple[set, dict]:
+def read_occupancy(
+    entries: list[dict] | None, claimed_reader, *, on_worked_error=None
+) -> tuple[set, dict]:
     """Live `node:` claims and roster-worked node ids, read once, together.
 
     Both reads are subprocess-bound and independent, so they overlap instead of
-    queueing. Both stay strict: an unreadable source raises, and the caller
-    refuses rather than select against an empty occupancy set. The claim
-    verdict is read first, so its refusal wins when both sources are down.
+    queueing. The claim verdict is read first, so its refusal wins when both
+    sources are down. Both stay strict unless ``on_worked_error`` is a callable:
+    it then receives the worked-read exception and ``worked`` reads empty, for
+    a caller with its own degrade policy (``store.ready``).
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -37,7 +40,10 @@ def read_occupancy(entries: list[dict], claimed_reader) -> tuple[set, dict]:
         try:
             worked = worked_read.result()
         except Exception as exc:  # noqa: BLE001 - unknown liveness refuses
-            raise OccupancyUnavailable(f"worked overlay unreadable: {exc}") from exc
+            if on_worked_error is None:
+                raise OccupancyUnavailable(f"worked overlay unreadable: {exc}") from exc
+            on_worked_error(exc)
+            worked = {}
     return set(claimed), worked
 
 

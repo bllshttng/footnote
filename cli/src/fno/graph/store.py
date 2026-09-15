@@ -539,13 +539,16 @@ def shutdown_keeper(path: Path) -> None:
 
 
 def _recv_exact(stream: socket.socket, length: int) -> bytes:
-    data = b""
-    while len(data) < length:
-        chunk = stream.recv(length - len(data))
-        if not chunk:
+    # Preallocated buffer filled in place: `data += chunk` on bytes copies the
+    # whole buffer per chunk, which on a 16 MB graph reply cost ~6s.
+    buf, got = bytearray(length), 0
+    view = memoryview(buf)
+    while got < length:
+        n = stream.recv_into(view[got:])
+        if not n:
             raise StoreUnavailable(STATE_SILENT, "keeper closed the connection mid-frame")
-        data += chunk
-    return data
+        got += n
+    return bytes(buf)
 
 
 def _client_for(path: Path, *, spawn: bool = True) -> _Keeper:
@@ -881,21 +884,20 @@ def ready(
     if occupancy is not None:
         params["claimed"] = sorted(occupancy)
     else:
-        from fno.graph.statuses import live_claimed_node_ids, live_worked_node_ids
+        from fno.graph import statuses
+        from fno.graph.selection_evidence import OccupancyUnavailable, read_occupancy
 
         try:
-            claimed = set(live_claimed_node_ids(strict=True))
-        except Exception as exc:  # noqa: BLE001 - unknown claim state refuses
-            # The keeper's own refusal wording: an unreadable claims root is
-            # UNKNOWN claim state, which must refuse, never read as "nothing is
-            # claimed". The parent-side strict read can hit that refusal first.
-            raise ClaimsUnavailableError(f"live claim state is unavailable ({exc})") from exc
-        try:
-            worked = set(live_worked_node_ids())
-        except Exception as exc:  # noqa: BLE001 - claims stay fail-closed
-            print(f"worked overlay degraded: {exc}", file=sys.stderr)
-            worked = set()
-        params["claimed"] = sorted(claimed | worked)
+            claimed, worked = read_occupancy(
+                None, lambda **kw: statuses.live_claimed_node_ids(**kw),
+                on_worked_error=lambda exc: print(
+                    f"worked overlay degraded: {exc}", file=sys.stderr
+                ),
+            )
+        except OccupancyUnavailable as exc:
+            # Unreadable claim state is UNKNOWN: refuse, never read as empty.
+            raise ClaimsUnavailableError(f"live claim state is unavailable ({exc.__cause__})") from exc
+        params["claimed"] = sorted(claimed | set(worked))
     if entries is not None:
         params["entries"] = entries
     from fno import paths as _paths

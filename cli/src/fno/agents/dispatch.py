@@ -4971,7 +4971,7 @@ def rpc_roundtrip(
             emit(f"daemon returned oversized frame ({length} bytes)")
             return None
 
-        data = b""
+        data = bytearray()
         while len(data) < length:
             chunk = sock.recv(length - len(data))
             if not chunk:

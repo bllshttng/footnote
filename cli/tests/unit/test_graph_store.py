@@ -1362,3 +1362,71 @@ def test_seat_owned_spawn_polls_for_the_incumbent(tmp_path, monkeypatch):
     assert keeper.sock == sock
     srv_sock = sock
     assert srv_sock.exists()
+
+
+_CHUNK_CAP = 8192
+
+
+class _CappedStream:
+    """Fake stream handing out at most 8192 bytes per call, through both recv
+    and recv_into, so the chunk size is identical on every OS (a real
+    socketpair on Linux hands out large chunks and would pass the old loop)."""
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self.pos = 0
+
+    def _next_chunk(self) -> bytes:
+        chunk = self.data[self.pos : self.pos + _CHUNK_CAP]
+        self.pos += len(chunk)
+        return chunk
+
+    def recv(self, n: int) -> bytes:
+        return self._next_chunk()
+
+    def recv_into(self, view, n=None) -> int:
+        chunk = self._next_chunk()
+        view[: len(chunk)] = chunk
+        return len(chunk)
+
+
+def test_recv_exact_linear_on_16mb_frame():
+    """AC1-HP: a 16,044,243-byte reply (the measured graph frame) read
+    in <=8192-byte chunks returns equal bytes in under 2s. The old
+    `data += chunk` loop on bytes copies the whole buffer per chunk and measured
+    ~6s of pure copy on this payload."""
+    from fno.graph.store import _recv_exact
+
+    payload = (b"a" + bytes(range(1, 256)) * 64) * (16_044_243 // (1 + 255 * 64) + 1)
+    payload = payload[:16_044_243]
+    stream = _CappedStream(payload)
+    start = time.monotonic()
+    out = _recv_exact(stream, len(payload))
+    elapsed = time.monotonic() - start
+    assert out == payload
+    assert elapsed < 2.0
+
+
+def test_recv_exact_refuses_silent_close_midframe():
+    """AC1-ERR: a stream that goes silent after half the payload
+    raises StoreUnavailable (state silent, keeper-closed wording), never a
+    short frame."""
+    from fno.graph.store import STATE_SILENT, StoreUnavailable, _recv_exact
+
+    class _DyingStream:
+        def __init__(self, serve: int):
+            self.serve = serve
+
+        def recv_into(self, view, n=None) -> int:
+            if self.serve <= 0:
+                return 0
+            take = min(_CHUNK_CAP, len(view), self.serve)
+            view[:take] = b"\x00" * take
+            self.serve -= take
+            return take
+
+    stream = _DyingStream(serve=16_044_243 // 2)
+    with pytest.raises(StoreUnavailable) as exc:
+        _recv_exact(stream, 16_044_243)
+    assert exc.value.state == STATE_SILENT
+    assert exc.value.detail == "keeper closed the connection mid-frame"

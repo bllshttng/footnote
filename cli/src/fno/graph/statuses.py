@@ -322,6 +322,7 @@ def live_worked_node_ids(
         from fno.claims.roster import _worker_reachability, read_roster
         from fno.graph.store import read_graph_strict
         from fno.paths import graph_json
+        from fno.provenance.resolver import transcript_listing
 
         if entries is None:
             entries = read_graph_strict(graph_json())
@@ -334,50 +335,54 @@ def live_worked_node_ids(
             raise RuntimeError(reading.reason or "roster not consulted")
 
         worked: dict[str, list[str]] = {}
-        for entry in entries:
-            if not isinstance(entry, dict) or entry.get("status") in TERMINAL_RUNGS:
-                continue
-            node_id = entry.get("id")
-            if not isinstance(node_id, str) or not node_id:
-                continue
-            workers: list[str] = []
-            closed_ids = closed_worker_session_ids(entry)
+        # One store-wide listing for every transcript resolution in this batch:
+        # per-session globs over ~2000 project dirs measured 4.32s for 31
+        # sessions.
+        with transcript_listing():
+            for entry in entries:
+                if not isinstance(entry, dict) or entry.get("status") in TERMINAL_RUNGS:
+                    continue
+                node_id = entry.get("id")
+                if not isinstance(node_id, str) or not node_id:
+                    continue
+                workers: list[str] = []
+                closed_ids = closed_worker_session_ids(entry)
 
-            def _admit(name, verdict):
-                # x-dead: unmeasured rows are listed marked, never vanished.
-                label = (
-                    name if verdict == REACHABLE
-                    else f"{name} {UNMEASURABLE_LABEL_MARK} no positive liveness evidence)"
-                )
-                if isinstance(label, str) and label and label not in workers:
-                    workers.append(label)
+                def _admit(name, verdict):
+                    # Unmeasured rows are listed marked, never vanished.
+                    label = (
+                        name if verdict == REACHABLE
+                        else f"{name} {UNMEASURABLE_LABEL_MARK} no positive liveness evidence)"
+                    )
+                    if isinstance(label, str) and label and label not in workers:
+                        workers.append(label)
 
-            for row in entry.get("sessions") or []:
-                # A ship row is a link event, never occupancy: the PR-link
-                # stamp opens it and no terminal closes it, so it cannot show
-                # that anyone is working the node.
-                if not (isinstance(row, dict) and isinstance(row.get("phase"), str)
-                        and row["phase"] != "ship"
-                        and is_open_phase_row(row, row["phase"])):
-                    continue
-                roster_row = reading.row_for_session(row["session_id"])
-                if roster_row is None or roster_row.get("row_id") in closed_ids:
-                    continue
-                verdict = _worker_reachability(roster_row).verdict
-                if verdict in (REACHABLE, UNKNOWN):
-                    _admit(roster_row.get("name"), verdict)
-            for extra in reading.workers_on(node_id):
-                if extra.get("row_id") in closed_ids:
-                    continue
-                verdict = _worker_reachability(extra).verdict
-                if verdict in (REACHABLE, UNKNOWN):
-                    _admit(extra.get("name"), verdict)
-            for extra_name in reading.unmeasurable_by_node.get(node_id, ()):
-                marker = f"{extra_name} {UNMEASURABLE_LABEL_MARK} no harness session id)"
-                if marker not in workers:
-                    workers.append(marker)
-            if workers:
-                worked[node_id] = workers
+                for row in entry.get("sessions") or []:
+                    # A ship row is a link event, never occupancy: the PR-link
+                    # stamp opens it and no terminal closes it, so it cannot show
+                    # that anyone is working the node.
+                    if not (isinstance(row, dict) and isinstance(row.get("phase"), str)
+                            and row["phase"] != "ship"
+                            and is_open_phase_row(row, row["phase"])):
+                        continue
+                    roster_row = reading.row_for_session(row["session_id"])
+                    if roster_row is None or roster_row.get("row_id") in closed_ids:
+                        continue
+                    verdict = _worker_reachability(roster_row).verdict
+                    if verdict in (REACHABLE, UNKNOWN):
+                        _admit(roster_row.get("name"), verdict)
+                for extra in reading.workers_on(node_id):
+                    if extra.get("row_id") in closed_ids:
+                        continue
+                    verdict = _worker_reachability(extra).verdict
+                    if verdict in (REACHABLE, UNKNOWN):
+                        _admit(extra.get("name"), verdict)
+                for extra_name in reading.unmeasurable_by_node.get(node_id, ()):
+                    marker = f"{extra_name} {UNMEASURABLE_LABEL_MARK} no harness session id)"
+                    if marker not in workers:
+                        workers.append(marker)
+                if workers:
+                    worked[node_id] = workers
         return worked
     except Exception as exc:  # noqa: BLE001 - display callers degrade loudly
         if strict:

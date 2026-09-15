@@ -1,36 +1,24 @@
 """Transcript resolver for backlog node provenance (Task 2.3, x-30f6).
 
-Core primitive: resolve_transcript(harness, session_id, cwd) -> ResolvedTranscript
-
-Claude layout:
-    ~/.claude/projects/<slug(cwd)>/<session_id>.jsonl
-where slug(cwd) replaces BOTH '/' and '.' with '-'.
-Example: /Users/bb16/code/me/fno -> -Users-bb16-code-me-fno
-
-Codex resolves to the rollout jsonl embedding the session id (kind="jsonl");
-opencode resolves to the SQLite store, with the session id as the lookup key
-(kind="opencode-db", the "path" names the store, not a per-session file). Both
-reuse fno.agents.discover's shipped, read-only store readers.
-
-For all remaining harnesses (gemini, antigravity, ...) the function returns
-resolved=False with reason="harness-not-supported" and NEVER raises.
-
-All degenerate inputs (None/empty session_id, None cwd) also return
-resolved=False without raising.
-
-The projects_root parameter is injectable (default: Path.home()/".claude"/"projects")
-so tests never touch the real ~/.claude tree.
+Core primitive: resolve_transcript(harness, session_id, cwd) -> ResolvedTranscript.
+Layouts, degenerate-input rules, and the never-raises contract live on the
+function itself; store roots are injectable so tests never touch the real
+stores. transcript_listing() shares one store-wide listing across a batch.
 """
 from __future__ import annotations
 
 import dataclasses
 import glob as _glob
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Optional
 
 # Default used in production; injected in tests via monkeypatch.
 _DEFAULT_PROJECTS_ROOT: Path = Path.home() / ".claude" / "projects"
+
+_ACTIVE_LISTING: ContextVar = ContextVar("claude_transcript_listing", default=None)
 
 
 @dataclasses.dataclass
@@ -106,6 +94,33 @@ def _newest_mtime(paths: list[Path]) -> Optional[Path]:
     return best
 
 
+@contextmanager
+def transcript_listing(projects_root: Optional[Path] = None):
+    """Share one listing of the claude transcript store across the scope.
+
+    Same stem filter as the per-session glob (a dotted stem is a sibling
+    artifact). A miss re-globs, so a transcript written after entry is still
+    found, and a different root ignores the scope. Scoped, never process-cached:
+    a worktree entry can copy a transcript into a second project dir mid-batch,
+    and a long-lived cache would keep serving the stale first-dir copy.
+    """
+    root = projects_root or _DEFAULT_PROJECTS_ROOT
+    listing = [p for p in root.glob("*/*.jsonl") if "." not in p.name[: -len(".jsonl")]]
+    token = _ACTIVE_LISTING.set((root, listing))
+    try:
+        yield
+    finally:
+        _ACTIVE_LISTING.reset(token)
+
+
+def _unresolved(
+    harness: Optional[str], session_id: Optional[str], cwd: Optional[str], reason: str
+) -> ResolvedTranscript:
+    return ResolvedTranscript(
+        harness=harness, session_id=session_id, cwd=cwd, resolved=False, reason=reason
+    )
+
+
 def resolve_transcript(
     harness: Optional[str],
     session_id: Optional[str],
@@ -117,40 +132,20 @@ def resolve_transcript(
 ) -> ResolvedTranscript:
     """Resolve a provenance pointer to its on-disk transcript path.
 
-    Parameters
-    ----------
-    harness:
-        Harness identifier, e.g. "claude", "codex", "gemini".  "claude",
-        "codex" and "opencode" are actively resolved (see the arms below);
-        every other harness returns resolved=False, reason="harness-not-
-        supported".
-    session_id:
-        Full UUID-style session id OR an 8-hex prefix for a glob match.
-        None/empty -> resolved=False immediately.
-    cwd:
-        Working directory of the session that produced the node.
-        None -> resolved=False immediately.
-    projects_root:
-        Override the default ~/.claude/projects root.  Required in tests.
-    codex_sessions_dir / opencode_db_path:
-        Override the codex rollout store / opencode SQLite store. Required in
-        tests so no read ever touches the developer's real stores.
+    ``harness``: "claude", "codex" and "opencode" are actively resolved; every
+    other harness returns resolved=False, reason="harness-not-supported".
+    ``session_id``: a full uuid or an 8-hex prefix; None/empty -> resolved=False.
+    ``cwd``: the producing session's working directory; None -> resolved=False
+    (claude needs it even though the search spans every project dir).
+    ``projects_root`` / ``codex_sessions_dir`` / ``opencode_db_path``: store
+    root overrides, required in tests so no read touches the real stores.
 
-    Returns
-    -------
-    ResolvedTranscript
-        Never raises.  resolved=True only when an actual store entry was found.
+    Never raises.  resolved=True only when an actual store entry was found.
     """
     root = projects_root if projects_root is not None else _DEFAULT_PROJECTS_ROOT
 
     if not session_id:
-        return ResolvedTranscript(
-            harness=harness,
-            session_id=session_id,
-            cwd=cwd,
-            resolved=False,
-            reason="missing-input",
-        )
+        return _unresolved(harness, session_id, cwd, "missing-input")
 
     # codex keys on the session id in the rollout; opencode keys on the session
     # id in the store. Neither needs cwd (only claude does, for its slug).
@@ -161,23 +156,11 @@ def resolve_transcript(
 
     # Guard: unsupported harnesses (gemini, antigravity, ...)
     if harness != "claude":
-        return ResolvedTranscript(
-            harness=harness,
-            session_id=session_id,
-            cwd=cwd,
-            resolved=False,
-            reason="harness-not-supported",
-        )
+        return _unresolved(harness, session_id, cwd, "harness-not-supported")
 
     # claude needs cwd for the projects slug (the guard above narrows it to str).
     if not cwd:
-        return ResolvedTranscript(
-            harness=harness,
-            session_id=session_id,
-            cwd=cwd,
-            resolved=False,
-            reason="missing-input",
-        )
+        return _unresolved(harness, session_id, cwd, "missing-input")
 
     # Claude resolution. Transcript-truth (x-a472): a session's transcript can
     # exist in more than one project dir -- EnterWorktree re-keys it from the
@@ -188,25 +171,23 @@ def resolve_transcript(
     # session id. cwd stays required (a claude pointer without it is
     # missing-input, guarded above) but no longer scopes the search.
     try:
-        # Escape the id so a stray glob metachar ('*', '?', '[') in an 8-hex
-        # prefix can't widen the match. `*/` scopes to one-level project dirs
-        # (the CC layout), never the UUID tool-results subdirs. Filter sibling
-        # artifacts: only `<uuid>.jsonl` is a real transcript, so a stem carrying
-        # a dot (`<uuid>.orphaned-...`, `<uuid>.sync-conflict-...`) is dropped --
-        # otherwise a full uuid would match its own artifacts and read as
-        # ambiguous, regressing exact-match-first.
-        esc = _glob.escape(session_id)
-        matches = sorted(
-            p for p in root.glob(f"*/{esc}*.jsonl") if "." not in p.name[: -len(".jsonl")]
-        )
+        scope = _ACTIVE_LISTING.get()
+        matches: list[Path] = []
+        if scope is not None and scope[0] == root:
+            matches = sorted(p for p in scope[1] if p.name.startswith(session_id))
         if not matches:
-            return ResolvedTranscript(
-                harness=harness,
-                session_id=session_id,
-                cwd=cwd,
-                resolved=False,
-                reason="not-found",
+            # No listing scope (or a miss inside one: the listing predates a
+            # transcript written after entry). Escape a stray glob metachar
+            # ('*', '?', '[') in an 8-hex prefix. A stem carrying a dot is a
+            # sibling artifact (`<uuid>.orphaned-...`), never a transcript:
+            # dropping it keeps a full uuid from matching its own artifacts
+            # and reading as ambiguous.
+            esc = _glob.escape(session_id)
+            matches = sorted(
+                p for p in root.glob(f"*/{esc}*.jsonl") if "." not in p.name[: -len(".jsonl")]
             )
+        if not matches:
+            return _unresolved(harness, session_id, cwd, "not-found")
 
         stems = {m.name for m in matches}
         if len(stems) > 1:
@@ -233,13 +214,7 @@ def resolve_transcript(
             ambiguous = False
 
         if chosen is None:  # every candidate vanished mid-scan (stat race)
-            return ResolvedTranscript(
-                harness=harness,
-                session_id=session_id,
-                cwd=cwd,
-                resolved=False,
-                reason="not-found",
-            )
+            return _unresolved(harness, session_id, cwd, "not-found")
         return ResolvedTranscript(
             harness=harness,
             session_id=session_id,
@@ -251,13 +226,7 @@ def resolve_transcript(
 
     except Exception:
         # Never raise (defensive: permissions, unexpected OS errors, etc.)
-        return ResolvedTranscript(
-            harness=harness,
-            session_id=session_id,
-            cwd=cwd,
-            resolved=False,
-            reason="error",
-        )
+        return _unresolved(harness, session_id, cwd, "error")
 
 
 def _resolve_codex(
