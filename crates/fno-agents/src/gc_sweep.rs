@@ -110,6 +110,11 @@ pub struct GcSummary {
     pub kept_open_work: Vec<(String, String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
+    /// `(id, detail)` (x-d8bc): the fresh truth probe answered nothing
+    /// within its bound and the in-process quiet witness could not lift the
+    /// row either. An unread instrument is never reported as `active` and
+    /// never carries an invented age.
+    pub kept_probe_unread: Vec<(String, String)>,
     /// The transcript could not be resolved through the row's own store.
     /// (x-1b90 change 3) Rows of `{ id, held_s, nodes_done }`: the hold
     /// names its age, and an old hold on done work asks for a decision.
@@ -280,6 +285,7 @@ impl GcSummary {
             + self.kept_planning_unclosed.len()
             + self.kept_open_work.len()
             + self.kept_active.len()
+            + self.kept_probe_unread.len()
             + self.kept_transcript_unresolved.len()
             + self.kept_graph_unreadable.len()
             + self.kept_open_do_row.len()
@@ -1110,7 +1116,7 @@ pub(crate) fn stop_row_process_with(
     // still holds the session - the adopt-then-rm recovery the operator ran
     // 50 times.
     if crate::gc_native::stop_precedes_removal(e) {
-        return stop_claude_confirmed(e);
+        return crate::gc_claude_stop::stop_claude_confirmed(e);
     }
     // A row with a mux ref: the pane kill IS the process end - the same
     // seam rm runs. Ok(_) (killed, or already absent) confirms; an error
@@ -1210,89 +1216,23 @@ pub(crate) fn worker_finished(
     terminal.is_some()
 }
 
-/// Stop a claude row's session before the row drops. The roster is the exited
-/// proof: a session the live roster no longer lists is already gone, and
-/// running `claude stop` on it would fail on every future sweep, wedging the
-/// row in `stop_refused` forever. A roster read that FAILS holds the row -
-/// a torn read is not an exited proof. An unreachable session id (no short
-/// id, no session id) holds too: the sweep cannot reach the session, so it
-/// must not drop the row and orphan the sideline entry. A successful stop
-/// EXIT is a receipt, not a proof: the roster has been seen still listing a
-/// session half a minute after a "stopped" return, so absence AFTER the stop
-/// is the confirmation and anything else holds the row for the next pass.
-fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
-    let Some(short) = e
-        .transport_short()
-        .map(str::to_string)
-        .or_else(|| roster_short(&e.harness_session_id))
-    else {
-        return false;
-    };
-    let sid = e.harness_session_id.as_deref();
-    if roster_lists(&short, sid) == Some(false) {
-        return true;
-    }
-    let stopped = {
-        let short = short.clone();
-        std::thread::spawn(move || {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map(|rt| {
-                    rt.block_on(async {
-                        matches!(
-                            crate::lifecycle_child::bounded_claude_stop(&short, std::time::Duration::from_secs(15))
-                                .await,
-                            Ok(Ok(output)) if output.status.success()
-                        )
-                    })
-                })
-                .unwrap_or(false)
-        })
-        .join()
-        .unwrap_or(false)
-    };
-    stopped && roster_lists(&short, sid) == Some(false)
-}
-
 /// The stop detail for the arms whose injected seam answers a bare bool
 /// (x-9485 change 1): which arm ran, the session, and the registered pid.
 /// The pane arm carries its own measurement; this fills the gap so a
 /// confirmed-removed effect names the pid the outcome is about, and the
-/// checked-in probe (`scripts/probes/reap-receipt-stop-probe.py`) verifies
-/// that pid reads gone.
+/// checked-in probe (`scripts/probes/reap-receipt-stop-probe.py`) reads only
+/// a `pid ` token from the worker-arm text, so the claude arm's honest text
+/// (x-d8bc change 1c) costs the probe nothing.
 fn stop_row_detail(e: &state::RegistryEntry) -> Option<String> {
     if crate::gc_native::stop_precedes_removal(e) {
         let sid = e.harness_session_id.as_deref()?;
-        Some(format!("claude stop ran; session {sid}"))
+        Some(format!("claude session ended; session {sid}"))
     } else if let Some(mux) = e.mux.as_ref() {
         Some(format!("mux pane {}:{} killed", mux.session, mux.pane_id))
     } else {
         let pid = e.pid.map(|p| format!("; pid {p}")).unwrap_or_default();
         Some(format!("worker socket stop ran{pid}"))
     }
-}
-
-/// Whether the live roster still lists the session, by short id or session
-/// id. `None` when the roster cannot be read: a torn read is not an exited
-/// proof in either direction.
-fn roster_lists(short: &str, sid: Option<&str>) -> Option<bool> {
-    roster_lists_in(&crate::claude_roster::default_roster_path(), short, sid)
-}
-
-fn roster_lists_in(path: &std::path::Path, short: &str, sid: Option<&str>) -> Option<bool> {
-    let roster = crate::claude_roster::ClaudeRoster::load(path).ok()?;
-    Some(roster.find(short).is_some() || sid.is_some_and(|sid| roster.find(sid).is_some()))
-}
-
-/// Resolve a claude short id from the live roster by session id.
-fn roster_short(session_id: &Option<String>) -> Option<String> {
-    let sid = session_id.as_deref()?.trim();
-    if sid.is_empty() {
-        return None;
-    }
-    let roster = crate::claude_roster::ClaudeRoster::load_default().ok()?;
-    roster.find(sid).map(|w| w.short_id().to_string())
 }
 
 /// The production tree probes for a retiring row: cleanliness first, the
@@ -2203,16 +2143,64 @@ pub(crate) fn run_with_release(
             // re-read keeps: absence is not quiet.
             // ponytail: a write inside the same whole second as a
             // classification that already read age 0 is not seen.
+            // x-d8bc change 1d: the quiet witness the subprocess probe cannot
+            // starve. The daemon writes inside_leg in process on every claude
+            // turn hook and every codex thread turn phase, so a seq that has
+            // not moved since classification says no turn report arrived -
+            // quiet - where the timed-out probe answer would read active.
+            let fresh_seq = state::load_registry(&home.registry_json())
+                .ok()
+                .and_then(|fresh| {
+                    fresh
+                        .entries
+                        .iter()
+                        .find(|row| row.name == e.name)
+                        .and_then(|row| row.inside_leg.as_ref().map(|leg| leg.seq))
+                });
+            let quiet_witness = fresh_age.is_none()
+                && age.is_some()
+                && e.inside_leg.is_some()
+                && fresh_seq == e.inside_leg.as_ref().map(|leg| leg.seq);
             let still_quiet = worker_finished(e, fresh_age, grace_secs, None)
                 // The release lift (x-e3cc): a missing age reads quiet for
                 // this row only. An ANSWERED fresh age still keeps -
                 // activity is activity even under a ruling.
                 || (release_quiet_row && fresh_age.is_none())
+                || quiet_witness
                 || (row.session_terminal.is_some()
                     && matches!((fresh_age, age), (Some(now_a), Some(then_a)) if now_a >= then_a));
             if !still_quiet {
-                let age_now = fresh_age.unwrap_or(0);
-                summary.kept_active.push((id, age_now));
+                match fresh_age {
+                    Some(age_now) => summary.kept_active.push((id, age_now)),
+                    None => {
+                        // x-d8bc: the silent keep dies here. An unanswered
+                        // probe with no lifting witness is a NAMED hold -
+                        // never kept_active, never an invented age 0.
+                        let detail = match (e.inside_leg.as_ref(), fresh_seq) {
+                            (None, _) => {
+                                "truth probe answered nothing within its bound; no inside-leg report on the row"
+                                    .to_string()
+                            }
+                            (Some(leg), Some(new_seq)) => format!(
+                                "truth probe answered nothing within its bound; inside-leg seq moved {} -> {new_seq}",
+                                leg.seq
+                            ),
+                            (Some(leg), None) => format!(
+                                "truth probe answered nothing within its bound; inside-leg seq moved {} -> absent",
+                                leg.seq
+                            ),
+                        };
+                        summary.kept_probe_unread.push((id.clone(), detail.clone()));
+                        summary.holds.push(Hold {
+                            id,
+                            reason: "probe unread",
+                            detail,
+                            age_s: hold_age_s,
+                            age_basis: hold_age_basis,
+                            escalated: false,
+                        });
+                    }
+                }
                 continue;
             }
         }
@@ -3860,7 +3848,7 @@ mod tests {
         claude.pid = Some(40001);
         assert_eq!(
             stop_row_detail(&claude).as_deref(),
-            Some("claude stop ran; session aaaa-bbbb")
+            Some("claude session ended; session aaaa-bbbb")
         );
 
         let mut codex = state::RegistryEntry::default();
@@ -4397,69 +4385,6 @@ mod tests {
         assert_eq!(summary.totals.deleted, 0);
         assert_eq!(summary.totals.would_delete, 0);
         std::fs::remove_dir_all(&base).ok();
-    }
-
-    /// A one-worker roster in the confirmed live shape (the shape the
-    /// claude_roster parse test accepts).
-    const ONE_WORKER_ROSTER: &str = r#"{
-  "proto": 1,
-  "supervisorPid": 4242,
-  "updatedAt": 1751049130000,
-  "workers": {
-    "ee99ff00": {
-      "pid": 5002,
-      "sessionId": "ee99ff00-7777-8888-9999-aaaabbbbcccc",
-      "ptySock": "/tmp/cc-daemon-501/deadbeef/pty/ee99ff00.pty.sock",
-      "startedAt": 1751049050000,
-      "attempt": 2,
-      "cwd": "/Users/x/code/other",
-      "dispatch": {"source": "fleet"}
-    }
-  }
-}"#;
-
-    fn roster_file(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("fno-roster-lists-{}-{}", std::process::id(), tag));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("roster.json");
-        std::fs::write(&path, ONE_WORKER_ROSTER).unwrap();
-        path
-    }
-
-    #[test]
-    fn roster_lists_by_short_id_session_id_or_not_at_all() {
-        let path = roster_file("listed");
-        assert_eq!(
-            roster_lists_in(&path, "ee99ff00", None),
-            Some(true),
-            "listed by short id"
-        );
-        assert_eq!(
-            roster_lists_in(&path, "ee99ff00-7777-8888-9999-aaaabbbbcccc", None),
-            Some(true),
-            "listed by session id"
-        );
-        assert_eq!(
-            roster_lists_in(&path, "deadbeef", None),
-            Some(false),
-            "an unknown session is not listed"
-        );
-        std::fs::remove_dir_all(path.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn torn_roster_read_is_unknown_not_gone() {
-        let dir = std::env::temp_dir().join(format!("fno-roster-torn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("roster.json")).unwrap();
-        assert_eq!(
-            roster_lists_in(&dir.join("roster.json"), "ee99ff00", None),
-            None,
-            "a torn read is not an exited proof"
-        );
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     // The cross-check runs even when the reverse join answers: a name

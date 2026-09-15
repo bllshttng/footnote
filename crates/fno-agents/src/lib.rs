@@ -109,6 +109,7 @@ pub mod finalize;
 pub mod fleet_incident;
 pub mod flight_gate;
 pub mod gc;
+pub mod gc_claude_stop;
 pub mod gc_inventory;
 pub mod gc_native;
 pub mod gc_sweep;
