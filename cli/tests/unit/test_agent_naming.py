@@ -266,7 +266,16 @@ def test_bridge_dispatch_form_prints_the_canonical_name():
     manual = _run_name("", "x-84b2", "--verb", "t")
     assert manual.exit_code == 0
     assert manual.stdout.strip() == "t-84b2"
-    modeled = _run_name("", "x-84b2", "--verb", "t", "--model", "claude-opus-5")
+    # The model rides the env, not a flag (x-72fc refuses flag growth).
+    from typer.testing import CliRunner as _CR
+
+    from fno.cli import app as _app
+
+    modeled = _CR().invoke(
+        _app,
+        ["agents", "name", "", "x-84b2", "--verb", "t"],
+        env={"FNO_AGENTS_NAME_MODEL": "claude-opus-5"},
+    )
     assert modeled.exit_code == 0
     assert modeled.stdout.strip() == "t-84b2-opus"
 

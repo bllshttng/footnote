@@ -2814,13 +2814,16 @@ def cmd_name(
     discriminator: str = typer.Option("", "--discriminator", help="Uniqueness token; never shaved."),
     source: str = typer.Option("", "--source", help="Dispatch source code (x-84b2); omit when attended."),
     verb: str = typer.Option("", "--verb", help="Verb code (t|bp|r|th|f) or a work verb the bridge maps."),
-    model: str = typer.Option("", "--model", help="Raw model string (x-57fe); the mint appends its short code."),
 ) -> None:
     """Mechanical bridge to the canonical agent-name owner, for shell dispatchers.
 
     Prints one name on stdout. Exit 3 (NOT 2) is the naming refusal; 2 is Click's usage
     error, which an `fno` too old to know this verb also returns - reading 2 as a refusal
     refuses the fleet on a stale install.
+
+    The model rides $FNO_AGENTS_NAME_MODEL, not a flag: the flag-registry gate
+    (x-72fc) refuses Python typer-flag growth, and a shell dispatcher carries an
+    env var as cheaply as a flag.
     """
     from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
 
@@ -2830,6 +2833,7 @@ def cmd_name(
     if not node_id:
         typer.echo("error: a node id is required: fno agents name [prefix] <node-id>", err=True)
         raise typer.Exit(2)
+    model = (os.environ.get("FNO_AGENTS_NAME_MODEL") or "").strip() or None
     try:
         name = bridge_name(
             prefix or "",
@@ -2839,7 +2843,7 @@ def cmd_name(
             discriminator=discriminator or None,
             source=source or None,
             verb=verb or None,
-            model=model or None,
+            model=model,
         )
     except (BridgeUsageError, AgentNameError) as exc:
         typer.echo(f"error: {exc}", err=True)

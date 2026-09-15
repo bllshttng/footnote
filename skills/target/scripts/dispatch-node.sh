@@ -335,11 +335,14 @@ for id in "${NODES[@]}"; do
   node_slug="$(printf '%s' "$node_json" | jq -r '.slug // .title // empty' 2>/dev/null)"
   # --verb t: the bridge refuses a verb-less mint (it usage-refused every
   # dispatch here until 2026-09-14, so every name came from the fallback
-  # assembly below). --model: the route's model when pinned, so the name
-  # carries the model tag that makes a misroute visible at a glance (x-57fe).
+  # assembly below). FNO_AGENTS_NAME_MODEL: the route's model when pinned, so
+  # the name carries the model tag that makes a misroute visible at a glance
+  # (x-57fe); an env var, not a flag - the flag registry refuses Python flag
+  # growth (x-72fc).
   name_args=("$id" --verb t --slug "$node_slug")
-  [[ -n "$ROUTE" ]] && name_args+=(--model "${ROUTE##*/}")
-  name_out="$(FNO_AGENTS_RUNTIME=python fno agents name "${name_args[@]}" 2>&1)"
+  name_env=(FNO_AGENTS_RUNTIME=python)
+  [[ -n "$ROUTE" ]] && name_env+=(FNO_AGENTS_NAME_MODEL="${ROUTE##*/}")
+  name_out="$(env "${name_env[@]}" fno agents name "${name_args[@]}" 2>&1)"
   name_rc=$?
   name_last="${name_out##*$'\n'}"
   agent_name=""
