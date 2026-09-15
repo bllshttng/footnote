@@ -110,7 +110,7 @@ pub struct GcSummary {
     pub kept_open_work: Vec<(String, String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
-    /// `(id, detail)` (x-d8bc): the fresh truth probe answered nothing
+    /// `(id, detail)`: the fresh truth probe answered nothing
     /// within its bound and the in-process quiet witness could not lift the
     /// row either. An unread instrument is never reported as `active` and
     /// never carries an invented age.
@@ -1222,7 +1222,7 @@ pub(crate) fn worker_finished(
 /// confirmed-removed effect names the pid the outcome is about, and the
 /// checked-in probe (`scripts/probes/reap-receipt-stop-probe.py`) reads only
 /// a `pid ` token from the worker-arm text, so the claude arm's honest text
-/// (x-d8bc change 1c) costs the probe nothing.
+/// (change 1c) costs the probe nothing.
 fn stop_row_detail(e: &state::RegistryEntry) -> Option<String> {
     if crate::gc_native::stop_precedes_removal(e) {
         let sid = e.harness_session_id.as_deref()?;
@@ -1934,7 +1934,7 @@ pub(crate) fn run_with_release(
             planning_closed,
             planning_plan_written,
             planning_released: false,
-            // x-d8bc: the latest inside-leg report reading `done` is the
+            // the latest inside-leg report reading `done` is the
             // halted-planner fact - the turn ended, the session waits on
             // nothing.
             turn_ended: e
@@ -2150,7 +2150,7 @@ pub(crate) fn run_with_release(
             // re-read keeps: absence is not quiet.
             // ponytail: a write inside the same whole second as a
             // classification that already read age 0 is not seen.
-            // x-d8bc change 1d: the quiet witness the subprocess probe cannot
+            // Change 1d: the quiet witness the subprocess probe cannot
             // starve. The daemon writes inside_leg in process on every claude
             // turn hook and every codex thread turn phase, so a seq that has
             // not moved since classification says no turn report arrived -
@@ -2186,7 +2186,7 @@ pub(crate) fn run_with_release(
                 match fresh_age {
                     Some(age_now) => summary.kept_active.push((id, age_now)),
                     None => {
-                        // x-d8bc: the silent keep dies here. An unanswered
+                        // the silent keep dies here. An unanswered
                         // probe with no lifting witness is a NAMED hold -
                         // never kept_active, never an invented age 0.
                         let detail = match (e.inside_leg.as_ref(), fresh_seq) {
@@ -2470,7 +2470,7 @@ pub(crate) fn run_with_release(
                 // and it is never anonymous. The arm order mirrors the
                 // release precedence in gc_decide: terminal state, then live
                 // peer, then inactive status, then recorded merge.
-                // x-d8bc: the planner arms answer only for a row the graph
+                // the planner arms answer only for a row the graph
                 // gave an assignment set - an empty set falls to the session
                 // arms below, so a released bp row never borrows the
                 // planning wording.

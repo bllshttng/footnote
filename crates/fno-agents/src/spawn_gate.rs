@@ -45,7 +45,7 @@ pub const EXIT_NO_WAIT: i32 = 76;
 /// was unreadable. The team cap is the one permanent, non-queueable machine
 /// refusal with its own number, so a caller never retries it as capacity.
 pub const EXIT_TERRITORY_CAP: i32 = 86;
-/// The blueprint thread cap (x-d8bc): more than
+/// The blueprint thread cap: more than
 /// `agents.profiles.blueprint.max_live` live `bp` threads, or more than one
 /// per territory, refuses the spawn and teaches the subagent path.
 pub const EXIT_BLUEPRINT_CAP: i32 = 88;
@@ -645,7 +645,7 @@ fn territory_refusal(receipt: &str) -> Refusal {
         .ev("axis", serde_json::json!("territory"))
 }
 
-/// The blueprint thread cap (x-d8bc): the machine axis counts live rows whose
+/// The blueprint thread cap: the machine axis counts live rows whose
 /// names parse to verb `bp`; the territory axis counts the ones working the
 /// spawn's territory. Refuses, never queues, beside the machine cap - and
 /// `--force` does not excuse it, the same posture as the territory cap. The
@@ -1153,7 +1153,7 @@ pub fn run_gate(
                 return Err(territory_refusal(&receipt));
             }
         }
-        // The blueprint axis refuses under --force too (x-d8bc): force speaks
+        // The blueprint axis refuses under --force too: force speaks
         // for the machine being busy, never for one king holding every
         // planning lane.
         {
@@ -1542,7 +1542,7 @@ pub fn run_gate(
                                     return Err(territory_refusal(&receipt));
                                 }
                             }
-                            // The blueprint axis beside it (x-d8bc): a full
+                            // The blueprint axis beside it: a full
                             // planning lane refuses, never queues.
                             if let Err(receipt) = check_blueprint_cap(
                                 config_cwd,
@@ -3647,7 +3647,7 @@ MemAvailable:    8000000 kB\n";
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// x-d8bc AC6-HP: with five live `bp` rows and default config, a sixth
+    /// AC6-HP: with five live `bp` rows and default config, a sixth
     /// blueprint spawn refuses with `blueprint_cap`, the receipt naming the
     /// five live rows, the cap, and the subagent remedy. A non-bp spawn and
     /// a spawn under the cap admit.
@@ -3685,7 +3685,7 @@ MemAvailable:    8000000 kB\n";
         assert!(check_blueprint_cap(dir.path(), &reg, "bp-x-9-slug", None, &live[..4]).is_ok());
     }
 
-    /// x-d8bc AC6-ERR: one live blueprint row on a node, a second blueprint
+    /// AC6-ERR: one live blueprint row on a node, a second blueprint
     /// spawn for the same territory refuses with `blueprint_territory_cap`
     /// and names the live row.
     #[test]
@@ -3728,7 +3728,7 @@ MemAvailable:    8000000 kB\n";
         );
     }
 
-    /// x-d8bc AC6-ERR (force): the force branch refuses the same blueprint
+    /// AC6-ERR (force): the force branch refuses the same blueprint
     /// spawn - force never excuses the blueprint axis.
     #[test]
     fn the_force_branch_refuses_a_capped_blueprint_spawn() {

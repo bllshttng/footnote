@@ -659,7 +659,7 @@ pub fn territory_max_live(cwd: &Path) -> u32 {
     }
 }
 
-/// Blueprint thread cap defaults (operator law, x-d8bc): no more than five
+/// Blueprint thread cap defaults (operator law): no more than five
 /// blueprint threads at once, one per territory - one for each king. The
 /// spawn gate refuses past either; the remedy is a native subagent.
 pub const DEFAULT_BLUEPRINT_MAX_LIVE: u32 = 5;
@@ -1216,7 +1216,7 @@ mod tests {
         clear_config_env();
     }
 
-    /// x-d8bc AC6-EDGE (config side): default, a configured value, and the
+    /// AC6-EDGE (config side): default, a configured value, and the
     /// 0-coercion on both blueprint cap readers.
     #[test]
     fn blueprint_caps_default_configure_and_coerce() {

@@ -476,7 +476,7 @@ pub fn parse_dispatch_agent_name(name: Option<&str>) -> Option<Parsed> {
 
 /// Is this a blueprint dispatch name? The grammar answers it, never a
 /// prefix test: `bp-x-1-slug`, `ac-bp-x-2-slug` and `sob-bp-x-3-slug` all
-/// parse to verb `bp`; `t-x-4-slug` does not (x-d8bc AC4-HP).
+/// parse to verb `bp`; `t-x-4-slug` does not (AC4-HP).
 pub fn is_blueprint_name(name: &str) -> bool {
     parse_dispatch_agent_name(Some(name)).is_some_and(|p| p.verb == "bp")
 }
@@ -625,7 +625,7 @@ pub fn run_name_codes() -> i32 {
 mod tests {
     use super::*;
 
-    /// x-d8bc AC4-HP: the grammar answers the blueprint question - every
+    /// AC4-HP: the grammar answers the blueprint question - every
     /// verb-bp name matches whatever its source prefix, and a target row
     /// never does.
     #[test]

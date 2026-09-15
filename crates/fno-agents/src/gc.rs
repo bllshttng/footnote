@@ -81,7 +81,7 @@ pub struct GcRow {
     /// marker question is answered (the operator ruled the assignment
     /// over), so only the 1200 s quiet gate remains.
     pub planning_released: bool,
-    /// The row's latest inside-leg report reads `done` (x-d8bc): the turn
+    /// The row's latest inside-leg report reads `done`: the turn
     /// ended and the session is not waiting. A halted planner - one whose
     /// turn ended with no plan on the node - counts as finished, never as
     /// an assignment in flight. `blocked` (waiting on input) and `working`
@@ -150,7 +150,7 @@ impl GcRow {
 pub const PLANNING_COMPLETE_STATUSES: [&str; 5] =
     ["done", "ready", "in_progress", "in_review", "shipped"];
 
-/// Statuses that finish a planning assignment with NO marker (x-d8bc): a
+/// Statuses that finish a planning assignment with NO marker: a
 /// node that moved to `deferred` or `superseded` has nothing left to plan.
 /// The assignment is over even though this session wrote no close and no
 /// plan - waiting forever on a moved-on node is the hold it cures.
@@ -319,7 +319,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
                 // vacuous all() would retire a row the graph could not
                 // describe. It falls through to the open-work gate below.
                 if !assignments.is_empty() {
-                    // x-d8bc: three facts finish an assignment beside the
+                    // three facts finish an assignment beside the
                     // markers - the node moved on (deferred or superseded,
                     // nothing left to plan), and the planner halted (its
                     // last inside-leg report reads done: the turn ended
@@ -1040,7 +1040,7 @@ pub fn maybe_retirement_sweep(
             Some(&detail),
             interval.as_secs(),
         );
-        // x-d8bc AC5: every held row lands in the journal once per tick -
+        // AC5: every held row lands in the journal once per tick -
         // one `retire_holds` row beside the tick, so a fleet question reads
         // the event stream instead of parsing bucket counts. Zero holds
         // writes nothing.
@@ -1437,7 +1437,7 @@ mod tests {
         );
     }
 
-    /// x-d8bc AC5-HP: a tick whose sweep held rows writes ONE
+    /// AC5-HP: a tick whose sweep held rows writes ONE
     /// `retire_holds` journal row naming each held id, beside the tick row.
     #[test]
     fn a_tick_with_held_rows_writes_one_retire_holds_event() {
@@ -1520,7 +1520,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.path());
     }
 
-    /// x-d8bc AC5-EDGE: a tick with zero holds writes NO `retire_holds`
+    /// AC5-EDGE: a tick with zero holds writes NO `retire_holds`
     /// row, even when the pass kept a row under a hold-free bucket.
     #[test]
     fn a_tick_with_zero_holds_writes_no_retire_holds_event() {
@@ -2153,7 +2153,7 @@ mod tests {
         assert_eq!(gc_decide(&planner, GRACE), (GcAction::Retire, None));
     }
 
-    /// x-d8bc AC3-HP: a planner whose only assignment is a moved-on node -
+    /// AC3-HP: a planner whose only assignment is a moved-on node -
     /// `deferred` or `superseded` - retires with no close and no plan:
     /// there is nothing left to plan.
     #[test]
@@ -2176,7 +2176,7 @@ mod tests {
         }
     }
 
-    /// x-d8bc AC3-ERR: a planner whose assignment is unfinished keeps as
+    /// AC3-ERR: a planner whose assignment is unfinished keeps as
     /// `PlanningUnclosed`. The sweep maps `blocked`, `working`, and an
     /// absent inside-leg report to the same fact: the turn has not ended.
     #[test]
@@ -2203,7 +2203,7 @@ mod tests {
         );
     }
 
-    /// x-d8bc AC3-EDGE: a halted planner (latest inside-leg report `done`)
+    /// AC3-EDGE: a halted planner (latest inside-leg report `done`)
     /// on an unfinished node retires past the planner grace, and keeps as
     /// Active inside it.
     #[test]

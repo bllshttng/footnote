@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn an_unread_probe_row_prints_its_line_and_json_key() {
-        // x-d8bc: an unread probe is its own bucket, never `active` - the
+        // an unread probe is its own bucket, never `active` - the
         // render must show both the text line and the JSON key.
         let mut s = GcSummary::default();
         s.kept_probe_unread.push((

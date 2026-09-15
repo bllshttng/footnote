@@ -1,4 +1,4 @@
-//! The x-d8bc retirement families: the probe-unread hold, the polled stop
+//! The blueprint retirement families: the probe-unread hold, the polled stop
 //! confirmation's apply path, and the empty-planning-set basis. Split out of
 //! `gc_receipts` (file budget); the shared fixtures resolve through it.
 
@@ -6,7 +6,7 @@ use super::*;
 use super::{no_agents, quiet_transcript, stage_graph, staged_graph_home, uniform_ages};
 use crate::gc_sweep::{self, GcSummary};
 
-/// x-d8bc AC1-HP: a claude thread row classified would-retire, whose fresh
+/// AC1-HP: a claude thread row classified would-retire, whose fresh
 /// re-read answers NOTHING (the staged timeout), whose registry
 /// `inside_leg.seq` is unchanged since classification, still stages: the
 /// in-process quiet witness answers where the subprocess probe starved.
@@ -40,7 +40,7 @@ fn an_unanswered_re_read_with_no_new_turn_still_stages_the_retirement() {
     );
 }
 
-/// x-d8bc AC1-ERR: same row, but between classification and the re-read the
+/// AC1-ERR: same row, but between classification and the re-read the
 /// inside-leg seq ADVANCED (a new turn report landed). The row keeps in
 /// `kept_probe_unread` with a `probe unread` hold naming the seq move; it
 /// never appears in kept_active.
@@ -94,7 +94,7 @@ fn an_unanswered_re_read_after_a_new_turn_holds_by_name() {
     assert!(summary.kept_active.is_empty(), "{:?}", summary.kept_active);
 }
 
-/// x-d8bc AC1-EDGE: a row with no inside-leg report whose fresh re-read
+/// AC1-EDGE: a row with no inside-leg report whose fresh re-read
 /// answers nothing holds in `kept_probe_unread` - never kept_active, never
 /// an age of 0.
 #[test]
@@ -139,7 +139,7 @@ fn a_row_with_no_inside_leg_holds_on_an_unanswered_re_read() {
     assert!(summary.holds.iter().any(|h| h.id == "worker-x-u1"));
 }
 
-/// x-d8bc AC4-EDGE: a `bp-` row whose planning set is EMPTY retires through
+/// AC4-EDGE: a `bp-` row whose planning set is EMPTY retires through
 /// the session release - the basis uses the session arm, never the planning
 /// wording. The `released` spelling is reserved for planning_released.
 #[test]
@@ -204,7 +204,7 @@ fn a_bp_row_with_an_empty_planning_set_retires_on_the_session_basis() {
     );
 }
 
-/// The x-d8bc AC1 fixture: one claude thread row (`pid` null is the
+/// The AC1 fixture: one claude thread row (`pid` null is the
 /// default), `inside_leg` present, staged on a done node so classification
 /// answers would-retire on its quiet age.
 fn staged_probe_unread_home() -> (tempfile::TempDir, AgentsHome) {

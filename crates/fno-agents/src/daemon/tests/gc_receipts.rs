@@ -4791,7 +4791,7 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// The x-d8bc retirement families, split by the file budget; the
+/// The blueprint retirement families, split by the file budget; the
 /// fixtures above are the shared seams.
 #[path = "gc_receipts/blueprint_retirement.rs"]
 mod blueprint_retirement;

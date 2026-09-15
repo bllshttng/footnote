@@ -1,5 +1,5 @@
 //! The claude stop arm of the retirement sweep, moved out of `gc_sweep`
-//! (x-d8bc change 1a) so the file stays under its shrink-only cap.
+//! (change 1a) so the file stays under its shrink-only cap.
 //!
 //! The stop confirmation polls two witnesses (change 1b): the daemon
 //! `roster.json` and the `claude agents` state. A single post-stop roster
@@ -65,7 +65,7 @@ pub(crate) fn stop_claude_confirmed(e: &state::RegistryEntry) -> bool {
     )
 }
 
-/// The injectable stop-confirmation core (x-d8bc change 1b). The stop ran
+/// The injectable stop-confirmation core (change 1b). The stop ran
 /// when `stop` answers true; after it, poll up to `polls` times, one second
 /// apart, and confirm on the first poll where the roster stops listing the
 /// session or the `claude agents` state reads terminal. A stop that did not

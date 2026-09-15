@@ -962,7 +962,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
     // live-but-unowned PID to exited); this REMOVES the row entirely.
     "agent_row_reaped",
-    // One row per daemon retire tick that held rows (x-d8bc): every held id
+    // One row per daemon retire tick that held rows: every held id
     // with its reason, detail and age, so the fleet reads one event stream.
     "retire_holds",
     // One bounded count summary for every configured state-retention pass.

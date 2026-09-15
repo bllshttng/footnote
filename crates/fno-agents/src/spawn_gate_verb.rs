@@ -188,7 +188,7 @@ mod probe {
                 );
             }
             // The blueprint axis shows the same verdict a spawn would get
-            // (x-d8bc): gate-status never lies about a bp spawn's odds.
+            //: gate-status never lies about a bp spawn's odds.
             let bp_name = opt_str_of(payload, "name").unwrap_or_default();
             let bp_live = spawn_gate::live_rows(&registry_path, &mut warnings);
             if let Err(receipt) = spawn_gate::check_blueprint_cap(
