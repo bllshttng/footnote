@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import Path
 import typer
 
 graph_app = typer.Typer(help="Inspect or export the durable graph store.")
