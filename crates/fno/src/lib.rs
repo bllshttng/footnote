@@ -55,6 +55,8 @@ pub mod squad_cascade;
 pub mod squad_store;
 pub mod store_client;
 pub mod templates;
+#[cfg(test)]
+pub(crate) mod test_owner;
 pub mod theme;
 pub(crate) mod thread_viewer;
 pub mod transcript_tail;

@@ -13,6 +13,12 @@
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+
+// One source, two compilation units: this file is the lib's cfg(test) module
+// (used by src/server_tests.rs) and is included here by path for the
+// integration harness. See the module doc for the units contract.
+#[path = "../../src/test_owner.rs"]
+pub(crate) mod test_owner;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -80,6 +86,11 @@ impl Scratch {
             )
             .env("FNO_E2E", "1")
             .env("FNO_PROCESS_ADMISSION_MAX", "512");
+        // x-7447: a server this command autospawns inherits the env and passes
+        // it to every `fno-agents-worker` keeper it launches, so the keeper's
+        // watchdog reaps it when this test binary exits. Applied after the
+        // FNO_* strip above; a later explicit .env still overrides.
+        cmd.envs(test_owner::self_owner_env());
     }
 
     fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
@@ -106,6 +117,12 @@ impl Scratch {
         );
         cmd.env("FNO_E2E", "1");
         cmd.env("FNO_PROCESS_ADMISSION_MAX", "512");
+        // x-7447, same contract as isolate_command: the autospawned server
+        // inherits this and its keepers reap on this test binary's exit.
+        // CommandBuilder has no batch envs(); apply the pair one call each.
+        for (k, v) in test_owner::self_owner_env() {
+            cmd.env(k, v);
+        }
     }
 
     /// The session socket the client will use under `FNO_MUX_DIR`.
@@ -578,6 +595,42 @@ fn pin_checkout_worker(cmd: &mut std::process::Command) {
     }
 }
 
+/// The sibling keeper binary, built on demand. The keeper-path tests
+/// (`FNO_AGENTS_WORKER_BIN`) and the owner-reap control both need a real
+/// `fno-agents-worker`; CARGO_TARGET_DIR wins so an out-of-tree target dir
+/// that already has the binary is found without a second build.
+pub fn worker_bin() -> PathBuf {
+    static WORKER_BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    WORKER_BIN
+        .get_or_init(|| {
+            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fno-agents/target")
+                });
+            let path = target_dir.join("debug/fno-agents-worker");
+            if !path.is_file() {
+                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+                let manifest =
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fno-agents/Cargo.toml");
+                let status = std::process::Command::new(cargo)
+                    .args(["build", "--manifest-path"])
+                    .arg(manifest)
+                    .args(["--bin", "fno-agents-worker"])
+                    .status()
+                    .expect("cargo builds the keeper worker");
+                assert!(status.success(), "keeper worker build failed: {status}");
+            }
+            assert!(
+                path.is_file(),
+                "keeper worker binary missing: {}",
+                path.display()
+            );
+            path
+        })
+        .clone()
+}
+
 /// Spawn the real server binary headless on `sock`, with `envs` overriding
 /// the inherited environment (SHELL, PATH for the git-stub cases, ...).
 #[allow(dead_code)]
@@ -653,6 +706,12 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
         "FNO_GLOBAL_SETTINGS_PATH",
         iso.join("iso-cfg").join("settings.json"),
     );
+    // x-7447: the server launches `fno-agents-worker` keepers by inheriting
+    // its env (launch_keeper does not filter), so the owner reaches the keeper
+    // and its watchdog reaps the keeper when this test binary exits. The
+    // `envs` slice below still overrides - the owner-death control test pins
+    // the owner to a surrogate process it can kill.
+    cmd.envs(test_owner::self_owner_env());
     for (k, v) in envs {
         cmd.env(k, v);
     }

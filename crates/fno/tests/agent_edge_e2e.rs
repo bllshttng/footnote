@@ -9,7 +9,7 @@
 //! (registry write + `pane run`) is exercised by cli pytest (test_spawn_pane).
 
 mod common;
-use common::{FakeClient, Scratch};
+use common::{worker_bin, FakeClient, Scratch};
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -21,38 +21,6 @@ use fno::proto::{AgentBadge, AgentRow, Command as MuxCommand};
 /// resolves it via `FNO_AGENTS_HOME` (inherited by the self-spawned server).
 fn agents_home(scratch: &Scratch) -> PathBuf {
     scratch.0.join("agents-home")
-}
-
-fn worker_bin() -> PathBuf {
-    static WORKER_BIN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    WORKER_BIN
-        .get_or_init(|| {
-            let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fno-agents/target")
-                });
-            let path = target_dir.join("debug/fno-agents-worker");
-            if !path.is_file() {
-                let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-                let manifest =
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fno-agents/Cargo.toml");
-                let status = Command::new(cargo)
-                    .args(["build", "--manifest-path"])
-                    .arg(manifest)
-                    .args(["--bin", "fno-agents-worker"])
-                    .status()
-                    .expect("cargo builds the keeper worker");
-                assert!(status.success(), "keeper worker build failed: {status}");
-            }
-            assert!(
-                path.is_file(),
-                "keeper worker binary missing: {}",
-                path.display()
-            );
-            path
-        })
-        .clone()
 }
 
 fn pane(scratch: &Scratch, args: &[&str]) -> Output {

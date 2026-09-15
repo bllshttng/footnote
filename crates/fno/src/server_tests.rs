@@ -10125,6 +10125,10 @@ fn spawn_keeper_for_test(
         "--",
     ]);
     cmd.args(provider);
+    // x-7447: the keeper outlives the server by design, so without an owner
+    // it survives this test run as a ppid-1 orphan. The test binary IS the
+    // owner; the watchdog inside the keeper reaps it when the run ends.
+    cmd.envs(crate::test_owner::self_owner_env());
     let child = cmd
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
