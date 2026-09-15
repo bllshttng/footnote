@@ -24,11 +24,11 @@ _REFUSAL_ERROR_CAP = 5
 #: Top-level blocks the walker must not judge: another reader owns `kanban`,
 #: and `providers` is the pre-rename spelling the loader still aliases across.
 _UNMODELED_BLOCKS = frozenset({"kanban", "providers"})
-#: Legacy spellings the loader still honors (config/_watchdog.py: coerce_legacy
-#: lifts `watchdog_mail_to`, lift_retire_grace lifts `retire_grace_s`). The
-#: walker reads the raw tree, before coercion, so a key the loader would lift
-#: must not report as unknown: warning on a working key is cried wolf.
-_HONORED_LEGACY_KEYS = frozenset({"recovery.watchdog_mail_to", "recovery.retire_grace_s"})
+#: Legacy spellings the loader still honors (config/_watchdog.py:
+#: lift_retire_grace). The walker reads the raw tree, before coercion, so a
+#: key the loader would lift must not report as unknown: warning on a working
+#: key is cried wolf.
+_HONORED_LEGACY_KEYS = frozenset({"recovery.retire_grace_s"})
 
 _Model = Optional[type[BaseModel]]
 

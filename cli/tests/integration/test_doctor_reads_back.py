@@ -487,14 +487,20 @@ def test_dead_key_under_a_known_table_warns_at_load(tmp_path: Path) -> None:
 
 
 def test_honored_legacy_spelling_is_not_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`coerce_legacy` lifts `watchdog_mail_to` into the nested block, so the
-    raw spelling is honored, not ignored, and must never report as unknown:
-    a load-time warning that fires on a working key is cried wolf."""
+    """`lift_retire_grace` lifts the moved retire_grace_s key, so the raw
+    spelling is honored, not ignored, and must never report as unknown: a
+    load-time warning that fires on a working key is cried wolf. A key the
+    repo has retired (the deleted mail_to leaf, per retired-config-leaves.txt)
+    is the opposite: dead means dead, and the walker must say so."""
     from fno.config_readback import check_unknown_keys
 
-    honored = _write(tmp_path / "honored.toml", 'schema_version = 1\n[recovery]\nwatchdog_mail_to = "bp"\n')
+    honored = _write(tmp_path / "honored.toml", 'schema_version = 1\n[recovery]\nretire_grace_s = 60\n')
     monkeypatch.setenv("FNO_CONFIG", str(honored))
     assert check_unknown_keys() == []
+
+    retired = _write(tmp_path / "retired.toml", 'schema_version = 1\n[recovery]\nwatchdog_mail_to = "bp"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(retired))
+    assert any("recovery.watchdog_mail_to" in p for p in check_unknown_keys())
 
     dead = _write(tmp_path / "dead.toml", 'schema_version = 1\n[recovery]\nwatchdog_reap = true\n')
     monkeypatch.setenv("FNO_CONFIG", str(dead))

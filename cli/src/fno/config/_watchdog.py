@@ -28,9 +28,9 @@ class WatchdogBlock(BaseModel):
 
 def coerce_legacy(data: object) -> object:
     """A ``recovery`` block written before the split still parses, unchanged.
-    ``"off"`` becomes ``enabled=false`` keeping the DEFAULT mode, so turning
-    the lane back on does not also silently pick a depth; a key already in the
-    nested form wins over its legacy sibling."""
+    A one-word ``watchdog = "off"`` becomes ``enabled=false`` keeping the
+    DEFAULT mode, so turning the lane back on does not also silently pick a
+    depth; a nested block already present wins over the one-word spelling."""
     if not isinstance(data, dict):
         return data
     flat = data.get("watchdog")
@@ -45,8 +45,6 @@ def coerce_legacy(data: object) -> object:
         block["enabled"] = word not in {"", "off"}
         if block["enabled"]:
             block["mode"] = word
-    if "watchdog_mail_to" in data and "mail_to" not in block:
-        block["mail_to"] = data["watchdog_mail_to"]
     if block or isinstance(flat, str):
         data = {**data, "watchdog": block}
     return data
