@@ -3564,6 +3564,9 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
             # difficulty rides alongside so the grid resolver sees the work axis.
             "model": e.get("model"),
             "difficulty": e.get("difficulty"),
+            # x-0961: the dispatcher refuses a node dict with no dispatch_verb
+            # key, so the projection must carry it (raw, may be None).
+            "dispatch_verb": e.get("dispatch_verb"),
             "cross_project": (e.get("project") or None) != (closed_project or None),
         })
     return out

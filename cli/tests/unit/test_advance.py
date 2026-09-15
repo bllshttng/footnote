@@ -937,6 +937,10 @@ def test_direct_dependents_carry_difficulty(monkeypatch):
     assert deps["ab-dep00001"]["difficulty"] == "high"
     assert deps["ab-dep00002"]["difficulty"] is None
     assert all("model_tier" not in d for d in deps.values())
+    # x-0961: the dispatcher refuses a node dict with no dispatch_verb key, so
+    # the projection carries the RAW declaration (present, may be None/empty).
+    assert "dispatch_verb" in deps["ab-dep00001"]
+    assert deps["ab-dep00001"]["dispatch_verb"] is None
 
 
 def test_direct_dependents_admit_plan_less_idea(monkeypatch):
