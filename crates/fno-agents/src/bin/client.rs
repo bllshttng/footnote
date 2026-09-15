@@ -553,7 +553,6 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::kill_criteria::run_kill_check(&args[1..]);
     }
 
-
     // `authorized-merge`: the one merge/arm authorization (see
     // authorized_merge.rs doc). Direct dispatch; no daemon RPC. `fno do pr
     // merge` sends one JSON payload and reads one receipt back, so the merge
