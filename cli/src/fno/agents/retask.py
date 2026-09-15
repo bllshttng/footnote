@@ -363,9 +363,8 @@ def finished_planner(
     parent = (graph.get(node_id) or {}).get("parent")
     if not parent:
         return None
-    parsed_rows = parse_many([e.name for e in entries])
     candidates: list[tuple[str, AgentEntry]] = []
-    for entry, parsed in zip(entries, parsed_rows):
+    for entry, parsed in zip(entries, parse_many([e.name for e in entries])):
         if entry.status != "live" or entry.substrate not in {"pane", "thread"}:
             continue
         if parsed is None or parsed.verb != "bp":
@@ -385,9 +384,7 @@ def finished_planner(
         if not any(s.get("phase") == "blueprint" and s.get("ended_at") for s in sessions):
             continue
         candidates.append((inside.get("received_at") or "", entry))
-    if not candidates:
-        return None
-    return min(candidates, key=lambda pair: pair[0])[1]
+    return min(candidates, key=lambda pair: pair[0])[1] if candidates else None
 
 
 def detect_retask(
