@@ -133,7 +133,8 @@
       "spawn_trigger",
       "spawned_by_cwd",
       "spawned_by_harness",
-      "spawned_by_session"
+      "spawned_by_session",
+      "stop"
     ]
   },
   "known_gaps": {}
