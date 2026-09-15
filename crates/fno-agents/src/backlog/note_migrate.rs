@@ -495,7 +495,7 @@ fn run_migrate(
             None,
             Some(&mut hook),
             |rows| {
-                // x-385e: build the candidate from the FRESH read, never the
+                // Build the candidate from the FRESH read, never the
                 // pre-loop snapshot that republished stale rows.
                 let candidate = build_candidate(
                     rows,

@@ -250,7 +250,7 @@ fn run_machine(
 }
 
 /// Set the bounded `state_needs_refresh` marker in the row extras. Runs the
-/// shared optimistic cycle (x-385e): the marker now fails loud instead of a
+/// shared optimistic cycle: the marker now fails loud instead of a
 /// dropped Result on a lost race.
 fn set_refresh_marker(
     graph: &std::path::Path,

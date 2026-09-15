@@ -598,7 +598,7 @@ fn a_shutdown_during_a_mutation_answers_busy_and_keeps_serving() {
     let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
 }
 
-// x-385e change 6c: the 2026-09-14 temp repro, ported. Two idea-style
+// The 2026-09-14 temp repro, ported. Two idea-style
 // appenders race two note loops on one keeper; no ok-replied append may be
 // lost and no note write may be reverted.
 // ---------------------------------------------------------------
@@ -784,7 +784,7 @@ fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
     drop(keeper);
 }
 
-// x-385e change 6d: a shutdown never cuts an in-flight request, and a
+// A shutdown never cuts an in-flight request, and a
 // request that read an ok reply always has its row in the file.
 // ---------------------------------------------------------------
 

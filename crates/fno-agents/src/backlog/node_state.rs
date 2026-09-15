@@ -226,7 +226,7 @@ pub fn replace_state(graph: &Path, input: &StateWriteInput) -> Result<StateRecei
     let expected_cell = std::cell::Cell::new(0u64);
     // Under the publication lock: re-verify the row revision, journal the
     // exact pre-image, then allow publication. Any history failure refuses
-    // the whole mutation. (x-385e: the old details/status snapshot check is
+    // the whole mutation. (The old details/status snapshot check is
     // gone; the base version refuses any foreign change to any row.)
     let mut hook = |raw: &[Value]| -> Result<(), StoreError> {
         let row = raw

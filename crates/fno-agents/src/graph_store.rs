@@ -2066,7 +2066,7 @@ pub(crate) fn rotate_backups(dir: &Path, prefix: &str) -> Option<PathBuf> {
 }
 
 /// Atomic whole-file write: temp sibling + rename (store._write_json).
-/// x-385e change 4: a publish answers Ok only after its bytes are durable:
+/// A publish answers Ok only after its bytes are durable:
 /// the file fsync propagates (the swallowed `.ok()` let a publish answer Ok
 /// before it could survive a crash), and the rename itself is synced by
 /// fsyncing the parent directory.
@@ -2119,7 +2119,7 @@ pub struct MutateOutcome {
     pub is_canonical: bool,
     /// The content digest of the published bytes, computed from the same
     /// `body` the atomic replace wrote and verified by the under-lock
-    /// read-back (x-385e change 4): when the cycle answers Ok the file holds
+    /// read-back: when the cycle answers Ok the file holds
     /// these bytes. A caller that pairs this digest with a file stat can
     /// PROVE the file still holds this publish before caching against it.
     pub version: String,
@@ -2141,7 +2141,7 @@ pub struct MutateInput {
     /// bytes it replaces are the bytes the caller read. The cycle refuses to
     /// publish over a changed file, so a caller whose read ran outside the
     /// lock retries on [`StoreError::Conflict`] instead of silently
-    /// clobbering an interleaved writer (x-385e: `None` let four writers
+    /// clobbering an interleaved writer (`None` let four writers
     /// publish stale snapshots that dropped every row landed in between).
     pub base_version: String,
     /// Node id -> the rung of the node's linked plan, as the client computed
@@ -2446,7 +2446,7 @@ pub fn locked_mutate_with_hook(
         (backup, warning, version)
     };
 
-    // x-385e change 4: still under the lock, read the published bytes back
+    // Still under the lock, read the published bytes back
     // and compare digests. Every receipt (idea, session close, note) rides
     // this Ok, so a publish that silently failed to land refuses instead of
     // claiming success.
@@ -2500,7 +2500,7 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
 /// re-runs over a FRESH read every attempt, so a retry never overwrites what
 /// another writer just landed; `Ok(false)` is a domain refusal that writes
 /// nothing. Lifted from `backlog::api::mutate` so the writers that used to
-/// publish stale snapshots (x-385e) share one loop instead of four shapes.
+/// publish stale snapshots share one loop instead of four shapes.
 pub fn mutate_rows(
     path: &Path,
     timeout: Duration,
@@ -3305,7 +3305,7 @@ mod tests {
 
     #[test]
     fn mutate_rows_retries_when_a_row_lands_between_read_and_publish() {
-        // x-385e change 2, first acceptance line: a concurrent writer lands
+        // First acceptance line: a concurrent writer lands
         // between the cycle's read and publish; the loop conflicts, re-reads,
         // and both rows persist.
         let dir = tempfile::tempdir().unwrap();
@@ -3349,7 +3349,7 @@ mod tests {
 
     #[test]
     fn mutate_rows_no_change_publishes_nothing() {
-        // x-385e change 2, second acceptance line: apply's Ok(false) is a
+        // Second acceptance line: apply's Ok(false) is a
         // domain refusal; the file digest must not move.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");
@@ -3365,7 +3365,7 @@ mod tests {
 
     #[test]
     fn a_landed_publish_reads_back_its_own_digest_and_leaves_no_tmp() {
-        // x-385e change 4, first acceptance line: the returned version equals
+        // First acceptance line: the returned version equals
         // the file's content digest and no graph.json.tmp-* sibling remains.
         let dir = tempfile::tempdir().unwrap();
         let graph = dir.path().join("graph.json");

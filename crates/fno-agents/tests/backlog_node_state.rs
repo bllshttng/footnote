@@ -238,7 +238,7 @@ fn history_dedupe_is_idempotent() {
 
 #[test]
 fn a_state_write_keeps_a_row_another_writer_landed() {
-    // x-385e change 6b: thread one loops replace_state on t-1; thread two
+    // Thread one loops replace_state on t-1; thread two
     // appends 30 rows through graph_store::mutate_rows. Every append lands,
     // and t-1's final revision equals thread one's success count.
     let dir = tempfile::tempdir().unwrap();

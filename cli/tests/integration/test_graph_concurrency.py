@@ -1,4 +1,4 @@
-"""x-385e change 6e: two concurrent `fno backlog idea` filings both persist.
+"""Two concurrent `fno backlog idea` filings both persist.
 
 End-to-end port of the incident that filed this node: two idea receipts
 printed exit-0, one node never existed. With the fix, every receipt's node
@@ -92,7 +92,7 @@ def test_two_concurrent_idea_filings_both_persist(tmp_path):
                 timeout=120.0,
             )
             if note.returncode != 0:
-                # x-385e makes a lost race exit 1: a churning note may fail
+                # A lost race exits 1: a churning note may fail
                 # loud, but it must never claim success while losing the row.
                 continue
         return

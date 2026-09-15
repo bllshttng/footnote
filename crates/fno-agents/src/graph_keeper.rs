@@ -255,7 +255,7 @@ struct StoreState {
     gate: RwLock<()>,
     /// One read guard per in-flight REQUEST, held from handle_request through
     /// the reply write. Shutdown ladders on the write guard, so it cannot cut
-    /// a request that is mid-publish or mid-reply (x-385e: the old ladder
+    /// a request that is mid-publish or mid-reply (the old ladder
     /// dropped its guard before exit and a later request died mid-frame with
     /// its client reading a hangup for a write that answered ok).
     inflight: RwLock<()>,
@@ -1156,8 +1156,8 @@ fn serve_client(
                 // survived-hangup vs survived-close line; an explicit
                 // shutdown ends the process here, so in-flight writers on
                 // other threads are bounded by the atomic-replace publish.
-                // Wait out in-flight REQUESTS first (x-f188 change 3, x-385e
-                // change 5): a bounded try_write ladder on the inflight lock;
+                // Wait out in-flight REQUESTS first (x-f188 change 3): a
+                // bounded try_write ladder on the inflight lock;
                 // when it cannot land within lock_timeout, answer busy and
                 // KEEP SERVING instead of exiting mid-write. Once held, the
                 // guard stays held until exit: no request is mid-publish or
@@ -1203,7 +1203,7 @@ fn serve_client(
                 std::process::exit(0);
             }
             Incoming::Request(payload) => {
-                // x-385e: hold an inflight guard from handling through the
+                // Hold an inflight guard from handling through the
                 // reply write. Shutdown ladders on this lock, so a request
                 // that is mid-publish or mid-reply cannot be cut by an
                 // exiting keeper.
@@ -2973,7 +2973,7 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     let p = params.get("params").cloned().unwrap_or(Value::Null);
     let client_base = params.get("base_version").and_then(Value::as_str);
     let _gate = state.gate.write().unwrap_or_else(|e| e.into_inner());
-    // x-385e change 5: a foreign writer that publishes between this op's
+    // A foreign writer that publishes between this op's
     // gated read and the flock check surfaces as Conflict; retry the
     // read-apply-publish cycle while the gate is held, so the op lands
     // instead of replying kind conflict (the measured session-close
