@@ -288,15 +288,12 @@ def run_task(
     max_retries: int = 0,
 ) -> list[RunResult]:
     """Run *task* ``repeat`` times, appending one history row per ATTEMPT.
-    Each attempt: fresh disposable worktree -> optional worker (skipped for a
-    grade-only task) -> mechanical grade -> history row -> worktree removed.
-    Every planned attempt is persisted with a unique attempt identity and its
-    structured observations; the native verdict labels it graded /
-    infrastructure / unavailable / ungraded. A retryable (infrastructure or
-    unavailable) verdict consumes no completed (case, repeat) slot, so the
-    slot is retried up to *max_retries* times; graded task failures never
-    retry. A worker-spawn failure is a graded fail in the legacy ``pass``
-    field; the remaining repeats still run.
+    Each attempt: fresh disposable worktree -> optional worker -> mechanical
+    grade -> history row -> worktree removed. Every attempt persists with a
+    unique identity and structured observations; the native verdict labels
+    it graded/infrastructure/unavailable/ungraded. A retryable verdict
+    consumes no completed (case, repeat) slot, so the slot retries up to
+    *max_retries* times; graded task failures never retry.
     A requested *lane* records the requested coordinate; *observe* (default
     _observe_worker) reads back what ran. *experiment_id* is an opaque
     cohort tag recorded on the row."""

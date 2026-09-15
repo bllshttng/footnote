@@ -31,13 +31,8 @@ def append_row(path: Path, row: dict[str, object]) -> None:
 
 
 def append_attempt(path: Path, row: dict[str, object]) -> None:
-    """Append one ATTEMPT row: the write path the runner uses.
-
-    An attempt row must carry a unique attempt identity and its structured
-    observations - the evidence the native verdict (and every later re-read)
-    classifies from. A row without them is refused here rather than persisted
-    as unattributable evidence.
-    """
+    """Append one ATTEMPT row: refuses a row without its unique identity and
+    structured observations - the evidence every verdict classifies from."""
     missing = [k for k in ("attempt_id", "run_id", "obs")
                if not isinstance(row.get(k), (str, dict)) or row.get(k) in ("", None)]
     if missing:

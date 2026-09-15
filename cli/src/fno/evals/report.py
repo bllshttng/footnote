@@ -84,13 +84,9 @@ def _stats(
     rows: list[dict[str, object]],
     verdicts: Optional[dict[int, dict]] = None,
 ) -> list[TaskStat]:
-    """Per-task stats with the attempt-aware denominators (x-ecda).
-
-    *verdicts* maps each row's position to the NATIVE attempt verdict
-    (`{"status": ..., "graded": ...}`). A task with any classified row
-    reports correctness over its valid grades; an all-legacy task keeps the
-    pre-attempt boolean fold, never reinterpreting legacy evidence.
-    """
+    """Per-task stats keyed by NATIVE attempt verdicts (row position ->
+    verdict). A task with any classified row reports correctness over its
+    valid grades; an all-legacy task keeps the pre-attempt boolean fold."""
     by_id = _by_task(rows)
     stats: list[TaskStat] = []
     for tid in sorted(by_id):
@@ -144,10 +140,9 @@ def build_report(
     rows: list[dict[str, object]],
     attempt_verdicts: Optional[dict[int, dict]] = None,
 ) -> dict[str, Any]:
-    """Fold *rows* into a JSON-friendly report dict (all-rows alarm; the
-    windowed read lives in the native evals-trend fold, d-b6cc1a2a).
-    *attempt_verdicts* optionally carries the native per-row verdicts keyed
-    by row position; absent verdicts read as legacy rows."""
+    """Fold *rows* into a JSON-friendly report dict. *attempt_verdicts*
+    carries native per-row verdicts by position; absent verdicts read as
+    legacy rows."""
     stats = _stats(rows, attempt_verdicts)
 
     tier_runs: dict[str, int] = {}
