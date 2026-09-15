@@ -147,7 +147,10 @@ pub fn run_note(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let entries = match graph_store::read_defaulted(&graph, false) {
+    // Backend-aware read (x-b21f): entry resolution must see post-flip nodes,
+    // which exist only in graph.db; the frozen json keeper does not know
+    // them. read_rows switches on graph_meta.backend.
+    let entries = match graph_store::read_rows(&graph) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("fno-agents backlog-note: graph read failed: {e}");
