@@ -286,8 +286,13 @@ fn process_table_ps() -> (Vec<ProcRow>, usize) {
         ) else {
             continue;
         };
+        // A pid that fails to parse is a torn line, not pid 0; keep a real
+        // pid-0 row (the swapper, where a ps dialect lists it).
+        let Ok(pid) = pid.parse() else {
+            continue;
+        };
         rows.push(ProcRow {
-            pid: pid.parse().unwrap_or(0),
+            pid,
             ppid: ppid.parse().unwrap_or(0),
             state: state.chars().next().unwrap_or('?'),
             elapsed_s: crate::gc::parse_etime(etime).unwrap_or(0),
@@ -296,7 +301,6 @@ fn process_table_ps() -> (Vec<ProcRow>, usize) {
             command: fields.next().unwrap_or("").trim().to_string(),
         });
     }
-    rows.retain(|r| r.pid != 0);
     (rows, 0)
 }
 
@@ -426,9 +430,13 @@ fn row(
 /// one socket are listed as duplicates (change 2 retires them).
 fn keeper_rows() -> Vec<Value> {
     let (table, _) = process_table();
+    keeper_rows_from(&table)
+}
+
+fn keeper_rows_from(table: &[ProcRow]) -> Vec<Value> {
     let mut rows = Vec::new();
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
-    for proc_row in &table {
+    for proc_row in table {
         let pid = proc_row.pid;
         let argv: Vec<&str> = proc_row.command.split_whitespace().collect();
         let Some(argv0) = argv.first() else {
@@ -580,10 +588,9 @@ async fn daemon_row() -> Value {
 
 /// Mux server rows from the front door's own `ls --json`; the pid sidecar
 /// field (change 4) is what the census classifies.
-fn mux_rows() -> Vec<Value> {
-    let (table, _) = process_table();
+fn mux_rows(table: &[ProcRow]) -> Vec<Value> {
     let elapsed: BTreeMap<u32, u64> = table
-        .into_iter()
+        .iter()
         .map(|proc_row| (proc_row.pid, proc_row.elapsed_s))
         .collect();
     let started_of = |pid: u32| started_epoch(elapsed.get(&pid).map(|&secs| secs as f64));
@@ -678,18 +685,20 @@ fn home_dir() -> PathBuf {
 /// subprocess carries a timeout, so a wedged keeper delays one row, never
 /// the census.
 pub async fn census() -> Vec<Value> {
+    let (table, _) = process_table();
     let mut rows = vec![daemon_row().await];
-    rows.extend(keeper_rows());
-    rows.extend(mux_rows());
+    rows.extend(keeper_rows_from(&table));
+    rows.extend(mux_rows(&table));
     rows
 }
 
 /// Walk the keeper rows synchronously (tests, and callers already holding no
 /// daemon context).
 pub fn census_blocking() -> Vec<Value> {
+    let (table, _) = process_table();
     let mut rows = Vec::new();
-    rows.extend(keeper_rows());
-    rows.extend(mux_rows());
+    rows.extend(keeper_rows_from(&table));
+    rows.extend(mux_rows(&table));
     rows
 }
 
@@ -821,5 +830,17 @@ mod process_table_tests {
             ps_text(&rows),
             "PID PPID STAT ELAPSED %CPU RSS COMMAND\n100 1 R 01:00:00 86.0 1024 fno-agents-worker --run\n"
         );
+    }
+
+    #[test]
+    fn argv_copy_agrees_with_the_fno_crate_reader() {
+        // The argv reader here is a verbatim copy of fno::pane_argv's (the
+        // dev-only link blocks a shared call in production). Both readers
+        // parsing this process's live argv pins the copies together: a
+        // layout drift fails here, not silently in the census.
+        let mine = super::argv_of(std::process::id()).expect("own argv readable");
+        let theirs = fno::pane_argv::process_argv(std::process::id())
+            .expect("fno crate reads the same argv");
+        assert_eq!(mine, theirs);
     }
 }
