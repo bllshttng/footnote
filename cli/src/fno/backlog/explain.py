@@ -262,9 +262,9 @@ def routing_for(node: Optional[dict]) -> dict:
     # with the dispatch seam, and the same normalization on the canonical
     # verb, so a blueprint-verb node walks agents.profiles.blueprint here.
     try:
-        from fno.backlog import advance as adv
+        from fno.agents.node_dispatch import node_effective_verb
 
-        verb = adv._node_effective_verb(node)
+        verb = node_effective_verb(node)
     except Exception as exc:  # noqa: BLE001 - an unanswerable verb is reported
         return {
             "chain": [f"verb unresolved: {exc}"], "candidate": None, "inputs": inputs,

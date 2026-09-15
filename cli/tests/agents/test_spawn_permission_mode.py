@@ -359,7 +359,7 @@ def test_advance_worker_reads_config_default(monkeypatch):
     monkeypatch.setattr(
         "fno.config.load_settings", lambda: _fake_settings("acceptEdits")
     )
-    advance._spawn_worker("x-test", None, "slug")
+    advance._spawn_worker("x-test", None, "slug", node=_node_row("x-test"))
     assert "--permission-mode" in captured["cmd"]
     i = captured["cmd"].index("--permission-mode")
     assert captured["cmd"][i + 1] == "acceptEdits"
@@ -370,7 +370,7 @@ def test_advance_worker_explicit_flag_wins_over_config(monkeypatch):
 
     captured = _capture_spawn(monkeypatch, advance)
     monkeypatch.setattr("fno.config.load_settings", lambda: _fake_settings("plan"))
-    advance._spawn_worker("x-test", None, "slug", permission_mode="acceptEdits")
+    advance._spawn_worker("x-test", None, "slug", permission_mode="acceptEdits", node=_node_row("x-test"))
     i = captured["cmd"].index("--permission-mode")
     assert captured["cmd"][i + 1] == "acceptEdits"
 
@@ -383,7 +383,7 @@ def test_advance_worker_unset_config_falls_to_builtin(monkeypatch):
 
     captured = _capture_spawn(monkeypatch, advance)
     monkeypatch.setattr("fno.config.load_settings", lambda: _fake_settings(""))
-    advance._spawn_worker("x-test", None, "slug")
+    advance._spawn_worker("x-test", None, "slug", node=_node_row("x-test"))
     i = captured["cmd"].index("--permission-mode")
     assert captured["cmd"][i + 1] == SPAWN_PERMISSION_BUILTIN
 
@@ -503,6 +503,22 @@ def test_think_worker_explicit_pane_uses_shared_capability_gate(monkeypatch):
 import shutil  # noqa: E402
 import stat  # noqa: E402
 import subprocess as _sp  # noqa: E402
+
+
+def _node_row(
+    node_id: str, difficulty: str | None = "low", verb: str | None = None
+) -> dict:
+    """The minimal node dict tests pass to the dispatcher (x-2c0d).
+
+    Key presence is what the projection check reads; difficulty low derives
+    /target, matching what the builtin path asserted before the None branch
+    was deleted. An out-of-family ``verb`` rides the row so the lifecycle
+    table abstains and the explicit verb wins, as the deleted None path did."""
+    return {
+        "id": node_id,
+        "dispatch_verb": verb or "",
+        "difficulty": difficulty,
+    }
 
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="spawn.sh needs jq")
