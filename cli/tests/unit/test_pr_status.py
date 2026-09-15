@@ -248,7 +248,7 @@ def _run_status_on(monkeypatch, capsys, rollup):
     _patch("_fetch", lambda pr, cwd: ({"state": "OPEN", "statusCheckRollup": rollup}, ""))
     # The rerun-recovery probe shells out to gh on green reads; no case here
     # is about it, so it answers never-recovered (tests about it override).
-    _patch("rerun_recovery", lambda pr, cwd=None, sha=None: {"recovered": False, "failed": []})
+    _patch("rerun_recovery", lambda pr, cwd=None, sha=None, runs=None: {"recovered": False, "failed": []})
     _patch(
         "read_optional_review_state",
         lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
@@ -816,7 +816,7 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
     monkeypatch.setattr(
         _status,
         "rerun_recovery",
-        lambda pr, cwd=None, sha=None: {"recovered": False, "failed": []},
+        lambda pr, cwd=None, sha=None, runs=None: {"recovered": False, "failed": []},
     )
     # The durable-grant projection is stubbed to its own documented no-node
     # answer; the resolver's real arms are pinned in test_pr_merge_grant.py.

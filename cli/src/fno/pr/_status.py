@@ -219,12 +219,20 @@ def _recovery_from_run_rows(run_rows, attempts_of, failed_jobs_of) -> dict:
     return {"recovered": recovered, "failed": failed}
 
 
-def rerun_recovery(pr_number, cwd: Optional[str] = None, sha: Optional[str] = None) -> dict:
+def rerun_recovery(
+    pr_number,
+    cwd: Optional[str] = None,
+    sha: Optional[str] = None,
+    runs: Optional[list] = None,
+) -> dict:
     """Rerun-recovery fact for a PR head: ``{recovered, failed}``.
 
     A re-run-recovered failure reads green to `verdict_for`; this names it.
     ANY read error fails open: a fact beside the verdict, never a second red.
     `sha` skips the PR-info read when the caller already holds the head.
+    `runs` is the head's `actions/runs` listing when the caller (run_status,
+    via fetch_pr_rest) already read it; the merge gate passes none and keeps
+    its own live read.
     """
     try:
         from fno.pr._proc import run
@@ -242,9 +250,11 @@ def rerun_recovery(pr_number, cwd: Optional[str] = None, sha: Optional[str] = No
             res = run(["gh", "api", f"repos/{slug}{path}"], cwd=cwd)
             return json.loads(res.stdout) if res.ok else None
 
-        rows = _get(f"/actions/runs?head_sha={sha}&per_page=100")
-        if isinstance(rows, dict):
-            rows = rows.get("workflow_runs")
+        rows = runs if isinstance(runs, list) else None
+        if rows is None:
+            rows = _get(f"/actions/runs?head_sha={sha}&per_page=100")
+            if isinstance(rows, dict):
+                rows = rows.get("workflow_runs")
         if not isinstance(rows, list):
             return dict(_NO_RECOVERY)
 
@@ -995,11 +1005,30 @@ def run_status(
             coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
     owner_guidance = _review_owner_guidance(coverage, activity.worktree)
     # Rerun recovery, probed on every green read of a live PR (fail-open).
-    rerun = (
-        rerun_recovery(pr, cwd, sha=pr_json.get("headRefOid"))
-        if verdict == "green" and not is_terminal
-        else None
-    )
+    # Same-head reuse (x-c770): a recovery is history of one head - a new
+    # attempt cannot fail and then recover between two reads without the
+    # verdict or the check count changing first - so a prior green payload at
+    # this head and check count replays its rerun facts instead of re-reading
+    # attempts and jobs per run. `runs` hands over the listing `fetch_pr_rest`
+    # already read, so a miss reads it once, not twice.
+    rerun = None
+    if verdict == "green" and not is_terminal:
+        head_sha = pr_json.get("headRefOid")
+        prior_green = (
+            prior_payload.get("verdict") == "green"
+            and prior_payload.get("head") == head_sha
+            and "rerun_recovered" in prior_payload
+            and (prior_payload.get("checks") or {}).get("total") == counts["total"]
+        )
+        if prior_green:
+            rerun = {
+                "recovered": bool(prior_payload.get("rerun_recovered")),
+                "failed": list(prior_payload.get("recovered_failures") or []),
+            }
+        else:
+            rerun = rerun_recovery(
+                pr, cwd, sha=head_sha, runs=pr_json.get("workflowRuns")
+            )
     rerun_fields = (
         {
             "rerun_recovered": bool(rerun.get("recovered")),
