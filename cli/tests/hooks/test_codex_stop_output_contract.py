@@ -3,7 +3,7 @@
 Codex 0.154.0 parses a successful (exit 0) synchronous Stop handler's
 stdout as ONE strict Stop JSON object; plain text fails the hook with
 "hook returned invalid stop hook JSON output" and a finished worker never
-continues (x-ae17: two workers sat idle, 2026-09-10 and 2026-09-13).
+continues; two workers sat idle, 2026-09-10 and 2026-09-13.
 Exit 2 with non-empty stderr is a block; any other exit fails.
 
 Mirrors rust-v0.154.0 codex-rs/hooks/src/events/stop.rs:277-341 (exit
@@ -40,6 +40,15 @@ _STOP_ALLOWED_KEYS = {
     "reason",
 }
 
+# serde types for the known fields (schema.rs 87-99); decision is enum-checked below.
+_STOP_VALUE_TYPES = {
+    "continue": bool,
+    "stopReason": str,
+    "suppressOutput": bool,
+    "systemMessage": str,
+    "reason": str,
+}
+
 
 def codex_stop_accepts(rc: int, stdout: str, stderr: str) -> str | None:
     """None = Codex 0.154.0 accepts the handler result, else the failure text.
@@ -62,6 +71,10 @@ def codex_stop_accepts(rc: int, stdout: str, stderr: str) -> str | None:
         unknown = sorted(set(parsed) - _STOP_ALLOWED_KEYS)
         if unknown:
             return f"hook output has unknown Stop field(s): {unknown}"
+        for key, value in parsed.items():
+            expected = _STOP_VALUE_TYPES.get(key)
+            if expected is not None and not isinstance(value, expected):
+                return f"hook output field {key!r} must be {expected.__name__}"
         decision = parsed.get("decision")
         if decision is not None:
             if decision != "block":
@@ -218,6 +231,8 @@ def test_codex_regression_not_json_names_the_ui_error() -> None:
         ((0, '{"decision":"block","reason":""}', ""), False),
         ((0, '{"decision":"block"}', ""), False),
         ((0, '{"surprise":true}', ""), False),
+        ((0, '{"continue":"yes"}', ""), False),
+        ((0, '{"stopReason":7}', ""), False),
         ((2, "", ""), False),
         ((1, '{"decision":"block","reason":"r"}', ""), False),
     ],
