@@ -295,6 +295,7 @@ fn ask_answer(req: &AskRequest) -> AskAnswer {
 /// read.
 /// The verb-level entry: the near-law read rides the disk here, so the body
 /// below stays the pure function the existing tests pin.
+#[cfg(test)]
 fn law_answer(req: &LawRequest) -> LawAnswer {
     let near = near_law_lines(&req.law);
     law_answer_with(req, near)
