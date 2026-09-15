@@ -74,7 +74,7 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
 
 
 # --------------------------------------------------------------------------- #
-# Spawn argv normalization : three ergonomic cuts, one argv->argv pass.
+# Spawn argv normalization: three ergonomic cuts, one argv->argv pass.
 #
 # Runs at the front door (inside inject_spawn_defaults, BEFORE config injection
 # and BEFORE the runtime route/fork), so by the time either runtime parser sees
@@ -499,7 +499,7 @@ def normalize_spawn_args(
             toks += ["--substrate", tok]
 
     # Pass 2: -r / --resume id widening + implied bg. The scan sees only the
-    # pre-fence head : a fenced `--resume`/`-r` is the provider's flag,
+    # pre-fence head: a fenced `--resume`/`-r` is the provider's flag,
     # and reading it here would append an implied `--substrate bg` under a
     # passthrough fence - or exit 2 on the provider's short-flag value.
     _fence = next((i for i, t in enumerate(toks) if t == "--"), None)
@@ -557,7 +557,7 @@ def normalize_spawn_args(
         # `--resume` is bg-only: default the substrate when none was pinned.
         # Print the implied choice so the routing decision is never silent
         # (blueprint Silent-Failure-Hunter / Locked Decision 4). The flag pair
-        # splices BEFORE any bare `--` fence : appended past it, click
+        # splices BEFORE any bare `--` fence: appended past it, click
         # reads it as passthrough positionals and the implied lane is lost.
         if _has_explicit_substrate(toks) is None:
             cut = _fence if _fence is not None else len(toks)
@@ -1117,7 +1117,7 @@ def inject_spawn_defaults(
         if a in ("-h", "--help"):
             return out
 
-    # Ergonomic normalization runs FIRST : the substrate-token / -r /
+    # Ergonomic normalization runs FIRST: the substrate-token / -r /
     # autogen-name rewrites consider only operator-supplied argv, so config
     # defaults injected below never fight the token form.
     out = normalize_spawn_args(out, stderr=stderr)
@@ -1166,7 +1166,7 @@ def inject_spawn_defaults(
             profile = profiles.get(legacy_verb)
             if profile is not None:
                 profile_verb = legacy_verb
-    # Overlay table guards : the spawn-overlay verb owns them now -
+    # Overlay table guards: the spawn-overlay verb owns them now -
     # an unknown harness name, or a ranking field inside an overlay, refuses
     # the composition from the same call that resolves the rungs. Scoped to
     # the rungs THIS spawn reads; an unrelated verb's typo must not block it.
@@ -1604,7 +1604,7 @@ def inject_spawn_defaults(
         suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
         route_injected = bool(_axes.get("route_injected"))
 
-    # The spawn-overlay verb owns the harness-keyed rungs : one
+    # The spawn-overlay verb owns the harness-keyed rungs: one
     # round-trip answers effort/substrate/permission plus the ONE bundle and
     # refuses a bad overlay. Gated on an overlay table (or lane args) being
     # present, so an overlay-free spawn pays zero subprocesses and the
@@ -1681,7 +1681,7 @@ def inject_spawn_defaults(
         cfg_substrate, substrate_rung = "", None
     _has_permission = _has_permission_mode(out[1:])
     if not _has_permission:
-        # Re-read through the harness rungs : an empty re-read keeps
+        # Re-read through the harness rungs: an empty re-read keeps
         # the harness-blind read alive: that is the builtin.autonomous rung
         #, which field() cannot see.
         h_permission, h_rung = _seamed("permission_mode")
@@ -1723,7 +1723,7 @@ def inject_spawn_defaults(
     suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
     injected_substrate = _axes.get("injected_substrate") or None
 
-    # Harness bundle : the verb's ONE bundle answer (lane args >
+    # Harness bundle: the verb's ONE bundle answer (lane args >
     # profile harness overlay > defaults harness overlay, never concatenated)
     # lands behind the -- passthrough fence at the argv TAIL, so the caller's
     # own pre-fence tokens stay pre-fence; a boundary the caller already typed

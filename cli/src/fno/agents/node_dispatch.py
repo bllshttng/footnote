@@ -77,7 +77,7 @@ def resolve_node_spawn(
     """Resolve every node-dispatch preference except the launch itself.
 
     Lifted verbatim from ``backlog.advance._spawn_worker``'s preference half
-  ; helpers are imported at CALL time from advance so the suite's
+; helpers are imported at CALL time from advance so the suite's
     monkeypatches keep firing. Raises the same ``SpawnError``s;
     ``DispatchResolveError`` propagates to the caller's spawn-failure path.
     """

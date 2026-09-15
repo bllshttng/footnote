@@ -206,7 +206,7 @@ pub(crate) fn codex_resume_route(
     if entry.get("harness").and_then(Value::as_str) != Some("codex") {
         return None;
     }
-    // A thread row delivers over the daemon, never a terminal exec :
+    // A thread row delivers over the daemon, never a terminal exec:
     // `codex resume <id>` needs a tty and a headless caller has none.
     if entry.get("substrate").and_then(Value::as_str) == Some("thread") {
         return Some(run_codex_thread_delivery(
