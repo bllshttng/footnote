@@ -221,8 +221,7 @@ def resolve_lane(name: str, *, settings: object = None):
 
 
 class CohortError(ValueError):
-    """A cohort declaration is missing, malformed, stale, or fails native
-    validation - qualification and tuning exports refuse on it."""
+    """A cohort declaration is malformed, stale, or fails native validation."""
 
 
 COHORTS_FILENAME = "cohorts.yaml"
@@ -230,10 +229,9 @@ COHORTS_FILENAME = "cohorts.yaml"
 
 @dataclass(frozen=True)
 class CohortDecl:
-    """A declared train/validation/qualification split, pinned to a bank rev.
+    """A declared train/validation/qualification split pinned to a bank rev.
 
-    Stored exactly as declared (lists default empty when a role key is
-    absent); the NATIVE door is the semantic authority on membership rules -
+    Stored exactly as declared; the NATIVE door owns membership rules -
     load_cohorts only parses the YAML shape.
     """
 
@@ -245,11 +243,8 @@ class CohortDecl:
 
 
 def load_cohorts(bank_dir: Path) -> Optional[CohortDecl]:
-    """Load ``cohorts.yaml`` from *bank_dir*; None = no declared split.
-
-    Raises :class:`CohortError` on a malformed file (not a mapping, or a
-    non-string ``bank_rev`` / non-list role key).
-    """
+    """Load ``cohorts.yaml``; None = no declared split. Raises CohortError
+    on a malformed file."""
     path = bank_dir / COHORTS_FILENAME
     if not path.exists():
         return None
@@ -280,12 +275,8 @@ def load_cohorts(bank_dir: Path) -> Optional[CohortDecl]:
 
 
 def bank_unchanged_since(decl: CohortDecl, repo_root: Path) -> bool:
-    """True when every bank task file is unchanged from *decl*'s pinned rev.
-
-    The split pins the BANK, not the whole repo: an unrelated commit since
-    the pin keeps the split valid; any change under the bank dir voids it.
-    An unreadable pin (unknown rev) voids it too.
-    """
+    """True when the bank files are unchanged from the pinned rev. The split
+    pins the BANK, not the repo; an unreadable pin voids it too."""
     try:
         verify = subprocess.run(
             ["git", "rev-parse", "--verify", "--quiet", f"{decl.bank_rev}^{{commit}}"],
@@ -315,13 +306,8 @@ def cohorts_verdict(
     known_ids: Optional[list[str]] = None,
     task_ids: Optional[list[str]] = None,
 ) -> dict[str, Any]:
-    """One native membership/eligibility decision shared by run and report
-    consumers: `{"ok", "errors", "roles"}`. Fail-closed - an unreachable
-    native door is itself a refusal, never a silent pass.
-
-    *known_ids* validates every declared id against the loaded bank;
-    *task_ids* resolves each into its cohort role (null when unlisted).
-    """
+    """The one native membership decision: `{"ok", "errors", "roles"}`.
+    Fail-closed - an unreachable door is a refusal, never a silent pass."""
     import json
     import subprocess
 

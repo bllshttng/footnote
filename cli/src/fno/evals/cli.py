@@ -296,15 +296,9 @@ def export_command(
 ) -> None:
     """Export train-cohort history for prompt tuning (x-ecda AC2-HP).
 
-    Refuses without a declared, natively valid, bank-current split, then
-    writes ONLY train-task rows - held-out trajectories and prompts never
-    enter a tuning view.
-
-    Exit codes:
-      0  exported
-      1  no declared cohort split
-      2  split refused (unknown id, overlap, stale pin) or door unreachable
-    """
+    Refuses without a declared, natively valid, bank-current split; writes
+    ONLY train rows, so held-out trajectories never enter a tuning view.
+    Exit 0 exported / 1 no declared split / 2 split refused."""
     import json as _json
 
     from fno.evals.bank import (
@@ -375,16 +369,9 @@ def qualify_command(
 ) -> None:
     """Aggregate held-out qualification results (x-ecda AC2-HP/AC2-EDGE).
 
-    The allowed aggregate projection: counts and coverage only - never a
-    held-out prompt, trace, or per-attempt trajectory. Reports unqualified
-    (exit 0, `qualified: false`) when the split is absent, refused, or the
-    qualification cohort is empty; a small bank reports insufficiency
-    honestly instead of inventing a split.
-
-    Exit codes:
-      0  aggregate computed (the JSON carries `qualified`)
-      2  a malformed declaration or an unreadable bank (setup error)
-    """
+    Counts and coverage only, never a held-out prompt or trace. Reports
+    `{"qualified": false, "reason": ...}` (exit 0) when the split is absent,
+    refused, stale, or has an empty qualification list. Exit 2 = setup error."""
     import json as _json
 
     from fno.evals import history as _history
