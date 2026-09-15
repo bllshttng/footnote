@@ -534,11 +534,12 @@ where
         let observed = crate::claude_ask::parse_short_id(&combined).ok();
         let copy_short = copy_short_from_notice(&combined).or(observed);
         let copy = combined.contains("started a copy as ")
-            || copy_short
-                .as_deref()
-                .is_some_and(|s| s != plan.short_id);
+            || copy_short.as_deref().is_some_and(|s| s != plan.short_id);
         if copy {
-            if let Some(short) = copy_short.as_deref().filter(|s| *s != plan.short_id.as_str()) {
+            if let Some(short) = copy_short
+                .as_deref()
+                .filter(|s| *s != plan.short_id.as_str())
+            {
                 let mut stop = std::process::Command::new("claude");
                 stop.args(["stop", short]).current_dir(&plan.cwd);
                 for (key, value) in &plan.env {
@@ -579,11 +580,11 @@ where
         read_state_json(&jobs_dir).is_ok()
     } else {
         match (before_updated_at, read_state_json(&jobs_dir)) {
-        (Some(before), Ok(s)) => s.updated_at.as_deref().is_some_and(|a| a > before.as_str()),
-        // No readable BEFORE stamp (the file the resolver just proved exists
-        // did not parse): an AFTER read carrying any stamp is the evidence
-        // left, and it is still content, never an exit code.
-        (None, Ok(s)) => s.updated_at.is_some(),
+            (Some(before), Ok(s)) => s.updated_at.as_deref().is_some_and(|a| a > before.as_str()),
+            // No readable BEFORE stamp (the file the resolver just proved exists
+            // did not parse): an AFTER read carrying any stamp is the evidence
+            // left, and it is still content, never an exit code.
+            (None, Ok(s)) => s.updated_at.is_some(),
             (_, Err(_)) => false,
         }
     };
@@ -935,11 +936,8 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                bin.join("claude"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .unwrap();
+            std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
         }
         let old_path = std::env::var_os("PATH");
         std::env::set_var("PATH", crate::path_with(&bin));
