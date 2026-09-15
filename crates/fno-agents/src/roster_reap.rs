@@ -37,7 +37,7 @@ use std::path::PathBuf;
 
 use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
 use crate::daemon::CascadeOutcome;
-use crate::gc_sweep::{provenance_verdict, GraphRead};
+use crate::gc_sweep::{open_pr_verdict, provenance_verdict, GraphRead, OpenPrVerdict};
 use crate::graph_store::WorkState;
 use crate::state::RegistryEntry;
 
@@ -327,31 +327,24 @@ pub(crate) fn run(
                         Some(crate::node_route::NodeSource::Sessions)
                             | Some(crate::node_route::NodeSource::Registry)
                     );
-                // The open-PR keep at scope all: an open node whose PR is
-                // unmerged and whose driver is THIS session keeps its row
-                // even on a terminal roster state - the tree's branch is
-                // unmerged and the PR needs its driver alive. The default
-                // scope is unchanged.
+                // The open-PR keep at scope all, asked through the one
+                // predicate the registry sweep runs: the graph record names
+                // the candidate and both sweeps read the same answer. No
+                // GitHub reader is supplied here, so a candidate holds as it
+                // always has - the record alone decides at this scope. The
+                // default scope is unchanged.
                 if scope_all_strong {
-                    let pr = graph.pr_number.get(n).copied().flatten();
-                    let merged = graph
-                        .pr_state
-                        .get(n)
-                        .and_then(|(merge_status, _, _)| merge_status.clone())
-                        .as_deref()
-                        == Some("merged");
-                    let drives = graph
-                        .do_nodes
-                        .get(&sid.to_ascii_lowercase())
-                        .is_some_and(|set| set.contains(n));
-                    if let Some(pr) = pr.filter(|_| !merged && drives) {
-                        summary.kept.push(judgement(
-                            &ident,
-                            Some(n.clone()),
-                            format!("open pr: {n} #{pr}"),
-                            false,
-                        ));
-                        continue;
+                    match open_pr_verdict(graph, sid, n, &entry.cwd, true, None) {
+                        OpenPrVerdict::Holds { node, pr } | OpenPrVerdict::Unread { node, pr } => {
+                            summary.kept.push(judgement(
+                                &ident,
+                                Some(node.clone()),
+                                format!("open pr: {node} #{pr}"),
+                                false,
+                            ));
+                            continue;
+                        }
+                        _ => {}
                     }
                 }
                 match &open_release {

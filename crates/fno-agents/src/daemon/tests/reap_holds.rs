@@ -900,6 +900,12 @@ fn ac1_hp_open_pr_keep_survives_a_terminal_state_through_the_sweep() {
             sid.to_string(),
             std::collections::HashSet::from(["x-node".to_string()]),
         )]),
+        // The row is quiet past the grace, so the keep asks the PR: stage
+        // the open answer the sweep must read (no test touches the network).
+        pr_reads: HashMap::from([("/tmp".to_string(), 1943u64)])
+            .into_iter()
+            .map(|(cwd, pr)| ((cwd, pr), Some(true)))
+            .collect(),
         ..Default::default()
     });
     // The roster reads stopped: the exact state that reaped seven rows on
@@ -935,5 +941,172 @@ fn ac1_hp_open_pr_keep_survives_a_terminal_state_through_the_sweep() {
     // A stopped roster state reads as not live: the ladder's resume arm.
     assert!(!ladder_row.live);
     assert_eq!(summary.retired, vec![], "nothing retires");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── the open-PR keep asks the PR ─────────────────────────────────────────
+
+/// The candidate's graph: one in_review node this session drives, PR 4242.
+fn open_candidate_graph() -> GraphRead {
+    let mut g = graph_read(&[("sess-pr", "N1", "in_review")], &[]).unwrap();
+    g.pr_number.insert("N1".into(), Some(4242));
+    g.do_nodes.insert(
+        "sess-pr".into(),
+        std::collections::HashSet::from(["N1".into()]),
+    );
+    g
+}
+
+/// The read gate: a candidate inside the grace window is kept without the
+/// read firing at all.
+#[test]
+fn open_pr_verdict_asks_only_a_quiet_candidate() {
+    let g = open_candidate_graph();
+    let mut calls = 0u32;
+    {
+        let mut reader = |_pr: u64, _cwd: &str| -> Option<bool> {
+            calls += 1;
+            Some(true)
+        };
+        let fresh =
+            gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", false, Some(&mut reader));
+        assert!(
+            matches!(fresh, gc_sweep::OpenPrVerdict::Holds { .. }),
+            "{fresh:?}"
+        );
+    }
+    assert_eq!(calls, 0, "a fresh candidate pays no read");
+    let mut calls2 = 0u32;
+    let mut reader2 = |_pr: u64, _cwd: &str| -> Option<bool> {
+        calls2 += 1;
+        Some(true)
+    };
+    let quiet = gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, Some(&mut reader2));
+    assert!(matches!(quiet, gc_sweep::OpenPrVerdict::Holds { .. }));
+    assert_eq!(calls2, 1);
+}
+
+/// The three answers once the read fires: open holds, merged or closed
+/// settles, and both a failed read and no reader hold under unread - never
+/// a retirement on an unread answer. The attribution gate is unchanged: a
+/// session that never drove the node is no candidate and pays no read.
+#[test]
+fn open_pr_verdict_settles_on_a_closed_answer() {
+    let g = open_candidate_graph();
+    let mut closed = |_pr: u64, _cwd: &str| -> Option<bool> { Some(false) };
+    assert!(matches!(
+        gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, Some(&mut closed)),
+        gc_sweep::OpenPrVerdict::Settled { .. }
+    ));
+    let mut failed = |_pr: u64, _cwd: &str| -> Option<bool> { None };
+    assert!(matches!(
+        gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, Some(&mut failed)),
+        gc_sweep::OpenPrVerdict::Unread { .. }
+    ));
+    assert!(matches!(
+        gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, None),
+        gc_sweep::OpenPrVerdict::Unread { .. }
+    ));
+    let mut never = |_pr: u64, _cwd: &str| -> Option<bool> { panic!("no candidate pays a read") };
+    assert!(matches!(
+        gc_sweep::open_pr_verdict(&g, "sess-other", "N1", "/tmp", true, Some(&mut never)),
+        gc_sweep::OpenPrVerdict::None
+    ));
+}
+
+/// The sweep asks: a quiet candidate whose PR reads closed retires, an open
+/// answer keeps the row with the hold named, an unread answer holds under
+/// `pr state contradicts`, and a candidate inside the grace window is kept
+/// without its staged answer ever being consulted.
+#[test]
+fn the_sweep_asks_the_pr_once_the_row_is_quiet() {
+    let home = tmp_home("gc-openpr-ask");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    let fresh = quiet_transcript(transcripts.path(), "fresh.jsonl", 30);
+    state::update_registry(&home.registry_json(), |r| {
+        for (name, short) in [
+            ("closed-row", "closedrow"),
+            ("open-row", "openrow"),
+            ("failed-row", "failedrow"),
+            ("fresh-row", "freshrow"),
+        ] {
+            let mut row = claude_worker_row(name, short);
+            row.origin = Some("spawn".into());
+            r.entries.push(row);
+        }
+    })
+    .unwrap();
+
+    let mut graph = graph_read(
+        &[
+            ("closedrow-1111-2222-3333-444444444444", "NC", "in_review"),
+            ("openrow-1111-2222-3333-444444444444", "NO", "in_review"),
+            ("failedrow-1111-2222-3333-444444444444", "NF", "in_review"),
+            ("freshrow-1111-2222-3333-444444444444", "NR", "in_review"),
+        ],
+        &[],
+    )
+    .unwrap();
+    for (node, pr) in [("NC", 101u64), ("NO", 102), ("NF", 103), ("NR", 104)] {
+        graph.pr_number.insert(node.into(), Some(pr));
+        graph.pr_state.insert(node.into(), (None, 0, 0));
+    }
+    for (sid, node) in [
+        ("closedrow-1111-2222-3333-444444444444", "NC"),
+        ("openrow-1111-2222-3333-444444444444", "NO"),
+        ("failedrow-1111-2222-3333-444444444444", "NF"),
+        ("freshrow-1111-2222-3333-444444444444", "NR"),
+    ] {
+        graph
+            .do_nodes
+            .insert(sid.into(), std::collections::HashSet::from([node.into()]));
+    }
+    // Staged answers keyed by (cwd, pr); the fixture rows cwd to /tmp.
+    for (pr, answer) in [
+        (101u64, Some(false)),
+        (102, Some(true)),
+        (103, None),
+        (104, Some(false)),
+    ] {
+        graph.pr_reads.insert(("/tmp".into(), pr), answer);
+    }
+
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        Some(graph),
+        &|e| match e.harness_session_id.as_deref() {
+            Some("freshrow-1111-2222-3333-444444444444") => Some(vec![fresh.clone()]),
+            _ => Some(vec![quiet.clone()]),
+        },
+        no_agents(),
+        &|_| true,
+    );
+
+    let retired: Vec<&str> = summary.retired.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(retired, vec!["closedrow"], "retired: {:?}", summary.retired);
+    let held: Vec<&str> = summary
+        .kept_open_pr
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(held, vec!["openrow", "freshrow"], "{held:?}");
+    let h = find_hold(&summary, "openrow");
+    assert_eq!(h.reason, "open pr");
+    assert_eq!(h.detail, "NO #102");
+    assert_eq!(
+        summary.kept_pr_contradicts,
+        vec![(
+            "failedrow".to_string(),
+            "NF".to_string(),
+            "pr 103 state unread".to_string()
+        )],
+        "{:?}",
+        summary.kept_pr_contradicts
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }

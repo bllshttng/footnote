@@ -1279,6 +1279,78 @@ pub struct ProvenanceVerdict {
 /// owns the per-pass cache; the verdict itself stays network-free.
 pub type PrStateRead<'a> = &'a mut dyn FnMut(u64, &str) -> Option<bool>;
 
+/// The open-PR question, asked once for both sweeps. The graph record
+/// names the candidate; the PR itself settles it.
+#[derive(Debug)]
+pub enum OpenPrVerdict {
+    /// The PR reads open: hold, and name it.
+    Holds { node: String, pr: u64 },
+    /// The PR reads merged or closed: this session has nothing left to
+    /// drive, and the row falls through to the grace gate.
+    Settled { node: String, pr: u64 },
+    /// The read failed, or no reader was supplied: hold, and say so.
+    Unread { node: String, pr: u64 },
+    /// No candidate: no pr_number, a recorded merge, or this session
+    /// never drove the node.
+    None,
+}
+
+/// The candidate conjuncts are exactly the three the open-PR keep has
+/// always used: the node carries `pr_number`, its recorded `merge_status`
+/// is not `merged`, and this session has a `do` row on it. The attribution
+/// gate is unchanged, so a session that never drove the PR pays no read.
+/// `quiet_past_grace` is the read gate: a row inside the grace window is
+/// kept by `Active` anyway and a row with no age by `TranscriptUnresolved`
+/// anyway, so the read would change no verdict - pass `false` and every
+/// candidate holds, which is the keep's behavior before it learned to ask.
+pub fn open_pr_verdict(
+    graph: &GraphRead,
+    sid: &str,
+    node: &str,
+    cwd: &str,
+    quiet_past_grace: bool,
+    mut pr_read: Option<PrStateRead>,
+) -> OpenPrVerdict {
+    let pr = match graph.pr_number.get(node).copied().flatten() {
+        Some(pr) => pr,
+        None => return OpenPrVerdict::None,
+    };
+    let merged = graph
+        .pr_state
+        .get(node)
+        .and_then(|(merge_status, _, _)| merge_status.clone())
+        .as_deref()
+        == Some("merged");
+    let drives = graph
+        .do_nodes
+        .get(&sid.to_ascii_lowercase())
+        .is_some_and(|set| set.contains(node));
+    if merged || !drives {
+        return OpenPrVerdict::None;
+    }
+    if !quiet_past_grace {
+        return OpenPrVerdict::Holds {
+            node: node.to_string(),
+            pr,
+        };
+    }
+    match pr_read.as_mut().map(|f| f(pr, cwd)) {
+        Some(Some(false)) => OpenPrVerdict::Settled {
+            node: node.to_string(),
+            pr,
+        },
+        Some(Some(true)) => OpenPrVerdict::Holds {
+            node: node.to_string(),
+            pr,
+        },
+        // No reader, or the reader itself failed: both are an unread answer.
+        _ => OpenPrVerdict::Unread {
+            node: node.to_string(),
+            pr,
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn provenance_verdict(
     e: &state::RegistryEntry,
@@ -1555,6 +1627,26 @@ pub(crate) fn run_with_release(
         })
         .collect();
     let ages = age_many(&age_entries);
+    // The PR-state reader both askers share (the AllDone confirm arm in this
+    // pass and the open-PR keep in pass 2): a staged answer in the graph read
+    // wins; a miss resolves through gh. The cache lives for the whole sweep,
+    // keyed by cwd and PR, so two rows driving one PR pay one read.
+    let pr_cache: std::cell::RefCell<HashMap<(String, u64), Option<bool>>> = Default::default();
+    let mut pr_read_adapter = |pr: u64, cwd: &str| -> Option<bool> {
+        let key = (cwd.to_string(), pr);
+        if let Some(graph) = graph.as_ref() {
+            if let Some(staged) = graph.pr_reads.get(&key) {
+                return *staged;
+            }
+        }
+        let hit = pr_cache.borrow().get(&key).copied();
+        if let Some(cached) = hit {
+            return cached;
+        }
+        let fresh = gh_pr_is_open(pr, cwd);
+        pr_cache.borrow_mut().insert(key, fresh);
+        fresh
+    };
     let mut staged: Vec<Option<(ProvenanceVerdict, Option<i64>)>> =
         Vec::with_capacity(registry.entries.len());
     for e in &registry.entries {
@@ -1569,23 +1661,6 @@ pub(crate) fn run_with_release(
         };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
         let hits = store_matches(e);
-        // The PR-state reader the AllDone confirm arm may call: a staged
-        // answer in the graph read wins; a miss resolves through gh. The
-        // cache lives for this pass, keyed by cwd and PR.
-        let pr_cache: std::cell::RefCell<HashMap<(String, u64), Option<bool>>> = Default::default();
-        let mut pr_read_adapter = |pr: u64, cwd: &str| -> Option<bool> {
-            let key = (cwd.to_string(), pr);
-            if let Some(staged) = graph.pr_reads.get(&key) {
-                return *staged;
-            }
-            let hit = pr_cache.borrow().get(&key).copied();
-            if let Some(cached) = hit {
-                return cached;
-            }
-            let fresh = gh_pr_is_open(pr, cwd);
-            pr_cache.borrow_mut().insert(key, fresh);
-            fresh
-        };
         let verdict =
             provenance_verdict(e, sid, graph, hits.as_deref(), Some(&mut pr_read_adapter));
         let age = ages.get(&row_handle(e)).copied().flatten();
@@ -1873,33 +1948,38 @@ pub(crate) fn run_with_release(
                 }),
             _ => false,
         };
-        // The open-PR fact (Locked Decision 1) is the graph record alone:
-        // this session has a `do` row on the open node, the node carries
-        // `pr_number`, and the recorded merge_status is not `merged`. The
-        // sweep makes no network call for an open node.
-        let open_pr = match &verdict.work {
+        // The open-PR keep (Locked Decision 1) asks the PR, not the record:
+        // the graph names the candidate, and once the row is quiet past the
+        // grace GitHub settles whether the PR still needs its driver. A
+        // settled PR releases through `pr_settled`; a failed read holds
+        // under `pr state contradicts` - never a retirement on an unread
+        // answer.
+        let (open_pr, pr_settled) = match &verdict.work {
             WorkState::Open { node, .. } => {
-                let pr = graph.pr_number.get(node).copied().flatten();
-                let merged = graph
-                    .pr_state
-                    .get(node)
-                    .and_then(|(merge_status, _, _)| merge_status.clone())
-                    .as_deref()
-                    == Some("merged");
-                match pr {
-                    Some(pr)
-                        if !merged
-                            && graph
-                                .do_nodes
-                                .get(&sid.to_ascii_lowercase())
-                                .is_some_and(|set| set.contains(node)) =>
-                    {
-                        Some((node.clone(), pr))
+                let quiet_past_grace = matches!(age, Some(a) if a > grace_secs);
+                match open_pr_verdict(
+                    graph,
+                    sid,
+                    node,
+                    &e.cwd,
+                    quiet_past_grace,
+                    Some(&mut pr_read_adapter),
+                ) {
+                    OpenPrVerdict::Holds { node, pr } => (Some((node, pr)), false),
+                    OpenPrVerdict::Settled { .. } => (None, true),
+                    OpenPrVerdict::Unread { node, pr } => {
+                        if confirm_hold.is_none() {
+                            confirm_hold = Some(KeepReason::PrStateContradicts {
+                                node,
+                                detail: format!("pr {pr} state unread"),
+                            });
+                        }
+                        (None, false)
                     }
-                    _ => None,
+                    OpenPrVerdict::None => (None, false),
                 }
             }
-            _ => None,
+            _ => (None, false),
         };
         let node_merged = verdict.merged_but_open.is_some();
         // change 8: the existence-specific probe on the row's own
@@ -1957,6 +2037,7 @@ pub(crate) fn run_with_release(
             release_quiet: release_quiet_row,
             open_pr,
             peer_drives_pr,
+            pr_settled,
         };
         let (mut action, mut reason) = gc_decide(&row, grace_secs);
         // d-81c6da7e: a release matched to the planning hold answers the

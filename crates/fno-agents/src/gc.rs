@@ -116,16 +116,19 @@ pub struct GcRow {
     /// instead of holding. Set only when the verb's ruling matched the row;
     /// a missing age is never quiet on any other path.
     pub release_quiet: bool,
-    /// The `(node, pr)` THIS session drives and the PR is still open:
-    /// the session has a `do` row on the open node, the node carries
-    /// `pr_number`, and its recorded `merge_status` is not `merged`.
-    /// The graph record is the whole open-PR fact - the sweep makes no
-    /// network call for an open node.
+    /// The `(node, pr)` THIS session drives and the PR still reads open
+    /// (or was never asked): the session has a `do` row on the open node,
+    /// the node carries `pr_number`, its recorded `merge_status` is not
+    /// `merged`, and the PR-state read did not answer merged or closed.
     pub open_pr: Option<(String, u64)>,
     /// The live newer peer on the same node has its own `do` row on the
     /// node: the peer drives the PR, so this row's open-PR keep does not
     /// apply and the ordinary release path answers.
     pub peer_drives_pr: bool,
+    /// GitHub answered that this session's PR is merged or closed: the
+    /// session has nothing left to drive, so the row releases like any
+    /// other finished work and falls to the grace gate.
+    pub pr_settled: bool,
 }
 
 impl GcRow {
@@ -139,6 +142,7 @@ impl GcRow {
             || matches!(&self.work, WorkState::Open { status, .. }
                 if INACTIVE_NODE_STATUSES.contains(&status.as_str()))
             || self.node_merged
+            || self.pr_settled
     }
 }
 
@@ -1952,6 +1956,7 @@ mod tests {
             release_quiet: false,
             open_pr: None,
             peer_drives_pr: false,
+            pr_settled: false,
         }
     }
 
@@ -2878,6 +2883,22 @@ mod tests {
         assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
     }
 
+    /// A settled PR (GitHub answered merged or closed) is a fifth positive
+    /// fact: the open-PR keep has nothing to hold on, so the row falls to
+    /// the grace gate - retiring quiet, staying active fresh.
+    #[test]
+    fn a_settled_pr_releases_the_row_through_the_grace_gate() {
+        let mut row = open_row("in_review");
+        row.pr_settled = true;
+        assert_eq!(gc_decide(&row, GRACE), (GcAction::Retire, None));
+        row.transcript_age_s = Some(10);
+        assert_eq!(
+            gc_decide(&row, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 10 })),
+            "a settled PR never overrides recency: fresh is fresh"
+        );
+    }
+
     /// Change 8: a provably dead pid (ESRCH) overrides transcript recency,
     /// but never transcript UNRESOLVED - absence is not quiet even for a
     /// dead pid, because a dead pid says nothing about the transcript.
@@ -2940,6 +2961,7 @@ mod tests {
             release_quiet: false,
             open_pr: None,
             peer_drives_pr: false,
+            pr_settled: false,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
     }
@@ -2971,6 +2993,7 @@ mod tests {
             release_quiet: false,
             open_pr: Some((node.into(), pr)),
             peer_drives_pr: false,
+            pr_settled: false,
         }
     }
 
