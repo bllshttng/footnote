@@ -776,8 +776,8 @@ pub(crate) fn check_account_quota_lock(
 
 /// The same wall on the ROUTE axis: a route-keyed spawn (`--provider zai`,
 /// no `--account`) never reaches the account check above, so the lane
-/// snapshot the daemon persists every PROVIDER_CAP_INTERVAL_S — armed or
-/// not — is the provider-keyed lock it refuses on. A missing or unreadable
+/// snapshot the daemon persists every PROVIDER_CAP_INTERVAL_S, armed or
+/// not, is the provider-keyed lock it refuses on. A missing or unreadable
 /// snapshot reads unlocked, exactly as the unreadable runtime-state arm
 /// does; a reset at or before now reads unlocked (the lane is returning).
 pub(crate) fn check_lane_quota_lock(
