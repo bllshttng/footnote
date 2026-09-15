@@ -150,7 +150,7 @@ def _failed_job_step(steps: Sequence[dict]) -> Optional[str]:
 def unreached_job_steps(steps: Sequence[dict]) -> list[str]:
     """GitHub-job steps after the failed one whose own conclusion is skipped.
 
-    Position alone was the old discriminator, and it lied on PR 1823 (x-188e):
+    Position alone was the old discriminator, and it lied on PR 1823:
     `.github/workflows/guards.yml` carries `if: ${{ !cancelled() }}` on its
     steps, so steps after a failure can RUN and read `success` - thirteen
     guard steps were reported as unreached work that had passed. Only a later

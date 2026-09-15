@@ -1011,7 +1011,8 @@ def run_status(
             prior_payload.get("verdict") == "green"
             and prior_payload.get("head") == head_sha
             and "rerun_recovered" in prior_payload
-            and (prior_payload.get("checks") or {}).get("total") == counts["total"]
+            and isinstance(prior_payload.get("checks"), dict)
+            and prior_payload["checks"].get("total") == counts["total"]
         )
         if prior_green:
             rerun = {

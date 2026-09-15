@@ -676,9 +676,9 @@ def fetch_pr_rest(
             # validates head.ref on the same request.
             "headRefName": info["head_ref"],
             "mergeable": info["mergeable"],
-            # The raw listing the workflow-name mapping above already read
-            # (x-c770): run_status hands it to rerun_recovery, which then
-            # skips its own actions/runs read - one listing per miss, not two.
+            # The raw listing the workflow-name mapping above already read:
+            # run_status hands it to rerun_recovery, which then skips its own
+            # actions/runs read - one listing per miss, not two.
             "workflowRuns": run_rows,
         },
         "",

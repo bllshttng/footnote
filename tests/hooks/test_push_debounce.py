@@ -10,7 +10,7 @@ instrument, the stamp of the last allowed push: GitHub needs a moment to
 register the run a push started, so a push inside the window waits. (The old
 second instrument, a `fno do pr status --json` probe, never fired: the CLI
 exits 2 on the unknown flag, so it read as broken on every push and was
-deleted 2026-09-15, x-c770.)
+deleted 2026-09-15.)
 
 Every failure path allows. A missing stamp, a stale one, a read error: a push
 is never blocked by an instrument that could not answer.
@@ -81,7 +81,7 @@ def test_an_expired_stamp_allows(tmp_path, monkeypatch):
 
 def test_a_push_without_a_stamp_allows_and_spawns_no_fno_process(tmp_path, monkeypatch):
     """No stamp is no evidence of a run in flight: the push goes out, and the
-    debounce spawns no process to decide (x-c770 acceptance)."""
+    debounce spawns no process to decide."""
     _Harness(tmp_path, monkeypatch)
     spawned = []
     monkeypatch.setattr(

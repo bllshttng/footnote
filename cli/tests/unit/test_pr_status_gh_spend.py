@@ -3,7 +3,7 @@
 The fake sits one level BELOW the verbs, at `fno.pr._proc.subprocess.run`, so
 an absolute gh path (the GraphQL broker's resolve_real_gh spawn) counts
 exactly like a bare `gh` - the blind spot that left 4 of 20 spawns on a red
-read uncounted (x-c770). The bounds it pins, on fixture F6 (a red head, 6
+read uncounted. The bounds it pins, on fixture F6 (a red head, 6
 failing Actions checks with distinct job ids, 28 passing checks on one page,
 logs with no smoke-runner lines, and the review, coverage, hold and lane
 probes stubbed):
@@ -19,7 +19,7 @@ probes stubbed):
 And on a green head: the runs listing is read once per miss (not twice), and
 a same-head refresh at an equal check count reuses the rerun facts (0
 attempts and 0 jobs reads). No test here touches the network: the fake gh is
-the proof (plan x-c770, Verification 6).
+the proof (the fake gh is the proof; no live read verifies this).
 """
 from __future__ import annotations
 

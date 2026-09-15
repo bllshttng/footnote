@@ -127,7 +127,7 @@ def test_unreached_runner_steps_is_none_on_old_logs_without_prologue() -> None:
 
 
 def test_unreached_job_steps_keeps_only_later_skipped_steps() -> None:
-    """Reverses the old positional premise (x-188e): a workflow carrying
+    """Reverses the old positional premise: a workflow carrying
     `if: ${{ !cancelled() }}` runs its later steps, so a step after the
     failure can read `success` - PR 1823 named 13 guard steps unreached that
     had run and passed. A later step counts as unreached only when its OWN
@@ -224,7 +224,7 @@ def test_collect_failures_reports_a_status_context_without_pretending_a_log() ->
 
 
 def test_collect_failures_names_the_failed_step_without_a_log() -> None:
-    """x-611d: the no-log branch fetched the job steps and named the steps
+    """The no-log branch fetched the job steps and named the steps
     fail-fast never reached, but never the step that failed - the cause
     without the consequence's neighbour."""
     steps = [
