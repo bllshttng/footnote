@@ -687,7 +687,7 @@ fn resolve_subject_session(
 
 /// (holder session, dispatcher session) for a claim payload. A
 /// spawn-handover record stores the MINTER's session in `session_id`; the
-/// holder is the worker it names, joined through the registry (x-41f7). The
+/// holder is the worker it names, joined through the registry. The
 /// minter is published as `metadata.dispatched_by_session` - the shape
 /// `compare_and_rebind` writes at target-init rebind - so the payload reads
 /// the same before and after the rebind.
@@ -1487,7 +1487,7 @@ mod tests {
         });
     }
 
-    // ---- the served-liveness tier (x-aa80) ---------------------------------
+    // ---- the served-liveness tier ------------------------------------------
 
     /// The 20-byte Z stamp `rfc3339_like_to_secs` accepts, generated at test
     /// runtime: a hardcoded stamp ages past the 120-second window and the
