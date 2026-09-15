@@ -23,6 +23,9 @@
 # for itself; a session with an empty queue is the steady state.
 #
 # Hook contract: stdout is appended to the session prompt; exit 0 always.
+# Codex runs this at SessionStart only (codex-hooks.json): a Codex Stop
+# handler must print one JSON object or nothing, and this script prints
+# prompt Markdown.
 set -uo pipefail
 
 command -v fno >/dev/null 2>&1 || exit 0

@@ -342,8 +342,8 @@ def test_subagent_stop_with_findings_emits_failed_attestation(tmp_path: Path) ->
     assert data["head_sha"] == head
     assert data["findings_blocking"] == 1
     assert data["findings_nonblocking"] == 0
-    assert "classified 1 finding(s): 1 blocking, 0 non-blocking" in r.stdout
-    assert f"reviewed head {head}" in r.stdout
+    assert "classified 1 finding(s): 1 blocking, 0 non-blocking" in r.stderr
+    assert f"reviewed head {head}" in r.stderr
 
 
 _SURFACES = {

@@ -103,10 +103,6 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/context-nudge.sh"
-          },
-          {
-            "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"
           }
         ]
       }
