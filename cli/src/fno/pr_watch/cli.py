@@ -619,7 +619,6 @@ def tick() -> None:
                 ceiling_box["v"] is None or cap is None or cap >= (left or 0.0)
             )
             slice_s = max(1.0, slice_s)
-            body_cut = False
             phase_start = time.monotonic()
             try:
                 if alarm_ok:
@@ -628,7 +627,6 @@ def tick() -> None:
                 set_phase_deadline(time.monotonic() + slice_s)
                 body(slice_s)
             except TickDeadlineExceeded:
-                body_cut = True
                 cut.append(name)
                 cut_whys[name] = "deadline_exceeded" if wall_limited else "slice_starved"
                 if arm is not None:

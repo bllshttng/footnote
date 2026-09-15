@@ -792,7 +792,7 @@ fn down_schedulers(rows: &[ArmStatus]) -> HashSet<String> {
         .collect()
 }
 
-/// The merge phase stamps pr_watch_merge at its own end (x-7aaf), so the
+/// The merge phase stamps pr_watch_merge at its own end, so the
 /// row's ok describes the merge phase, not the tick or the sweep. When the containing
 /// tick's end record landed newer and carries a failure token, the reader
 /// corrects the row instead of trusting it.

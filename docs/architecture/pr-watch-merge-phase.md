@@ -13,7 +13,7 @@ headed every later tick. Completed ticks read `scanned` 13-23 before such an
 outage and 1-2 during it, and the tick verdict read `dead` with `cut:
 ['sweep']`.
 
-The split: the merge phase asks the `authorized-merge` verb's `grant-queue` op for the durable-grant queue. It drains the queue under a fresh 150s slice (`arm="pr_watch_merge"`), so a sweep the alarm cut leaves the queue intact (x-7aaf). The sweep itself resolves no grants, and its `merge_scan` receipt names only `scanned`. At its own end the merge phase stamps the `pr_watch_merge` row in the grammar `merge sweep=<cut|ok> candidates=<n> granted=<g> executed=<e> skipped=<s>`. A later cut can no longer erase the merge record, and the row names whether it ran after a cut or a completed sweep.
+The split: the merge phase asks the `authorized-merge` verb's `grant-queue` op for the durable-grant queue. It drains the queue under a fresh 150s slice (`arm="pr_watch_merge"`), so a sweep the alarm cut leaves the queue intact. The sweep itself resolves no grants, and its `merge_scan` receipt names only `scanned`. At its own end the merge phase stamps the `pr_watch_merge` row in the grammar `merge sweep=<cut|ok> candidates=<n> granted=<g> executed=<e> skipped=<s>`. A later cut can no longer erase the merge record, and the row names whether it ran after a cut or a completed sweep.
 
 `run_execute_queue` owns the per-attempt discipline:
 
