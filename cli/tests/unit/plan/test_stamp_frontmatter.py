@@ -142,6 +142,24 @@ def test_plain_items_stay_bare() -> None:
     assert text == "probes: [plain item, 1, https://x.y/z, don't, issue#12]"
 
 
+def test_unsafe_scalar_is_quoted_on_write() -> None:
+    """The scalar branch quotes under the same structural rule as list items.
+
+    A title scalar holding ': ' used to serialize bare and stop the doc from
+    being valid YAML at all.
+    """
+    fields = {"title": "a: b"}
+    text = serialize_frontmatter(fields)
+    assert yaml.safe_load(text) == {"title": "a: b"}
+    assert _roundtrip(fields) == {"title": "a: b"}
+
+
+def test_plain_scalar_stays_bare() -> None:
+    """Ordinary scalars keep their current bare spelling."""
+    text = serialize_frontmatter({"status": "ready", "done_at": "2026-09-15T00:00:00Z"})
+    assert text == "status: ready\ndone_at: 2026-09-15T00:00:00Z"
+
+
 # ---------------------------------------------------------------------------
 # AC5-EDGE: nothing else about the output changes
 # ---------------------------------------------------------------------------

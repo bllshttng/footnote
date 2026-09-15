@@ -366,7 +366,10 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
             else:
                 fields[key] = ""
         else:
-            fields[key] = raw_val  # scalar (string)
+            # Strip a quote wrap exactly as list items do, so a value the
+            # writer quoted reads back as itself instead of growing a second
+            # wrap on the next write.
+            fields[key] = _parse_scalar(raw_val)  # scalar (string)
 
     return fields, block, rest
 
@@ -388,7 +391,13 @@ def serialize_frontmatter(fields: dict[str, Any]) -> str:
         elif isinstance(value, list):
             lines.append(f"{key}: {_serialize_inline_list(value)}")
         else:
-            lines.append(f"{key}: {value}")
+            # Same structural quote rule as the list items: a scalar holding
+            # ': ' or edge whitespace goes back bare only to fail the next
+            # YAML read.
+            text = str(value)
+            if _bare_is_ambiguous(text):
+                text = _quote_item(text)
+            lines.append(f"{key}: {text}")
     return "\n".join(lines)
 
 
