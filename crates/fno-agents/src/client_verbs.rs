@@ -2669,12 +2669,14 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         );
     }
 
-    // Dead-arm respawn: the plan's mechanism says `claude respawn`, which
-    // exits as soon as the job relaunches. Run and confirm; exec would drop
-    // the operator into a shell that looks like a no-op.
+    // Dead-arm respawn and bg-resume: the plan's mechanism relaunches the
+    // session (respawn restarts the saved job; bg-resume backgrounds a
+    // same-id resume). Both exit as soon as the job relaunches. Run and
+    // confirm; exec would drop the operator into a shell that looks like a
+    // no-op.
     if reentry_plan
         .as_ref()
-        .is_some_and(|p| p.mechanism == "respawn")
+        .is_some_and(|p| matches!(p.mechanism.as_str(), "respawn" | "bg-resume"))
     {
         return run_and_confirm_respawn(
             reentry_plan.as_ref().unwrap(),
@@ -2900,10 +2902,11 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
         );
     }
 
-    // Respawn mechanism: run and confirm (see run_and_confirm_respawn). A
-    // `claude respawn` exits at once, so the exec below would replace this
-    // process with a launcher that immediately returns.
-    if plan.mechanism == "respawn" {
+    // Respawn and bg-resume mechanisms: run and confirm (see
+    // run_and_confirm_respawn). Both relaunch shapes exit at once, so the
+    // exec below would replace this process with a launcher that immediately
+    // returns.
+    if matches!(plan.mechanism.as_str(), "respawn" | "bg-resume") {
         return run_and_confirm_respawn(&plan, &name, "recover", "agent_recovered", home);
     }
 

@@ -432,6 +432,18 @@ fn finish_on_the_thread_lane(
 /// The state WORD is not evidence - the wake lane's confirm primitive exists
 /// because `working -> working` read the same for a landed and an unlanded
 /// message.
+/// The copy short id inside the measured copy notice: `started a copy as
+/// <short>.` None when the output does not carry one.
+fn copy_short_from_notice(text: &str) -> Option<String> {
+    const MARKER: &str = "started a copy as ";
+    let idx = text.find(MARKER)? + MARKER.len();
+    let short: String = text[idx..]
+        .chars()
+        .take_while(|c| c.is_ascii_hexdigit())
+        .collect();
+    (short.len() == 8).then_some(short)
+}
+
 pub(crate) fn run_and_confirm_respawn(
     plan: &crate::reentry::ReentryPlan,
     name: &str,
@@ -466,39 +478,114 @@ where
     S: Fn(std::time::Duration),
 {
     let jobs_dir = claude_home.jobs_dir_for(&plan.short_id);
-    let before_updated_at = read_state_json(&jobs_dir).ok().and_then(|s| s.updated_at);
+    let bg_resume = plan.mechanism == "bg-resume";
+    // A bg resume relaunches a session whose job dir is typically GONE, so
+    // its confirmation is the state file appearing after the launch, not a
+    // stamp advancing. The respawn arm keeps the advance proof.
+    let before_updated_at = if bg_resume {
+        None
+    } else {
+        read_state_json(&jobs_dir).ok().and_then(|s| s.updated_at)
+    };
 
     let mut command = std::process::Command::new(&plan.argv[0]);
     command.args(&plan.argv[1..]).current_dir(&plan.cwd);
+    // Identity first, so a plan env entry can still override it: the
+    // resumed serving process inherits none of the env the original spawn
+    // carried (measured: FNO_AGENT_SELF absent from the resumed process),
+    // so this stamp is the only carrier of the fno name.
+    crate::claims::stamp_command_env(
+        &mut command,
+        Some(&plan.name),
+        "claude",
+        Some(&plan.session_id),
+    );
+    if let Some(node) = plan.node.as_deref().filter(|n| !n.is_empty()) {
+        command.env("FNO_NODE", node);
+    }
     for (key, value) in &plan.env {
         command.env(key, value);
     }
-    let status = match command.status() {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("fno agents {verb}: failed to run {}: {e}", plan.argv[0]);
+    if bg_resume {
+        let out = match command.output() {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("fno agents {verb}: failed to run {}: {e}", plan.argv[0]);
+                return 1;
+            }
+        };
+        if !out.status.success() {
+            eprintln!(
+                "fno agents {verb}: {} for {name} exited {}",
+                plan.argv.join(" "),
+                out.status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string())
+            );
             return 1;
         }
-    };
-    if !status.success() {
-        eprintln!(
-            "fno agents {verb}: {} for {name} exited {}",
-            plan.argv.join(" "),
-            status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string())
-        );
-        return 1;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let combined = format!("{stdout}{stderr}");
+        // A live session answers the bg resume with a COPY under a NEW id
+        // (measured notice: `started a copy as <short>.`); a plain
+        // `backgrounded` line naming a DIFFERENT job id is the same fact.
+        let observed = crate::claude_ask::parse_short_id(&combined).ok();
+        let copy_short = copy_short_from_notice(&combined).or(observed);
+        let copy = combined.contains("started a copy as ")
+            || copy_short
+                .as_deref()
+                .is_some_and(|s| s != plan.short_id);
+        if copy {
+            if let Some(short) = copy_short.as_deref().filter(|s| *s != plan.short_id.as_str()) {
+                let mut stop = std::process::Command::new("claude");
+                stop.args(["stop", short]).current_dir(&plan.cwd);
+                for (key, value) in &plan.env {
+                    stop.env(key, value);
+                }
+                let _ = stop.status();
+            }
+            eprintln!(
+                "fno agents {verb}: refused: session {} is already running, so the \
+                 relaunch started a COPY instead of continuing it and the copy was \
+                 stopped. Reach the live original with `fno agents attach {name}`.",
+                plan.session_id
+            );
+            return crate::reentry::REENTRY_REFUSED_EXIT;
+        }
+    } else {
+        let status = match command.status() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("fno agents {verb}: failed to run {}: {e}", plan.argv[0]);
+                return 1;
+            }
+        };
+        if !status.success() {
+            eprintln!(
+                "fno agents {verb}: {} for {name} exited {}",
+                plan.argv.join(" "),
+                status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "signal".to_string())
+            );
+            return 1;
+        }
     }
 
-    let confirmed = match (before_updated_at, read_state_json(&jobs_dir)) {
+    let confirmed = if bg_resume {
+        read_state_json(&jobs_dir).is_ok()
+    } else {
+        match (before_updated_at, read_state_json(&jobs_dir)) {
         (Some(before), Ok(s)) => s.updated_at.as_deref().is_some_and(|a| a > before.as_str()),
         // No readable BEFORE stamp (the file the resolver just proved exists
         // did not parse): an AFTER read carrying any stamp is the evidence
         // left, and it is still content, never an exit code.
         (None, Ok(s)) => s.updated_at.is_some(),
-        (_, Err(_)) => false,
+            (_, Err(_)) => false,
+        }
     };
     if !confirmed {
         eprintln!(
@@ -540,6 +627,39 @@ where
              {last_state}; not confirmed live."
         );
         return 16;
+    }
+
+    // The row still reads dead/exited while its session is demonstrably
+    // live again. Flip it under the registry lock, matching on name AND
+    // session id; the binding fields stay untouched so mail and attach keep
+    // resolving the same session.
+    let flip = crate::state::update_registry(&home.registry_json(), |reg| {
+        let mut flipped = false;
+        for entry in reg.entries.iter_mut() {
+            if entry.name == plan.name
+                && entry.harness_session_id.as_deref() == Some(plan.session_id.as_str())
+            {
+                entry.status = crate::AgentStatus::Live;
+                entry.exited_at = None;
+                flipped = true;
+            }
+        }
+        flipped
+    });
+    match flip {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!(
+                "fno agents {verb}: {name} is live, but no registry row carries \
+                 session {}; the row was removed while the relaunch ran.",
+                plan.session_id
+            );
+            return 16;
+        }
+        Err(e) => {
+            eprintln!("fno agents {verb}: registry flip failed: {e}");
+            return 16;
+        }
     }
 
     append_agents_event(
@@ -647,6 +767,7 @@ mod tests {
             env: Default::default(),
         };
         let home = AgentsHome::at(temp.path().join("agents-home"));
+        seed_exited_row(&home, "w1", "sess-uuid");
         let code = run_and_confirm_respawn_with_truth(
             &plan,
             "w1",
@@ -661,6 +782,10 @@ mod tests {
             |_| {},
         );
         assert_eq!(code, 0);
+        let reg = crate::state::load_registry(&home.registry_json()).unwrap();
+        let row = reg.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert_eq!(row.status, crate::AgentStatus::Live);
+        assert_eq!(row.harness_session_id.as_deref(), Some("sess-uuid"));
         std::fs::remove_dir_all(temp.path()).ok();
     }
 
@@ -713,6 +838,162 @@ mod tests {
             |_| {}, // no-op sleep: the window must not cost wall clock in tests
         );
         assert_eq!(code, 16);
+        std::fs::remove_dir_all(temp.path()).ok();
+    }
+
+    /// A registry home with one exited row: the flip target. `fno_id` is set
+    /// so the tests can prove the flip leaves the binding fields untouched.
+    fn seed_exited_row(home: &AgentsHome, name: &str, session_id: &str) {
+        crate::state::update_registry(&home.registry_json(), |reg| {
+            reg.entries.push(crate::state::RegistryEntry {
+                name: name.to_string(),
+                harness: Some("claude".to_string()),
+                harness_session_id: Some(session_id.to_string()),
+                fno_id: Some("fid-keep".to_string()),
+                status: crate::AgentStatus::Exited,
+                exited_at: Some("2026-09-14T00:00:00Z".to_string()),
+                ..Default::default()
+            });
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn bg_resume_confirms_a_returning_job_and_flips_the_row_live() {
+        // The fake launch echoes the plain `backgrounded` line and recreates
+        // the job state the resolver could not find. Exit 0 requires the
+        // state file to appear and the truth probe to read live.
+        let temp = tempfile::tempdir().unwrap();
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let jobs = claude_home.jobs_dir_for("abcd1234");
+        let plan = crate::reentry::ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "bg-resume".into(),
+            name: "w1".into(),
+            fno_id: None,
+            node: None,
+            session_id: "sess-uuid".into(),
+            short_id: "abcd1234".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: temp.path().display().to_string(),
+            substrate: "bg".into(),
+            mux: None,
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                format!(
+                    "echo 'backgrounded · abcd1234 · w1'; \
+                     mkdir -p '{jobs}' && printf '%s' \
+                     '{{\"state\":\"working\",\"updatedAt\":\"2026-09-15T00:00:00Z\"}}' \
+                     > '{jobs}/state.json'",
+                    jobs = jobs.display()
+                ),
+            ],
+            env: Default::default(),
+        };
+        let home = AgentsHome::at(temp.path().join("agents-home"));
+        seed_exited_row(&home, "w1", "sess-uuid");
+        let code = run_and_confirm_respawn_with_truth(
+            &plan,
+            "w1",
+            "resume",
+            "agent_resumed",
+            &home,
+            claude_home.clone(),
+            |_| Some("working".to_string()),
+            |_| {},
+        );
+        assert_eq!(code, 0);
+        let reg = crate::state::load_registry(&home.registry_json()).unwrap();
+        let row = reg.entries.iter().find(|e| e.name == "w1").unwrap();
+        assert_eq!(row.status, crate::AgentStatus::Live);
+        assert_eq!(row.fno_id.as_deref(), Some("fid-keep"));
+        assert_eq!(row.harness_session_id.as_deref(), Some("sess-uuid"));
+        assert!(row.exited_at.is_none());
+        std::fs::remove_dir_all(temp.path()).ok();
+    }
+
+    #[test]
+    fn bg_resume_refuses_a_copy_stops_it_and_never_touches_the_registry() {
+        // A live session answers the bg resume with the measured copy notice.
+        // The launch must refuse at 3, stop the COPY (never the original),
+        // and leave the registry byte-identical.
+        let _guard = crate::path_test_guard();
+        let temp = tempfile::tempdir().unwrap();
+        let claude_home = crate::claude_ask::ClaudeHome::at(temp.path());
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let stop_log = temp.path().join("stop.log");
+        std::fs::write(
+            bin.join("claude"),
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", stop_log.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                bin.join("claude"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        let old_path = std::env::var_os("PATH");
+        std::env::set_var("PATH", crate::path_with(&bin));
+
+        let plan = crate::reentry::ReentryPlan {
+            resolved: true,
+            transition: "resume".into(),
+            mechanism: "bg-resume".into(),
+            name: "w1".into(),
+            fno_id: None,
+            node: None,
+            session_id: "sess-uuid".into(),
+            short_id: "abcd1234".into(),
+            launch_account: "default".into(),
+            claude_config_dir: None,
+            route_settings_path: None,
+            cwd: temp.path().display().to_string(),
+            substrate: "bg".into(),
+            mux: None,
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "echo 'note: session abcd1234 is already running in the background, \
+                 so this started a copy as 660e758a.'; \
+                 echo 'backgrounded · 660e758a (idle - send a prompt to start)'"
+                    .to_string(),
+            ],
+            env: Default::default(),
+        };
+        let home = AgentsHome::at(temp.path().join("agents-home"));
+        seed_exited_row(&home, "w1", "sess-uuid");
+        let reg_before = std::fs::read(home.registry_json()).unwrap();
+        let code = run_and_confirm_respawn_with_truth(
+            &plan,
+            "w1",
+            "resume",
+            "agent_resumed",
+            &home,
+            claude_home,
+            |handle| {
+                // The copy refusal fires before any truth read.
+                unreachable!("truth probe must not run on the copy path: {handle}");
+            },
+            |_| {},
+        );
+        match &old_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        assert_eq!(code, crate::reentry::REENTRY_REFUSED_EXIT);
+        let stops = std::fs::read_to_string(&stop_log).unwrap();
+        assert!(stops.contains("stop 660e758a"), "{stops}");
+        let reg_after = std::fs::read(home.registry_json()).unwrap();
+        assert_eq!(reg_before, reg_after);
         std::fs::remove_dir_all(temp.path()).ok();
     }
 
