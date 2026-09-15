@@ -6,12 +6,14 @@ conversation is a stream with no event boundary and no receipt, so it does
 not. This sub-app gives the operator turn the shape mail already has: an id,
 a queue, and an ack, with no capture-time write path and no hook.
 
-The transcript is already the event log, so the queue is DERIVED: the
-undispositioned turns are the prose user turns minus the ids already acked,
-which works retroactively on something said an hour ago. Recording still
-runs through the existing capture verbs first; ``ack`` then names what the
-turn produced - one ack verb instead of a ``--from-turn`` flag threaded
-through three surfaces.
+The transcript is the event log and the system of record, so the queue is
+DERIVED from it: the undispositioned turns are the prose user turns minus
+the ids already acked, read from the whole transcript. A per-session scan
+cursor (``<session>.scan.json``, a deletable cache) remembers how far a
+read got, so later reads parse only newly appended bytes and no turn is
+lost to distance from EOF. Recording still runs through the existing
+capture verbs first; ``ack`` then names what the turn produced - one ack
+verb instead of a ``--from-turn`` flag threaded through three surfaces.
 
 Session/transcript/ledger resolution (in order: explicit env pins, then the
 ambient identity): ``FNO_OPERATOR_SESSION_ID``, ``FNO_OPERATOR_HARNESS``,
@@ -78,9 +80,10 @@ operator_app = typer.Typer(
     name="user",
     help="Queue of this session's undispositioned user turns, derived "
     "from the transcript and acked to a per-session ledger under "
-    "~/.fno/operator-capture/. Machine envelopes are refused and counted "
-    "by name. Residual hole: raw mail (send --raw) reads as a user turn; "
-    "over-counting is the safe direction there.",
+    "~/.fno/operator-capture/ (the <session>.scan.json scan cursor is a "
+    "cache; deleting it only forces a full rescan). Machine envelopes are "
+    "refused and counted by name. Residual hole: raw mail (send --raw) "
+    "reads as a user turn; over-counting is the safe direction there.",
     no_args_is_help=True,
 )
 
@@ -230,37 +233,24 @@ def classify(text: str) -> tuple[Optional[str], str]:
     return cleaned, ""
 
 
-#: The retroactivity window. The read is tail-bounded so a multi-MB
-#: transcript costs fixed bytes per hook fire; past the window a turn can
-#: only be surfaced by acking nothing and re-reading, which no caller does.
-_TAIL_BYTES = 2_000_000
+def _scan_path(session_id: str) -> Path:
+    return _capture_dir() / f"{session_id}.scan.json"
 
 
-def read_operator_turns(transcript_path: Path) -> tuple[list[dict], dict[str, int]]:
-    """Operator turns, oldest first, plus a per-reason skip tally.
+def _scan(fh, line_no: int) -> tuple[list[dict], dict[str, int], int, int]:
+    """Turns and skip counts from fh to its last full row, plus (bytes, lines) consumed.
 
-    Returns ``({turn_id, ts_epoch, text}, {reason: count})``. The tally is
-    the visible half of a refusal: every machine turn dropped at classify
-    is counted by name, so a read that filtered something can always say
-    what and why.
+    A torn trailing row waits for its newline, so a read never parses a
+    half-written row and derived turn ids stay stable across reads.
     """
-    try:
-        with transcript_path.open("rb") as fh:
-            fh.seek(0, 2)
-            size = fh.tell()
-            fh.seek(max(0, size - _TAIL_BYTES))
-            raw = fh.read().decode("utf-8", errors="replace")
-    except OSError as exc:
-        raise OperatorCaptureError(f"transcript {transcript_path} unreadable: {exc}") from exc
-    if size > _TAIL_BYTES:
-        # Drop the torn line the seek landed inside.
-        newline = raw.find("\n")
-        raw = raw[newline + 1 :] if newline >= 0 else ""
-    turns: list[dict] = []
-    skipped: dict[str, int] = {}
-    for line_no, line in enumerate(raw.splitlines()):
+    raw = fh.read()
+    cut = raw.rfind(b"\n")
+    if cut < 0:
+        return [], {}, 0, 0
+    kept, turns, skipped = raw[: cut + 1], [], {}
+    for i, row in enumerate(kept.split(b"\n")[:-1]):
         try:
-            obj = json.loads(line)
+            obj = json.loads(row.decode("utf-8", errors="replace"))
         except ValueError:
             continue
         if not isinstance(obj, dict) or not _is_user_turn(obj):
@@ -269,14 +259,69 @@ def read_operator_turns(transcript_path: Path) -> tuple[list[dict], dict[str, in
         if text is None:
             skipped[reason] = skipped.get(reason, 0) + 1
             continue
-        turns.append(
-            {
-                "turn_id": _turn_id(obj, text, line_no),
-                "ts_epoch": _turn_ts_epoch(obj),
-                "text": text,
-            }
-        )
-    return turns, skipped
+        turns.append({"turn_id": _turn_id(obj, text, line_no + i), "ts_epoch": _turn_ts_epoch(obj), "text": text})
+    return turns, skipped, len(kept), kept.count(b"\n")
+
+
+def _load_scan_state(session_id: str, transcript_path: Path) -> dict:
+    """The saved cursor, else fresh: missing, invalid, alien, or past EOF all reset."""
+    fresh = {"transcript": str(transcript_path), "offset": 0, "line_no": 0, "turns": [], "skipped": {}}
+    try:
+        saved = json.loads(_scan_path(session_id).read_text(encoding="utf-8"))
+        if (
+            isinstance(saved, dict)
+            and saved.get("transcript") == str(transcript_path)
+            and isinstance(saved.get("offset"), int)
+            and 0 <= saved["offset"] <= transcript_path.stat().st_size
+            and isinstance(saved.get("line_no"), int)
+            and isinstance(saved.get("turns"), list)
+            and isinstance(saved.get("skipped"), dict)
+        ):
+            saved["turns"] = [t for t in saved["turns"] if isinstance(t, dict) and isinstance(t.get("turn_id"), str)]
+            return saved
+    except (OSError, ValueError):
+        pass
+    return fresh
+
+
+def _save_scan_state(session_id: str, state: dict) -> None:
+    """Atomic best-effort save; failure costs speed on the next read, never correctness."""
+    try:
+        path = _scan_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def pending_turns(session_id: str, transcript_path: Path) -> tuple[list[dict], dict[str, int]]:
+    """Unacked turns, oldest first, plus a per-reason skip tally.
+
+    The transcript is the system of record; the scan file is a cache whose
+    deletion only forces a full rescan. # ponytail: the first read is one
+    full pass (1.07s at 220MB) with no mid-scan checkpoint - checkpoint
+    every 64MB in the loop if a transcript ever nears the hook's 10s budget.
+    """
+    state = _load_scan_state(session_id, transcript_path)
+    try:
+        with transcript_path.open("rb") as fh:
+            fh.seek(state["offset"])
+            new_turns, new_skips, consumed, lines = _scan(fh, state["line_no"])
+    except OSError as exc:
+        raise OperatorCaptureError(f"transcript {transcript_path} unreadable: {exc}") from exc
+    if consumed:
+        known = {t["turn_id"] for t in state["turns"]}
+        state["turns"] += [t for t in new_turns if t["turn_id"] not in known]
+        for reason, n in new_skips.items():
+            state["skipped"][reason] = state["skipped"].get(reason, 0) + n
+        state["offset"] += consumed
+        state["line_no"] += lines
+    acked = read_acked_turn_ids(session_id)
+    state["turns"] = [t for t in state["turns"] if t["turn_id"] not in acked]
+    _save_scan_state(session_id, state)
+    return state["turns"], dict(state["skipped"])
 
 
 def format_skip_report(skipped: dict[str, int]) -> str:
@@ -338,9 +383,7 @@ def excerpt(text: str, limit: int = _EXCERPT_CHARS) -> str:
 
 
 def queue_depth(session_id: str, transcript_path: Path) -> dict:
-    acked = read_acked_turn_ids(session_id)
-    turns, skipped = read_operator_turns(transcript_path)
-    pending = [t for t in turns if t["turn_id"] not in acked]
+    pending, skipped = pending_turns(session_id, transcript_path)
     oldest = pending[0] if pending else None
     age = None
     if oldest is not None and oldest["ts_epoch"] is not None:
@@ -375,9 +418,7 @@ def cmd_list(
 ) -> None:
     """Undispositioned user turns, oldest first."""
     sid, path = _resolve_with_transcript()
-    acked = read_acked_turn_ids(sid)
-    turns, skipped = read_operator_turns(path)
-    pending = [t for t in turns if t["turn_id"] not in acked]
+    pending, skipped = pending_turns(sid, path)
     report = format_skip_report(skipped)
     if report:
         typer.echo(report, err=True)
