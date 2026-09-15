@@ -402,9 +402,11 @@ fn flush_gate_metrics(state: &StoreState) {
 }
 
 /// The soak sampler: each 5-minute window, when the backend is json
-/// (JSON authoritative) and the db version moved since the last
-/// sample, run one parity compare and journal it. A failed compare
-/// does not advance the sampler, so the window retries (AC13-HP).
+/// (JSON authoritative) and the db version moved since the last sample,
+/// run one parity compare and record it in graph_meta. A quiet day still
+/// counts: once per UTC date a sample lands even when the version did not
+/// move, so the soak reaches seven clean days without seven mutations. A
+/// failed compare does not advance the sampler, so the window retries.
 fn sample_parity(state: &StoreState, last_sampled: &mut Option<String>) {
     if state.backend() != crate::backlog::Backend::Json {
         return;
@@ -412,7 +414,9 @@ fn sample_parity(state: &StoreState, last_sampled: &mut Option<String>) {
     let Ok(version) = crate::backlog::version(&state.graph) else {
         return;
     };
-    if last_sampled.as_deref() == Some(version.as_str()) {
+    let version_moved = last_sampled.as_deref() != Some(version.as_str());
+    let sampled_today = crate::backlog::soak_sampled_today(&state.graph);
+    if !version_moved && sampled_today {
         return;
     }
     // Same gate discipline as the parity op: the compare holds the shared
@@ -424,6 +428,9 @@ fn sample_parity(state: &StoreState, last_sampled: &mut Option<String>) {
         return;
     };
     *last_sampled = Some(version);
+    // graph_meta carries the gate's evidence; the journal emit stays for
+    // observers, but nothing reads it for the soak any more.
+    let _ = crate::backlog::record_parity_sample(&state.graph, &report, chrono::Utc::now());
     if let Some(events) = &state.events {
         let emitter = crate::events::EventEmitter::new(events, "daemon");
         let _ = emitter.emit(
@@ -790,7 +797,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     .into_bytes();
 
     let shutdown = Arc::new(AtomicU64::new(0));
-    if state.events.is_some() {
+    if state.canonical || state.events.is_some() {
         let metrics_state = Arc::clone(&state);
         let metrics_shutdown = Arc::clone(&shutdown);
         let _ = std::thread::Builder::new()
@@ -1681,32 +1688,15 @@ fn handle_set_backend(state: &StoreState, params: &Value) -> Result<Value, Store
 }
 
 /// The flip gate's soak half: one gap line per failed requirement, read
-/// from the journals the sampler could have written. The keeper's own
-/// `--events` path is the first candidate; a Rust-spawned keeper carries
-/// none, so the state-root and every space journal are unioned in - the
-/// soak was recorded wherever the canonical keeper's spawner pointed.
-/// The source-tree half of the gate (the census, the writer ratchet, the
-/// ownership test, the negative control) runs from
-/// scripts/ci/check-graph-flip-gates.sh; the verb unions both halves.
+/// from the graph_meta keys the sampler records. Journals are not read:
+/// rotation dropped evidence after ~11 hours, and the same journal was
+/// counted twice when the keeper's own `--events` path was also a space
+/// journal. The source-tree checks are CI's job; the verb unions this
+/// read with the in-process negative control.
 fn handle_backend_gate(state: &StoreState) -> Result<Value, StoreError> {
-    let mut journals: Vec<PathBuf> = state.events.clone().into_iter().collect();
-    if let Some(root) = state.graph.parent() {
-        journals.push(root.join("events.jsonl"));
-        for entry in root
-            .join("spaces")
-            .read_dir()
-            .map(|read| read.flatten().collect::<Vec<_>>())
-            .unwrap_or_default()
-        {
-            let journal = entry.path().join("events.jsonl");
-            if journal.is_file() {
-                journals.push(journal);
-            }
-        }
-    }
     Ok(json!({
         "backend": state.backend().name(),
-        "gaps": crate::backlog::soak_gaps(&journals, chrono::Utc::now()),
+        "gaps": crate::backlog::soak_gaps(&state.graph, chrono::Utc::now()),
     }))
 }
 
@@ -3376,6 +3366,25 @@ mod tests {
             Err(CommitRowsError::Conflict(ids)) => assert_eq!(ids, vec!["x-left"]),
             _ => panic!("same-row commit must conflict"),
         }
+    }
+
+    #[test]
+    fn flipgate_soak_canonical_keeper_without_events_records_samples() {
+        // AC12-HP: a canonical keeper with no --events journal still
+        // records the parity sample in graph_meta.
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, r#"{"entries":[{"id":"x-one","title":"one"}]}"#).unwrap();
+        let rows = crate::backlog::read_entries(&graph).unwrap();
+        crate::backlog::shadow_sync(&graph, &[], &rows, "sha256:seed").unwrap();
+        let mut state = row_commit_state(graph.clone());
+        state.canonical = true;
+        let mut last_sampled: Option<String> = None;
+        sample_parity(&state, &mut last_sampled);
+        assert!(
+            crate::backlog::soak_sampled_today(&graph),
+            "the sample was recorded in graph_meta"
+        );
     }
 
     fn read_state(graph: &std::path::Path) -> StoreState {

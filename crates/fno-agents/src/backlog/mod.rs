@@ -29,7 +29,7 @@ use std::time::Duration;
 
 /// The schema stamp the import writes after the blob `entries` table is
 /// dropped.
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "3";
 
 /// Each aggregate's owning module (ruling 4). The table_ownership test
 /// scans src/ against this map: a write to an owned table outside its
@@ -149,15 +149,16 @@ fn open(graph: &Path) -> Result<Connection, String> {
 
 /// The one-shot import: a db holding the blob `entries` table and no
 /// `nodes` imports its rows into the owned tables, drops `entries`, and
-/// stamps schema_version 2. A path with graph.json and no graph.db imports
-/// on first open, which keeps the hundreds of test files that seed
-/// graph.json fixtures working. A populated nodes table never re-imports.
+/// stamps the current schema_version. A path with graph.json and no
+/// graph.db imports on first open, which keeps the hundreds of test files
+/// that seed graph.json fixtures working. A populated store re-imports
+/// never; it may rebuild once (see [`rebuild_if_schema_v2`]).
 fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), String> {
     let nodes_count: i64 = connection
         .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
         .map_err(|error| error.to_string())?;
     if nodes_count > 0 {
-        return Ok(());
+        return rebuild_if_schema_v2(connection, graph);
     }
     let has_entries: bool = connection
         .query_row(
@@ -230,6 +231,85 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Schema 3: a populated schema-2 store under the json backend rebuilds
+/// its rows once from authoritative graph.json. The raw-baseline shadow
+/// diff and the child-extras columns stop NEW drift; this rebuild visits
+/// the rows that already drifted while normalization-only changes were
+/// being skipped. It is also the soak restart: the rebuild deletes the
+/// graph_meta soak keys, so the next clean sample starts a fresh 7-day
+/// clock. Under the sqlite backend graph.json is not authoritative, so
+/// the stamp moves and nothing is rewritten. No live store runs sqlite
+/// today.
+fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(), String> {
+    let target: i64 = SCHEMA_VERSION.parse().unwrap_or(i64::MAX);
+    let current: i64 = meta(connection, "schema_version")?
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or(2);
+    if current >= target {
+        return Ok(());
+    }
+    if backend(graph) == Backend::Sqlite {
+        return stamp_meta(connection, "schema_version", SCHEMA_VERSION);
+    }
+    // The rebuild reads graph.json; a file that does not parse is left for
+    // the next open, and parity surfaces the gap loudly meanwhile.
+    let rows: Vec<Value> = match std::fs::read_to_string(graph) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(doc) => doc
+                .get("entries")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            Err(_) => return Ok(()),
+        },
+        Err(_) => return Ok(()),
+    };
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    // Re-read under the write lock: a concurrent opener may have rebuilt
+    // already, and two rebuilds must not interleave.
+    let raced: i64 = meta(&transaction, "schema_version")?
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or(2);
+    if raced >= target {
+        return Ok(());
+    }
+    let ids: Vec<String> = {
+        let mut statement = transaction
+            .prepare("SELECT id FROM nodes")
+            .map_err(|error| error.to_string())?;
+        let mapped = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        mapped.collect::<Result<Vec<_>, _>>()
+    }
+    .map_err(|error: rusqlite::Error| error.to_string())?;
+    for id in &ids {
+        delete_aggregate(&transaction, id)?;
+    }
+    for (ordinal, row) in rows.iter().enumerate() {
+        // Same best-effort rule as the import: a row the model cannot
+        // represent is skipped so the JSON publish never inherits a
+        // rebuild failure.
+        let Ok(mut node) = Node::from_json(row) else {
+            continue;
+        };
+        node.ordinal = ordinal as i64;
+        save_aggregate(&transaction, &node).map_err(|error| format!("rebuild: {error}"))?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM graph_meta WHERE key IN ('soak_clean_since_ms', 'soak_clean_days',
+             'soak_last_sample_ms', 'soak_last_divergent')",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+    stamp_version_fields(&transaction, &content_version(&rows))?;
+    stamp_meta(&transaction, "schema_version", SCHEMA_VERSION)?;
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 fn stamp_version_fields(connection: &Connection, version: &str) -> Result<(), String> {
@@ -611,99 +691,144 @@ pub fn backend_since(graph: &Path) -> Result<Option<u128>, String> {
     }
 }
 
-/// The soak evidence the flip needs, read from the journals the client
-/// names (the sampler wrote whichever journal its spawner carried, so the
-/// caller that knows the space layout names the candidates): one gap line
-/// per failed requirement, empty when the soak is clean. Each journal is
-/// read with its single rotation generation; a sample row carries
-/// `{ts, type|kind, data:{divergent, divergent_ids}}` (the retired flat
-/// shape reads too).
-pub fn soak_gaps(journals: &[PathBuf], now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
-    let mut rows: Vec<(chrono::DateTime<chrono::Utc>, i64, Vec<String>)> = Vec::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
-    for journal in journals {
-        paths.push(journal.clone());
-        if let Some(name) = journal
-            .file_name()
-            .map(|name| name.to_string_lossy().to_string())
-        {
-            paths.push(journal.with_file_name(format!("{name}.1")));
+/// Record one parity sample into graph_meta, the soak evidence the flip
+/// gate reads. One transaction per sample: a clean sample extends the
+/// current run (start the clock when absent, add today's UTC date), a
+/// divergent sample ends it (drop the clock, name the ids).
+pub fn record_parity_sample(
+    graph: &Path,
+    report: &ParityReport,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    let mut connection = open(graph)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    stamp_meta(
+        &transaction,
+        "soak_last_sample_ms",
+        &now.timestamp_millis().to_string(),
+    )?;
+    if report.divergent > 0 {
+        let divergent = serde_json::json!({
+            "ts": now.to_rfc3339(),
+            "divergent": report.divergent,
+            "ids": report.divergent_ids,
+        });
+        stamp_meta(&transaction, "soak_last_divergent", &divergent.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM graph_meta WHERE key IN ('soak_clean_since_ms', 'soak_clean_days')",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+    } else {
+        if meta(&transaction, "soak_clean_since_ms")?.is_none() {
+            stamp_meta(
+                &transaction,
+                "soak_clean_since_ms",
+                &now.timestamp_millis().to_string(),
+            )?;
+        }
+        let mut days: Vec<String> = meta(&transaction, "soak_clean_days")?
+            .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+            .unwrap_or_default();
+        let today = now.date_naive().to_string();
+        if !days.contains(&today) {
+            days.push(today);
+            let days = serde_json::to_string(&days).map_err(|error| error.to_string())?;
+            stamp_meta(&transaction, "soak_clean_days", &days)?;
         }
     }
-    if paths.is_empty() {
-        return vec!["no soak journal to read; the client named no candidate journals".into()];
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+/// Whether a parity sample was already recorded on today's UTC date: the
+/// sampler's once-per-day floor, so a quiet store still accrues clean days.
+pub fn soak_sampled_today(graph: &Path) -> bool {
+    let Ok(connection) = open(graph) else {
+        return false;
+    };
+    let Some(ms) = meta(&connection, "soak_last_sample_ms")
+        .ok()
+        .flatten()
+        .and_then(|raw| raw.parse::<i64>().ok())
+    else {
+        return false;
+    };
+    match chrono::DateTime::from_timestamp_millis(ms) {
+        Some(ts) => ts.date_naive() == chrono::Utc::now().date_naive(),
+        None => false,
     }
-    for journal in &paths {
-        let Ok(text) = std::fs::read_to_string(journal) else {
-            continue;
-        };
-        for line in text.lines() {
-            if !line.contains("graph_parity_sample") {
-                continue;
-            }
-            let Ok(row) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            let kind = row
-                .get("type")
-                .or_else(|| row.get("kind"))
-                .and_then(Value::as_str);
-            if kind != Some("graph_parity_sample") {
-                continue;
-            }
-            let data = match row.get("data") {
-                Some(data) if data.is_object() => data.clone(),
-                _ => row.clone(),
-            };
-            let Some(Ok(ts)) = row
+}
+
+/// The soak evidence the flip needs, read from the graph_meta keys
+/// `record_parity_sample` maintains: one gap line per failed requirement,
+/// empty when the soak is clean. Old samples cannot block a later clean
+/// run, because a divergent sample deletes the run it ended.
+pub fn soak_gaps(graph: &Path, now: chrono::DateTime<chrono::Utc>) -> Vec<String> {
+    let connection = match open(graph) {
+        Ok(connection) => connection,
+        Err(_) => return vec!["no clean parity sample recorded yet".into()],
+    };
+    let since_ms = meta(&connection, "soak_clean_since_ms")
+        .ok()
+        .flatten()
+        .and_then(|raw| raw.parse::<i64>().ok());
+    let since = since_ms.and_then(chrono::DateTime::from_timestamp_millis);
+    let Some(since) = since else {
+        // No live run. A recorded divergent sample names itself; with no
+        // evidence at all the soak has simply never run.
+        let last_divergent = meta(&connection, "soak_last_divergent")
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        if let Some(value) = last_divergent {
+            let ts = value
                 .get("ts")
                 .and_then(Value::as_str)
-                .map(chrono::DateTime::parse_from_rfc3339)
-                .map(|parsed| parsed.map(chrono::DateTime::<chrono::Utc>::from))
-            else {
-                continue;
-            };
-            let divergent = data.get("divergent").and_then(Value::as_i64).unwrap_or(0);
-            let ids = data
-                .get("divergent_ids")
+                .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+                .map(chrono::DateTime::<chrono::Utc>::from);
+            let divergent = value.get("divergent").and_then(Value::as_i64).unwrap_or(0);
+            let ids = value
+                .get("ids")
                 .and_then(Value::as_array)
                 .map(|ids| {
                     ids.iter()
                         .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 })
                 .unwrap_or_default();
-            rows.push((ts, divergent, ids));
+            if let Some(ts) = ts {
+                return vec![format!(
+                    "last sample {} had {divergent} divergent row(s): {ids}; the soak restarts at the next clean sample",
+                    ts.format("%Y-%m-%dT%H:%M:%SZ")
+                )];
+            }
         }
-    }
-    if rows.is_empty() {
-        let named: Vec<String> = journals
-            .iter()
-            .map(|journal| journal.display().to_string())
-            .collect();
-        return vec![format!(
-            "no graph_parity_sample events found in {}; the soak sampler has not run",
-            named.join(", ")
-        )];
-    }
-    rows.sort_by_key(|(ts, _, _)| *ts);
+        return vec!["no clean parity sample recorded yet".into()];
+    };
     let mut gaps = Vec::new();
-    let first = rows[0].0;
-    let age_days = (now - first).num_days();
+    let age_days = (now - since).num_days();
     if age_days < 7 {
         gaps.push(format!(
-            "first sample {} is {age_days} day(s) old; the soak needs 7 days",
-            first.format("%Y-%m-%dT%H:%M:%SZ")
+            "soak clean since {} is {age_days} day(s) old; the soak needs 7",
+            since.format("%Y-%m-%d")
         ));
     }
-    let covered: std::collections::HashSet<chrono::NaiveDate> =
-        rows.iter().map(|(ts, _, _)| ts.date_naive()).collect();
+    let covered: std::collections::HashSet<String> = meta(&connection, "soak_clean_days")
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .map(|list| list.into_iter().collect())
+        .unwrap_or_default();
     let mut missing = Vec::new();
-    let mut day = first.date_naive();
+    let mut day = since.date_naive();
     while day <= now.date_naive() {
-        if !covered.contains(&day) {
-            missing.push(day.to_string());
+        let text = day.to_string();
+        if !covered.contains(&text) {
+            missing.push(text);
         }
         day = day.succ_opt().unwrap_or(day);
         if missing.len() > 64 {
@@ -715,16 +840,6 @@ pub fn soak_gaps(journals: &[PathBuf], now: chrono::DateTime<chrono::Utc>) -> Ve
             "no sample on {} day(s): {}",
             missing.len(),
             missing.join(", ")
-        ));
-    }
-    let divergent: Vec<&(chrono::DateTime<chrono::Utc>, i64, Vec<String>)> =
-        rows.iter().filter(|(_, count, _)| *count > 0).collect();
-    if let Some((ts, _, ids)) = divergent.first() {
-        gaps.push(format!(
-            "{} sample(s) with divergent rows, first at {}: {}",
-            divergent.len(),
-            ts.format("%Y-%m-%dT%H:%M:%SZ"),
-            ids.join(", ")
         ));
     }
     gaps
@@ -878,89 +993,95 @@ mod tests {
         assert!(!database_path(&graph).exists());
     }
 
-    #[test]
-    fn soak_clean_seven_days_has_no_gaps() {
-        let dir = TempDir::new().unwrap();
-        let journal = dir.path().join("events.jsonl");
-        let now = chrono::Utc::now();
-        let mut lines = Vec::new();
-        for offset in (0..8).rev() {
-            lines.push(sample_row(now - chrono::Duration::days(offset)));
+    fn sample_report(divergent: usize, ids: Vec<String>) -> ParityReport {
+        ParityReport {
+            rows: 2,
+            divergent,
+            divergent_ids: ids,
         }
-        std::fs::write(&journal, lines.join("\n") + "\n").unwrap();
-        assert_eq!(soak_gaps(&[journal.clone()], now), Vec::<String>::new());
+    }
+
+    #[test]
+    fn flipgate_soak_eight_clean_days_have_no_gaps() {
+        // AC9-HP: clean samples on eight consecutive UTC days read clean.
+        let (dir, graph) = fixture("graph.json");
+        let now = chrono::Utc::now();
+        for offset in (0..8).rev() {
+            record_parity_sample(
+                &graph,
+                &sample_report(0, vec![]),
+                now - chrono::Duration::days(offset),
+            )
+            .unwrap();
+        }
+        assert_eq!(soak_gaps(&graph, now), Vec::<String>::new());
         drop(dir);
     }
 
     #[test]
-    fn soak_too_young_missing_day_and_divergence_each_name_the_gap() {
-        let dir = TempDir::new().unwrap();
-        let journal = dir.path().join("events.jsonl");
+    fn flipgate_soak_divergent_sample_ends_the_run_and_names_its_ids() {
+        // AC10-EDGE: a three-day clean run ends at one divergent sample;
+        // the gap names the ids, and the next clean sample restarts the
+        // clock at its own instant.
+        let (dir, graph) = fixture("graph.json");
         let now = chrono::Utc::now();
-        // Two clean samples, three days apart: young AND a missing day.
-        std::fs::write(
-            &journal,
-            sample_row(now - chrono::Duration::days(4))
-                + "\n"
-                + &sample_row(now - chrono::Duration::days(1)),
-        )
-        .unwrap();
-        let gaps = soak_gaps(&[journal.clone()], now);
+        for offset in (1..4).rev() {
+            record_parity_sample(
+                &graph,
+                &sample_report(0, vec![]),
+                now - chrono::Duration::days(offset),
+            )
+            .unwrap();
+        }
+        record_parity_sample(&graph, &sample_report(1, vec!["x-bad".into()]), now).unwrap();
+        let gaps = soak_gaps(&graph, now);
+        assert!(
+            gaps.iter()
+                .any(|gap| gap.contains("x-bad") && gap.contains("restarts")),
+            "{gaps:?}"
+        );
+        let clean = sample_report(0, vec![]);
+        let restart = now + chrono::Duration::hours(1);
+        record_parity_sample(&graph, &clean, restart).unwrap();
+        let connection = open(&graph).unwrap();
+        let since = meta(&connection, "soak_clean_since_ms").unwrap();
+        assert_eq!(since, Some(restart.timestamp_millis().to_string()));
+        drop(connection);
+        drop(dir);
+    }
+
+    #[test]
+    fn flipgate_soak_missing_day_and_young_run_each_name_the_gap() {
+        // AC11-EDGE: a run whose day 2 has no sample names that date, and
+        // a run younger than 7 days names its age.
+        let (dir, graph) = fixture("graph.json");
+        let now = chrono::Utc::now();
+        let clean = sample_report(0, vec![]);
+        record_parity_sample(&graph, &clean, now - chrono::Duration::days(2)).unwrap();
+        record_parity_sample(&graph, &clean, now).unwrap();
+        let gaps = soak_gaps(&graph, now);
+        let skipped = (now - chrono::Duration::days(1)).date_naive().to_string();
+        assert!(
+            gaps.iter()
+                .any(|gap| gap.contains("no sample on 1 day(s)") && gap.contains(&skipped)),
+            "{gaps:?}"
+        );
         assert!(
             gaps.iter().any(|gap| gap.contains("day(s) old")),
             "{gaps:?}"
         );
-        assert!(
-            gaps.iter().any(|gap| gap.contains("no sample on")),
-            "{gaps:?}"
-        );
-        // One divergent sample names its id.
-        std::fs::write(
-            &journal,
-            sample_row(now - chrono::Duration::days(4))
-                + "\n"
-                + &sample_row_divergent(now - chrono::Duration::days(1)),
-        )
-        .unwrap();
-        let gaps = soak_gaps(&[journal.clone()], now);
-        assert!(
-            gaps.iter()
-                .any(|gap| gap.contains("divergent") && gap.contains("x-bad")),
-            "{gaps:?}"
-        );
         drop(dir);
     }
 
     #[test]
-    fn soak_no_journal_and_empty_journal_name_the_gap() {
-        let dir = TempDir::new().unwrap();
-        let gaps = soak_gaps(&[], chrono::Utc::now());
-        assert!(gaps[0].contains("no soak journal"), "{gaps:?}");
-        let journal = dir.path().join("events.jsonl");
-        let gaps = soak_gaps(&[journal], chrono::Utc::now());
-        assert!(gaps[0].contains("sampler has not run"), "{gaps:?}");
+    fn flipgate_soak_no_evidence_names_the_gap() {
+        let (dir, graph) = fixture("graph.json");
+        let gaps = soak_gaps(&graph, chrono::Utc::now());
+        assert_eq!(
+            gaps,
+            vec!["no clean parity sample recorded yet".to_string()]
+        );
         drop(dir);
-    }
-
-    /// One clean sample row in the emitted `{ts, type, data}` shape.
-    fn sample_row(ts: chrono::DateTime<chrono::Utc>) -> String {
-        serde_json::json!({
-            "ts": ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            "type": "graph_parity_sample",
-            "source": "daemon",
-            "data": {"rows": 2, "divergent": 0, "divergent_ids": []},
-        })
-        .to_string()
-    }
-
-    fn sample_row_divergent(ts: chrono::DateTime<chrono::Utc>) -> String {
-        serde_json::json!({
-            "ts": ts.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-            "type": "graph_parity_sample",
-            "source": "daemon",
-            "data": {"rows": 2, "divergent": 1, "divergent_ids": ["x-bad"]},
-        })
-        .to_string()
     }
 
     #[test]
@@ -1423,5 +1544,129 @@ mod tests {
         assert!(comments.is_empty(), "imported rows load fine: {comments:?}");
         drop(connection);
         drop(dir);
+    }
+
+    /// Seed a schema-2 store whose db rows lag the json: the title change
+    /// after the seed is published to graph.json only, then the store is
+    /// downgraded and one stale soak key is planted.
+    fn schema2_graph_with_stale_rows(dir: &TempDir) -> PathBuf {
+        let graph = two_node_graph(dir);
+        let rows = raw_rows(&graph);
+        shadow_sync(&graph, &[], &rows, "sha256:one").unwrap();
+        let mut after = rows.clone();
+        after[0]["title"] = Value::String("One renamed".into());
+        std::fs::write(&graph, crate::graph_store::serialize_graph_file(&after)).unwrap();
+        let connection = open(&graph).unwrap();
+        connection
+            .execute(
+                "UPDATE graph_meta SET value = '2' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO graph_meta(key, value) VALUES('soak_clean_since_ms', '123')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        graph
+    }
+
+    #[test]
+    fn flipgate_schema_v3_rebuild_clears_drift_and_soak() {
+        // AC6-HP: the first open of a populated schema-2 store rebuilds
+        // from graph.json, reads parity clean, and leaves no soak key.
+        let dir = TempDir::new().unwrap();
+        let graph = schema2_graph_with_stale_rows(&dir);
+        let entries = read_entries(&graph).unwrap();
+        assert_eq!(entries[0]["title"], "One renamed", "rows rebuilt from json");
+        let report = parity(&graph).unwrap();
+        assert_eq!(
+            report.divergent, 0,
+            "the rebuild cleared the drift: {report:?}"
+        );
+        let connection = open(&graph).unwrap();
+        let schema: String = connection
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, SCHEMA_VERSION);
+        let soak: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM graph_meta WHERE key LIKE 'soak_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(soak, 0, "the soak keys were deleted");
+    }
+
+    #[test]
+    fn flipgate_schema_v3_sqlite_backend_stamps_without_rewrite() {
+        // AC7-EDGE: under the sqlite backend graph.json is not
+        // authoritative; the stamp moves and no row is rebuilt.
+        let dir = TempDir::new().unwrap();
+        let graph = schema2_graph_with_stale_rows(&dir);
+        // Stamp the backend directly: set_backend opens the store, and an
+        // open here would run the json-backend rebuild first.
+        let connection = Connection::open(database_path(&graph)).unwrap();
+        connection
+            .execute(
+                "INSERT INTO graph_meta(key, value) VALUES('backend', 'sqlite')
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+        let entries = read_entries(&graph).unwrap();
+        assert_eq!(
+            entries[0]["title"], "One",
+            "the stale row was NOT rewritten from json"
+        );
+        let connection = open(&graph).unwrap();
+        let schema: String = connection
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn flipgate_schema_v3_concurrent_opens_both_reach_schema_3() {
+        // AC8-EDGE: two openers racing the same schema-2 store both
+        // succeed; one rebuilds, one observes the re-read stamp.
+        let dir = TempDir::new().unwrap();
+        let graph = schema2_graph_with_stale_rows(&dir);
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let path = graph.clone();
+                std::thread::spawn(move || read_entries(&path).map(|rows| rows.len()))
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap().unwrap();
+        }
+        let report = parity(&graph).unwrap();
+        assert_eq!(
+            report.divergent, 0,
+            "parity clean after the race: {report:?}"
+        );
+        let connection = open(&graph).unwrap();
+        let schema: String = connection
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, SCHEMA_VERSION);
     }
 }
