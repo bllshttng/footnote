@@ -3907,11 +3907,16 @@ def cmd_update(
                 projected_node[0]["id"],
                 *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
             ],
-            # The operator typed `--type`, so THIS node's value is observed:
-            # write it through, or the graph and the doc disagree and Obsidian's
-            # `type == "epic"` view drops a node the graph is rolling up. Scoped
-            # to this id - the repaint fan-out must not carry it to siblings.
-            mirror_type_for=(projected_node[0]["id"] if type_ is not None else None),
+            # The operator typed --type/--difficulty, so THIS node's value is
+            # observed: write it through, scoped to this id, never the fan-out.
+            mirror_keys_for=(
+                projected_node[0]["id"],
+                frozenset(
+                    k
+                    for k, v in (("type", type_), ("difficulty", difficulty))
+                    if v is not None
+                ),
+            ),
             # An explicit `--difficulty null` is the ONE clear the projector
             # honors for that key; a graph None on its own never deletes it.
             clear_keys_for=(
@@ -7291,22 +7296,22 @@ def cmd_stuck_epics(
 def _project_plans_from_graph(
     node_ids: list[str],
     *,
-    mirror_type_for: str | None = None,
+    mirror_keys_for: tuple[str, frozenset[str]] | None = None,
     force_status_off_terminal_for: str | None = None,
     clear_keys_for: tuple[str, frozenset[str]] | None = None,
 ) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
 
-    Re-reads the graph so every node carries its recomputed ``status`` (a claim
-    reads ``claimed`` -> ``in_progress``; a close reads ``done`` -> ``done`` +
-    ``done_at``), then delegates to the shared converger. Covers cascade-closed
-    epic parents that ``_stamp_and_graduate_plan`` never stamps. Best-effort per
-    node: a missing or unreadable plan never fails the mutation.
+    Re-reads the graph so every node carries its recomputed ``status``, then
+    delegates to the shared converger. Covers cascade-closed epic parents that
+    ``_stamp_and_graduate_plan`` never stamps. Best-effort per node: a missing
+    or unreadable plan never fails the mutation.
 
-    ``mirror_type_for`` names the ONE node whose ``type`` may be written, set
-    only by the ``--type`` path where the operator supplied that node's value.
+    ``mirror_keys_for`` pairs the ONE node whose extra keys (``type``,
+    ``difficulty``) may be written with those keys, set only by the
+    ``--type``/``--difficulty`` paths where the operator supplied the value.
     It is an id, not a flag: this projection repaints ancestors and siblings
-    too, and their ``type`` is still a mint-time default.
+    too, and their values are still mint-time defaults.
     """
     ids = [i for i in dict.fromkeys(node_ids) if i]
     if not ids:
@@ -7325,7 +7330,7 @@ def _project_plans_from_graph(
     project_graph_nodes(
         entries,
         ids,
-        mirror_type_for=mirror_type_for,
+        mirror_keys_for=mirror_keys_for,
         force_status_off_terminal_for=force_status_off_terminal_for,
         clear_keys_for=clear_keys_for,
     )

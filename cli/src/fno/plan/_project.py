@@ -23,17 +23,15 @@ from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
 # Graph-authoritative fields mirrored into frontmatter. `parent_slug` is not a
 # native node field - the converger injects it (see project_graph_nodes).
 #
-# `type` is deliberately ABSENT: it is unconditionally mirrored by nothing,
-# because the graph's value is only sometimes observed. `decompose` mints every
-# child "feature" with no way to say otherwise, so an unconditional mirror
-# rewrote authored `type: bug` docs to `type: feature`. A caller that actually
-# supplied a type opts back in per call via `mirror_type=True`, which is the
-# distinction that matters: a defaulted type must never reach a doc, a
-# supplied one must.
+# `type` and `difficulty` are deliberately ABSENT: their graph value is only
+# sometimes observed. `decompose` mints every child "feature" with no way to
+# say otherwise, so an unconditional mirror rewrote authored `type: bug` docs
+# to `type: feature`. The plan authors its own `difficulty` band and intake
+# reads it INTO the graph, so a repaint never writes the graph band back -
+# only the verb that supplied a value opts in, per node, via `mirror_keys`.
 MIRROR_KEYS: tuple[str, ...] = (
     "priority",
     "blocks_everything",
-    "difficulty",
     "blocked_by",
     "tags",
     "project",
@@ -55,13 +53,13 @@ CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "parent", "parent_slug"})
 
 # difficulty is NOT clearable by a None: a bandless row is born with the key
 # absent or (pre-fix rows, still on disk) present-and-None, and neither is an
-# operator's decision. The doc authors the band at blueprint time, so a None
-# here must never delete it. The one explicit clear, `update --difficulty
-# null`, names the key through ``clear_keys`` instead.
+# operator's decision. `update --difficulty` opts in through ``mirror_keys``,
+# and its one explicit clear, `--difficulty null`, names the key through
+# ``clear_keys`` instead.
 
 
 def project_node_to_plan(
-    node: dict[str, Any], plan_path: Path, *, mirror_type: bool = False,
+    node: dict[str, Any], plan_path: Path, *, mirror_keys: frozenset[str] = frozenset(),
     force_status_off_terminal: bool = False,
     clear_keys: frozenset[str] = frozenset(),
 ) -> bool:
@@ -72,10 +70,11 @@ def project_node_to_plan(
     mutation must not fail because its projected doc is absent or unreadable
     (warns to stderr instead).
 
-    ``mirror_type`` opts this call into writing ``type`` as well. Only a caller
-    that took the type from the operator (``backlog update --type``) may set it;
-    every other path leaves the doc's own ``type`` alone, because the graph's
-    value there is a mint-time default nobody chose.
+    ``mirror_keys`` opts this call into writing extra keys (``type``,
+    ``difficulty``) beyond MIRROR_KEYS. Only a caller that took the value from
+    the operator (``backlog update --type`` / ``--difficulty``) may name it;
+    every other path leaves the doc's own value alone, because the graph's
+    value there is a default nobody chose.
 
     ``force_status_off_terminal`` names the legitimate backward moves, of which
     there are two: ``unsupersede`` reviving a node whose plan the supersede
@@ -100,7 +99,7 @@ def project_node_to_plan(
         return False
 
     changed = False
-    for key in (*MIRROR_KEYS, "type") if mirror_type else MIRROR_KEYS:
+    for key in dict.fromkeys((*MIRROR_KEYS, *sorted(mirror_keys), *sorted(clear_keys))):
         if key in clear_keys:
             # Explicit clear: the graph row may not carry the key at all (a
             # null clear on a bandless row leaves it absent), so this runs
@@ -232,7 +231,7 @@ def project_graph_nodes(
     node_ids: list[str],
     root: str | None = None,
     *,
-    mirror_type_for: str | None = None,
+    mirror_keys_for: tuple[str, frozenset[str]] | None = None,
     force_status_off_terminal_for: str | None = None,
     clear_keys_for: tuple[str, frozenset[str]] | None = None,
 ) -> int:
@@ -306,7 +305,11 @@ def project_graph_nodes(
             # exists to prevent. Only the node the operator named opts in.
             if project_node_to_plan(
                 augmented, p,
-                mirror_type=(nid == mirror_type_for),
+                mirror_keys=(
+                    mirror_keys_for[1]
+                    if mirror_keys_for and nid == mirror_keys_for[0]
+                    else frozenset()
+                ),
                 force_status_off_terminal=(nid == force_status_off_terminal_for),
                 clear_keys=(
                     clear_keys_for[1]
