@@ -597,3 +597,189 @@ fn a_shutdown_during_a_mutation_answers_busy_and_keeps_serving() {
     let _ = keeper.child.wait();
     let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
 }
+
+// x-385e change 6c: the 2026-09-14 temp repro, ported. Two idea-style
+// appenders race two note loops on one keeper; no ok-replied append may be
+// lost and no note write may be reverted.
+// ---------------------------------------------------------------
+
+#[test]
+fn two_concurrent_idea_commits_survive_concurrent_note_writes() {
+    let home = short_home("race");
+    let graph = home.join("graph.json");
+    // 500 seed rows: enough that a whole-file publish can drop foreign rows,
+    // small enough that a debug build's publish stays well inside the 10s
+    // lock deadline (the 3000-row repro form held the flock for seconds per
+    // write and starved the keeper instead of racing it).
+    let seed: Vec<Value> = (0..500)
+        .map(|i| {
+            json!({
+                "id": format!("r-{i:04}"),
+                "slug": format!("slug-r-{i:04}"),
+                "title": format!("seed {i}"),
+                "type": "feature",
+                "status": "ready",
+                "priority": "p2",
+            })
+        })
+        .collect();
+    std::fs::write(
+        &graph,
+        serde_json::to_string(&json!({ "entries": seed })).unwrap(),
+    )
+    .unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let keeper = spawn_keeper("race-test", &graph, &sock);
+    wait_for_socket(&sock);
+
+    // Two note loops: 12 in-process replace_state writes each, on rows the
+    // appenders never touch. This is the shape every `fno backlog note`
+    // takes: read the whole graph outside the lock, publish it whole.
+    let note_graph = graph.clone();
+    let note_handles: Vec<_> = ["r-0000", "r-0001"]
+        .iter()
+        .map(|node| {
+            let g = note_graph.clone();
+            let node = node.to_string();
+            std::thread::spawn(move || {
+                let mut ok = 0u64;
+                for i in 0..12 {
+                    let rev =
+                        fno_agents::backlog::node_state::current_revision(&g, &node).unwrap_or(0);
+                    let input = fno_agents::backlog::node_state::StateWriteInput {
+                        node_id: node.clone(),
+                        body: format!("race note {i}"),
+                        if_revision: Some(rev),
+                        source_session_id: None,
+                        source_harness: None,
+                        reads: None,
+                    };
+                    if fno_agents::backlog::node_state::replace_state(&g, &input).is_ok() {
+                        ok += 1;
+                    }
+                    // Yield the file lock between writes: a tight in-process
+                    // loop re-acquires flock before a starving waiter is
+                    // scheduled, and the keeper's 10s deadline fires instead
+                    // of the race this test exists to exercise.
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                (node, ok)
+            })
+        })
+        .collect();
+
+    // Two idea-style appenders: 30 begin + commit_rows appends each through
+    // the keeper socket, retrying kind conflict like cmd_idea does.
+    let appender_handles: Vec<_> = (0..2)
+        .map(|w| {
+            let s = sock.clone();
+            std::thread::spawn(move || {
+                let prefix = ['a', 'b'][w];
+                let mut stream = UnixStream::connect(&s).unwrap();
+                let mut landed: Vec<String> = Vec::new();
+                let mut conflicts = 0u64;
+                for i in 0..20 {
+                    let id = format!("{prefix}-app-{i:04}");
+                    let row = json!({
+                        "id": id,
+                        "slug": format!("slug-{id}"),
+                        "title": format!("appended {id}"),
+                        "type": "feature",
+                        "status": "intake",
+                        "priority": "p2",
+                    });
+                    let mut landed_here = false;
+                    for attempt in 0..30u64 {
+                        let begin = ok_result(rpc(&mut stream, attempt, "begin", json!({})));
+                        let version = begin["version"].as_str().unwrap().to_string();
+                        let digests = begin["base_digests"].clone();
+                        let reply = rpc(
+                            &mut stream,
+                            attempt,
+                            "commit_rows",
+                            json!({
+                                "base_version": version,
+                                "base_digests": digests,
+                                "changed": [row],
+                                "removed": [],
+                                "attempt": attempt + 1,
+                            }),
+                        );
+                        if reply.get("ok") == Some(&json!(true)) {
+                            landed.push(id.clone());
+                            landed_here = true;
+                            break;
+                        }
+                        let kind = reply["error"]["kind"].as_str().unwrap_or("");
+                        assert_eq!(
+                            kind, "conflict",
+                            "appender {w} row {id}: unexpected error: {reply}"
+                        );
+                        conflicts += 1;
+                    }
+                    assert!(
+                        landed_here,
+                        "appender {w}: row {id} never landed in 30 attempts"
+                    );
+                }
+                (landed, conflicts)
+            })
+        })
+        .collect();
+
+    let note_out: Vec<(String, u64)> = note_handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect();
+    let appender_out: Vec<(Vec<String>, u64)> = appender_handles
+        .into_iter()
+        .map(|h| h.join().unwrap())
+        .collect();
+
+    // Positive control: the race must have produced contention. The repro
+    // measured 19 commit_rows conflicts; zero means the threads never
+    // interleaved and this run proves nothing.
+    let total_conflicts: u64 = appender_out.iter().map(|(_, c)| c).sum();
+    assert!(
+        total_conflicts > 0,
+        "did not race: zero commit_rows conflicts across both appenders"
+    );
+
+    // Every append that answered ok must be in the final file.
+    let final_raw = std::fs::read_to_string(&graph).unwrap();
+    let final_graph: Value = serde_json::from_str(&final_raw).unwrap();
+    let final_ids: std::collections::BTreeSet<String> = final_graph["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["id"].as_str().map(str::to_string))
+        .collect();
+    for (landed, _) in &appender_out {
+        for id in landed {
+            assert!(
+                final_ids.contains(id),
+                "append {id} answered ok but is missing from the final graph"
+            );
+        }
+    }
+
+    // Each note node's final revision equals its successful write count: a
+    // reverted note write (clobbered by a stale whole-file publish) reads as
+    // a revision below the count of ok answers.
+    for (node, ok) in &note_out {
+        let row = final_graph["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"].as_str() == Some(node.as_str()))
+            .unwrap();
+        let revision = row["current_state"]["revision"].as_u64().unwrap();
+        assert_eq!(
+            revision, *ok,
+            "node {node} answered ok {ok} times but its final revision is {revision}"
+        );
+    }
+
+    let _ = std::fs::remove_file(home.join("graph.json.store.sock.lock"));
+    drop(keeper);
+}
