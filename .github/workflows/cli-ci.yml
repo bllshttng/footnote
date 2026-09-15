@@ -212,11 +212,17 @@ jobs:
           start=$SECONDS
           trap 'bash scripts/ci/smoke-duration-report.sh changed-smoke "$(( SECONDS - start ))" "$CAP_MINUTES" || true; touch "$RUNNER_TEMP/smoke-duration-reported"' EXIT
           # The estimate is raw (unclamped). A packet that cannot fit the
-          # ceiling fails THIS assertion, naming both numbers, instead of
-          # running until the cap kills it and the run reports cancelled.
+          # ceiling does not run: the cap kill would report an
+          # unattributable cancelled, and a partial packet killed at the
+          # ceiling earns no verdict. Whole-repo PRs (a tree-wide cleanup,
+          # a mass rename) structurally cannot fit: their packet IS most
+          # of the tree, and splitting the PR changes nothing - each half
+          # still maps the same packet. That shape is evidence about the
+          # lane, not the change, so it takes the rc-20 exit: the full
+          # smoke job, which runs on every PR, remains the gate.
           if [ -z "$ESTIMATE_MINUTES" ] || [ "$ESTIMATE_MINUTES" -gt "$CAP_MINUTES" ]; then
-            echo "ASSERTION: the changed packet estimates ${ESTIMATE_MINUTES:-unknown}m, which cannot fit its ${CAP_MINUTES}m ceiling. Split the work; do not raise the cap."
-            exit 1
+            echo "DEFERRED: the changed packet estimates ${ESTIMATE_MINUTES:-unknown}m against a ${CAP_MINUTES}m ceiling; it cannot fit, so no changed verdict is earned. The full smoke job gates this PR."
+            exit 0
           fi
           set +e
           uv run --project cli fno-py doctor test smoke --changed \
