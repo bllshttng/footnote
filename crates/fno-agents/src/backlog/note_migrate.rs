@@ -701,7 +701,7 @@ pub fn run_notes(args: &[String]) -> i32 {
                 }
             }
             "--apply" => apply = true,
-            "--json" => json_out = true,
+            "--json" | "-J" => json_out = true,
             other if action == "history" && positional.is_none() && !other.starts_with('-') => {
                 positional = Some(other.to_string());
             }
@@ -753,5 +753,30 @@ pub fn run_notes(args: &[String]) -> i32 {
             print_usage();
             2
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_short_json_spelling_parses_like_the_long_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, serde_json::json!({"entries": []}).to_string()).unwrap();
+        let base = vec![
+            "inventory".to_string(),
+            "--graph".to_string(),
+            graph.display().to_string(),
+        ];
+        assert_eq!(run_notes(&base), 0);
+        let mut short = base.clone();
+        short.insert(0, "-J".to_string());
+        assert_eq!(run_notes(&short), 0);
+        // An unknown flag still refuses with usage.
+        let mut bogus = base.clone();
+        bogus.insert(0, "--bogus".to_string());
+        assert_eq!(run_notes(&bogus), 2);
     }
 }

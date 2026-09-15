@@ -133,11 +133,11 @@ fn web_reap(args: &[OsString]) -> i32 {
             return EXIT_USAGE;
         };
         match s {
-            "--json" if json => {
+            "--json" | "-J" if json => {
                 eprintln!("fno mux web reap: --json given twice");
                 return EXIT_USAGE;
             }
-            "--json" => json = true,
+            "--json" | "-J" => json = true,
             f => {
                 eprintln!("fno mux web reap: unexpected argument {f:?}");
                 return EXIT_USAGE;
@@ -237,6 +237,19 @@ mod tests {
         assert!(
             !marker_path("jsondead").exists(),
             "the corpse was removed during the partition"
+        );
+    }
+
+    #[test]
+    fn reap_accepts_both_json_spellings() {
+        // -J is accepted (reap runs, EXIT_OK), not "unexpected argument" (2).
+        write_marker(
+            "jsonflag",
+            "{\"bind\":\"127.0.0.1\",\"port\":1,\"token\":\"b\",\"pid\":1}",
+        );
+        assert_eq!(
+            web(&[OsString::from("reap"), OsString::from("-J")], None),
+            EXIT_OK
         );
     }
 }

@@ -54,7 +54,7 @@ pub fn run_prove_it_verdicts(args: &[String]) -> i32 {
         match args[i].as_str() {
             // JSON is the verb's only output shape; the flag is accepted (and
             // spelled in every caller) so the read stays explicit.
-            "--json" => {}
+            "--json" | "-J" => {}
             "--route" => route = true,
             "--graph" => {
                 i += 1;
@@ -1168,6 +1168,19 @@ mod tests {
             "/tmp/fake-graph.json".to_string(),
         ];
         assert_eq!(run_prove_it_verdicts(&args), 2);
+    }
+
+    #[test]
+    fn the_short_json_spelling_parses_like_the_long_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_graph(dir.path(), &[json!({"id": "x-aaa"})]);
+        let args: Vec<String> = vec![
+            "-J".to_string(),
+            "--graph".to_string(),
+            path.display().to_string(),
+        ];
+        // -J is accepted (exit 0 on an empty report), not an unknown flag (2).
+        assert_eq!(run_prove_it_verdicts(&args), 0);
     }
 
     #[test]

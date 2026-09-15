@@ -743,7 +743,7 @@ pub fn run_resume_argv(rest: &[String]) -> i32 {
                 }
             },
             "--cd" => pin_cd = true,
-            "--json" => json = true,
+            "--json" | "-J" => json = true,
             t if t.starts_with('-') => {
                 eprintln!("resume-argv: unknown flag {t}");
                 return 2;
@@ -835,6 +835,21 @@ mod tests {
     };
     use crate::pane_stop::PaneSighting;
     use std::time::Duration;
+
+    #[test]
+    fn resume_argv_accepts_both_json_spellings() {
+        let sid = "test-resume-session".to_string();
+        // -J reaches the JSON branch (0), not the unknown-flag refusal (2).
+        assert_eq!(
+            super::run_resume_argv(&["claude".into(), sid.clone(), "-J".into()]),
+            0
+        );
+        assert_eq!(
+            super::run_resume_argv(&["claude".into(), sid, "--json".into()]),
+            0
+        );
+        assert_eq!(super::run_resume_argv(&["claude".into(), "-J".into()]), 2);
+    }
 
     /// Per-probe staged scripts: each probe keeps its OWN counter, so script
     /// slot N is the Nth time that probe is read. The tail and wait read

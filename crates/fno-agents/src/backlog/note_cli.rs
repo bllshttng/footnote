@@ -71,7 +71,7 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
             "--read" => out.read = true,
             "--clear" => out.clear = true,
             "--quiet" => out.quiet = true,
-            "--json" => out.json_out = true,
+            "--json" | "-J" => out.json_out = true,
             "--if-revision" => {
                 i += 1;
                 let v = args
@@ -400,5 +400,28 @@ fn map_state_err(e: &StateError) -> i32 {
         StateError::EmptyBody => 1,
         StateError::History(_) => 1,
         StateError::Store(_) => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn json_flag_accepts_both_spellings() {
+        let long = parse_args(&args(&["x-1", "--json"])).unwrap();
+        let short = parse_args(&args(&["x-1", "-J"])).unwrap();
+        assert!(long.json_out);
+        assert!(short.json_out);
+    }
+
+    #[test]
+    fn an_unknown_flag_still_refuses() {
+        assert!(parse_args(&args(&["x-1", "-j"])).is_err());
+        assert!(parse_args(&args(&["x-1", "--JSON"])).is_err());
     }
 }

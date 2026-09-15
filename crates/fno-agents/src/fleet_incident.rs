@@ -287,7 +287,7 @@ fn parse_read_flags(rest: &[String]) -> Result<bool, i32> {
     let mut as_json = false;
     for a in rest {
         match a.as_str() {
-            "--json" => as_json = true,
+            "--json" | "-J" => as_json = true,
             other => {
                 eprintln!("fleet-incident: unrecognized argument {other:?}");
                 return Err(2);
@@ -443,6 +443,18 @@ pub fn run_fleet_incident(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn read_flags_accept_both_json_spellings() {
+        assert_eq!(super::parse_read_flags(&[]), Ok(false));
+        assert_eq!(super::parse_read_flags(&["--json".to_string()]), Ok(true));
+        assert_eq!(super::parse_read_flags(&["-J".to_string()]), Ok(true));
+        assert_eq!(
+            super::parse_read_flags(&["--bogus".to_string()]),
+            Err(2),
+            "a mistyped flag still refuses with usage"
+        );
+    }
+
     use super::*;
 
     fn tmp_path(tag: &str) -> PathBuf {

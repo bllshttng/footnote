@@ -1003,7 +1003,7 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
                     cwd = Some(args[i].clone());
                 }
             }
-            "--json" => want_json = true,
+            "--json" | "-J" => want_json = true,
             _ => {}
         }
         i += 1;
@@ -1514,6 +1514,27 @@ mod done_probe_tests {
             "close_probes must read the close_probes list, not done_probes"
         );
         assert_eq!(probes_for(&doc, "done_probes"), vec!["exit 1".to_string()]);
+    }
+
+    #[test]
+    fn probe_run_accepts_both_json_spellings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let passing = tmp.path().join("pass.md");
+        std::fs::write(&passing, fm("close_probes:\n  - \"echo probe-passed\"")).unwrap();
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            passing.to_string_lossy().into(),
+            "--key".into(),
+            "close_probes".into(),
+            "--cwd".into(),
+            tmp.path().to_string_lossy().into(),
+            "-J".into(),
+        ]);
+        assert_eq!(code, 0);
+        assert_eq!(
+            serde_json::from_str::<Value>(&json).unwrap()["passed"],
+            true
+        );
     }
 
     /// `probe-run` exit contract: 0 passes, 1 fails a probe, 2 is undeterminable

@@ -2236,7 +2236,7 @@ pub fn run_route_slot_audit(args: &[String]) -> (i32, String, String) {
             "--project" => project = it.next().cloned().unwrap_or_default(),
             "--node" => node = it.next().cloned().unwrap_or_default(),
             "--since" => since = it.next().cloned().unwrap_or_else(|| "30m".into()),
-            "--json" => json_out = true,
+            "--json" | "-J" => json_out = true,
             "--snapshot" => snapshot_path = it.next().map(String::as_str),
             other => {
                 return (
@@ -2805,6 +2805,21 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect()
+    }
+
+    #[test]
+    fn audit_accepts_both_json_spellings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let snap = dir.path().join("snap.json");
+        std::fs::write(&snap, "{}").unwrap();
+        let path = snap.display().to_string();
+        let long =
+            run_route_slot_audit(&["--snapshot".to_string(), path.clone(), "--json".to_string()]);
+        let short = run_route_slot_audit(&["--snapshot".to_string(), path, "-J".to_string()]);
+        // Same snapshot, same code, empty stderr: only the flag differs.
+        assert_eq!(long, short);
+        assert_eq!(long.2, String::new());
+        assert_ne!(long.0, 2, "the flag parse must not refuse");
     }
 
     #[test]
