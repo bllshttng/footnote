@@ -60,7 +60,7 @@ When the PR adds or modifies a type that wraps another (cache, proxy, decorator,
 
 ### Angle F - sibling answerer
 
-For the one question this diff answers (take it from the plan's `surface:` block when the PR has one; phrase it yourself when it does not), find one answerer the diff did not touch: another read or write of the same field, a second timeout on the same read, a second id format for the same thing, a second constant for the same limit. Grep the symbol, not the word. If you find one the block does not list, that is a candidate: the plan undercounted, and the next PR on this feature is already visible. If the block lists it as `out-of-scope`, check that the reason still holds against the diff.
+For the one question this diff answers (take it from the plan's `surface:` block when the PR has one; phrase it yourself when it does not), find one answerer the diff did not touch: another read or write of the same field, a second timeout on the same read, a second id format for the same thing, a second constant for the same limit. Grep the symbol, not the word. Grep it in every language tree, not only the diff's own. If you find one the block does not list, that is a candidate: the plan undercounted, and the next PR on this feature is already visible. If the block lists it as `out-of-scope`, check that the reason still holds against the diff.
 
 ### Reuse
 
