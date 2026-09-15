@@ -104,6 +104,45 @@ def test_item_wrapped_in_apostrophes_keeps_them() -> None:
 
 
 # ---------------------------------------------------------------------------
+# AC3-HP / AC3-ERR: a list item is quoted exactly when YAML needs the quotes
+# ---------------------------------------------------------------------------
+
+_YAML_UNSAFE_ITEMS = [
+    "fno x --json | grep -oE 'scope: [a-z]+'",
+    "a #b",
+    "- nested",
+    "key:",
+    "*alias",
+    "[x]",
+]
+
+
+def test_yaml_indicator_items_roundtrip_as_valid_yaml() -> None:
+    """AC3-HP: an item YAML cannot carry bare is quoted on write, both forms.
+
+    The reported case is the first item: a done_probes regex holding ': ' and
+    single quotes serialized bare and the doc stopped being valid YAML.
+    """
+    from fno.plan._stamp import BlockList
+
+    for items in (_YAML_UNSAFE_ITEMS, BlockList(_YAML_UNSAFE_ITEMS)):
+        text = serialize_frontmatter({"probes": items})
+        assert yaml.safe_load(text) == {"probes": _YAML_UNSAFE_ITEMS}
+
+    fields = {"probes": list(_YAML_UNSAFE_ITEMS)}
+    for _ in range(3):
+        fields = _roundtrip(fields)
+        assert fields["probes"] == _YAML_UNSAFE_ITEMS
+
+
+def test_plain_items_stay_bare() -> None:
+    """AC3-ERR: quoting is structural only; ordinary text is never quoted."""
+    items = ["plain item", "1", "https://x.y/z", "don't", "issue#12"]
+    text = serialize_frontmatter({"probes": items})
+    assert text == "probes: [plain item, 1, https://x.y/z, don't, issue#12]"
+
+
+# ---------------------------------------------------------------------------
 # AC5-EDGE: nothing else about the output changes
 # ---------------------------------------------------------------------------
 
