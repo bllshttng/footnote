@@ -675,17 +675,6 @@ class _EventFormatter(string.Formatter):
     ``{data.reason}`` does *dict item* traversal (not attribute access, which
     raises on a dict), and any missing field renders empty instead of raising."""
 
-    def get_field(self, field_name: str, args: Any, kwargs: Any) -> "tuple[Any, str]":
-        first, _, rest = field_name.partition(".")
-        obj: Any = kwargs.get(first, "") if isinstance(kwargs, dict) else ""
-        for part in (rest.split(".") if rest else []):
-            obj = obj.get(part, "") if isinstance(obj, dict) else ""
-        return obj, first
-
-    def get_value(self, key: Any, args: Any, kwargs: Any) -> Any:
-        if isinstance(key, int):
-            return ""  # positional refs unsupported; never crash
-        return kwargs.get(key, "") if isinstance(kwargs, dict) else ""
 
     def format_field(self, value: Any, format_spec: str) -> str:
         return str(super().format_field("" if value is None else value, format_spec))

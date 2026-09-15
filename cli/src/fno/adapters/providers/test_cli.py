@@ -21,11 +21,6 @@ runner = CliRunner()
 # Wider help width for chip subcommands so options don't column-wrap
 # (caught on PR #224: typer/rich line-wraps help in narrow CI envs and
 # options vanish from captured stdout). Mirrors the project pattern.
-_WIDE_HELP_ENV = {
-    "COLUMNS": "240",
-    "NO_COLOR": "1",
-    "TERM": "dumb",
-}
 
 
 # ---------------------------------------------------------------------------

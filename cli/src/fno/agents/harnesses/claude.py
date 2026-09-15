@@ -930,7 +930,6 @@ _AGENTS_JSON_TIMEOUT_DEFAULT = 3.0
 
 # Locked Decision 3 — 500ms polling cadence for --follow without an
 # inotify/fsevents dep. Matches US2's state.json polling pattern.
-_FOLLOW_POLL_INTERVAL = 0.5
 
 
 # The OUTPUT vocabulary: what this parser promises its callers, regardless of

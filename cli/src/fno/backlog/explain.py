@@ -203,36 +203,6 @@ def _cpu_row_refused(probe_answer: dict) -> bool:
     return False
 
 
-def _resolved_vendor(node: Optional[dict], grid_harness: Optional[str] = None) -> Optional[str]:
-    """The VENDOR whose lane cap a spawn for ``node`` would be counted against.
-
-    Five axes, never confused: harness, provider (vendor), model, effort,
-    account. `agents.provider_limits` is keyed by VENDOR (`zai`), while a node's
-    own `provider` field and `config.dispatch.harness` carry the HARNESS
-    (`codex`), and `effective_active()` returns an ACCOUNT record (`makers`).
-    An early draft of this function reported `provider-lane 0 (makers)` - an
-    account name checked against a vendor-keyed table, so it could only ever
-    read 0. That is the axis-inference trap by name.
-
-    Resolved through `resolve_lane_vendor`, the shipped harness-to-vendor
-    mapping, rather than a second table here: two tables disagree.
-    """
-    if node is None:
-        return None
-    from fno.agents.spawn_defaults import resolve_lane_vendor
-
-    harness = grid_harness or (node.get("provider") or "").strip() or None
-    if harness is None:
-        try:
-            from fno.dispatch_flags import resolve_dispatch_harness
-
-            harness = resolve_dispatch_harness(None)[0]
-        except Exception:  # noqa: BLE001 - an unresolved harness reports absent
-            return None
-    try:
-        return resolve_lane_vendor([], harness=harness)
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def routing_for(node: Optional[dict]) -> dict:

@@ -826,7 +826,6 @@ def load_orientation(
 # `key: value` lines, NOT YAML frontmatter), so load_agent_context (frontmatter
 # only) never sees them. The shared reader in target.manifest owns this set and
 # the merge; orient keeps a thin wrapper so existing callers are unchanged.
-_BODY_KEYS = ("graph_node_id", "target_claim_key", "target_claim_holder")
 
 
 def _read_manifest(project_root: Path) -> Optional[Dict[str, Any]]:

@@ -92,12 +92,6 @@ class VerificationReport:
     def ok(self) -> bool:
         return bool(self.conditions) and all(condition.ok for condition in self.conditions)
 
-    def by_family(self) -> dict[ConditionFamily, tuple[Condition, ...]]:
-        grouped: dict[ConditionFamily, tuple[Condition, ...]] = {}
-        for condition in self.conditions:
-            grouped.setdefault(condition.family, ())
-            grouped[condition.family] = (*grouped[condition.family], condition)
-        return grouped
 
     def as_dict(self) -> dict[str, Any]:
         return {

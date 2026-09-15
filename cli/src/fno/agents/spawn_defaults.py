@@ -923,9 +923,6 @@ def _permission_mappable(provider: str, mode: str, substrate: Optional[str]) -> 
         return False
 
 
-_LANE_FIELDS = frozenset(
-    {"provider", "model", "effort", "substrate", "permission_mode", "route", "account", "pane_group"}
-)
 
 
 def _lane_value(lane: object, name: str) -> str:

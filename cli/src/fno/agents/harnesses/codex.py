@@ -891,7 +891,6 @@ def default_session_index_path() -> Path:
 
 # Backwards-compatible alias for callers that imported the underscore-prefixed
 # name before the public-API rename. New code should use the public name.
-_default_session_index_path = default_session_index_path
 
 
 def load_known_session_ids(
