@@ -1240,8 +1240,6 @@ def run_execute_queue(
         try:
             entry = store.get(key)
             left = phase_seconds_left()
-            # Merged, parked and listed-closed rows never retry, and an attempt
-            # slower than the slice left would be cut mid-call.
             why = ("no-watermark" if not isinstance(entry, dict)
                    else "merged" if entry.get("merge_dispatched") else "parked" if entry.get("parked")
                    else "not-open" if entry.get("last_seen_state") == "NOT_OPEN"
@@ -1279,8 +1277,7 @@ def run_execute_queue(
                 store.set(key, entry)
                 _grant("executed", pr, cand, grant_fields)
             elif rc == 2:
-                # Held by a canonical guard: retryable, no failure budget. A PR
-                # the core reports already merged or closed never retries.
+                # Retryable, no failure budget; an already-terminal PR never retries.
                 counts["held"] += 1
                 entry["retries"] = prior_retries
                 if reason.startswith(_merge.ALREADY_TERMINAL):

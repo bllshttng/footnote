@@ -1144,8 +1144,6 @@ def tick() -> None:
             try:
                 # Durable grants, never the sweep's result: a cut sweep leaves
                 # no result, and a completed one reads few PRs under load.
-                # rotate is the tick index: Rust rotates the queue head by it,
-                # so a slow head never starves the tail.
                 out = verb_call("authorized-merge", {"op": "grant-queue",
                                 "rotate": int(time.time() // interval),
                                 "cwd": str(roots[0] if roots else Path.cwd())}, timeout=60)
