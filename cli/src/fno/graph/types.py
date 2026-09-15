@@ -70,12 +70,6 @@ def _ts_now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-# Process-wide dedupe for graph_status_drift emission: one row per
-# (entry_id, persisted, computed) transition. Without it every graph load of a
-# drifted node pays a journal append, so cost scales with reads, not drift.
-_DRIFT_EMITTED: set[tuple[str, str, str]] = set()
-
-
 def _derive_status(data: dict) -> str:
     """Derive single-entry status from a dict of field values.
 
@@ -101,13 +95,6 @@ def _derive_status(data: dict) -> str:
     # locked_by-first; tolerate a raw pre-rename dict passed straight in (not via
     # the store normalize) that still carries only the legacy session_id.
     if data.get("locked_by") or data.get("session_id"):
-        return "in_progress"
-    # An open do window holds the store's status at in_progress
-    # (recompute_statuses counts it); if the single-entry read disagreed,
-    # every graph load of a correct row emitted a false graph_status_drift.
-    from fno.graph.statuses import is_open_do_row
-
-    if any(is_open_do_row(row) for row in data.get("sessions") or ()):
         return "in_progress"
     # Same rung table `recompute_statuses` uses - NOT a second derivation. This
     # was a `plan_path`-presence + `is_design_stage` cascade, which was
@@ -427,10 +414,6 @@ class Node(BaseModel):
             if computed == "blocked" and persisted in {"ready", "design", "in_progress", "idea"}:
                 return data
 
-            key = (str(data.get("id", "")), str(persisted), str(computed))
-            if key in _DRIFT_EMITTED:
-                return data
-
             try:
                 from fno.events import append_event  # local import avoids circularity
 
@@ -445,9 +428,6 @@ class Node(BaseModel):
                     },
                 }
                 append_event(event)
-                # Mark seen only after a successful append: a failed emit
-                # retries on the next read instead of being lost.
-                _DRIFT_EMITTED.add(key)
             except (OSError, ImportError):
                 # Fix 4: narrowed from broad except Exception. OSError covers transient
                 # filesystem failures writing events.jsonl; ImportError covers installs
@@ -490,8 +470,6 @@ class Node(BaseModel):
             # locked_by-first; fall back to the legacy session_id mirror in case
             # this Entry was built from a pre-rename node not yet normalized.
             "locked_by": self.locked_by or self.session_id,
-            # Wire-shaped rows: is_open_do_row reads dicts, not SessionRecord.
-            "sessions": [row.model_dump() for row in self.sessions],
             "plan_path": self.plan_path,
             # Needed to resolve a repo-relative plan_path for the design probe.
             "cwd": self.cwd,
