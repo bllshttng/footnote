@@ -381,6 +381,21 @@ def test_unreachable_native_door_persists_unclassified_without_retry(tmp_path, m
     assert rows[0]["obs"]["grader_ran"] is True
 
 
+def test_gate_blocked_attempt_never_retries(tmp_path, monkeypatch) -> None:
+    """A gate refusal is deterministic: max_retries must not burn worktree
+    cycles re-attempting it inside the same sweep."""
+    root = _git_repo(tmp_path)
+    hp = tmp_path / "hist.jsonl"
+    monkeypatch.setattr(_runner, "_native_verdict",
+                        lambda row: {"status": "unavailable", "retryable": True})
+    monkeypatch.setattr(_runner, "evals_enabled", lambda: False)
+    task = _task(prompt="x", grade=[GradeCheck("file-exists", path="made.txt")])
+    results = run_task(task, repeat=1, repo_root=root, history_path=hp, max_retries=2)
+    assert len(results) == 1  # no retry
+    assert results[0].status == "unavailable"
+    assert "config.evals.enabled is false" in results[0].reason
+
+
 def test_history_append_attempt_refuses_unattributable_rows(tmp_path) -> None:
     hp = tmp_path / "h.jsonl"
     with pytest.raises(ValueError, match="attempt row"):

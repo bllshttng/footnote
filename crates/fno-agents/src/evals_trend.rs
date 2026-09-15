@@ -23,7 +23,7 @@ const USAGE: &str = "usage: fno-agents evals-trend --history <jsonl> (--mode rep
 /// One history row: the fields the folds read. Absent keys read as the
 /// Python fold read them (missing `variant` is baseline, missing `ts` is
 /// unparseable, missing `tier` is "unknown"). `raw` is kept so the attempt
-/// verdict comes from the ONE native classifier (x-ecda), never a second fold.
+/// verdict comes from the ONE native classifier, never a second fold.
 #[derive(Clone)]
 struct Row {
     task_id: String,
@@ -91,7 +91,7 @@ fn read_rows(history: &str, variant: Option<&str>, since: Option<usize>) -> Vec<
 /// Per-task stats over one row list: attempts/passes since the task's latest
 /// tier change (the anti-false-alarm segment rule).
 ///
-/// Two denominators (x-ecda): a task with ANY natively classified row reports
+/// Two denominators: a task with ANY natively classified row reports
 /// `grades` (valid task grades) and correctness over those grades only -
 /// infrastructure/unavailable/ungraded attempts never drag the pass rate. A
 /// task whose rows are ALL legacy (pre-attempt history) keeps the old

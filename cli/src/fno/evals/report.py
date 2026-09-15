@@ -212,9 +212,9 @@ def _native_attempt_verdicts(history_path: Path) -> dict[int, dict]:
     exactly the pre-attempt semantics)."""
     import subprocess
 
-    from fno.rust_binary import find_dev_binary, resolve_binary
+    from fno.evals.bank import _door_binary
 
-    binary = find_dev_binary() or resolve_binary()
+    binary = _door_binary()
     if binary is None or not history_path.exists():
         return {}
     try:

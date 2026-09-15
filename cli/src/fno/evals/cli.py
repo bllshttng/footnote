@@ -136,7 +136,7 @@ def run_command(
     except Exception:  # noqa: BLE001
         repo_root = Path.cwd()
 
-    # x-ecda: a declared cohort split is validated BEFORE any worker call -
+    # A declared cohort split is validated BEFORE any worker call -
     # membership (unknown ids), overlap, duplicates, and bank-rev staleness.
     from fno.evals.bank import CohortError, bank_unchanged_since, cohorts_verdict, load_cohorts
 
@@ -294,7 +294,7 @@ def export_command(
     bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
     history: Optional[Path] = typer.Option(None, "--history", help="History JSONL (default: the evals history)."),
 ) -> None:
-    """Export train-cohort history for prompt tuning (x-ecda AC2-HP).
+    """Export train-cohort history for prompt tuning.
 
     Refuses without a declared, natively valid, bank-current split; writes
     ONLY train rows, so held-out trajectories never enter a tuning view.
@@ -367,7 +367,7 @@ def qualify_command(
     bank: Optional[Path] = typer.Option(None, "--bank", help="Bank dir (default: <repo>/evals/bank)."),
     history: Optional[Path] = typer.Option(None, "--history", help="History JSONL (default: the evals history)."),
 ) -> None:
-    """Aggregate held-out qualification results (x-ecda AC2-HP/AC2-EDGE).
+    """Aggregate held-out qualification results.
 
     Counts and coverage only, never a held-out prompt or trace. Reports
     `{"qualified": false, "reason": ...}` (exit 0) when the split is absent,
@@ -429,9 +429,9 @@ def qualify_command(
     # classify_rows numbers lines exactly like iter_rows_tolerant does.
     import subprocess as _subprocess
 
-    from fno.rust_binary import find_dev_binary, resolve_binary
+    from fno.evals.bank import _door_binary
 
-    binary = find_dev_binary() or resolve_binary()
+    binary = _door_binary()
     verdicts: dict[int, dict] = {}
     if binary is not None and rows:
         try:

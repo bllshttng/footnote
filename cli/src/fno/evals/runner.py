@@ -254,9 +254,9 @@ def _native_verdict(row: dict[str, object]) -> Optional[dict[str, object]]:
     from its structured observations. None when the binary is unreachable -
     the row still persists with its observations, and the read side re-asks
     natively over the batch. The verdict is NEVER re-derived in Python."""
-    from fno.rust_binary import find_dev_binary, resolve_binary
+    from fno.evals.bank import _door_binary
 
-    binary = find_dev_binary() or resolve_binary()
+    binary = _door_binary()
     if binary is None:
         return None
     try:
@@ -373,7 +373,9 @@ def run_task(
             }
             attempt_id = uuid.uuid4().hex
             verdict = _native_verdict({"obs": obs, "bank_rev": bank_rev})
-            retryable = bool(verdict and verdict.get("retryable"))
+            # The gate is deterministic within this process: retrying a
+            # gate-blocked attempt burns a worktree cycle and changes nothing.
+            retryable = bool(verdict and verdict.get("retryable") and not gate_blocked)
             row = {
                 "ts": _now_iso(),
                 "task_id": task.id,
