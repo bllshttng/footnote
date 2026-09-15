@@ -36,6 +36,7 @@ agents distress-scan	T1	agents distress-scan	0
 agents distress-verdicts	T1	agents distress-verdicts	0
 agents gate-status	T1	agents gate-status	0
 agents drive-authority	T1	agents drive-authority	9
+agents evals-arm	T1	agents evals-arm	0
 agents evals-macro	T1	agents evals-macro	0
 agents finalize	T1	agents finalize	26
 agents fleet-incident	T1	agents fleet-incident	0

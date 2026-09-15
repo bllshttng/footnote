@@ -217,16 +217,12 @@ def _pair_verdict(a_rows: list[dict[str, object]],
 def window_rows(
     rows: list[dict[str, object]], start: datetime, end: datetime
 ) -> list[dict[str, object]]:
-    """Rows whose ``ts`` parses and falls in the half-open ``(start, end]``.
-
-    A row with no parseable ``ts`` lands in no window.
-    """
-    kept: list[dict[str, object]] = []
-    for r in rows:
-        dt = _parse_ts(r.get("ts"))
-        if dt is not None and start < dt <= end:
-            kept.append(r)
-    return kept
+    """Rows whose ``ts`` parses and falls in the half-open ``(start, end]``;
+    a row with no parseable ``ts`` lands in no window."""
+    return [
+        r for r in rows
+        if (dt := _parse_ts(r.get("ts"))) is not None and start < dt <= end
+    ]
 
 
 def compare_windows(
@@ -238,34 +234,30 @@ def compare_windows(
     ``regressed`` names regression-tier tasks (tier of each task's newest row)
     whose verdict is ``regressed``.
     """
-    window = timedelta(days=window_days)
-    prior = _by_task(window_rows(rows, now - 2 * window, now - window))
-    recent = _by_task(window_rows(rows, now - window, now))
+    w = timedelta(days=window_days)
+    prior = _by_task(window_rows(rows, now - 2 * w, now - w))
+    recent = _by_task(window_rows(rows, now - w, now))
     tasks: dict[str, Any] = {}
     missing_in_prior: list[str] = []
     missing_in_recent: list[str] = []
     for tid in sorted(set(prior) | set(recent)):
-        p = prior.get(tid, [])
-        r = recent.get(tid, [])
+        p, r = prior.get(tid, []), recent.get(tid, [])
         if not p:
             missing_in_prior.append(tid)
         if not r:
             missing_in_recent.append(tid)
-        if not p or not r:
-            continue
-        score = _pair_verdict(p, r)
-        tasks[tid] = {"prior": score["a"], "recent": score["b"],
-                      "delta": score["delta"], "verdict": score["verdict"]}
-    newest_tier = {tid: str(task_rows[-1].get("tier", "unknown"))
-                   for tid, task_rows in _by_task(rows).items()}
-    regressed = [
-        tid for tid, t in tasks.items()
-        if t["verdict"] == "regressed" and newest_tier.get(tid) == "regression"
-    ]
+        if p and r:
+            s = _pair_verdict(p, r)
+            tasks[tid] = {"prior": s["a"], "recent": s["b"],
+                          "delta": s["delta"], "verdict": s["verdict"]}
+    newest_tier = {tid: str(tr[-1].get("tier", "unknown"))
+                   for tid, tr in _by_task(rows).items()}
+    regressed = [tid for tid, t in tasks.items()
+                 if t["verdict"] == "regressed" and newest_tier.get(tid) == "regression"]
     return {
         "window_days": window_days,
-        "prior_start": (now - 2 * window).isoformat(),
-        "recent_start": (now - window).isoformat(),
+        "prior_start": (now - 2 * w).isoformat(),
+        "recent_start": (now - w).isoformat(),
         "tasks": tasks,
         "missing_in_prior": missing_in_prior,
         "missing_in_recent": missing_in_recent,
@@ -309,11 +301,11 @@ def evals_health_summary(
     reg = report["tiers"].get("regression")
     reg_ts = [dt for r in rows if r.get("tier") == "regression"
               and (dt := _parse_ts(r.get("ts"))) is not None]
-    newest_dt = max(reg_ts) if reg_ts else None
     never_ran = reg is None
+    newest_dt = max(reg_ts, default=None)
     age_days = None if newest_dt is None else round(
         (now - newest_dt).total_seconds() / 86400, 3)
-    stale = never_ran is False and age_days is not None and age_days > stale_days
+    stale = not never_ran and age_days is not None and age_days > stale_days
     try:
         regressed = compare_windows(
             rows, window_days=stale_days, now=now
