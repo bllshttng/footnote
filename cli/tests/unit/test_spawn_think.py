@@ -1353,11 +1353,12 @@ def test_worker_agent_name_reason_scoped():
     lifecycle trigger for a node collides on name and is wrongly skipped.
     """
     # x-84b2: the spawn_think source stamped only by this path, the think
-    # verb as a code; the reason stays the reason-scoped qualifier.
-    assert st._worker_agent_name("x-1", "slug") == "th-th-x-1-slug"  # default birth
-    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "th-th-x-1-slug"
-    assert st._worker_agent_name("x-1", "slug", st.REASON_WORK_START) == "th-th-x-1-work-start-slug"
-    assert st._worker_agent_name("x-1", "slug", st.REASON_RETRO) == "th-th-x-1-retro-slug"
+    # verb as a code; the reason stays the reason-scoped qualifier. x-57fe:
+    # the node carries its bare hex.
+    assert st._worker_agent_name("x-1", "slug") == "th-th-1-slug"  # default birth
+    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "th-th-1-slug"
+    assert st._worker_agent_name("x-1", "slug", st.REASON_WORK_START) == "th-th-1-work-start-slug"
+    assert st._worker_agent_name("x-1", "slug", st.REASON_RETRO) == "th-th-1-retro-slug"
     names = {st._worker_agent_name("x-1", "slug", r)
              for r in (st.REASON_BIRTH, st.REASON_WORK_START, st.REASON_RETRO)}
     assert len(names) == 3  # no collision across a node's lifecycle
@@ -1375,7 +1376,7 @@ def test_worker_agent_name_capped_at_64_keeps_node_id():
     suffix = "sessaaaa"
     name = st._worker_agent_name("x-2c27", long_slug, st.REASON_WORK_START, suffix)
     assert len(name) <= 64, f"name overflowed: {len(name)} chars: {name!r}"
-    assert name.startswith("th-th-x-2c27-work-start"), f"node id/reason dropped: {name!r}"
+    assert name.startswith("th-th-2c27-work-start"), f"node id/reason dropped: {name!r}"
     assert not name.endswith("-"), f"trailing hyphen not trimmed: {name!r}"
     # codex P2: the per-session suffix is the uniqueness discriminator - capping
     # must trim the slug, never the suffix, or two repeat dispatches collide.
@@ -1520,7 +1521,7 @@ def test_worker_name_unique_per_conversation():
     assert a != b
     assert a.endswith("-sessaaaa") and b.endswith("-sessbbbb")
     # No suffix -> byte-for-byte the prior name (birth/lifecycle unchanged).
-    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "th-th-x-1-slug"
+    assert st._worker_agent_name("x-1", "slug", st.REASON_BIRTH) == "th-th-1-slug"
 
 
 # ---------------------------------------------------------------------------

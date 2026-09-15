@@ -295,8 +295,8 @@ def test_keepgo_name_preserves_the_full_node_id():
     b = agent_name("keepgo", long_id + "bb")
     assert a != b
 
-    # Ordinary ids are unchanged from the old form.
-    assert agent_name("keepgo", "x-3218") == "keepgo-x-3218"
+    # Ordinary ids keep the node identity, hex-only for node shapes (x-57fe).
+    assert agent_name("keepgo", "x-3218") == "keepgo-3218"
 
     # An id that cannot fit refuses rather than being shaved to a colliding stub.
     with pytest.raises(AgentNameError):

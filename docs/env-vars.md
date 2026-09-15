@@ -38,6 +38,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_AGENTS_FRONT` | py+rs | unclear: cli/src/fno/graph/store.py:213 |
 | `FNO_AGENTS_HOME` | py+rs | unclear: cli/src/fno/agents/cli.py:801 |
 | `FNO_AGENTS_IDLE_EXIT_SECS` | rs | unclear: crates/fno-agents/src/bin/daemon.rs:67 |
+| `FNO_AGENTS_NAME_MODEL` | py | Raw model string; the agent-name mint appends its short code to the worker name. |
 | `FNO_AGENTS_NO_STARTUP_RECONCILE` | rs | unclear: crates/fno-agents/src/bin/daemon.rs:87 |
 | `FNO_AGENTS_RESPONSE_DEADLINE_MS` | rs | unclear: crates/fno-agents/src/client.rs:68 |
 | `FNO_AGENTS_RUNTIME` | py | unclear: cli/src/fno/doctor.py:564 |

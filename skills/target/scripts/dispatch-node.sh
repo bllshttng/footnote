@@ -333,8 +333,16 @@ for id in "${NODES[@]}"; do
   # contract (a live config notice on stderr reproduced a false refusal on
   # 2026-09-03 when the WHOLE capture was matched).
   node_slug="$(printf '%s' "$node_json" | jq -r '.slug // .title // empty' 2>/dev/null)"
-  name_args=("$id" --slug "$node_slug")
-  name_out="$(FNO_AGENTS_RUNTIME=python fno agents name "${name_args[@]}" 2>&1)"
+  # --verb t: the bridge refuses a verb-less mint (it usage-refused every
+  # dispatch here until 2026-09-14, so every name came from the fallback
+  # assembly below). FNO_AGENTS_NAME_MODEL: the route's model when pinned, so
+  # the name carries the model tag that makes a misroute visible at a glance
+  # (x-57fe); an env var, not a flag - the flag registry refuses Python flag
+  # growth (x-72fc).
+  name_args=("$id" --verb t --slug "$node_slug")
+  name_env=(FNO_AGENTS_RUNTIME=python)
+  [[ -n "$ROUTE" ]] && name_env+=(FNO_AGENTS_NAME_MODEL="${ROUTE##*/}")
+  name_out="$(env "${name_env[@]}" fno agents name "${name_args[@]}" 2>&1)"
   name_rc=$?
   name_last="${name_out##*$'\n'}"
   agent_name=""
@@ -349,11 +357,11 @@ for id in "${NODES[@]}"; do
     n_failed=$((n_failed + 1))
     continue
   elif [[ "$name_rc" -ne 0 || -z "$agent_name" ]]; then
-    # Degraded: fno unreachable or too old for this verb. Keep the historical
+    # Degraded: fno unreachable or too old for this verb. Keep a fallback
     # assembly, and say so - an invisible degrade means the whole fleet can be
-    # named by the fallback with nothing in the receipt to show it. The legacy
-    # shape stays legible to rollout readers (AC3-EDGE); the vocabulary is never
-    # re-implemented here.
+    # named by the fallback with nothing in the receipt to show it. The
+    # fallback mirrors the canonical shape (t-<hex>[-<slug>]) minus the model;
+    # the vocabulary is never re-implemented here.
     # rc=0 here means the owner ran but its output was unusable (noise on the
     # merged stream), which is a different story from an unreachable owner - say
     # which, or the receipt reads as "unavailable (rc=0)" and puzzles the reader.
@@ -364,11 +372,12 @@ for id in "${NODES[@]}"; do
     fi
     echo "degraded-name $id reason=\"$name_why; using the fallback assembly\""
     node_slug="$(printf '%s' "$node_slug" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' \
-      | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-30 | sed -E 's/-+$//')"
+      | sed -E 's/-+/-/g; s/^-+//; s/-+$//' | cut -c1-12 | sed -E 's/-+$//')"
+    node_hex="${id##*-}"
     if [[ -n "$node_slug" ]]; then
-      agent_name="target-${id}-${node_slug}"
+      agent_name="t-${node_hex}-${node_slug}"
     else
-      agent_name="target-${id}"
+      agent_name="t-${node_hex}"
     fi
     # The fallback is uncapped, and nothing downstream enforces 64 here: this
     # spawn passes --node, which forces the Python path (_NAME_MAX_LEN = 128),

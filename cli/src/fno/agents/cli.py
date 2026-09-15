@@ -2820,6 +2820,10 @@ def cmd_name(
     Prints one name on stdout. Exit 3 (NOT 2) is the naming refusal; 2 is Click's usage
     error, which an `fno` too old to know this verb also returns - reading 2 as a refusal
     refuses the fleet on a stale install.
+
+    The model rides $FNO_AGENTS_NAME_MODEL, not a flag: the flag-registry gate
+    (x-72fc) refuses Python typer-flag growth, and a shell dispatcher carries an
+    env var as cheaply as a flag.
     """
     from fno.agents.naming import AgentNameError, BridgeUsageError, bridge_name
 
@@ -2829,6 +2833,7 @@ def cmd_name(
     if not node_id:
         typer.echo("error: a node id is required: fno agents name [prefix] <node-id>", err=True)
         raise typer.Exit(2)
+    model = (os.environ.get("FNO_AGENTS_NAME_MODEL") or "").strip() or None
     try:
         name = bridge_name(
             prefix or "",
@@ -2838,6 +2843,7 @@ def cmd_name(
             discriminator=discriminator or None,
             source=source or None,
             verb=verb or None,
+            model=model,
         )
     except (BridgeUsageError, AgentNameError) as exc:
         typer.echo(f"error: {exc}", err=True)
