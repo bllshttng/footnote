@@ -24,6 +24,14 @@ The verb names the verdict. `kept` means the sweep declined this pass. `held` me
 
 The first report line carries the counts. The last lines carry the dry-run marker and the mux sweep line. A retire line names its basis, for example `every named node done`, with the witnesses that agreed.
 
+Every daemon tick with held rows also writes one journal row you can read without the verb. The row carries one entry per held handle, with its reason, detail, age, and escalation flag. Read it with:
+
+```
+rg '"type":"retire_holds"' ~/.fno/agents/events.jsonl
+```
+
+A tick with zero holds writes no `retire_holds` row, so silence is the zero-reading.
+
 ## Three programs answer to the word reap
 
 Three programs share the word reap. A reader who watches one and concludes the others are broken has mixed them up. This exact confusion cost a real session. The arms readout showed `acted=0 skip=held` while the manual verb retired 3 rows in the same minute.
@@ -132,15 +140,17 @@ Never hand-close the node to clear this line. That hides the obligation and fals
 
 The line reads `kept {id} (planning assignment not finished by this session: {node})`. The row is a planner, the node sits planning-complete, and the session holds neither finished marker.
 
-Marker one: the session's own blueprint or think row on the node carries a non-empty `ended_at` (`gc.rs:287-310`).
+Marker one: the session's own blueprint or think row on the node carries a non-empty `ended_at` (`gc.rs:310-330`).
 
 Marker two: the session wrote the node's plan. The node's `plan_path` names a file that exists, and no other planner's row on the node started earlier (`gc_sweep.rs:645-682`).
 
-A finished planner retires once its transcript is quiet for 1200 s, not the default grace (`gc.rs:140`).
+Two facts finish an assignment with neither marker. A node whose status reads `deferred` or `superseded` has moved on: nothing is left to plan (`gc.rs:153-158`). And a halted planner, one whose latest inside-leg report reads `done`, has ended its turn with no plan on the node; it is waiting on nothing (`gc.rs:82-89`). A planner waiting on input reads `blocked`, and a mid-turn planner reads `working` - both keep the hold.
 
-A planner with neither marker keeps its row, and the hold ages. Past `agents.hold_escalate_after_s` the line names the cure: `fno agents reap --release <row>` (`gc_sweep.rs:1881-1897`).
+A finished planner retires once its transcript is quiet for 1200 s, not the default grace (`gc.rs:162`).
 
-The retirement basis names the marker that fired: `planning finished on {node}: closed by this session`, `planning finished on {node}: plan written`, or `planning finished on {node}: released` (`gc_sweep.rs:2224-2231`).
+A planner with neither marker keeps its row, and the hold ages. Past `agents.hold_escalate_after_s` the line names the cure: `fno agents reap --release <row>` (`reap_render.rs:85-118`).
+
+The retirement basis names the marker that fired, in order: `planning finished on {node}: closed by this session`, `planning finished on {node}: plan written`, `planning finished on {node}: node {status}` for a moved-on node, `planning finished on {node}: released`, or `planning halted on {node}: turn ended with no plan` for the halted planner (`gc_sweep.rs:2476-2500`). A blueprint row whose assignment set is empty retires through the session arms instead, and never borrows the planning wording.
 
 ### live descendant
 
@@ -187,6 +197,14 @@ The asymmetry matters (`gc.rs:152-155`). A recorded status that is not `merged` 
 
 The line reads `kept {id} (active: transcript written {age}s ago)`. The transcript was written inside the grace window, which defaults to 900 seconds (`agents_config.rs:349`, `gc.rs:334-349`). The session is live in the only sense the law allows. Wait past the window. Two facts override it early: a terminal harness state (`done`, `stopped`, `failed`) and a provably dead pid (ESRCH). If `claude agents` reads the session `done` while the reaper prints this line, that combination is a defect, not a wait.
 
+### probe unread
+
+The line reads `kept {id} (probe unread: truth probe answered nothing within its bound; ...)`. The fresh re-read of the row's transcript age did not answer inside its bound, so the row is neither known quiet nor known active. An unread instrument is never reported as `active`, and the row never carries an invented age of 0.
+
+The detail names the in-process witness that answered instead. The registry row's `inside_leg.seq` is the quiet witness: the daemon writes it in process on every turn report, so no subprocess can time it out. `no inside-leg report on the row` means the row carries no report at all, so the witness cannot speak. `inside-leg seq moved {old} -> {new}` means a new turn report landed between classification and the re-read: the session woke up, and the keep is real. When the seq is unchanged and the classification age measured quiet, the row retires - the witness answers where the probe starved (`gc_sweep.rs:2160-2205`).
+
+The cure is patience, not a ruling: the next sweep's probe usually answers, and the row retires then.
+
 ### graph unreadable
 
 The line reads `kept {id} (graph unreadable: never a retirement on a failed read)`. The graph read failed this pass (`gc.rs:169-171`). Rerun the dry run. When the graph reads, the reason clears.
@@ -210,7 +228,7 @@ A clean and merged tree prunes, and the branch stays (`gc.rs:206-207`). The remo
 
 Three lines mean the sweep acted on a retire decision and hit a refusal.
 
-- `kept {id} (stop refused: {reason})`: the confirmed stop refused, so the row stays for retry on the next pass (`gc_sweep.rs:112-114`). On a claude row with no death evidence, the reason names the missing evidence (`gc_sweep.rs:1256-1267`).
+- `kept {id} (stop refused: {reason})`: the confirmed stop refused, so the row stays for retry on the next pass (`gc_sweep.rs:112-114`). On a claude row with no death evidence, the reason names the missing evidence (`gc_sweep.rs:1256-1267`). After `claude stop` exits 0, the stop arm polls both witnesses, the daemon roster and the `claude agents` state, once a second for up to 15 s before it concedes (`gc_claude_stop.rs:73-103`), so a supervisor that tears the session down a beat late no longer wedges the row for a whole tick.
 - `prune failed {id} ({reason})`: the tree removal did not confirm (`gc_sweep.rs:55-59`).
 - `settle refused {node} ({reason})`: the settle write refused, named and never silent (`gc_sweep.rs:103-104`).
 
@@ -244,6 +262,7 @@ Every keep and hold reason from the sections above, one row each.
 | `kept {id} (planning assignment not finished by this session: {node})` | Wait up to 20 quiet minutes, or rule with `fno agents reap --release <row>` once escalated. | The line names the node and the hold age. |
 | `kept {id} (live descendant: {child})` | Wait for the child row to go, unless the parent's roster state reads `done`, `stopped` or `failed`. | The same report carries the child line. |
 | `kept {id} (active: transcript written {age}s ago)` | Wait past the grace window. A terminal harness state or a dead pid retires the row early, unless the row keeps for an open PR. | Run the dry run again. Read the new age. |
+| `kept {id} (probe unread: {detail})` | Wait for the next sweep. The probe usually answers then. A moved seq means a new turn - the keep is real. | Run the dry run again. Read the detail. |
 | `kept {id} (transcript unresolved: absence is not quiet)` | Diagnose one of the four causes above. | Run `fno agents list`. Rerun the dry run. Search the store roots. |
 | `kept {id} (no provenance: ...)` | Restore one resolvable source for the row. | Run `fno-agents node-route --names <name> --json`. |
 | `kept {id} (sources disagree: {a} vs {b})` | Fix source `{a}`, which named `{b}`. | Run `fno-agents node-route --names <name> --json`. |
