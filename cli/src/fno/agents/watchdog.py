@@ -657,6 +657,22 @@ def lane_armed(settings: Any) -> bool:
     return _armed(settings, None)
 
 
+def lane_off_detail(settings: Any) -> str:
+    """Why `lane_armed` read false, as key=value: the watchdog_off skip token
+    names the lane, this names the key, so an operator holding a config that
+    says otherwise can join the two."""
+    try:
+        if not settings.recovery.watchdog.enabled:
+            return "recovery.watchdog.enabled=false"
+        if not settings.recovery.enabled:
+            return "recovery.enabled=false"
+        if not settings.autonomy.enabled:
+            return "autonomy.enabled=false"
+    except Exception:  # noqa: BLE001 - a partial settings stub is not armed
+        return "watchdog keys unresolved (partial settings)"
+    return "watchdog keys all read true (transient)"
+
+
 def wake_armed(settings: Any) -> bool:
     """Return true only for the level that may resume a stalled session."""
     return _armed(settings, "wake")

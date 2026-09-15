@@ -684,6 +684,7 @@ def tick() -> None:
             # Imported here, not at module scope: the watchdog package pulls the
             # harness layer and this module is on the launchd hot path.
             from fno.agents.watchdog import lane_armed as _wd_lane_armed
+            from fno.agents.watchdog import lane_off_detail as _wd_lane_off_detail
             from fno.agents.watchdog import wake_armed as _wd_wake_armed
 
             # Fleet watchdog, same cadence, same non-fatal wrap. The REPORT is
@@ -1015,7 +1016,9 @@ def tick() -> None:
                                    detail=str(exc)[:200])
             else:
                 # An unarmed lane still ticks: "why it did nothing" is the readout's job.
-                _emit_tick_row("watchdog", interval_s=wd_i, skip_reason="watchdog_off")
+                # The detail names the key that read false, not just the lane.
+                _emit_tick_row("watchdog", interval_s=wd_i, skip_reason="watchdog_off",
+                               detail=_wd_lane_off_detail(settings))
 
         def _phase_sweep(slice_s: float) -> None:
             nonlocal result, tick_failed
