@@ -1319,11 +1319,8 @@ _TARGET_FAMILY_VERBS = ("/target", "/blueprint")
 
 
 def _canonical_verb(token: str) -> Optional[str]:
-    """The leading verb token's canonical ``/verb`` spelling, or None.
-
-    ``/x``, ``/fno:x`` and ``$fno:x`` all mean ``/x``; the shape rule is the
-    one parser every reader shares (:func:`parse_verb_token`), so a path
-    (``/usr/bin/script``) never parses as a verb."""
+    """``/x``, ``/fno:x``, ``$fno:x`` -> ``/x``; None otherwise (a path never
+    parses as a verb - the one shape rule lives in :func:`parse_verb_token`)."""
     if parsed := parse_verb_token(token):
         return "/" + parsed[0]
     return None
@@ -1385,23 +1382,19 @@ def resolve_effective_verb(
 def node_seed(
     seed: Optional[str], node_id: str, rec: Optional[Mapping[str, object]]
 ) -> Optional[str]:
-    """The seed a ``--node`` spawn should launch: unchanged, composed, or a
-    refusal (x-2c0d).
+    """The seed a ``--node`` spawn should launch, or None to pass it through.
 
     The authority is :func:`resolve_effective_verb` over the node's stored
     ``dispatch_verb``, difficulty and plan rung - the same derivation
-    ``backlog advance`` runs. Returns the seed to launch, or ``None`` to pass
-    it through untouched: a seed led by a verb outside the target family
-    (``/pr``, ``/think`` - declared precedence holds, like the resolver's
-    abstain), one carrying ``--reconcile`` (an explicit template bypasses the
-    table), and a family verb that already agrees with the derivation. A
-    family verb that DISAGREES refuses: every dispatch naming the verb twice
-    is evidence nobody trusts ``--node``, and an unknown verb is not evidence
-    of ``/target``. Raises :class:`DispatchResolveError` for an unreadable
-    node row or an unanswerable derivation. A verbless seed (prose or empty)
-    is composed: the node's resolved command, then the prose. The spawn seam
-    skips empty seeds so the door's node-seed render (the brief env and the
-    worktree ensure) keeps owning that shape."""
+    ``backlog advance`` runs. Out-of-family leads, ``--reconcile`` seeds, and
+    a family verb that already agrees return None; a family verb that
+    DISAGREES refuses (an unknown verb is not evidence of ``/target``, the
+    spawn_gate posture). A verbless seed composes the node's resolved command
+    in front of the prose. Raises :class:`DispatchResolveError` for an
+    unreadable row or an unanswerable derivation. Full contract:
+    docs/architecture/backlog-graph-verb-contracts.md. The spawn seam skips
+    empty seeds so the door's node-seed render keeps the brief env and the
+    worktree ensure."""
     text = (seed or "").strip()
     lead = _canonical_verb(text.split(maxsplit=1)[0]) if text else None
     if lead is not None and lead not in _TARGET_FAMILY_VERBS:

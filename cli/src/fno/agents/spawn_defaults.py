@@ -654,11 +654,9 @@ SPAWN_PERMISSION_BUILTIN = "bypassPermissions"
 
 
 def _seed_slot(toks: Sequence[str]) -> Optional[Tuple[str, int]]:
-    """Where the MESSAGE seed lives in ``toks``: ``(kind, index)``.
-
-    ``kind`` is ``"message"`` (value at ``index + 1``), ``"message="``
-    (value inside the token), ``"fence"`` (the ``--`` index; value at
-    ``index + 1``), or ``"positional"``. One scan serves the reader
+    """Where the MESSAGE seed lives in ``toks``: ``(kind, index)`` - kind is
+    ``"message"``/``"fence"`` (value at ``index + 1``), ``"message="`` (inside
+    the token), or ``"positional"``. ONE scan serves the reader
     (:func:`_seed_of`) and the writer (:func:`replace_seed`), so they cannot
     drift. Stops at the ``--argv`` payload boundary."""
     i = 0
@@ -703,10 +701,9 @@ def _seed_of(toks: Sequence[str]) -> Optional[str]:
 
 def replace_seed(args: Sequence[str], new: str) -> List[str]:
     """Rewrite the seed :func:`_seed_of` reads - ``args[0]`` is the verb - to
-    ``new``, through the ONE slot scan, so reader and writer cannot drift.
-    With no seed at all, ``new`` is inserted as a positional before any ``--``
-    fence or ``--argv`` boundary, so it can never land in a fenced prompt or
-    a provider payload."""
+    ``new``, through the ONE slot scan. With no seed, ``new`` is inserted as a
+    positional before any ``--`` fence or ``--argv`` boundary, so it can never
+    land in a fenced prompt or a provider payload."""
     toks = list(args[1:])
     slot = _seed_slot(toks)
     if slot is None:
