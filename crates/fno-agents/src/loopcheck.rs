@@ -1543,7 +1543,7 @@ use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
 pub use coverage_receipt::coverage_receipt_line;
-use watch_lease::{harness_can_idle, watch_window_ms, watching_harness_refusal};
+use watch_lease::{harness_can_idle, watch_window_ms};
 
 /// Whether a `review_attestation` line is about the PR under evaluation.
 ///
@@ -15384,11 +15384,11 @@ git_bounded();";
     #[test]
     fn watching_refusal_names_the_disqualifying_substrate() {
         assert_eq!(
-            watching_harness_refusal(Some("claude"), true),
+            watch_lease::watching_harness_refusal(Some("claude"), true),
             "watching ignored: loop-run child cannot idle"
         );
         assert_eq!(
-            watching_harness_refusal(Some("codex"), false),
+            watch_lease::watching_harness_refusal(Some("codex"), false),
             "watching ignored: harness codex cannot idle"
         );
     }
