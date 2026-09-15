@@ -307,16 +307,6 @@ Until the fix merges, confirm ownership against the worker roster. Do not trust 
 
 *Graduates to:* one ownership answer per payload, with the resolver reporting an unresolved roster as unresolved rather than free.
 
-## A hook fails Permission denied and the fix is already merged
-
-**Answer.** The checkout is stale. The script is correct upstream. Look at the checkout before you file the bug.
-
-**Specimen.** `hooks/operator-capture-nudge.sh` stopped with `/bin/sh: Permission denied`. The local mode was `100644` and the mode on `origin/main` was `100755`, corrected earlier the same day. The checkout was 342 commits behind and 0 ahead. Seven orphaned uncommitted files from another session blocked the fast-forward. A second king reported the same defect from a checkout 327 behind, after the fix had merged.
-
-Everything in that checkout was 342 commits old: hooks, guards and CI scripts. After the fast-forward, `fno agents rm` worked immediately, having failed all night with a traceback.
-
-*Graduates to:* a checkout staleness reader that names how far behind a tree is and which uncommitted files block the fast-forward. `fno doctor` already reports the lag between the deployed binary and its source. The checkout has no equivalent.
-
 ## My king has no spawn share and its workers are finished
 
 **Answer.** Share counts live harness rows, and a session never ends. A finished worker holds its lane forever.
@@ -477,6 +467,7 @@ The same read reported both branches as 32 commits behind `main`. That is the no
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.
 
+- **A hook fails Permission denied and the fix is already merged.** PR 2069. Session start now prints `[fno-checkout-behind]` and `[fno-checkout-ff-blocked]` for a stale main checkout, naming the uncommitted files that block the fast-forward.
 - **The merge gate refuses a real cross-model review.** PR 1595. The self lane counts any real review now, whatever produced it.
 - **My PR reads rounds 5 of 2.** PR 1426. A rebase or a fix under 100 interdiff lines carries its verdict now.
 
