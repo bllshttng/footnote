@@ -1568,17 +1568,20 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
                         );
                         // The row learns fno did this: the stamp keeps the
                         // sweep from reading the harness `stopped` state as
-                        // finished work on a later tick.
+                        // finished work on a later tick. The write is
+                        // offloaded like every other registry write on the
+                        // async runtime.
                         let sweep_home = home.clone();
                         let stopped_session = marker.uuid.clone();
                         let stopped_reason = marker.reason.clone();
-                        let _ = state::update_registry(&sweep_home.registry_json(), |r| {
+                        let _ = update_registry_offloaded(sweep_home.registry_json(), move |r| {
                             if let Some(entry) = r.entries.iter_mut().find(|e| {
                                 e.harness_session_id.as_deref() == Some(stopped_session.as_str())
                             }) {
                                 state::record_stop(entry, "terminal-sweep", Some(stopped_reason));
                             }
-                        });
+                        })
+                        .await;
                         crate::terminal_stop::remove_marker(home, &marker.uuid);
                     }
                     // Non-fatal: leave the marker so the next tick retries.

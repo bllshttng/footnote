@@ -1009,6 +1009,7 @@ mod tests {
             .join("work");
         std::fs::create_dir_all(&projects).unwrap();
         let staged = quiet_transcript(&projects, "present-1111-2222-3333-444444444444");
+        let old_home = std::env::var_os("HOME");
         std::env::set_var("HOME", store_home.path());
         let present = row(
             "present1",
@@ -1058,7 +1059,10 @@ mod tests {
             absent_event["data"]["resumable_basis"], "no-transcript",
             "{absent_event}"
         );
-        let _ = std::env::remove_var("HOME");
+        match &old_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
