@@ -229,6 +229,7 @@ pub mod spawn_payload;
 pub mod state;
 pub mod state_path;
 pub mod stream_worker;
+pub mod stuck_work;
 pub mod subprocess_ask;
 pub mod subscribe;
 pub mod supervisor;
