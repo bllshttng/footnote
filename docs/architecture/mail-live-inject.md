@@ -39,7 +39,7 @@ message text
 </fno_mail>
 ```
 
-`from` holds the sender's FULL session id when one is proven (the collision-safe reply address), falling back to the compact handle for an unregistered sender. `id` is the load-bearing field (`reply --to`, drain dedup, `reply_to` threading). `from_rank` and `to_rank` are live crowns read from the registry at render time; `to_rank="none"` means a resolved reader with no crown in a crowned fleet. Non-peer origins render `origin="..."` as the last attribute. An absent origin reads as peer on both the Python and Rust doors. `model` renders nowhere, and the bus record keeps it for audit. The envelope carries no footer lines of any kind: only fno writes the tag, so the tag itself marks agent text.
+When one is proven, `from` holds the sender's FULL session id (the collision-safe reply address), falling back to the compact handle for an unregistered sender. `id` is the load-bearing field (`reply --to`, drain dedup, `reply_to` threading). `from_rank` and `to_rank` are live crowns read from the registry at render time. `to_rank="none"` means a resolved reader with no crown in a crowned fleet. Non-peer origins render `origin="..."` as the last attribute. An absent origin reads as peer on both the Python and Rust doors. `model` renders nowhere, and the bus record keeps it for audit. The envelope carries no footer lines of any kind: only fno writes the tag, so the tag itself marks agent text.
 
 The delivered turn records itself in the recipient transcript. The hosted audit row adds provider-neutral sender history without creating pending mail.
 

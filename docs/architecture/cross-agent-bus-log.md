@@ -30,7 +30,7 @@ One JSON object per line (`fno.bus.log.Envelope`):
 {"v":1,"id":"msg-3f8f96","ts":"2026-06-07T19:51:32Z","thread":"msg-3f8f96","from":"alice","to":"bob","kind":"send","from_harness":"claude","to_harness":"codex","in_reply_to":"...","delivery":"hosted","word_count":17,"meta":{...},"body":"..."}
 ```
 
-`from` and `to` are canonical registry names, session handles, or project names. `from_harness` and `to_harness` are audit tags, never addresses (x-f1f0 renamed them from `provider_from`/`provider_to`; the reader still accepts the old keys on stored rows). Reply correlation uses `request_id` and `in_reply_to` independently of harness tags.
+`from` and `to` are canonical registry names, session handles, or project names. `from_harness` and `to_harness` are audit tags, never addresses (x-f1f0 renamed them from `provider_from`/`provider_to`, and the reader still accepts the old keys on stored rows). Reply correlation uses `request_id` and `in_reply_to` independently of harness tags.
 
 `word_count` stores the authored body's send-time count under the pure Rule 7 masking rules. It is never recomputed from a stored `<fno_mail>` wrapper.
 
@@ -113,7 +113,7 @@ to_rank="L1 fno"     (or to_rank="none")
 
 `from_rank` is the sender's verified crown. The Rust injection door refuses a payload whose `from_rank` does not match the live registry read for its sender. `to_rank` names the RECIPIENT's own crown. `from_rank` and `to_rank` name verified standing, never authority: they are a display of who holds what, not a grant.
 
-Two gates, in order, for `to_rank`. With no resolved recipient session id, the attribute is omitted: `none` is a positive claim about the reader's authority, and an unresolved address is an absence rather than a reading. A crownless fleet (`fleet_has_crown()` false) omits it too, so those envelopes stay byte-unchanged. An unreadable registry omits it as well, because `fleet_has_crown()` fails open while the crown read fails closed, and the two alone would tell a live king it had been deposed.
+Two gates, in order, for `to_rank`. With no resolved recipient session id, the attribute is omitted. `none` is a positive claim about the reader's authority, and an unresolved address is an absence rather than a reading. A crownless fleet (`fleet_has_crown()` false) omits it too, so those envelopes stay byte-unchanged. An unreadable registry omits it as well. `fleet_has_crown()` fails open while the crown read fails closed. The two alone once told a live king it had been deposed, so an unreadable registry claims nothing.
 
 ## Job-address lane
 
