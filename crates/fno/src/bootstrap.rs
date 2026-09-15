@@ -201,7 +201,7 @@ fn run(args: &[OsString]) -> BootResult<()> {
     // side by side, and that adjacent CLI is the complete install. Probing it
     // before the uv tool dir keeps a Homebrew (or pip) user off the uv path -
     // otherwise `fno <verb>` downloads uv and installs a SECOND copy of the
-    // wheel, and fails outright offline (x-538e review P2). Verified like any
+    // wheel, and fails outright offline (review P2). Verified like any
     // other target: the sibling's shebang names the interpreter whose metadata
     // answers the identity probe. An instrument failure falls through to the
     // uv arm below; a verifiable stranger is refused on the first pass, same
@@ -2803,7 +2803,7 @@ mod tests {
         assert_eq!(strip_ansi("/plain/path"), "/plain/path");
     }
 
-    // -- x-538e: the packaged-sibling resolution arm ------------------------
+    // --: the packaged-sibling resolution arm ------------------------
 
     fn write_script(path: &Path, body: &str) {
         fs::write(path, body).unwrap();

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# x-d285 repro: route and account binding survive every Claude re-entry.
+# repro: route and account binding survive every Claude re-entry.
 #
 # Builds a scratch world with NO real credentials - a fake `claude` binary on
 # PATH, an isolated account record, a route file carrying a sentinel secret -

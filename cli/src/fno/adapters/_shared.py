@@ -6,7 +6,7 @@ The Protocol's three primitives (spawn_worker, call_api, health) stay
 per-adapter because they DO depend on the CLI.
 
 Worktree path: ``~/.fno/worktrees/{project_id}-{name}/`` (Plan
-ab-3180b3f4). The legacy ``.claude/worktrees/{name}/`` location is
+). The legacy ``.claude/worktrees/{name}/`` location is
 detected only for branch-reuse purposes (AC7) - new worktrees always
 land at the canonical location.
 """

@@ -66,7 +66,7 @@ class Sidecar(BaseModel):
     # so selection must drop it; cleared on abandon). Selection fact the
     # tracker cannot express.
     batch: Optional[str] = None
-    # Delivery-unit containment (x-e957): this node's work ships inside
+    # Delivery-unit containment: this node's work ships inside
     # another node's PR, so it is not separately dispatchable. Selection
     # fact the tracker cannot express.
     contained_in: Optional[str] = None

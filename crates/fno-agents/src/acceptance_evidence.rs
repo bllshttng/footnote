@@ -6,7 +6,7 @@
 //! `evaluate_done_probes`) and `close_probes` (node closure, shelled by the
 //! close verbs). The `acceptance_evidence` frontmatter binds a compiled AC id
 //! to a probe index, so a criterion's satisfaction is MEASURED by a fresh run
-//! with its own positive marker, never witnessed (x-d098).
+//! with its own positive marker, never witnessed.
 //!
 //! Terminal scoping: a binding names its list, and each terminal validates and
 //! evaluates only its own scope. `done_probes` evidence stops a session;
@@ -737,7 +737,7 @@ pub(crate) fn evaluate_done_probes(
     }
 }
 
-// ── acceptance evidence bindings (x-d098) ────────────────────────────
+// ── acceptance evidence bindings ────────────────────────────
 //
 // `acceptance_evidence` frontmatter: a compiled AC id wired to one probe by
 // index, so the loop gates report criterion-level coverage instead of leaving
@@ -1896,7 +1896,7 @@ mod done_probe_tests {
         );
     }
 
-    // ── project-level done_probes (x-a534) ────────────────────────────────
+    // ── project-level done_probes ────────────────────────────────
     //
     // A repo-wide guardrail must apply to every plan in the repo, and no plan
     // doc may switch it off - a guard on one of two reachable paths is
@@ -2102,7 +2102,7 @@ mod done_probe_tests {
 
 #[cfg(test)]
 mod acceptance_evidence_tests {
-    // x-d098: bindings parse fail-closed, validate structurally, and evaluate
+    // bindings parse fail-closed, validate structurally, and evaluate
     // to criterion-level coverage in the probe-run payload and the session
     // gate's event map.
     use super::*;

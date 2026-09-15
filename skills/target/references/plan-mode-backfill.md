@@ -36,7 +36,7 @@ step, so a declined confirm leaves the sidecar re-offerable (AC1-FR).
   approved; a kept-planning / rejected exit fires `PermissionDenied` (a
   different event the matcher never sees). So a fire here ALREADY means approval
   — the event type is the discriminator, not a field (source-confirmed,
-  `ab-588650c7`; see `docs/architecture/target-plan-mode-integration.md`).
+  ``; see `docs/architecture/target-plan-mode-integration.md`).
 - Captures on every fire, SKIPPING only on the one real "not approved yet"
   signal: `tool_response.awaitingLeaderApproval == true` (teammate plan
   submitted to a team lead). The `Output` has no `approved` / `decision` /

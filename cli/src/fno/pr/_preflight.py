@@ -400,7 +400,7 @@ def verification_event_paths(*, cwd: Optional[str] = None) -> tuple[list[Path], 
         errors.append(f"repository root discovery failed: {exc}")
     # project_log, not a hand-built checkout path: the coverage reader resolves
     # the space journal, so a hand-built path scans a dead file and reports
-    # every PR unreviewed (x-d2e9).
+    # every PR unreviewed.
     paths = [global_events_json(), project_log("events.jsonl", project_root=root)]
     try:
         raw = json.loads(ledger_json().read_text(encoding="utf-8"))

@@ -1,4 +1,4 @@
-//! `fno mux serve --web` (x-6a14): the read-only web bridge.
+//! `fno mux serve --web` : the read-only web bridge.
 //!
 //! A pure client. It attaches to a running mux session over the same per-session
 //! unix socket the native TUI uses, as an OBSERVER (`Attach { rows: 0, cols: 0 }`,
@@ -152,7 +152,7 @@ fn reign_html_path() -> PathBuf {
     }
 }
 
-/// The bridge's live-state marker (x-b80d): `web-<session>.json` beside the
+/// The bridge's live-state marker: `web-<session>.json` beside the
 /// session socket, holding the bind/port/token the bind-time print showed
 /// once. Written 0600 (the token is the only URL guard); removed by `Drop`
 /// on every exit path. A SIGKILLed bridge leaves it behind - the reader
@@ -181,7 +181,7 @@ pub(crate) fn web_state_path_for_session(session: &str) -> Option<PathBuf> {
     web_state_path(&proto::socket_path(session).ok()?)
 }
 
-/// Read a session's web-bridge state file (x-b80d) and build the pasteable
+/// Read a session's web-bridge state file and build the pasteable
 /// per-pane URL. The bridge writes `web-<session>.json` at bind; a file whose
 /// port no longer answers is a corpse, not a bridge, so the TCP probe - not
 /// the file's existence - decides liveness. Exit codes follow the mux verbs'
@@ -233,7 +233,7 @@ pub(crate) fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
         eprintln!("{verb}: {hint}");
         return 1;
     }
-    // Bracket a literal IPv6 host; a bare ::1 in a URL truncates at the colon.
+    // Bracket a literal IPv6 host; a bare::1 in a URL truncates at the colon.
     let url_host = if host.contains(':') {
         format!("[{host}]")
     } else {
@@ -682,7 +682,7 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
             "  bound to all interfaces - reach it over tailscale/LAN; the URL token is the only guard."
         );
     }
-    // (x-b80d) Record the live bridge so `mux view <selector> --url` can
+    // Record the live bridge so `mux view <selector> --url` can
     // recover the URL after this one print. A write failure only costs the
     // --url door (it reports "no web bridge"), never the bridge itself; a
     // file left behind by a killed bridge is inert because the reader probes
@@ -709,7 +709,7 @@ async fn run(args: WebArgs, socket: PathBuf) -> i32 {
         .with_graceful_shutdown(async move {
             // Ctrl-C is the NORMAL way a bridge ends. Without this hook the
             // process dies straight to the signal, no Drop runs, and the
-            // state file outlives its bridge (x-b80d). Firing the watch makes
+            // state file outlives its bridge. Firing the watch makes
             // every ws loop close its tab first, so graceful shutdown can
             // actually complete instead of waiting out an open connection.
             let _ = tokio::signal::ctrl_c().await;
@@ -1396,7 +1396,7 @@ mod tests {
         assert_eq!(v["_bridge"]["state"], "disconnected");
     }
 
-    /// The served page must stay pinch-zoomable (x-ce65). A pane grid is as wide
+    /// The served page must stay pinch-zoomable. A pane grid is as wide
     /// as its terminal, so on a phone zooming is the only way to read a grid
     /// wider than the screen; `maximum-scale` / `user-scalable=no` take that away.
     /// Anchored on the meta line itself, so a page that lost the tag entirely
@@ -1449,7 +1449,7 @@ mod tests {
         panic!("unbalanced braces lifting {name}()");
     }
 
-    /// The retention diff (x-ce65) decides how many rows scrolled off between
+    /// The retention diff decides how many rows scrolled off between
     /// two frames, and getting it wrong silently corrupts what the operator
     /// reads as recent output. Exercise the SHIPPED source, not a Rust
     /// re-implementation, by running the lifted function under node.
@@ -1566,7 +1566,7 @@ console.log("evictedRowCount: 18 cases ok");
         }
     }
 
-    /// The page must keep calling retention what it is (x-ce65). A protocol
+    /// The page must keep calling retention what it is. A protocol
     /// history request is unreachable while `writer.forget()` stands, so the
     /// visible label must not promise scrollback the wire never carries.
     #[test]
@@ -1581,7 +1581,7 @@ console.log("evictedRowCount: 18 cases ok");
         );
     }
 
-    /// Fit-to-width is client-side only (x-ce65). The bridge attaches passive
+    /// Fit-to-width is client-side only. The bridge attaches passive
     /// with rows==0/cols==0 so it never shrinks a PTY, and `writer.forget()`
     /// leaves no upstream handle. A page that learned to ask for a resize would
     /// collapse every terminal user's pane to phone width.

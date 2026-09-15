@@ -2,7 +2,7 @@
 # Regression gate for the /spec -> /blueprint rename sweep.
 #
 # The skill was renamed from /spec to /blueprint in db2d43a1 (produce -> blueprint).
-# A follow-up sweep (ab-cdf21e76, 2026-05-18) cleared 117 stale /spec references
+# A follow-up sweep (2026-05-18) cleared 117 stale /spec references
 # from skills/, agents/, commands/, docs/, AGENTS.md, and CLAUDE.md. This check
 # prevents the dead name from creeping back in via doc copy-paste or generated
 # templates that lift stale patterns from memory / git log.

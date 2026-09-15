@@ -1,4 +1,4 @@
-//! The fallback-chain walk (x-8975 budget port of the failover walk).
+//! The fallback-chain walk (budget port of the failover walk).
 //!
 //! Python resolves config and paths (the compatibility shell): it serializes
 //! the chain links as raw config tables, the spent link ids, and each
@@ -260,7 +260,7 @@ fn type_name(v: &Value) -> &'static str {
 
 /// The worst headroom verdict across the link's accounts. Callers that must
 /// treat UNKNOWN differently from exhausted (the provider-cap destination
-/// filter, x-7e05 trap 3) read this instead of the collapsed bool.
+/// filter, trap 3) read this instead of the collapsed bool.
 fn worst_link_verdict(
     link: &Value,
     accounts: Option<&Value>,

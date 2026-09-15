@@ -1,4 +1,4 @@
-"""Plan-vs-reality reconciliation delta (x-a7be, change C).
+"""Plan-vs-reality reconciliation delta (change C).
 
 Cheap, advisory heuristics that answer "is this plan stale?" for the target
 orientation report. NOT a gate -- printed for the agent's judgment, never an

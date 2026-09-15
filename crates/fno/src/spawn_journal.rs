@@ -1,4 +1,4 @@
-//! The spawn-journal read that restore classifies against (x-7b5e, x-9052):
+//! The spawn-journal read that restore classifies against :
 //! the still-held spawn receipts, their revocations, and the never-bound
 //! removal markers, walked in file order across rotated segments. Extracted
 //! from server.rs under the file budget's shrink-only rule; the question the
@@ -18,7 +18,7 @@ pub(crate) struct HeldWorker {
     pub(crate) cwd: String,
 }
 
-/// (x-1b90) What a resumable `agent_row_reaped` event recorded: the identity
+/// What a resumable `agent_row_reaped` event recorded: the identity
 /// the receipt is read back through, the reap instant, and the work-done
 /// verdict. Keyed by worker NAME in `JournalEvents::reaped`, recency-guarded
 /// against the name's last spawn - a reap newer than the spawn is the newer
@@ -116,7 +116,7 @@ impl DetachedPane {
     }
 }
 
-/// (x-d285) The canonical re-entry verdict a mux gesture consumes, parsed from
+/// The canonical re-entry verdict a mux gesture consumes, parsed from
 /// `fno-agents reentry-plan`'s JSON. `argv` is the provider invocation (ids
 /// and file PATHS only - never a settings value), `env` the `KEY=VALUE`
 /// assignments (the account's `CLAUDE_CONFIG_DIR`) that prefix it through
@@ -200,7 +200,7 @@ impl ReentryVerdict {
     }
 }
 
-/// (x-d285) What the core loop re-enters once a gesture's re-entry plan
+/// What the core loop re-enters once a gesture's re-entry plan
 /// arrives. The gesture arms re-run with the verdict in hand: every gate
 /// (shape, catalog, reconcile-focus, placement) is an idempotent read, so the
 /// second pass makes exactly the placement decision the first pass would
@@ -221,7 +221,7 @@ pub(crate) enum ReentrySpawnRequest {
     FocusHeld { pid: u64 },
 }
 
-/// (x-d285) What a batch re-enters once its pre-resolved plans land. The
+/// What a batch re-enters once its pre-resolved plans land. The
 /// single-verdict slot covers one-gesture-one-spawn replays; a batch is
 /// N spawns under one gesture, so its plans arrive keyed by attach id and
 /// this names the loop that consumes them. Every gate inside those loops
@@ -257,11 +257,11 @@ pub(crate) fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldW
 pub(crate) struct JournalEvents {
     pub(crate) receipts: HashMap<(String, String), HeldWorker>,
     pub(crate) never_bound: HashMap<String, String>,
-    /// (x-1b90) Worker names whose newest journal fact is a resumable reap.
+    /// Worker names whose newest journal fact is a resumable reap.
     /// The receipt stays held (the worker must stay resumable); this map is
     /// the newer-fact read that lets a prune release the pane.
     pub(crate) reaped: HashMap<String, ReapedMarker>,
-    /// (x-688b) Every name an `agent_spawned` event ever recorded - the
+    /// Every name an `agent_spawned` event ever recorded - the
     /// population a registry read is checked against for reaped rows.
     pub(crate) spawned_names: std::collections::HashSet<String>,
 }
@@ -283,7 +283,7 @@ pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
     // a dead name that came back to life.
     let mut last_spawn: HashMap<String, usize> = HashMap::new();
     let mut removals: HashMap<String, (usize, String)> = HashMap::new();
-    // (x-1b90) Resumable reap markers, recency-guarded after the walk like
+    // Resumable reap markers, recency-guarded after the walk like
     // the never-bound markers: a spawn line AFTER the reap revives the name.
     let mut reaped_raw: HashMap<String, (usize, ReapedMarker)> = HashMap::new();
     for (idx, line) in raw.lines().enumerate() {
@@ -358,7 +358,7 @@ pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
                 }
             }
             Some("registry_row_removed") => {
-                // (x-6b0b) A worker name the journal positively records as
+                // A worker name the journal positively records as
                 // never bound: the row's own session field is absent or empty
                 // and the reason names the missing identity. An
                 // `agent_removed` row with a null session is deliberately NOT
@@ -454,7 +454,7 @@ pub(crate) fn parse_journal_events(raw: &str) -> JournalEvents {
     }
 }
 
-/// (x-688b) The names with a still-held spawn receipt: these workers are
+/// The names with a still-held spawn receipt: these workers are
 /// resumable, so registry absence must never read as their death.
 pub(crate) fn held_worker_names(
     receipts: &HashMap<(String, String), HeldWorker>,
@@ -462,7 +462,7 @@ pub(crate) fn held_worker_names(
     receipts.values().map(|r| r.name.clone()).collect()
 }
 
-/// (x-6b0b) Worker names the journal positively records as never bound, with
+/// Worker names the journal positively records as never bound, with
 /// the removal reason each carries.
 #[cfg(test)]
 pub(crate) fn parse_never_bound_removals(raw: &str) -> HashMap<String, String> {
@@ -492,7 +492,7 @@ fn spawn_receipt_segments(dir: &std::path::Path, stem: &str) -> Vec<std::path::P
 }
 
 /// What one pass over the agent journal yields for restore: the still-held
-/// spawn receipts, the never-bound removal markers (x-6b0b), and the first
+/// spawn receipts, the never-bound removal markers, and the first
 /// read error. Segments are concatenated OLDEST FIRST before parsing, because
 /// `parse_spawn_receipts` revokes in file order - a revocation in the live
 /// file must land on a receipt from `.1`, and reading newest-first would
@@ -615,7 +615,7 @@ fn segment_stamps(live: &std::path::Path) -> Vec<(std::path::PathBuf, std::time:
         .collect()
 }
 
-/// (x-6b0b) The journal's retained segments plus the live file, concatenated
+/// The journal's retained segments plus the live file, concatenated
 /// OLDEST FIRST and newline-terminated per segment, with the first read
 /// error. Shared with the mux CLI's prune evidence (`member_evidence`), so
 /// the sweep modal and the CLI apply read the same durable rows the server
@@ -1108,7 +1108,7 @@ mod tests {
         );
     }
 
-    /// (x-688b) The reaped-row rule's input: every name an `agent_spawned`
+    /// The reaped-row rule's input: every name an `agent_spawned`
     /// event ever recorded, whether or not the spawn minted a receipt (a
     /// pane-substrate spawn with no session id is still a spawned worker the
     /// registry-absence check must see).

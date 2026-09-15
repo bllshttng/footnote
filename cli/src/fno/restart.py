@@ -1,4 +1,4 @@
-"""fno agents restart - restart running fno processes onto freshly-installed binaries (x-69b3).
+"""fno agents restart - restart running fno processes onto freshly-installed binaries.
 
 `fno doctor update && fno agents restart` is the reboot loop: `update` installs new binaries,
 `restart` swaps the RUNNING processes onto them.
@@ -13,7 +13,7 @@
 - Worker panes: killing a mux server ends the worker PTYs it hosted. A
   keeper-hosted pane outlives the kill and is re-adopted with the same pid;
   `fno mux workspace restore` brings back what a workspace held. There is no
-  respawn lane here (x-a6b9: the claude-only revive leg is deleted).
+  respawn lane here (: the claude-only revive leg is deleted).
 """
 from __future__ import annotations
 
@@ -180,7 +180,7 @@ def restart_command(
                 continue
             state = s.get("state")
             if state == "wedged":
-                # A wedged server holds its socket but never accepts (x-82c6):
+                # A wedged server holds its socket but never accepts:
                 # a broken server, NOT a benign non-live socket.
                 wedged.append(s)
             elif state != "live":
@@ -188,7 +188,7 @@ def restart_command(
             else:
                 live_rows.append(s)
                 live.append(s["session"])
-                # (x-1a85) A stale-wire live server is below the compatibility
+                # A stale-wire live server is below the compatibility
                 # floor. A pane-less one still heals pair-deploy skew
                 # automatically. A server with live panes is spared because
                 # killing it closes their PTYs; --mux remains the deliberate
@@ -228,7 +228,7 @@ def restart_command(
                 )
                 # Sparing is deliberate, but the fleet is NOT healed: an exit 0
                 # here lets automation conclude the skew was cleared, the same
-                # ok:true lie the wedged rows stopped telling (x-82c6).
+                # ok:true lie the wedged rows stopped telling.
                 failures.append(
                     f"mux: {row['session']} spared (stale wire, "
                     f"{row.get('panes') or 0} live pane(s)); --mux forces"
@@ -292,7 +292,7 @@ def restart_command(
     if json_out:
         typer.echo(json.dumps(result))
     else:
-        # One honest verdict line, always last on stdout (x-f188).
+        # One honest verdict line, always last on stdout.
         if failures:
             typer.echo(f"fno agents restart: FAILED - {'; '.join(failures)}")
         else:

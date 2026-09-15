@@ -194,7 +194,7 @@ if [[ -f "$_REMOVAL_EVENT_LIB" ]]; then
   source "$_REMOVAL_EVENT_LIB"
 fi
 
-# The occupancy classifier bridge (x-0396). A partial deploy that dropped it
+# The occupancy classifier bridge. A partial deploy that dropped it
 # reads every pid as holds, which keeps today's confirm-or-decline path.
 _OCCUPANCY_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-occupancy.sh"
 if [[ -f "$_OCCUPANCY_LIB" ]]; then
@@ -538,7 +538,7 @@ if [[ "$CWD_SNAPSHOT_OK" -ne 1 ]]; then
   exit 2
 fi
 
-# Removal-time classification (x-0396). The sweep's step-4 read is a moment
+# Removal-time classification. The sweep's step-4 read is a moment
 # old; this re-enumeration is authoritative. All-inert rows release the tree:
 # only terminate rows are signalled here, retire rows are the sweep's claude
 # rm business. Any holds row - including a classifier that cannot answer,

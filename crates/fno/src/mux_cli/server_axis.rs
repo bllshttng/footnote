@@ -1,4 +1,4 @@
-//! The server axis (x-f209): which mux server does this call address?
+//! The server axis : which mux server does this call address?
 //! One server is one socket and its workspaces; a session is one harness
 //! transcript. `--server` / `FNO_SERVER` name the axis, and the retired
 //! `--session` / `FNO_SESSION` spellings stay as aliases that work and warn,
@@ -8,7 +8,7 @@
 
 use crate::proto::DEFAULT_SESSION;
 
-/// The mux server axis, ruled 2026-09-10 (x-f209): a server is one socket and
+/// The mux server axis, ruled 2026-09-10: a server is one socket and
 /// its workspaces; a session is one harness transcript. `FNO_SESSION` and
 /// `--session` stay as deprecated aliases that work and warn, because live
 /// worker payloads and long-running servers still send the old spellings.

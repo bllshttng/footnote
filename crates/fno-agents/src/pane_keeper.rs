@@ -644,7 +644,7 @@ fn serve_client(
                             if let Some(value) = keeper.identify.get() {
                                 let mut value = value.clone();
                                 value["subscriber"] = serde_json::json!(is_subscriber);
-                                // Build + drift merged at reply time (x-f188
+                                // Build + drift merged at reply time (
                                 // change 3): live re-stat, not a startup
                                 // snapshot, so a rewritten binary reads
                                 // drifted in the next census while the

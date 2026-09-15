@@ -1,4 +1,4 @@
-"""In-package port of ``scripts/lib/rebase-resolve.sh`` (ab-d4c98550, US3).
+"""In-package port of ``scripts/lib/rebase-resolve.sh`` (US3).
 
 Two-phase rebase with the conflict-delegation protocol. The exit-code contract
 is load-bearing for skill orchestration (a caller dispatches the
@@ -298,7 +298,7 @@ def run_rebase(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         _emit("failed", base, {"reason": "git CLI not found"})
         return 1
     if rc == 0:
-        # Advisory-only nudge (x-91b5, AC1-UI): a hand-rebase is a common
+        # Advisory-only nudge (AC1-UI): a hand-rebase is a common
         # stale-base escape the loop should have caught. The nudge NEVER emits
         # on its own - it just prints the copy-paste tag line so retro's
         # autonomy-debt ranking can see stale-base interventions the operator

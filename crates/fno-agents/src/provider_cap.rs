@@ -1,4 +1,4 @@
-//! The provider cap actor (x-7e05).
+//! The provider cap actor.
 //!
 //! A provider usage cap strands every session on the lane: nothing notices,
 //! decides, moves them, or brings them back. The trigger half already exists
@@ -355,7 +355,7 @@ fn runtime_state_path_from(
 /// Where the quota lock lives. Ports Python's `paths.runtime_state_json()`
 /// (paths.py:1108): `FNO_RUNTIME_STATE_PATH` when set; else the configured
 /// `state_dir` when its RAW value is absolute (a relative one falls back to
-/// `$HOME/.fno` in Python, never the cwd); else `$HOME/.fno`. Before x-6412
+/// `$HOME/.fno` in Python, never the cwd); else `$HOME/.fno`. Before
 /// this defaulted to `runtime-state.json`, a file nobody writes, so every
 /// reset read as unknown.
 pub fn runtime_state_path(cwd: &Path) -> PathBuf {
@@ -718,11 +718,11 @@ pub fn questions_path(home: &AgentsHome) -> PathBuf {
 
 // ---------------------------------------------------------------------------
 // Tests. Fixtures quote the REAL 429 assistant tail measured on this machine
-// (x-a13e worktree transcript, 2026-08-17).
+// (worktree transcript, 2026-08-17).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Leaving (x-7e05 wave 3): short waits hold, sleep hours decide, else ask.
+// Leaving (wave 3): short waits hold, sleep hours decide, else ask.
 // ---------------------------------------------------------------------------
 
 /// True when `now_epoch` falls inside `cfg.sleep_hours` ("HH:MM-HH:MM")
@@ -950,7 +950,7 @@ pub fn journal(home: &AgentsHome, lane: &str, epoch: i64, step: &Value) {
 }
 
 // ---------------------------------------------------------------------------
-// Returning (x-6412): one canary, a survive window, then a trickle.
+// Returning: one canary, a survive window, then a trickle.
 // ---------------------------------------------------------------------------
 
 /// The operator's veto window after the return announcement (a constant; no
@@ -1021,7 +1021,7 @@ fn return_candidates(home: &AgentsHome, lane: &CapLane) -> Vec<CapMember> {
 }
 
 // ---------------------------------------------------------------------------
-// Leaving: execution (x-7e05 wave 3). Deps are injected so the ladder runs
+// Leaving: execution (wave 3). Deps are injected so the ladder runs
 // against fakes in tests and shells out to fno in the armed daemon path.
 // ---------------------------------------------------------------------------
 
@@ -1403,7 +1403,7 @@ pub struct LeaveDeps {
     /// Stop the old session and release its node claim.
     pub stop: Box<dyn Fn(&CapMember) -> Result<(), String>>,
     /// Bring one stranded member back through the harness's own resume
-    /// path (x-6ac3: exit 0 is the confirmed receipt). The canary and the
+    /// path (: exit 0 is the confirmed receipt). The canary and the
     /// trickle both resume through this leg.
     pub resume: Box<dyn Fn(&CapMember) -> Result<(), String>>,
     /// Announce the return, with the veto instruction in the body.
@@ -2336,7 +2336,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Wave 4 (x-6412): the reset reads the file Python writes, and a passed
+    // Wave 4: the reset reads the file Python writes, and a passed
     // reset survives as `returning`.
     // -----------------------------------------------------------------------
 
@@ -2491,7 +2491,7 @@ mod tests {
         assert_eq!(lane.reset_epoch, None);
     }
     // -----------------------------------------------------------------------
-    // Wave 4 return ladder (x-6412): fake deps, real state files.
+    // Wave 4 return ladder: fake deps, real state files.
     // -----------------------------------------------------------------------
 
     fn member_fix(name: &str, ts: Option<i64>, capped: bool) -> CapMember {

@@ -14,7 +14,7 @@
 //! view state - never on the wire (Locked Decision 15).
 //!
 //! Every error surface while the compositor owns the terminal goes through
-//! the rendered UI (tab-bar notice + BEL), never stderr (x-0175 pitfall).
+//! the rendered UI (tab-bar notice + BEL), never stderr (pitfall).
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -81,7 +81,7 @@ const ATTACH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Sideline width in columns at [`Density::Regular`], divider column included.
 /// Client-local chrome: the server sees only the content-area viewport.
 const PANEL_W: u16 = 28;
-/// (x-b186) The [`Density::Slim`] rail width. FIXED rather than fitted to the
+/// The [`Density::Slim`] rail width. FIXED rather than fitted to the
 /// widest header: a rail that resized itself as squads came and went would
 /// shift the content area on unrelated events, and `header_band_text` already
 /// degrades a too-long header gracefully (rollup pairs drop from the
@@ -89,7 +89,7 @@ const PANEL_W: u16 = 28;
 /// workspace name plus a rollup pair, which is what makes slim legible rather
 /// than blind.
 const SLIM_PANEL_W: u16 = 16;
-/// (x-b186) The narrowest slim rail. Below this the sideline finally hides, but
+/// The narrowest slim rail. Below this the sideline finally hides, but
 /// between here and [`SLIM_PANEL_W`] it clamps - a rail that disappeared on a
 /// narrow terminal would contradict the one thing slim promises.
 const MIN_SLIM_PANEL_W: u16 = 8;
@@ -181,7 +181,7 @@ impl TableLayout {
     }
 }
 
-/// (x-b186) The full extended-table panel width (every column plus the divider),
+/// The full extended-table panel width (every column plus the divider),
 /// what entering `Extended` widens to before any clamp.
 const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 1;
 /// The narrowest useful extended panel: fixed status/PR/age cells, a readable
@@ -189,8 +189,8 @@ const EXTENDED_PANEL_W: u16 = COL_STATUS + COL_PR + COL_TIME + 54 + 1;
 /// eight-column floor; age is never dropped from an admitted table.
 const MIN_EXTENDED_PANEL_W: u16 = COL_STATUS + COL_MIN_NAME + COL_PR + COL_TIME + 1;
 
-/// (x-b186) Columns the top-right density button reserves on the sideline's
-/// first row: the state glyph plus a trailing pad (x-2e86) so it does not sit
+/// Columns the top-right density button reserves on the sideline's
+/// first row: the state glyph plus a trailing pad so it does not sit
 /// flush against the divider.
 const DENSITY_BTN_W: usize = 2;
 /// The tab bar row.
@@ -200,7 +200,7 @@ const STATUS_ROWS: u16 = 1;
 /// Below this many terminal rows the bottom chrome (status row + which-key
 /// hint) auto-hides and the content area recovers the line (AC4-ERR).
 const MIN_ROWS_FOR_STATUS: u16 = TAB_BAR_ROWS + STATUS_ROWS + 5;
-/// The sideline footer's `+ new` and `☰ menu` labels (x-8ccf US4). The menu
+/// The sideline footer's `+ new` and `☰ menu` labels (US4). The menu
 /// button rides the existing new-workspace footer row's right edge when the
 /// panel is wide enough (see [`View::footer_menu_range`]).
 const FOOTER_NEW_LABEL: &str = "+ new workspace";
@@ -208,7 +208,7 @@ const FOOTER_MENU: &str = "☰ menu";
 /// How long a pending prefix chord waits before the which-key hint paints
 /// (US4, AC4-HP). `prefix+?` shows the full table instantly instead.
 const HINT_DELAY: Duration = Duration::from_millis(400);
-/// (x-e10f fix) How long a held global-chord candidate (a lone Esc so far)
+/// (fix) How long a held global-chord candidate (a lone Esc so far)
 /// waits for the chord's remaining bytes before flushing to the pane - the
 /// tmux escape-time analog. A terminal delivers a whole CSI in one read, so
 /// anything still pending after this window is a bare Esc (or a torn write
@@ -216,7 +216,7 @@ const HINT_DELAY: Duration = Duration::from_millis(400);
 /// until the next keystroke. 40ms: far above intra-CSI byte gaps, far below
 /// the latency a typist feels.
 const CHORD_FLUSH_AFTER: Duration = Duration::from_millis(40);
-/// (x-cf97) How long a held tab number waits for the next digit before
+/// How long a held tab number waits for the next digit before
 /// resolving - the tmux escape-time analog for a typed number. Far above an
 /// inter-keystroke gap (so `3` then `4` lands tab 34, never 3 then 4), short
 /// enough that a one-digit jump feels immediate. Enter always resolves now.
@@ -225,7 +225,7 @@ const DIGIT_FLUSH_AFTER: Duration = Duration::from_millis(400);
 /// The client-side pane identity overlay follows the scanner's repeat grace.
 pub const PANE_ID_REVEAL_WINDOW: Duration = PANE_IDS_REPEAT_WINDOW;
 
-/// (x-c5ee) The top-K live-row cap per rendered squad: attention rows
+/// The top-K live-row cap per rendered squad: attention rows
 /// (Blocked/Working/DoneUnseen) always render, then idle rows fill up to this
 /// many LIVE rows total; the idle overflow folds into one `+N more` row. Sized
 /// a little above a typical attention set so the common squad emits no fold.
@@ -233,7 +233,7 @@ pub const PANE_ID_REVEAL_WINDOW: Duration = PANE_IDS_REPEAT_WINDOW;
 const SQUAD_ROW_CAP: usize = 8;
 
 /// How long the pointer must settle on one new pane before focus follows it
-/// (x-a496). 1003 reports every crossed cell, so a fast sweep produces a burst;
+///. 1003 reports every crossed cell, so a fast sweep produces a burst;
 /// only a pane that stays under the pointer this long steals focus, coalescing
 /// the burst to one `FocusPane` for the pane the pointer lands on.
 const HOVER_DEBOUNCE: Duration = Duration::from_millis(50);
@@ -375,7 +375,7 @@ impl LinkHoverState {
     }
 }
 
-/// How long a seam drag survives with no motion before it expires (x-d807,
+/// How long a seam drag survives with no motion before it expires (
 /// AC7-FR). A drag whose mouse-up never arrives - the terminal lost focus
 /// mid-gesture, or the release was eaten - would otherwise stay latched and
 /// swallow every later mouse event. Generous compared to [`HOVER_DEBOUNCE`]
@@ -383,19 +383,19 @@ impl LinkHoverState {
 /// a stuck-state backstop, not a gesture timer.
 const SEAM_DRAG_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// (x-aa95) The pane grip: a small mark at top-center saying "this pane can be
+/// The pane grip: a small mark at top-center saying "this pane can be
 /// moved". Middle dots rather than ASCII periods so it reads as a handle and
 /// not as truncated text, and three cells so it is findable without eating a
 /// meaningful slice of a narrow pane's title row.
 const GRIP: &str = "···";
 
-/// (x-aa95) How long a relocation drag survives with no motion before it
+/// How long a relocation drag survives with no motion before it
 /// expires. Same backstop role - and so the same duration - as
 /// [`SEAM_DRAG_TIMEOUT`]: a swallowed mouse-up must not leave the client
 /// latched, silently eating every later click.
 const PANE_DRAG_TIMEOUT: Duration = SEAM_DRAG_TIMEOUT;
 
-/// (x-7683) How long a Left press must hold, with no drag, before its release
+/// How long a Left press must hold, with no drag, before its release
 /// opens the context menu instead of the click action - the no-config path for
 /// terminals that never forward a right-click (Terminal.app, an unconfigured
 /// iTerm2, tmux with mouse on). Long enough that an ordinary click never
@@ -406,7 +406,7 @@ const PANE_DRAG_TIMEOUT: Duration = SEAM_DRAG_TIMEOUT;
 /// retune can never leave the help advertising a stale duration.
 pub(crate) const MENU_LONG_PRESS: Duration = Duration::from_millis(500);
 
-/// (x-7683) The one long-press qualification rule, shared by the tab release
+/// The one long-press qualification rule, shared by the tab release
 /// arm, the row release arm, and the dead-drag reaper: a hold that never
 /// moved, past the threshold. One definition so the three surfaces can never
 /// disagree about what a hold is.
@@ -431,7 +431,7 @@ fn run_inner(session: &str) -> Result<i32, String> {
     // dir diverged must say so on every path, not only the happy attach. The
     // write rides the client log, never stderr - we are pre-alternate-screen,
     // and any stderr byte lands in the PTY the harness is about to read as
-    // the TUI (the x-0296 NEVER-stderr rule). The mux dir is ensured first:
+    // the TUI (the NEVER-stderr rule). The mux dir is ensured first:
     // on a fresh state root nothing creates it until connect_or_spawn, and an
     // append to a missing parent silently drops the warning.
     let _ = proto::mux_dir();
@@ -530,7 +530,7 @@ fn log_path(socket: &Path) -> PathBuf {
     socket.with_extension("log")
 }
 
-/// x-0296 CI diagnostics: connect-path breadcrumbs, FNO_E2E-gated, appended
+/// CI diagnostics: connect-path breadcrumbs, FNO_E2E-gated, appended
 /// to `<mux_dir>/client-<pid>.log` (the e2e harness dumps every `*.log` in
 /// its scratch on a timeout). NEVER stderr: pre-TUI stderr reaches the
 /// client's PTY, and any byte there trips the harness's screen-not-empty
@@ -567,17 +567,17 @@ fn spawn_server(path: &Path) -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(log);
-    // Config->env bridge for the interactive path (x-6165). The pure-Rust mux
+    // Config->env bridge for the interactive path. The pure-Rust mux
     // server reads no config.toml, so `config.mux.shell_integration: off` was
     // a silent no-op here (the Python spawn front-half already bridges
-    // dispatched panes, x-b63b). Latch it at server birth: an explicit env
+    // dispatched panes). Latch it at server birth: an explicit env
     // export wins (inherited naturally, never overwritten); otherwise a single
     // bounded `fno config get` decides. Only `off` needs materializing - the
     // server reads absent/anything-else as on (the default).
     if std::env::var_os("FNO_MUX_SHELL_INTEGRATION").is_none() && shell_integration_off() {
         cmd.env("FNO_MUX_SHELL_INTEGRATION", "off");
     }
-    // Same bridge, same reason, for the backlog board's project scope (x-20f1).
+    // Same bridge, same reason, for the backlog board's project scope.
     // Resolving it needs `fno config get`, and the SERVER must not shell out on
     // its startup path: doing so delayed shutdown past the SIGTERM grace and
     // perturbed multiclient frame ordering. The client already pays a bounded
@@ -669,7 +669,7 @@ impl Drop for TerminalGuard {
 // View state + pure composition
 // ---------------------------------------------------------------------------
 
-/// An agent row's hosting-tab context, resolved inside-out (x-0f9d US3): a
+/// An agent row's hosting-tab context, resolved inside-out (US3): a
 /// chosen tab name when the tab is named, else its `·N` ordinal.
 enum TabContext {
     Named(String),
@@ -702,7 +702,7 @@ struct SeamDrag {
     last_at: Instant,
 }
 
-/// (x-2e86) A sideline right-border drag in flight. `start_width` is the width
+/// A sideline right-border drag in flight. `start_width` is the width
 /// at grab, so a bare Esc reverts to it (mirroring [`SeamDrag::start_pos`]);
 /// `last_at` refreshes on every column of motion so a swallowed mouse-up expires
 /// via the same stuck-drag timeout seam and pane drags use (Locked 9).
@@ -712,7 +712,7 @@ struct SidelineDrag {
     last_at: Instant,
 }
 
-/// (x-aa95) Where a drop would put the dragged pane: adjacent to `target` on
+/// Where a drop would put the dragged pane: adjacent to `target` on
 /// its `dir` side.
 ///
 /// A seam and the outer edge beside it collapse to the same shape on purpose -
@@ -726,7 +726,7 @@ struct DropZone {
     dir: Dir,
 }
 
-/// (x-aa95) A pane relocation drag in flight.
+/// A pane relocation drag in flight.
 ///
 /// `zone` is the candidate under the pointer, recomputed per motion report and
 /// kept here so the renderer can light it without re-hit-testing. Purely
@@ -736,7 +736,7 @@ struct DropZone {
 struct PaneDrag {
     mover: u64,
     zone: Option<DropZone>,
-    /// (v43, x-d6a8 G1) The pointer is over the tab strip: the drop breaks the
+    /// (v43, G1) The pointer is over the tab strip: the drop breaks the
     /// pane into its own new tab (`Command::BreakPane`) instead of relocating it
     /// within the tab (`Command::MovePane`). Mutually exclusive with `zone` - a
     /// cell is either the strip or the content area, never both.
@@ -744,7 +744,7 @@ struct PaneDrag {
     last_at: Instant,
 }
 
-/// (v43, x-d6a8 G2) A tab-cell relocation drag in flight: picking a whole tab up
+/// (v43, G2) A tab-cell relocation drag in flight: picking a whole tab up
 /// from the strip to graft it into the current tab's content as a split
 /// (`Command::JoinTab`). Mirrors [`PaneDrag`]'s lifetime (ghost, timeout reaper,
 /// esc-cancel); `zone` is the content-edge candidate under the pointer.
@@ -753,16 +753,16 @@ struct TabDrag {
     src_tab: u64,
     zone: Option<DropZone>,
     last_at: Instant,
-    /// (x-7683) When the press began - the long-press clock, unlike `last_at`
+    /// When the press began - the long-press clock, unlike `last_at`
     /// which motion refreshes.
     start_at: Instant,
-    /// (x-7683) Whether any drag report arrived: a long-press needs a hold
+    /// Whether any drag report arrived: a long-press needs a hold
     /// with NO motion, and the clock alone cannot tell a hold from a slow
     /// drag that ends zone-less.
     moved: bool,
 }
 
-/// (x-10ec) The workspace peek body: everything the layout already holds for
+/// The workspace peek body: everything the layout already holds for
 /// one squad - its origin, its tabs (the active one marked), and its member
 /// rows with their states. Pure and local; no wire round trip.
 fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
@@ -802,7 +802,7 @@ fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
                 PaneState::Blocked => "blocked",
                 PaneState::Working => "working",
                 PaneState::DoneUnseen => "done",
-                // NOT "unread" (x-d401): that word names output nobody has
+                // NOT "unread": that word names output nobody has
                 // looked at, which is `DoneUnseen` - a different row, filed
                 // under "done". A filter typed as `unread` would then return
                 // rows with no liveness reading and EXCLUDE every row that
@@ -822,7 +822,7 @@ fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
     out
 }
 
-/// (v43, x-d6a8 G3) The drag source of a sideline agent row.
+/// (v43, G3) The drag source of a sideline agent row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum RowSource {
     /// A pane-hosted row: the drop moves its pane into the current tab's content,
@@ -833,7 +833,7 @@ enum RowSource {
     Attach(String),
 }
 
-/// (v43, x-d6a8 G3) A sideline-row placement drag in flight. Reuses the
+/// (v43, G3) A sideline-row placement drag in flight. Reuses the
 /// content-area zone vocabulary; `RowSource` carries whether the drop moves a
 /// live pane or attaches a paneless session. Not `Copy` (the attach id is owned).
 #[derive(Clone, Debug)]
@@ -841,10 +841,10 @@ struct RowDrag {
     src: RowSource,
     zone: Option<DropZone>,
     last_at: Instant,
-    /// (x-7683) When the press began - the long-press clock, unlike `last_at`
+    /// When the press began - the long-press clock, unlike `last_at`
     /// which motion refreshes.
     start_at: Instant,
-    /// (x-7683) Whether any drag report arrived: a long-press needs a hold
+    /// Whether any drag report arrived: a long-press needs a hold
     /// with NO motion, and the clock alone cannot tell a hold from a slow
     /// drag that ends zone-less.
     moved: bool,
@@ -864,16 +864,16 @@ struct LayoutView {
     /// under their squads (display-only; never selectable).
     agents: Vec<AgentRow>,
     /// (v10) The focused pane's `FNO_NODE` provenance, for the status-row
-    /// `⚑ <node>` cell (x-66e8). `None` for an ad-hoc pane.
+    /// `⚑ <node>` cell. `None` for an ad-hoc pane.
     focus_node: Option<String>,
-    /// (v11, x-6f77) Board-ordered work-queue cards for the sideline backlog
+    /// (v11) Board-ordered work-queue cards for the sideline backlog
     /// lane; empty when the graph is unreadable or has no ready/blocked/in-flight
     /// work (the lane then renders nothing - the agents section is unaffected).
     backlog: Vec<BacklogCard>,
-    /// (v36, x-1d91) The UNCAPPED per-lane queue-card counts, feeding the
+    /// (v36) The UNCAPPED per-lane queue-card counts, feeding the
     /// section's exact `+N more` and the mini-kanban's lane headers.
     backlog_lanes: Vec<(String, usize)>,
-    /// (v36, x-1d91) `backlog` is last-known rather than current - the graph read
+    /// (v36) `backlog` is last-known rather than current - the graph read
     /// has been failing. Rendered as a header marker; the cards still show (a
     /// blank section would be worse than an honestly-labelled stale one).
     backlog_stale: bool,
@@ -890,7 +890,7 @@ struct SelRow {
     tab: Option<usize>,
 }
 
-/// A live pane badged `blocked` - the answer-queue membership test (x-c929).
+/// A live pane badged `blocked` - the answer-queue membership test.
 /// Shared by every queue read so counting/emptiness checks never clone the rows.
 fn is_blocked_row(a: &AgentRow) -> bool {
     !a.exited && a.badge == Some(AgentBadge::Blocked)
@@ -909,19 +909,19 @@ struct View {
     /// Orthogonal to [`View::density`]: this is visibility, that is how much
     /// each visible row shows. `Slim` is a narrow rail, NOT a hidden panel.
     panel_on: bool,
-    /// (x-b186) Sideline density, persisted by [`crate::view_store`]. Since
-    /// x-2e86 it drives only the row set (via [`View::display_rows`]) and the
+    /// Sideline density, persisted by [`crate::view_store`]. Since
+    /// it drives only the row set (via [`View::display_rows`]) and the
     /// preset width jump - the rendered width is [`View::sideline_width`], an
     /// independent value the border drag sets freely.
     density: Density,
-    /// (x-2e86) The operator's chosen sideline width in columns (the stored
+    /// The operator's chosen sideline width in columns (the stored
     /// intent), independent of the density. Resolved once at startup from the
     /// persisted width, or the density's canonical width when none is stored.
     /// [`View::panel_w`] clamps it to the terminal transiently; this value is
     /// never overwritten by that clamp, so a terminal shrink-then-grow restores
     /// it (AC1-FR).
     sideline_width: u16,
-    /// (x-b186) Extended-table row order, persisted alongside the density.
+    /// Extended-table row order, persisted alongside the density.
     /// Inert in the other two densities (they render no table).
     agent_sort: AgentSort,
     /// Manual status-row toggle (prefix+s). Client-local and deliberately
@@ -930,7 +930,7 @@ struct View {
     /// The whole-machine resource meter, rendered in the status row. Off by
     /// default: it needs `macmon` on PATH, which fno core does not depend on.
     resource_meter_on: bool,
-    /// (x-e763) Ask before stop/remove. Default false: a stop means stop.
+    /// Ask before stop/remove. Default false: a stop means stop.
     confirm_lifecycle: bool,
     /// The meter's latest one-line reading, or None before the first sample
     /// (and after a failed one - the row then says the sensor is unavailable
@@ -947,7 +947,7 @@ struct View {
     /// The which-key hint line is painted over the bottom row (prefix held
     /// past [`HINT_DELAY`]); any chord resolution clears it (AC4-HP).
     hint: bool,
-    /// The which-key keybinds modal (prefix+?, x-8ccf US3): a centered popup
+    /// The which-key keybinds modal (prefix+?, US3): a centered popup
     /// built from the prefix-chord table. While open, a bound key executes
     /// through the SAME dispatch as a direct chord (which-key); arrows/pgup
     /// scroll+select, Enter runs the selected row, Esc/unbound closes. `None`
@@ -959,43 +959,43 @@ struct View {
     /// Pending escape bytes in modal mode (arrow/pgup folding), same split-arrow
     /// safety as [`View::sel_esc`].
     keys_modal_esc: Vec<u8>,
-    /// (x-8ccf US2) The right-click / `m` row context menu over a sideline agent
+    /// (US2) The right-click / `m` row context menu over a sideline agent
     /// row: an anchored popup whose entries route to existing commands. `None`
     /// when closed. The target is pinned by name so a layout reshuffle can only
     /// stale-refuse an action, never redirect it.
     row_menu: Option<RowMenu>,
     /// Pending escape bytes in row-menu mode (arrow folding).
     row_menu_esc: Vec<u8>,
-    /// (x-8ccf US4/US5) The sideline MENU popup or the settings modal (they share
+    /// (US4/US5) The sideline MENU popup or the settings modal (they share
     /// one slot; MENU chains into settings). `None` when closed.
     aux: Option<AuxPopup>,
     /// Pending escape bytes in aux-popup mode (arrow folding).
     aux_esc: Vec<u8>,
-    /// (x-975a) Per-section view state - client-local, instant (AC6-UI), and
+    /// Per-section view state - client-local, instant (AC6-UI), and
     /// persisted across restarts by [`crate::view_store`]. Keyed by squad NAME
     /// (not the ephemeral session id) so a restart restores the same sections.
     /// An absent squad key reads as [`SectionView::Collapsed`], an absent
     /// fixed section as `Expanded` - see [`View::section_view`].
     section_view: HashMap<SectionKey, SectionView>,
-    /// (x-975a) The subset of [`View::section_view`] the operator EXPLICITLY
+    /// The subset of [`View::section_view`] the operator EXPLICITLY
     /// chose, and the only thing that reaches disk. A seeded default is
     /// recomputed on every attach, so persisting it would let this build
     /// re-seed over a value a NEWER build wrote and this one could not parse.
     section_chosen: HashMap<SectionKey, SectionView>,
-    /// (x-c5ee) Squads the operator has expanded past the top-K idle cap for
+    /// Squads the operator has expanded past the top-K idle cap for
     /// THIS session - a transient "show me all the idle rows", not a durable
     /// preference (that layer is [`SectionView`]). Ephemeral by design: dropped
     /// on restart, and a dead-squad key left in it is inert, so it never needs
     /// pruning.
     idle_expanded: HashSet<SectionKey>,
-    /// Selector cursor into [`View::display_rows`], when open (x-260a: one
+    /// Selector cursor into [`View::display_rows`], when open (: one
     /// index space shared with painting, hover, and mouse hit-testing).
     selector: Option<usize>,
     /// Pending escape bytes in selector mode, carried ACROSS reads so a
     /// split arrow sequence can never half-close the selector and leak its
     /// tail into the pane (gemini medium).
     sel_esc: Vec<u8>,
-    /// (x-f331) The [`View::selector`] was armed by a pointer resting in the
+    /// The [`View::selector`] was armed by a pointer resting in the
     /// panel, not by an explicit `prefix+w`. Pointer-in-panel arms the selector
     /// so `x`/`X`/`r`/`space` act on the pointed-at row (one regime, closes the
     /// old PTY leak where a bare `x` fell through to the focused pane). A
@@ -1003,17 +1003,17 @@ struct View {
     /// first key OUTSIDE that set disarms and forwards, so a pointer parked over
     /// the sideline never swallows typing into the focused pane (AC2-EDGE).
     sel_hover_armed: bool,
-    /// (x-a621) First-visible [`View::display_rows`] index in the sideline:
+    /// First-visible [`View::display_rows`] index in the sideline:
     /// follow-the-cursor scroll offset so rows below the fold render and take
     /// the mouse. 0 (top-anchored) whenever the catalog fits the height.
     sideline_offset: usize,
-    /// Answer-overlay cursor into [`View::blocked_queue`] (x-c929), when open;
+    /// Answer-overlay cursor into [`View::blocked_queue`], when open;
     /// the index of the selected blocked pane in `Layout.agents` order.
     answers: Option<usize>,
     /// Pending escape bytes in answer-overlay mode (same split-arrow safety as
     /// [`View::sel_esc`]).
     ans_esc: Vec<u8>,
-    /// (x-4433, x-f089) The activity feed panel on the right edge, `e`
+    /// The activity feed panel on the right edge, `e`
     /// toggle; the fold's rows newest first. `None` closed. The panel's
     /// width/drag/hover state and behavior live in `feed_view`.
     feed: Option<feed_view::FeedOverlay>,
@@ -1028,33 +1028,33 @@ struct View {
     feed_offset: usize,
     hover_feed_border: bool,
     feed_drag: Option<SidelineDrag>,
-    /// (x-feec) The event-derived needs-me leg: the last `fno-agents needs` fold
+    /// The event-derived needs-me leg: the last `fno-agents needs` fold
     /// result while the overlay is open (`None` = live-only, not yet fetched
     /// this open). Merged with the live badge leg by [`View::needs_queue`].
     needs_fold: Option<Vec<crate::needs_overlay::FoldItem>>,
     /// Operator-owned priorities folded independently from the event lane.
     mine_fold: Option<Vec<crate::needs_overlay::MineItem>>,
-    /// (x-feec) When `needs_fold` was last fetched, for the short re-open cache.
+    /// When `needs_fold` was last fetched, for the short re-open cache.
     needs_fold_at: Option<Instant>,
-    /// (x-feec) The last fold shell-out failed/timed out: render the loud
+    /// The last fold shell-out failed/timed out: render the loud
     /// degraded notice (AC2-ERR) instead of a silent partial queue.
     needs_degraded: bool,
     /// The MINE command failed/timed out; the operator lane degrades visibly
     /// without hiding THEY NEED YOU.
     mine_degraded: bool,
-    /// (x-f730 task 2.2) The MINE add-line text buffer: `Some(text)` while the
+    /// (task 2.2) The MINE add-line text buffer: `Some(text)` while the
     /// `a` mini text-entry is open inside the needs overlay (appended below
     /// the MINE lane), `None` when closed. Owns the keyboard ahead of the
     /// normal overlay keys so a typed letter never triggers cycle/answer.
     mine_adding: Option<String>,
-    /// (x-f730 task 2.2) A MINE mutation queued by the stdin handler for the
+    /// (task 2.2) A MINE mutation queued by the stdin handler for the
     /// run loop to shell out (kept out of the deep stdin handler, mirrors
     /// `conn_action`); `mine_acting` bounds it to one in flight so a second
     /// x/d/add press cannot race the first write.
     mine_action: Option<crate::needs_overlay::MineMutation>,
     mine_acting: bool,
-    /// (x-f730 task 2.3) Open operator questions, folded independently
-    /// (`fno inbox outstanding --json`, the richer x-7979 record - asker,
+    /// (task 2.3) Open operator questions, folded independently
+    /// (`fno inbox outstanding --json`, the richer record - asker,
     /// options, resolved liveness) from both the MINE lane and the bare
     /// events leg. Rendered as its own row kind, ranked ahead of the rest of
     /// THEY NEED YOU.
@@ -1062,27 +1062,27 @@ struct View {
     /// The questions command failed/timed out; same degrade contract as
     /// `mine_degraded`/`needs_degraded`.
     questions_degraded: bool,
-    /// (x-f730 task 2.3) The free-text answer buffer for a no-options
+    /// (task 2.3) The free-text answer buffer for a no-options
     /// question: `Some((question_id, text))` while open, `None` when closed.
     /// Same keyboard-ownership contract as `mine_adding`.
     question_answering: Option<(String, String)>,
-    /// (x-f730 task 2.3) A queued question answer, mirroring
+    /// (task 2.3) A queued question answer, mirroring
     /// `mine_action`/`mine_acting` exactly (its own single-flight guard - a
     /// question answer and a MINE write are independent, so one in flight
     /// never blocks the other).
     question_action: Option<(String, String)>,
     question_acting: bool,
-    /// (x-feec) Set by OpenAnswers when a fresh fold is wanted; the run loop
+    /// Set by OpenAnswers when a fresh fold is wanted; the run loop
     /// spawns the shell-out and clears it, keeping the channel sender out of the
     /// deep stdin handler.
     needs_want: bool,
-    /// (x-feec) A fold shell-out is running; bounds concurrent folds to one so
+    /// A fold shell-out is running; bounds concurrent folds to one so
     /// mashing prefix+a on a stale cache cannot spawn a pile of children (P2-5).
     needs_inflight: bool,
-    /// (x-feec) Generation token, bumped on every open/close so a fold result
+    /// Generation token, bumped on every open/close so a fold result
     /// landing after the overlay closed or re-opened is discarded (AC6-FR).
     needs_gen: u64,
-    /// (x-b2bf) The yard overlay, when open. The cursor indexes the
+    /// The yard overlay, when open. The cursor indexes the
     /// roster-derived crowd; the spotlight renders that citizen's sprite,
     /// and `opened_at` drives frame cycling (a flavour channel - it carries
     /// no reading, so a timer is legal where it would not be for the eye).
@@ -1090,7 +1090,7 @@ struct View {
     /// Pending escape bytes in yard-overlay mode (same split-arrow safety as
     /// [`View::ans_esc`]).
     yard_esc: Vec<u8>,
-    /// (x-b2bf) The identity fold's last result while the overlay is open
+    /// The identity fold's last result while the overlay is open
     /// (`None` = not yet fetched this open). Species/rarity/crown/
     /// first-sighting only - no status field, ever: the eye is derived from
     /// the row's own badge/need values so the sprite cannot disagree.
@@ -1100,23 +1100,23 @@ struct View {
     yard_want: bool,
     yard_inflight: bool,
     yard_gen: u64,
-    /// (x-3cb3) The court panel. The whole thing - open flag, cached fold,
+    /// The court panel. The whole thing - open flag, cached fold,
     /// generation - lives in its own module, so this is one field.
     court: crate::court_overlay::Panel,
-    /// Catch-up "while you were gone" digest lines (x-4e2d), set on attach after
+    /// Catch-up "while you were gone" digest lines, set on attach after
     /// an absence; the next keypress dismisses it (like [`View::overlay`]).
     digest: Option<Vec<String>>,
     notice: Option<(String, Instant)>,
-    /// (x-f191) The row-scoped outcome stamp and its armed action, one at a
+    /// The row-scoped outcome stamp and its armed action, one at a
     /// time - see [`RowStamp`] / [`RowArm`].
     row_stamp: Option<RowStamp>,
     row_arm: Option<RowArm>,
-    /// (x-f191 scope a+c) The display slot a row-scoped confirm was armed
+    /// (scope a+c) The display slot a row-scoped confirm was armed
     /// from, captured at arm time (the confirm clears the selector). The
     /// commit re-anchors onto the row's identity; a row the action removed
     /// falls to this slot, clamped - the neighbour, never a reset.
     row_slot: Option<usize>,
-    /// (v12, x-e780) Active in-scrollback search (prefix+/), when open. While
+    /// (v12) Active in-scrollback search (prefix+/), when open. While
     /// `Some`, stdin diverts to [`search_keys`] and the bottom chrome shows the
     /// input line / counter. Client-local: opening never sends a message and
     /// never reserves a row (no Resize -> no reflow -> no dropped highlight).
@@ -1125,11 +1125,11 @@ struct View {
     /// arrow sequence can never half-close the search or leak its tail into the
     /// pane (same split-arrow safety as [`View::sel_esc`]).
     search_esc: Vec<u8>,
-    /// (x-1d91) The one dispatched-but-unconfirmed Backlog reorder verb, if any.
+    /// The one dispatched-but-unconfirmed Backlog reorder verb, if any.
     /// At most one: the marker doubles as the double-press guard, so a second
     /// dispatch on the same card cannot fire until the first resolves.
     backlog_pending: Option<BacklogPending>,
-    /// (x-a496) `config.mux.hover_focus`: focus-follows-mouse over panes.
+    /// `config.mux.hover_focus`: focus-follows-mouse over panes.
     /// Latched once at startup (default on); false disables the hover pre-pass.
     hover_focus: bool,
     /// `config.obsidian.*`, latched once at startup like the toggles above.
@@ -1142,15 +1142,15 @@ struct View {
     /// than collapsing it each session.
     show_missions: bool,
     show_backlog: bool,
-    /// (x-f75e) `config.mux.theme`: the chrome palette. Latched once at startup
+    /// `config.mux.theme`: the chrome palette. Latched once at startup
     /// from the same config ladder `hover_focus` reads, and swapped in memory on
     /// an explicit apply from the settings modal. `terminal` (the default)
     /// inherits the emulator's own colors so every pre-theme render is
     /// byte-identical.
     theme: Theme,
-    /// (x-f75e) Which settings tab is in front (general toggles / theme picker).
+    /// Which settings tab is in front (general toggles / theme picker).
     settings_tab: SettingsTab,
-    /// (x-a496) Focus-follows-mouse debounce: the pane the pointer is settling on
+    /// Focus-follows-mouse debounce: the pane the pointer is settling on
     /// and when it first landed there. `FocusPane` fires once the same pane holds
     /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
     hover_pending: Option<(u64, Instant)>,
@@ -1159,35 +1159,35 @@ struct View {
     /// exact cell, and a focus-follows-mouse off-switch disables focus
     /// stealing, not hover affordances.
     link_hover: LinkHoverState,
-    /// (x-a496) The `display_rows()` index the pointer is hovering in the
+    /// The `display_rows()` index the pointer is hovering in the
     /// sideline, painted with the selector's INVERSE bar. Highlight-only - never
     /// switches the viewed squad/tab. `None` off the panel.
     hover_row: Option<usize>,
-    /// (x-d807) The seam under the pointer, accented so a divider reads as
+    /// The seam under the pointer, accented so a divider reads as
     /// draggable before the press. Terminals cannot portably change the cursor
     /// shape, so the accent is the whole affordance.
     hover_seam: Option<Seam>,
-    /// (x-d807) The seam drag in flight, if any. While `Some`, drag and release
+    /// The seam drag in flight, if any. While `Some`, drag and release
     /// reports are intercepted before they reach a pane's PTY.
     seam_drag: Option<SeamDrag>,
-    /// (x-d807) True while the pointer is over the sideline's right border, and
+    /// True while the pointer is over the sideline's right border, and
     /// the border-drag in flight. The sideline stays client-local (never on the
-    /// wire); the drag sets a free width (x-2e86, reversing x-b186's snap-only).
+    /// wire); the drag sets a free width (reversing snap-only).
     hover_sideline_border: bool,
     sideline_drag: Option<SidelineDrag>,
-    /// (x-aa95) The pane whose grip the pointer is over, accented so the grip
+    /// The pane whose grip the pointer is over, accented so the grip
     /// reads as grabbable before the press - the same "no portable cursor
     /// shape" constraint that makes [`View::hover_seam`] the whole affordance.
     hover_grip: Option<u64>,
-    /// (x-aa95) The relocation drag in flight, if any. While `Some`, motion and
+    /// The relocation drag in flight, if any. While `Some`, motion and
     /// release are intercepted before they reach a pane's PTY.
     pane_drag: Option<PaneDrag>,
-    /// (v43, x-d6a8 G2) A tab-cell join drag in flight. Same interception as
+    /// (v43, G2) A tab-cell join drag in flight. Same interception as
     /// `pane_drag`; at most one of the three drags is ever live at a time.
     tab_drag: Option<TabDrag>,
-    /// (v43, x-d6a8 G3) A sideline-row placement drag in flight.
+    /// (v43, G3) A sideline-row placement drag in flight.
     row_drag: Option<RowDrag>,
-    /// (x-b465) A press being held on a sideline row that is NOT a drag source -
+    /// A press being held on a sideline row that is NOT a drag source -
     /// a workspace name row, a section header. Those rows carry menus
     /// (`open_row_menu` builds one for a squad row), but the long-press arm that
     /// opens a menu lives inside the `row_drag` branch, and `row_drag_source_at`
@@ -1206,14 +1206,14 @@ struct View {
     /// against [`View::row_identity`], the same discipline `RowDrag` gets from
     /// `RowSource` and the selector gets from its name re-anchor.
     press_hold: Option<(usize, String, Instant)>,
-    /// (x-a496) A pending click-a-card confirm: the node to dispatch and its
+    /// A pending click-a-card confirm: the node to dispatch and its
     /// display label. While `Some`, keys route to the confirm (Enter dispatches,
     /// any other key cancels) and the bottom row shows the prompt.
     confirm: Option<ConfirmAction>,
     /// A left-button release paired with a click on a modal's close chip must
     /// stay swallowed after that click closes the modal.
     modal_release_swallow: bool,
-    /// (x-9e5e) The pending new-workspace name buffer, `Some` while the `+`
+    /// The pending new-workspace name buffer, `Some` while the `+`
     /// create overlay is open. Keys divert to [`create_keys`]: printable append,
     /// Backspace pops, Enter sends [`Command::NewSquad`] (empty keeps it open),
     /// Esc cancels. Client-local like `search`: opening reserves no row.
@@ -1221,13 +1221,13 @@ struct View {
     /// Pending escape bytes in create-overlay mode (same split-arrow safety as
     /// [`View::search_esc`]).
     create_esc: Vec<u8>,
-    /// (x-c150; widened x-96e8) The pending rename buffer: `(target captured at
+    /// (; widened) The pending rename buffer: `(target captured at
     /// open, typed name)`, `Some` while the `prefix+,` (tab) or selector `r`
     /// (squad) overlay is open. Keys divert to [`rename_keys`]. Enter on an
     /// EMPTY buffer still sends (blank = clear back to the derived label),
     /// unlike `create`.
     rename: Option<(RenameTarget, String)>,
-    /// (x-cf97) The pending move-to-position prompt: `(tab captured at open,
+    /// The pending move-to-position prompt: `(tab captured at open,
     /// typed destination)`, `Some` while the tab menu's `Move to…` entry (or
     /// `prefix+#`) has it open. Keys divert to [`move_to_keys`], the rename
     /// overlay's shape with a numeric grammar: digits/backspace edit, Enter
@@ -1235,36 +1235,36 @@ struct View {
     /// and an out-of-range ordinal keeps the prompt open with a notice - it
     /// never sends a clamped guess.
     move_to: Option<(TabId, String)>,
-    /// (x-e4f1) The lane-colors drill + text-entry state for the settings
+    /// The lane-colors drill + text-entry state for the settings
     /// Colors tab. Client-local ephemera like `create`/`rename`; dormant while
     /// another tab or no popup is front, reset on tab switch away from Colors.
     lane: LaneColorsUi,
     /// Pending escape bytes in rename-overlay mode (same split-arrow safety
     /// as [`View::create_esc`]).
     rename_esc: Vec<u8>,
-    /// (x-0f9d US1) Armed when a bare NewTab (`c` / the strip `+`) is
+    /// (US1) Armed when a bare NewTab (`c` / the strip `+`) is
     /// dispatched: `Some(baseline)` where `baseline` is the greatest tab id in
     /// the active squad at send time, or `None` when the squad had no tabs. The
     /// layout that materializes a tab beyond that baseline opens the rename
-    /// overlay on it, so a create-time name prompt reuses the x-c150 rename
+    /// overlay on it, so a create-time name prompt reuses the rename
     /// machinery with no new command or overlay. Guarding on the baseline (not a
     /// bare bool) keeps a routine scrape-tick layout - which can arrive before
     /// the server has processed NewTab - from arming on the wrong (old) tab. The
     /// nested Option distinguishes "no tabs before" from "max id 0", so the
     /// first tab (id 0) still triggers (gemini review).
     pending_new_tab: Option<Option<u64>>,
-    /// (x-8f11) Multi-select marks for bulk recruit: the `attach_id`s toggled
+    /// Multi-select marks for bulk recruit: the `attach_id`s toggled
     /// with `space` in the sideline selector. Client-local ephemera keyed by id,
     /// so a marked row surviving a filter/scroll keeps its mark and a vanished
     /// row simply drops it (never a stale index). Cleared on a recruit submit.
     marks: std::collections::HashSet<String>,
-    /// (x-8f11) The pending recruit workspace-name buffer, `Some` while the `R`
+    /// The pending recruit workspace-name buffer, `Some` while the `R`
     /// recruit overlay is open. Enter sends [`Command::RecruitAgents`] with the
     /// marked ids (empty keeps it open, like `create`); Esc cancels, marks kept.
     recruit: Option<String>,
     /// Pending escape bytes in recruit-overlay mode (split-arrow safety).
     recruit_esc: Vec<u8>,
-    /// (x-96e8) The move-a-tab-to-another-squad picker: `(tab captured at open,
+    /// The move-a-tab-to-another-squad picker: `(tab captured at open,
     /// candidate squad ids in the numbered order shown)`, `Some` while the
     /// selector `m` overlay is open. A digit sends [`Command::MoveTab`] for a tab
     /// source or [`Command::MovePane`] (cross-squad) for a pane source; the id
@@ -1272,16 +1272,16 @@ struct View {
     move_pick: Option<MovePick>,
     /// Pending target and geometry for selector `p` placement.
     attach_place: Option<AttachPlace>,
-    /// (x-9fd0) The portal-placement picker (selector `P`): the focused row's
+    /// The portal-placement picker (selector `P`): the focused row's
     /// id plus a cursor. The rows are never stored - [`View::open_portal_rows`]
     /// derives them per frame.
     portal_pick: Option<PortalPick>,
-    /// (x-96e8) The squad the selector cursor is tracking across a `J`/`K`
+    /// The squad the selector cursor is tracking across a `J`/`K`
     /// reorder: the next `Layout` re-points the cursor at this squad's row so it
     /// visually follows the moved workspace. Cleared by any non-reorder key or a
     /// selector close.
     sel_follow: Option<u64>,
-    /// (x-653d) The session-navigator overlay (prefix+f): a global goto picker
+    /// The session-navigator overlay (prefix+f): a global goto picker
     /// over a flat catalog of every squad/tab/agent/card, filtered by typed text
     /// AND by agent state. `Some` while open; stdin diverts to [`nav_keys`].
     /// Client-local like `search` - opening never sends a message and reserves
@@ -1290,7 +1290,7 @@ struct View {
     /// Pending escape bytes in navigator mode, carried ACROSS reads (same
     /// split-arrow safety as [`View::search_esc`]).
     nav_esc: Vec<u8>,
-    /// (x-c376) The read-only peek overlay (Space on a selector agent row),
+    /// The read-only peek overlay (Space on a selector agent row),
     /// `Some` while open. Sits ON TOP of the selector; stdin diverts to
     /// [`peek_keys`] BEFORE selector routing. Client-local like `nav` - opening
     /// sends one `PeekAgent` and reserves no row.
@@ -1298,40 +1298,40 @@ struct View {
     /// Pending escape bytes in peek mode (j/k arrow folding), same split-arrow
     /// safety as [`View::sel_esc`].
     peek_esc: Vec<u8>,
-    /// (x-c376) Monotonic `PeekAgent` request counter, bumped per open/move so a
+    /// Monotonic `PeekAgent` request counter, bumped per open/move so a
     /// body landing after a newer request is dropped by seq (AC1-FR).
     peek_seq: u64,
-    /// (x-9c5f) The peek `m` free-text reply input: (target name captured at
+    /// The peek `m` free-text reply input: (target name captured at
     /// m-press, buffer). `Some` while typing; input mode wins the key route
     /// inside peek (digits/j/k/l/r are literal chars). Client-local like `peek`.
     peek_input: Option<(String, String)>,
     /// Split-CSI carry for the reply input (its own buffer, like `rename_esc`),
     /// so an arrow key mid-type never leaks a param byte into the buffer.
     peek_input_esc: Vec<u8>,
-    /// (x-c914) The session-local active claude account: every mux-initiated
+    /// The session-local active claude account: every mux-initiated
     /// worker spawn (prefix+g `DispatchNext`, a targeted `DispatchNode`)
     /// appends `--account <id>` while `Some`. Client-local ephemera like
     /// `nav`/`peek` - dropped on exit, never persisted, never touches a
     /// credential slot (Locked Decisions 1-2). Toggled via the Connections
     /// modal's set-active key; `None` = the default account (no flag).
     active_account: Option<String>,
-    /// (x-84d7) The Connections modal (MENU -> connections): a stateful overlay
+    /// The Connections modal (MENU -> connections): a stateful overlay
     /// listing provider accounts + combos, driving the `fno config accounts` CLI.
     /// `Some` while open; stdin diverts to [`connections_keys`]. Its reads run
     /// off the UI loop via the `conn_*` triad below (the needs-fold idiom).
     connections: Option<crate::connections_view::ConnectionsView>,
     /// Pending escape bytes in connections mode (arrow folding, split-arrow safe).
     conn_esc: Vec<u8>,
-    /// (x-84d7) A connections read (list/combos fold) is wanted; the run loop
+    /// A connections read (list/combos fold) is wanted; the run loop
     /// spawns it at loop top and clears this, keeping the sender out of the deep
     /// stdin handler (the needs_want idiom).
     conn_want: bool,
-    /// (x-84d7) A connections read is in flight; bounds concurrent folds to one.
+    /// A connections read is in flight; bounds concurrent folds to one.
     conn_inflight: bool,
-    /// (x-84d7) Generation token, bumped per open/refresh so a read landing after
+    /// Generation token, bumped per open/refresh so a read landing after
     /// the modal closed or refreshed again is discarded.
     conn_gen: u64,
-    /// (x-84d7) A mutation/login verb wanted by a keypress; the run loop spawns
+    /// A mutation/login verb wanted by a keypress; the run loop spawns
     /// it at loop top (the sender lives there, out of the stdin handler) and
     /// clears this. `(argv, child-env, is_login)`: `is_login` runs `fno mux pane
     /// run` (opens the login pane, keeps the pending notice), else a single-flight
@@ -1354,7 +1354,7 @@ struct View {
     /// A pending sweep verb (counts probe or scoped apply) for the run
     /// loop to spawn off the UI thread, mirroring `conn_action`.
     sweep_action: Option<SweepAction>,
-    /// (x-f188) A queued `fno agents restart` and its one-in-flight bound,
+    /// A queued `fno agents restart` and its one-in-flight bound,
     /// mirroring the sweep pair.
     restart_agents_want: bool,
     restart_inflight: bool,
@@ -1367,7 +1367,7 @@ struct View {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SweepScope {
     Tabs,
-    /// (x-cf97) The opt-in half: idle shells the operator has typed in. Its
+    /// The opt-in half: idle shells the operator has typed in. Its
     /// own row, its own count, its own confirmation - never folded into the
     /// default tabs half, whose posture stays exactly what it was.
     UsedShells,
@@ -1472,15 +1472,15 @@ pub(crate) use confirm::{remove_dead, ConfirmAction, ConfirmKind, CLEAR_DEAD_MAX
 
 // The needs overlay's projection + render, moved out of this file (file
 // budget); the feed overlay answers its own question from its own module and
-// reuses join_fold_row's join keys for its deep link (x-4433).
+// reuses join_fold_row's join keys for its deep link.
 mod feed_detail;
 mod feed_view;
 mod keys_modal;
 mod needs_view;
 pub(crate) use needs_view::needs_overlay_lines;
 
-/// The move-tab / move-pane destination picker's state (x-96e8, cursored by
-/// x-3e17). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
+/// The move-tab / move-pane destination picker's state (cursored by
+///). Was a bare `(MoveSrc, Vec<u64>)` tuple, which had nowhere to keep a
 /// cursor or the escape carry an arrow key needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MovePick {
@@ -1517,7 +1517,7 @@ impl MovePick {
     }
 }
 
-/// Client-local in-scrollback search state (v12, x-e780).
+/// Client-local in-scrollback search state (v12).
 struct SearchView {
     /// The pane the search opened on (captured so every step/clear targets it,
     /// even if focus shifts server-side mid-search).
@@ -1531,13 +1531,13 @@ struct SearchView {
     result: Option<(u32, u32)>,
 }
 
-/// Client-local session-navigator overlay state (x-653d). The rows are NOT
+/// Client-local session-navigator overlay state. The rows are NOT
 /// stored here - they are recomputed from the live layout each keypress (the
 /// same per-key re-read discipline as the selector/search), so a layout push
 /// under an open navigator is reflected at once.
 struct NavView {
     /// Incremental text filter (substring, case-insensitive) over row match
-    /// keys: label + pane id + node id + slug + workspace (x-e10f).
+    /// keys: label + pane id + node id + slug + workspace.
     query: String,
     /// The active state chip; `None` = all states. `Tab` cycles it.
     state_filter: Option<PaneState>,
@@ -1545,8 +1545,8 @@ struct NavView {
     cursor: usize,
 }
 
-/// (x-c376) The read-only peek overlay over a sideline agent row: its full
-/// status sentence + recent transcript + (for a blocked row) the x-c929
+/// The read-only peek overlay over a sideline agent row: its full
+/// status sentence + recent transcript + (for a blocked row) the
 /// answerable prompt. Opens ON TOP of the selector (which stays open
 /// underneath); Esc drops back into it. The row is re-read from the live
 /// `display_rows()` per frame (navigator-style), so only the index, the request
@@ -1565,16 +1565,16 @@ struct PeekView {
     /// header over the old transcript (codex review): the seq guard covers a
     /// late body under the same request, this covers a changed row identity.
     name: String,
-    /// (x-9c5f) When this row's transcript was last fetched, throttling the
+    /// When this row's transcript was last fetched, throttling the
     /// auto-refresh on Layout pushes to >= `PEEK_REFRESH_INTERVAL` (US9).
     last_fetch: Instant,
-    /// (x-9c5f) An auto-refresh request is in flight (armed, body not yet
+    /// An auto-refresh request is in flight (armed, body not yet
     /// landed). Guards against stacking a new refresh every Layout push while a
     /// slow `fno agents peek` is still running - without it a >3s peek read on a
     /// busy row would supersede each response before it arrives and never settle.
     /// Cleared when any body lands (`apply_peek_body`).
     refresh_pending: bool,
-    /// (x-10ec) Some for a WORKSPACE peek: `sid` of the peeked squad. The body
+    /// Some for a WORKSPACE peek: `sid` of the peeked squad. The body
     /// is rendered locally from the layout (a workspace has no transcript), so
     /// no request follows the seq `open_peek` consumed - which is the point:
     /// that seq can never be answered, so a late `PeekBody` for a superseded
@@ -1582,7 +1582,7 @@ struct PeekView {
     squad: Option<u64>,
 }
 
-/// (x-8ccf US3) The which-key keybinds modal: a centered [`Popup`] built from
+/// (US3) The which-key keybinds modal: a centered [`Popup`] built from
 /// the single-source prefix-chord table, plus the [`Event`] each selectable row
 /// runs (`None` for headers, rules, and display-only meta rows). Keeping the
 /// events beside the popup lets Enter/click on the SELECTED row dispatch through
@@ -1593,7 +1593,7 @@ struct KeysModal {
     row_events: Vec<Option<Event>>,
 }
 
-/// (x-8ccf US2) The right-click / `m` row context menu over a sideline agent
+/// (US2) The right-click / `m` row context menu over a sideline agent
 /// row. The target is pinned by NAME (not index) so a layout reshuffle between
 /// open and click can only turn an action into a stale-name refusal, never
 /// redirect it to a different agent (Concurrency). `actions` runs parallel to
@@ -1613,7 +1613,7 @@ struct RowMenu {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum MenuTarget {
     Agent(AgentIdent),
-    /// (x-1d91) A Backlog card pinned by node id (ids are unique in the graph,
+    /// A Backlog card pinned by node id (ids are unique in the graph,
     /// so unlike agent names they need no disambiguation).
     Card(String),
     /// A section header (a squad name row or a `~` band). `label` is cosmetic
@@ -1656,7 +1656,7 @@ impl AgentIdent {
 /// name) at execution time - a stale target becomes a Notice, not a wrong action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MenuAction {
-    /// Attach a bg (paneless) agent by repointing the focused pane (x-9f75).
+    /// Attach a bg (paneless) agent by repointing the focused pane.
     OpenHere,
     /// Attach a bg (paneless) agent as a new tab.
     NewTab,
@@ -1693,17 +1693,17 @@ enum MenuAction {
     Stop,
     /// Remove an exited row (RemoveAgent, or RemoveExternal for a roster row).
     Remove,
-    /// (x-1d91) Run a reorder verb on a Backlog card.
+    /// Run a reorder verb on a Backlog card.
     Backlog(BacklogVerb),
     /// Open a Backlog card's plan: through Obsidian, or as a plain file when
     /// the plan resolves outside the configured vault. Card-menu only (LD5);
     /// the resolution and the opener live in `link::plan_link`.
     OpenPlan,
-    /// Remove EVERY exited row in the target section (x-f300). The section comes
+    /// Remove EVERY exited row in the target section. The section comes
     /// from [`MenuTarget::Section`], so this stays payload-free and `Copy`.
     ClearDead,
     /// Open the rename overlay for a workspace section header - menu parity with
-    /// selector `r` (x-96e8). Only built for a section carrying a squad id.
+    /// selector `r`. Only built for a section carrying a squad id.
     Rename,
     /// Reorder a workspace section `delta` slots on the sideline - menu parity
     /// with selector `J`/`K`, bound to the same `Command::MoveSquad`.
@@ -1712,7 +1712,7 @@ enum MenuAction {
     /// `ConfirmKind::RemoveSquad` confirm the keyboard path uses - a mouse
     /// click must not skip the destructive-action gate.
     RemoveSquad,
-    /// (x-92d3 5.1) Tab-menu entries, all bound to existing wire commands and
+    /// (5.1) Tab-menu entries, all bound to existing wire commands and
     /// all resolved against the pinned [`TabId`] at execute: a new tab on the
     /// target's squad, the rename overlay, a strip reorder, a join of the whole
     /// tab into the viewed tab as `dir` split of the focused pane, and the
@@ -1720,7 +1720,7 @@ enum MenuAction {
     TabNew,
     TabRename,
     TabReorder(i32),
-    /// (x-cf97) Open the move-to-position prompt on the pinned tab: type the
+    /// Open the move-to-position prompt on the pinned tab: type the
     /// 1-based destination, the client computes the delta and sends ONE
     /// `Command::ReorderTab`. The direct-destination gesture the ±1 pair
     /// cannot be - moving tab 22 to slot 3 costs one prompt, not nineteen
@@ -1728,12 +1728,12 @@ enum MenuAction {
     TabMoveTo,
     TabJoin(Dir),
     TabClose,
-    /// (x-92d3 6.2) Respawn an exited row - the menu twin of peek `r`, the
+    /// (6.2) Respawn an exited row - the menu twin of peek `r`, the
     /// same `Command::RespawnAgent`.
     Resume,
     /// Reattach a live paneless row whose server-side session is still present.
     Reattach,
-    /// (x-92d3 6.2) Mail this agent - opens the SAME peek overlay and its
+    /// (6.2) Mail this agent - opens the SAME peek overlay and its
     /// free-text composer (`peek_input`) that peek `m` opens, never a second
     /// input surface.
     Mail,
@@ -1744,7 +1744,7 @@ enum MenuAction {
 }
 
 impl MenuAction {
-    /// (x-91a1) The stable id this action's in-menu accelerator is registered
+    /// The stable id this action's in-menu accelerator is registered
     /// under in `keys::menu_bindings`, when it has one. The drawn hint and the
     /// dispatched byte both resolve through this id, so the key the menu
     /// advertises and the key it answers cannot drift. The tab verbs and the
@@ -1763,7 +1763,7 @@ impl MenuAction {
             }),
             MenuAction::TabMoveTo => Some("move-tab-to"),
             MenuAction::Remove => Some("remove-row"),
-            // (x-d545) The row-menu verbs join the keyboard: every entry that
+            // The row-menu verbs join the keyboard: every entry that
             // can carry a key now shows one, and the drawn glyph and the
             // dispatched byte both resolve through the same menu-scope id.
             MenuAction::Stop => Some("stop-row"),
@@ -1788,7 +1788,7 @@ enum MoveSrc {
     Pane(u64),
 }
 
-/// (x-91a1) An entry whose action has an IN-MENU accelerator: the hint is the
+/// An entry whose action has an IN-MENU accelerator: the hint is the
 /// live glyph from the menu scope (`keys::menu_key_for`), never a prefix chord
 /// - the open menu does not run prefix chords, so advertising one describes an
 /// input path the reader is not on. An unscoped id resolves to nothing, which
@@ -1923,7 +1923,7 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     // Diff is common to every row state: it reads the row's worktree,
     // which an exited or paneless row has just as much as a live pane-hosted
     // one - and a finished worker's diff is the one you most want to read.
-    // (x-d545) Bound in menu scope now, so its hint is the live key.
+    // Bound in menu scope now, so its hint is the live key.
     add(PopupRow::Rule, &[]);
     add(entry_acc("±", "Diff", "diff-row"), &[MenuAction::Diff]);
     // Live AND exited rows are renamable; an EXTERNAL row is claude-owned.
@@ -1937,7 +1937,7 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     }
 }
 
-/// (x-1d91) The v1 reorder menu for a Backlog card: float to top, defer. Both
+/// The v1 reorder menu for a Backlog card: float to top, defer. Both
 /// route through `fno backlog` server-side; the mux never writes the graph.
 /// Floated READY cards carry a "may dispatch" hint: the dispatcher can pick
 /// one up in about a minute, and the guards it applies (containers, batching,
@@ -2019,7 +2019,7 @@ fn build_card_menu(
     }
 }
 
-/// (x-f300) The section-header context menu. A workspace section (`squad`
+/// The section-header context menu. A workspace section (`squad`
 /// present) offers `Rename` - menu parity with selector `r`. `Clear dead` is
 /// added only when `dead > 0`; its label count is both what it advertises AND
 /// what the commit runs, so the two can never disagree. The caller guarantees
@@ -2066,7 +2066,7 @@ fn build_section_menu(
     }
 }
 
-/// (x-92d3 5.1) The tab-strip context menu for one tab cell, resolved through
+/// (5.1) The tab-strip context menu for one tab cell, resolved through
 /// the SAME `tab_cell_at` the drag pickup uses (LD-A: one hit test per
 /// surface, so a drag and a click can never disagree about where a tab is).
 /// Every item binds an existing wire command; nothing here needs a server
@@ -2101,7 +2101,7 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
         &[],
     );
     add(PopupRow::Rule, &[]);
-    // (x-91a1) Every tab verb answers a bare in-menu key from the same
+    // Every tab verb answers a bare in-menu key from the same
     // registry its hint reads: n for New tab, the angle brackets for the
     // reorder pair - app vocabulary beside the prefix chords (prefix+c, and
     // prefix+< / prefix+> mean the same moves from outside the menu).
@@ -2148,7 +2148,7 @@ fn build_tab_menu(idx: usize, tab: &TabMeta, anchor: Anchor) -> RowMenu {
     }
 }
 
-/// (x-8ccf US4/US5) The sideline MENU popup and the minimal settings modal share
+/// (US4/US5) The sideline MENU popup and the minimal settings modal share
 /// this one aux-popup type: a [`Popup`] plus the [`AuxAction`] each selectable
 /// row runs. The two chain (MENU -> settings) by swapping the `aux` slot.
 struct AuxPopup {
@@ -2158,7 +2158,7 @@ struct AuxPopup {
 
 /// What a MENU / settings-modal / mini-kanban row does. Menu entries open a
 /// surface or detach; settings entries change a live setting; a kanban entry
-/// names a card. Not `Copy` since x-1d91 - a card action carries its node id.
+/// names a card. Not `Copy` since - a card action carries its node id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AuxAction {
     OpenKeybinds,
@@ -2168,7 +2168,7 @@ pub(crate) enum AuxAction {
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
     OpenUpdate,
-    /// (x-f188 change 7) Queue `fno agents restart` off the UI loop. Never
+    /// (change 7) Queue `fno agents restart` off the UI loop. Never
     /// `--mux`, never `--force`: the modal named what survives, and the tap
     /// is the confirmation.
     RestartAgents,
@@ -2179,7 +2179,7 @@ pub(crate) enum AuxAction {
     /// Apply the prune with one scope. Each choice is the confirmation: the
     /// modal named the counts, the tap picked the half.
     SweepTabs,
-    /// (x-cf97) The opt-in used-shell half: `--tabs-only
+    /// The opt-in used-shell half: `--tabs-only
     /// --include-used-shells`. Its own row so a tap can only ever pick the
     /// posture the modal showed.
     SweepUsedShells,
@@ -2194,13 +2194,13 @@ pub(crate) enum AuxAction {
     /// `resource_meter.enabled`, start or stop the sampler.
     ToggleResourceMeter,
     ToggleConfirmLifecycle,
-    /// (x-f75e) Apply the named mux theme now: swap the in-memory theme, then
+    /// Apply the named mux theme now: swap the in-memory theme, then
     /// persist via `fno config set mux.theme`. The picker lists the shipped
     /// names, so this carries one of them.
     ApplyTheme(String),
     /// Apply a validated mux prefix change now, then persist it through the CLI.
     ApplyPrefix(String),
-    /// (x-e4f1) Open the color picker for one `[sideline.colors]` axis key
+    /// Open the color picker for one `[sideline.colors]` axis key
     /// (existing or just typed). The axis names its table
     /// (`harness` / `route` / `model` / `row`).
     LaneColorEdit(String, String),
@@ -2211,7 +2211,7 @@ pub(crate) enum AuxAction {
     /// Persist one lane color through `fno config set` block-replace, then
     /// restart-free via `reload_palette`.
     LaneColorSet(String, String, String),
-    /// (x-1d91) Jump the sideline selector to this Backlog card and close the
+    /// Jump the sideline selector to this Backlog card and close the
     /// mini-kanban - the overlay is a scanning surface, so acting on a card
     /// hands you back to the row where its full menu lives.
     BacklogGoto(String),
@@ -2248,7 +2248,7 @@ fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, Vec<AuxActio
     (rows, actions)
 }
 
-/// (x-1d91) Build the mini-kanban: the Backlog's lanes as collapsed columns, each
+/// Build the mini-kanban: the Backlog's lanes as collapsed columns, each
 /// a header carrying its TRUE count over the cards the feed is holding.
 ///
 /// It is the QUEUE's lanes, not the whole board's. The feed carries only
@@ -2374,7 +2374,7 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
 
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
-        // Persisted per-section state wins (x-975a); pruned to the squads this
+        // Persisted per-section state wins; pruned to the squads this
         // layout actually has, so a workspace deleted since the last run is
         // absent from the map (and so from the next write).
         // Load only - do NOT prune here. A real attach constructs the View with
@@ -2382,17 +2382,17 @@ impl View {
         // pruning against it would delete every persisted entry before the
         // session ever learns what squads exist. `set_layout` owns the prune,
         // where a real squad list is in hand.
-        // (x-c5ee) Load-only: the map holds persisted operator choices, nothing
+        // Load-only: the map holds persisted operator choices, nothing
         // else. The active-squad "open on first frame" default is no longer
         // seeded here - it lives in `section_view()`, computed live each frame so
         // a majority-exited squad can downgrade to LiveOnly as agents exit
         // (AC3-FR), which a one-time seed snapshot cannot.
         let section_view = view_store::load();
-        // (x-b186) Layout-independent, unlike the section map above, so it is
+        // Layout-independent, unlike the section map above, so it is
         // safe to resolve against the empty placeholder layout a real attach
         // constructs with. A missing or corrupt store reads as the defaults.
         let (density, agent_sort, stored_width) = view_store::load_prefs();
-        // (x-2e86) The stored intent, resolved once. Deliberately NOT clamped to
+        // The stored intent, resolved once. Deliberately NOT clamped to
         // the current terminal here: `panel_w` clamps transiently on every paint,
         // and pre-clamping the stored value would let a small startup terminal
         // permanently shrink a width chosen on a large one (AC1-FR / Locked 4).
@@ -2530,7 +2530,7 @@ impl View {
         }
     }
 
-    /// (x-84d7) Open the Connections modal in its loading state and arm the first
+    /// Open the Connections modal in its loading state and arm the first
     /// read. Bumps the gen so any in-flight read from a prior open is discarded.
     fn open_connections(&mut self) {
         self.conn_gen = self.conn_gen.wrapping_add(1);
@@ -2542,14 +2542,14 @@ impl View {
         self.conn_want = true; // the run loop spawns the fold at loop top
     }
 
-    /// (x-84d7) Close the modal and bump the gen so a late read is dropped.
+    /// Close the modal and bump the gen so a late read is dropped.
     fn close_connections(&mut self) {
         self.connections = None;
         self.conn_esc.clear();
         self.conn_gen = self.conn_gen.wrapping_add(1);
     }
 
-    /// (x-84d7) Arm a fresh read (R refresh) under a new gen.
+    /// Arm a fresh read (R refresh) under a new gen.
     fn refresh_connections(&mut self) {
         self.conn_gen = self.conn_gen.wrapping_add(1);
         if let Some(cv) = self.connections.as_mut() {
@@ -2565,7 +2565,7 @@ impl View {
         self.conn_want = true;
     }
 
-    /// (x-84d7) Re-read after a mutation: keep the current lists + the result
+    /// Re-read after a mutation: keep the current lists + the result
     /// notice visible (no Loading blank) while the fresh data folds in. This is
     /// the read-after-write that keeps the modal from trusting optimistic state.
     fn rearm_connections_read(&mut self) {
@@ -2576,7 +2576,7 @@ impl View {
         self.conn_want = true;
     }
 
-    /// The unified needs-me queue (x-feec), worst-first: the live badge leg
+    /// The unified needs-me queue, worst-first: the live badge leg
     /// (this session's blocked / done-unseen rows, instant from the layout)
     /// merged with the event-fold leg (`review_wedged` / `budget_stop`), each
     /// fold item joined to a roster row when one exists. Owned rows so a per-key
@@ -2739,7 +2739,7 @@ impl View {
         }
     }
 
-    /// (x-f730 task 2.2) Apply a finished MINE mutation: success re-folds so
+    /// (task 2.2) Apply a finished MINE mutation: success re-folds so
     /// the render reflects the file (the client never simulates the write
     /// itself - `mine_fold` is untouched here either way); a failure shows
     /// the reason as a notice and leaves everything - the file included -
@@ -2752,7 +2752,7 @@ impl View {
         }
     }
 
-    /// (x-f730 task 2.3) Same contract as [`Self::apply_mine_action_result`]
+    /// (task 2.3) Same contract as [`Self::apply_mine_action_result`]
     /// for a question answer: success re-folds so the row leaves the queue on
     /// the next fold (AC1-HP), a failure shows the reason and leaves the
     /// question open (AC3-ERR).
@@ -2764,7 +2764,7 @@ impl View {
         }
     }
 
-    /// (x-b2bf) The yard crowd: every roster agent as `(name, eye, crown)`,
+    /// The yard crowd: every roster agent as `(name, eye, crown)`,
     /// the eye derived from that row's own badge/need reading at render time
     /// and the crown read off the same wire field the sideline orders by.
     /// This is the whole multi-citizen surface - one glyph each, no sprite,
@@ -2785,7 +2785,7 @@ impl View {
             .collect()
     }
 
-    /// (x-b2bf) The identity payload for a citizen, joined by name the same
+    /// The identity payload for a citizen, joined by name the same
     /// way the needs fold joins: first match on a display name. A
     /// display-name collision degrades to whichever citizen the fold listed
     /// first - noted, not fixed here.
@@ -2795,7 +2795,7 @@ impl View {
             .and_then(|f| f.iter().find(|c| c.name == name))
     }
 
-    /// (x-b2bf) The selected yard citizen's name, for re-anchoring the
+    /// The selected yard citizen's name, for re-anchoring the
     /// spotlight across a layout push: the crowd follows `layout.agents`
     /// order, so a scrape that removes or reorders rows before the cursor
     /// would silently move the spotlight onto a different citizen (the same
@@ -2811,7 +2811,7 @@ impl View {
             .map(|(name, _, _)| (*name).to_string())
     }
 
-    /// (x-b2bf) The yard overlay's footer state, same three shapes as the
+    /// The yard overlay's footer state, same three shapes as the
     /// needs fold's.
     fn yard_footer(&self) -> NeedsFooter {
         if self.yard_degraded {
@@ -2853,7 +2853,7 @@ impl View {
         self.answers = Some(idx);
     }
 
-    /// Open the new-workspace name overlay modally (x-9e5e): clear any
+    /// Open the new-workspace name overlay modally: clear any
     /// keyboard-opened overlay first. `create_keys` is routed AFTER
     /// selector/answers in `handle_stdin`, so a lingering selector would
     /// otherwise swallow the typed name (codex peer review).
@@ -2874,8 +2874,8 @@ impl View {
         self.create_esc.clear();
     }
 
-    /// Open the recruit workspace-name overlay modally (x-8f11), clearing other
-    /// keyboard-opened overlays first (x-260a). The marks are NOT cleared - they
+    /// Open the recruit workspace-name overlay modally, clearing other
+    /// keyboard-opened overlays first. The marks are NOT cleared - they
     /// are the payload; Esc keeps them, a submit clears them.
     fn open_recruit(&mut self) {
         self.selector = None;
@@ -2894,10 +2894,10 @@ impl View {
         self.recruit_esc.clear();
     }
 
-    /// Arm the card-dispatch confirm modally (x-a496) with the same
+    /// Arm the card-dispatch confirm modally with the same
     /// overlay-clearing discipline as [`View::open_create`]: the confirm wins
     /// the stdin routing, so a selector left open behind it would swallow the
-    /// keystrokes that follow the confirm's resolution (sigma review x-260a -
+    /// keystrokes that follow the confirm's resolution (sigma review -
     /// reachable by mouse-clicking a card while prefix+w is open).
     fn open_confirm(&mut self, action: ConfirmAction) {
         self.selector = None;
@@ -2910,14 +2910,14 @@ impl View {
         // after the confirm resolves reads as a stuck client.
         self.create = None;
         self.create_esc.clear();
-        // Same for a half-typed rename (x-c150): the confirm must not hide a
+        // Same for a half-typed rename: the confirm must not hide a
         // live text-input overlay whose next Enter it would steal.
         self.rename = None;
         self.rename_esc.clear();
         self.move_pick = None;
         self.attach_place = None;
         self.portal_pick = None;
-        // A live navigator overlay (x-653d) must not linger behind the confirm:
+        // A live navigator overlay must not linger behind the confirm:
         // it wins stdin routing after the confirm resolves and would swallow the
         // next keys, same reasoning as the selector above.
         self.nav = None;
@@ -2927,7 +2927,7 @@ impl View {
         self.confirm = Some(action);
     }
 
-    /// Open the move-to-position prompt for `tab` (x-cf97), clearing any other
+    /// Open the move-to-position prompt for `tab`, clearing any other
     /// keyboard-opened overlay first - the same discipline as
     /// [`View::open_rename`], whose shape this prompt copies: a surface that
     /// forgets one of those clears leaves two overlays live at once.
@@ -2949,7 +2949,7 @@ impl View {
 
     /// The greatest tab id in the active squad (ids are monotonic + never
     /// reused, so the max is the newest tab), or `None` when the active squad
-    /// is absent/empty (x-0f9d US1). Used only as the arm-time baseline.
+    /// is absent/empty (US1). Used only as the arm-time baseline.
     fn active_squad_max_tab_id(&self) -> Option<u64> {
         self.layout
             .squads
@@ -2958,7 +2958,7 @@ impl View {
             .and_then(|s| s.tabs.iter().map(|t| t.id).max())
     }
 
-    /// The id of the active squad's ACTIVE tab (x-0f9d US1). For the active
+    /// The id of the active squad's ACTIVE tab (US1). For the active
     /// squad the server projects `active_tab` per-viewer, and a NewTab switches
     /// only its sender to the new tab (Locked 3), so this identifies THIS
     /// client's own newly-created tab - not a concurrent tab another client
@@ -2971,7 +2971,7 @@ impl View {
             .and_then(|s| s.tabs.get(s.active_tab).map(|t| t.id))
     }
 
-    /// Arm the create-time name prompt for the NEXT tab (x-0f9d US1): a bare
+    /// Arm the create-time name prompt for the NEXT tab (US1): a bare
     /// NewTab (keyboard `c`, strip `+`) records the current newest tab id so
     /// the layout that adds a higher one opens rename on it. Other commands are
     /// ignored, so only an explicit create arms the prompt.
@@ -2983,7 +2983,7 @@ impl View {
 
     /// If a create-time name prompt is armed and THIS client's active tab is a
     /// newly-minted one (its id is beyond the arm-time baseline), open the
-    /// x-c150 rename overlay on it (x-0f9d US1): type + Enter names it, Esc /
+    /// rename overlay on it (US1): type + Enter names it, Esc /
     /// empty Enter leaves it unnamed. Called from [`View::set_layout`] after the
     /// swap. Keying on the active tab (not the max id) means a concurrent tab
     /// another client created in the same squad never steals this prompt.
@@ -3005,7 +3005,7 @@ impl View {
         }
     }
 
-    /// Open the move-tab-to-squad picker modally for `tab` (x-96e8), listing the
+    /// Open the move-tab-to-squad picker modally for `tab`, listing the
     /// candidate destination squads (source excluded). Same overlay-clearing
     /// discipline as the others. The cursor starts at the top; the list is no
     /// longer capped at the digit range, so rows past nine are cursor-only.
@@ -3025,18 +3025,18 @@ impl View {
         self.move_pick = Some(MovePick::new(src, squads));
     }
 
-    /// Clear the read-only peek overlay (x-c376) and its escape carry. Called by
+    /// Clear the read-only peek overlay and its escape carry. Called by
     /// every modal `open_*` helper so a mouse-driven overlay open (the mouse
     /// pre-pass runs before overlay routing) never leaves peek rendering on top.
     fn clear_peek(&mut self) {
         self.peek = None;
         self.peek_esc.clear();
-        // (x-9c5f) The reply input lives inside peek; closing peek drops it too.
+        // The reply input lives inside peek; closing peek drops it too.
         self.peek_input = None;
         self.peek_input_esc.clear();
     }
 
-    /// Open the which-key keybinds modal (prefix+?, x-8ccf US3). Clears peek like
+    /// Open the which-key keybinds modal (prefix+?, US3). Clears peek like
     /// every other overlay open so a mouse-driven open never leaves peek on top.
     fn open_keys_modal(&mut self) {
         self.clear_peek();
@@ -3087,14 +3087,14 @@ impl View {
         }
     }
 
-    /// (x-1d91) Every queue card the graph holds, cap included - the sum of the
+    /// Every queue card the graph holds, cap included - the sum of the
     /// per-lane counts, so the section's remainder and the kanban's lane headers
     /// are the same number twice rather than two independent claims.
     fn backlog_total(&self) -> usize {
         self.layout.backlog_lanes.iter().map(|(_, n)| n).sum()
     }
 
-    /// (x-1d91) Open the mini-kanban over the Backlog section.
+    /// Open the mini-kanban over the Backlog section.
     fn open_kanban(&mut self, anchor: Anchor) {
         self.clear_peek();
         self.aux = Some(build_kanban(
@@ -3105,7 +3105,7 @@ impl View {
         self.aux_esc.clear();
     }
 
-    /// (x-1d91) Whether this card is wearing the dispatched-verb `…` marker.
+    /// Whether this card is wearing the dispatched-verb `…` marker.
     fn card_pending(&self, id: &str) -> bool {
         self.backlog_pending.as_ref().is_some_and(|p| p.node == id)
     }
@@ -3209,8 +3209,8 @@ impl View {
     }
 
     /// Open the row context menu on `display_rows()` index `i`, anchored at
-    /// `anchor` (x-8ccf US2): the agent lifecycle menu, (x-1d91) the Backlog
-    /// card's reorder menu, or (x-f300) a section header's clear-dead menu (a
+    /// `anchor` (US2): the agent lifecycle menu, the Backlog
+    /// card's reorder menu, or a section header's clear-dead menu (a
     /// squad name row or a `~` band). Returns whether it opened - `false` for a
     /// row with no menu, which the caller turns into "close whatever is open".
     fn open_row_menu(&mut self, i: usize, anchor: Anchor) -> bool {
@@ -3245,7 +3245,7 @@ impl View {
                 }
                 Some(Pick::Menu(Box::new(menu)))
             }
-            // (x-1d91) A Backlog card gets the reorder menu.
+            // A Backlog card gets the reorder menu.
             Some(DisplayRow::Card(c)) => Some(Pick::Menu(Box::new(build_card_menu(
                 c,
                 &self.obsidian,
@@ -3304,7 +3304,7 @@ impl View {
         }
     }
 
-    /// (x-92d3 5.1) Open the tab-strip context menu on the tab cell at
+    /// (5.1) Open the tab-strip context menu on the tab cell at
     /// `(row, col)`, through the same `tab_cell_at` the drag pickup uses.
     /// `false` (and no swallow) for the `+` NewTab cell, a notice-overlay cell,
     /// or anything off the strip: those cells are not a tab, so the press
@@ -3316,7 +3316,7 @@ impl View {
         self.open_tab_menu_by_id(tid, anchor)
     }
 
-    /// (x-7683) Open the tab menu pinned to a stable [`TabId`] - the ONE
+    /// Open the tab menu pinned to a stable [`TabId`] - the ONE
     /// menu-open sequence (build, clear peek, reset the esc buffer) behind
     /// the cell-resolved right-press, the long-press release arm, and the
     /// dead-drag reaper, so the three paths can never drift apart.
@@ -3349,7 +3349,7 @@ impl View {
         })
     }
 
-    /// (x-7683) The `display_rows()` index of the agent row that owns `pid`, or
+    /// The `display_rows()` index of the agent row that owns `pid`, or
     /// `None` when no visible row hosts that pane (a scratch pane, or a roster
     /// that no longer carries it). A pane-cell right-press resolves its menu
     /// through this, so a pane and its sideline row can never disagree about
@@ -3360,7 +3360,7 @@ impl View {
             .position(|r| matches!(r, DisplayRow::Agent(a) if a.pane_id == Some(pid)))
     }
 
-    /// (x-7683) Whether any mode-owning overlay is open. The PANE context
+    /// Whether any mode-owning overlay is open. The PANE context
     /// menu refuses to open over one: most overlays never intercepted the
     /// mouse, so a pane press fell through to the pane, and open_row_menu
     /// clears only peek - a menu opening under rename would steal the
@@ -3373,7 +3373,7 @@ impl View {
             || self.digest.is_some()
     }
 
-    /// (x-7683) The narrower guard for the ROW/TAB menu paths (right-press
+    /// The narrower guard for the ROW/TAB menu paths (right-press
     /// and long-press alike): only overlays a menu would actually USURP -
     /// text inputs (rename/create/recruit/search/peek_input/nav, whose typed
     /// buffer the menu would orphan) and overlays that own live keys routed
@@ -3405,7 +3405,7 @@ impl View {
             || self.digest.is_some()
     }
 
-    /// (x-7683) Open the owning agent's row menu for the pane under
+    /// Open the owning agent's row menu for the pane under
     /// `(row, col)`, the one shared sequence behind the fresh right-press and
     /// the in-menu re-anchor (one implementation of "a pane is
     /// menu-bearing", so the two paths can never disagree about whose menu
@@ -3419,7 +3419,7 @@ impl View {
             .is_some_and(|i| self.open_row_menu(i, Anchor::At { row, col }))
     }
 
-    /// (x-7683) Open the context menu for whichever new drag is live, pinned
+    /// Open the context menu for whichever new drag is live, pinned
     /// to its captured source - the dead-drag reaper's path, which has no
     /// press cell to hit-test. A motionless hold past MENU_LONG_PRESS emits
     /// no events at all, so the reaper at PANE_DRAG_TIMEOUT is the only
@@ -3467,7 +3467,7 @@ impl View {
             self.set_notice("no menu on the held row".into());
             return false;
         }
-        // (x-b465) The press-hold latch gets the same treatment, and needs it
+        // The press-hold latch gets the same treatment, and needs it
         // more: a hold on a workspace row emits no events at all while it is
         // held, so without this the menu waits for the release. Identity
         // re-checked here too - the reaper fires precisely when a layout push
@@ -3508,7 +3508,7 @@ impl View {
             .map(|(t, _, _)| *t)
     }
 
-    /// Open the sideline MENU popup anchored at `anchor` (x-8ccf US4). Also
+    /// Open the sideline MENU popup anchored at `anchor` (US4). Also
     /// re-arms the update-readiness probe so a menu opened long
     /// after the last probe is never showing a stale answer; the menu itself
     /// still renders instantly from whatever outcome is already in hand.
@@ -3634,7 +3634,7 @@ impl View {
             .map(|(t, _, _)| *t)
     }
 
-    // (x-f75e) In-block guards for the three popup click routers. A click that
+    // In-block guards for the three popup click routers. A click that
     // hits no target used to read as "off the popup" and dismiss, so clicking a
     // Header (no target) closed the menu. These distinguish an in-block miss
     // (swallow) from an off-block click (dismiss) - the same fix at every site,
@@ -3660,7 +3660,7 @@ impl View {
 
     /// True when `(row, col)` lands on any of a popup's `esc`-close hit spans:
     /// the footer's `esc close` words, the Full title bar's ` esc ` chip, or a
-    /// Bare menu's inline bottom-border chip (x-020d) - every one of them is
+    /// Bare menu's inline bottom-border chip - every one of them is
     /// `ESC_CLOSE_HIT`-tagged by `chrome::frame`/`top_border`/`bottom_border`,
     /// so one generic scan over the rendered line's hits covers all three.
     /// Checked BEFORE the entry hit routers so a close target is never
@@ -3748,7 +3748,7 @@ impl View {
         }
     }
 
-    /// Apply a `PeekBody` under the seq guard (x-c376, AC1-FR): store `lines`
+    /// Apply a `PeekBody` under the seq guard (AC1-FR): store `lines`
     /// only when peek is open AND `seq` is the current request. Returns whether
     /// it applied (the caller redraws on true). A stale body (any other seq) is
     /// dropped, so a peek moved on to another row never shows the prior row's
@@ -3758,7 +3758,7 @@ impl View {
             Some(peek) => {
                 peek.body = Some(lines);
                 // A body landed: any in-flight auto-refresh is settled, so the
-                // next Layout push may arm a new one (x-9c5f US9).
+                // next Layout push may arm a new one (US9).
                 peek.refresh_pending = false;
                 true
             }
@@ -3766,7 +3766,7 @@ impl View {
         }
     }
 
-    /// Open the read-only peek overlay on `cursor` (x-c376), a `display_rows()`
+    /// Open the read-only peek overlay on `cursor`, a `display_rows()`
     /// index the caller verified is a `DisplayRow::Agent`. Bumps the request seq
     /// and starts in the loading state; the caller sends the matching
     /// `PeekAgent` with the returned seq. Deliberately unlike the modal `open_*`
@@ -3786,7 +3786,7 @@ impl View {
         self.peek_seq
     }
 
-    /// (x-10ec) Open a read-only peek on a WORKSPACE row, rendered locally
+    /// Open a read-only peek on a WORKSPACE row, rendered locally
     /// from the layout the client already holds: its tabs and its member rows
     /// with their states. No wire command - a workspace has no transcript to
     /// fetch - and the auto-refresh and re-anchor paths key off `squad` so
@@ -3808,7 +3808,7 @@ impl View {
 
     /// The `display_rows()` index of squad `id`'s own row (a `Sel` with no tab),
     /// or `None` if it is not currently a visible row. Used to re-point the
-    /// selector cursor onto a squad after a `J`/`K` reorder (x-96e8).
+    /// selector cursor onto a squad after a `J`/`K` reorder.
     fn squad_row(&self, id: u64) -> Option<usize> {
         self.display_rows()
             .iter()
@@ -3819,7 +3819,7 @@ impl View {
     ///
     /// The single width authority (AC5-EDGE): every consumer routes through
     /// here, so the work-pane minimum is enforced in ONE place rather than at
-    /// each call site. Since x-2e86 the width is [`View::sideline_width`] (the
+    /// each call site. Since the width is [`View::sideline_width`] (the
     /// operator's stored intent) clamped to `[MIN_SLIM_PANEL_W .. `
     /// [`sideline_max_width`]`]`, not a pure function of the density. The clamp
     /// is TRANSIENT: `sideline_width` is never mutated here, so a terminal
@@ -3875,7 +3875,7 @@ impl View {
     /// Content viewport as `(origin, dims)` in `usize`, for centering a
     /// [`draw_lines_overlay`] popover against the content rect (right of the
     /// sideline, above any splits) instead of the outer terminal. One call
-    /// site for every corner-anchored popover (x-e9c3).
+    /// site for every corner-anchored popover.
     fn overlay_viewport(&self) -> ((usize, usize), (usize, usize)) {
         let (rows, cols) = self.content_dims();
         (
@@ -4051,7 +4051,7 @@ impl View {
 
     /// End a sideline-border drag and recompute hover; see [`View::end_seam_drag`].
     ///
-    /// (x-2e86) Persists the reached width on the way out - but only if the drag
+    /// Persists the reached width on the way out - but only if the drag
     /// actually moved it, so a bare press-and-release on the border writes
     /// nothing. Every non-revert end routes here (release, a non-left event, and
     /// the stuck-drag timeout), so all three keep the width the operator dragged
@@ -4065,7 +4065,7 @@ impl View {
         self.refresh_hover_affordances(row, col);
     }
 
-    /// (x-2e86) End a sideline drag by reverting to the width at grab (a bare
+    /// End a sideline drag by reverting to the width at grab (a bare
     /// Esc), mirroring [`View::revert_seam_drag`]. Returns whether the width
     /// changed, so the caller re-reports the content viewport only when it did.
     /// Client-local, so unlike the seam revert nothing travels to the server
@@ -4126,12 +4126,12 @@ impl View {
         })
     }
 
-    /// (x-2e86) Set the sideline to a free width from the dragged border column,
+    /// Set the sideline to a free width from the dragged border column,
     /// clamped to `[MIN_SLIM_PANEL_W .. `[`sideline_max_width`]`]`. Returns
     /// whether the width changed, so the caller re-reports the content viewport
     /// only on a real crossing (the drag reports far more cells than columns).
     ///
-    /// Reverses x-b186's snap-only rule: the width is now continuous. The lower
+    /// Reverses snap-only rule: the width is now continuous. The lower
     /// clamp is the constant `MIN_SLIM_PANEL_W`, NOT the current density's floor,
     /// so a drag can shrink past a mode's structural floor - crossing it demotes
     /// the mode (Locked 5) rather than stopping the drag (AC2-EDGE).
@@ -4186,7 +4186,7 @@ impl View {
         })
     }
 
-    // -- pane relocation (x-aa95) -------------------------------------------
+    // -- pane relocation -------------------------------------------
 
     /// The grip's row and column span for a pane rect, in OUTER terminal
     /// coordinates. Shared by the renderer and the hit test so a press always
@@ -4232,7 +4232,7 @@ impl View {
 
     /// The drop zone under an outer cell during a relocation drag.
     ///
-    /// Seams come straight from x-d807's [`View::seam_at`], so the resize and
+    /// Seams come straight from [`View::seam_at`], so the resize and
     /// relocate gestures cannot disagree about where a divider is - including
     /// its refusal on a `┼`, which stays "no zone here" rather than becoming a
     /// rejected drop. Outer edges are this node's own surface precisely because
@@ -4285,7 +4285,7 @@ impl View {
             // Interior cell: instead of going dark (the old `return None`),
             // resolve to the nearest edge of the pane UNDER the pointer, so the
             // destination band tracks the pointer live rather than only waking
-            // at the content-area rim (x-aa95 shipped rim-only; a relocation
+            // at the content-area rim (shipped rim-only; a relocation
             // gave no preview until the pointer was dragged all the way to an
             // outer edge). Keyed off THIS pane's own centre so it stays
             // predictable: the pointer's dominant offset from centre picks the
@@ -4318,7 +4318,7 @@ impl View {
         Some(DropZone { target, dir })
     }
 
-    /// (v43, x-d6a8 G1) Whether a cell lies on the tab strip (the top bar right
+    /// (v43, G1) Whether a cell lies on the tab strip (the top bar right
     /// of the sideline panel) rather than the content area. The same region
     /// [`View::chrome_hit`] treats as the strip, so a pane dropped anywhere on it
     /// breaks into a new tab.
@@ -4326,7 +4326,7 @@ impl View {
         row < TAB_BAR_ROWS && col >= self.panel_w()
     }
 
-    /// (v43, x-d6a8 G2) The stable tab id under a strip cell, if it names an
+    /// (v43, G2) The stable tab id under a strip cell, if it names an
     /// existing tab (a drag SOURCE). Walks the same spans [`View::chrome_hit`]
     /// walks, so a drag pickup and a click resolve identically. The `+` (NewTab)
     /// is not a drag source, and a cell under the notice overlay is not the strip.
@@ -4355,7 +4355,7 @@ impl View {
         None
     }
 
-    /// (x-b465) A content-derived identity for the sideline row at `i`, stable
+    /// A content-derived identity for the sideline row at `i`, stable
     /// across a layout push. `None` for a row with no identity of its own (a
     /// spacer, a table head): those cannot be re-checked after a push, so a
     /// gesture must not latch onto one in the first place.
@@ -4392,7 +4392,7 @@ impl View {
         }
     }
 
-    /// (x-b465) The sideline row a press at `(row, col)` should HOLD on, with the
+    /// The sideline row a press at `(row, col)` should HOLD on, with the
     /// identity to re-check it by, for the rows `row_drag_source_at` declines.
     /// Inert rows qualify: a hold that opens no menu answers with a notice, and
     /// silence is the defect this fixes. A row with no stable identity does not,
@@ -4413,7 +4413,7 @@ impl View {
         Some((i, self.row_identity(i)?))
     }
 
-    /// (v43, x-d6a8 G3) The drag source of a sideline agent row under a cell, if
+    /// (v43, G3) The drag source of a sideline agent row under a cell, if
     /// any. A pane-hosted row drags its pane; a paneless bg row drags its attach
     /// id; a row with neither (a dead external tombstone) is not draggable.
     fn row_drag_source_at(&self, row: u16, col: u16) -> Option<RowSource> {
@@ -4499,7 +4499,7 @@ impl View {
         })
     }
 
-    // ---- (v43, x-d6a8 G2) tab-cell join drag -------------------------------
+    // ---- (v43, G2) tab-cell join drag -------------------------------
 
     fn begin_tab_drag(&mut self, src_tab: u64, now: Instant) {
         self.tab_drag = Some(TabDrag {
@@ -4514,7 +4514,7 @@ impl View {
     /// Track a tab-cell drag to a content-edge zone. Returns whether the
     /// highlight changed. A drag of the CURRENT tab lights nothing: any zone in
     /// its own content would be a self-join, suppressed exactly like an origin
-    /// drop (x-aa95 grammar).
+    /// drop (grammar).
     fn tab_drag_to(&mut self, row: u16, col: u16, now: Instant) -> bool {
         let Some(src_tab) = self.tab_drag.map(|d| d.src_tab) else {
             return false;
@@ -4552,7 +4552,7 @@ impl View {
         self.tab_drag.take().is_some()
     }
 
-    // ---- (v43, x-d6a8 G3) sideline-row placement drag ----------------------
+    // ---- (v43, G3) sideline-row placement drag ----------------------
 
     fn begin_row_drag(&mut self, src: RowSource, now: Instant) {
         self.row_drag = Some(RowDrag {
@@ -4692,7 +4692,7 @@ impl View {
         })
     }
 
-    /// The column range of the footer's `☰ menu` button (x-8ccf US4), shared by
+    /// The column range of the footer's `☰ menu` button (US4), shared by
     /// the renderer and the hit-test so a click lands where it draws. `None` when
     /// the panel is too narrow to add the button beside the `+ new workspace`
     /// affordance, or a recruit-mark tally is competing for the row.
@@ -4706,7 +4706,7 @@ impl View {
         (self.marks.is_empty() && tw >= FOOTER_NEW_LABEL.len() + 2 + mw).then(|| (tw - mw)..tw)
     }
 
-    /// (x-b186) The column range of the density button on the sideline's top
+    /// The column range of the density button on the sideline's top
     /// row, shared by the renderer and the hit-test so a click lands where it
     /// draws. `None` when the panel is too narrow to reserve the button without
     /// eating the header's own label.
@@ -4729,7 +4729,7 @@ impl View {
         if let Some(hit) = self.chrome_hit_feed(row, col) {
             return Some(hit);
         }
-        // Tab strip (row 0, scoped to the content columns since x-cd67 US1): it
+        // Tab strip (row 0, scoped to the content columns since US1): it
         // begins at `panel_w`, walking the same spans the renderer paints (with
         // the same origin). A row-0 click LEFT of the divider (`col < panel_w`)
         // belongs to the sideline's reclaimed row 0 and falls through below.
@@ -4764,7 +4764,7 @@ impl View {
         if row as usize == (self.term.0 as usize).saturating_sub(1) && self.bottom_row_is_chrome() {
             return None;
         }
-        // (x-b186) The density button rides the sideline's top row, painted over
+        // The density button rides the sideline's top row, painted over
         // whatever display row is scrolled to it. It is chrome pinned to row 0,
         // not a property of that row, so the check is on the PAINTED row and
         // must precede the display-row resolution below.
@@ -4782,7 +4782,7 @@ impl View {
         if let Some(hit) = self.table_header_hit(i, col) {
             return Some(hit);
         }
-        // x-8ccf US4: a click on the footer's `☰ menu` region opens the sideline
+        // US4: a click on the footer's `☰ menu` region opens the sideline
         // MENU popup; the rest of the footer row keeps its `+ new` create action.
         if matches!(self.display_rows().get(i), Some(DisplayRow::NewSquad)) {
             if let Some(range) = self.footer_menu_range(panel_w as usize) {
@@ -4818,14 +4818,14 @@ impl View {
 
     /// What acting on sideline display row `i` does - the single resolver both
     /// a mouse click ([`View::chrome_hit`]) and the prefix+w selector's Enter
-    /// route through (x-260a), so the two inputs can never diverge. `None` only
+    /// route through, so the two inputs can never diverge. `None` only
     /// for an out-of-range index or an inert [`DisplayRow::Header`].
     fn row_action(&self, i: usize) -> Option<ChromeHit> {
         match self.display_rows().get(i)? {
             DisplayRow::Sel(row) => match row.tab {
                 // Acting on the already-active squad row was a silent no-op
                 // (SelectSquad to the squad you're on); it now toggles the
-                // caret locally instead (x-2f99). Inactive rows keep
+                // caret locally instead. Inactive rows keep
                 // SelectSquad - auto-expand in set_layout completes the
                 // gesture when the resulting layout push lands.
                 None if row.squad == self.layout.active_squad => {
@@ -4845,27 +4845,27 @@ impl View {
             // A pane-hosted agent focuses its pane; a paneless claude bg row
             // attaches; a non-attachable row says so. Resolved by [`agent_hit`],
             // shared with the navigator's goto so a click and a keyboard jump
-            // never diverge on what an agent's action is (x-653d).
+            // never diverge on what an agent's action is.
             DisplayRow::Agent(a) => Some(agent_hit(a, self.layout.active_squad)),
             // A work-queue card dispatches/focuses via [`View::card_hit`], the
-            // same resolver the navigator uses (x-653d).
+            // same resolver the navigator uses.
             DisplayRow::Card(c) => Some(self.card_hit(c)),
-            // (x-975a) A `~` section header cycles its own view state, exactly
+            // A `~` section header cycles its own view state, exactly
             // like a squad name row. It stays `row_is_inert` so the selector
-            // cursor still skips it (the x-260a "never rests on a label"
+            // cursor still skips it (the "never rests on a label"
             // invariant): this makes it CLICKABLE, not selectable.
             DisplayRow::Header { key, .. } => Some(ChromeHit::CycleSection(key.clone())),
-            // (x-c5ee) The idle fold row toggles its squad's idle expansion -
+            // The idle fold row toggles its squad's idle expansion -
             // the idle sibling of a header's CycleSection. Actionable, so it is
             // NOT inert: both a click and a selector Enter route here.
             DisplayRow::IdleFold { key, .. } => Some(ChromeHit::ToggleIdle(key.clone())),
             // Inert rows (subline, spacer, table column header) resolve to no
-            // action (x-cd67).
+            // action.
             DisplayRow::Sub(_)
             | DisplayRow::Blank
             | DisplayRow::TableHead
             | DisplayRow::TableEmpty => None,
-            // The `+` footer opens the name-input overlay (x-9e5e).
+            // The `+` footer opens the name-input overlay.
             DisplayRow::NewSquad if self.term.0 < MIN_ROWS_FOR_STATUS => Some(ChromeHit::Notice(
                 "terminal too short for the name prompt".into(),
             )),
@@ -4875,19 +4875,19 @@ impl View {
 
     /// The [`ChromeHit`] for one work-queue card - the resolver shared by a
     /// sideline click ([`View::row_action`]) and the navigator's goto
-    /// ([`View::nav_rows`], x-653d). A method (not a free fn like [`agent_hit`])
+    /// ([`View::nav_rows`]). A method (not a free fn like [`agent_hit`])
     /// because the Ready confirm needs the term-height guard.
     ///
-    /// Only a READY card starts a session (x-a496) - the same nodes prefix+g
+    /// Only a READY card starts a session - the same nodes prefix+g
     /// picks - and only behind a one-keypress confirm (too costly for a stray
     /// tap). A blocked/in-flight card is work prefix+g never selects, so it says
-    /// why or routes to the running session (x-54fa, priority pane > attach >
+    /// why or routes to the running session (priority pane > attach >
     /// notice) rather than opening the confirm.
     fn card_hit(&self, c: &BacklogCard) -> ChromeHit {
         match c.state {
             // A terminal too short to render the bottom-row prompt refuses
             // instead of arming an INVISIBLE confirm that would capture keys and
-            // could dispatch blind (sigma review x-260a).
+            // could dispatch blind (sigma review).
             CardState::Ready if self.term.0 < MIN_ROWS_FOR_STATUS => {
                 ChromeHit::Notice("terminal too short for the dispatch prompt".into())
             }
@@ -4912,7 +4912,7 @@ impl View {
         }
     }
 
-    /// The navigator's flat GLOBAL catalog (x-653d): one [`NavRow`] per squad,
+    /// The navigator's flat GLOBAL catalog: one [`NavRow`] per squad,
     /// per tab (ignoring expand state - a collapsed squad's tabs still appear,
     /// the key difference from [`display_rows`]), per plain pane (v22: those NOT
     /// already shown as an agent row), per agent, and per work-queue card across
@@ -4926,7 +4926,7 @@ impl View {
     fn nav_rows(&self) -> Vec<NavRow> {
         let mut out = Vec::new();
         let cross = |sq: u64| (sq != self.layout.active_squad).then_some(sq);
-        // (x-e10f) The pane -> work-queue join behind "find by node": an agent
+        // The pane -> work-queue join behind "find by node": an agent
         // row's pane is the pane a card's `pane_id` names when that node is in
         // flight, so the card carries the node id and title-slug the pane's own
         // row can be searched by. Built ONCE per catalog rebuild (F5 on PR
@@ -4984,7 +4984,7 @@ impl View {
                 }
             }
             for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
-                // (x-0090, x-0f9d US3) A pane-hosted agent's context resolves
+                // (US3) A pane-hosted agent's context resolves
                 // inside-out: a NAMED tab leads with the agent then the tab name
                 // (`build › reviews`); an unnamed tab keeps today's
                 // `{squad} › {agent} ·N`; a watch-only row (no tab) falls back
@@ -5009,7 +5009,7 @@ impl View {
                         card.map(|c| c.id.clone()).unwrap_or_default(),
                         card.map(|c| c.slug.clone()).unwrap_or_default(),
                         s.name.clone(),
-                        // (x-0719) The portal index joins the match key so an
+                        // The portal index joins the match key so an
                         // EXISTING portal is reachable by number through the
                         // navigator; the `portal:` prefix keeps it from
                         // colliding with pane ids and node hex.
@@ -5058,9 +5058,9 @@ impl View {
         out
     }
 
-    /// The navigator rows matching the current text + state filter (x-653d),
+    /// The navigator rows matching the current text + state filter,
     /// recomputed per keypress (no cache): case-insensitive substring on the
-    /// match key (label + identity, x-e10f) AND the state chip when one is set.
+    /// match key (label + identity) AND the state chip when one is set.
     /// Text and state compose (both must match); letters only ever edit the
     /// query (Locked 5).
     fn nav_filtered(&self, nav: &NavView) -> Vec<NavRow> {
@@ -5137,10 +5137,10 @@ impl View {
     /// `None` when the cell is not a sideline text cell - a pane, the divider
     /// column, the tab bar, or the bottom chrome row. Mirrors [`chrome_hit`]'s
     /// sideline geometry exactly so the highlight lands where a click would
-    /// (x-a496).
+    ///.
     fn sideline_row_at(&self, row: u16, col: u16) -> Option<usize> {
         let panel_w = self.panel_w();
-        // (x-cd67 US1) The sideline now owns row 0 (the strip moved right of the
+        // (US1) The sideline now owns row 0 (the strip moved right of the
         // divider), so the `row < TAB_BAR_ROWS` exclusion is gone and display
         // row `i` maps directly from `row` (no TAB_BAR_ROWS offset). A cell on
         // the divider or in the strip's content columns still returns None.
@@ -5155,7 +5155,7 @@ impl View {
     }
 
     /// Fold one bare-motion (hover) report into the sideline highlight and the
-    /// focus-follows-mouse debounce state (x-a496). Does NOT fire focus - it only
+    /// focus-follows-mouse debounce state. Does NOT fire focus - it only
     /// records which pane the pointer is settling on and when it first landed
     /// there; the select loop's settle timer commits the focus once the pointer
     /// rests past [`HOVER_DEBOUNCE`]. Firing CANNOT be reactive here: ?1003 stops
@@ -5167,7 +5167,7 @@ impl View {
         // a cell off the sideline text column clears it.
         self.hover_row = self.sideline_row_at(row, col);
 
-        // (x-f331) Pointer-in-panel ARMS the selector to the hovered actionable
+        // Pointer-in-panel ARMS the selector to the hovered actionable
         // row - one regime, so x/X/r/space act on the row under the pointer and
         // a bare verb no longer leaks into the focused pane. Only touch a free or
         // already-hover-armed selector; an explicit prefix+w selector keeps
@@ -5231,7 +5231,7 @@ impl View {
         }
     }
 
-    /// The settle timer fired (x-a496): if a pane is still pending and is not
+    /// The settle timer fired: if a pane is still pending and is not
     /// already the focus, claim it (clearing the pending state) and return it for
     /// the caller to `FocusPane`. `None` when the pointer left the pane before
     /// the deadline or it already became the focus.
@@ -5246,11 +5246,11 @@ impl View {
         // generation it belongs to).
         let live: HashSet<u64> = layout.panes.iter().map(|(id, _)| *id).collect();
         self.frames.retain(|id, _| live.contains(id));
-        // (x-1d91) A changed card set is the ONLY confirmation a dispatched
+        // A changed card set is the ONLY confirmation a dispatched
         // reorder verb gets. Checked against the incoming backlog before it is
         // stored, since the comparison is against the dispatch-time snapshot.
         self.confirm_backlog_pending(&layout.backlog);
-        // (x-c5ee) No active-squad or mission seed here: the "active squad and
+        // No active-squad or mission seed here: the "active squad and
         // missions open by default" rule is computed live in `section_view()`,
         // so it tracks agents exiting mid-session (a majority-exited section
         // downgrades to LiveOnly, AC3-FR) and leaves this map holding only the
@@ -5264,25 +5264,25 @@ impl View {
         // Capture the selected needs-row identity against the OLD layout, before
         // the swap, so the cursor can re-anchor to the same item afterward.
         let needs_prev = self.answers_selected_id();
-        // (x-b2bf) Same capture for the yard spotlight: the crowd recomputes
+        // Same capture for the yard spotlight: the crowd recomputes
         // from layout.agents, so the selection must follow the citizen, not
         // the slot.
         let yard_prev = self.yard_selected_name();
-        // (x-b186) Same, for the sideline cursor when the table is status-sorted:
+        // Same, for the sideline cursor when the table is status-sorted:
         // a scrape tick that flips one badge RE-ORDERS the rows, so preserving
         // only the numeric index would silently move the cursor onto a different
         // agent and point the next Enter / lifecycle key at the wrong worker.
         let agent_prev = (self.density == Density::Extended)
             .then(|| self.selected_agent_name())
             .flatten();
-        // (x-4374) Capture the focused pane before the swap so a focus CHANGE can
+        // Capture the focused pane before the swap so a focus CHANGE can
         // pull the newly-focused row into view once the catalog settles.
         let focus_prev = self.layout.focus;
         self.layout = layout;
         // Selector re-anchors to a live, actionable row on catalog change
         // (AC6-FR): clamp into the unified rows, then step off an inert Header
-        // so the cursor never rests on a label (x-260a). A pending J/K reorder
-        // (x-96e8) instead re-points the cursor at the moved squad's new row so
+        // so the cursor never rests on a label. A pending J/K reorder
+        // instead re-points the cursor at the moved squad's new row so
         // it visually follows the workspace; the follow persists across repeated
         // presses until a non-reorder key clears sel_follow.
         if self.selector.is_some() {
@@ -5301,12 +5301,12 @@ impl View {
             self.selector = anchored;
         }
         // Needs-me overlay re-anchors to the SAME item across a scrape tick
-        // (x-feec AC3-UI): a resolved row drops out, the queue re-sorts, and the
+        // (AC3-UI): a resolved row drops out, the queue re-sorts, and the
         // cursor stays on the item it was on (by identity, not index), clamped
         // in range. An emptied queue keeps the overlay open in its "nothing
         // needs you" state (AC4-EDGE) rather than closing under the user.
         self.reanchor_answers(needs_prev);
-        // Yard spotlight re-anchors by citizen name (x-b2bf): identity first,
+        // Yard spotlight re-anchors by citizen name: identity first,
         // index clamp the fallback, so the sprite never jumps animals when a
         // scrape reorders the roster under an open yard.
         if self.yard.is_some() {
@@ -5326,7 +5326,7 @@ impl View {
             }
         }
         // Navigator re-clamps its cursor when a scrape tick reorders/removes rows
-        // under it (x-653d, AC1-FR/AC2-EDGE): the rows recompute from self.layout
+        // under it (AC1-FR/AC2-EDGE): the rows recompute from self.layout
         // on every access, so after a push a past-the-end cursor would draw no
         // marker and mis-target Enter. Clamp, don't reset - the query and state
         // filter are unchanged, only the underlying catalog moved; resetting to 0
@@ -5337,7 +5337,7 @@ impl View {
             nav.cursor = count.saturating_sub(1).min(nav.cursor);
         }
         // Hover highlight re-anchors to a live display row on a layout push
-        // (x-a496, AC3-FR): a dropped row must not leave the bar on a stale index.
+        // (AC3-FR): a dropped row must not leave the bar on a stale index.
         // Clear (not clamp) - a re-clamp would slide the highlight to an unrelated
         // row the pointer isn't over; the next Move re-establishes it.
         if let Some(hr) = self.hover_row {
@@ -5346,9 +5346,9 @@ impl View {
             }
         }
         // Re-clamp the sideline scroll offset against the new catalog so a
-        // shrunk row set never leaves the offset past the last row (x-a621).
+        // shrunk row set never leaves the offset past the last row.
         self.clamp_sideline_offset();
-        // (x-4374) On a focus CHANGE, scroll the focused-row band into view - a
+        // On a focus CHANGE, scroll the focused-row band into view - a
         // band the operator scrolled past is no better than the old gutter. Only
         // on a change, so a plain scrape tick never fights a manual scroll.
         if self.layout.focus != focus_prev {
@@ -5361,7 +5361,7 @@ impl View {
                 self.hover_pending = None;
             }
         }
-        // (x-d807) Same for a seam: a split or close elsewhere can retire the
+        // Same for a seam: a split or close elsewhere can retire the
         // pair that addressed it, and a seam whose panes are gone must not stay
         // lit as draggable. The drag itself re-anchors here too - it survives a
         // layout push that leaves its pair intact, and ends when one does not.
@@ -5372,7 +5372,7 @@ impl View {
             self.seam_drag = None;
             self.set_notice("divider gone: layout changed".into());
         }
-        // (x-aa95) Same for a relocation. AC7-FR: the dragged pane's process can
+        // Same for a relocation. AC7-FR: the dragged pane's process can
         // exit mid-gesture, and continuing to drag a pane that no longer exists
         // would end in a drop the server refuses for reasons the operator never
         // saw. The grip accent is cleared unannounced (it is only a hover hint);
@@ -5396,13 +5396,13 @@ impl View {
                 }
             }
         }
-        // (x-0f9d US1) Last, after every re-anchor: if a bare NewTab is
+        // (US1) Last, after every re-anchor: if a bare NewTab is
         // pending, the layout that just added the tab opens rename on it. Last
         // so `open_rename` clearing the selector/nav is never re-clobbered.
         self.maybe_prompt_new_tab_name();
     }
 
-    /// A section's effective view, resolved live every frame (x-c5ee). The one
+    /// A section's effective view, resolved live every frame. The one
     /// authority behind both the caret glyph and the row filter, so they can
     /// never disagree. Order:
     ///   1. An explicit persisted operator choice wins verbatim - it survives a
@@ -5484,7 +5484,7 @@ impl View {
         exited * 2 > total
     }
 
-    /// Advance a section one step through the view cycle (x-975a): pure client
+    /// Advance a section one step through the view cycle: pure client
     /// state, always visible next frame, then persisted so the choice survives
     /// a restart. `has_dead` and `binary` come from the section's own rows -
     /// see [`next_view`].
@@ -5494,14 +5494,14 @@ impl View {
         self.set_section_view(key, next);
     }
 
-    /// (x-b186) One press of the density control: advance the cycle, persist,
+    /// One press of the density control: advance the cycle, persist,
     /// re-clamp the scroll. The one mutation point the keybind AND the top-right
     /// button share, so the two inputs cannot diverge on what they persist.
     ///
     /// Every press changes both the panel geometry and the button glyph in the
     /// same frame, so no press is ever visually inert.
     fn cycle_density(&mut self) {
-        // (x-2e86, concurrency invariant) A density press during a live border
+        // (concurrency invariant) A density press during a live border
         // drag would fight the pointer for the width, so the in-flight drag owns
         // it until release: ignore the preset while dragging (AC3-FR).
         if self.sideline_drag.is_some() {
@@ -5509,7 +5509,7 @@ impl View {
         }
         let held = self.selected_agent_name();
         self.density = self.density.next();
-        // (x-2e86) A preset press picks the mode AND jumps the width to that
+        // A preset press picks the mode AND jumps the width to that
         // mode's canonical size, deliberately overwriting any dragged width -
         // that width jump is what makes each press visibly a preset (Locked 2).
         // Mode and width are one choice, so they persist in ONE locked mutation
@@ -5519,7 +5519,7 @@ impl View {
         view_store::save_preset(self.density, self.agent_sort, self.sideline_width);
         // The row set changes with the density (slim suppresses agent rows,
         // extended adds a column header), so a scrolled sideline must re-clamp
-        // or it can sit past the new last row (x-a621). Ordering matters: the
+        // or it can sit past the new last row. Ordering matters: the
         // clamp scrolls TO the selector, so it has to run after the re-anchor
         // has decided where the selector is - `reanchor_selector` owns both.
         self.reanchor_selector(held);
@@ -5537,7 +5537,7 @@ impl View {
         self.reanchor_selector(held);
     }
 
-    /// (x-b186) One press of the sort control. Persisted even outside Extended
+    /// One press of the sort control. Persisted even outside Extended
     /// so the choice survives a round trip through another density.
     fn toggle_agent_sort(&mut self) {
         let held = self.selected_agent_name();
@@ -5561,7 +5561,7 @@ impl View {
     /// Identity first (the agent is still there, just elsewhere), then the
     /// existing index-clamp fallback for a cursor that was not on an agent or
     /// whose agent this density no longer emits - so the cursor never dangles
-    /// past the end and never rests on an inert label (x-260a).
+    /// past the end and never rests on an inert label.
     fn reanchor_selector(&mut self, held: Option<String>) {
         if self.selector.is_none() {
             return;
@@ -5594,11 +5594,11 @@ impl View {
         self.section_chosen.insert(key, view);
         view_store::save(&self.section_chosen);
         // Hiding rows shrinks the row set; re-clamp so a scrolled sideline never
-        // skips past the new last row (x-a621).
+        // skips past the new last row.
         self.clamp_sideline_offset();
     }
 
-    /// (x-c5ee) Toggle a squad's top-K idle expansion: a squad in the set shows
+    /// Toggle a squad's top-K idle expansion: a squad in the set shows
     /// all its idle rows, one absent folds the overflow behind `+N more`. A pure
     /// local flip, never persisted (the durable layer is [`SectionView`]), then
     /// re-anchor the selector and re-clamp - the row set just changed size under
@@ -5616,7 +5616,7 @@ impl View {
     /// A section's exited rows. ONE predicate behind both `LiveOnly`'s hiding
     /// and the header menu's clear-dead, so the count the caret implies and the
     /// set the menu removes cannot drift apart. Folded live off the layout,
-    /// never cached (the x-df4c drift posture), so a section whose last dead
+    /// never cached (the drift posture), so a section whose last dead
     /// row was reaped elsewhere reports honestly on the very next click.
     /// `squad` is the caller's RUNTIME identity for a squad section, and it wins
     /// when present. `SectionKey::Squad` carries the canonical cwd because it is
@@ -5680,7 +5680,7 @@ impl View {
         }
     }
 
-    /// (x-c5ee) Force both pull-sections open so a test that exercises orphan
+    /// Force both pull-sections open so a test that exercises orphan
     /// (`~ elsewhere`) or backlog (`~ backlog`) rows renders them past their new
     /// Collapsed defaults. The collapse itself has dedicated AC tests; a test
     /// about card actions or orphan rows should not silently lose them.
@@ -5706,7 +5706,7 @@ impl View {
 
     /// Clamp a selector cursor into the current [`View::display_rows`] and
     /// step it off an inert Header row (forward first, else backward), so the
-    /// cursor never rests on a label (x-260a invariant). `None` only for an
+    /// cursor never rests on a label (invariant). `None` only for an
     /// empty list, unreachable in practice: the `+ new workspace` footer keeps
     /// the rows non-empty.
     fn selector_anchor(&self, cur: usize) -> Option<usize> {
@@ -5743,7 +5743,7 @@ impl View {
     }
 
     /// The nearest `DisplayRow::Agent` index past `from` in `dir` (+1 down, -1
-    /// up), skipping every non-agent row (x-c376 j/k peek). `None` when there is
+    /// up), skipping every non-agent row (j/k peek). `None` when there is
     /// no agent row that way (the caller BELs and stays put). Re-reads the live
     /// catalog per call, so a scrape tick between keys never chases a stale row.
     fn peek_next_agent(&self, from: usize, dir: isize) -> Option<usize> {
@@ -5758,13 +5758,13 @@ impl View {
         None
     }
 
-    /// Re-anchor or close the peek overlay after a catalog change (x-c376): if
+    /// Re-anchor or close the peek overlay after a catalog change: if
     /// the peeked index no longer lands on an agent row, snap to the nearest
     /// agent row (down first, then up); close peek when none remain. Returns the
     /// name to re-fetch when it re-anchored, `None` when it held or closed.
     fn peek_reanchor(&mut self) -> Option<(usize, String)> {
         let (cursor, peeked) = self.peek.as_ref().map(|p| (p.cursor, p.name.clone()))?;
-        // (x-10ec) A workspace peek holds while its squad's row still sits at
+        // A workspace peek holds while its squad's row still sits at
         // the cursor, refreshing the local body from the live layout; the
         // squad gone, it closes. Never re-anchors onto an agent row - that
         // would silently swap a workspace summary for a transcript fetch.
@@ -5817,7 +5817,7 @@ impl View {
         anchored
     }
 
-    /// (x-9c5f US9) Arm a transcript auto-refresh for the peeked row when its
+    /// (US9) Arm a transcript auto-refresh for the peeked row when its
     /// last fetch is older than [`PEEK_REFRESH_INTERVAL`]: bump the request seq +
     /// reset the fetch timer but KEEP the current body, so an active row follows
     /// without the "loading…" flicker a full [`View::open_peek`] would cause. The
@@ -5825,7 +5825,7 @@ impl View {
     /// name) to send the fresh `PeekAgent`, or `None` when peek is closed / not
     /// yet due.
     fn peek_refresh_due(&mut self) -> Option<(u64, String)> {
-        // (x-10ec) A workspace peek has no transcript to refresh - its body
+        // A workspace peek has no transcript to refresh - its body
         // re-renders locally on each Layout push in `peek_reanchor`. Arming a
         // request here would send a `PeekAgent` carrying a workspace label.
         if self.peek.as_ref().is_some_and(|p| p.squad.is_some()) {
@@ -5851,7 +5851,7 @@ impl View {
     }
 
     /// Sideline rows the cursor can occupy: the full terminal height (the
-    /// sideline owns row 0 since x-cd67 US1) minus the bottom chrome row,
+    /// sideline owns row 0 since US1) minus the bottom chrome row,
     /// minus the court block's rows at the bottom. The block is the
     /// subtraction point's only second customer, so `clamp_sideline_offset`
     /// and `reveal_focus_row` inherit the shrunk window without a second
@@ -5862,7 +5862,7 @@ impl View {
             .saturating_sub(self.court_block_rows())
     }
 
-    /// Follow-the-cursor sideline scroll (x-a621): move [`View::sideline_offset`]
+    /// Follow-the-cursor sideline scroll: move [`View::sideline_offset`]
     /// the least it takes to keep the selector (or hover) row on screen, then
     /// clamp into `[0, rows - visible]` so a shrunk catalog never scrolls past the
     /// last row. Everything-fits (or an empty window) resets the offset to 0, so
@@ -5884,7 +5884,7 @@ impl View {
         self.sideline_offset = self.sideline_offset.min(total - visible);
     }
 
-    /// (x-4374) Scroll the focused pane's sideline row into the visible window,
+    /// Scroll the focused pane's sideline row into the visible window,
     /// moving [`View::sideline_offset`] the least it takes - the focused-row band
     /// is useless if it scrolled off. Deliberately narrow: a focused pane with no
     /// visible row (a bare shell pane, or a row inside a folded/LiveOnly section)
@@ -5896,7 +5896,7 @@ impl View {
         // the actionable cursor on-screen, and stealing that to reveal a focus
         // band (which a background focus-follows-mouse can move independently of
         // the cursor) would leave Enter/lifecycle keys acting on a scrolled-off
-        // row. The selector-visibility invariant wins (x-a621).
+        // row. The selector-visibility invariant wins.
         if self.selector.is_some() {
             return;
         }
@@ -5922,7 +5922,7 @@ impl View {
     /// coherent); otherwise it nudges the scroll offset directly, bounded to the
     /// catalog. A sideline that already fits its height is a no-op.
     ///
-    /// (x-f331) A HOVER-armed selector is a transient pointer-follow, not a modal
+    /// A HOVER-armed selector is a transient pointer-follow, not a modal
     /// cursor, so the wheel must scroll the list rather than walk it - otherwise
     /// the wheel moves the selector away from the pointer, leaving `hover_row` and
     /// `selector` on two different rows (codex P2). Scrolling shifts the rows out
@@ -5979,7 +5979,7 @@ impl View {
         let origin_r = TAB_BAR_ROWS as usize;
         let origin_c = panel_w;
         let mut covered = vec![false; rows * cols];
-        // x-5a52: cells owned by the focused pane, so the divider pass can accent
+        // cells owned by the focused pane, so the divider pass can accent
         // the seams that bound it (a standing "you are here" outline).
         let mut focused = vec![false; rows * cols];
         for (pid, rect) in &self.layout.panes {
@@ -6029,7 +6029,7 @@ impl View {
                 }
             }
         }
-        // x-aa95: pane grips, drawn on cells the pane owns, hence after the blit
+        // pane grips, drawn on cells the pane owns, hence after the blit
         // - but BEFORE the scroll indicator, which is state rather than an
         // affordance and so wins the cells they contend for on a narrow pane. The dragged pane's own grip stays lit for the
         // whole gesture, which is what keeps the origin marked (AC3-UI) once
@@ -6110,8 +6110,8 @@ impl View {
         // A drag keeps the accent on the seam it grabbed even as the pointer
         // runs ahead of it, so the thing being moved stays the thing lit.
         let active_seam = self.seam_drag.map(|d| d.seam).or(self.hover_seam);
-        // x-aa95: the candidate drop zone, lit while a relocation drag is live.
-        // (x-d6a8) The tab-cell and sideline-row drags reuse the SAME content-edge
+        // the candidate drop zone, lit while a relocation drag is live.
+        // The tab-cell and sideline-row drags reuse the SAME content-edge
         // zone vocabulary, so one of the three lights the seam/band identically.
         let drop_zone = self
             .pane_drag
@@ -6139,7 +6139,7 @@ impl View {
                     || c + 1 < cols && covered[r * cols + c + 1];
                 let vert = r > origin_r && covered[(r - 1) * cols + c]
                     || r + 1 < rows && covered[(r + 1) * cols + c];
-                // x-5a52: a divider cell that borders the focused pane paints in
+                // a divider cell that borders the focused pane paints in
                 // the lattice accent at full brightness (not the DIM chrome), so
                 // the focused pane wears a standing outline that moves with focus.
                 // Interior seams only - an edge pane has no divider on that side.
@@ -6153,14 +6153,14 @@ impl View {
                     || c + 1 < cols && focused[r * cols + c + 1]
                     || r > origin_r && focused[(r - 1) * cols + c]
                     || r + 1 < rows && focused[(r + 1) * cols + c];
-                // x-d807: the seam under the pointer (or held in a drag) reads
+                // the seam under the pointer (or held in a drag) reads
                 // BOLD, distinct from both idle DIM chrome and the focus
                 // outline's plain accent. A terminal cannot portably change the
                 // cursor shape, so this is the only signal a divider is
                 // draggable before the press.
                 let grabbable =
                     active_seam.is_some_and(|s| self.seam_at(r as u16, c as u16) == Some(s));
-                // x-aa95: the candidate zone outranks the hover accent - during
+                // the candidate zone outranks the hover accent - during
                 // a drag the only question on screen is where the pane lands.
                 let dropping =
                     drop_zone.is_some_and(|z| self.drop_zone_at(r as u16, c as u16) == Some(z));
@@ -6187,7 +6187,7 @@ impl View {
             }
         }
 
-        // x-aa95: an edge drop zone lands on cells a PANE owns, which the
+        // an edge drop zone lands on cells a PANE owns, which the
         // divider pass above skips by construction. Lit here, after the blit,
         // so the rim reads as a candidate the same way a seam does.
         if let Some((band_rows, band_cols)) = drop_zone.and_then(|z| self.drop_band(z)) {
@@ -6227,7 +6227,7 @@ impl View {
         }
 
         self.draw_bottom_row(&mut cells, rows, cols);
-        // (x-f089) Chrome, not an overlay: after panes, before modals.
+        // Chrome, not an overlay: after panes, before modals.
         self.draw_feed_panel(&mut cells, rows, cols);
         let (overlay_origin, overlay_dims) = self.overlay_viewport();
         if let Some(item) = &self.feed_detail_of {
@@ -6240,7 +6240,7 @@ impl View {
                 overlay_dims,
             );
         } else if let Some(lines) = &self.digest {
-            // x-4e2d catch-up overlay: any key dismisses (handle_stdin, like the
+            // catch-up overlay: any key dismisses (handle_stdin, like the
             // key-table overlay). Framed chrome so it reads as one product with
             // the settings and connections modals.
             let chrome = chrome::Chrome::new("catch up", Anchor::Center).footer("any key closes");
@@ -6256,7 +6256,7 @@ impl View {
                 None,
             );
         } else if let Some(m) = &self.keys_modal {
-            // x-8ccf US3: the centered which-key modal replaces the old top-left
+            // US3: the centered which-key modal replaces the old top-left
             // key-table poster (opaque, sectioned, scrollable).
             popup::draw(
                 &mut cells,
@@ -6266,7 +6266,7 @@ impl View {
                 &self.theme,
             );
         } else if let Some(m) = &self.row_menu {
-            // x-8ccf US2: the anchored row context menu, drawn at the pointer.
+            // US2: the anchored row context menu, drawn at the pointer.
             popup::draw(
                 &mut cells,
                 rows,
@@ -6275,7 +6275,7 @@ impl View {
                 &self.theme,
             );
         } else if let Some(m) = &self.aux {
-            // x-8ccf US4/US5: the sideline MENU popup or settings modal.
+            // US4/US5: the sideline MENU popup or settings modal.
             popup::draw(
                 &mut cells,
                 rows,
@@ -6284,8 +6284,8 @@ impl View {
                 &self.theme,
             );
         } else if let Some(sel) = self.answers {
-            // x-feec needs-me queue (grown from the x-c929 answer overlay,
-            // x-f730 folded MINE in as the first lane): MINE then the
+            // needs-me queue (grown from the answer overlay,
+            // folded MINE in as the first lane): MINE then the
             // severity-ranked THEY NEED YOU union, on the shared inverse-video
             // chrome. Always drawn while open - an empty union renders
             // "nothing needs you", a pending/failed fold renders its footer
@@ -6314,7 +6314,7 @@ impl View {
                 Some(projection.selected_line(sel)),
             );
         } else if let Some(yv) = &self.yard {
-            // (x-b2bf) The yard: the fleet as f[no]nimals. The
+            // The yard: the fleet as f[no]nimals. The
             // crowd is one eye glyph per roster citizen (each glyph computed
             // from that row's own badge/need values); the spotlight is ONE
             // 12-column sprite for the selected citizen, its eye from the
@@ -6344,7 +6344,7 @@ impl View {
                 None,
             );
         } else if let Some(picker) = &self.move_pick {
-            // x-96e8 move picker: `move tab to:` / `move pane to:` + one
+            // move picker: `move tab to:` / `move pane to:` + one
             // numbered line per candidate squad.
             let lines = self.move_pick_lines(picker);
             let chrome = chrome::Chrome::new("move to", Anchor::Center).footer("esc cancel");
@@ -6380,7 +6380,7 @@ impl View {
                 Some(picker.cursor + 1),
             );
         } else if let Some(pick) = &self.portal_pick {
-            // (x-9fd0) The portal-placement picker, the attach picker's sibling:
+            // The portal-placement picker, the attach picker's sibling:
             // same cursor-on-screen discipline (+1 for the header line).
             let lines = self.portal_pick_lines(pick);
             let chrome = chrome::Chrome::new("portal", Anchor::Center).footer("esc cancel");
@@ -6396,7 +6396,7 @@ impl View {
                 Some(pick.cursor + 1),
             );
         } else if let Some(conn) = &self.connections {
-            // x-84d7 Connections modal: accounts + combos lists. Drawn from the
+            // Connections modal: accounts + combos lists. Drawn from the
             // modal's own render (pure). This and the settings modal are the
             // pair from the operator's screenshot - they now share one chrome.
             let chrome = chrome::Chrome::new("connections", Anchor::Center).footer("esc close");
@@ -6412,7 +6412,7 @@ impl View {
                 None,
             );
         } else if let Some(peek) = &self.peek {
-            // x-c376 peek overlay: the peeked agent row (re-read LIVE from the
+            // peek overlay: the peeked agent row (re-read LIVE from the
             // layout, navigator-style) header + transcript. Drawn above nav
             // (mutually exclusive modes).
             let drows = self.display_rows();
@@ -6440,7 +6440,7 @@ impl View {
                 None,
             );
         } else if let Some(nav) = &self.nav {
-            // x-653d navigator: the filtered flat catalog + query/chip line. Rows
+            // navigator: the filtered flat catalog + query/chip line. Rows
             // recompute per frame from the live layout (no cache), so a push
             // repopulates it.
             let filtered = self.nav_filtered(nav);
@@ -6556,7 +6556,7 @@ impl View {
     /// It must not stack `BOLD` on the inversion: bold brightens the foreground,
     /// which reverse has made the background. The shared framer handles that.
     ///
-    /// (x-b465) It wears the SHARED chrome now, the same `Chrome` + `frame` +
+    /// It wears the SHARED chrome now, the same `Chrome` + `frame` +
     /// `blit` path the settings, connections and catch-up modals take, with the
     /// target as the title and the blank-clears rule as the footer. It used to
     /// hand-paint a bare three-row inverse block with no border, no title bar
@@ -6615,18 +6615,18 @@ impl View {
             return;
         }
         // A card-dispatch confirm is modal - it owns the row above everything
-        // else while the operator decides (x-a496).
+        // else while the operator decides.
         if let Some(c) = &self.confirm {
             self.draw_confirm_line(cells, rows, cols, c);
             return;
         }
-        // The new-workspace name input is a centered modal (x-9e5e); the operator
+        // The new-workspace name input is a centered modal; the operator
         // is mid-entry, so it sits above search/hint/status.
         if let Some(name) = &self.create {
             self.draw_name_modal(cells, rows, cols, "new workspace", name, None);
             return;
         }
-        // The rename input (x-c150 tab; widened x-96e8 to squads): the noun tracks
+        // The rename input (tab; widened to squads): the noun tracks
         // the target so the operator sees what they are renaming, and the hint
         // spells out the blank-clears semantics.
         if let Some((target, name)) = &self.rename {
@@ -6642,7 +6642,7 @@ impl View {
             self.draw_name_modal(cells, rows, cols, &format!("rename {noun}"), name, hint);
             return;
         }
-        // The move-to prompt (x-cf97): the typed number IS the body; the hint
+        // The move-to prompt: the typed number IS the body; the hint
         // names the grammar so a `4` never reads as "move 4 left".
         if let Some((_, buf)) = &self.move_to {
             self.draw_name_modal(
@@ -6655,7 +6655,7 @@ impl View {
             );
             return;
         }
-        // The recruit workspace-name input (x-8f11): the hint names how many
+        // The recruit workspace-name input: the hint names how many
         // marked agents will join (create-if-absent).
         if let Some(name) = &self.recruit {
             let n = self.marks.len();
@@ -6706,7 +6706,7 @@ impl View {
             c += 1;
         }
         // Active squad's name, only when there is more than one squad to be
-        // ambiguous about (x-2f99) - the always-visible answer to "which
+        // ambiguous about - the always-visible answer to "which
         // squad?" when the sideline is toggled off or auto-hidden. BOLD: it
         // is identity, like the session cell, not context like the cwd.
         if self.layout.squads.len() > 1 {
@@ -6733,7 +6733,7 @@ impl View {
             put(cells, c, ch, cell_flags::DIM);
             c += 1;
         }
-        // Provenance cell for the focused pane (x-66e8): config-free `⚑ <node>`,
+        // Provenance cell for the focused pane: config-free `⚑ <node>`,
         // shown only when the focused pane was node-driven. Absent for an ad-hoc
         // pane, so a plain shell reads clean.
         if let Some(node) = &self.layout.focus_node {
@@ -6773,10 +6773,10 @@ impl View {
         }
     }
 
-    /// Paint the confirm prompt over the bottom row (x-a496 dispatch; x-96e8
-    /// squad removal). Blank first (the x-5041 divider-bleed gotcha), then the
+    /// Paint the confirm prompt over the bottom row (dispatch;
+    /// squad removal). Blank first (the divider-bleed gotcha), then the
     /// BOLD prompt whose wording tracks the action being confirmed.
-    /// (x-f331) The outer row a live confirm prompt paints on: the acted-on
+    /// The outer row a live confirm prompt paints on: the acted-on
     /// sideline row when it is still in the catalog and visible, else the bottom
     /// row. Anchoring the prompt at the target row is AC2-UI - a bottom-row
     /// prompt far from the row reads as "nothing happened". The target is
@@ -6795,7 +6795,7 @@ impl View {
         }
     }
 
-    /// (x-f331) The display-row index the confirm's target CURRENTLY occupies,
+    /// The display-row index the confirm's target CURRENTLY occupies,
     /// matched by the identity carried in the [`ConfirmAction`] (squad id, agent
     /// name, or external/dismiss attach_id, or a card node) - never a captured
     /// numeric index. A global confirm (reap / clear-dead) has no row, and a
@@ -6942,7 +6942,7 @@ impl View {
         draw_overlay_layout(cells, rows, cols, &layout, &self.theme);
     }
 
-    /// Build the move-tab picker overlay lines (x-96e8): a header plus one
+    /// Build the move-tab picker overlay lines: a header plus one
     /// numbered line per candidate squad, the number being the digit that
     /// selects it. A candidate that vanished from the catalog since open still
     /// renders (labelled) - the digit is re-validated on press, and the server
@@ -6978,8 +6978,8 @@ impl View {
         lines
     }
 
-    /// Paint the in-scrollback search line over the bottom row (v12, x-e780).
-    /// Blank first so the divider-fill pass cannot bleed through (x-5041 gotcha).
+    /// Paint the in-scrollback search line over the bottom row (v12).
+    /// Blank first so the divider-fill pass cannot bleed through (gotcha).
     /// Typing shows `/query_`; browsing shows `[i/n] /query` or `/query - no
     /// matches` (total 0).
     fn draw_search_line(&self, cells: &mut [Cell], rows: usize, cols: usize, sv: &SearchView) {
@@ -7025,7 +7025,7 @@ impl View {
         });
         for (i, t) in s.tabs.iter().enumerate() {
             let label = tab_group_label(tab_label_text(&t.name, i, t.named), t.panes.len());
-            // x-df4c US4: a leading max-severity rollup glyph so a background
+            // US4: a leading max-severity rollup glyph so a background
             // tab's blocked/working pane reads at the strip without opening it,
             // carrying the lattice's weight and color. `None` (no live panes:
             // empty or all-exited) prepends nothing, so a stateless tab renders
@@ -7176,12 +7176,12 @@ impl View {
     }
 
     fn draw_tab_bar(&self, cells: &mut [Cell], cols: usize) {
-        // (x-cd67 US1) The strip is scoped to the content area: it begins at
+        // (US1) The strip is scoped to the content area: it begins at
         // the content-column origin (`panel_w`) so the sideline column owns row
         // 0 too and tabs read as owned by the active workspace rather than the
         // reverse. `panel_w == 0` (no sideline) -> origin 0, byte-identical to
         // the pre-scoping full-width strip.
-        // (x-d6a8 G1) While a pane is dragged, the whole strip reads as a break
+        // (G1) While a pane is dragged, the whole strip reads as a break
         // target (accent), brightening to INVERSE the moment the pointer is over
         // it (the "drop here to break into a new tab" affordance). (G2) While a
         // tab cell is dragged, that cell dims to read as lifted - the same
@@ -7221,7 +7221,7 @@ impl View {
         paint_notice_overlay(cells, cols, self.notice_overlay(cols));
     }
 
-    /// The hosting-tab context for an agent row, resolved inside-out (x-0f9d
+    /// The hosting-tab context for an agent row, resolved inside-out (
     /// US3): a NAMED tab supplies its name; an unnamed tab supplies the `·N`
     /// ordinal (today's form). `None` = the row has no tab (a paneless /
     /// watch-only row), so the caller falls back to the squad name.
@@ -7240,10 +7240,10 @@ impl View {
     /// The sideline's display order (4a-G2): each squad's squad/tab rows, that
     /// squad's agent rows, then the `+ new workspace` footer, a catch-all
     /// section for agents matched to no squad, and the work-queue lane. The
-    /// ONE row enumeration (x-260a): painting, hover, mouse hit-testing, and
+    /// ONE row enumeration: painting, hover, mouse hit-testing, and
     /// the prefix+w selector all index into it.
     /// The sideline's rows for the CURRENT density - the one enumeration every
-    /// consumer indexes into (x-260a: painting, hover, hit-test, and the
+    /// consumer indexes into (: painting, hover, hit-test, and the
     /// selector share this index space in all three densities).
     ///
     /// Slim is a FILTER over the regular rows rather than a second builder, so
@@ -7268,7 +7268,7 @@ impl View {
         }
     }
 
-    /// (x-132c) [`Self::display_rows`] plus the lineage depth of each rendered
+    /// [`Self::display_rows`] plus the lineage depth of each rendered
     /// row, aligned index-for-index. The depths come from the SAME pass that
     /// builds the rows, so they are computed over exactly the set that paints:
     /// an idle parent the fold removed, or an exited parent a LiveOnly section
@@ -7344,7 +7344,7 @@ impl View {
         out.into_iter().unzip()
     }
 
-    // (x-c5ee) The sideline tree, with the top-K idle cap applied. A PURE
+    // The sideline tree, with the top-K idle cap applied. A PURE
     // function of state: a squad shows its idle overflow only when the operator
     // toggled its `+N more` row open (`idle_expanded`). No per-frame,
     // selector-driven force-expand - that needs to know which row the selector
@@ -7368,7 +7368,7 @@ impl View {
         let mut out = Vec::new();
         // Display index -> lineage depth for agent rows, filled at emit time.
         let mut agent_depth_at: HashMap<usize, usize> = HashMap::new();
-        // (x-cd67 US3) Section spacing only with more than one workspace: a
+        // (US3) Section spacing only with more than one workspace: a
         // single squad has no groups to separate (US3 verify: absent with 1
         // squad).
         let multi_squad = self.layout.squads.len() > 1;
@@ -7384,15 +7384,15 @@ impl View {
                 squad: s.id,
                 tab: None,
             }));
-            // Agents-first (x-0090, Locked 4): the caret gates the squad's agent
+            // Agents-first (Locked 4): the caret gates the squad's agent
             // rows; tab rows are gone (tabs live in the top tab bar). A collapsed
-            // squad shows only its name row + the x-d140 rollup glyph, so the
+            // squad shows only its name row + the rollup glyph, so the
             // rollup is the sole signal there - no more agent rows rendering
             // unconditionally under a folded squad.
-            // (x-975a) Tri-state: `LiveOnly` drops the exited rows in place
+            // Tri-state: `LiveOnly` drops the exited rows in place
             // while the header's `✗N` rollup keeps them discoverable; live rows
             // keep their original order. Display filtering only - nothing is
-            // reaped (that is x-f300).
+            // reaped (that is).
             let key = section_key(s);
             let view = self.section_view(&key);
             if view != SectionView::Collapsed {
@@ -7404,7 +7404,7 @@ impl View {
                     .filter(|a| a.squad == Some(s.id))
                     .filter(|a| view == SectionView::Expanded || !a.exited)
                     .collect();
-                // (x-132c) Order by lineage: children render beneath their
+                // Order by lineage: children render beneath their
                 // parent, pre-order. Keyed by row identity (input index), never
                 // display name - two panes can share a label. A squad with no
                 // parent edges keeps its input order (pane-tree, then
@@ -7415,7 +7415,7 @@ impl View {
                     |a| a.spawned_by_session.as_deref(),
                 );
                 squad_agents = order.into_iter().map(|i| squad_agents[i]).collect();
-                // (x-c5ee) Top-K idle cap: attention rows (live, non-idle) always
+                // Top-K idle cap: attention rows (live, non-idle) always
                 // render; idle rows fill to SQUAD_ROW_CAP live rows total; the
                 // idle overflow folds into one `+N more` row. Dead rows (present
                 // only in Expanded) sit OUTSIDE the budget under the view's
@@ -7441,7 +7441,7 @@ impl View {
                     }
                     emitted.push(a);
                 }
-                // (x-132c) Depth over exactly the emitted set: an idle parent
+                // Depth over exactly the emitted set: an idle parent
                 // the fold removed is ABSENT, so its visible child roots
                 // instead of indenting under a row that never painted.
                 let (_, emitted_depths) = lineage_layout(
@@ -7452,7 +7452,7 @@ impl View {
                 for (a, depth) in emitted.iter().zip(emitted_depths) {
                     agent_depth_at.insert(out.len(), depth);
                     out.push(DisplayRow::Agent(a));
-                    // (x-6851 US3) Exception-based subline: a Sub row follows the
+                    // (US3) Exception-based subline: a Sub row follows the
                     // agent ONLY when its cwd_base differs from the squad's
                     // project basename - the foreign-cwd join worth flagging. A
                     // same-project agent stays one clean row.
@@ -7480,7 +7480,7 @@ impl View {
             out.push(DisplayRow::Blank);
         }
         // The `+` create-workspace affordance sits directly under the squad list
-        // (x-9e5e), above the agents/work-queue sections.
+        //, above the agents/work-queue sections.
         out.push(DisplayRow::NewSquad);
         // Mission squads are progress indicators, not workspaces (an agent is
         // never assigned a mission id), so they render as one `~ missions` band -
@@ -7506,7 +7506,7 @@ impl View {
                 view,
             });
             if view != SectionView::Collapsed {
-                // (x-b465) Inert on purpose, and it stays that way. A mission
+                // Inert on purpose, and it stays that way. A mission
                 // squad is a render-time grouping the server appends to the
                 // LAYOUT catalog only (`push_layout`); it is absent from
                 // `session.squads`, so `RenameSquad` and `RemoveSquad` both
@@ -7523,7 +7523,7 @@ impl View {
         if !orphans.is_empty() {
             // Orphans (cwd matched no squad) keep one flat section in the same
             // row grammar; the header reads `~ elsewhere` (Locked 6). One spacer
-            // precedes the header (x-cd67 US3), not doubled with the group
+            // precedes the header (US3), not doubled with the group
             // separators above (the `+ new workspace` footer sits between).
             if multi_squad {
                 out.push(DisplayRow::Blank);
@@ -7538,14 +7538,14 @@ impl View {
             });
             // Orphans keep their line-1 ` (basename)` suffix (every orphan is
             // foreign by definition); a Sub row would double it, so the
-            // `~ elsewhere` section emits no sublines (x-6851 US3).
+            // `~ elsewhere` section emits no sublines (US3).
             if view != SectionView::Collapsed {
                 let visible: Vec<&AgentRow> = orphans
                     .iter()
                     .filter(|a| view == SectionView::Expanded || !a.exited)
                     .copied()
                     .collect();
-                // (x-132c) Same lineage ordering as the squad sections, over
+                // Same lineage ordering as the squad sections, over
                 // this section's own visible set: an orphan spawned by another
                 // orphan nests beneath it. Index-keyed, like the squads.
                 let (order, depths) = lineage_layout(
@@ -7559,7 +7559,7 @@ impl View {
                 }
             }
         }
-        // The Backlog section (x-6f77, renamed x-1d91): board-ordered
+        // The Backlog section (renamed): board-ordered
         // ready/blocked/in-flight cards under their own header. Empty
         // (unreadable/no-work graph) renders nothing - the agents section above
         // is unaffected (AC-edge fail-open).
@@ -7592,7 +7592,7 @@ impl View {
             if view != SectionView::Collapsed {
                 for c in &self.layout.backlog {
                     out.push(DisplayRow::Card(c));
-                    // (x-1d91) Line 2: which backlog this row belongs to. Emitted
+                    // Line 2: which backlog this row belongs to. Emitted
                     // only when there is something to say - an unscoped, unlaned
                     // card stays one clean row, the same exception-based stance
                     // the agent sublines take.
@@ -7611,7 +7611,7 @@ impl View {
                 }
             }
         }
-        // (x-132c) Materialize the aligned depth vec: agent rows carry the
+        // Materialize the aligned depth vec: agent rows carry the
         // depth their emit site recorded (keyed by display index); every other
         // row (headers, sublines, spacers, fold rows) indents nothing.
         let out_depths = (0..out.len())
@@ -7623,7 +7623,7 @@ impl View {
     fn draw_sideline(&self, cells: &mut [Cell], rows: usize, cols: usize, panel_w: usize) {
         let text_w = panel_w - 1; // last column is the divider
         let off = self.sideline_offset;
-        // (x-b186) Read the clock ONCE per paint, not per row: every extended
+        // Read the clock ONCE per paint, not per row: every extended
         // row's age is relative to the same instant, so a mid-paint tick cannot
         // make one row read older than the row above it.
         let now = crate::digest_overlay::now_secs();
@@ -7635,44 +7635,44 @@ impl View {
         };
         // `i` stays the TRUE display index (so the selector/hover highlight and
         // hit-test still match); the painted row subtracts the scroll offset.
-        // (x-132c) The depths come from the SAME compose pass as the rows, so
+        // The depths come from the SAME compose pass as the rows, so
         // an agent row indents by the depth computed over exactly the set that
         // paints - never a re-derivation over a different visibility set.
         let (display, row_depths) = self.display_rows_with_depths();
-        // (x-aeab) The reservation is the court block's rendered line count.
+        // The reservation is the court block's rendered line count.
         let (block_rows, block_lines) = self.court_block_layout(rows);
         let list_rows = rows - block_rows;
         for (i, drow) in display.into_iter().enumerate().skip(off) {
-            // (x-cd67 US1) The sideline owns the full column height including
+            // (US1) The sideline owns the full column height including
             // row 0; the tab strip moved right of the divider. Display row `i`
             // paints at outer row `i - off` (was `TAB_BAR_ROWS + (i - off)`).
             let r = i - off;
             if r >= list_rows {
                 break;
             }
-            // (x-b186) The density button is pinned to the top painted row, so
+            // The density button is pinned to the top painted row, so
             // that row COMPOSES its text into a narrower width. Reserving beats
             // overlaying: painting the button over a finished header band ate
-            // the always-on rollup counts x-6851 exists to keep visible. The
+            // the always-on rollup counts exists to keep visible. The
             // band still FILLS the full width below - only the text yields.
             let text_w = if r == 0 { btn_reserved } else { text_w };
             let is_inert = row_is_inert(&drow);
-            // x-5a52: the active-squad header accents its caret (always on,
+            // the active-squad header accents its caret (always on,
             // independent of the selector/hover).
             let mark_caret = matches!(
                 &drow,
                 DisplayRow::Sel(row)
                     if row.tab.is_none() && row.squad == self.layout.active_squad
             );
-            // (x-4374) The focused pane's owning row is the sole standing
+            // The focused pane's owning row is the sole standing
             // full-width INVERSE band, replacing the near-invisible one-cell
-            // gutter x-5a52 painted: the band IS the "you are here" signal now. At
+            // gutter painted: the band IS the "you are here" signal now. At
             // most one row matches focus, and a focused shell pane or a focused row
             // inside a folded section matches no painted row - so zero bands,
             // never a stale one on a previously-focused row.
             let is_focus =
                 matches!(&drow, DisplayRow::Agent(a) if a.pane_id == Some(self.layout.focus));
-            // (x-f331) An EXITED focused row is legibly dead: it drops the bright
+            // An EXITED focused row is legibly dead: it drops the bright
             // band for a DIM accent so a dead "you are here" never reads as a live
             // one (the screenshot case - a focus band on an EXITED row was
             // indistinguishable from a selector).
@@ -7686,9 +7686,9 @@ impl View {
             // `header_band_flags` and carry zero standing INVERSE cells).
             let is_band =
                 is_focus || matches!(&drow, DisplayRow::Sel(_) | DisplayRow::Header { .. });
-            // (x-f191) Read the row stamp before `drow` moves into the match.
+            // Read the row stamp before `drow` moves into the match.
             let row_stamp = self.row_stamp_for(&drow);
-            // (x-df4c) The row tuple carries `fg` now: most rows are
+            // The row tuple carries `fg` now: most rows are
             // `Color::Default`, but a needs-attention (Blocked) agent row or card
             // paints the accent, so the color must reach the cells below.
             let (text, mut flags, mut fg) = match drow {
@@ -7701,17 +7701,17 @@ impl View {
                             let caret = view_caret(self.section_view(&section_key(squad)));
                             // `*` after the caret marks the active squad so
                             // activity survives weak-BOLD themes and manual
-                            // collapse (x-2f99); replaces the space, so row
+                            // collapse; replaces the space, so row
                             // width is unchanged. Same vocabulary as the
                             // active-tab marker below.
                             let mark = if is_active_squad { '*' } else { ' ' };
                             let label = format!("{caret}{mark}{}", squad.name);
-                            // (x-6851 US2, demoted x-4374) The squad name row
+                            // (US2, demoted) The squad name row
                             // carries always-on per-state rollup counts folded
                             // from THIS squad's live rows every paint (never
-                            // cached - the x-df4c drift posture), right-aligned
+                            // cached - the drift posture), right-aligned
                             // across the full width. The reverse-video band came
-                            // off in x-4374 (active BOLD / inactive plain via
+                            // off in (active BOLD / inactive plain via
                             // `header_band_flags`); the counts still read in every
                             // view state, so a blocked pane shows `▲N` whether the
                             // squad is folded or open.
@@ -7732,7 +7732,7 @@ impl View {
                                 ' '
                             };
                             // The same digit-collapse as the tab bar: a
-                            // no-signal tab renders its bare ordinal (x-c150).
+                            // no-signal tab renders its bare ordinal.
                             let label = match squad.tabs.get(t) {
                                 Some(tm) => tab_label_text(&tm.name, t, tm.named),
                                 None => (t + 1).to_string(),
@@ -7742,7 +7742,7 @@ impl View {
                     };
                     (text, flags, fg)
                 }
-                // (x-b186) In Extended an agent row IS a table row: same lattice
+                // In Extended an agent row IS a table row: same lattice
                 // style and external DIM modifier, different text composition.
                 DisplayRow::Agent(a) if self.density == Density::Extended => {
                     let layout =
@@ -7754,7 +7754,7 @@ impl View {
                     if a.external && st != LatticeState::Blocked {
                         flags |= cell_flags::DIM;
                     }
-                    // (x-1b35) Same lane-color cascade as the compact arm; the
+                    // Same lane-color cascade as the compact arm; the
                     // Blocked accent wins there and here.
                     (
                         table_row_text(a, layout, depth, now),
@@ -7763,14 +7763,14 @@ impl View {
                     )
                 }
                 DisplayRow::Agent(a) => {
-                    // The unified icon lattice (x-df4c): exit beats badge beats
+                    // The unified icon lattice: exit beats badge beats
                     // liveness (row precedence, unchanged), mapped onto the one
                     // state->style mapping. Idle is now the outline `○`, not the
                     // near-invisible `·` this node exists to kill.
                     let st = agent_lattice_state(a);
                     let style = lattice_style(st, self.theme.accent);
                     let glyph = style.glyph;
-                    // A recruit mark (x-8f11) replaces the leading space with a
+                    // A recruit mark replaces the leading space with a
                     // `*`, keeping the row width unchanged (same vocabulary as
                     // the active-squad/tab marker).
                     let mark = if a
@@ -7782,14 +7782,14 @@ impl View {
                     } else {
                         ' '
                     };
-                    // (x-1b35) The `@<account>` text prefix is retired from the
+                    // The `@<account>` text prefix is retired from the
                     // row: the account is an incidental stand-in for the LANE,
-                    // and the lane now renders as zero-width color (x-c914's
+                    // and the lane now renders as zero-width color (
                     // account glyph logic lives in the peek header, which keeps
                     // its own account surfacing).
                     let dnd = if a.dnd { " [DND]" } else { "" };
                     let mut text = format!(" {mark}{glyph}{dnd} {}", a.name);
-                    // (x-1b35) The model-deviation token: a dim short prefix on
+                    // The model-deviation token: a dim short prefix on
                     // rows OFF their harness's default lane (claude on glm
                     // renders ` glm`; claude on opus renders nothing). The
                     // textual channel for the lane color - accessibility and
@@ -7799,7 +7799,7 @@ impl View {
                     {
                         text.push_str(&format!(" {tok}"));
                     }
-                    // (x-8f9d) The portal index, when this row is shown
+                    // The portal index, when this row is shown
                     // through one. The server derives it per frame from the
                     // open portals, so a row moving between portals stays ONE
                     // row whose marker changes - never a second row. Absent
@@ -7807,7 +7807,7 @@ impl View {
                     if let Some(idx) = a.portal {
                         text.push_str(&format!(" ◫{idx}"));
                     }
-                    // (x-132c) Indent the row under its lineage parent: one
+                    // Indent the row under its lineage parent: one
                     // step per depth, read from the compose-pass depth vec.
                     // Zero steps -> no prefix -> a section with no parent
                     // edges stays byte-identical.
@@ -7815,13 +7815,13 @@ impl View {
                     if steps > 0 {
                         text = format!("{}{text}", "  ".repeat(steps));
                     }
-                    // (x-0090, x-0f9d US3) A pane row names its hosting tab
+                    // (US3) A pane row names its hosting tab
                     // inside-out: a NAMED tab shows its name (`·reviews`), an
                     // unnamed tab shows the `·N` ordinal. An orphan row (no tab)
                     // instead names its repo with a ` (basename)` suffix. Tab vs
                     // orphan are mutually exclusive, so at most one suffix lands.
                     match self.agent_tab_context(a.squad, a.tab) {
-                        // (x-4374) The badge means "this session lives on a tab
+                        // The badge means "this session lives on a tab
                         // you are not looking at": suppress it when the row's pane
                         // is in the viewer's active (squad, tab). A row in a
                         // background tab or another squad keeps it, so quietness is
@@ -7832,11 +7832,11 @@ impl View {
                         Some(TabContext::Named(name)) => text.push_str(&format!(" ·{name}")),
                         Some(TabContext::Ordinal(ord)) => text.push_str(&format!(" ·{ord}")),
                         None => {
-                            // (x-0090) An ORPHAN (no squad) names its repo with a
+                            // An ORPHAN (no squad) names its repo with a
                             // ` (basename)` line-1 suffix so two same-named
                             // workers in different repos are distinguishable. A
                             // squad-matched paneless row is NOT an orphan - now
-                            // that every row carries `cwd_base` (x-6851 US3), the
+                            // that every row carries `cwd_base` (US3), the
                             // `squad.is_none()` guard keeps the suffix orphan-only;
                             // a matched row's foreign cwd surfaces as the exception
                             // subline instead.
@@ -7859,7 +7859,7 @@ impl View {
                         text.push_str(&format!(" [L{level} {scope}]"));
                     }
                     // External (roster-surfaced) is a MODIFIER, not a state
-                    // (x-df4c AC1-UI): the row keeps its lattice style and ORs
+                    // (AC1-UI): the row keeps its lattice style and ORs
                     // DIM on top - EXCEPT on Blocked, where the accent wins and
                     // DIM is withheld (attention must never be dimmed). Exit's
                     // DIM already rides `style.flags`.
@@ -7867,14 +7867,14 @@ impl View {
                     if a.external && st != LatticeState::Blocked {
                         flags |= cell_flags::DIM;
                     }
-                    // (x-1b35) The lane color: zero width, keyed on the ROUTE
+                    // The lane color: zero width, keyed on the ROUTE
                     // through the fixed cascade (routing row > model > route >
                     // harness > built-in). A Blocked row keeps the lattice
                     // accent - attention is never re-colored.
                     (text, flags, agent_lane_fg(a, st, style.fg))
                 }
                 DisplayRow::Card(c) => {
-                    // The same icon lattice as the agent rows (x-df4c US3): a
+                    // The same icon lattice as the agent rows (US3): a
                     // Ready card IS the hollow waiting state, InFlight IS the
                     // filled running state, so the card vocabulary and the agent
                     // lattice are literally one mapping. Blocked now carries the
@@ -7882,7 +7882,7 @@ impl View {
                     let style = lattice_style(card_lattice_state(c.state), self.theme.accent);
                     let glyph = style.glyph;
                     let label = if c.slug.is_empty() { &c.id } else { &c.slug };
-                    // (x-1d91) The head of the queue is stated, not inferred from
+                    // The head of the queue is stated, not inferred from
                     // position: the section can be scrolled or the top card
                     // claimed, and either would make "first row" a lie. Labelled
                     // `head` rather than `next` on purpose - it names the board's
@@ -7908,24 +7908,24 @@ impl View {
                     view,
                     ..
                 } => (
-                    // (x-975a) The caret leads a `~` header exactly as it leads
+                    // The caret leads a `~` header exactly as it leads
                     // a squad row, so both read as the same cycleable control.
                     header_band_text(&format!("{}{label}", view_caret(view)), &rollup, text_w),
                     // A section header is never the active squad, so it is the
                     // inactive (plain) header - one grammar with the demoted squad
-                    // rows above (x-4374).
+                    // rows above.
                     header_band_flags(false),
                     Color::Default,
                 ),
                 DisplayRow::NewSquad => {
                     // The recruit-mark footer count rides the create affordance
-                    // (x-8f11): `space` marks, `R` recruits the marked set.
+                    // `space` marks, `R` recruits the marked set.
                     let base = if self.marks.is_empty() {
                         FOOTER_NEW_LABEL.to_string()
                     } else {
                         format!("{FOOTER_NEW_LABEL}   {} marked ·R", self.marks.len())
                     };
-                    // x-8ccf US4: the `☰ menu` button rides the footer's right edge
+                    // US4: the `☰ menu` button rides the footer's right edge
                     // when the panel is wide enough (footer_menu_range gates it);
                     // the same range routes a click there to the MENU popup.
                     let label = match self.footer_menu_range(panel_w) {
@@ -7942,9 +7942,9 @@ impl View {
                     // so a long attribution ellipses rather than wrapping.
                     (format!("    {sub}"), cell_flags::DIM, Color::Default)
                 }
-                // (x-cd67 US3) A blank section spacer paints nothing.
+                // (US3) A blank section spacer paints nothing.
                 DisplayRow::Blank => (String::new(), 0, Color::Default),
-                // (x-b186) The extended table's column header: DIM like the
+                // The extended table's column header: DIM like the
                 // other inert labels, so it reads as chrome rather than a row.
                 DisplayRow::TableHead => (
                     table_head_text(
@@ -7957,14 +7957,14 @@ impl View {
                 DisplayRow::TableEmpty => {
                     ("  no agents".to_string(), cell_flags::DIM, Color::Default)
                 }
-                // (x-c5ee) The idle fold: `+N more` folded, `- fewer` expanded.
+                // The idle fold: `+N more` folded, `- fewer` expanded.
                 // Indented 4 cells to sit under the agent rows like a `Sub`, and
                 // DIM as a quiet summary - but it is NOT inert, so the selector's
                 // INVERSE bar still lifts it when the cursor lands on it.
                 DisplayRow::IdleFold {
                     hidden, expanded, ..
                 } => {
-                    // (x-d401) `+N more`, not `+N idle`. The fold now covers
+                    // `+N more`, not `+N idle`. The fold now covers
                     // `Unmeasured` rows as well as `Idle` and `Empty` ones, and
                     // a row with NO reading counted under the word "idle" is
                     // this branch's own defect: a label asserting a measurement
@@ -7979,12 +7979,12 @@ impl View {
                     (label, cell_flags::DIM, Color::Default)
                 }
             };
-            // (x-4374) The focused row wears the band via INVERSE in its base
+            // The focused row wears the band via INVERSE in its base
             // flags, set BEFORE the selector/hover XOR below so the two compose:
             // a parked selector leaves the row as the sole standing band; a
             // selector ON the focused row XOR-de-inverts it under the cursor, the
             // same grammar the old header bands used, so the selection still reads.
-            // (x-f331) Three distinct treatments so "you are here" reads apart
+            // Three distinct treatments so "you are here" reads apart
             // from the selector's "about to act here": the focus band wears the
             // ACCENT colour (accent fg -> accent bg under INVERSE) vs the
             // selector's plain-INVERSE bar. An EXITED focus row is DIM accent, no
@@ -7999,7 +7999,7 @@ impl View {
                 fg = self.theme.accent;
             }
             // The selector cursor OR the mouse hover paints the INVERSE bar
-            // (x-a496); both are display indices now (x-260a), so the bar can
+            //; both are display indices now, so the bar can
             // never drift from the painted row. Hover is highlight-only, and
             // neither bar lands on an inert Header (the cursor skips them; the
             // hover check here keeps a label from reading as actionable -
@@ -8008,8 +8008,8 @@ impl View {
             // Selection/hover TOGGLES the INVERSE bit: an agent row (no INVERSE)
             // gains the cursor bar exactly as before, while a header band (which
             // already carries INVERSE) de-inverts under the cursor so the
-            // selection still reads instead of vanishing into the band (x-6851
-            // US1; the you-are-here highlight proper lands in x-5a52).
+            // selection still reads instead of vanishing into the band (
+            // US1; the you-are-here highlight proper lands in).
             if highlit {
                 flags ^= cell_flags::INVERSE;
             }
@@ -8046,7 +8046,7 @@ impl View {
             if is_band {
                 for j in col..text_w {
                     cells[r * cols + j].flags = flags;
-                    // (x-f331) Carry the accent across the focus band's padding so
+                    // Carry the accent across the focus band's padding so
                     // the whole band is one colour, not accent-under-text +
                     // default-under-pad.
                     if is_focus {
@@ -8058,27 +8058,27 @@ impl View {
                     cells[r * cols + j].flags |= cell_flags::INVERSE;
                 }
             }
-            // x-5a52 (US4): the active-squad caret rides column 0 in the accent,
+            // (US4): the active-squad caret rides column 0 in the accent,
             // recolored in place so the header's flags (BOLD, or INVERSE when
             // selected) survive and the caret glyph stays. The focused row's
             // signal is the band above, not a gutter, so nothing is painted here
-            // for it (x-4374).
+            // for it.
             if mark_caret && text_w >= 1 {
                 cells[r * cols].fg = self.theme.accent;
             }
-            // (x-f191) A row-scoped outcome stamp renders AT the row the
+            // A row-scoped outcome stamp renders AT the row the
             // operator acted on; the paint lives in row_stamp.
             paint_row_stamp(cells, r, cols, text_w, row_stamp);
         }
-        // (x-b186) The density button, painted LAST over the sideline's top row.
+        // The density button, painted LAST over the sideline's top row.
         // Overlaying is what keeps it pinned to row 0 while the rows beneath it
-        // scroll, and it costs no display row - so the x-260a invariant (every
+        // scroll, and it costs no display row - so the invariant (every
         // painted line is exactly one display row) still holds and
         // `sideline_row_at` needs no special case. The header band underneath
         // already right-aligns a droppable rollup strip, so the two columns this
         // takes cost at worst the least-severe rollup pair, never the label.
         //
-        // (x-2e86) Layout is [inverse glyph][plain pad]: the glyph leads and the
+        // Layout is [inverse glyph][plain pad]: the glyph leads and the
         // divider-adjacent cell is a NON-inverse space, so the button reads one
         // column in from the border (the operator's padding ask) without shifting
         // `range.start` - the header band keeps every column it had, so a tight
@@ -8098,17 +8098,17 @@ impl View {
                 }
             }
         }
-        // (x-aeab) The court block: three glance lines minimized, the full
+        // The court block: three glance lines minimized, the full
         // reading expanded, pinned to the bottom rows of the column. The row
         // list already stopped above it; the block renders DIM so it reads as
         // chrome beside the live rows, and the painter truncates to the panel
         // width - the same rule every sideline row follows.
         court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
         // The divider column, now full terminal height (the sideline owns row
-        // 0 too; the strip sits right of the divider) - x-cd67 US1.
+        // 0 too; the strip sits right of the divider) - US1.
         //
-        // x-9e33: accent it while hovered or dragged, the same signal a pane
-        // seam wears (x-d807 shipped the drag but never rendered this, leaving
+        // accent it while hovered or dragged, the same signal a pane
+        // seam wears (shipped the drag but never rendered this, leaving
         // the border a draggable-but-invisible 1-cell target). A terminal
         // cannot change the cursor shape, so this accent IS the affordance.
         let border_active = self.hover_sideline_border || self.sideline_drag.is_some();
@@ -8130,52 +8130,52 @@ impl View {
 
 /// One rendered sideline line. The actionable variants (`Sel`, `Agent`, `Card`,
 /// `NewSquad`) resolve through [`View::row_action`] via the selector's Enter or a
-/// mouse click (x-260a); the inert variants (`Header`, `Sub`, `Blank`) are
+/// mouse click; the inert variants (`Header`, `Sub`, `Blank`) are
 /// skipped by the selector, never hover-highlighted, and return `None` from
 /// `row_action` - see [`row_is_inert`].
 enum DisplayRow<'a> {
     Sel(SelRow),
     Agent(&'a AgentRow),
-    /// A work-queue backlog card (x-6f77); a Ready card dispatches via the
-    /// confirm (x-a496), by click or selector Enter (x-260a).
+    /// A work-queue backlog card; a Ready card dispatches via the
+    /// confirm, by click or selector Enter.
     Card(&'a BacklogCard),
-    /// (x-6851 US1+US2) A section header: a full-width INVERSE band with a
+    /// (US1+US2) A section header: a full-width INVERSE band with a
     /// right-aligned per-state rollup strip. `rollup` is folded at
     /// `display_rows` time from the section's own rows (orphans / cards), so the
     /// painter renders it without re-deriving section membership.
     Header {
         label: &'static str,
         rollup: Vec<(LatticeState, usize)>,
-        /// (x-975a) Which section this header owns, so a click cycles it
+        /// Which section this header owns, so a click cycles it
         /// without the action path re-deriving the section from `label`.
         key: SectionKey,
         /// The section's view state at fold time, for the caret glyph.
         view: SectionView,
     },
-    /// The `+` create-workspace affordance (x-9e5e), a footer under the squad
+    /// The `+` create-workspace affordance, a footer under the squad
     /// list. A click opens the name-input overlay.
     NewSquad,
-    /// (x-cd67 US2) The dim, 4-cell-indented line-2 under a row: an agent's
-    /// foreign `cwd_base`, or (x-1d91) a Backlog card's `project · lane`
+    /// (US2) The dim, 4-cell-indented line-2 under a row: an agent's
+    /// foreign `cwd_base`, or a Backlog card's `project · lane`
     /// attribution and the section's `+N more` remainder. Owns its text so any
     /// section can emit one without the painter learning a new row type. Inert:
-    /// every painted line stays one display row (the x-260a single-enumeration
+    /// every painted line stays one display row (the single-enumeration
     /// invariant), so scroll, hover, and hit-test index math are untouched.
     Sub(String),
-    /// (x-cd67 US3) A one-line spacer between workspace groups and before the
+    /// (US3) A one-line spacer between workspace groups and before the
     /// trailing sections. Inert, like `Sub`.
     Blank,
-    /// (x-b186) The extended table's column-header line, carrying the current
+    /// The extended table's column-header line, carrying the current
     /// sort label so a toggle is never invisible - even when the two orders
     /// happen to coincide (one agent, or all rows in one band), the label
     /// changes. Inert like `Sub`: one painted line, one display row, so the
-    /// x-260a hit-test math is untouched.
+    /// hit-test math is untouched.
     TableHead,
-    /// (x-b186) The extended table's zero-agent line. Inert, like `TableHead`:
+    /// The extended table's zero-agent line. Inert, like `TableHead`:
     /// a header with nothing under it reads as a stalled table, so the empty
     /// state is stated rather than implied.
     TableEmpty,
-    /// (x-c5ee) The top-K idle fold: a squad with more live idle rows than the
+    /// The top-K idle fold: a squad with more live idle rows than the
     /// cap folds the overflow behind this one row. `hidden` is the foldable
     /// count (the idle rows past the cap, always > 0 when this row is emitted).
     /// Unlike the inert rows above it is ACTIONABLE - a click / selector Enter
@@ -8189,7 +8189,7 @@ enum DisplayRow<'a> {
     },
 }
 
-/// (x-1d91) A dispatched Backlog reorder verb awaiting confirmation from the feed.
+/// A dispatched Backlog reorder verb awaiting confirmation from the feed.
 ///
 /// There is no optimistic reorder: the rendered order changes only when the graph
 /// reader republishes, so between dispatch and that republish the card wears a `…`
@@ -8213,7 +8213,7 @@ struct BacklogPending {
 /// lost, short enough that a stuck row is never mistaken for a live one.
 const BACKLOG_PENDING_TTL: Duration = Duration::from_secs(10);
 
-/// (x-1d91) What a Backlog card looks like for confirmation purposes: its
+/// What a Backlog card looks like for confirmation purposes: its
 /// position, state, and lane, or `None` when it is not in the feed at all.
 ///
 /// Position covers a float (the card moves), lane covers a cross-column move,
@@ -8227,7 +8227,7 @@ fn card_mark(cards: &[BacklogCard], node: &str) -> Option<(usize, CardState, Opt
         .map(|i| (i, cards[i].state, cards[i].lane.clone()))
 }
 
-/// (x-1d91) A Backlog card's `project · lane` attribution subline, or `None` when
+/// A Backlog card's `project · lane` attribution subline, or `None` when
 /// the card carries neither (an unscoped, unlaned node says nothing worth a
 /// second row). Either half alone renders alone - the separator only appears
 /// between two present values.
@@ -8240,7 +8240,7 @@ fn card_attribution(c: &BacklogCard) -> Option<String> {
     }
 }
 
-/// (x-cd67) True for a non-actionable sideline row: the selector skips it, it is
+/// True for a non-actionable sideline row: the selector skips it, it is
 /// never hover/selection-highlighted, and [`View::row_action`] returns `None`.
 /// Header (a section label), Sub (an agent's dim subline), and Blank (a section
 /// spacer). One predicate so paint, hit-test, and the selector never diverge.
@@ -8319,7 +8319,7 @@ fn view_caret(v: SectionView) -> char {
     }
 }
 
-/// (x-f331) The action-verb keys a HOVER-ARMED selector captures on the
+/// The action-verb keys a HOVER-ARMED selector captures on the
 /// pointed-at row: remove/stop (`x`), bulk reap (`X`), rename (`r`), peek
 /// (space), recruit-mark (tab). Everything else - navigation, and any typing -
 /// disarms the hover-arm and forwards to the focused pane, so a parked pointer
@@ -8446,7 +8446,7 @@ fn row_age(a: &AgentRow, now_secs: u64) -> Option<u64> {
         .or_else(|| a.updated_at.map(|updated| now_secs.saturating_sub(updated)))
 }
 
-/// (x-6851 US3) The project basename a section is keyed by (the squad's
+/// (US3) The project basename a section is keyed by (the squad's
 /// canonical repo root), for the foreign-cwd subline comparison. `None` for a
 /// squad whose canonical cwd has no final component (degenerate; no subline).
 fn section_project_base(canonical_cwd: &str) -> Option<&str> {
@@ -8455,10 +8455,10 @@ fn section_project_base(canonical_cwd: &str) -> Option<&str> {
         .and_then(|b| b.to_str())
 }
 
-/// (x-6851 US3) Whether an agent's cwd is FOREIGN to its section: its `cwd_base`
+/// (US3) Whether an agent's cwd is FOREIGN to its section: its `cwd_base`
 /// is present AND differs from the section's project basename. A missing
 /// `cwd_base` (absent on the wire, AC4-EDGE) or a match yields false - no
-/// subline. This is the exception predicate that replaced x-cd67's
+/// subline. This is the exception predicate that replaced
 /// always-on server subline.
 fn agent_is_foreign(a: &AgentRow, section_base: Option<&str>) -> bool {
     match (a.cwd_base.as_deref(), section_base) {
@@ -8518,7 +8518,7 @@ fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
     // mark the active tab, and the squad label's own surrounding spaces.
     let shrink = |s: &mut TabSpan| {
         let mut chars: Vec<char> = s.text.chars().collect();
-        // (x-b465) A group marker must not outlive the name it marks. Columns
+        // A group marker must not outlive the name it marks. Columns
         // come off the right, so the `·N` count goes early - correct, it is the
         // least of the three. The leading glyph would otherwise survive to the
         // floor and leave a strip of identical nameless cells, which is worse
@@ -8595,7 +8595,7 @@ fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
 struct TabSpan {
     text: String,
     flags: u8,
-    /// (x-df4c US4) The span's foreground: the accent when the tab's rollup is a
+    /// (US4) The span's foreground: the accent when the tab's rollup is a
     /// Blocked pane, else `Color::Default`.
     fg: Color,
     hit: Option<TabHit>,
@@ -8633,27 +8633,27 @@ enum TabHit {
 
 /// What a left-click on chrome resolves to: server commands to send, a local
 /// one-line hint for a row that isn't directly actionable, or a pending confirm
-/// (a work-queue card, x-a496 - dispatch is too costly for a silent tap).
+/// (a work-queue card, - dispatch is too costly for a silent tap).
 enum ChromeHit {
     Cmds(Vec<Command>),
     /// Owned, not `&'static`: an in-flight card's notice carries the
     /// server-computed `where_hint` (v18), which is per-card data.
     Notice(String),
     Confirm(ConfirmAction),
-    /// Open the new-workspace name-input overlay (x-9e5e); the `+` footer.
+    /// Open the new-workspace name-input overlay; the `+` footer.
     OpenCreate,
-    /// Flip the active squad row's caret locally (x-2f99); no socket write.
-    /// (x-975a) Advance one sideline section through the view cycle.
+    /// Flip the active squad row's caret locally; no socket write.
+    /// Advance one sideline section through the view cycle.
     CycleSection(SectionKey),
     /// Sort the extended table by the clicked header column.
     SortColumn(AgentSortColumn),
-    /// (x-c5ee) Toggle a squad's top-K idle expansion - the idle sibling of
+    /// Toggle a squad's top-K idle expansion - the idle sibling of
     /// `CycleSection`. A pure local set flip, no socket write.
     ToggleIdle(SectionKey),
-    /// (x-b186) Advance the sideline density: the top-right button's click,
+    /// Advance the sideline density: the top-right button's click,
     /// routed to the same mutation the keybind runs so the two cannot diverge.
     CycleDensity,
-    /// Open the sideline MENU popup anchored at the footer's menu cell (x-8ccf
+    /// Open the sideline MENU popup anchored at the footer's menu cell (
     /// US4). Carries the click cell so the popup anchors under the pointer.
     OpenSidelineMenu {
         row: u16,
@@ -8669,22 +8669,22 @@ enum ChromeHit {
 /// live row through the ONE dedicated thread pane, else resume a resumable row
 /// through its harness, else say it has no pane here. Shared by a sideline
 /// click ([`View::row_action`]) and the navigator's goto ([`View::nav_rows`])
-/// so the two inputs resolve the same entity identically (x-653d). Pure - the
+/// so the two inputs resolve the same entity identically. Pure - the
 /// agent's own fields decide, so no `&self` needed.
 fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
     match a.pane_id {
         Some(pid) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
         None if !a.exited => {
-            // (x-07c2) Every paneless live row reaches a portal: Drive
+            // Every paneless live row reaches a portal: Drive
             // attaches, Follow tails the transcript, Locate renders the
             // explanation screen. One command, no placement dialog - the
             // server owns the tier (the row set lives there). The command's id
             // is the attach id for a claude row and the row NAME for every
             // other harness (Follow/Locate rows carry no attach id); the
-            // x-e10f refusal invariant holds by construction because the
+            // refusal invariant holds by construction because the
             // client never chooses between attach and focus.
             //
-            // (x-8f9d) The default gesture names portal 0, which is exactly
+            // The default gesture names portal 0, which is exactly
             // where the single thread pane always landed. `P` opens the next
             // free portal beside it; nothing about this path changed.
             let id = a.attach_id.clone().unwrap_or_else(|| a.name.clone());
@@ -8697,7 +8697,7 @@ fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
             }])
         }
         None => {
-            // (x-5f7f) A paneless row whose harness owns a resume form resumes
+            // A paneless row whose harness owns a resume form resumes
             // through that form: the server spawns `claude --resume <sid>` /
             // `codex resume <sid>` as a pane in the recorded cwd. The
             // operator's explicit gesture - restore never sends this.
@@ -8713,19 +8713,19 @@ fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
 }
 
 /// The rollup state of a pane/agent, worst-first. The navigator's state filter
-/// (x-653d), the squad-row rollup (x-d140), and seen/unseen surfacing (x-4328)
+///, the squad-row rollup, and seen/unseen surfacing
 /// all consume it. Derived, never wire-serialized - computed from [`AgentBadge`]
 /// + the seen bit at render time. The derive orders it `Blocked < Working <
 /// DoneUnseen < Unmeasured < Idle < Empty`, so a squad rollup is
-/// `agents.map(pane_state).min()` (the worst state wins - x-d140's `min` and
-/// this filter agree on the ordering). `Unmeasured` (x-d401) ranks worse than
+/// `agents.map(pane_state).min()` (the worst state wins - `min` and
+/// this filter agree on the ordering). `Unmeasured` ranks worse than
 /// every settled state: a no-reading row deserves a look before an idle one
-/// does. `Empty` (x-d401) is a pristine shell - nothing running, nothing done,
+/// does. `Empty` is a pristine shell - nothing running, nothing done,
 /// the least severe reading there is.
 ///
 /// NOT the same ordering as [`SEVERITY_ORDER`], and neither is "the single
 /// ordering authority" the two comments used to each claim. They answer
-/// different questions and have disagreed since before x-d401: this one
+/// different questions and have disagreed since before: this one
 /// answers WHICH ROW IS WORST, for a `min()` rollup and the navigator filter,
 /// so `Working` outranks `DoneUnseen`. `SEVERITY_ORDER` answers IN WHAT ORDER
 /// A SECTION'S COUNTS ARE LISTED AND TRUNCATED, where a finished-but-unseen
@@ -8742,8 +8742,8 @@ enum PaneState {
 }
 
 /// Derive a [`PaneState`] from an agent's badge, whether its output has been
-/// seen (x-4328's `AgentRow.seen`, server-owned), and the pane's own OSC 133
-/// activity reading (x-d401's `AgentRow.pane_activity`). A present badge wins
+/// seen (`AgentRow.seen`, server-owned), and the pane's own OSC 133
+/// activity reading (`AgentRow.pane_activity`). A present badge wins
 /// (the registry worker's own in-TTL report); a `Done` badge folds to `Idle`
 /// once seen, else `DoneUnseen`. With NO badge the vt reading decides, and an
 /// absent/unmeasured reading renders `Unmeasured` - never a blind `Idle`, the
@@ -8792,7 +8792,7 @@ fn evidence_rank(a: &AgentRow) -> u8 {
     // dead pid / gone pane): the sunk tier. Archived, snoozed and pane-dead
     // all collapse here - none of them needs the operator's attention now.
     // `exit-recorded` fires when reconcile already nulled the pid, which can
-    // leave the mux's OWN `exited`/`unmeasured` pair reading dormant (x-9239
+    // leave the mux's OWN `exited`/`unmeasured` pair reading dormant (
     // review: the probe saw the tombstone the mux's liveness derivation
     // cannot see); the basis string is the more complete reading here and
     // must win. Mirrors the falsifier set `fno agents list` and the daemon
@@ -8846,11 +8846,11 @@ fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Rev
     )
 }
 
-/// (x-c5ee) A LIVE idle row - the top-K cap's fold target. Exited is checked
+/// A LIVE idle row - the top-K cap's fold target. Exited is checked
 /// first, exactly as [`agent_lattice_state`] does, so a dead worker (whose
 /// `pane_state` also reads `Idle`) is never mistaken for live idle and swept
 /// into `+N more`: dead rows are the section view's business, not the cap's.
-/// (x-d401) The fold takes every NON-ATTENTION state, which after this branch
+/// The fold takes every NON-ATTENTION state, which after this branch
 /// means three of them, not one. `pane_state` used to answer `Idle` for any
 /// badgeless row; the split sends a pristine shell to `Empty` and a row with
 /// no reading to `Unmeasured`, and `server.rs` hard-codes `pane_activity:
@@ -8877,16 +8877,16 @@ fn is_idle_row(a: &AgentRow) -> bool {
         )
 }
 
-/// Why a session needs a human, worst-first (x-feec). Declaration order IS the
+/// Why a session needs a human, worst-first. Declaration order IS the
 /// severity contract: the needs-me queue is `(kind, ts, name)`-sorted, so the
 /// worst band leads and the longest-waiting fold item tops its band (a live
 /// badge row carries no ts, so it degenerates to name order within its band -
 /// leg-1 and leg-2 never share a band, so the two orderings never mix). Same
-/// declaration-order `Ord` trick as [`PaneState`]. `Decision` (x-e3be) is fed
+/// declaration-order `Ord` trick as [`PaneState`]. `Decision` is fed
 /// by two `needs.rs` fold arms - `carveout_stale` (an aged unharvested
 /// carve-out pile), `stale_claims` (an aged orphaned `node:` claim pile) -
 /// read from durable on-disk state rather than a recent event, so neither is
-/// windowed by the fold's 24h `since` bound. `Question` (x-f730) is the third
+/// windowed by the fold's 24h `since` bound. `Question` is the third
 /// arm, `operator_question`; it is split out from `Decision` because the
 /// overlay renders it from a richer, separately-folded leg
 /// ([`crate::needs_overlay::QuestionItem`]) instead - `Question` on a
@@ -9017,7 +9017,7 @@ const MINE_CAP: usize = 10;
 /// Re-open cache: a fold younger than this is reused instantly (mashing
 /// `prefix+a` never re-shells - Perspective B).
 const NEEDS_CACHE_TTL: Duration = Duration::from_secs(5);
-/// (x-b2bf) The yard's re-open cache. Longer than the needs fold's because
+/// The yard's re-open cache. Longer than the needs fold's because
 /// the identity leg pays a full Python interpreter start plus an archive
 /// parse for data that is nearly static (species and album history change
 /// on merge cadence, not keystroke cadence).
@@ -9026,18 +9026,18 @@ const YARD_CACHE_TTL: Duration = Duration::from_secs(60);
 /// Default fold window: the last 24h (the fold also windows server-side).
 const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
 
-/// One row of the navigator's flat catalog (x-653d). Fully owned (no layout
+/// One row of the navigator's flat catalog. Fully owned (no layout
 /// borrow) so goto can mutate the view after the catalog is built; recomputed
 /// per keypress, never cached.
 struct NavRow {
     /// The displayed label (e.g. `nairobi › build` or `nairobi › claude#3`).
     /// Rendering only - the text filter matches [`NavRow::match_key`].
     label: String,
-    /// (x-e10f) The searchable identity, composed at build time and NEVER
+    /// The searchable identity, composed at build time and NEVER
     /// displayed: `label` plus the mux pane id, the bound node id, the
     /// title-slug and the workspace name, lowercased and space-joined. The
     /// text filter matches HERE, so a row is findable by what it IS (pane
-    /// `307`, node `x-6233`, a slug) not just by its label text. A row whose
+    /// `307`, node ``, a slug) not just by its label text. A row whose
     /// hit is invisible in the label shows the matched token
     /// ([`nav_overlay_lines`]) - a hit with no visible reason reads as a bug.
     match_key: String,
@@ -9060,7 +9060,7 @@ struct NavRow {
 }
 
 impl NavRow {
-    /// (x-e10f fix) The ONLY construction path: `match_key` is composed from
+    /// (fix) The ONLY construction path: `match_key` is composed from
     /// `label` + `tokens` here, so a row can never exist with an unset key.
     /// The first cut left the field as `String::new()` at every literal plus
     /// a chained `with_match_key` call - a row class that forgot the chain
@@ -9086,7 +9086,7 @@ impl NavRow {
     }
 }
 
-/// (x-e10f) Compose a nav row's searchable identity: the label plus every
+/// Compose a nav row's searchable identity: the label plus every
 /// non-empty token, lowercased and space-joined. An unresolved field
 /// contributes NO token, so a squad row without a node binding is not made
 /// matchable by the empty string.
@@ -9101,7 +9101,7 @@ fn nav_match_key(label: &str, tokens: &[String]) -> String {
     key
 }
 
-/// (x-e10f) Whether a nav row's goto lands on pane `pid`: every pane-hosted
+/// Whether a nav row's goto lands on pane `pid`: every pane-hosted
 /// row class (a plain pane, a pane-hosted agent) applies `FocusPane(pid)`.
 /// The cursor-seed predicate for opening the navigator on the focused pane.
 fn nav_row_targets_pane(r: &NavRow, pid: u64) -> bool {
@@ -9110,7 +9110,7 @@ fn nav_row_targets_pane(r: &NavRow, pid: u64) -> bool {
 
 /// The navigator state of an agent row: an exited pane reads `Idle` (finished,
 /// nothing to act on); otherwise derive from the badge + the server-owned
-/// seen bit (x-4328): a looked-at `Done` reads `Idle`, an unseen one
+/// seen bit: a looked-at `Done` reads `Idle`, an unseen one
 /// `DoneUnseen`.
 fn nav_agent_state(a: &AgentRow) -> PaneState {
     if a.exited {
@@ -9120,14 +9120,14 @@ fn nav_agent_state(a: &AgentRow) -> PaneState {
     }
 }
 
-/// An agent row's icon-lattice state (x-df4c US2): exit beats badge beats
+/// An agent row's icon-lattice state (US2): exit beats badge beats
 /// liveness. Unlike [`nav_agent_state`] this keeps `Exited` distinct (`✗`)
 /// rather than folding it to `Idle` - a row shows its own exit, but a squad/tab
-/// rollup ignores it. Within the exited case, `unmeasured` (x-9de7) further
+/// rollup ignores it. Within the exited case, `unmeasured` further
 /// splits `Exited` (`✗`, confirmed dead, respawn is safe) from `Unmeasured`
 /// (`?`, no corroboration, look before you spawn) - the operator's routing
 /// decision turns on telling the two apart at a glance. The non-exit case goes
-/// through `pane_state`, so the row respects the `seen` bit (x-4328) exactly
+/// through `pane_state`, so the row respects the `seen` bit exactly
 /// as the nav/tab rollups do: a Done pane the operator has already viewed
 /// folds to `Idle` (`○`) instead of holding a stale bold `✓` needs-attention
 /// marker - one system across every surface.
@@ -9143,7 +9143,7 @@ fn agent_lattice_state(a: &AgentRow) -> LatticeState {
     }
 }
 
-/// A queue card's icon-lattice state (x-df4c US3): Ready unifies with `Idle`
+/// A queue card's icon-lattice state (US3): Ready unifies with `Idle`
 /// (hollow waiting), InFlight with `Working` (filled running), Blocked stays
 /// the accent state - so cards and agent rows render the identical vocabulary.
 fn card_lattice_state(s: CardState) -> LatticeState {
@@ -9155,7 +9155,7 @@ fn card_lattice_state(s: CardState) -> LatticeState {
 }
 
 /// Fold a tab's LIVE panes to their worst lattice state for the tab-strip
-/// rollup (x-df4c US4). Exited panes are filtered BEFORE the fold, so `None`
+/// rollup (US4). Exited panes are filtered BEFORE the fold, so `None`
 /// (no glyph) means "no live panes" - an empty tab or an all-exited tab, which
 /// both render byte-identically to a stateless tab (AC2-EDGE). A tab with live
 /// panes always rolls up, so a live-idle tab yields `Some(Idle)` -> the outline
@@ -9182,18 +9182,18 @@ fn card_state(c: &BacklogCard) -> PaneState {
     }
 }
 
-/// A named tab's visible label width in the tab bar / sideline (x-c150);
+/// A named tab's visible label width in the tab bar / sideline;
 /// keeps ~4 labeled tabs visible at 100 cols.
 const TAB_LABEL_W: usize = 14;
 
-/// A tab span's label body (x-c150): the bare 1-based ordinal when the
+/// A tab span's label body: the bare 1-based ordinal when the
 /// server-derived name carries no signal (the name IS the ordinal -
 /// byte-for-byte today's render for a plain shell tab, AC1-EDGE), else
 /// `{ordinal}:{name}` with the name truncated to [`TAB_LABEL_W`] chars. The
 /// ordinal stays visible in every span because the `1-9 select tab` keys
 /// key off it (Locked 5).
 /// The mux's home workspace surfaces the bare brand `fno` in the tab strip
-/// (x-597f: derived from the cwd basename); render it bracketed as `f[no]`.
+/// (: derived from the cwd basename); render it bracketed as `f[no]`.
 /// Any other workspace name passes through unchanged.
 fn brand_label(name: &str) -> String {
     if name == "fno" {
@@ -9205,14 +9205,14 @@ fn brand_label(name: &str) -> String {
 
 fn tab_label_text(name: &str, i: usize, named: bool) -> String {
     let ordinal = (i + 1).to_string();
-    // Collapse (x-0f9d AC7, x-c150): a name equal to its own ordinal renders as
+    // Collapse (AC7): a name equal to its own ordinal renders as
     // the bare digit, byte-identical to an unnamed ordinal - even a chosen one.
     if name == ordinal {
         return ordinal;
     }
     let short: String = name.chars().take(TAB_LABEL_W).collect();
     if named {
-        // (x-0f9d US2, supersedes x-c150 Locked 5) A chosen name renders alone,
+        // (US2, supersedes Locked 5) A chosen name renders alone,
         // never with a forced `{ordinal}:` prefix.
         short
     } else {
@@ -9404,7 +9404,7 @@ fn draw_overlay_layout(
     theme: &Theme,
 ) {
     let (origin_r, origin_c) = layout.origin;
-    // (x-b465) A framed block stamps a SUB-RANGE of each row, so a double-width
+    // A framed block stamps a SUB-RANGE of each row, so a double-width
     // glyph in the pane content underneath can straddle either edge, leaving one
     // half painted and the row corrupted. The name modal carried this guard when
     // it hand-painted its own block; every family-B overlay needs it for the same
@@ -9439,7 +9439,7 @@ fn draw_overlay_layout(
 ///
 /// `content_origin` is `(TAB_BAR_ROWS, panel_w)`; `content_dims` is the content
 /// viewport's `(rows, cols)` (status row excluded). The framed block is centered
-/// on its FRAMED dimensions (x-e9c3 placement; x-9f75 policy).
+/// on its FRAMED dimensions (placement; policy).
 #[allow(clippy::too_many_arguments)]
 fn draw_lines_overlay<S: AsRef<str>>(
     cells: &mut [Cell],
@@ -9477,7 +9477,7 @@ pub(crate) enum NeedsFooter {
     AsOf,
 }
 
-/// (x-b2bf) The yard overlay's open state: the crowd cursor plus the open
+/// The yard overlay's open state: the crowd cursor plus the open
 /// timestamp that drives frame cycling.
 struct YardSel {
     sel: usize,
@@ -9496,7 +9496,7 @@ pub(crate) const YARD_OVERLAY_W: usize = 48;
 /// is legal where cycling the eye would not be).
 const YARD_FRAME_MS: u128 = 800;
 
-/// The sprite's eye for a roster row (x-b2bf) - the binding that keeps a
+/// The sprite's eye for a roster row - the binding that keeps a
 /// sprite honest. Computed at render time from the same values the row
 /// itself renders (badge, joined need kind, the open-PR fact); there is no
 /// stored eye field anywhere. A gift outranks every mood: the PR is open
@@ -9524,11 +9524,11 @@ fn yard_eye(a: &AgentRow, need: Option<NeedKind>) -> crate::sprites::Eye {
     }
 }
 
-/// The navigator overlay content width (x-653d): labels truncate to it and pad
+/// The navigator overlay content width: labels truncate to it and pad
 /// to it so the inverse block is a clean rectangle, like the answer overlay.
 const NAV_OVERLAY_W: usize = 54;
 
-/// The unified icon lattice (x-df4c): ONE state->style mapping every renderer
+/// The unified icon lattice: ONE state->style mapping every renderer
 /// (sideline rows, queue cards, tab rollups, overlays) calls, so glyph, weight,
 /// and accent read as one system. Outline `○` = waiting/idle, filled `●` =
 /// active, `▲` = needs-attention (the sole accent state). Exhaustive by design:
@@ -9540,12 +9540,12 @@ enum LatticeState {
     Blocked,
     DoneUnseen,
     Exited,
-    /// (x-9de7) A terminal row with no positive corroboration: no confirmed-
+    /// A terminal row with no positive corroboration: no confirmed-
     /// dead pid, no confirmed-gone pane. Distinct from `Exited` because the
     /// operator's routing decision turns on it - `Exited` means respawn is
     /// safe, `Unmeasured` means look before you spawn.
     Unmeasured,
-    /// (x-d401) A live pane that positively read as nothing-running-yet: OSC
+    /// A live pane that positively read as nothing-running-yet: OSC
     /// 133 markers active, no command open, no completed block. Distinct from
     /// `Idle` (a completed block, the prompt back) and from `Unmeasured` (no
     /// reading at all): a pristine shell is an honest zero, not a waiting
@@ -9556,7 +9556,7 @@ enum LatticeState {
 /// The terminal theme's accent (index 3 = the emulator's own amber/yellow), kept
 /// as the reference value the lattice tests assert against. Production reads the
 /// live theme's accent (`self.theme.accent`), so this is test-only - under the
-/// default `terminal` theme the two are the same `Indexed(3)` (x-f75e).
+/// default `terminal` theme the two are the same `Indexed(3)`.
 #[cfg(test)]
 const LATTICE_ACCENT: Color = Color::Indexed(3);
 
@@ -9571,11 +9571,11 @@ struct LatticeStyle {
 /// sole discriminator), so a weak-BOLD or monochrome terminal still reads.
 ///
 /// `accent` is the needs-attention color, now the active theme's accent rather
-/// than a hardcoded yellow (x-f75e): under `terminal` it is `Indexed(3)` (the
+/// than a hardcoded yellow: under `terminal` it is `Indexed(3)` (the
 /// emulator's own amber, preserved exactly), under a named theme it is the
 /// palette's pick. Only the one caller that reads `.fg` supplies it; callers
 /// that want only the glyph/flags use [`lattice_glyph`] and stay out of color.
-/// (x-1b35) The lane fg for one agent row, shared by both sideline arms:
+/// The lane fg for one agent row, shared by both sideline arms:
 /// the fixed cascade over the row's axes, with the lattice accent standing
 /// on Blocked (attention is never re-colored) and the lattice fg as the
 /// fallback when nothing declares the lane.
@@ -9613,11 +9613,11 @@ fn lattice_glyph(s: LatticeState) -> (char, u8) {
     (st.glyph, st.flags)
 }
 
-/// (x-6851 US2) Severity order for the header rollup strip: most-severe first,
+/// (US2) Severity order for the header rollup strip: most-severe first,
 /// so the strip reads `▲ ✓ ● ○ ∅ ✗ ?` and narrow-panel truncation drops from
-/// the least-severe (`?`) end. `Unmeasured` (x-9de7) sits after `Exited`: it is a
+/// the least-severe (`?`) end. `Unmeasured` sits after `Exited`: it is a
 /// sub-case of the same terminal bucket, just less certain, so it never
-/// outranks a live state. `Empty` (x-d401) sits after `Idle` and before the
+/// outranks a live state. `Empty` sits after `Idle` and before the
 /// terminal pair: a pristine shell is less severe than any worker state but
 /// still a live pane, not a terminal one. The one ordering the fold and the
 /// truncation share.
@@ -9625,7 +9625,7 @@ fn lattice_glyph(s: LatticeState) -> (char, u8) {
 /// NOT the same ordering as [`PaneState`]'s derive, and this comment used to
 /// claim to be "the single ordering authority" beside a sibling claiming the
 /// same thing, which cannot both be true. They answer different questions and
-/// have disagreed since before x-d401, on `Working` versus `DoneUnseen`. This
+/// have disagreed since before, on `Working` versus `DoneUnseen`. This
 /// one answers IN WHAT ORDER A SECTION'S COUNTS ARE LISTED AND TRUNCATED;
 /// `PaneState` answers WHICH ROW IS WORST for a `min()` rollup. A known
 /// consequence of the split, left as is: `Unmeasured` is now reachable for
@@ -9643,8 +9643,8 @@ const SEVERITY_ORDER: [LatticeState; 7] = [
     LatticeState::Unmeasured,
 ];
 
-/// (x-6851 US2) Fold a section's rows into per-state counts, nonzero only, in
-/// severity order. Exhaustive over `LatticeState` (the x-df4c lock-3 posture):
+/// (US2) Fold a section's rows into per-state counts, nonzero only, in
+/// severity order. Exhaustive over `LatticeState` (the lock-3 posture):
 /// a new state is a compile error here, never a silently uncounted glyph.
 fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeState, usize)> {
     let mut counts = [0usize; SEVERITY_ORDER.len()];
@@ -9675,7 +9675,7 @@ fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeSta
         .collect()
 }
 
-/// (x-4374) The flag set for a section header, demoted from the old always-on
+/// The flag set for a section header, demoted from the old always-on
 /// INVERSE band: the full-width INVERSE is now the focused-row signal, not the
 /// header's, so a header carries zero standing INVERSE cells. The rollup counts
 /// (`header_band_text`) are unchanged and still fill the full width.
@@ -9688,7 +9688,7 @@ fn header_band_flags(_active: bool) -> u8 {
     cell_flags::BOLD
 }
 
-/// (x-6851 US1+US2) Compose one section header band: the label at the left, the
+/// (US1+US2) Compose one section header band: the label at the left, the
 /// rollup counts right-aligned, spaces between so the whole string is exactly
 /// the panel width `w` (the caller paints it as one INVERSE band). Counts are
 /// compact `{glyph}{n}` pairs; when the panel is too narrow, whole pairs drop
@@ -9751,17 +9751,17 @@ fn pane_to_lattice(s: PaneState) -> LatticeState {
     }
 }
 
-/// The leading state glyph for a navigator row (x-653d), sourced from the one
-/// icon lattice (x-df4c) so nav and sideline read identically: blocked `▲`,
+/// The leading state glyph for a navigator row, sourced from the one
+/// icon lattice so nav and sideline read identically: blocked `▲`,
 /// working `●`, done `✓`, idle `○`.
 fn nav_glyph(s: PaneState) -> char {
     lattice_glyph(pane_to_lattice(s)).0
 }
 
-/// Build the navigator overlay lines (x-653d): a top `find › <query>  [chip]`
+/// Build the navigator overlay lines: a top `find › <query>  [chip]`
 /// line, then one line per FILTERED row with a leading state glyph and the
 /// cursor row marked `▸`. A row that matched an identity token invisible in
-/// its label appends that token as a `·<token>` suffix (x-e10f), so a hit
+/// its label appends that token as a `·<token>` suffix, so a hit
 /// always shows WHY it hit - a row that appears arbitrary reads as a bug. An
 /// empty result renders a single `no matches` line (the key handler BELs).
 /// `rows` is pre-filtered; `cursor` is pre-clamped.
@@ -9810,18 +9810,18 @@ fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
     lines
 }
 
-/// The peek overlay content width (x-c376): wider than the navigator/answer
+/// The peek overlay content width: wider than the navigator/answer
 /// overlays because it renders transcript lines, clamped to the terminal by
 /// `draw_lines_overlay`.
 const PEEK_OVERLAY_W: usize = 72;
 
-/// (x-9c5f US9) Minimum gap between transcript auto-refreshes while peek is open:
+/// (US9) Minimum gap between transcript auto-refreshes while peek is open:
 /// a Layout push arriving sooner than this since the last fetch for the same row
 /// is ignored. Working rows push at the 1s registry cadence, so an active
 /// transcript still follows within ~3s; a silent row stops refetching entirely.
 const PEEK_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
-/// (x-9c5f) Humanize an age in seconds to `Ns`/`Nm`/`Nh`/`Nd` for the peek
+/// Humanize an age in seconds to `Ns`/`Nm`/`Nh`/`Nd` for the peek
 /// header's `changed Ns ago` line (Discretion 3). A future stamp (clock skew)
 /// is clamped by the caller to 0 before this, so `0s` is the floor.
 pub(crate) fn humanize_ago(secs: u64) -> String {
@@ -9864,7 +9864,7 @@ fn humanize_age(secs: Option<u64>) -> String {
 /// remain empty because no honest value exists for those cells.
 fn table_row_text(a: &AgentRow, layout: TableLayout, depth: usize, now_secs: u64) -> String {
     let glyph = lattice_glyph(agent_lattice_state(a)).0;
-    // (x-1b35) The deviation token rides the agent cell (pad absorbs the few
+    // The deviation token rides the agent cell (pad absorbs the few
     // chars), matching the compact arm's vocabulary.
     let token = sideline_color::deviation_token(a.harness.as_deref(), a.model.as_deref())
         .map(|t| format!(" {t}"))
@@ -9897,7 +9897,7 @@ fn table_row_text(a: &AgentRow, layout: TableLayout, depth: usize, now_secs: u64
     out
 }
 
-/// (x-b186) The extended table's column-header line.
+/// The extended table's column-header line.
 ///
 /// Carries the active sort label, which is what makes the sort toggle visible
 /// even when the two orders coincide (one agent, or every row in one band): the
@@ -9973,8 +9973,8 @@ fn wrap_words(s: &str, w: usize) -> Vec<String> {
     out
 }
 
-/// Build the read-only peek overlay lines (x-c376): a header (badge glyph + name
-/// + full wrapped status sentence), the x-c929 answerable block when the row is
+/// Build the read-only peek overlay lines: a header (badge glyph + name
+/// + full wrapped status sentence), the answerable block when the row is
 /// blocked (prompt + numbered options, reused verbatim), a divider, then the
 /// transcript body (" loading…" until it arrives, "no activity yet" for an empty
 /// one, error/timeout text rendered verbatim as body lines) and a footer hint.
@@ -10001,18 +10001,18 @@ fn peek_overlay_lines(
             .filter(|c| !c.is_control())
             .collect()
     }
-    // x-df4c: the peek header reuses the sideline row's lattice state.
+    // the peek header reuses the sideline row's lattice state.
     // `agent_lattice_state` is both exit- and seen-aware (it routes the non-exit
     // case through `pane_state`), so the peek, the row, and the rollups agree
     // and no call site re-derives the precedence.
     let glyph = lattice_glyph(agent_lattice_state(a)).0;
-    // (x-c914) The account glyph rides the peek header next to the name, same
+    // The account glyph rides the peek header next to the name, same
     // vocabulary as the selector row.
     let mut header = match a.account.as_deref() {
         Some(acct) => format!(" {glyph} {}  @{acct}", a.name),
         None => format!(" {glyph} {}", a.name),
     };
-    // (x-9c5f) Additive header labels, each present only when its data exists (no
+    // Additive header labels, each present only when its data exists (no
     // placeholder dashes): `changed Ns ago` (a future stamp / clock skew clamps
     // to `0s` via saturating_sub) and `PR #N`.
     if let Some(updated) = a.updated_at {
@@ -10030,7 +10030,7 @@ fn peek_overlay_lines(
             lines.push(pad_to(&format!("   {wl}"), PEEK_OVERLAY_W));
         }
     }
-    // x-c929 answerable block: prompt + numbered options, mirroring the needs-me
+    // answerable block: prompt + numbered options, mirroring the needs-me
     // overlay's body so a blocked peek reads identically. Digit answers (US3)
     // act on exactly these options.
     if let Some(ans) = &a.answerable {
@@ -10061,7 +10061,7 @@ fn peek_overlay_lines(
             }
         }
     }
-    // (x-9c5f) The reply input (`m`) replaces the footer while open; else the
+    // The reply input (`m`) replaces the footer while open; else the
     // footer swaps by row state (attach is a dead end on an exited row - the bug
     // US6 closes - so it becomes `r respawn`; `m reply` shows in both).
     match reply {
@@ -10084,7 +10084,7 @@ fn peek_overlay_lines(
 /// Truncate `s` to `w` display chars (ellipsizing) and pad with spaces to `w`,
 /// so an overlay line is a fixed-width inverse block that fully overwrites the
 /// content beneath it.
-/// (x-b186) `pad_to` measured in DISPLAY columns rather than scalar values.
+/// `pad_to` measured in DISPLAY columns rather than scalar values.
 ///
 /// The painter advances by `glyph_cols`, so a name or tail containing a
 /// double-width glyph would occupy more columns than `pad_to` reserved and shove
@@ -10171,7 +10171,7 @@ async fn attach_and_run(
             missions: Vec::new(),
         },
     );
-    // Latch the focus-follows-mouse off-switch once (x-a496); a direct
+    // Latch the focus-follows-mouse off-switch once; a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
     view.status_on = crate::digest_overlay::status_row_enabled(Path::new(&cwd));
@@ -10189,7 +10189,7 @@ async fn attach_and_run(
     // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
     view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
     view.show_backlog = crate::digest_overlay::backlog_section_enabled(Path::new(&cwd));
-    // (x-f75e) The chrome theme, same ladder. An unknown name falls back to
+    // The chrome theme, same ladder. An unknown name falls back to
     // `terminal` WITH a notice - silence here would hide a typo the operator
     // cannot otherwise detect, the same reasoning the keymap notices make.
     let (theme, theme_warn) = crate::digest_overlay::theme_for(Path::new(&cwd));
@@ -10308,7 +10308,7 @@ async fn attach_and_run(
                 | ServerMsg::OpenLink { .. }
                 | ServerMsg::SearchResult { .. }
                 | ServerMsg::LinkHover { .. }
-                // PeekBody answers a post-attach PeekAgent (x-c376): impossible
+                // PeekBody answers a post-attach PeekAgent: impossible
                 // in the preamble, ignore rather than desync.
                 | ServerMsg::PeekBody { .. }
                 // (v41) Script-layout control-verb replies: only ever sent on a
@@ -10383,13 +10383,13 @@ async fn attach_and_run(
     // (US4). Client-local; the scanner state is the single source of truth
     // for WHETHER a chord is pending, this only remembers SINCE WHEN.
     let mut prefix_since: Option<Instant> = None;
-    // (x-e10f fix) When the held global-chord candidate started, for the
+    // (fix) When the held global-chord candidate started, for the
     // quiet-window flush (the tmux escape-time analog): a lone Esc must reach
     // the pane even when no further byte ever arrives. The scanner state is
     // the truth for WHETHER a candidate is held; this only remembers SINCE
     // WHEN, exactly like `prefix_since`.
     let mut chord_since: Option<Instant> = None;
-    // (x-cf97) Same clock for the held tab number: the scanner state is the
+    // Same clock for the held tab number: the scanner state is the
     // truth for WHETHER digits are held; this remembers SINCE WHEN, so a
     // number typed and then left alone still lands.
     let mut digits_since: Option<Instant> = None;
@@ -10401,29 +10401,29 @@ async fn attach_and_run(
     let (copy_tx, mut copy_rx) =
         tokio::sync::mpsc::unbounded_channel::<(usize, crate::clipboard::CopyOutcome)>();
 
-    // x-a2d0: opening a clicked URL execs `open`/`xdg-open`, which can block for
+    // opening a clicked URL execs `open`/`xdg-open`, which can block for
     // as long as a cold browser launch takes. Same shape as the copy leg above:
     // run it on a blocking thread and report the outcome back here, so the
     // select loop keeps drawing frames while the browser starts.
     let (link_tx, mut link_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Result<(), String>)>();
 
-    // x-feec: the needs-me event-fold leg runs off the UI loop and reports back
+    // the needs-me event-fold leg runs off the UI loop and reports back
     // here, tagged with the generation token it was kicked under, so a slow
     // `fno-agents needs` never blocks the overlay and a result landing after the
-    // overlay closed/re-opened is discarded (AC6-FR). x-f730 widened the
+    // overlay closed/re-opened is discarded (AC6-FR). widened the
     // payload to `FoldOutcome`, the two independent legs (events, MINE) run
     // under `fold_both` so one unavailable command never hides the other.
     let (needs_tx, mut needs_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::needs_overlay::FoldOutcome)>();
 
-    // x-4433: the activity feed leg, the needs fold's exact shape - off the UI
+    // the activity feed leg, the needs fold's exact shape - off the UI
     // loop, gen-tagged, one fold in flight; a result for a closed/superseded
     // overlay is discarded.
     let (feed_tx, mut feed_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::feed_overlay::FoldResult)>();
 
-    // x-f730 task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
+    // task 2.2: a queued MINE mutation (x/d/add) runs off the UI loop
     // and reports back here. Single-flight (`mine_acting`), ungated by
     // generation - a mutation always applies wherever the overlay currently
     // is, since a write from a stale open is still a real write the operator
@@ -10431,31 +10431,31 @@ async fn attach_and_run(
     let (mine_act_tx, mut mine_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
 
-    // x-f730 task 2.3: a queued question answer, same shape and independence
+    // task 2.3: a queued question answer, same shape and independence
     // as the MINE mutation channel above - its own single-flight
     // (`question_acting`) so an answer and a MINE write never block each
     // other.
     let (question_act_tx, mut question_act_rx) =
         tokio::sync::mpsc::unbounded_channel::<Result<(), String>>();
 
-    // x-b2bf: the yard identity fold leg, same shape as the needs fold -
+    // the yard identity fold leg, same shape as the needs fold -
     // off the UI loop, gen-tagged, one in flight. `None` = fold failed.
     let (yard_tx, mut yard_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, Option<Vec<crate::yard_overlay::YardItem>>)>();
 
-    // (x-aeab) The court fold leg: single-flight + the TTL are the whole
+    // The court fold leg: single-flight + the TTL are the whole
     // concurrency contract; no generation to supersede.
     let (court_tx, mut court_rx) =
         tokio::sync::mpsc::unbounded_channel::<Option<crate::court_overlay::Court>>();
 
-    // x-84d7: the Connections modal's read fold runs off the UI loop and reports
+    // the Connections modal's read fold runs off the UI loop and reports
     // back here, tagged with the generation it was kicked under, so a slow `fno`
     // never blocks the modal and a result landing after a close/refresh is
     // discarded. Carries a full ReadOutcome (Ok lists, or a named degrade).
     let (conn_tx, mut conn_rx) =
         tokio::sync::mpsc::unbounded_channel::<(u64, crate::connections_view::ReadOutcome)>();
 
-    // x-84d7: a Connections single-flight mutation verb reports its result here,
+    // a Connections single-flight mutation verb reports its result here,
     // gen-tagged like the read, so a result for a closed/superseded modal is
     // dropped and a live one surfaces the notice + triggers the read-after-write.
     let (conn_act_tx, mut conn_act_rx) = tokio::sync::mpsc::unbounded_channel::<(
@@ -10474,7 +10474,7 @@ async fn attach_and_run(
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
 
-    // (x-f188) The queued `fno agents restart` runs off the UI loop and
+    // The queued `fno agents restart` runs off the UI loop and
     // reports back its verdict line. One at a time (the View's inflight
     // flag); the notice is the receipt.
     let (restart_tx, mut restart_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -10485,7 +10485,7 @@ async fn attach_and_run(
     // gate, so an off meter costs nothing.
     let (meter_tx, mut meter_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    // x-4e2d: after an absence, fold a "while you were gone" digest for the
+    // after an absence, fold a "while you were gone" digest for the
     // focused pane's node and show it on the FIRST frame. Fully fail-open (a
     // disabled knob, a too-recent detach, or a slow/absent `fno-agents` all
     // leave `digest` None), so it can never break the attach. It runs before the
@@ -10519,7 +10519,7 @@ async fn attach_and_run(
         .map_err(|e| format!("draw: {e}"))?;
 
     let exit: Result<i32, String> = loop {
-        // x-feec: kick a wanted event-fold off the UI loop, at most ONE in
+        // kick a wanted event-fold off the UI loop, at most ONE in
         // flight (P2-5). Runs at loop top so a want re-armed from either the
         // stdin arm (OpenAnswers) or the needs_rx arm (superseded refold) fires
         // without needing another keypress. The sender lives in this scope, out
@@ -10538,9 +10538,9 @@ async fn attach_and_run(
                 let _ = tx.send((gen, result));
             });
         }
-        // x-4433: kick a wanted feed fold off the UI loop, same discipline.
+        // kick a wanted feed fold off the UI loop, same discipline.
         feed_view::maybe_kick(&mut view, &feed_tx);
-        // x-f730 task 2.2: kick a queued MINE mutation off the UI loop.
+        // task 2.2: kick a queued MINE mutation off the UI loop.
         // `mine_acting` is already set by the stdin handler at enqueue time
         // (mirrors `Connections::acting`), so a second x/d/add press before
         // this one lands is a no-op there rather than a race here.
@@ -10551,7 +10551,7 @@ async fn attach_and_run(
                 let _ = tx.send(result);
             });
         }
-        // x-f730 task 2.3: kick a queued question answer off the UI loop.
+        // task 2.3: kick a queued question answer off the UI loop.
         // `question_acting` is set by the stdin handler at enqueue time,
         // same discipline as the MINE mutation above.
         if let Some((qid, answer)) = view.question_action.take() {
@@ -10577,7 +10577,7 @@ async fn attach_and_run(
                 let _ = tx.send(crate::court_overlay::fold_now().await);
             });
         }
-        // x-84d7: kick a wanted Connections read off the UI loop, at most one in
+        // kick a wanted Connections read off the UI loop, at most one in
         // flight, tagged with the current gen so a stale result is dropped.
         if view.conn_want && !view.conn_inflight {
             view.conn_want = false;
@@ -10588,7 +10588,7 @@ async fn attach_and_run(
                 crate::connections_view::load_all(tx, gen).await;
             });
         }
-        // x-84d7: run a wanted single-flight mutation off the UI loop. The modal's
+        // run a wanted single-flight mutation off the UI loop. The modal's
         // `acting` flag (set by the reducer) is the concurrency guard, so no extra
         // inflight bool is needed here; the result reports on conn_act_rx.
         if let Some((argv, env, is_login)) = view.conn_action.take() {
@@ -10611,7 +10611,7 @@ async fn attach_and_run(
                 let _ = tx.send(outcome);
             });
         }
-        // (x-f188) Kick a wanted agents restart off the UI loop, at most
+        // Kick a wanted agents restart off the UI loop, at most
         // one in flight.
         if view.restart_agents_want && !view.restart_inflight {
             view.restart_agents_want = false;
@@ -10635,12 +10635,12 @@ async fn attach_and_run(
         }
         // Redraw-after-event; expiry of the transient notice needs a timer.
         let notice_deadline = view.notice.as_ref().map(|(_, d)| *d);
-        // (x-e10f fix) The held global-chord candidate's quiet-window flush
+        // (fix) The held global-chord candidate's quiet-window flush
         // deadline. A whole CSI arrives in one read, so a candidate still
         // pending after this window is a lone Esc (or a torn write older than
         // the window) and must not wait for the next keypress.
         let chord_flush_deadline = chord_since.map(|t| t + CHORD_FLUSH_AFTER);
-        // (x-cf97) The held tab number's quiet-window deadline; Enter and the
+        // The held tab number's quiet-window deadline; Enter and the
         // non-digit terminator resolve sooner, this only covers
         // number-then-nothing.
         let digits_flush_deadline = digits_since.map(|t| t + DIGIT_FLUSH_AFTER);
@@ -10651,7 +10651,7 @@ async fn attach_and_run(
         } else {
             prefix_since.map(|t| t + HINT_DELAY)
         };
-        // Focus-follows-mouse settle (x-a496): a pending hover target commits at
+        // Focus-follows-mouse settle: a pending hover target commits at
         // its landing time + the debounce, re-armed each loop from the latest
         // pending, so a fast sweep's earlier panes are dropped before they fire.
         let hover_deadline = view.hover_pending.map(|(_, t0)| t0 + HOVER_DEBOUNCE);
@@ -10660,20 +10660,20 @@ async fn attach_and_run(
         // probe debounces the exact cell, and a fired probe stops the clock
         // until motion or a frame restarts it.
         let link_hover_deadline = view.link_hover.deadline();
-        // (x-1d91) A dispatched reorder verb the feed never confirmed: the `…`
+        // A dispatched reorder verb the feed never confirmed: the `…`
         // marker must clear with a notice rather than spin forever.
         let backlog_deadline = view.backlog_pending_deadline();
-        // (x-d807, AC7-FR) A drag whose mouse-up never arrives - the terminal
+        // (AC7-FR) A drag whose mouse-up never arrives - the terminal
         // lost focus mid-gesture, or the release was eaten - would otherwise
         // leave the drag latched, swallowing every later mouse event. Expire it.
         let seam_drag_deadline = view.seam_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         let pane_drag_deadline = view.pane_drag.map(|d| d.last_at + PANE_DRAG_TIMEOUT);
-        // (x-2e86, Locked 9) The sideline drag now latches continuous resize, so
+        // (Locked 9) The sideline drag now latches continuous resize, so
         // a swallowed mouse-up is worse than under the old single-snap drag.
         // Give it the same backstop seam/pane drags already have.
         let sideline_drag_deadline = view.sideline_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
         let feed_drag_deadline = view.feed_drag.map(|d| d.last_at + SEAM_DRAG_TIMEOUT);
-        // (x-d6a8 AC1-FR) The tab-cell and sideline-row drags share the same
+        // (AC1-FR) The tab-cell and sideline-row drags share the same
         // dead-drag reaper: a mouse-up that never arrives must not latch the
         // gesture. Only one of the three is ever live, so one deadline over both
         // new drags suffices.
@@ -10686,7 +10686,7 @@ async fn attach_and_run(
                     .as_ref()
                     .map(|d| d.last_at + PANE_DRAG_TIMEOUT),
             )
-            // (x-b465) The press-hold latch joins the same reaper. It has no
+            // The press-hold latch joins the same reaper. It has no
             // `last_at` to refresh - a hold is motionless by definition - so its
             // deadline runs from the press. Lose terminal focus mid-hold and the
             // release lands in the other app; without this the latch survives,
@@ -10698,14 +10698,14 @@ async fn attach_and_run(
                     .map(|(_, _, start)| *start + PANE_DRAG_TIMEOUT),
             )
             .min();
-        // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
+        // The yard's frame cycling is a flavour channel on a timer:
         // while the overlay is open, wake at the next frame boundary so the
         // spotlight animates on an otherwise idle terminal (nothing else
         // redraws there). Re-armed each loop pass, so the cadence holds until
         // the overlay closes; closed -> no deadline, no wakeups.
-        // (x-aeab) Refresh timer; the deadline is None while a fold runs.
+        // Refresh timer; the deadline is None while a fold runs.
         let court_tick = view.court.refresh_deadline();
-        // (x-b2bf) The yard's frame cycling is a flavour channel on a timer:
+        // The yard's frame cycling is a flavour channel on a timer:
         // while the overlay is open, wake at the next frame boundary so the
         // spotlight animates on an otherwise idle terminal (nothing else
         // redraws there). Re-armed each loop pass, so the cadence holds until
@@ -10754,7 +10754,7 @@ async fn attach_and_run(
                 }
                 Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, missions, .. }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, missions });
-                    // x-c376: a scrape tick may have removed the peeked row.
+                    // a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
                     match view.peek_reanchor() {
@@ -10763,7 +10763,7 @@ async fn attach_and_run(
                                 break Err(e);
                             }
                         }
-                        // (x-9c5f US9) Same row held: auto-refresh the transcript
+                        // (US9) Same row held: auto-refresh the transcript
                         // if the interval elapsed. Body is kept until the fresh
                         // one lands (peek_refresh_due), so no loading flicker.
                         None => {
@@ -10791,13 +10791,13 @@ async fn attach_and_run(
                     }
                 }
                 Ok(ServerMsg::Notice { text }) => {
-                    // (x-1d91) A dispatched reorder verb reports its outcome as
+                    // A dispatched reorder verb reports its outcome as
                     // exactly this notice, so a notice arriving mid-verb settles
                     // the `…` marker. Without this a FAILED verb left the card
                     // spinning and every further verb blocked until the timeout,
                     // which then overwrote the real reason with a generic one.
                     view.settle_backlog_pending_on_notice();
-                    // (x-f191) A row-scoped outcome stamps its row before the
+                    // A row-scoped outcome stamps its row before the
                     // tab-bar notice takes the full text.
                     view.resolve_row_stamp(&text);
                     view.set_notice(text);
@@ -10845,7 +10845,7 @@ async fn attach_and_run(
                     });
                 }
                 Ok(ServerMsg::OpenLink { url }) => {
-                    // x-a2d0: the server resolved a clicked URL (OSC 8 or
+                    // the server resolved a clicked URL (OSC 8 or
                     // linkified text) and vetted its scheme; `open_url` vets it
                     // again before exec. Off-loop for the same reason Copy is -
                     // a cold browser launch must not stall the render loop.
@@ -10903,7 +10903,7 @@ async fn attach_and_run(
                     }
                 }
                 Ok(ServerMsg::PeekBody { seq, lines, .. }) => {
-                    // x-c376: the seq guard (AC1-FR) drops a superseded body so
+                    // the seq guard (AC1-FR) drops a superseded body so
                     // B's header never shows A's transcript. `name` is a wire
                     // checksum; the header reads the live row.
                     if view.apply_peek_body(seq, lines) {
@@ -10944,7 +10944,7 @@ async fn attach_and_run(
                                 prefix_since = None;
                                 view.hint = false;
                             }
-                            // (x-e10f fix) Same one-way sync for a held global
+                            // (fix) Same one-way sync for a held global
                             // chord candidate: arm the quiet-window flush once,
                             // clear it when the candidate resolves or releases.
                             if scanner.chord_pending() {
@@ -10952,7 +10952,7 @@ async fn attach_and_run(
                             } else {
                                 chord_since = None;
                             }
-                            // (x-cf97) Same one-way sync for a held tab
+                            // Same one-way sync for a held tab
                             // number: arm the quiet window once; Enter or a
                             // non-digit clears it by clearing the state.
                             if scanner.digits_pending() {
@@ -10965,7 +10965,7 @@ async fn attach_and_run(
                             }
                         }
                         Ok(StdinFlow::Detach) => {
-                            // x-4e2d: stamp the detach time so the next attach can
+                            // stamp the detach time so the next attach can
                             // gate the catch-up digest on how long we were away.
                             crate::digest_overlay::record_detach(&view.session);
                             let _ = write_msg(&mut sock_w, &ClientMsg::Detach).await;
@@ -11000,7 +11000,7 @@ async fn attach_and_run(
                 }
             }
             Some((url, outcome)) = link_rx.recv() => {
-                // x-a2d0: a click that opens nothing visible reads as a broken
+                // a click that opens nothing visible reads as a broken
                 // button, so BOTH outcomes get a notice - the browser may not
                 // even raise itself above the terminal.
                 let notice = match outcome {
@@ -11016,7 +11016,7 @@ async fn attach_and_run(
                 }
             }
             Some((gen, result)) = yard_rx.recv() => {
-                // x-b2bf: the identity fold landed; same merge discipline as
+                // the identity fold landed; same merge discipline as
                 // the needs fold - gen-guarded, degraded-loud on None, never
                 // blocking, never cached from a failure.
                 view.yard_inflight = false;
@@ -11038,15 +11038,15 @@ async fn attach_and_run(
                 }
             }
             Some(result) = court_rx.recv() => {
-                // (x-aeab) The fold landed; `apply` owns the merge rules.
+                // The fold landed; `apply` owns the merge rules.
                 view.court.apply(result);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
             }
             Some((gen, outcome)) = needs_rx.recv() => {
-                // x-feec: an event-fold landed; the in-flight fold is done, so a
-                // later open may spawn a fresh one (P2-5 bound). x-f730: the
+                // an event-fold landed; the in-flight fold is done, so a
+                // later open may spawn a fresh one (P2-5 bound).: the
                 // outcome now carries both legs (events + MINE), applied
                 // independently so one unavailable command never hides the
                 // other lane's render.
@@ -11106,7 +11106,7 @@ async fn attach_and_run(
                 }
             }
             Some((gen, outcome)) = feed_rx.recv() => {
-                // x-4433: a feed fold landed; apply only to the still-open,
+                // a feed fold landed; apply only to the still-open,
                 // same-generation panel (a result for a closed/superseded open
                 // is discarded, the needs arm's contract, one consumer).
                 feed_view::apply_fold(&mut view, gen, outcome);
@@ -11115,21 +11115,21 @@ async fn attach_and_run(
                 }
             }
             Some(result) = mine_act_rx.recv() => {
-                // x-f730 task 2.2: a queued MINE mutation finished.
+                // task 2.2: a queued MINE mutation finished.
                 view.apply_mine_action_result(result);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
             }
             Some(result) = question_act_rx.recv() => {
-                // x-f730 task 2.3: a queued question answer finished.
+                // task 2.3: a queued question answer finished.
                 view.apply_question_action_result(result);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
             }
             Some((gen, outcome)) = conn_rx.recv() => {
-                // x-84d7: apply a Connections read under the gen guard. A result
+                // apply a Connections read under the gen guard. A result
                 // for a closed/superseded modal is discarded; a live match seeds
                 // the lists (or the degraded banner) and repaints.
                 view.conn_inflight = false;
@@ -11143,7 +11143,7 @@ async fn attach_and_run(
                 }
             }
             Some((gen, result, is_login)) = conn_act_rx.recv() => {
-                // x-84d7: a mutation/login verb finished. Clear the single-flight
+                // a mutation/login verb finished. Clear the single-flight
                 // guard UNCONDITIONALLY (the subprocess has exited, whatever the
                 // modal's read-gen), so a manual R during the mutation can never
                 // wedge `acting` on nor let a second write overlap this one. The
@@ -11182,7 +11182,7 @@ async fn attach_and_run(
                 }
             }
             Some(verdict) = restart_rx.recv() => {
-                // (x-f188) The restart verdict line lands as a notice: the
+                // The restart verdict line lands as a notice: the
                 // last stdout line the verb printed, whatever it said.
                 view.restart_inflight = false;
                 view.set_notice(verdict);
@@ -11236,7 +11236,7 @@ async fn attach_and_run(
                 if let Ok((cols, rows)) = terminal::size() {
                     view.term = (rows, cols);
                     // A shorter terminal shrinks the scroll window; re-clamp so
-                    // the offset never scrolls past the last row (x-a621).
+                    // the offset never scrolls past the last row.
                     view.clamp_sideline_offset();
                     let (c_rows, c_cols) = view.content_dims();
                     // The server resizes PTYs + grids off the content area
@@ -11267,7 +11267,7 @@ async fn attach_and_run(
                     None => std::future::pending().await,
                 }
             }, if chord_flush_deadline.is_some() => {
-                // (x-e10f fix) Quiet window elapsed with a candidate still
+                // (fix) Quiet window elapsed with a candidate still
                 // held: release it to the pane. No redraw needed beyond the
                 // send - the pane's own output will repaint when it reacts.
                 chord_since = None;
@@ -11283,7 +11283,7 @@ async fn attach_and_run(
                     None => std::future::pending().await,
                 }
             }, if digits_flush_deadline.is_some() => {
-                // (x-cf97) Quiet window elapsed with a tab number still held:
+                // Quiet window elapsed with a tab number still held:
                 // resolve it. The dispatch answers an out-of-range number
                 // with a notice, so a missed jump is never a silent no-op -
                 // and unlike the chord release above (whose send repaints via
@@ -11373,7 +11373,7 @@ async fn attach_and_run(
                     None => std::future::pending().await,
                 }
             }, if sideline_drag_deadline.is_some() => {
-                // (x-2e86, AC2-FR) Same "keep the reached width" reasoning as the
+                // (AC2-FR) Same "keep the reached width" reasoning as the
                 // seam reaper: the resize was real up to the missing release, so
                 // `end_sideline_drag` ends it exactly as a release would (and
                 // persists the reached width). Coords the drag last saw are gone,
@@ -11390,7 +11390,7 @@ async fn attach_and_run(
                     None => std::future::pending().await,
                 }
             }, if feed_drag_deadline.is_some() => {
-                // (x-f089) The feed drag's own reaper, same "keep the reached
+                // The feed drag's own reaper, same "keep the reached
                 // width" reasoning: end it exactly as a release would (and
                 // persist), refreshing hover at the border's current column.
                 let col = view.term.1 - view.feed_panel_w();
@@ -11420,18 +11420,18 @@ async fn attach_and_run(
                     None => std::future::pending().await,
                 }
             }, if new_drag_deadline.is_some() => {
-                // (x-d6a8 AC1-FR) Same discrete-jump reasoning as the pane drag:
+                // (AC1-FR) Same discrete-jump reasoning as the pane drag:
                 // a tab-join / row-place whose release went missing applies
                 // NOTHING. Clear whichever new drag is live; the struct is cleared
                 // internally so a late release cannot commit a stale command.
-                // (x-7683) Exception: a motionless hold that already qualifies
+                // Exception: a motionless hold that already qualifies
                 // as a long press opens its menu here instead - a held-still
                 // pointer emits no events, so this reaper is the only thing
                 // that ever fires for a hold past the drag timeout.
                 if !view.open_drag_menu() {
                     view.cancel_tab_drag();
                     view.cancel_row_drag();
-                    // (x-b465) A press-hold `open_drag_menu` declined is a dead
+                    // A press-hold `open_drag_menu` declined is a dead
                     // gesture - drop it so a later stray release cannot claim
                     // it. Only when its OWN deadline expired, though: the
                     // deadline above is a `min()` across the latches, so a tab
@@ -11457,7 +11457,7 @@ async fn attach_and_run(
                 }
             }, if hover_deadline.is_some() => {
                 // The pointer rested on the pending pane past the debounce
-                // (x-a496): commit focus. The server replies with a Layout that
+                // commit focus. The server replies with a Layout that
                 // redraws, so no local compose is needed here.
                 if let Some(pane) = view.take_settled_hover() {
                     if let Err(e) = write_msg(&mut sock_w, &ClientMsg::Command(Command::FocusPane(pane))).await {
@@ -11581,7 +11581,7 @@ async fn handle_stdin(
         // would leave the drag latched - visibly stuck, eating input until its
         // timeout - for a gesture the operator has already finished. Nobody is
         // shift-selecting text mid-drag, so nothing is taken away here.
-        // (x-b465) `press_hold` belongs in this list for the same reason and with
+        // `press_hold` belongs in this list for the same reason and with
         // more at stake: the press it latched DEFERRED a click, so dropping its
         // release does not merely leave state armed - it swallows the action
         // entirely. On a terminal that marks releases with Shift, every plain
@@ -11624,7 +11624,7 @@ async fn handle_stdin(
         {
             view.link_hover.clear();
         }
-        // x-8ccf US3: while the which-key modal is open, the mouse drives it
+        // US3: while the which-key modal is open, the mouse drives it
         // (hover selects, wheel scrolls, click executes or dismisses) and is
         // SWALLOWED - it never reaches a pane or the chrome underneath.
         if view.keys_modal.is_some() {
@@ -11633,20 +11633,20 @@ async fn handle_stdin(
             }
             continue;
         }
-        // x-8ccf US2: the row context menu owns the mouse while open (hover
+        // US2: the row context menu owns the mouse while open (hover
         // selects, click runs, right-press re-anchors) and is swallowed.
         if view.row_menu.is_some() {
             row_menu_mouse(view, rep, sock_w).await?;
             continue;
         }
-        // x-8ccf US4/US5: the MENU popup / settings modal owns the mouse.
+        // US4/US5: the MENU popup / settings modal owns the mouse.
         if view.aux.is_some() {
             if let StdinFlow::Detach = aux_mouse(view, rep, sock_w).await? {
                 return Ok(StdinFlow::Detach);
             }
             continue;
         }
-        // x-d807: a seam drag in flight owns the mouse. The pointer routinely
+        // a seam drag in flight owns the mouse. The pointer routinely
         // leaves the divider it grabbed - that is what dragging is - so this
         // precedes every position-based route below, including the pane forward
         // that would otherwise hand the drag to a PTY as text selection.
@@ -11670,7 +11670,7 @@ async fn handle_stdin(
                 _ => view.end_seam_drag(rep.row, rep.col),
             }
         }
-        // x-aa95: a relocation drag owns the mouse, for the same reason a seam
+        // a relocation drag owns the mouse, for the same reason a seam
         // drag does - the pointer's whole job is to leave the pane it grabbed,
         // so this must precede the pane forward that would otherwise feed the
         // gesture to a PTY as a text selection.
@@ -11710,13 +11710,13 @@ async fn handle_stdin(
                 }
             }
         }
-        // (x-d6a8 G2) a tab-cell join drag owns the mouse, same ownership rule as
+        // (G2) a tab-cell join drag owns the mouse, same ownership rule as
         // a pane drag: the pointer's whole job is to leave the strip it grabbed.
         if view.tab_drag.is_some() {
             match rep.kind {
                 MouseKind::Drag(MouseButton::Left) => {
                     view.tab_drag_to(rep.row, rep.col, Instant::now());
-                    // (x-7683) Real motion disqualifies the long-press. Set
+                    // Real motion disqualifies the long-press. Set
                     // here, not in tab_drag_to: the Release arm calls it too
                     // (zone recompute at release coords) and a hold that never
                     // moved must stay a hold.
@@ -11728,7 +11728,7 @@ async fn handle_stdin(
                 MouseKind::Release(MouseButton::Left) => {
                     view.tab_drag_to(rep.row, rep.col, Instant::now());
                     let held = view.tab_drag.map(|d| (d.src_tab, d.start_at, d.moved));
-                    // (x-7683) A motionless hold past MENU_LONG_PRESS consumes
+                    // A motionless hold past MENU_LONG_PRESS consumes
                     // the release BEFORE any commit: `moved` gates it (the
                     // clock alone cannot tell a hold from a slow drag), and a
                     // terminal that drops drag reports can place the release
@@ -11791,12 +11791,12 @@ async fn handle_stdin(
                 }
             }
         }
-        // (x-d6a8 G3) a sideline-row placement drag owns the mouse.
+        // (G3) a sideline-row placement drag owns the mouse.
         if view.row_drag.is_some() {
             match rep.kind {
                 MouseKind::Drag(MouseButton::Left) => {
                     view.row_drag_to(rep.row, rep.col, Instant::now());
-                    // (x-7683) Real motion disqualifies the long-press. Set
+                    // Real motion disqualifies the long-press. Set
                     // here, not in row_drag_to: the Release arm calls it too
                     // (zone recompute at release coords) and a hold that never
                     // moved must stay a hold.
@@ -11814,7 +11814,7 @@ async fn handle_stdin(
                     let held = view.row_drag.as_ref().map(|d| (d.start_at, d.moved));
                     let still_on_row =
                         pressed.is_some() && view.row_drag_source_at(rep.row, rep.col) == pressed;
-                    // (x-7683) A motionless hold past MENU_LONG_PRESS consumes the
+                    // A motionless hold past MENU_LONG_PRESS consumes the
                     // release BEFORE any commit, exactly like the tab arm: a
                     // terminal that drops drag reports can place the release
                     // coords on a drop zone, and a hold must never execute a
@@ -11876,7 +11876,7 @@ async fn handle_stdin(
                 }
             }
         }
-        // (x-b465) A press held on a menu-bearing sideline row that is not a drag
+        // A press held on a menu-bearing sideline row that is not a drag
         // source. The drag arms above own their own releases; this owns the rest,
         // so a workspace row answers a hold the way an agent row does.
         if view.press_hold.is_some() {
@@ -11960,9 +11960,9 @@ async fn handle_stdin(
                 _ => view.press_hold = None,
             }
         }
-        // x-d807: the sideline border drag, same ownership rule as a seam drag.
+        // the sideline border drag, same ownership rule as a seam drag.
         // Client-local: the sideline is never on the wire, so a width change only
-        // tells the server its content area changed (x-2e86: a free width now,
+        // tells the server its content area changed (: a free width now,
         // reported per crossed column so inner apps reflow live).
         if view.sideline_drag.is_some() {
             match rep.kind {
@@ -11991,7 +11991,7 @@ async fn handle_stdin(
         if modal_mouse(view, rep) {
             continue;
         }
-        // Bare motion is hover (x-a496): record the sideline highlight + the
+        // Bare motion is hover: record the sideline highlight + the
         // focus-follows-mouse settle target, and swallow it - a Move is never
         // forwarded to a pane. The actual FocusPane is committed by the select
         // loop's settle timer (a rested pointer emits no further motion event).
@@ -12003,7 +12003,7 @@ async fn handle_stdin(
         // an agent's pane, opens a tab, or opens a card-dispatch confirm - it
         // never reaches the pane underneath.
         if matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
-            // (x-d6a8 G2/G3) a tab cell and a sideline agent row are DRAG SOURCES.
+            // (G2/G3) a tab cell and a sideline agent row are DRAG SOURCES.
             // Begin the drag before chrome_hit (which would apply the click action
             // immediately); a zone-less release falls back to that same click
             // action (select / focus / attach), so a plain click is unchanged.
@@ -12015,7 +12015,7 @@ async fn handle_stdin(
                 view.begin_row_drag(src, Instant::now());
                 continue;
             }
-            // (x-b465) A sideline row that is NOT a drag source still has a menu
+            // A sideline row that is NOT a drag source still has a menu
             // to hold for - a workspace name row is the motivating case. Arm the
             // hold clock and DEFER the click: the release decides between the
             // menu and `chrome_hit`'s own action, exactly as the drag arm defers
@@ -12030,7 +12030,7 @@ async fn handle_stdin(
                 apply_hit(view, hit, sock_w).await?;
                 continue;
             }
-            // x-aa95: a press on a pane's grip starts a relocation. Before the
+            // a press on a pane's grip starts a relocation. Before the
             // seam check only for readability - grips sit on cells a pane
             // covers and seams only on cells no pane covers, so the two can
             // never contend for the same press.
@@ -12038,7 +12038,7 @@ async fn handle_stdin(
                 view.begin_pane_drag(mover, Instant::now());
                 continue;
             }
-            // x-d807: a press on a divider grabs the seam. After chrome_hit so
+            // a press on a divider grabs the seam. After chrome_hit so
             // sideline and tab-bar affordances still win their own cells.
             if let Some(seam) = view.seam_at(rep.row, rep.col) {
                 view.begin_seam_drag(seam, Instant::now());
@@ -12047,7 +12047,7 @@ async fn handle_stdin(
             // Likewise the sideline's own border. Also after chrome_hit, so the
             // density button keeps the cells it draws on. Remember the width at
             // grab so a bare Esc reverts, and stamp `last_at` for the stuck-drag
-            // timeout (x-2e86).
+            // timeout.
             if view.on_sideline_border(rep.row, rep.col) {
                 view.sideline_drag = Some(SidelineDrag {
                     start_width: view.sideline_width,
@@ -12059,11 +12059,11 @@ async fn handle_stdin(
                 continue;
             }
         }
-        // x-8ccf US2: right-click a sideline row opens its context menu (agent
+        // US2: right-click a sideline row opens its context menu (agent
         // rows) or is swallowed (non-agent chrome). A right-click on a PANE cell
         // (sideline_row_at -> None) falls through and forwards to the inner app,
         // so pane right-click behavior is untouched (AC3-EDGE).
-        // (x-7683) Menu paths are blocked under overlays they would USURP -
+        // Menu paths are blocked under overlays they would USURP -
         // text inputs (including nav's typed filter) and interactive modals
         // (rename's Enter would run a menu action; the key router checks
         // row_menu first). The read-only peek overlay deliberately does not
@@ -12073,7 +12073,7 @@ async fn handle_stdin(
         // overlay_open guard: a pane press under ANY overlay always fell
         // through to the pane, and it still does.
         if matches!(rep.kind, MouseKind::Press(MouseButton::Right)) && !view.menu_usurping_open() {
-            // (x-92d3 5.1) A tab cell opens the tab menu, resolved through the
+            // (5.1) A tab cell opens the tab menu, resolved through the
             // same tab_cell_at the drag pickup uses. Checked first to mirror
             // the left-press ordering; the strip and the sideline own disjoint
             // columns, so the two tests can never contend for one cell.
@@ -12103,7 +12103,7 @@ async fn handle_stdin(
                     continue;
                 }
             }
-            // (x-7683) A right-press on a PANE cell opens the owning agent's
+            // A right-press on a PANE cell opens the owning agent's
             // row menu - the same menu its sideline row opens - so a pane is a
             // menu-bearing surface too. Same swallow-only-when-opened rule: an
             // agent-less pane falls through to the forward below, keeping the
@@ -12147,7 +12147,7 @@ async fn handle_stdin(
     if passthrough.is_empty() {
         return Ok(StdinFlow::Continue);
     }
-    // x-d807 (AC6-FR): a bare Esc during a seam drag reverts it. The revert is
+    // (AC6-FR): a bare Esc during a seam drag reverts it. The revert is
     // an explicit final command to the drag-start ratio, not a client-side
     // rollback - the server owns the layout, so putting the seam back has to
     // travel the same path that moved it. Matched on a lone 0x1b so an arrow
@@ -12160,7 +12160,7 @@ async fn handle_stdin(
         }
         return Ok(StdinFlow::Continue);
     }
-    // x-aa95 (AC5-EDGE): a bare Esc during a relocation drag cancels it. No
+    // (AC5-EDGE): a bare Esc during a relocation drag cancels it. No
     // command travels, unlike the seam revert above - nothing was ever applied,
     // so there is nothing to put back. Same lone-0x1b match so an arrow key's
     // escape sequence cannot read as a cancel.
@@ -12168,7 +12168,7 @@ async fn handle_stdin(
         view.cancel_pane_drag();
         return Ok(StdinFlow::Continue);
     }
-    // x-2e86: a bare Esc during a sideline-border drag reverts the width to where
+    // a bare Esc during a sideline-border drag reverts the width to where
     // the drag began, mirroring the seam revert. Client-local, so only a Resize
     // travels (and only if the width actually changed) - the layout is the
     // client's own, not the server's.
@@ -12181,7 +12181,7 @@ async fn handle_stdin(
         }
         return Ok(StdinFlow::Continue);
     }
-    // (x-f089) A bare Esc during a feed-border drag reverts the width to where
+    // A bare Esc during a feed-border drag reverts the width to where
     // the drag began, the sideline revert's mirror.
     if view.feed_drag.is_some()
         && passthrough == [0x1b]
@@ -12189,7 +12189,7 @@ async fn handle_stdin(
     {
         return Ok(StdinFlow::Continue);
     }
-    // (x-d6a8 AC1-FR) A bare Esc cancels a tab-cell or sideline-row drag too. No
+    // (AC1-FR) A bare Esc cancels a tab-cell or sideline-row drag too. No
     // command travels; the same lone-0x1b match so an arrow key cannot read as a
     // cancel.
     if view.tab_drag.is_some() && passthrough == [0x1b] {
@@ -12201,29 +12201,29 @@ async fn handle_stdin(
         return Ok(StdinFlow::Continue);
     }
     if view.digest.is_some() {
-        // x-4e2d: any key dismisses the catch-up digest into the normal view.
+        // any key dismisses the catch-up digest into the normal view.
         // Same whole-chunk swallow as the key-table overlay below.
         view.digest = None;
         return Ok(StdinFlow::Continue);
     }
     if view.keys_modal.is_some() {
-        // x-8ccf US3 which-key: a bound key executes through the shared dispatch,
+        // US3 which-key: a bound key executes through the shared dispatch,
         // arrows/pgup scroll+select, Enter runs the selected row, Esc/unbound
         // dismiss. Routed here (same precedence as the old poster) so its keys
         // never leak to a pane.
         return keys_modal_keys(view, scanner, &passthrough, sock_w).await;
     }
     if view.row_menu.is_some() {
-        // x-8ccf US2: the row context menu consumes keys while open (arrows walk
+        // US2: the row context menu consumes keys while open (arrows walk
         // the entries + grid, Enter runs, Esc/q close) - never leaks to a pane.
         return row_menu_keys(view, &passthrough, sock_w).await;
     }
     if view.aux.is_some() {
-        // x-8ccf US4/US5: the MENU popup / settings modal consumes keys.
+        // US4/US5: the MENU popup / settings modal consumes keys.
         return aux_keys(view, &passthrough, sock_w).await;
     }
     if view.connections.is_some() {
-        // x-84d7: the Connections modal consumes all keys while open (Tab
+        // the Connections modal consumes all keys while open (Tab
         // switches tabs, j/k move, R refreshes, Esc closes) - never leaks to a
         // pane. Routed here (top-level modal, like the MENU it opened from).
         return connections_keys(view, &passthrough, sock_w).await;
@@ -12232,7 +12232,7 @@ async fn handle_stdin(
         return confirm_keys(view, &passthrough, sock_w).await;
     }
     if view.move_pick.is_some() {
-        // Modal like confirm (x-96e8): a single digit/Esc resolves it. Ahead of
+        // Modal like confirm: a single digit/Esc resolves it. Ahead of
         // the selector (which it replaced on open) so its keys can't leak there.
         return move_pick_keys(view, &passthrough, sock_w).await;
     }
@@ -12240,16 +12240,16 @@ async fn handle_stdin(
         return attach_place_keys(view, &passthrough, sock_w).await;
     }
     if view.portal_pick.is_some() {
-        // (x-9fd0) The portal picker consumes keys while open, ahead of the
+        // The portal picker consumes keys while open, ahead of the
         // selector it replaced - same precedence slot as its sibling.
         return portal_pick_keys(view, &passthrough, sock_w).await;
     }
     if view.peek.is_some() {
-        // x-c376: peek sits ON TOP of the selector; routed BEFORE it so its keys
+        // peek sits ON TOP of the selector; routed BEFORE it so its keys
         // (j/k, Esc, later digit/attach) never leak to the selector underneath.
         return peek_keys(view, &passthrough, sock_w).await;
     }
-    // (x-f331) A hover-armed selector is motion-fresh: only the action-verb set
+    // A hover-armed selector is motion-fresh: only the action-verb set
     // acts on the pointed-at row; the first key OUTSIDE it disarms the arm and
     // falls through to the pane, so a pointer parked over the sideline never
     // swallows typing into the focused shell (AC2-EDGE). An explicitly-opened
@@ -12271,7 +12271,7 @@ async fn handle_stdin(
     if view.yard.is_some() {
         return yard_keys(view, &passthrough, sock_w).await;
     }
-    // (x-f089) The feed panel is chrome and consumes no keys UNTIL the
+    // The feed panel is chrome and consumes no keys UNTIL the
     // operator focuses it with `E`, or opens a row's provenance. Both are
     // explicit, and both release back to the pane on Esc, so the property
     // this slot protects - typing reaches the focused pane - holds by
@@ -12284,11 +12284,11 @@ async fn handle_stdin(
     }
     if view.rename.is_some() {
         // Same precedence slot as create_keys: AFTER selector/answers, so a
-        // lingering overlay never swallows the typed name (x-9e5e finding).
+        // lingering overlay never swallows the typed name (finding).
         return rename_keys(view, &passthrough, sock_w).await;
     }
     if view.move_to.is_some() {
-        // (x-cf97) Same precedence slot as the rename overlay it mirrors.
+        // Same precedence slot as the rename overlay it mirrors.
         return move_to_keys(view, &passthrough, sock_w).await;
     }
     if view.recruit.is_some() {
@@ -12320,7 +12320,7 @@ enum DispatchFlow {
 }
 
 /// Dispatch one resolved prefix [`Event`] to the wire / view state - the single
-/// executor the key-scan loop and the which-key modal both call (x-8ccf Locked
+/// executor the key-scan loop and the which-key modal both call (Locked
 /// 3), so a modal-executed chord runs the IDENTICAL path as a directly-typed one
 /// (no parallel keymap to drift).
 async fn dispatch_event(
@@ -12345,8 +12345,8 @@ async fn dispatch_event(
                 .map_err(|e| format!("command send failed: {e}"))?;
         }
         Event::SelectTabIdx(ordinal) => {
-            // (x-cf97) The event carries the 1-BASED ordinal the operator
-            // reads off the tab strip (x-1499's three-identifier-spaces trap:
+            // The event carries the 1-BASED ordinal the operator
+            // reads off the tab strip (three-identifier-spaces trap:
             // the ordinal is the SHIFTING space and is deliberately what a
             // number gesture addresses; it is resolved to the stable TabId
             // HERE, once, so a layout push mid-gesture cannot move the
@@ -12378,7 +12378,7 @@ async fn dispatch_event(
         Event::OpenSelector => {
             // The unified rows are never empty - the `+ new workspace`
             // footer is always present - so an empty session opens on it
-            // (x-260a AC3-EDGE) instead of a BEL. Only the width gate stays.
+            // (AC3-EDGE) instead of a BEL. Only the width gate stays.
             // Gate on the CURRENT density's width authority, not the regular
             // width: Slim renders down to a narrower terminal than Regular, and
             // gating on PANEL_W left that rail mouse-clickable but refusing the
@@ -12390,7 +12390,7 @@ async fn dispatch_event(
             } else {
                 // Row 0 is NOT always actionable: Extended opens on the inert
                 // column header, where the cursor would paint nothing and Enter
-                // would only ring. Seed from the FOCUSED pane's row (x-e10f:
+                // would only ring. Seed from the FOCUSED pane's row (:
                 // opening must land where you already are, not row one - the
                 // confirmed `ctrl+w goes to the top each time` defect); a pane
                 // with no visible row (a scratch pane, a folded section) falls
@@ -12407,7 +12407,7 @@ async fn dispatch_event(
                 view.sel_hover_armed = false;
                 view.sel_esc.clear();
                 // Open at the top: a stale offset from a prior session must
-                // not hide row 0 (x-a621). Then re-follow the SEEDED cursor -
+                // not hide row 0. Then re-follow the SEEDED cursor -
                 // offset 0 can leave it scrolled off-screen, and Enter must
                 // act on a visible row.
                 view.sideline_offset = 0;
@@ -12415,7 +12415,7 @@ async fn dispatch_event(
             }
         }
         Event::OpenAnswers => {
-            // x-feec: open the needs-me queue. Always opens (even with an
+            // open the needs-me queue. Always opens (even with an
             // empty live leg) so the async event-fold leg can populate it;
             // an ultimately-empty union renders "nothing needs you". The
             // fold merges in when it lands - the overlay never blocks on it.
@@ -12445,7 +12445,7 @@ async fn dispatch_event(
             }
         }
         Event::OpenYard => {
-            // x-b2bf: open the yard. Always opens - an empty roster renders
+            // open the yard. Always opens - an empty roster renders
             // "the yard is empty - nothing was dispatched", the true failure
             // state, rather than staying hidden. The identity fold merges in
             // when it lands; the overlay never blocks on it.
@@ -12580,13 +12580,13 @@ async fn dispatch_event(
             return Ok(DispatchFlow::Break);
         }
         Event::OpenNav => {
-            // Client-local overlay (x-653d): opening sends nothing and
+            // Client-local overlay: opening sends nothing and
             // reserves no row (it draws over the content top-left like the
             // answer overlay, not the bottom chrome). Break so same-chunk
             // bytes after the chord can't leak to the pane (like SearchOpen).
             // No width gate: draw_lines_overlay clips a tiny terminal, and a
             // zero-squad session shows an explicit `no matches` (AC1-EDGE).
-            // (x-e10f) Seed from the focused pane so the navigator opens on
+            // Seed from the focused pane so the navigator opens on
             // the row you are already at; the filter is empty at open, so the
             // filtered list IS nav_rows() here. A focused pane with no row (a
             // scratch pane) opens at row zero (AC7-EDGE).
@@ -12627,7 +12627,7 @@ async fn dispatch_event(
             }
         }
         Event::OpenMoveTo => {
-            // (x-cf97) Move-to targets the ACTIVE tab, resolved to its stable
+            // Move-to targets the ACTIVE tab, resolved to its stable
             // id at open so a tab switch mid-edit cannot retarget the send -
             // the OpenRename discipline. Same-chunk bytes after the chord are
             // swallowed, like every prompt-opening chord.
@@ -12678,9 +12678,9 @@ async fn dispatch_event(
 }
 
 /// Apply one resolved [`ChromeHit`] - the single consumer both input paths
-/// share (x-260a): the mouse press path and the selector's Enter. Cmds go to
+/// share: the mouse press path and the selector's Enter. Cmds go to
 /// the wire; Notice is a local one-liner; Confirm arms the one-keypress
-/// dispatch prompt (x-a496); OpenCreate opens the name-input overlay (x-9e5e).
+/// dispatch prompt; OpenCreate opens the name-input overlay.
 async fn apply_hit(
     view: &mut View,
     hit: ChromeHit,
@@ -12696,19 +12696,19 @@ async fn apply_hit(
             }
         }
         ChromeHit::Notice(msg) => view.set_notice(msg.to_string()),
-        // A card hit opens the confirm (x-a496); the next keypress (Enter
+        // A card hit opens the confirm; the next keypress (Enter
         // dispatches, else cancels) resolves it via confirm_keys.
         ChromeHit::Confirm(action) => view.open_confirm(action),
-        // The `+` footer opens the name-input overlay (x-9e5e); the next keys
+        // The `+` footer opens the name-input overlay; the next keys
         // route to create_keys (Enter sends NewSquad, Esc cancels).
         ChromeHit::OpenCreate => view.open_create(),
         // Pure state flip, no I/O - usable even when the socket write path
-        // is failing (x-2f99, AC1-FR).
+        // is failing (AC1-FR).
         ChromeHit::CycleSection(key) => view.cycle_section(key),
         ChromeHit::SortColumn(column) => view.set_agent_sort_column(column),
-        // (x-c5ee) Pure local set flip, like CycleSection - no I/O.
+        // Pure local set flip, like CycleSection - no I/O.
         ChromeHit::ToggleIdle(key) => view.toggle_idle(key),
-        // (x-b186) The density button. The panel width moved with the density,
+        // The density button. The panel width moved with the density,
         // so unlike CycleSection this owes the server a new content viewport.
         ChromeHit::CycleDensity => {
             view.cycle_density();
@@ -12717,7 +12717,7 @@ async fn apply_hit(
                 .await
                 .map_err(|e| format!("resize send failed: {e}"))?;
         }
-        // x-8ccf US4: open the sideline MENU popup anchored at the clicked cell.
+        // US4: open the sideline MENU popup anchored at the clicked cell.
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
@@ -12728,7 +12728,7 @@ async fn apply_hit(
     Ok(())
 }
 
-/// Card-dispatch confirm keys (x-a496): Enter (CR/LF) as the first byte sends
+/// Card-dispatch confirm keys: Enter (CR/LF) as the first byte sends
 /// the targeted `DispatchNode`; any other key cancels. The whole chunk is
 /// swallowed (like the overlay dismiss) so an arrow's escape tail can't leak
 /// into a pane. `take()` clears the confirm either way, so a stale prompt can
@@ -12742,7 +12742,7 @@ async fn confirm_keys(
         return Ok(StdinFlow::Continue);
     };
     if matches!(bytes.first(), Some(b'\r') | Some(b'\n')) {
-        // (x-92d3 5.1) Close tab is the one confirm whose commit is TWO
+        // (5.1) Close tab is the one confirm whose commit is TWO
         // commands (select the captured tab, then close it, because CloseTab
         // closes the sender's VIEWED tab) and the one that must re-resolve its
         // target at Enter: a tab that vanished while the prompt sat open must
@@ -12760,9 +12760,9 @@ async fn confirm_keys(
             }
             return Ok(StdinFlow::Continue);
         }
-        // Most confirms are one command; clear-dead (x-f300) fans out to one
+        // Most confirms are one command; clear-dead fans out to one
         // Remove per exited row, so the commit path speaks in a list.
-        // (x-f191) A row-scoped commit arms the row stamp: its outcome
+        // A row-scoped commit arms the row stamp: its outcome
         // notice will render at the row, not only the tab bar.
         view.arm_row_stamp(&action.action);
         let row_name = match &action.action {
@@ -12817,14 +12817,14 @@ async fn confirm_keys(
                 .await
                 .map_err(|e| format!("confirm-action send failed: {e}"))?;
         }
-        // (x-f191 scope a+c) The sideline comes back after a row-scoped
+        // (scope a+c) The sideline comes back after a row-scoped
         // commit: selection resolved onto the acted row, or its neighbour.
         view.reanchor_after_row_commit(row_name.as_deref());
     }
     Ok(StdinFlow::Continue)
 }
 
-/// A folded which-key modal key (x-8ccf US3). Arrows/pgup navigate the
+/// A folded which-key modal key (US3). Arrows/pgup navigate the
 /// reference; `Byte`/`Enter` execute; `Esc` dismisses. Distinct from
 /// [`fold_selector_keys`] because the modal needs arrows kept as navigation
 /// (not folded to hjkl, which are executable bindings) and pgup/pgdn as scroll.
@@ -12905,7 +12905,7 @@ fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
                     // "swallow it whole (never leak)" used to be a comment
                     // rather than a behaviour here: this arm dropped ONE byte
                     // and let the rest of the sequence fall through as plain
-                    // keys, so Ctrl-Up (`ESC [ 1 ; 5 A`) leaked `;`, `5`, `A`.
+                    // keys, so Ctrl-Up (`ESC [ 1; 5 A`) leaked `;`, `5`, `A`.
                     // Same defect the selector fold had, same fix.
                     if b == 0x1b {
                         // ESC aborts an in-progress sequence and starts a fresh
@@ -12937,7 +12937,7 @@ fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
     out
 }
 
-/// Which-key modal keys (x-8ccf US3). Esc closes; arrows/pgup scroll+select;
+/// Which-key modal keys (US3). Esc closes; arrows/pgup scroll+select;
 /// Enter/`click` run the selected row; a bound printable key runs immediately
 /// through the shared chord dispatch (which-key), an unbound one dismisses. Esc
 /// is folded like every other overlay (carried across reads) so a split arrow
@@ -13054,7 +13054,7 @@ async fn keys_modal_execute_selected(
     }
 }
 
-/// One mouse report while the which-key modal is open (x-8ccf US3): hover moves
+/// One mouse report while the which-key modal is open (US3): hover moves
 /// the selection, the wheel scrolls, a left click on a row runs it, a click off
 /// the popup dismisses (click-elsewhere).
 async fn keys_modal_mouse(
@@ -13118,7 +13118,7 @@ async fn keys_modal_mouse(
     Ok(StdinFlow::Continue)
 }
 
-/// Run a row-menu entry (x-8ccf US2) against the LIVE agent row (resolved by the
+/// Run a row-menu entry (US2) against the LIVE agent row (resolved by the
 /// pinned identity). A stale OR ambiguous target is a Notice (AC1-ERR / codex
 /// P1), never a misrouted action; every action maps to an existing Command /
 /// overlay / confirm (zero proto).
@@ -13129,7 +13129,7 @@ async fn execute_row_menu_action(
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<(), String> {
     let target = match (target, action) {
-        // (x-1d91) A Backlog reorder verb: refuse a card that left the feed
+        // A Backlog reorder verb: refuse a card that left the feed
         // between menu-open and Enter, arm the pending marker (which is also the
         // double-press guard), then send. The server re-validates and owns the
         // shellout; the order changes only when the feed republishes.
@@ -13173,13 +13173,13 @@ async fn execute_row_menu_action(
             }
             return Ok(());
         }
-        // (x-f300) The section menu's clear-dead action, resolved against the
+        // The section menu's clear-dead action, resolved against the
         // section rather than a single row.
         (MenuTarget::Section { key, label, squad }, MenuAction::ClearDead) => {
             return clear_dead_confirm(view, key, label, squad);
         }
         // A workspace section's Rename opens the same overlay as selector `r`
-        // (x-96e8). The id is the section's squad, so a non-workspace header
+        //. The id is the section's squad, so a non-workspace header
         // (`squad: None`) can never reach it - it falls to the refuse arm below.
         (
             MenuTarget::Section {
@@ -13234,7 +13234,7 @@ async fn execute_row_menu_action(
             });
             return Ok(());
         }
-        // (x-92d3 5.1) The tab menu: every item re-resolves the pinned tab id
+        // (5.1) The tab menu: every item re-resolves the pinned tab id
         // against the live layout first, so a tab that closed or moved between
         // open and pick is a notice, never a redirected action.
         (MenuTarget::Tab(_tid), MenuAction::TabNew) => {
@@ -13483,7 +13483,7 @@ async fn execute_row_menu_action(
             match idx {
                 Some(idx) => {
                     fetch_peek(view, idx, a.name.clone(), sock_w).await?;
-                    // (x-92d3 6.2) Mail arms the SAME free-text composer peek
+                    // (6.2) Mail arms the SAME free-text composer peek
                     // `m` opens - one input surface, two doors.
                     if matches!(action, MenuAction::Mail) {
                         view.peek_input = Some((a.name.clone(), String::new()));
@@ -13493,7 +13493,7 @@ async fn execute_row_menu_action(
                 None => view.set_notice("agent is no longer here".into()),
             }
         }
-        // (x-92d3 6.2) Resume: the same command peek `r` sends, re-checked
+        // (6.2) Resume: the same command peek `r` sends, re-checked
         // against the row's LIVE state - a row that restarted on its own
         // between open and pick must not be respawned again.
         MenuAction::Resume => {
@@ -13565,13 +13565,13 @@ async fn execute_row_menu_action(
                     },
                 },
             };
-            // (x-f191 scope a+c) Same post-commit re-anchor slot the bare `x`
+            // (scope a+c) Same post-commit re-anchor slot the bare `x`
             // arms: the sideline stays open, the cursor stays on the row.
             view.row_slot = view
                 .display_rows()
                 .iter()
                 .position(|r| matches!(r, DisplayRow::Agent(row) if row.name == a.name));
-            // (x-e763) The confirm pref arms the overlay; the default (off)
+            // The confirm pref arms the overlay; the default (off)
             // dispatches the SAME command the confirm would commit, so the two
             // paths cannot disagree about what a gesture sends. The
             // too-short-terminal guard rides the confirm branch only: it exists
@@ -13626,7 +13626,7 @@ async fn execute_row_menu_action(
     Ok(())
 }
 
-/// (x-f300) Arm the clear-dead confirm for a section, over the dead set as it
+/// Arm the clear-dead confirm for a section, over the dead set as it
 /// stands NOW rather than as the menu found it.
 fn clear_dead_confirm(
     view: &mut View,
@@ -13643,7 +13643,7 @@ fn clear_dead_confirm(
         return Ok(());
     }
     // A confirm owns the bottom row; a too-short terminal refuses rather than
-    // arm an invisible prompt (matching the selector's stop/reap, x-260a).
+    // arm an invisible prompt (matching the selector's stop/reap).
     if view.term.0 < MIN_ROWS_FOR_STATUS {
         view.set_notice("terminal too short for the confirm prompt".into());
         return Ok(());
@@ -13674,7 +13674,7 @@ async fn row_menu_execute_selected(
     Ok(())
 }
 
-/// Row-menu keys (x-8ccf US2): arrows walk the entries + 2x2 grid (scrolling to
+/// Row-menu keys (US2): arrows walk the entries + 2x2 grid (scrolling to
 /// keep the selection on-screen), pgup/pgdn scroll, Enter runs the selection,
 /// Esc/`q`/any unbound key dismiss (the shared popup contract, codex P2). Esc is
 /// carried across reads like every overlay, so a split arrow never leaks; no key
@@ -13729,7 +13729,7 @@ async fn row_menu_keys(
                 }
             }
             ModalKey::Enter => row_menu_execute_selected(view, sock_w).await?,
-            // (x-91a1) A printable byte first resolves against the accelerators
+            // A printable byte first resolves against the accelerators
             // of the actions THIS menu offers: a hit moves the selection to
             // that entry and runs it through the SAME execute path Enter and a
             // click use, so keyboard and mouse execution cannot drift. A byte
@@ -13760,7 +13760,7 @@ async fn row_menu_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// One mouse report while the row menu is open (x-8ccf US2): hover selects, a
+/// One mouse report while the row menu is open (US2): hover selects, a
 /// left click runs the entry, a right press re-anchors on the row under the
 /// pointer (or dismisses off the sideline), a click off the popup dismisses.
 async fn row_menu_mouse(
@@ -13810,11 +13810,11 @@ async fn row_menu_mouse(
             // below, not just the pane one: a menu anchored at a sideline row
             // or the strip extends over those cells too, and a press on its
             // visible body must not silently re-anchor onto whatever row or
-            // tab cell happens to sit underneath (x-7683 review finding).
+            // tab cell happens to sit underneath (review finding).
             if view.row_menu_block_contains(rep.row, rep.col) {
                 return Ok(());
             }
-            // (x-92d3 5.1) A tab cell re-anchors the tab menu, the same
+            // (5.1) A tab cell re-anchors the tab menu, the same
             // one-press contract a sideline row gets below; the strip and the
             // sideline own disjoint columns, so the two cannot contend.
             if view.tab_cell_at(rep.row, rep.col).is_some() {
@@ -13844,7 +13844,7 @@ async fn row_menu_mouse(
                         view.row_menu = None;
                     }
                 }
-                // (x-7683) A pane cell re-anchors too - panes are
+                // A pane cell re-anchors too - panes are
                 // menu-bearing now, and a second right-press on another
                 // pane swapping in that pane's agent menu keeps the
                 // one-press contract the tab re-anchor above cites.
@@ -13862,7 +13862,7 @@ async fn row_menu_mouse(
     Ok(())
 }
 
-/// Run one aux-popup action (x-8ccf US4/US5). Menu entries open a surface or
+/// Run one aux-popup action (US4/US5). Menu entries open a surface or
 /// detach; settings toggles flip a session-local view flag and rebuild the modal
 /// so its glyph reflects the new state (the popup stays open for another toggle).
 async fn execute_aux_action(
@@ -13899,7 +13899,7 @@ async fn execute_aux_action(
         AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
         AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
         AuxAction::RestartAgents => {
-            // x-f188 change 7: the modal named every effect; the tap is the
+            // change 7: the modal named every effect; the tap is the
             // confirmation. Close the popup, queue the verb off the UI loop.
             view.aux = None;
             if view.restart_inflight {
@@ -13911,7 +13911,7 @@ async fn execute_aux_action(
         AuxAction::SweepNamed => begin_sweep_apply(view, SweepScope::Named),
         AuxAction::SweepSquads => begin_sweep_apply(view, SweepScope::Squads),
         AuxAction::OpenConnections => {
-            // x-84d7: close the MENU and open the Connections modal in its
+            // close the MENU and open the Connections modal in its
             // loading state; arm the first read (the run loop spawns it).
             view.aux = None;
             view.open_connections();
@@ -13931,7 +13931,7 @@ async fn execute_aux_action(
             view.reopen_settings_keeping_sel();
         }
         AuxAction::BacklogGoto(node) => {
-            // (x-1d91) The overlay is for scanning; acting on a card hands you
+            // The overlay is for scanning; acting on a card hands you
             // back to its sideline row, where the full reorder menu lives. A card
             // that left the feed meanwhile says so rather than moving the cursor
             // somewhere arbitrary.
@@ -14117,7 +14117,7 @@ async fn aux_keys(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    // (x-e4f1) A lane-colors text entry (naming a key / typing a free-form
+    // A lane-colors text entry (naming a key / typing a free-form
     // color) consumes the chunk, same precedence shape as create_keys.
     if view.lane.is_entry() {
         return lane_entry_keys(view, bytes, sock_w).await;
@@ -14189,7 +14189,7 @@ async fn aux_keys(
                         SettingsTab::Keys => SettingsTab::Colors,
                         SettingsTab::Colors => SettingsTab::General,
                     };
-                    // (x-e4f1) A section switch drops the colors drill so a
+                    // A section switch drops the colors drill so a
                     // return to Colors always opens at the top level.
                     view.lane.reset();
                     view.reopen_settings_keeping_sel();
@@ -14204,7 +14204,7 @@ async fn aux_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// (x-e4f1) Keys while a lane-colors text entry is open: printable/Backspace
+/// Keys while a lane-colors text entry is open: printable/Backspace
 /// edit the buffer, Enter submits, Esc cancels back to the underlying drill
 /// level. Modeled on [`create_keys`] (`fold_search_input` + per-key re-check),
 /// with the settings modal staying open underneath. Enter on an EMPTY buffer
@@ -14287,7 +14287,7 @@ async fn lane_entry_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// (x-e4f1) Persist one lane color through the CLI block-replace form and
+/// Persist one lane color through the CLI block-replace form and
 /// reload the palette so it goes live without a restart. The merge source is
 /// re-read fresh first, so a config change written by another process since
 /// the palette loaded is not clobbered by the whole-block replace.
@@ -14359,7 +14359,7 @@ async fn aux_mouse(
             }
             match view.aux_hit(rep.row, rep.col) {
                 Some(t) => {
-                    // (x-e4f1) While a lane text entry owns the keyboard, row
+                    // While a lane text entry owns the keyboard, row
                     // clicks are inert: acting on a picker row mid-typing
                     // would leave the buffer armed under a changed view.
                     if view.lane.is_entry() {
@@ -14409,7 +14409,7 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
                 // rather than dropping one byte and letting the tail out.
                 //
                 // "swallowed whole" used to be a comment, not a behaviour: a
-                // modified arrow like Ctrl-Up (`ESC [ 1 ; 5 A`) had its `1`
+                // modified arrow like Ctrl-Up (`ESC [ 1; 5 A`) had its `1`
                 // swallowed and then leaked `;`, `5` and `A` as plain keys. That
                 // was survivable while these overlays closed on any key they did
                 // not recognise. Once a picker gained a cursor it was not: the
@@ -14487,7 +14487,7 @@ fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
 /// the seq, resets the body to loading, and sends the matching `PeekAgent`. The
 /// caller guarantees `cursor` is a `DisplayRow::Agent`. Shared by Space-open,
 /// j/k, and the layout re-anchor so the seq/loading discipline is identical on
-/// every path (x-c376).
+/// every path.
 async fn fetch_peek(
     view: &mut View,
     cursor: usize,
@@ -14503,14 +14503,14 @@ async fn fetch_peek(
     .map_err(|e| format!("peek send failed: {e}"))
 }
 
-/// Peek-overlay keys (x-c376): j/k (and folded arrows) peek the adjacent agent
+/// Peek-overlay keys: j/k (and folded arrows) peek the adjacent agent
 /// row (fresh seq, stale bodies dropped by the seq guard); Esc/q closes back to
 /// the selector with its cursor synced to the peeked row (AC2-UI). Digit answers
 /// (US3) and attach (US4) are added by later stories; until then those keys are
 /// swallowed - no key in peek mode ever reaches a pane (the prefix-layer
 /// invariant). The catalog is re-read per key so a scrape tick that removed the
 /// peeked row re-anchors or closes (never a panic on a dropped index).
-/// (x-84d7) Route keys to the Connections modal. Pure state changes run through
+/// Route keys to the Connections modal. Pure state changes run through
 /// the modal's own reducer ([`ConnectionsView::on_key`]); the intents that touch
 /// the world (close, refresh) are executed here. The run loop redraws after this
 /// returns `Continue`, so a `Redraw` intent needs no explicit paint.
@@ -14555,7 +14555,7 @@ async fn connections_keys(
                 view.conn_action = Some((argv, Vec::new(), true));
             }
             ConnIntent::SetActiveAccount(account) => {
-                // (x-c914) Mirror the modal's post-toggle value into the client's
+                // Mirror the modal's post-toggle value into the client's
                 // authoritative session-local active account. Shells nothing and
                 // touches no credential (Locked Decisions 1-2); later spawns read
                 // it. The modal already repainted its own marker.
@@ -14571,7 +14571,7 @@ async fn peek_keys(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    // (x-9c5f) Input mode wins the key route: while the `m` reply input is open,
+    // Input mode wins the key route: while the `m` reply input is open,
     // every key types into it (digits/j/k/l/r literal), never peek nav. Checked
     // before the nav fold so the two folders never share a chunk's bytes.
     if view.peek_input.is_some() {
@@ -14603,10 +14603,10 @@ async fn peek_keys(
                 }
             }
             b'0'..=b'9' => {
-                // Answer a blocked peeked row in place (x-c929 reuse): send the
+                // Answer a blocked peeked row in place (reuse): send the
                 // EXACT PaneAnswer payload (fingerprint, region_lines, keystroke)
                 // only when the row is answerable AND pane-hosted; else BEL,
-                // nothing sent (x-c929 AC1-ERR carried over). The overlay stays
+                // nothing sent (AC1-ERR carried over). The overlay stays
                 // open; the answered row drops from blocked on the next scrape
                 // tick. The daemon-pinned keystroke is relayed opaquely - the
                 // client never fabricates bytes.
@@ -14654,9 +14654,9 @@ async fn peek_keys(
                 // Attach from peek (US4) through the shared agent_hit -> apply_hit
                 // path a click / selector Enter uses: a pane-hosted row focuses;
                 // a paneless live row reaches PORTAL 0 with no placement dialog
-                // (x-07c2; the explicit picker is `p`, a new portal is `P`). A
+                // (; the explicit picker is `p`, a new portal is `P`). A
                 // Notice refusal (a dead or unresolvable row) keeps BOTH
-                // overlays open (x-260a locked 3). Right-arrow folds to `l`.
+                // overlays open (locked 3). Right-arrow folds to `l`.
                 let hit = match view.display_rows().get(cursor) {
                     Some(DisplayRow::Agent(a)) => Some(agent_hit(a, view.layout.active_squad)),
                     _ => None,
@@ -14711,7 +14711,7 @@ async fn peek_keys(
             0x1b | b'q' => {
                 // Close peek. When peek was opened FROM the selector it stays
                 // open underneath, so re-point its cursor to the peeked row
-                // (AC2-UI). When peek was opened standalone (x-8ccf US2:
+                // (AC2-UI). When peek was opened standalone (US2:
                 // right-click a row -> Peek, selector closed), Esc must return to
                 // normal pane input, NOT drop into panel-selector mode.
                 let restore = view.selector.is_some();
@@ -14728,7 +14728,7 @@ async fn peek_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// (x-9c5f US5) The peek `m` free-text reply input keys, mirroring
+/// (US5) The peek `m` free-text reply input keys, mirroring
 /// [`rename_keys`]' discipline (fold_search_input, Esc drops the buffer,
 /// backspace pops, printable ASCII appends, re-read the mode each key) with two
 /// node-spec divergences: **empty-Enter keeps the input open** (a blank mail is
@@ -14810,18 +14810,18 @@ async fn peek_input_keys(
 /// skipping inert Headers; h (and left) collapse, `l` explicitly expands a
 /// squad row, Right toggles a workspace row's idle caret;
 /// Enter acts on the row through [`View::row_action`] + [`apply_hit`] - the
-/// same resolver a mouse click uses (x-260a), so squad/tab switch, agent
+/// same resolver a mouse click uses, so squad/tab switch, agent
 /// focus/attach, card dispatch-confirm, and workspace-create are all keyboard
-/// reachable. The x-96e8 squad-management context keys ride here too: on a
+/// reachable. The squad-management context keys ride here too: on a
 /// squad row `r` renames, `x` removes (behind a confirm), `J`/`K` reorder; on
 /// a tab row `m` opens the move-to-squad picker. A refusal (Notice/BEL) keeps
 /// the selector open; Esc/q closes. Rows and cursor are re-read per key so a
 /// close mid-chunk swallows the remainder instead of resurrecting the selector.
 /// Detach is prefix+d from NORMAL mode only (Locked 11): close the selector.
-/// The selector's act-on-a-row body, shared by Enter, the x-9fd0 `l` reach on
+/// The selector's act-on-a-row body, shared by Enter, the `l` reach on
 /// an agent row, and the Right-arrow pre-pass on an agent row, so the three
 /// doors cannot drift on what "act" means: a refusal keeps the selector open
-/// (x-260a locked 3), a hit closes it and applies, a row with no action says
+/// (locked 3), a hit closes it and applies, a row with no action says
 /// so on-screen.
 async fn selector_apply_row_action(
     view: &mut View,
@@ -14837,7 +14837,7 @@ async fn selector_apply_row_action(
             apply_hit(view, hit, sock_w).await?;
         }
         // Out of range / Header: unreachable via j/k, but a stale cursor gets
-        // an on-screen notice, never a silent close or a bare beep (x-f331 US3).
+        // an on-screen notice, never a silent close or a bare beep (US3).
         None => view.set_notice("no action for this row".into()),
     }
     Ok(())
@@ -14853,7 +14853,7 @@ async fn selector_keys(
     // explicit expand: strip each COMPLETE `ESC [ C` from this chunk and handle
     // it below, so it never aliases onto `l` through the fold. A sequence the
     // read split lands in the carry and folds to `l` (expand) - a valid caret
-    // open, never a mis-toggle. A modified Right (`ESC [ 1 ; 5 C`) does not
+    // open, never a mis-toggle. A modified Right (`ESC [ 1; 5 C`) does not
     // contain the contiguous triple, so it still drops as unmapped.
     let mut rights = 0usize;
     let mut cleaned: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -14871,13 +14871,13 @@ async fn selector_keys(
     view.sel_esc = esc;
     for _ in 0..rights {
         // Same cursor as every other selector verb: pointer-follow works
-        // through the hover-ARMED selector (x-f331), and an explicit prefix+w
+        // through the hover-ARMED selector, and an explicit prefix+w
         // selector keeps keyboard control even with the pointer parked on an
         // inert sideline cell.
         let Some(cur) = view.selector else {
             break;
         };
-        // (x-9fd0) On an AGENT row Right is the reach - the same row_action
+        // On an AGENT row Right is the reach - the same row_action
         // path Enter takes, matching the peek overlay where Right already
         // reaches. A workspace row keeps the caret toggle; anything else says
         // why not.
@@ -14910,7 +14910,7 @@ async fn selector_keys(
             b'j' => view.selector = Some(view.selector_down(cur)),
             b'k' => view.selector = Some(view.selector_up(cur)),
             b'l' | b'h' => {
-                // (x-9fd0) `l` on an AGENT row is the reach: the same
+                // `l` on an AGENT row is the reach: the same
                 // row_action path Enter takes, so Right (which folds to `l`
                 // when the sequence splits across a read boundary) and the
                 // peek overlay's `l` all agree on one meaning. `h` stays
@@ -14930,7 +14930,7 @@ async fn selector_keys(
                     Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
                     _ => None,
                 };
-                // `l`/`h` stay the EXPLICIT open/close pair (x-975a keeps the
+                // `l`/`h` stay the EXPLICIT open/close pair (keeps the
                 // tri-state cycle on the header click and prefix+z); `l` from
                 // live-only opens back to the full section.
                 if let Some(key) = squad.and_then(|sq| squad_key(&view.layout, sq)) {
@@ -14960,7 +14960,7 @@ async fn selector_keys(
                 }
             }
             b'r' => {
-                // Rename the squad at the cursor (x-96e8). Tab/other rows have
+                // Rename the squad at the cursor. Tab/other rows have
                 // no squad rename here (prefix+, renames a tab), so they notice.
                 let squad = match view.display_rows().get(cur) {
                     Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
@@ -14972,11 +14972,11 @@ async fn selector_keys(
                 }
             }
             b' ' => {
-                // Open the read-only peek overlay: an agent row (x-c376) shows
+                // Open the read-only peek overlay: an agent row shows
                 // its status sentence + recent transcript from disk; a
-                // workspace row (x-10ec) shows its tabs and members rendered
+                // workspace row shows its tabs and members rendered
                 // locally from the layout, no wire round trip. Any other row
-                // notices why (x-f331 US3). The selector stays open
+                // notices why (US3). The selector stays open
                 // underneath; Esc drops back into it at the peeked row.
                 match view.display_rows().get(cur) {
                     Some(DisplayRow::Agent(a)) => {
@@ -14989,8 +14989,8 @@ async fn selector_keys(
                 }
             }
             b'\t' => {
-                // Toggle a recruit mark on the focused row (x-8f11; moved from
-                // Space to Tab by x-c376, which took Space for peek). Markable
+                // Toggle a recruit mark on the focused row (; moved from
+                // Space to Tab by, which took Space for peek). Markable
                 // only if it is an attachable watch-only agent (live, has an
                 // attach_id); anything else gives a notice, never zero feedback.
                 let id = match view.display_rows().get(cur) {
@@ -15009,10 +15009,10 @@ async fn selector_keys(
                 }
             }
             b'R' => {
-                // Open the recruit name prompt for the marked rows (x-8f11). With
+                // Open the recruit name prompt for the marked rows. With
                 // no marks, fall back to marking the focused attachable row first
                 // (the grid's single-recruit `m`, generalized); a non-attachable
-                // focused row with no marks notices why (x-f331 US3).
+                // focused row with no marks notices why (US3).
                 if view.marks.is_empty() {
                     let id = match view.display_rows().get(cur) {
                         Some(DisplayRow::Agent(a)) if a.attach_id.is_some() && !a.exited => {
@@ -15034,7 +15034,7 @@ async fn selector_keys(
                 }
             }
             b'b' => {
-                // (x-1d91) The mini-kanban: the Backlog's lanes with their true
+                // The mini-kanban: the Backlog's lanes with their true
                 // counts. A section-level view, not a row action, so it opens
                 // from anywhere in the sideline - but only when there is a
                 // backlog to show, rather than an empty board.
@@ -15053,7 +15053,7 @@ async fn selector_keys(
                     }
                     _ => None,
                 };
-                // (x-07c2) Enter reaches the thread pane, so `p` is the
+                // Enter reaches the thread pane, so `p` is the
                 // picker's only door. The synthetic mission squad must still be
                 // excluded here (attach_dst_squads does it) or the virtual id
                 // leaks into the picker and `place_spawned_pane` cannot route
@@ -15070,7 +15070,7 @@ async fn selector_keys(
                 }
             }
             b'P' => {
-                // (x-8f9d) opened the NEXT FREE portal; (x-9fd0) `P` opens the
+                // opened the NEXT FREE portal; `P` opens the
                 // portal picker instead: the portals that are OPEN, numbered,
                 // plus a new-portal row PRE-SELECTED, so `P` Enter still sends
                 // the exact wire gesture this key always had. The SERVER still
@@ -15079,7 +15079,7 @@ async fn selector_keys(
                 // number, and the loser's new portal is silently repointed.
                 //
                 // A bare digit was the obvious spelling and is not available:
-                // `b'0'..=b'9'` here is the x-c929 answerable-prompt path. `P`
+                // `b'0'..=b'9'` here is the answerable-prompt path. `P`
                 // pairs with `p` (the placement picker) the way `X`/`x` already
                 // pair.
                 let picked = match view.display_rows().get(cur) {
@@ -15094,11 +15094,11 @@ async fn selector_keys(
                 }
             }
             b'X' => {
-                // Bulk reap (x-7561): uppercase `X` from ANY agent row confirms
+                // Bulk reap: uppercase `X` from ANY agent row confirms
                 // `fno-agents reap`. Contextual on agent rows only (headers stay
                 // inert - no selector surgery); a non-agent row notices why
-                // (x-f331 US3). Too-short terminal refuses rather than arm an
-                // invisible confirm (x-260a).
+                // (US3). Too-short terminal refuses rather than arm an
+                // invisible confirm.
                 let on_agent = matches!(view.display_rows().get(cur), Some(DisplayRow::Agent(_)));
                 if !on_agent {
                     view.set_notice("reap works on an agent row".into());
@@ -15113,11 +15113,11 @@ async fn selector_keys(
                 continue;
             }
             b'x' => {
-                // A TOMBSTONE member row dismisses (x-8f11); a squad-header row
-                // removes the squad (x-96e8), behind a confirm - disambiguated by
+                // A TOMBSTONE member row dismisses; a squad-header row
+                // removes the squad, behind a confirm - disambiguated by
                 // row type so one key serves both. A too-short terminal cannot
                 // render the bottom-row prompt, so it refuses with a notice rather
-                // than arm an INVISIBLE confirm (x-260a); an unknown squad or a
+                // than arm an INVISIBLE confirm; an unknown squad or a
                 // tab/other row BELs.
                 let dismiss = match view.display_rows().get(cur) {
                     Some(DisplayRow::Agent(a)) if a.tombstone => a.squad.zip(a.attach_id.clone()),
@@ -15133,13 +15133,13 @@ async fn selector_keys(
                     continue;
                 }
                 // A WATCH-ONLY (paneless) agent row gets the lifecycle verb
-                // (x-76ea): a live row (`!exited`) stops, an exited row removes.
+                // a live row (`!exited`) stops, an exited row removes.
                 // The registry poll's state flip IS the stage separator - stop,
                 // wait ≤1s for the row to flip exited, then `x` again removes (no
                 // double-tap timer). The captured name (not the row index) rides
                 // the confirm, so a row that races out resolves to the server's
                 // stale-name refusal; too-short terminal refuses rather than arm
-                // an invisible confirm (x-260a), like RemoveSquad.
+                // an invisible confirm, like RemoveSquad.
                 //
                 // `pane_id.is_none()` is load-bearing (codex review): a PANE-hosted
                 // Agent row is either a real agent's pane or a bare shell pane that
@@ -15151,7 +15151,7 @@ async fn selector_keys(
                 // agents that today linger until GC - are the gap this closes.
                 //
                 // An EXTERNAL row (claude-daemon roster or a persisted external
-                // tombstone, x-7561) routes by stable `attach_id` to the
+                // tombstone) routes by stable `attach_id` to the
                 // External verbs instead of `fno-agents` by name: a live row
                 // (`!exited`) stops (`claude stop <id>`), a stopped tombstone
                 // (`exited`) removes (`claude rm <id>`). The server re-validates
@@ -15166,7 +15166,7 @@ async fn selector_keys(
                         a.external,
                         a.attach_id.clone(),
                         a.harness_session_id.clone(),
-                        // (x-b5d1) The row's lattice state decides whether the
+                        // The row's lattice state decides whether the
                         // remove carries the measure flag: a `?` row measures
                         // (rm's daemon gate) instead of paying a stop leg
                         // that times out against a session nothing answers.
@@ -15190,7 +15190,7 @@ async fn selector_keys(
                             attach_id: id,
                             name: name.clone(),
                         },
-                        // (x-a33f) `x` states the intent ONCE: remove. rm
+                        // `x` states the intent ONCE: remove. rm
                         // alone is sent; the daemon's rm ends a live row's
                         // process itself. Stop-only lives on the row menu's
                         // Stop.
@@ -15201,7 +15201,7 @@ async fn selector_keys(
                             measure: unmeasured,
                         },
                     };
-                    // (x-f191 scope a+c) The slot feeds the post-commit
+                    // (scope a+c) The slot feeds the post-commit
                     // re-anchor: the sideline stays open and the cursor stays
                     // on this row (or its neighbour) after the commit.
                     view.row_slot = Some(cur);
@@ -15241,7 +15241,7 @@ async fn selector_keys(
             }
             b'J' | b'K' => {
                 // Reorder the squad at the cursor down (`J`) / up (`K`) the
-                // sideline (x-96e8). The cursor follows the squad via sel_follow
+                // sideline. The cursor follows the squad via sel_follow
                 // on the authoritative next Layout. Tab/other rows notice why.
                 let squad = match view.display_rows().get(cur) {
                     Some(DisplayRow::Sel(r)) if r.tab.is_none() => Some(r.squad),
@@ -15262,8 +15262,8 @@ async fn selector_keys(
                 }
             }
             b'm' => {
-                // x-8ccf US2: `m` on an agent row - or (x-1d91) a Backlog card,
-                // or (x-7683) a band header whose section menu the mouse path
+                // US2: `m` on an agent row - or a Backlog card,
+                // or a band header whose section menu the mouse path
                 // already opens - opens its context menu (mouse-off parity),
                 // anchored at the row and sitting over the selector like peek;
                 // Esc drops back into the selector. A header that refuses (a
@@ -15273,7 +15273,7 @@ async fn selector_keys(
                     view.display_rows().get(cur),
                     Some(DisplayRow::Agent(_) | DisplayRow::Card(_) | DisplayRow::Header { .. })
                 ) {
-                    // Screen row = index - sideline_offset (x-cd67: the sideline
+                    // Screen row = index - sideline_offset (: the sideline
                     // owns row 0; there is no TAB_BAR_ROWS offset on this side
                     // of the divider).
                     let arow = (cur.saturating_sub(view.sideline_offset)) as u16;
@@ -15292,9 +15292,9 @@ async fn selector_keys(
                     }
                     continue;
                 }
-                // Move a tab into another squad (x-96e8): open the numbered
+                // Move a tab into another squad: open the numbered
                 // picker over the OTHER squads (a squad is moved with J/K, not
-                // m). Tab rows left the sideline (x-0090), so `m` on a squad row
+                // m). Tab rows left the sideline, so `m` on a squad row
                 // targets that squad's ACTIVE tab - the one shown in the tab bar.
                 // A non-squad row, or nowhere to move to (one squad), notices why.
                 let picked = match view.display_rows().get(cur) {
@@ -15322,12 +15322,12 @@ async fn selector_keys(
         }
     }
     // Follow the (possibly moved) cursor / expanded catalog into the scroll
-    // window so a row driven below the fold stays visible (x-a621).
+    // window so a row driven below the fold stays visible.
     view.clamp_sideline_offset();
     Ok(StdinFlow::Continue)
 }
 
-/// Move-tab / move-pane picker keys (x-96e8; cursored by x-3e17).
+/// Move-tab / move-pane picker keys (; cursored by).
 ///
 /// Two axes reach the same destination. A digit `1..=9` commits the numbered
 /// squad in one keystroke, exactly as it always has - that is why digits still
@@ -15479,7 +15479,7 @@ async fn move_pick_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// One folded search-input token (v12, x-e780). A printable/control byte for the
+/// One folded search-input token (v12). A printable/control byte for the
 /// query, or a bare Esc press. Complete arrow sequences are swallowed by the fold
 /// (cursor motion is discretionary polish, Discretion 4).
 #[derive(Debug, PartialEq, Eq)]
@@ -15492,7 +15492,7 @@ enum SearchKey {
 /// ESC-prefixed sequence broken at a read boundary never exits the search or
 /// leaks its tail into the query. A whole CSI sequence (`ESC [ ` params `x`) is
 /// consumed up to and including its final byte (`0x40..=0x7e`) and swallowed, so
-/// a MULTI-byte sequence - PageUp `ESC [ 5 ~`, Ctrl-Arrow `ESC [ 1 ; 5 A` - never
+/// a MULTI-byte sequence - PageUp `ESC [ 5 ~`, Ctrl-Arrow `ESC [ 1; 5 A` - never
 /// leaks its param/final tail into the typed query (gemini review, HIGH). A bare
 /// Esc surfaces as [`SearchKey::Esc`]; everything else is a [`SearchKey::Byte`].
 /// A lone trailing ESC stays pending until the next byte disambiguates it.
@@ -15552,16 +15552,16 @@ fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKey> {
 
 /// Navigator fold keys. Superset of [`SearchKey`]: the same split-arrow escape
 /// fold, but a completed CSI whose final byte is Up/Down/Shift-Tab surfaces as a
-/// motion token instead of being swallowed (ab-63b44059). Every other CSI is
+/// motion token instead of being swallowed. Every other CSI is
 /// still consumed whole, so no escape tail leaks into the query or the pane.
 enum NavKey {
     Byte(u8),
     Esc,
     Up,
     Down,
-    /// (x-e10f) Bare Right: reach the selected row (the Enter/goto arm).
+    /// Bare Right: reach the selected row (the Enter/goto arm).
     Right,
-    /// (x-e10f) Bare Left: close (the Esc arm) - back to the pane you came
+    /// Bare Left: close (the Esc arm) - back to the pane you came
     /// from. The overlay owns every keystroke, so a bare arrow is free.
     Left,
     ShiftTab,
@@ -15573,7 +15573,7 @@ enum NavKey {
 /// arrow-Right/Left `ESC [ C`/`ESC [ D`, and Shift-Tab `ESC [ Z` finals become
 /// [`NavKey::Up`]/[`Down`]/[`Right`]/[`Left`]/[`ShiftTab`] so the navigator can
 /// move its cursor, goto, close, and reverse-cycle the state chip. A modified
-/// arrow (`ESC [ 1 ; 5 A`) shares the final byte and maps to the same motion -
+/// arrow (`ESC [ 1; 5 A`) shares the final byte and maps to the same motion -
 /// harmless. All other finals are swallowed, same leak-safety as search.
 fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
     let mut keys = Vec::new();
@@ -15606,7 +15606,7 @@ fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
                 } else if (0x40..=0x7e).contains(&b) {
                     // CSI complete. Surface the three motion finals; swallow the
                     // rest. Only a BARE `ESC [ X` counts: a parameterised
-                    // sequence is a MODIFIED key (Ctrl-Up is `ESC [ 1 ; 5 A`),
+                    // sequence is a MODIFIED key (Ctrl-Up is `ESC [ 1; 5 A`),
                     // and aliasing it onto the unmodified one silently
                     // reinterprets a chord the operator meant as something else.
                     // This fold serves prefix+f, the navigator this change
@@ -15634,7 +15634,7 @@ fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
     keys
 }
 
-/// Search-mode keys (v12, x-e780). Typing: printable append, Backspace pops,
+/// Search-mode keys (v12). Typing: printable append, Backspace pops,
 /// Enter submits (send [`ClientMsg::SearchOpen`]), Esc cancels locally. Browsing
 /// (post-submit): `n`/`N` send [`ClientMsg::SearchStep`] (older/newer), Esc sends
 /// [`ClientMsg::SearchClear`] and exits. Esc ALWAYS exits the mode locally even
@@ -15720,15 +15720,15 @@ async fn search_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Navigator-overlay keys (x-653d): a client-owned typing overlay like search.
+/// Navigator-overlay keys: a client-owned typing overlay like search.
 /// Printable bytes edit the text filter (Locked 5: letters are ALWAYS query
 /// text, never state keys); Backspace widens; `Tab`/`Shift-Tab` cycle the state
 /// chip forward/back; `Up`/`Down` (or `Ctrl-p`/`Ctrl-n`) move the cursor over the
 /// filtered rows (clamped, no wrap); Enter or bare `Right` goto's the row;
-/// `Esc` or bare `Left` closes (x-e10f). Uses
+/// `Esc` or bare `Left` closes. Uses
 /// [`fold_nav_input`]'s split-arrow fold (which surfaces the motion finals while
 /// swallowing every other escape) and a per-key re-read so an Esc mid-chunk
-/// swallows the chunk's remainder (ab-63b44059).
+/// swallows the chunk's remainder.
 async fn nav_keys(
     view: &mut View,
     bytes: &[u8],
@@ -15752,7 +15752,7 @@ async fn nav_keys(
             // Arrows mirror Ctrl-p/Ctrl-n; Shift-Tab reverses the state ring.
             NavKey::Up => view.nav_move_cursor(-1),
             NavKey::Down => view.nav_move_cursor(1),
-            // (x-e10f) Bare Right reaches the selected row - the same
+            // Bare Right reaches the selected row - the same
             // nav_goto the Enter arm calls, so substrate behavior (attach a
             // thread, focus a pane, refuse with a notice) is the same too.
             NavKey::Right => nav_goto(view, sock_w).await?,
@@ -15795,7 +15795,7 @@ async fn nav_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Teleport to the navigator's cursor row (x-653d). Materializes the OWNED
+/// Teleport to the navigator's cursor row. Materializes the OWNED
 /// target before mutating the view (`nav_rows` borrows the layout), re-reading
 /// the filtered catalog at Enter time (per-key re-read; AC4-ERR relies on the
 /// server refusing a stale id fail-closed). A refusal (`Notice`: blocked /
@@ -15860,7 +15860,7 @@ async fn nav_goto(
     apply_hit(view, target.hit, sock_w).await
 }
 
-/// New-workspace name-input keys (x-9e5e). Reuses the search input's split-arrow
+/// New-workspace name-input keys. Reuses the search input's split-arrow
 /// folding: printable ASCII appends, Backspace pops, Enter sends
 /// [`Command::NewSquad`] with the typed name (an empty name keeps the overlay
 /// open - the server would reject it, and keeping it open avoids the round trip),
@@ -15927,7 +15927,7 @@ async fn create_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Recruit workspace-name keys (x-8f11): the create overlay's shape - printable
+/// Recruit workspace-name keys: the create overlay's shape - printable
 /// append, Backspace pops, Esc cancels locally (marks kept), Enter sends
 /// [`Command::RecruitAgents`] with the marked ids and CLEARS the marks. An empty
 /// name keeps the overlay open (the server would refuse it). An empty mark set
@@ -15992,7 +15992,7 @@ async fn recruit_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Rename-tab name-input keys (x-c150). The create overlay's shape (split-arrow
+/// Rename-tab name-input keys. The create overlay's shape (split-arrow
 /// folding, printable append, Backspace pops, Esc cancels locally) with one
 /// deliberate divergence: Enter ALWAYS sends [`Command::RenameTab`] - an empty
 /// buffer is the "reset to auto" verb (blank clears server-side), not a kept-open
@@ -16082,7 +16082,7 @@ async fn rename_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Move-to-position prompt keys (x-cf97). The rename overlay's shape
+/// Move-to-position prompt keys. The rename overlay's shape
 /// ([`rename_keys`]: Esc cancels locally, Backspace pops, printable append)
 /// with a numeric grammar: only digits enter the buffer, Enter resolves the
 /// 1-based ordinal against the tab's squad strip, computes the delta to the
@@ -16165,7 +16165,7 @@ async fn move_to_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// Needs-me overlay keys (x-feec, grown from x-c929; x-f730 folded MINE and
+/// Needs-me overlay keys (grown from; folded MINE and
 /// live questions in as editable/answerable lanes). A digit answers the
 /// selected answerable NEED row (unchanged [`ClientMsg::PaneAnswer`]) or, for
 /// a question with options, closes it via `outstanding clear --answer`.
@@ -16188,7 +16188,7 @@ async fn answer_keys(
     let projection = view.needs_projection();
     // Active squad/tab, captured once (the layout is stable within a key chunk):
     // an Enter goto sends SelectSquad/SelectTab only when they would change the
-    // view, mirroring the x-653d nav goto so a same-context row emits just
+    // view, mirroring the nav goto so a same-context row emits just
     // FocusPane (no redundant selects).
     let active_squad = view.layout.active_squad;
     let active_tab = view
@@ -16221,7 +16221,7 @@ async fn answer_keys(
             continue;
         }
         // Same keyboard-ownership contract for the free-text question answer
-        // (x-f730 task 2.3): opened by Enter on a no-options question, so it
+        // (task 2.3): opened by Enter on a no-options question, so it
         // is checked right alongside `mine_adding`.
         if let Some((qid, buf)) = view.question_answering.as_mut() {
             match k {
@@ -16286,7 +16286,7 @@ async fn answer_keys(
                 }
             }
             b'0'..=b'9' => {
-                // A question with options answers first (x-f730 task 2.3):
+                // A question with options answers first (task 2.3):
                 // the digit picks `options[n-1]`, closed via `outstanding
                 // clear --answer`. A no-options question falls through to
                 // the BEL below - Enter is its answer path. A MINE row has
@@ -16336,14 +16336,14 @@ async fn answer_keys(
                     // A digit with no matching option (a MINE row, or a
                     // non-answerable NEED row, e.g. review-wedged / budget /
                     // focus-only) is a local BEL, never a stray key sent to
-                    // any pane (x-c929 invariant).
+                    // any pane (invariant).
                     None => {
                         let _ = raw_out(b"\x07");
                     }
                 }
             }
             b'\r' | b'\n' => {
-                // A no-options question (x-f730 task 2.3): Enter opens the
+                // A no-options question (task 2.3): Enter opens the
                 // free-text answer entry, typed below the row like the MINE
                 // add box. A with-options question stays digit-only here -
                 // Enter on it falls through to the goto arm below, which
@@ -16354,7 +16354,7 @@ async fn answer_keys(
                         continue;
                     }
                 }
-                // Goto the row's target (x-653d): SelectSquad/SelectTab only when
+                // Goto the row's target: SelectSquad/SelectTab only when
                 // they change the view, then FocusPane; a paneless watch-only row
                 // attaches; a squadless live fold row - or a MINE row, which
                 // owns no pane at all - has no reachable pane here, so it
@@ -16400,7 +16400,7 @@ async fn answer_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// (x-b2bf) Yard-overlay key routing: `n`/`N` (and j/k, folded arrows) move
+/// Yard-overlay key routing: `n`/`N` (and j/k, folded arrows) move
 /// the spotlight over the crowd, `q`/Esc close. Any other key is consumed -
 /// an open modal owns the keyboard and never leaks a byte into a pane (the
 /// answer-overlay invariant).

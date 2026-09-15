@@ -23,7 +23,7 @@
 //!
 //! The target session's own loop-check stop hook already emitted the
 //! `termination` event before `close()` is called. The manifest is immutable
-//! (invariant from ab-d0337fbc). Closing the backlog graph node and stamping the
+//! (invariant from). Closing the backlog graph node and stamping the
 //! plan belong to `reconcile` and `stamp-plan` respectively; calling them here
 //! would duplicate work and couple the loop runtime to concerns it must not own.
 //! The active-backlog daemon (the keep-set) is where `fno backlog done` runs.
@@ -235,7 +235,7 @@ impl Queue for TargetQueue {
     /// Inert close: see module doc for why this does nothing.
     ///
     /// The session's loop-check stop hook already emitted the termination event.
-    /// The manifest is immutable (ab-d0337fbc invariant). Graph-node closing and
+    /// The manifest is immutable (invariant). Graph-node closing and
     /// plan-stamping belong to reconcile / stamp-plan, not the loop runtime.
     /// The active-backlog daemon is where `fno backlog done` runs.
     fn close(&mut self, _unit: &Unit, _evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
@@ -266,12 +266,12 @@ pub(crate) fn exit_code_for_reason(reason: &TerminationReason) -> i32 {
         // (not the exit code) is what a wrapper reads to distinguish it.
         | TerminationReason::DoneAwaitingMerge
         // DoneAwaitingReview: work complete, but a required review bot is
-        // rate-limited (x-9ab2) - a clean stop, human-gated like DoneAwaitingMerge.
+        // rate-limited - a clean stop, human-gated like DoneAwaitingMerge.
         | TerminationReason::DoneAwaitingReview
         // DonePlanned: a plan-only thread finished cleanly. Not a delivery, but a
         // clean stop (exit 0); the reason string distinguishes it from a ship.
         | TerminationReason::DonePlanned
-        // DoneUnreviewed (x-0eaf): green but nothing reviewed. A clean stop like
+        // DoneUnreviewed: green but nothing reviewed. A clean stop like
         // the other Done* terminals - the reason string (not the exit code) is
         // what a wrapper reads to see it declined the autonomous merge.
         | TerminationReason::DoneUnreviewed

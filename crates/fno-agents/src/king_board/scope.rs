@@ -121,7 +121,7 @@ pub(crate) fn project_map(cwd: &Path) -> Result<HashMap<String, String>, String>
     Ok(map)
 }
 // ---------------------------------------------------------------------------
-// Scope compilation moved to `crate::territory` (x-e221 port): the board and
+// Scope compilation moved to `crate::territory` (port): the board and
 // the drain call the same home. This module keeps the config/path resolvers
 // the board shares with it.
 // ---------------------------------------------------------------------------

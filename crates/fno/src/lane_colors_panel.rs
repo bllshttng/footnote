@@ -1,4 +1,4 @@
-//! (x-1b68) The settings modal's Colors tab: the four `[sideline.colors]`
+//! The settings modal's Colors tab: the four `[sideline.colors]`
 //! axes, the named-color picker, the add-key drill, and the rendered view of
 //! what every lane currently resolves to. Lived inline in `client.rs` until
 //! the file-budget gate (client.rs is shrink-only) named the remedy: a module
@@ -7,10 +7,10 @@
 
 use crate::client::AuxAction;
 use crate::popup::PopupRow;
-/// (x-e4f1) The four `[sideline.colors]` axis tables, in display order.
+/// The four `[sideline.colors]` axis tables, in display order.
 const LANE_AXES: [&str; 4] = ["harness", "route", "model", "row"];
 
-/// (x-e4f1) The named colors the picker offers: exactly `parse_color`'s
+/// The named colors the picker offers: exactly `parse_color`'s
 /// accepted set (the picker-drift test asserts every entry parses, so the two
 /// lists cannot drift silently).
 const LANE_COLOR_NAMES: [&str; 16] = [
@@ -32,7 +32,7 @@ const LANE_COLOR_NAMES: [&str; 16] = [
     "light_white",
 ];
 
-/// (x-e4f1) The lane-colors drill state for the settings Colors tab: which
+/// The lane-colors drill state for the settings Colors tab: which
 /// level the operator is on (axis list -> key list -> picker) and any open
 /// text entry. Client-local ephemera, the `create`/`rename` class. The
 /// Client owns the lifecycle (it drives the drill from key events), so the
@@ -70,7 +70,7 @@ impl LaneColorsUi {
     }
 }
 
-/// (x-e4f1) The palette entries for one axis name, in config order.
+/// The palette entries for one axis name, in config order.
 pub(crate) fn lane_axis_entries(
     pal: &crate::sideline_color::SidelinePalette,
     axis: &str,
@@ -83,7 +83,7 @@ pub(crate) fn lane_axis_entries(
     }
 }
 
-/// (x-1b68) Push one axis's listing rows: every key the resolution cascade
+/// Push one axis's listing rows: every key the resolution cascade
 /// knows, configured entries first (unmarked - the operator set them), then
 /// each built-in default the config does NOT override, marked `(default)` so
 /// an unconfigured install still shows what every lane resolves to. Defaults
@@ -131,7 +131,7 @@ fn push_lane_axis_rows(
     }
 }
 
-/// (x-e4f1) The color currently configured for one (axis, key), if any.
+/// The color currently configured for one (axis, key), if any.
 pub(crate) fn current_lane_color(
     pal: &crate::sideline_color::SidelinePalette,
     axis: &str,
@@ -143,7 +143,7 @@ pub(crate) fn current_lane_color(
         .map(|(_, v)| v)
 }
 
-/// (x-e4f1) Merge one (key, color) into an axis block and serialize the WHOLE
+/// Merge one (key, color) into an axis block and serialize the WHOLE
 /// block as a JSON object. `fno config set` refuses per-key dotted writes
 /// inside dict fields, so the picker replaces the whole block (REPLACE
 /// semantics) with the one key updated - the merge source is re-read fresh
@@ -162,7 +162,7 @@ pub(crate) fn merged_axis_json(entries: &[(String, String)], key: &str, color: &
     serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_default()
 }
 
-/// (x-e4f1) Build the settings Colors tab rows for the current drill level:
+/// Build the settings Colors tab rows for the current drill level:
 /// axis list -> key list -> picker -> (replacing the picker) the free-form
 /// color entry. The free function is the testable seam: `palette()` is a
 /// process-global cache, so tests pass a literal palette instead of seeding
@@ -255,7 +255,7 @@ mod tests {
     use crate::proto::Cell;
     use crate::theme::Theme;
 
-    // (x-e4f1) A literal palette for the lane-colors tests; the process
+    // A literal palette for the lane-colors tests; the process
     // palette() cache cannot be seeded per-test, so every builder test passes
     // the literal through the free-function seam.
     fn lane_pal(route: &[(&str, &str)]) -> crate::sideline_color::SidelinePalette {
@@ -387,7 +387,7 @@ mod tests {
         );
     }
 
-    // (x-1b68) An unconfigured install renders every built-in default the
+    // An unconfigured install renders every built-in default the
     // cascade knows, marked, instead of four empty groups.
     #[test]
     fn unconfigured_palette_renders_the_cascade_defaults_marked() {
@@ -426,7 +426,7 @@ mod tests {
     ));
     }
 
-    // (x-1b68) A configured key renders from config, unmarked, and suppresses
+    // A configured key renders from config, unmarked, and suppresses
     // its default row - what changed is visible against what is in effect.
     #[test]
     fn a_configured_override_renders_unmarked_and_hides_its_default_row() {
@@ -456,7 +456,7 @@ mod tests {
         )));
     }
 
-    // (x-1b68) The REAL render path, not the row builder: the Colors tab
+    // The REAL render path, not the row builder: the Colors tab
     // rendered through Popup::render + popup::draw (what the live client
     // calls), on a short viewport so the scrollbar appears. Every row must
     // close its right border on the same column - add-key rows carrying the

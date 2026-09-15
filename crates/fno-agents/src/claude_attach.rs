@@ -1,7 +1,7 @@
 //! Speak Claude's daemon `control.sock`: the `op:'attach'` handshake + the
 //! newline-delimited JSON transport.
 //!
-//! G1 substrate (epic x-07c1, node x-26df). The Phase-0 spike retired the
+//! G1 substrate (epic, node). The Phase-0 spike retired the
 //! held-attach *keepalive* premise (an idle `claude --bg` session and an un-held
 //! control both survived 65min idle, so the attach was not what kept it live).
 //! So footnote does NOT hold a session for liveness. `op:'attach'` survives for a
@@ -185,7 +185,7 @@ pub fn parse_attach_reply(line: &str) -> Result<AttachOk, AttachError> {
 /// a live daemon.
 pub trait ControlTransport {
     /// Write `line` VERBATIM -- despite the name, this does NOT append a
-    /// terminator of any kind (pre-existing naming defect, node x-1904:
+    /// terminator of any kind (pre-existing naming defect, node:
     /// `send_line` invites a caller to assume one is added, the way
     /// `writeln!`/`println!` do). Every caller supplies its own: either a
     /// pre-terminated string (`AttachRequest::to_json_line`, which already

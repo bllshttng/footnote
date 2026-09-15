@@ -34,7 +34,7 @@ its blocker landed before writing code. The two never touch each other's state.
 The orienter line names each stale blocker and its PR:
 
 ```
-boundary-reconcile: STALE vs x-e317 (PR #141, merged 2026-07-02) - Step 0 required
+boundary-reconcile: STALE vs (PR #141, merged 2026-07-02) - Step 0 required
 ```
 
 For **each stale blocker independently**, before the run's first code commit:

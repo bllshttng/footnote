@@ -7,7 +7,7 @@ use std::path::Path;
 pub(crate) struct KingBoard {
     pub(crate) actionable: i64,
     pub(crate) top_row: Option<String>,
-    /// x-c911: any queue on this board failed to read. The quiet branch
+    /// any queue on this board failed to read. The quiet branch
     /// refuses to certify a quiet board while this is true, instead of
     /// trusting a count that cannot see the blind queues.
     pub(crate) unreadable_sources: bool,
@@ -73,7 +73,7 @@ pub(crate) fn parse_king_board_value(value: &Value) -> Option<KingBoard> {
                 .and_then(|v| v.as_array())
                 .unwrap_or(&vec![])
             {
-                // Row-level veto (x-b9e1): a mergeable_pr row the merge gate
+                // Row-level veto: a mergeable_pr row the merge gate
                 // found not-ready carries `actionable: false` and names no
                 // next action, however green the listing called it.
                 if row.get("actionable").and_then(|v| v.as_bool()) == Some(false) {
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn a_blind_queue_sets_the_unreadable_sources_flag() {
-        // x-c911: one unreadable queue means the quiet branch must refuse to
+        // one unreadable queue means the quiet branch must refuse to
         // certify; the named boolean carries that, never a count sentinel.
         let board = board_with_queues(json!([
             {"name": "undispatched", "status": "unreadable", "error": "exit 1: flo",
@@ -455,7 +455,7 @@ mod tests {
 
     #[test]
     fn a_not_ready_mergeable_row_names_no_next_action() {
-        // x-b9e1: the stop hook offered mergeable_pr:1709 on four
+        // the stop hook offered mergeable_pr:1709 on four
         // consecutive stops while the merge gate refused that exact head.
         // The not-ready row names no next action.
         let board = board_with_queues(json!([

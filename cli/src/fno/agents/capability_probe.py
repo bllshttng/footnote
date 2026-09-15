@@ -1,4 +1,4 @@
-"""The capability probe: measure the table against the live harness (x-244c).
+"""The capability probe: measure the table against the live harness.
 
 One verdict per declared field, four values, and UNKNOWN never acts:
 

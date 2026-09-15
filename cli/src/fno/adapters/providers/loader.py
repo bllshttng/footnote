@@ -1,6 +1,6 @@
 """Settings loader for provider rotation substrate.
 
-Phase 01 of the provider rotation substrate (ab-256f6b6e).
+Phase 01 of the provider rotation substrate.
 Reads config.providers from .fno/settings.yaml with project-local-over-global
 precedence, mirroring cli/src/fno/cli.py::_load_v2_config_flag.
 """
@@ -259,7 +259,7 @@ _AGENTS_RESERVED_KEYS = frozenset(
         "happy_routed_panes",
         "hard_max_load_per_cpu",
         "hold_escalate_after_s",
-        # Legacy spelling of provider_limits (x-3f84 W5); still parsed by the
+        # Legacy spelling of provider_limits (W5); still parsed by the
         # model's before-validator, so it stays reserved here too.
         "max_lanes",
         "max_live",
@@ -862,7 +862,7 @@ def save_providers(
     # failover, agents, ...). Rebuilding providers_block from only records+active
     # would otherwise silently drop them, so e.g. `fno config accounts use` after
     # an operator set config.accounts.quota.defer_dispatch would turn quota
-    # deferral back off (x-5d3e review). Rebuilt keys win; everything else rides.
+    # deferral back off (review). Rebuilt keys win; everything else rides.
     #
     # Read the pre-rename `providers` block too, and pop it: this write IS the
     # migration. Carrying both keys forward would leave the file readable under
@@ -884,7 +884,7 @@ def save_providers(
 # ---------------------------------------------------------------------------
 # Atomic mutate / atomic read helpers
 #
-# Phase 01 of provider rotation failover (ab-9728b70b). The failover
+# Phase 01 of provider rotation failover. The failover
 # controller swaps the active provider by mutating settings.yaml from
 # multiple sessions concurrently. atomic_mutate_settings holds an exclusive
 # fcntl lock for the entire read+mutate+write cycle so concurrent mutators

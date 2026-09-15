@@ -1,6 +1,6 @@
-"""Optional-review signal for `fno do pr status` (x-705b).
+"""Optional-review signal for `fno do pr status`.
 
-x-d996 raised the drain-optional-review floor with SKILL.md prose, but prose is
+ raised the drain-optional-review floor with SKILL.md prose, but prose is
 miss-able: an agent shortcut to `gh pr checks` + `reviewDecision` (empty for a
 `COMMENTED` bot review) and promised green without ever reading the inline
 findings. This attaches the signal to the ONE command the loop already polls -
@@ -108,7 +108,7 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
     return [n for n in names if n]
 
 
-# x-0eaf: coverage read degrades to this on any failure (additive, fail-open).
+# coverage read degrades to this on any failure (additive, fail-open).
 # Annotated because the values are heterogeneous (str, None, list) and mypy
 # cannot infer a useful type from the literal alone.
 _UNKNOWN_COVERAGE: dict[str, object] = {
@@ -281,7 +281,7 @@ def latest_review_coverage_row(
     writes into the events file of the directory it runs in, so a review
     attested inside a worktree lands in that worktree's project log; a merge run
     from canonical reads canonical's. They agreed only by luck, and the
-    disagreement read as "nobody reviewed this" (x-f43c). ``~/.fno`` is the one
+    disagreement read as "nobody reviewed this". ``~/.fno`` is the one
     file both stand in, so it is the tiebreaker rather than a fallback.
 
     The project log is scanned unscoped (it is already repo-local); the global
@@ -427,7 +427,7 @@ def review_coverage_for_gate(
     *,
     recompute_postureless: bool = True,
 ) -> tuple[Optional[dict], str]:
-    """The coverage event a gate should act on, recomputed at most ONCE (x-3a3f).
+    """The coverage event a gate should act on, recomputed at most ONCE.
 
     Reads :func:`latest_review_coverage`; when there is no usable row (nothing
     found, the found row pins a head that is not ``head``, or it says
@@ -517,7 +517,7 @@ def review_coverage_for_gate(
                 # No stored row AND no instrument to compute one: the answer
                 # is "unmeasurable", never a Python-side freshness. The
                 # git-walk mirror this replaces guessed an answer here and
-                # diverged from the gate (x-027b's class); refusing with the
+                # diverged from the gate (class); refusing with the
                 # remedy named is the posture every other missing-instrument
                 # gate takes (validate-plan.sh, check-proto-version-bump.sh).
                 data = {
@@ -792,9 +792,9 @@ def _verdicts_as_stored(data: dict) -> list[dict]:
 
     Freshness is a READ here, never a recomputation: the Rust producer
     computed it at emit time against its own head, and a row whose head no
-    longer matches the caller's is the recompute arm's input (x-3a3f), not
+    longer matches the caller's is the recompute arm's input, not
     this function's. The Python git-walk mirror this replaces answered the
-    same question a second way and diverged from the gate (x-027b's class);
+    same question a second way and diverged from the gate (class);
     principle 9 deletes the leg instead of maintaining the twin.
     """
     verdicts = data.get("verdicts")
@@ -914,18 +914,18 @@ def read_review_coverage(
     recompute_postureless: bool = True,
 ) -> dict:
     """The ``review_coverage`` verdict for a PR, recomputed once when there is
-    no usable row and ``recompute`` is set (x-3a3f). The default stays a pure
+    no usable row and ``recompute`` is set. The default stays a pure
     read so direct callers (and hermetic tests) never spawn a subprocess; the
     two gate surfaces - ``fno do pr merge`` and ``fno do pr status`` - opt in.
     Event-read failures degrade to the unknown sentinel. When ``head`` is
     supplied, verdict freshness fails closed unless Git proves the reviewed
     change still ships at that head (ancestry, or an identical content delta
-    across a rebase - x-e8db).
+    across a rebase -).
     Python still consumes the event rather than recomputing coverage itself
     (Ownership: Rust computes, Python reads) - the recompute shells out to the
     SAME Rust producer the stop hook runs.
 
-    Carries ``head_sha`` and ``stale_verdicts`` (x-5b99) so a reader can see
+    Carries ``head_sha`` and ``stale_verdicts`` so a reader can see
     WHICH commit was covered and by whom, and ``recompute`` (only when one ran)
     so a human report and the merge gate can name how the number arrived.
     """
@@ -949,7 +949,7 @@ def read_review_coverage(
         "stale_verdicts": latest.get("stale_verdicts", []),
     }
     # The gate's own round budget, passed through verbatim: one producer per
-    # number (x-027b). Keys stay absent when the row predates them, and the
+    # number. Keys stay absent when the row predates them, and the
     # status payload reads that absence as "no row at this head" rather than
     # re-deriving a floor from events.
     for _key in ("rounds_used", "rounds_max", "rounds_exhausted"):

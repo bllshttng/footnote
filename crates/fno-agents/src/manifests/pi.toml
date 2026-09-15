@@ -1,5 +1,5 @@
 # pi readiness manifest. PINNED AGAINST A LIVE pi 0.84.2 TUI on 2026-08-28
-# (x-c198), replacing the unvalidated import this file used to carry. pi now
+#, replacing the unvalidated import this file used to carry. pi now
 # has an fno provider host, so this manifest is live rather than dormant.
 #
 # WHAT WAS MEASURED, in a 120x40 tmux pane on the openai-codex subscription:

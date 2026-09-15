@@ -5,7 +5,7 @@
 //! seven answers. The terminal vocabulary arrives from the caller (Python owns
 //! `fno.terminals`); the decision lives here. The `flow` section rides the
 //! same answer: the weekly delivery/cycle/waiting aggregates every board and
-//! view reads (x-b07a), so presentation layers never re-classify.
+//! view reads, so presentation layers never re-classify.
 //!
 //! - a confirmed merge delivers the node, ledger row or not;
 //! - an explicit doc/delivery terminal delivers the node with its evidence;
@@ -130,7 +130,7 @@ fn oldest_age_days<'a>(
     }
 }
 
-/// The weekly delivery flow (x-b07a) over the scoped entries/rows and the
+/// The weekly delivery flow over the scoped entries/rows and the
 /// classification they already received: merged PRs per local calendar week,
 /// code/document deliveries separately, PR created-to-merged median and
 /// nearest-rank p85 with sample count, current open-PR age, and the canonical

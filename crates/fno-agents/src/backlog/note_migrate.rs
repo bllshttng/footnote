@@ -1,4 +1,4 @@
-//! `fno-agents backlog-notes` (x-920a wave 3): inventory, digest migration,
+//! `fno-agents backlog-notes` (wave 3): inventory, digest migration,
 //! and history readback over the note corpus.
 //!
 //! `inventory` is a read-only census. `migrate` defaults to preview; an
@@ -630,7 +630,7 @@ flags:
     );
 }
 
-/// `backlog-notes inventory|migrate|history` (x-920a wave 3).
+/// `backlog-notes inventory|migrate|history` (wave 3).
 pub fn run_notes(args: &[String]) -> i32 {
     let mut action = String::new();
     let mut graph: Option<PathBuf> = None;

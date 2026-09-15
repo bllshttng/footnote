@@ -1,4 +1,4 @@
-//! Whether a pane-substrate worker's process actually stopped (x-1b90).
+//! Whether a pane-substrate worker's process actually stopped.
 //!
 //! Three stop answerers decided "this pane worker stopped" and none asked
 //! the process: the reap asked a roster or a worker socket that never held
@@ -49,10 +49,10 @@ pub(crate) struct PaneStopSeams {
     /// confirmation.
     pub pid_gone: Box<dyn Fn(u32) -> bool>,
     /// The recorded pid's current start time, for the recycled incarnation
-    /// check (x-58a5). `None` when unreadable or unsupported.
+    /// check. `None` when unreadable or unsupported.
     pub pid_start: Box<dyn Fn(u32) -> Option<u64>>,
     /// Whether a live process still holds the row's harness session, read
-    /// by the row's own harness (x-58a5).
+    /// by the row's own harness.
     pub session_holder: Box<dyn Fn(&RegistryEntry) -> SessionHolder>,
     /// Send a signal to a pid; answer whether it was sent.
     pub signal: Box<dyn Fn(u32, i32) -> bool>,
@@ -91,14 +91,14 @@ pub(crate) fn stop_pane_process_confirmed(e: &RegistryEntry) -> PaneStop {
     stop_pane_process_confirmed_with(e, &production_seams())
 }
 
-/// The one pane-stop body, shared by the reap and `fno agents rm` (x-1b90
+/// The one pane-stop body, shared by the reap and `fno agents rm` (
 /// change 1). Confirms ONLY on the pid reading gone; every earlier answer
 /// is a not-confirmed detail naming what ran.
 pub(crate) fn stop_pane_process_confirmed_with(
     e: &RegistryEntry,
     seams: &PaneStopSeams,
 ) -> PaneStop {
-    // 0. The precheck (x-58a5): separate the three facts `pid_ours` used to
+    // 0. The precheck: separate the three facts `pid_ours` used to
     //    fuse. A gone pid backed by the harness's own reader is the stop
     //    already happened; only an unprovable row refuses here.
     match precheck_pane_stop_with(e, seams) {
@@ -171,7 +171,7 @@ pub(crate) fn stop_pane_process_confirmed_with(
     //    signal: a recycled pid is never ours to signal. A pid whose
     //    incarnation is unproven - no recorded start time and no live pane
     //    hosting it - is never signalled: guessing costs someone else's
-    //    process (x-58a5; mirrors stop_claude_pid_confirmed).
+    //    process (; mirrors stop_claude_pid_confirmed).
     if !pane_hosts && e.pid_start_time.is_none() {
         return PaneStop {
             confirmed: false,
@@ -219,7 +219,7 @@ fn poll_gone(seams: &PaneStopSeams, pid: u32, ticks: usize) -> bool {
 }
 
 /// The verdict a pane stop's precheck reaches before any pane kill or
-/// signal (x-58a5). `pid_is_ours` fuses three different facts into one
+/// signal. `pid_is_ours` fuses three different facts into one
 /// `false` - gone, recycled, foreign - and the fused refusal made a gone
 /// pid unreapable: the reaper waited to prove a stop it could no longer
 /// observe. The classifier separates them and consults the harness's own
@@ -236,7 +236,7 @@ pub(crate) enum PanePrecheck {
 }
 
 /// Whether a live process still holds the row's harness session, answered
-/// by the row's OWN harness reader (x-58a5). The claude roster cannot see a
+/// by the row's OWN harness reader. The claude roster cannot see a
 /// codex row by construction, and absence from any roster is never death,
 /// so the reader resolves the harness first.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,7 +297,7 @@ pub(crate) fn precheck_pane_stop(e: &RegistryEntry) -> PanePrecheck {
     precheck_pane_stop_with(e, &production_seams())
 }
 
-/// Map the harness-holder answer for the gone and recycled cases (x-58a5).
+/// Map the harness-holder answer for the gone and recycled cases.
 /// `fact` spells the pid fact; the holder evidence rides behind it in every
 /// string.
 fn map_holder(pid: u32, fact: &str, e: &RegistryEntry, seams: &PaneStopSeams) -> PanePrecheck {
@@ -383,7 +383,7 @@ fn holder_from_lsof(reads: &[(std::path::PathBuf, LsofRead)]) -> SessionHolder {
 }
 
 /// Whether a live process still holds the row's harness session, answered
-/// by the row's own harness (x-58a5). Reached only for pane rows whose pid
+/// by the row's own harness. Reached only for pane rows whose pid
 /// already reads gone or recycled, so the hot path spawns nothing new.
 fn session_holder_live(e: &RegistryEntry) -> SessionHolder {
     match e.harness_name() {
@@ -860,7 +860,7 @@ mod tests {
         assert!(!mux_pane_is_absent("fno mux: permission denied"));
     }
 
-    // ── x-58a5: the precheck separates gone, recycled, foreign ──────────
+    // ──: the precheck separates gone, recycled, foreign ──────────
 
     /// A pane row shaped like the measured one: harness set, pid recorded,
     /// no start time (the shape every live pane row carries).

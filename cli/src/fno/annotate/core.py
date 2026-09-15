@@ -20,7 +20,7 @@ from typing import Any, Optional
 # annotate now mounts eagerly under `fno backlog`, the hottest verb in the
 # CLI, so a module-level import would tax every backlog call.
 
-# x-9ed6: node/operator free text embedded in an injected frame could carry a
+# node/operator free text embedded in an injected frame could carry a
 # literal delimiter and break out into the recipient's next prompt. Defang the
 # reminder + mail delimiters (case/whitespace-insensitive) before framing. The
 # RECORDED event keeps the original text; only the injected frame is defanged.

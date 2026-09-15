@@ -58,7 +58,7 @@ law_app = typer.Typer(help="Record operator law in one call.")
 
 
 def _sweep_open_questions(subject: str, decision: str, decision_id: str) -> None:
-    """Best-effort rule-time join (x-cf6a): name the open questions the new
+    """Best-effort rule-time join : name the open questions the new
     law may answer. The matcher runs in the crate (`law-match`); the
     open-question fold stays in `read_open_questions`. A candidate is only a
     surface, never a verdict - three per-PR budget grants point the other way

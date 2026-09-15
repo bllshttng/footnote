@@ -11,7 +11,7 @@ import typer
 
 cli = typer.Typer(name="event", help="emit and audit events", no_args_is_help=True)
 
-# Documented cap for truncatable x-dbaf family data strings (title/reason/evidence/
+# Documented cap for truncatable family data strings (title/reason/evidence/
 # termination_reason). Mirrors the Rust RUN_SUMMARY_DATA_CAP; keeps a runaway
 # reason from bloating an events.jsonl line while still landing the event.
 _PROTOCOL_DATA_STR_CAP = 500
@@ -27,7 +27,7 @@ _PROTOCOL_DATA_STR_CAP = 500
 # This entry was originally added on a misdiagnosis - the block it was meant to
 # fix was coverage never being produced at all, not an attestation missing from
 # canonical. It stays for symmetry with the coverage path, which loopcheck.rs
-# already dual-writes for exactly this reason, and because x-3a3f moves a reader
+# already dual-writes for exactly this reason, and because moves a reader
 # to the global log and will need it. Named intent, not dead code.
 #
 # `review_coverage` earns its entry for the HAND emit alone: loopcheck.rs
@@ -114,7 +114,7 @@ def _stamp_protocol_envelope(
     outcome: Optional[str],
     project: Optional[str],
 ) -> dict:
-    """Assemble the extended-envelope fields for an x-dbaf status-breakpoint
+    """Assemble the extended-envelope fields for an status-breakpoint
     event. Work coordinates fall back to the manifest; identity (from/model) is
     stamped ONLY for a real session producer and omitted entirely otherwise
     (a bare-shell producer never fakes an empty handle). ``None`` values are
@@ -277,7 +277,7 @@ def push_parent(
         None, "--parent", help="explicit parent handle (else registry-resolved)"
     ),
 ) -> None:
-    """Push a status-breakpoint notice to the parent handle (x-dbaf push leg).
+    """Push a status-breakpoint notice to the parent handle (push leg).
 
     The Rust ``finalize`` shells this for ``run_summary`` (it emits the
     events.jsonl line natively, so it cannot ride the emit-CLI auto-push). No
@@ -312,7 +312,7 @@ def mirror_to_global_log(event: dict, resolved_events: Path, repo_root: Optional
         global_events = global_events_json()
         if global_events.resolve() != Path(resolved_events).resolve():
             # Scope the row the way loopcheck scopes every coverage row it
-            # writes here (x-f43c). The global log is cross-project and this
+            # writes here. The global log is cross-project and this
             # payload carries no repo of its own, so without it a reader can
             # only match on `head_sha` - and a fork shares those. Stamped on
             # the MIRRORED copy alone: the project log needs no scoping, and
@@ -390,24 +390,24 @@ def emit(
         help="JSON object string for the event's data envelope",
     ),
     node: Optional[str] = typer.Option(
-        None, "--node", help="backlog node id (x-dbaf family; envelope coordinate)"
+        None, "--node", help="backlog node id (family; envelope coordinate)"
     ),
     task: Optional[str] = typer.Option(
-        None, "--task", help="task id within the plan (x-dbaf family; envelope coordinate)"
+        None, "--task", help="task id within the plan (family; envelope coordinate)"
     ),
     run: Optional[str] = typer.Option(
-        None, "--run", help="target-run id, the dedup identity (x-dbaf family; manifest fallback)"
+        None, "--run", help="target-run id, the dedup identity (family; manifest fallback)"
     ),
     parent: Optional[str] = typer.Option(
-        None, "--parent", help="parent spawn-lineage handle (x-dbaf family; when spawned)"
+        None, "--parent", help="parent spawn-lineage handle (family; when spawned)"
     ),
     outcome: Optional[str] = typer.Option(
         None,
         "--outcome",
-        help="return-contract outcome (x-dbaf family; task_done/run_summary only)",
+        help="return-contract outcome (family; task_done/run_summary only)",
     ),
     project: Optional[str] = typer.Option(
-        None, "--project", help="project the work belongs to (x-dbaf family; envelope coordinate)"
+        None, "--project", help="project the work belongs to (family; envelope coordinate)"
     ),
     payload: Optional[str] = typer.Option(
         None,
@@ -635,7 +635,7 @@ def emit(
         except Exception as exc:  # noqa: BLE001 - never fail the emit
             typer.echo(f"bot-review: skipped (mirror error: {exc})", err=True)
 
-    # Push leg (x-dbaf): blocked + run_summary notify the parent when spawn
+    # Push leg: blocked + run_summary notify the parent when spawn
     # lineage exists. Fired AFTER the durable append so the events.jsonl record
     # is independent of the push (AC1-FR). No lineage -> silent skip.
     # (run_summary is normally pushed by Rust finalize's native emit; a
@@ -695,7 +695,7 @@ def gate_escape(
         None, "--events", help="path to events.jsonl (default: canonical root)"
     ),
 ) -> None:
-    """Tag a human intervention the loop should have handled (x-91b5, Tier-2).
+    """Tag a human intervention the loop should have handled (Tier-2).
 
     Low-friction manual sugar for the reasons with no clean auto chokepoint
     (flake / stale-base / wedge): an operator runs this at the moment they

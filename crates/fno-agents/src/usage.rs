@@ -11,14 +11,14 @@
 /// `test_rust_client_verbs_match_client_rs` (Python) guards client.rs<->router
 /// parity; `print_help_lists_every_routable_verb` guards this display
 /// list against that set, so a new verb cannot land without a `--help` entry
-/// (ab-351427cb).
+///.
 /// Usage line per dispatchable verb; the leading token is the verb name and the
 /// slice order is the `--help` display order. This MUST cover every routable
 /// verb (the `build_request` match arms plus the directly-dispatched specials).
 /// `test_rust_client_verbs_match_client_rs` (Python) guards client.rs<->router
 /// parity; `print_help_lists_every_routable_verb` (below) guards this display
 /// list against that set, so a new verb cannot land without a `--help` entry
-/// (ab-351427cb).
+///.
 pub const CLIENT_VERB_USAGE: &[&str] = &[
     "spawn <name> --provider <p> [--substrate pane|thread|headless] [-s <squad>] [-x left|right|up|down] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
     "ask <name> <message> [--cwd <dir>|--fresh|--here]",
@@ -75,7 +75,7 @@ pub fn verb_usage(verb: &str) -> Option<&'static str> {
 /// Full per-verb help for a verb whose contract does not fit the one-line
 /// table above; checked before `verb_usage` by the per-verb `--help`
 /// intercept in the bin. Same reason `review-coverage` owns its `--help`
-/// inline (x-b863): the load-bearing contract has to live in a string the
+/// inline: the load-bearing contract has to live in a string the
 /// binary prints, next to the table entry that stays one line for the
 /// top-level list.
 pub const LOOP_CHECK_USAGE: &str = "\
@@ -115,7 +115,7 @@ mod tests {
     use super::*;
     use regex::Regex;
 
-    /// x-b863: every flag loop-check's parser accepts appears in its help
+    /// every flag loop-check's parser accepts appears in its help
     /// body. This is the gate that retires the class: --driver was
     /// load-bearing, accepted, and absent from the one place a user can
     /// look, and nothing caught that. The gate reads parse_args's own

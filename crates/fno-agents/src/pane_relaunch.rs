@@ -1,4 +1,4 @@
-//! How a pane relaunch carries its identity (x-0345): the `mux pane run`
+//! How a pane relaunch carries its identity : the `mux pane run`
 //! argv builder and the `env(1)` assignment run that names the relaunched
 //! worker. Extracted from client_verbs (over the file budget, shrink-only):
 //! the code the identity change touched moved here with the change.
@@ -46,7 +46,7 @@ pub(crate) fn mesh_identity_assignments(
 /// harness name (law d-dbf83820): `mux_spawn` writes the mux ref for every
 /// `--substrate pane` row, and the empty-`session_id` refusal for a harness
 /// whose resume needs one already ran before this predicate is consulted
-/// (x-eb79: this replaces the `harness == "claude"` narrowing that sent every
+/// (: this replaces the `harness == "claude"` narrowing that sent every
 /// non-claude pane row to the in-terminal exec).
 pub(crate) fn pane_relaunch_target<'a>(
     mux_session: Option<&'a str>,
@@ -75,12 +75,12 @@ fn worker_token(name: &str) -> Option<&str> {
 /// keeps a `--resume <uuid>` (or any flag-shaped inner arg) out of the mux
 /// parser, so the resumed command is transported verbatim - the one-verb form
 /// of the manual `fno mux pane run 'cd <wt> && exec claude --resume <uuid>'`
-/// recovery recipe (x-b84f D3). `identity` rides as an `env(1)` assignment
-/// run INSIDE the fence (x-0345 W1): the server's `agent_self_from_argv`
+/// recovery recipe (D3). `identity` rides as an `env(1)` assignment
+/// run INSIDE the fence (W1): the server's `agent_self_from_argv`
 /// reads exactly this shape to title the pane, and the same assignments set
 /// the env the session-start restamp keys on - without it a relaunched pane
 /// comes back anonymous, titled from the command basename. `worker` rides as
-/// `--worker` BEFORE the fence (x-eb79), matching what spawn passes at
+/// `--worker` BEFORE the fence, matching what spawn passes at
 /// `mux_spawn.py`: the server records the pane as a squad member joined to
 /// that row, so the relaunch survives a mux restart as an idle resumable row.
 /// Callers keep any `which_on_path` check on the UNWRAPPED harness argv; the
@@ -606,7 +606,7 @@ pub(crate) fn build_resume_argv(
     build_resume_argv_split(provider, session_id, cwd, cwd.is_some())
 }
 
-/// The grant/pin split behind [`build_resume_argv`] (x-eb79): `grant_cwd`
+/// The grant/pin split behind [`build_resume_argv`]: `grant_cwd`
 /// decides the codex writable-roots grant (None/empty = no grant), `pin_cd`
 /// decides `--cd` independently. The mux gesture grants the directory the
 /// worker will actually get and pins it only when it is the row's own
@@ -717,7 +717,7 @@ pub(crate) fn print_relaunch_command(
     }
 }
 
-/// The `fno-agents resume-argv` verb (x-eb79): render one harness's
+/// The `fno-agents resume-argv` verb: render one harness's
 /// interactive-resume argv through the ONE builder the CLI verb lane uses,
 /// so the mux gesture consumes the same argv instead of re-deriving the
 /// declared form and losing the codex writable-roots grant. `--cwd` supplies
@@ -759,7 +759,7 @@ pub fn run_resume_argv(rest: &[String]) -> i32 {
     }
     let harness = positional[0];
     let session_id = positional[1];
-    // x-3954: this verb's stdout is a recipe the mux gesture pastes into a
+    // this verb's stdout is a recipe the mux gesture pastes into a
     // pane, and a pane spawn has no secret-free channel for a route's key
     // (the claude verdict prefix puts `env K=V` on the argv, visible in ps).
     // A routed codex row therefore refuses here by name instead of printing
@@ -1314,7 +1314,7 @@ mod tests {
             "launch_account": "default",
             "launch_account_source": "caller",
             "related_session_id": "11111111-2222-3333-4444-555566667777",
-            "node": "x-2bd5",
+            "node": "x-aaaa",
             "requested_model": "glm-5.3-flash[1m]",
             "requested_provider": "zai",
             "requested_effort": "high",
@@ -1415,7 +1415,7 @@ mod tests {
 
     #[test]
     fn mux_pane_run_argv_fences_the_resumed_command() {
-        // x-b84f D3 + x-0345 W1: the one-verb form of the manual recovery now
+        // D3 + W1: the one-verb form of the manual recovery now
         // carries the row's identity past the fence, in the same `env(1)`
         // assignment-run shape `_mesh_env_wrapper` writes at spawn and
         // `agent_self_from_argv` reads for the pane title. The `--` fence
@@ -1430,9 +1430,9 @@ mod tests {
             "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9".into(),
         ];
         let identity =
-            mesh_identity_assignments("x-f75e-mux-chrome", "claude", Some("x-f75e")).unwrap();
+            mesh_identity_assignments("x-bbbb-mux-chrome", "claude", Some("x-bbbb")).unwrap();
         assert!(identity.iter().all(|t| t.starts_with("FNO_")));
-        let pane = mux_pane_run_argv("main", "/wt", &claude, &identity, Some("x-f75e-mux-chrome"));
+        let pane = mux_pane_run_argv("main", "/wt", &claude, &identity, Some("x-bbbb-mux-chrome"));
         assert_eq!(
             pane,
             vec![
@@ -1444,12 +1444,12 @@ mod tests {
                 "--cwd".into(),
                 "/wt".into(),
                 "--worker".into(),
-                "x-f75e-mux-chrome".into(),
+                "x-bbbb-mux-chrome".into(),
                 "--".into(),
                 "env".into(),
-                "FNO_AGENT_SELF=x-f75e-mux-chrome".into(),
+                "FNO_AGENT_SELF=x-bbbb-mux-chrome".into(),
                 "FNO_AGENT_HARNESS=claude".into(),
-                "FNO_NODE=x-f75e".into(),
+                "FNO_NODE=x-bbbb".into(),
                 "claude".into(),
                 "--settings".into(),
                 "/route/path.json".into(),
@@ -1463,7 +1463,7 @@ mod tests {
         // token itself, never the absence of a basename.
         assert_eq!(pane.iter().position(|a| a == "--"), Some(9));
         assert_eq!(pane[10], "env");
-        assert_eq!(pane[11], "FNO_AGENT_SELF=x-f75e-mux-chrome");
+        assert_eq!(pane[11], "FNO_AGENT_SELF=x-bbbb-mux-chrome");
         assert_eq!(pane[12], "FNO_AGENT_HARNESS=claude");
         // Route values never enter the wrapper; the path rides `--settings`
         // (re-pins #830 AC5 against the identity wrap).

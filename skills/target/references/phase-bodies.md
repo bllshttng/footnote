@@ -43,7 +43,7 @@ While the PR's CI is still polling, read posted optional bot reviews at first-po
 
 ## Intent verification (no promise-time self-grade)
 
-There is no promise-time self-grade phase (control-plane step 6, ab-f8e5f214).
+There is no promise-time self-grade phase (control-plane step 6).
 Intent is checked through CI, not an agent grading its own homework: the BDD
 acceptance criteria that matter become tests during `/execute` (TDD) and run in CI,
 which `fno-agents loop-check`'s CI read already covers. A genuinely missing test

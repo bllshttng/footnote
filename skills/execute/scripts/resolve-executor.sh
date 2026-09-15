@@ -30,12 +30,12 @@ TASK_EXEC="${TASK_EXEC:-}"
 PLAN_EXEC="${PLAN_EXEC:-}"
 TASK_FILES="${TASK_FILES:-}"
 AUTO_ROUTE_FRONTEND="${AUTO_ROUTE_FRONTEND:-true}"
-# Attribution for the executor_resolved telemetry event (x-64cb); both are
+# Attribution for the executor_resolved telemetry event; both are
 # best-effort - empty when the caller does not set them, and the event still
 # emits with empty strings.
 TASK_ID="${TASK_ID:-}"
 PLAN_PATH="${PLAN_PATH:-}"
-# x-dbaf status-breakpoint coordinates for the task_started emit. All best-effort:
+# status-breakpoint coordinates for the task_started emit. All best-effort:
 # empty TARGET_RUN/NODE_ID fall back to the manifest inside `fno doctor event emit`.
 TARGET_RUN="${TARGET_RUN:-}"
 NODE_ID="${NODE_ID:-}"
@@ -98,7 +98,7 @@ json_escape() {
     printf '%s' "$s"
 }
 
-# x-dbaf task_started boundary: this script IS the dispatch chokepoint (it runs
+# task_started boundary: this script IS the dispatch chokepoint (it runs
 # once per task, right before the executor is invoked), so it is the natural
 # emit site. Same non-corrupting contract as emit_resolution: runs after the
 # stdout executor value is printed, swallows fno's output, never fails dispatch.

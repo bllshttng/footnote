@@ -82,7 +82,7 @@ def _forward(verb: str, extra_args: List[str]) -> int:
 
 
 def _verdict(verb: str, rc: int) -> None:
-    """Terminal verdict line (x-6a8e).
+    """Terminal verdict line.
 
     The same code path that sets the exit code also emits a greppable last line
     on stdout, so ``fno doctor bundle <verb> | tail`` cannot mask a drift/lint failure

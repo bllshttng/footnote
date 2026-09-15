@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SessionStart hook: attribute the spawn seed (node x-3a64).
+# SessionStart hook: attribute the spawn seed (node).
 #
 # The seed is the one message that defines a worker's entire task, and it was
 # the one message a worker could not attribute: `fno agents mail send` wraps every a2a
@@ -8,7 +8,7 @@
 #
 # The envelope cannot ride the payload. `skills/agent/scripts/normalize.sh:710`
 # classifies by a LEADING slash, and the harness REPL is a second reader we do
-# not control, so anything in front of `/fno:target x-1234` breaks routing and
+# not control, so anything in front of `/fno:target ` breaks routing and
 # anything behind it may be swallowed into the verb's arguments. So the prompt
 # stays byte-identical and the attribution arrives beside it, here.
 #

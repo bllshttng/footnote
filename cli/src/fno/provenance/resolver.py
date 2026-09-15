@@ -1,4 +1,4 @@
-"""Transcript resolver for backlog node provenance (Task 2.3, x-30f6).
+"""Transcript resolver for backlog node provenance (Task 2.3).
 
 Core primitive: resolve_transcript(harness, session_id, cwd) -> ResolvedTranscript.
 Layouts, degenerate-input rules, and the never-raises contract live on the
@@ -162,7 +162,7 @@ def resolve_transcript(
     if not cwd:
         return _unresolved(harness, session_id, cwd, "missing-input")
 
-    # Claude resolution. Transcript-truth (x-a472): a session's transcript can
+    # Claude resolution. Transcript-truth: a session's transcript can
     # exist in more than one project dir -- EnterWorktree re-keys it from the
     # canonical cwd's slug to the worktree cwd's slug, and CC leaves a stub in
     # the other dir. Trusting the passed cwd's slug goes blind exactly when a bg

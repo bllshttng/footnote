@@ -143,7 +143,7 @@ pub enum StreamFrame {
     /// `type:user` — the `--replay-user-messages` echo: a DELIVERY RECEIPT, not
     /// a reply. Never mirror this as B's answer.
     UserEcho,
-    /// `type:control_request` — the headless permission gate (ab-28feac77). The
+    /// `type:control_request` — the headless permission gate. The
     /// child emits this and BLOCKS until a matching `control_response` is written
     /// to its stdin, so the worker must answer every one or the turn hangs
     /// forever. `request_id` echoes back in the response; `subtype` is
@@ -273,7 +273,7 @@ fn extract_stream_event_delta(event: Option<&Value>) -> Option<String> {
 }
 
 // =====================================================================
-// Control protocol — headless can_use_tool permission posture (ab-28feac77)
+// Control protocol — headless can_use_tool permission posture
 // =====================================================================
 //
 // `claude -p --input-format stream-json` runs in the DEFAULT permission mode, so
@@ -301,11 +301,11 @@ fn extract_stream_event_delta(event: Option<&Value>) -> Option<String> {
 // Wire shape (verified against the Claude Agent SDK control protocol — the CLI
 // and SDK share it; the SDK's `SDKControlPermissionRequest` / control-response
 // construction are the source of truth):
-//   in  : {"type":"control_request","request_id":"<id>",
+//   in : {"type":"control_request","request_id":"<id>",
 //          "request":{"subtype":"can_use_tool","tool_name":"Bash","input":{...}}}
 //   out allow: {"type":"control_response","response":{"subtype":"success",
 //          "request_id":"<id>","response":{"behavior":"allow","updatedInput":{...}}}}
-//   out deny : {"type":"control_response","response":{"subtype":"success",
+//   out deny: {"type":"control_response","response":{"subtype":"success",
 //          "request_id":"<id>","response":{"behavior":"deny","message":"<why>"}}}
 //   out error: {"type":"control_response","response":{"subtype":"error",
 //          "request_id":"<id>","error":"<why>"}}
@@ -708,7 +708,7 @@ impl FrameLog {
 struct StreamSession {
     child: Mutex<Child>,
     /// `Arc` so the stdout reader thread can also write `control_response`s to
-    /// stdin (ab-28feac77); the `Mutex` serializes a turn's bytes against a
+    /// stdin; the `Mutex` serializes a turn's bytes against a
     /// control response so they never interleave.
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     log: Arc<Mutex<FrameLog>>,
@@ -750,7 +750,7 @@ impl StreamSession {
         // Birth-armed: an untouched worker still drains IDLE_GRACE after spawn.
         let last_activity = Arc::new(Mutex::new(Instant::now()));
 
-        // The headless permission posture (ab-28feac77): read the session cwd's
+        // The headless permission posture: read the session cwd's
         // project permission settings once, here, so the reader thread can answer
         // every `can_use_tool` control_request without a per-frame settings read.
         let posture = Arc::new(Posture::from_cwd(&cfg.cwd));
@@ -959,7 +959,7 @@ pub async fn run(cfg: StreamWorkerConfig) -> Result<(), StreamWorkerError> {
     let session = StreamSession::spawn(&cfg)?;
 
     // Re-anchor the single-writer claim's PID-liveness to THIS (long-lived) worker
-    // process now that the child is up (ab-6d5afbde). The daemon's pre-spawn
+    // process now that the child is up. The daemon's pre-spawn
     // acquire pinned liveness to the ephemeral `fno` process it shelled, which is
     // already dead; without this the claim reads stale immediately and a live
     // human-TUI co-writing the transcript is never refused. Best-effort.
@@ -1266,7 +1266,7 @@ fn release_session_claim(claim: &SessionClaim) {
 }
 
 /// Re-anchor the single-writer claim's PID-liveness to THIS worker process
-/// (ab-6d5afbde). With the daemon's native acquire the claim is already born
+///. With the daemon's native acquire the claim is already born
 /// live (anchored to the daemon pid), so this re-anchor now refines the record
 /// to name the actual writer rather than closing a stale window. A same-holder
 /// re-acquire is idempotent (rewrites pid/host/acquired_at). Best-effort: the
@@ -1606,7 +1606,7 @@ done
 
     #[tokio::test(flavor = "current_thread")]
     async fn control_request_can_use_tool_is_answered_so_turn_never_hangs() {
-        // ab-28feac77: a headless thread has no human to answer a permission gate,
+        // a headless thread has no human to answer a permission gate,
         // so the worker must write a control_response or the turn hangs forever.
         // The fake child emits a can_use_tool for an OUT-OF-CWD path (cwd is
         // temp_dir), reads the worker's response off stdin into a capture file,
@@ -2160,7 +2160,7 @@ done
 
     #[test]
     fn reacquire_pins_pid_liveness_to_the_worker_process() {
-        // ab-6d5afbde: the re-acquire pins PID-liveness to THIS worker via a
+        // the re-acquire pins PID-liveness to THIS worker via a
         // same-holder idempotent re-acquire; the record's pid becomes the
         // worker's own process id.
         let td = tempfile::tempdir().unwrap();
@@ -2189,7 +2189,7 @@ done
         assert_eq!(rec.holder, "stream:sw7");
     }
 
-    // ---- ab-28feac77: headless can_use_tool permission posture ----------
+    // ----: headless can_use_tool permission posture ----------
 
     fn posture(cwd: &str, allowed: &[&str], restricted: &[&str]) -> Posture {
         Posture {

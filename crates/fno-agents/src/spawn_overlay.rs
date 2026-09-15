@@ -1,5 +1,5 @@
 //! `spawn-overlay`: the spawn-defaults resolver Python delegates to, ported
-//! from Python (x-8975). Three payload kinds, one verb, direct dispatch (no
+//! from Python. Three payload kinds, one verb, direct dispatch (no
 //! daemon RPC), the route-slot transport shape: one JSON payload in on stdin,
 //! one JSON answer out on stdout.
 //!

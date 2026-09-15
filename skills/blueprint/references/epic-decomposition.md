@@ -27,7 +27,7 @@ unchanged - auto-group only changes the default for `scope: epic` inputs.
 
 **Resolve the ceiling `N`** as the minimum of every ceiling that applies, with
 the config default as the floor of last resort. This mirrors decompose's own
-`effective = min(max_children, explicit)` (x-066a) exactly, so blueprint's `N`
+`effective = min(max_children, explicit)` exactly, so blueprint's `N`
 and the `--max-prs` it forwards stay in lockstep with the CLI and the two
 surfaces never disagree about the cap.
 
@@ -42,7 +42,7 @@ treat a bad value as unset and defer the check to decompose - procedure step 3
 skips decompose entirely when the waves cohere into a single group, so deferring
 would let a malformed durable cap pass silently on that path. Blueprint fails
 fast so the refusal holds on every path, matching decompose's own
-malformed-value refusal (x-066a US5); blueprint never invents a cap from a bad
+malformed-value refusal (US5); blueprint never invents a cap from a bad
 value, nor silently falls back to the default on one.
 
 | Case | `N` (blueprint's grouping ceiling AND `--max-prs` forwarded) |
@@ -61,7 +61,7 @@ today's single-doc behavior (not error) if the config read fails** - treat an
 unreadable ceiling as 4, never abort the blueprint. Because the epic's own
 `max_children` now sits above the config default in this ladder, an author who
 declares `max_children: 6` above a default of 4 gets 6 honored on the bare
-`/blueprint <epic-doc>` path (x-066a US3), not silently clamped to 4.
+`/blueprint <epic-doc>` path (US3), not silently clamped to 4.
 
 `N` is a **ceiling, not a quota** (Locked Decision #3): cohesive work uses
 fewer groups; never pad to `N`. This guardrail applies identically to
@@ -171,7 +171,7 @@ is known):
    ```bash
    cat > /tmp/groups-$$.json <<'JSON'
    [
-     {"slug": "1", "title": "Group 1: backend API", "waves": "1-3", "blocked_by_groups": [], "adopt": ["ab-1a2b3c4d", "ab-5e6f7a8b"]},
+     {"slug": "1", "title": "Group 1: backend API", "waves": "1-3", "blocked_by_groups": [], "adopt": ["ab-1a2b3c4d", "x-aaaa"]},
      {"slug": "2", "title": "Group 2: frontend", "waves": "4-6", "blocked_by_groups": ["1"], "dep": "contract"},
      {"slug": "3", "title": "Group 3: novel index engine", "waves": "7", "blocked_by_groups": ["1"], "needs_think": true}
    ]

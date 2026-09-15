@@ -41,31 +41,31 @@ const CAPABILITY_TOML: &str = include_str!("harness_capabilities.toml");
 pub struct RegistryAgent {
     pub name: String,
     pub cwd: String,
-    /// (x-5f7f) The harness axis (`claude`, `codex`, ...; `provider` is the
+    /// The harness axis (`claude`, `codex`, ...; `provider` is the
     /// pre-v10 spelling on disk, read as a fallback the same way every
     /// harness-keyed read here tolerates it). Decides the resume form: which
     /// harnesses own one, and which argv it builds. `None` when the row names
     /// neither key.
     pub harness: Option<String>,
-    /// (x-1b35) The spawn-recorded model string, raw. Rendered verbatim - a
+    /// The spawn-recorded model string, raw. Rendered verbatim - a
     /// recorded value may name an alias rather than a resolved id (the
     /// openrouter ALIASES config), so the sideline never implies resolution.
     pub model: Option<String>,
-    /// (x-1b35) The vendor lane the row bills: the registry row's `route`
+    /// The vendor lane the row bills: the registry row's `route`
     /// key when it names one, else its `provider` key (live rows carry the
     /// vendor there). The FIELD names the axis - the value is never re-classed
     /// (opencode is legally both harness and provider). This is the
     /// bill-separating axis the lane color keys on by default.
     pub route: Option<String>,
-    /// (x-d865) The row's own fno session id - the durable identity `pane ls`
+    /// The row's own fno session id - the durable identity `pane ls`
     /// reports as `fno_id` and `fno mux where <id>` resolves. `None` for a row
     /// the registry wrote without one. Distinct from `mux.0` (the mux server's
     /// session NAME) and `claude_session_uuid` (a claude transcript key).
     pub session_id: Option<String>,
-    /// (x-d865) The harness session id (claude/codex uuid), an accepted
+    /// The harness session id (claude/codex uuid), an accepted
     /// alternate spelling for `where` resolution. `None` when absent.
     pub harness_session_id: Option<String>,
-    /// (x-dfe7) Classified lineage, read straight off the registry row:
+    /// Classified lineage, read straight off the registry row:
     /// the succession chain this row's current session retired (oldest
     /// first) and the fork edge of a parallel branch. Empty/`None` for a
     /// row never re-minted and never forked - the dominant case. Rendered
@@ -88,7 +88,7 @@ pub struct RegistryAgent {
     pub reason: Option<String>,
     /// The `mux` ref, when this row is pane-hosted: (session, pane_id).
     pub mux: Option<(String, u64)>,
-    /// (x-c929) The answerable-prompt payload from the scrape rung, present only
+    /// The answerable-prompt payload from the scrape rung, present only
     /// when this row is `blocked` on a numbered menu the daemon could extract;
     /// `None` for a hook-badged block or a focus-only blocked prompt.
     pub answerable: Option<AnswerablePrompt>,
@@ -99,19 +99,19 @@ pub struct RegistryAgent {
     /// watch-only (paneless) click path consumes it - a pane-hosted row focuses
     /// its pane instead.
     pub attach_id: Option<String>,
-    /// (x-0a2e) True when this row's provenance is claude's daemon roster: a
+    /// True when this row's provenance is claude's daemon roster: a
     /// synthesized foreign session, or a registry row the roster liveness-
     /// upgraded. Renders dim; strictly read-only toward `~/.claude/**`. NOT an
     /// attachability signal - that is `attach_id.is_some() && !exited` (an
     /// external row whose pane died still carries `external: true`).
     pub external: bool,
-    /// (x-c914) The claude account this row bills, for the account glyph.
+    /// The claude account this row bills, for the account glyph.
     /// Precedence (Locked Decision 6): the STRUCTURAL roster-dir tag (a foreign
     /// isolated-account worker, piece 3) is ground truth; else the birth
     /// account of a mux-spawned pane (`FNO_ACCOUNT`, piece 2). `None` = the
     /// default `~/.claude` account (no glyph).
     pub account: Option<String>,
-    /// (x-9c5f) The claude session uuid recorded on the registry row, the
+    /// The claude session uuid recorded on the registry row, the
     /// `spawn --resume <uuid>` target for the peek `r` respawn. Carried ONLY when
     /// `provider == "claude"` (the registry writes it null on codex), so its
     /// presence alone is the respawn-eligibility signal the server arm checks.
@@ -126,7 +126,7 @@ pub struct RegistryAgent {
     /// registry content that lands in a file read, so shape-guarded at parse
     /// (absolute, `.jsonl`-suffixed) the same way the uuid is.
     pub log_path: Option<String>,
-    /// (x-9c5f) The freshest parseable activity stamp on the row (epoch secs):
+    /// The freshest parseable activity stamp on the row (epoch secs):
     /// the max of `last_message_at`, `inside_leg.received_at`, `screen_state.at`,
     /// and `exited_at`. `None` when none parsed. Feeds the peek `changed Ns ago`
     /// line via `AgentRow.updated_at`.
@@ -137,12 +137,12 @@ pub struct RegistryAgent {
     pub crown_level: Option<u32>,
     /// The project/epic/node id the crown rules over, for the inline crown badge.
     pub crown_scope: Option<String>,
-    /// (x-132c) The session id this row was spawned by - the lineage join key,
+    /// The session id this row was spawned by - the lineage join key,
     /// matched against other rows' `harness_session_id`. `None` = no recorded
     /// parent (a root, as far as the renderer can know). Distinct from
     /// `crown_level`, a fixed authority rank: lineage is who spawned whom.
     pub spawned_by_session: Option<String>,
-    /// (x-9de7) Whether this row's terminal-looking status is a POSITIVE
+    /// Whether this row's terminal-looking status is a POSITIVE
     /// falsification or an absence of evidence. `Alive` for an active
     /// non-terminal status (mirrors `exited == false`). Orphaned and failed
     /// rows are backend-not-live and use `Unmeasured` because they are not safe
@@ -168,7 +168,7 @@ pub struct RegistryAgent {
     /// render joins it into the subline when it differs from the label; the
     /// row's `name` is never rewritten from it.
     pub harness_title: Option<String>,
-    /// (x-3954) The spawn-recorded model-provider identity, read straight off
+    /// The spawn-recorded model-provider identity, read straight off
     /// the registry row. Presence (`Some`, not `openai`) is the routed fact the
     /// workspace restore refuses on; the routed predicate lives in
     /// `server.rs::member_routed_codex_refusal`, whose twin is
@@ -188,7 +188,7 @@ pub enum Liveness {
     Unmeasured,
 }
 
-/// (x-07c2) The harnesses whose transcripts `fno agents peek` can tail: the
+/// The harnesses whose transcripts `fno agents peek` can tail: the
 /// reader arms registered in `recent_records` (cli/src/fno/agents/peek.py).
 /// A static mirror of a Python seam; `thread_reach_mirrors_the_peek_reader_seam`
 /// pins it against that file so the two cannot drift (Rust checked against
@@ -199,7 +199,7 @@ pub enum Liveness {
 /// exit immediately; that gap is why this list omits opencode).
 const PEEK_READER_HARNESSES: [&str; 2] = ["claude", "codex"];
 
-/// (x-c198) The argv that opens pi's OWN interface on `session_id`.
+/// The argv that opens pi's OWN interface on `session_id`.
 ///
 /// An EXEC target, never a proxy, and the same shape as the codex builder
 /// above: the viewport replaces a pane with a real vendor process and draws
@@ -241,7 +241,7 @@ pub fn pi_attach_argv(session_id: &str) -> Vec<String> {
     ]
 }
 
-/// (x-296f) The `interactive_attach` argv a harness declares, parsed once from
+/// The `interactive_attach` argv a harness declares, parsed once from
 /// the capability contract this binary embeds.
 ///
 /// The attach form is the ONE place a harness says "here is the command that
@@ -347,7 +347,7 @@ impl FormLane {
 /// capability contract. That order is the point - it is what lets an operator
 /// teach fno a harness, or CORRECT a bundled form that is wrong, without a
 /// release. The bundled table is measured facts, and measured facts go stale
-/// when a vendor ships (x-244c records places where it already understates
+/// when a vendor ships (records places where it already understates
 /// agy's real CLI with nobody able to fix it).
 ///
 /// ```toml
@@ -362,7 +362,7 @@ impl FormLane {
 /// effect at the next mux server start.
 ///
 /// The merge covers the WHOLE `harness.<name>` row, per field, config
-/// winning - the attach lane was its first surface (x-6678) and x-244c moved
+/// winning - the attach lane was its first surface and moved
 /// it up a level rather than growing a second reader beside it. The Python
 /// reader (harness_map.py) implements the same rules, so an override answers
 /// identically on both runtimes.
@@ -501,7 +501,7 @@ fn apply_row_overrides(rows: &mut std::collections::BTreeMap<String, toml::Value
                 }
                 rows.insert(name.clone(), candidate);
             } else {
-                // A name with no bundled row is the x-296f teach path: the
+                // A name with no bundled row is the teach path: the
                 // config declares the pane lane and nothing else, so a whole
                 // row would fail validation by construction. The gate is the
                 // shipped lane parse instead - every form block the override
@@ -557,7 +557,7 @@ fn lane_forms_still_parse(candidate: &toml::Value) -> Result<(), String> {
 
 /// The whole-row override gate for a bundled row: every top-level key the
 /// override carries must already exist on the bundled row, or be one of the
-/// x-6678 shallow lane keys. Rows do NOT share one key set (gemini carries
+/// shallow lane keys. Rows do NOT share one key set (gemini carries
 /// no `slash_prefix`, rows without a measured palette carry no
 /// `native_verbs`), so the vocabulary is per row: a key another row carries
 /// is still refused here, and an unknown key is a typo that must not silently
@@ -584,7 +584,7 @@ fn override_keys_are_bundled_vocabulary(
     }
 }
 
-/// The x-6678 shallow lane keys, translated into the nested paths the bundled
+/// The shallow lane keys, translated into the nested paths the bundled
 /// row carries them under, so one override shape feeds both readers. Returns
 /// `None` when neither interactive lane block parses (or declares
 /// unsupported) - the teach path lands a row only when it can drive a lane.
@@ -614,7 +614,7 @@ fn parse_lane_blocks(normalized: &toml::Table) -> Option<toml::Value> {
     Some(toml::Value::Table(normalized.clone()))
 }
 
-/// The x-6678 shallow lane keys, translated into the nested paths the bundled
+/// The shallow lane keys, translated into the nested paths the bundled
 /// row carries them under, so one override shape feeds both readers.
 fn lane_alias_normalized(over: &toml::Table) -> toml::Table {
     let mut out = over.clone();
@@ -746,7 +746,7 @@ fn config_toml_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-/// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
+/// The dedicated thread-pane tier for a row, from capability only:
 /// `Drive` when the row carries an attach id (an interactive attach form
 /// resolved it), `Follow` when the harness's transcript has a peek reader,
 /// `Locate` otherwise. Never keyed on a harness NAME for its own sake (law
@@ -784,7 +784,7 @@ pub struct RosterWorker {
     pub short_id: String,
     pub name: String,
     pub cwd: String,
-    /// (x-c914) Which claude account's daemon roster this worker was read from:
+    /// Which claude account's daemon roster this worker was read from:
     /// `None` = the default `~/.claude` roster, `Some(id)` = an isolated
     /// account's `<config_dir>/daemon/roster.json`. Set by the reader (which
     /// knows the source dir), never by `parse_roster` (the file is dir-blind).
@@ -806,7 +806,7 @@ pub fn roster_path() -> PathBuf {
     base.join(".claude").join("daemon").join("roster.json")
 }
 
-/// (x-c914) The `[[providers.records]]` entries carrying an isolated
+/// The `[[providers.records]]` entries carrying an isolated
 /// `config_dir` (an own-dir claude account), as `(account_id, config_dir)`.
 /// Managed accounts share `~/.claude` and set no `config_dir`, so they
 /// contribute nothing - an all-managed config yields `[]` and the roster union
@@ -847,7 +847,7 @@ pub fn parse_isolated_dirs(
     out
 }
 
-/// (x-c914) `roster.json` path for every isolated account, `(account_id,
+/// `roster.json` path for every isolated account, `(account_id,
 /// path)`, mapping each isolated `config_dir` to `<config_dir>/daemon/roster.json`.
 ///
 /// Mirrors `load_providers`' record source precedence (codex P2) so an account
@@ -863,7 +863,7 @@ pub fn isolated_roster_paths() -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// (x-ed59) The registered worker name for `short_id` in ONE account's roster:
+/// The registered worker name for `short_id` in ONE account's roster:
 /// the isolated account's when `config_dir` is set, else the default. Short IDs
 /// are unique only within a daemon/account namespace, so the scan is scoped
 /// rather than first-match-across-accounts (a cross-account scan would label a
@@ -883,7 +883,7 @@ pub fn registered_name_for(short_id: &str, config_dir: Option<&std::path::Path>)
         .map(|w| w.name)
 }
 
-/// (x-c914) The isolated `config_dir` for one account, or `None` for a managed
+/// The isolated `config_dir` for one account, or `None` for a managed
 /// / unknown account. Used to route a cross-account `claude attach|stop|rm` to
 /// the right daemon via `CLAUDE_CONFIG_DIR` (codex P1) - a default-account row
 /// resolves to `None` and runs under the ambient `~/.claude` as before.
@@ -894,7 +894,7 @@ pub fn account_config_dir(account_id: &str) -> Option<PathBuf> {
         .map(|(_, dir)| dir)
 }
 
-/// (x-c914) `(account_id, config_dir)` for every isolated account, resolved with
+/// `(account_id, config_dir)` for every isolated account, resolved with
 /// `load_providers`' record precedence: project-local `$PWD/.fno/config.toml`
 /// first, then the global override (`$FNO_GLOBAL_SETTINGS_PATH` sibling
 /// `config.toml`) else `~/.fno/config.toml`; project-local wins on an id
@@ -952,7 +952,7 @@ pub fn is_terminal_state(state: &str) -> bool {
 /// u64 -> date-string drift once zeroed every typed-parse consumer, and
 /// tolerant per-field access means unread fields cannot break the parse. A
 /// worker missing `sessionId` is skipped alone (tolerate-alien-row, like a
-/// registry row without `name`). Two recognized shapes (x-2f03): a BARE LIST
+/// registry row without `name`). Two recognized shapes: a BARE LIST
 /// of worker objects (`claude agents --json`, measured 2026-08-27) and the
 /// legacy map under `workers`. Anything else - including an object with no
 /// `workers` key - is an UNRECOGNIZED shape and returns `None` (the caller
@@ -1045,7 +1045,7 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
             account: None,
         });
     }
-    // Refuse the silent empty (x-2f03): a non-empty container where NOTHING
+    // Refuse the silent empty: a non-empty container where NOTHING
     // was recognized - no parsed worker and no terminal skip - is schema
     // drift, not an empty fleet; `None` keeps the caller's last-good rows.
     // An all-terminal roster is NOT drift: every item was understood, so it
@@ -1062,7 +1062,7 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     Some(out)
 }
 
-/// (x-cd67 US4) The current git branch of `cwd`, for the sideline row subline.
+/// (US4) The current git branch of `cwd`, for the sideline row subline.
 /// Bounded file reads only - NEVER shells `git` (the origin freeze class) and
 /// NEVER runs on the core loop (the reader task resolves it off-loop). Any read
 /// failure, a plain (non-git) dir, or a malformed HEAD degrades to `None`; the
@@ -1182,7 +1182,7 @@ fn report_is_live(received_at: &str, ttl_ms: Option<u64>, now_secs: u64) -> bool
     }
 }
 
-/// (x-1b90) Parse an events-journal `ts` to epoch seconds. The emitter
+/// Parse an events-journal `ts` to epoch seconds. The emitter
 /// stamps `YYYY-MM-DDThh:mm:ss.mmmZ`; the registry writes `...ssZ`. A stamp
 /// that parses neither shape is `None` - an unparseable reap time proves
 /// nothing, and the release tier holds the pane.
@@ -1196,7 +1196,7 @@ pub(crate) fn ts_to_secs(s: &str) -> Option<u64> {
 }
 
 // ---------------------------------------------------------------------------
-// fno-truth badge source (x-4a48): the JUNIOR rung under inside_leg + screen_state.
+// fno-truth badge source: the JUNIOR rung under inside_leg + screen_state.
 //
 // A bg /target worker between turns reads as no-badge (Idle) even while its real
 // work (CI, preflight) runs externally. fno holds the truth the harness cannot:
@@ -1280,9 +1280,9 @@ fn is_well_formed_node_id(candidate: &str) -> bool {
 /// loose match can yield no badge but never a wrong badge.
 ///
 /// Three live spellings, measured against a registry dump on 2026-08-20:
-/// `t-xd7be-tally-claude-sonnet` -> `x-d7be` (hyphen dropped),
-/// `king-cliverbs-x-c1b9-g2` -> `x-c1b9` (hyphenated), and
-/// `t-fd2a-finish` -> `fd2a` (bare hex, prefix-less).
+/// `t-xaaaa-tally-claude-sonnet` -> `x-aaaa` (hyphen dropped),
+/// `king-cliverbs-x-bbbb-g2` -> `x-bbbb` (hyphenated), and
+/// `t-eeee-finish` -> `fd2a` (bare hex, prefix-less).
 pub(crate) fn node_id_candidates(name: &str) -> Vec<String> {
     let tokens: Vec<&str> = name.split('-').collect();
     let mut candidates = Vec::new();
@@ -1613,7 +1613,7 @@ pub fn overlay_truth_badges(rows: &mut [RegistryAgent], truth: &TruthBadges) {
     }
 }
 
-/// Process start time in the REGISTRY'S own units (x-caef): macOS folds
+/// Process start time in the REGISTRY'S own units: macOS folds
 /// `proc_bsdinfo` to microseconds, Linux keeps the raw `/proc/<pid>/stat`
 /// starttime ticks. Deliberately NOT `probe_pid`: the registry's
 /// `pid_start_time` is a per-host, per-boot quantity compared only for
@@ -1653,7 +1653,7 @@ fn registry_start_time(_pid: u32) -> Option<u64> {
 }
 
 /// POSITIVE falsification of one non-terminal row's liveness by its own
-/// recorded pid (x-caef). A machine restart writes nothing to the registry,
+/// recorded pid. A machine restart writes nothing to the registry,
 /// so every row keeps the status it last had on disk - including "working"
 /// for workers that died with the reboot. `restore_squads` reads that set to
 /// decide which members to respawn, so an unverified status read respawns
@@ -1784,7 +1784,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
         );
         let liveness = crate::served_liveness::served_liveness(served_word, measured_at, now_secs)
             .unwrap_or_else(|| {
-                // (x-688b) A stale served "dead" on a TERMINAL, pid-less row still
+                // A stale served "dead" on a TERMINAL, pid-less row still
                 // corroborates the terminal status: the daemon stamped it from an
                 // observed exit, and with no pid recorded there is no reused-pid
                 // contradiction to wait for - the stamp is the only evidence
@@ -1829,7 +1829,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .or_else(|| row.get("provider"))
             .and_then(|v| v.as_str());
         let is_claude = harness_name == Some("claude");
-        // (x-296f) The ROW-SHAPE half of the old is_codex_thread gate, kept
+        // The ROW-SHAPE half of the old is_codex_thread gate, kept
         // verbatim and un-gated by harness name. Only a THREAD row may take a
         // session-id attach target: interactive host mode, no claude short id,
         // and no pane of its own. A codex PANE row is excluded on the `mux`
@@ -1855,16 +1855,16 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                 .unwrap_or("")
                 .is_empty()
             && row.get("mux").is_none_or(serde_json::Value::is_null);
-        // (x-c198) A pi THREAD row's attach target is its caller-assigned
+        // A pi THREAD row's attach target is its caller-assigned
         // session id, which a plain `pi --session-id <id>` JOINS. Same
         // predicate shape as the codex clause above, and for the same reason:
         // a pi PANE row already has a place for its process and keeps
         // navigating to its tab.
         //
-        // LIVE as of x-43bd. The spawn arm shipped (pi is in
+        // LIVE as of. The spawn arm shipped (pi is in
         // `SPAWN_HARNESSES`, `dispatch_spawn` has a pi branch), so a pi
         // thread row now exists: keeper-hosted, no `mux` key, and this
-        // predicate starts firing for it. Before x-43bd every pi row fno
+        // predicate starts firing for it. Before every pi row fno
         // could register was pane-hosted and carried a `mux` key, which kept
         // this arm false for every row that existed.
         // The RAW `mux` key, not the parsed one, matching the codex clause
@@ -1879,7 +1879,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                 .unwrap_or("exec")
                 == "interactive"
             && row.get("mux").is_none_or(serde_json::Value::is_null);
-        // (x-296f) The attach target, keyed on the harness's DECLARED attach
+        // The attach target, keyed on the harness's DECLARED attach
         // form rather than on its name. Which id to read follows the form: a
         // short jobId where the command takes one (claude, `short_id` since
         // v9, legacy `claude_short_id` tolerated), the full session id where a
@@ -1916,7 +1916,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                 .map(str::to_string),
             None => None,
         };
-        // (x-9c5f) The `spawn --resume` uuid for the peek `r` respawn, and the
+        // The `spawn --resume` uuid for the peek `r` respawn, and the
         // transcript key for the extended table's message tail. Claude rows
         // only: a codex row's session id is not a claude transcript name. v10
         // moved it to `harness_session_id`; `claude_session_uuid` is the legacy
@@ -1941,7 +1941,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             })
             .flatten()
             .map(str::to_string);
-        // (x-9c5f) The freshest activity stamp: the max of the row's parseable
+        // The freshest activity stamp: the max of the row's parseable
         // UTC stamps (same fixed-format parser the badge TTL uses). Any
         // unparseable/missing stamp is skipped; all absent -> None (no line).
         // Bound once and reused by both `updated_at` and the badge match below.
@@ -2051,7 +2051,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                 _ => (None, None, None),
             },
         };
-        // (x-d865) The row's durable identity, provider-agnostic (both are
+        // The row's durable identity, provider-agnostic (both are
         // read unscoped: `where` resolves against either spelling).
         let session_id = row
             .get("fno_id")
@@ -2080,7 +2080,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
-        // (x-1b35) The vendor lane: `route` is the declared spelling, `provider`
+        // The vendor lane: `route` is the declared spelling, `provider`
         // the live fallback (live rows carry the vendor there; `route` exists
         // on disk but is null everywhere today, so a NULL route must still
         // reach the fallback - hence the or_else after the string read, not
@@ -2284,7 +2284,7 @@ pub async fn watch_registry(
         .map_err(|_| "agent.watch: round trip exceeded 2s".to_string())?
 }
 
-/// Union the fno registry rows with claude's roster (x-0a2e). Pure so the
+/// Union the fno registry rows with claude's roster. Pure so the
 /// whole merge is unit-testable without files or a clock, exactly like
 /// `derive_rows`. The join key is the registry row's `attach_id` (== its claude
 /// jobId in `short_id`) against the roster worker's `short_id`; a registry row
@@ -2301,7 +2301,7 @@ pub async fn watch_registry(
 pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<RegistryAgent> {
     use std::collections::{HashMap, HashSet};
     // short_id -> source account, so an upgrade can adopt the roster row's
-    // structural account tag (x-c914), not just test membership.
+    // structural account tag, not just test membership.
     let roster_by_id: HashMap<&str, Option<&str>> = roster
         .iter()
         .map(|w| (w.short_id.as_str(), w.account.as_deref()))
@@ -2387,7 +2387,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
     // minted under unknown evidence is addressable but owns no registry row
     // until the next positive SessionStart observation mints one; today it
     // was simply invisible. The child carries `spawned_by_session` so the
-    // x-132c join indents it under its parent, `external: false` and the
+    // join indents it under its parent, `external: false` and the
     // roster's own id as the attach target. When the real row lands, the
     // registry owns the id and this synthesis disappears in the same tick
     // (AC3-HP -> AC4-EDGE is the same row set one observation later).
@@ -2447,11 +2447,11 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
     out
 }
 
-/// (x-132c) Rendering cap on lineage depth: a pathological chain must not push
+/// Rendering cap on lineage depth: a pathological chain must not push
 /// rows off-screen (same bounded-steps posture `crown_indent` held).
 pub const MAX_LINEAGE_DEPTH: usize = 8;
 
-/// (x-132c) Join rows into a lineage forest and lay it out for rendering.
+/// Join rows into a lineage forest and lay it out for rendering.
 /// Returns `(order, depths)`: `order` is the render order as INPUT INDICES in
 /// stable pre-order (each row beneath its parent), and `depths[i]` is row
 /// `i`'s lineage depth. Keyed by ROW IDENTITY (the input index), never by a
@@ -2580,7 +2580,7 @@ pub fn lineage_layout<T>(
 }
 
 /// One tracked external session's observed liveness from `claude agents --json
-/// --all` (x-7561). `Live`/`Terminal` are the mapped states; `Unknown` is a
+/// --all`. `Live`/`Terminal` are the mapped states; `Unknown` is a
 /// tracked id PRESENT in the catalog but with an unrecognized/missing state (a
 /// per-id schema drift) - distinct from absence-from-the-map (the row is gone)
 /// and from a `None` map (the whole query failed).
@@ -2633,7 +2633,7 @@ pub fn parse_claude_agents(
 }
 
 /// Reconcile persisted external-lifecycle records against the observed catalog
-/// (x-7561, the AC1-FR/AC3-FR table). `observed` is `None` when the `claude
+/// (the AC1-FR/AC3-FR table). `observed` is `None` when the `claude
 /// agents` query failed or schema-drifted: every non-`unknown` record is
 /// retained as `unknown` (permitting only a safe stop retry), never deleted.
 /// Otherwise, per record by `(persisted state, observed)`:
@@ -2730,7 +2730,7 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000; // 2027-01-15T08:00:00Z-ish
 
-    // -- x-caef: restore liveness must not trust a status string the row's
+    // --: restore liveness must not trust a status string the row's
     //    own pid falsifies -----------------------------------------------
 
     /// A claude row with a recorded pid that ESRCHs must land in the stale
@@ -2929,7 +2929,7 @@ mod tests {
 
     #[test]
     fn derive_rows_counted_counts_the_nameless_row_it_skips() {
-        // AC1-HP (x-0b40): the skipped row EXISTED. Its absence from the
+        // AC1-HP: the skipped row EXISTED. Its absence from the
         // vector was never news - that absence IS the defect shape. The count
         // is the positive marker a caller that reasons from absence needs.
         let (rows, unattributable) = derive_rows_counted(
@@ -2944,7 +2944,7 @@ mod tests {
 
     #[test]
     fn derive_rows_counted_counts_a_present_but_unparseable_mux_on_the_surviving_row() {
-        // AC2-HP (x-0b40): a PRESENT `mux` key that does not parse into a
+        // AC2-HP: a PRESENT `mux` key that does not parse into a
         // (session, pane_id) pair keeps the row (the sideline renders what it
         // can read) and counts it, because the row's pane is unknown. Pinned
         // to the surviving row on purpose: a drop count alone would miss it.
@@ -2960,7 +2960,7 @@ mod tests {
 
     #[test]
     fn derive_rows_counted_is_zero_for_a_clean_registry() {
-        // AC3-EDGE (x-0b40): the control that keeps the two counting tests
+        // AC3-EDGE: the control that keeps the two counting tests
         // honest - a well-formed registry counts zero, so the count is a fact
         // about the rows and not a constant.
         let (rows, unattributable) = derive_rows_counted(
@@ -3021,7 +3021,7 @@ mod tests {
 
     #[test]
     fn derive_rows_carries_claude_uuid_only_for_claude_provider() {
-        // AC3-EDGE (x-9c5f): a claude row carries its claude_session_uuid; a
+        // AC3-EDGE: a claude row carries its claude_session_uuid; a
         // codex row with (hypothetically) the same field set carries NONE, so
         // uuid presence alone gates respawn eligibility downstream.
         let raw = reg(
@@ -3041,7 +3041,7 @@ mod tests {
 
     #[test]
     fn derive_rows_carries_model_and_the_vendor_route() {
-        // (x-1b35) AC1: the lane axes survive the tolerant read. `route` is
+        // AC1: the lane axes survive the tolerant read. `route` is
         // the declared spelling with `provider` as the live fallback - a NULL
         // route key must still reach the fallback (key-present-but-null is the
         // shape every live row carries today). A row naming neither derives
@@ -3079,7 +3079,7 @@ mod tests {
 
     #[test]
     fn pre_v10_provider_rows_do_not_mount_the_harness_as_the_route() {
-        // (x-1b35 review finding) A pre-v10 row carried the HARNESS under
+        // (review finding) A pre-v10 row carried the HARNESS under
         // `provider` and no `harness` key at all; the route fallback is
         // shape-gated on the row naming `harness`, so such a row derives
         // route=None instead of route=Some("claude").
@@ -3102,7 +3102,7 @@ mod tests {
         assert_eq!(get("new").route.as_deref(), Some("zai"));
     }
 
-    /// AC11-HP, AC12-EDGE, AC13-EDGE (x-6678): `attach_id` is derived PER
+    /// AC11-HP, AC12-EDGE, AC13-EDGE: `attach_id` is derived PER
     /// HARNESS at the `derive_rows` seam, so a codex thread row reaches Drive
     /// while no other harness gains a tier.
     ///
@@ -3193,7 +3193,7 @@ mod tests {
         );
     }
 
-    /// AC14-HP, AC16-EDGE (x-6678, x-296f): the viewport renders codex's
+    /// AC14-HP, AC16-EDGE: the viewport renders codex's
     /// attach from the DECLARATION, not from a hand-built argv. The declared
     /// form carries a bare `unix://`, so codex resolves `CODEX_HOME` itself
     /// and fno keeps no socket-path builder to drift against a relocated
@@ -3219,7 +3219,7 @@ mod tests {
         );
     }
 
-    /// AC5-ERR (x-296f): a malformed attach block is not an attach form, and
+    /// AC5-ERR: a malformed attach block is not an attach form, and
     /// an explicit `kind = "unsupported"` statement is - the two shapes an
     /// override layer must tell apart so a typo skips a block while a
     /// deliberate retirement lands.
@@ -3262,7 +3262,7 @@ tokens = []"#,
         assert!(parse_form(FormLane::Resume, &plain).is_some());
     }
 
-    /// AC1-HP (x-296f), config half: a harness fno has never heard of, declared
+    /// AC1-HP, config half: a harness fno has never heard of, declared
     /// ONLY as a `[harness.<name>.attach]` block, parses into a working form.
     /// With the id substituted, it renders `sh -c '<pre>; exec <attach>'` and
     /// reaches Drive - the no-Rust-change path, proven at the pure layer.
@@ -3310,14 +3310,14 @@ tokens = []"#,
         assert!(candidates[0] != candidates[1]);
     }
 
-    /// AC2-ERR (x-244c): the merged row the PYTHON reader resolves must equal
+    /// AC2-ERR: the merged row the PYTHON reader resolves must equal
     /// the merged row this reader resolves, under the same staged config.
     /// Driven by cli/tests/agents/test_harness_capability_parity.py, which
     /// stages the config chain, writes the Python answer to
     /// FNO_CAPABILITY_PARITY_JSON, and runs this test with
     /// FNO_CAPABILITY_PARITY_DIR pointing at the stage. Ignored by default:
     /// it needs that harness and a built dependency tree. The merge logic is
-    /// the one dual the x-244c ruling kept (both readers stand), so this is
+    /// the one dual the ruling kept (both readers stand), so this is
     /// the guard that pins them together.
     #[test]
     #[ignore = "driven by test_harness_capability_parity.py, which stages the config"]
@@ -3373,7 +3373,7 @@ tokens = []"#,
         );
     }
 
-    /// AC1/AC2 (x-244c), Rust half: the config chain merges WHOLE rows - a
+    /// AC1/AC2, Rust half: the config chain merges WHOLE rows - a
     /// nested table corrects one strategy, a scalar flips, a lane alias lands
     /// on its nested form, an unknown key is refused with the bundled row
     /// kept and named, and a name outside the roster is refused by name. The
@@ -3527,7 +3527,7 @@ unheard_of_field = true
 
     #[test]
     fn derive_rows_renders_unmeasured_not_dead_for_an_exited_row_with_a_live_pid() {
-        // AC1 (x-9de7 task 3): status says exited, but a recorded live pid
+        // AC1 (task 3): status says exited, but a recorded live pid
         // contradicts it. This is the exact shape task 1 stops the writer
         // from producing, and this is the render-layer half: even if such a
         // row exists (a different writer, a race, a stale read), the
@@ -3667,9 +3667,9 @@ unheard_of_field = true
         assert_eq!(rows[1].name, "zeta");
     }
 
-    // The roster parser (x-0a2e task 1.1): tolerant Value access over
+    // The roster parser (task 1.1): tolerant Value access over
     // claude's roster.json. Cites the "torn roster" and "missing sessionId"
-    // Failure Modes bullets. LEGACY shape only (x-2f03): claude now emits a
+    // Failure Modes bullets. LEGACY shape only: claude now emits a
     // bare list, covered by the fixture test below; this pins the map so the
     // fix stays additive.
     #[test]
@@ -3713,7 +3713,7 @@ unheard_of_field = true
     #[test]
     fn parse_roster_garbage_is_none_and_unrecognized_shape_is_none() {
         // Garbage doc -> None (caller keeps last-good, AC1-ERR). An object
-        // with NO workers key is an UNRECOGNIZED shape now (x-2f03), not an
+        // with NO workers key is an UNRECOGNIZED shape now, not an
         // empty roster: returning Some(empty) there is indistinguishable from
         // a genuinely empty fleet and is exactly how the bare-list drift hid.
         // An EMPTY recognized container is still a valid empty roster.
@@ -3730,7 +3730,7 @@ unheard_of_field = true
         assert_eq!(parse_roster(r#"{"workers":{"orphan":{"cwd":"/w"}}}"#), None);
     }
 
-    // The CURRENT claude shape (x-2f03): a bare list, as captured from
+    // The CURRENT claude shape: a bare list, as captured from
     // `claude agents --json` (claude 2.1.247, 2026-08-27). The fixture is a
     // mechanically redacted copy of that capture: item count, per-item key
     // set and order, value types, states, and the id==sessionId-prefix
@@ -3813,7 +3813,7 @@ unheard_of_field = true
         assert_eq!(parse_roster(r#"[{"cwd":"/w"}]"#), None);
     }
 
-    // ---- Union merge + dual-doc ReaderState (x-0a2e task 1.2) ----
+    // ---- Union merge + dual-doc ReaderState (task 1.2) ----
 
     fn worker(short: &str, name: &str, cwd: &str) -> RosterWorker {
         RosterWorker {
@@ -4041,7 +4041,7 @@ unheard_of_field = true
         assert_eq!(rows.len(), 2);
     }
 
-    // ---- Dual-dir roster union, tagged by account (x-c914 piece 3) ----
+    // ---- Dual-dir roster union, tagged by account (piece 3) ----
 
     fn iso(
         account: &str,
@@ -4287,7 +4287,7 @@ config_dir = "~/.claude-alt"
         );
     }
 
-    // x-c929: a live `blocked` scrape verdict with an `answerable` payload parses
+    // a live `blocked` scrape verdict with an `answerable` payload parses
     // it onto the row; a blocked verdict without one, and a hook-badged block,
     // are both focus-only (no answer payload in v1).
     #[test]
@@ -4330,7 +4330,7 @@ config_dir = "~/.claude-alt"
     }
 
     // -------------------------------------------------------------------
-    // fno-truth junior badge (x-4a48)
+    // fno-truth junior badge
     // -------------------------------------------------------------------
     fn plain_row(name: &str, badge: Option<AgentBadge>, exited: bool) -> RegistryAgent {
         RegistryAgent {
@@ -4373,21 +4373,21 @@ config_dir = "~/.claude-alt"
     #[test]
     fn resolves_node_id_from_worker_name() {
         let known = HashMap::from([
-            ("x-d7be".to_string(), ()),
-            ("x-c1b9".to_string(), ()),
-            ("x-cd1e".to_string(), ()),
-            ("x-4a48".to_string(), ()),
+            ("x-aaaa".to_string(), ()),
+            ("x-bbbb".to_string(), ()),
+            ("x-cccc".to_string(), ()),
+            ("x-dddd".to_string(), ()),
             ("ab-1a2b3c4d".to_string(), ()),
-            ("x-fd2a".to_string(), ()),
+            ("x-eeee".to_string(), ()),
         ]);
         for (name, expected) in [
-            ("t-xd7be-tally-claude-sonnet", "x-d7be"),
-            ("king-cliverbs-x-c1b9-g2", "x-c1b9"),
-            ("build-xcd1e", "x-cd1e"),
-            ("target-x-4a48-fleet-status", "x-4a48"),
+            ("t-xaaaa-tally-claude-sonnet", "x-aaaa"),
+            ("king-cliverbs-x-bbbb-g2", "x-bbbb"),
+            ("build-xcccc", "x-cccc"),
+            ("target-x-dddd-fleet-status", "x-dddd"),
             ("target-ab-1a2b3c4d-slug", "ab-1a2b3c4d"),
-            ("target-x-4a48", "x-4a48"),
-            ("t-fd2a-finish", "x-fd2a"),
+            ("target-x-dddd", "x-dddd"),
+            ("t-eeee-finish", "x-eeee"),
         ] {
             assert_eq!(
                 resolve_node_id(name, &known).as_deref(),
@@ -4397,22 +4397,22 @@ config_dir = "~/.claude-alt"
         }
         assert_eq!(resolve_node_id("phasestall", &known), None);
         let empty: HashMap<String, ()> = HashMap::new();
-        assert_eq!(resolve_node_id("worker-x-4a48-foo", &empty), None);
+        assert_eq!(resolve_node_id("worker-x-dddd-foo", &empty), None);
     }
 
     /// Copied verbatim from `fno agents list` on 2026-08-20. The negative
     /// half ensures loose candidates cannot turn ordinary worker names into
     /// wrong node badges.
     const LIVE_NAMES: &[(&str, Option<&str>)] = &[
-        ("t-xd7be-tally-claude-sonnet", Some("x-d7be")),
-        ("bp-xf920-toml", Some("x-f920")),
-        ("king-cliverbs-x-c1b9-g2", Some("x-c1b9")),
-        ("bp-sccache-x455f", Some("x-455f")),
-        ("build-xcd1e", Some("x-cd1e")),
-        ("bp-slotleak-xba39", Some("x-ba39")),
-        ("t-fd2a-finish", Some("x-fd2a")),
-        ("t-x7979-ship-agy", Some("x-7979")),
-        ("king-machinecost-x-f7b9", Some("x-f7b9")),
+        ("t-xaaaa-tally-claude-sonnet", Some("x-aaaa")),
+        ("bp-xffff-toml", Some("x-ffff")),
+        ("king-cliverbs-x-bbbb-g2", Some("x-bbbb")),
+        ("bp-sccache-x0000", Some("x-0000")),
+        ("build-xcccc", Some("x-cccc")),
+        ("bp-slotleak-x1111", Some("x-1111")),
+        ("t-eeee-finish", Some("x-eeee")),
+        ("t-x2222-ship-agy", Some("x-2222")),
+        ("king-machinecost-x-3333", Some("x-3333")),
         ("30d3c7e0", None),
         ("4763481e", None),
         ("rebase-988", None),
@@ -4438,13 +4438,13 @@ config_dir = "~/.claude-alt"
 
     #[test]
     fn ambiguous_bare_hex_node_id_resolves_to_none() {
-        let known = HashMap::from([("x-abcd".to_string(), ()), ("y-abcd".to_string(), ())]);
-        assert_eq!(resolve_node_id("t-abcd-finish", &known), None);
+        let known = HashMap::from([("x-4444".to_string(), ()), ("y-4444".to_string(), ())]);
+        assert_eq!(resolve_node_id("t-4444-finish", &known), None);
     }
 
     #[test]
     fn encode_claim_key_matches_python_quote() {
-        assert_eq!(encode_claim_key("node:x-4a48"), "node%3Ax-4a48");
+        assert_eq!(encode_claim_key("node:x-dddd"), "node%3Ax-dddd");
     }
 
     #[test]
@@ -4527,13 +4527,13 @@ config_dir = "~/.claude-alt"
     fn truth_badge_live_claim_recent_fire_is_working() {
         // AC1-HP e2e: live pid (this process) + a fire 2m ago -> Working.
         let t = Tmp::new("live");
-        t.write_claim("x-4a48", std::process::id() as i32, SID);
+        t.write_claim("x-dddd", std::process::id() as i32, SID);
         t.write_event(SID, "2026-07-09T01:05:00Z");
         let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
-        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert_eq!(
-            badges.get("target-x-4a48-fleet").map(String::as_str),
+            badges.get("target-x-dddd-fleet").map(String::as_str),
             Some("loop 2m ago")
         );
     }
@@ -4542,10 +4542,10 @@ config_dir = "~/.claude-alt"
     fn truth_badge_dead_pid_no_badge() {
         // AC3b/AC4: a dead-pid claim (suspect/stale) never earns a Working badge.
         let t = Tmp::new("dead");
-        t.write_claim("x-4a48", 0x7fff_fff0, SID); // implausible pid -> dead
+        t.write_claim("x-dddd", 0x7fff_fff0, SID); // implausible pid -> dead
         t.write_event(SID, "2026-07-09T01:05:00Z");
         let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
-        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
     }
@@ -4556,10 +4556,10 @@ config_dir = "~/.claude-alt"
         // alive under that pid, but it STARTED after the claim's acquired_at, so
         // the create-time guard rejects it even with a recent fire.
         let t = Tmp::new("reuse");
-        t.write_claim_full("x-4a48", std::process::id() as i32, SID, &hostname(), 1);
+        t.write_claim_full("x-dddd", std::process::id() as i32, SID, &hostname(), 1);
         t.write_event(SID, "2026-07-09T01:05:00Z");
         let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
-        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
     }
@@ -4570,7 +4570,7 @@ config_dir = "~/.claude-alt"
         // is not ours), even if the local pid happens to be live.
         let t = Tmp::new("xhost");
         t.write_claim_full(
-            "x-4a48",
+            "x-dddd",
             std::process::id() as i32,
             SID,
             "some-other-host",
@@ -4578,7 +4578,7 @@ config_dir = "~/.claude-alt"
         );
         t.write_event(SID, "2026-07-09T01:05:00Z");
         let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
-        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
     }
@@ -4587,10 +4587,10 @@ config_dir = "~/.claude-alt"
     fn truth_badge_live_claim_stale_fire_no_badge() {
         // AC3-EDGE: claim-live but no recent fire -> waiting -> no sideline badge.
         let t = Tmp::new("staleFire");
-        t.write_claim("x-4a48", std::process::id() as i32, SID);
+        t.write_claim("x-dddd", std::process::id() as i32, SID);
         t.write_event(SID, "2026-07-09T01:05:00Z");
         let now = rfc3339_like_to_secs("2026-07-09T02:00:00Z").unwrap(); // 55m later
-        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
     }
@@ -4600,7 +4600,7 @@ config_dir = "~/.claude-alt"
         // AC5-ERR: no claim + no events file -> no badges, no panic.
         let t = Tmp::new("missing");
         let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
-        let raw = reg(r#"{"name":"target-x-4a48-fleet","cwd":"/w","status":"live"}"#);
+        let raw = reg(r#"{"name":"target-x-dddd-fleet","cwd":"/w","status":"live"}"#);
         let badges = build_truth_badges_at(&raw, now, &t.claims(), &t.events());
         assert!(badges.is_empty());
     }
@@ -4609,7 +4609,7 @@ config_dir = "~/.claude-alt"
     fn truth_badge_non_target_name_skipped() {
         // AC7-FR: a name with no parseable node id changes nothing.
         let t = Tmp::new("nontarget");
-        t.write_claim("x-4a48", std::process::id() as i32, SID);
+        t.write_claim("x-dddd", std::process::id() as i32, SID);
         t.write_event(SID, "2026-07-09T01:05:00Z");
         let now = rfc3339_like_to_secs("2026-07-09T01:07:00Z").unwrap();
         let raw = reg(r#"{"name":"worker-frontend","cwd":"/w","status":"live"}"#);
@@ -4630,7 +4630,7 @@ config_dir = "~/.claude-alt"
         assert!(empty.is_empty());
     }
 
-    // -- external lifecycle reconcile (x-7561) --------------------------------
+    // -- external lifecycle reconcile --------------------------------
 
     use crate::squad_store::{ExternalLifecycle, ExternalState};
 
@@ -4794,12 +4794,12 @@ config_dir = "~/.claude-alt"
         assert!(out.iter().all(|r| r.state == ExternalState::Unknown));
     }
 
-    // (x-cd67 US4 resolve_branch family) moved verbatim into its own module: this file is over the
+    // (US4 resolve_branch family) moved verbatim into its own module: this file is over the
     // shrink-only line, and test motion is the sanctioned shrink.
     #[path = "resolve_branch_tests.rs"]
     mod resolve_branch_tests;
 
-    // ---- (x-07c2) thread_reach tier derivation --------------------------------
+    // ---- thread_reach tier derivation --------------------------------
 
     /// AC1-HP: a live claude thread row derives Drive and its attach_id is
     /// unchanged. AC2-EDGE: a paneless codex row is Follow, a gemini row is
@@ -4870,7 +4870,7 @@ config_dir = "~/.claude-alt"
         );
     }
 
-    /// (x-296f) Every attach-capable harness in the contract reaches Drive.
+    /// Every attach-capable harness in the contract reaches Drive.
     ///
     /// This inverts the guard it replaces, which asserted the attach-capable
     /// set was exactly `["claude"]` and fired the moment codex declared a
@@ -4883,7 +4883,7 @@ config_dir = "~/.claude-alt"
     fn every_attach_capable_harness_reaches_drive() {
         // The embedded table (the build-generated copy of the Python-tree
         // canonical) parsed straight from the const, not from a crate-local
-        // file: x-244c deleted this crate's own copy.
+        // file: deleted this crate's own copy.
         let caps: toml::Value =
             toml::from_str(CAPABILITY_TOML).expect("parse harness_capabilities.toml");
         let harness = caps.get("harness").expect("harness table");

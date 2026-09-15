@@ -9,14 +9,14 @@
 # copy table-driven (fno.agents.harness_map) - no subprocess, no daemon, no
 # drift. The engine semantics (arm/hold/clear, word-padded flag matching,
 # position-scoped legacy rewrite) live beside each reader and are unit-tested
-# in both languages; the table is what they must agree ON. (x-8151, standing
+# in both languages; the table is what they must agree ON. (standing
 # law d-450caaeb.)
 
 [target_family]
 # The /target-family first tokens (the per-harness spellings the dispatch
 # surfaces emit). The refusal carrier's vocabulary is scoped to these:
 # rewriting the args of another slash verb would mutate its instruction text,
-# and prose is not a control input (x-9d11). Widen here, rebuild, and every
+# and prose is not a control input. Widen here, rebuild, and every
 # language picks it up.
 spellings = ["/target", "/fno:target", "$fno:target"]
 

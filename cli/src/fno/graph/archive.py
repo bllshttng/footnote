@@ -35,7 +35,7 @@ def _is_terminal(e: Entry) -> bool:
     # The one terminal predicate, homed in statuses: status in TERMINAL_RUNGS,
     # superseded_by, or a non-deferred completed_at. Archive asks "closed for
     # good", NOT "is the work done" (that is node_is_done, the status-only
-    # ruling x-c672 narrowed), so an archived-set fixture stamping only
+    # ruling narrowed), so an archived-set fixture stamping only
     # completed_at is terminal here.
     return is_terminal_entry(e)
 
@@ -212,7 +212,7 @@ def remint_archive_collisions(
 ) -> tuple[list[Entry], dict[str, str]]:
     """Remint any archive entry whose id collides with a live working-graph id.
 
-    17 such collisions exist on disk (x-f69b): the id generator only checked
+    17 such collisions exist on disk : the id generator only checked
     the working graph, so a freed id got reissued while the archive still
     held a different node under it. Reminting the LIVE id would break every
     open reference to it today (blockers, parents, branches, worktrees, open

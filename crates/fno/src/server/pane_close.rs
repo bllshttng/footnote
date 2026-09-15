@@ -1,4 +1,4 @@
-//! What happens when one pane closes (x-9b37): the close cascade, the
+//! What happens when one pane closes : the close cascade, the
 //! portal stand-in swap, and the loss notice a vanishing portal owes the
 //! operator who was reading it.
 
@@ -10,7 +10,7 @@ impl Core {
     /// session (Locked 8). Idempotent: an unknown pane (double-close race,
     /// AC4-ERR) is a no-op.
     ///
-    /// (x-d545) A portal seat is the one exception, and only when it is alone
+    /// A portal seat is the one exception, and only when it is alone
     /// in its tab AND is the LAST open portal: a viewer whose child died must
     /// not delete the only window onto the fleet. An idle shell takes the leaf
     /// (`tree::replace_leaf`, the repoint mechanic) and the entry names the
@@ -19,7 +19,7 @@ impl Core {
     /// wedging a tab around a dead pane is worse. A plain pane keeps today's
     /// semantics exactly (AC8-FR) - the arm is gated on a recorded seat id.
     ///
-    /// (x-8f9d) With another portal open, "the only window" is false, so the
+    /// With another portal open, "the only window" is false, so the
     /// swap does not fire and the closing portal simply goes away with its
     /// pane. Either way the entry is dropped unless a stand-in took the seat.
     pub(super) fn close_pane(&mut self, pid: u64) -> Flow {
@@ -27,7 +27,7 @@ impl Core {
     }
 
     /// [`Core::close_pane`] with the reason the pane is dying, which a
-    /// vanishing portal's loss notice carries (x-9b37).
+    /// vanishing portal's loss notice carries.
     pub(super) fn close_pane_reasoned(&mut self, pid: u64, reason: &str) -> Flow {
         let Some((sid, ti)) = self.session.find_pane(pid) else {
             // Unknown to the tree; still reap a stray registry entry so a
@@ -35,9 +35,9 @@ impl Core {
             self.reap_pane(pid);
             return Flow::Continue;
         };
-        // (x-8f9d) Which portal, if any, this pane seats. Equality against the
+        // Which portal, if any, this pane seats. Equality against the
         // recorded seat, never a truthiness test: pane ids allocate from zero,
-        // so pane 0 is a valid seat (the x-d914 defect).
+        // so pane 0 is a valid seat (the defect).
         let seat_portal = self
             .portals
             .iter()
@@ -48,7 +48,7 @@ impl Core {
             // has to stay closable by hand, so only a real viewer (argv
             // provenance) triggers the replacement.
             && self.panes.get(&pid).is_some_and(|e| e.cmd.is_some());
-        // (x-8f9d) The stand-in exists because "a viewer whose child died must
+        // The stand-in exists because "a viewer whose child died must
         // not delete the only window onto the fleet". With another portal open
         // that premise is false, so only the LAST portal keeps its seat alive.
         // Without this, closing four portals leaves four idle stand-in shells
@@ -102,16 +102,16 @@ impl Core {
                 self.reap_pane(shell_pid);
             }
         }
-        // (x-8f9d) No stand-in took the seat. The entry is deliberately LEFT
+        // No stand-in took the seat. The entry is deliberately LEFT
         // naming the now-dead pane, exactly as closing the single dedicated
         // pane always did: the reach treats a recorded pane the tree no longer
         // knows as absent, and reads its remembered tab id so a replacement
         // viewer lands back where the operator had it. Liveness is computed
         // from `panes` above, so a stale row can never be mistaken for an open
         // portal.
-        // (x-9b37) A portal vanishing under a live operator destroys the
+        // A portal vanishing under a live operator destroys the
         // evidence they were reading, so the loss is broadcast, never silent.
-        // The x-d545 swap above keeps the view, so it does not reach this.
+        // The swap above keeps the view, so it does not reach this.
         if seat {
             let idx = seat_portal.expect("seat implies a portal");
             if let Some(portal) = self.portals.get(&idx) {
@@ -150,7 +150,7 @@ impl Core {
             RemoveOutcome::SquadRemoved => {
                 // The last pane's close removed the whole workspace - it must
                 // honor the same de-persist contract as Command::CloseTab or
-                // its row returns at restart (same shape as the x-cde1 spec
+                // its row returns at restart (same shape as the spec
                 // drop below).
                 self.squad_members.remove(&sid);
                 if let Some((name, key)) = ident {
@@ -168,7 +168,7 @@ impl Core {
         // it re-anchors in this same mutation, then the push delivers
         // ModeSync -> Layout -> frames in order (AC2-ERR).
         self.tab_areas.remove(&tid);
-        // (x-cde1) Closing the last pane removes the tab too, so it must
+        // Closing the last pane removes the tab too, so it must
         // honor the same de-persist contract as Command::CloseTab: a
         // template tab drops its stored spec or restore resurrects the
         // closed tab (persist rewrites the squad's list from live tabs).

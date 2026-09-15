@@ -53,7 +53,7 @@ STALE_MUTEX_STEAL_S = 120
 # section and about to release within milliseconds, or it already released
 # into the gap while its dir was away and nobody is left to remove it - a
 # zombie. Handing either case the full threshold costs nothing for the first
-# and 120s of unreleasable, un-stealable stall for the second (x-474a:
+# and 120s of unreleasable, un-stealable stall for the second (:
 # reproduced live in test_AC3_FR_concurrent_stealers_both_land - the failure
 # is a zombie lock, not xdist load). Wire protocol with claims.rs; change
 # both in lockstep, see test_threshold_matches_the_rust_constant.
@@ -208,7 +208,7 @@ def steal_if_stale(lock_dir: Path) -> bool:
         # mtime would shield that orphan for the full steal threshold, so
         # hand back only an honest-hold grace window instead - a live holder
         # releases inside it; an orphan becomes stealable in RESTORE_GRACE_S
-        # rather than STALE_MUTEX_STEAL_S (x-474a).
+        # rather than STALE_MUTEX_STEAL_S.
         backdate = time.time() - (STALE_MUTEX_STEAL_S - RESTORE_GRACE_S)
         try:
             os.utime(reaped, (backdate, backdate))

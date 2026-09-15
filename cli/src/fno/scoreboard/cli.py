@@ -138,7 +138,7 @@ def scoreboard_command(
     ledger_path = _paths.ledger_json()
     from fno.events import EPHEMERAL_SUFFIX  # lazy: keeps schema load off the help path
 
-    events_paths = [  # ephemeral rows (human_touch) live in the sibling journal (x-add3)
+    events_paths = [  # ephemeral rows (human_touch) live in the sibling journal
         ledger_path.parent / "events.jsonl",
         ledger_path.parent / ("events.jsonl" + EPHEMERAL_SUFFIX),
     ]
@@ -530,7 +530,7 @@ def _render(sb: dict) -> None:
     elif emit:
         out(f"  ! touch emission failures: unknown ({emit.get('reason') or 'server unreachable'}).\n")
 
-    # x-b6bd: shipped is the merge; the terminal count rides beside it for one release.
+    # shipped is the merge; the terminal count rides beside it for one release.
     shipped = sb.get("shipped_nodes")
     if shipped is not None:
         by_term = sb.get("shipped_by_terminal", 0)

@@ -37,7 +37,7 @@ function decideSpendDrift({ capUsd, cost, intendedModel, actualModel, state }) {
       message:
         `MODEL DRIFT: attested '${intendedModel}' but this session is running ` +
         `'${actualModel}'. A routing failure slipped past the SessionStart env ` +
-        `check (x-db50 class). Verify your provider routing before trusting this run.`,
+        `check (class). Verify your provider routing before trusting this run.`,
       state: s,
     }
   }

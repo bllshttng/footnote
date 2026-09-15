@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # attest-model.sh - SessionStart guard (a) Layer 1: model/provider env coherence.
 #
-# Catches the x-db50 bug class across ALL FIVE model vars: any of
+# Catches the bug class across ALL FIVE model vars: any of
 # ANTHROPIC_MODEL or the four ANTHROPIC_DEFAULT_<TIER>_MODEL vars names a
 # non-Anthropic model (e.g. a glm-* routing target) while ANTHROPIC_BASE_URL
 # is empty or an anthropic.com host, so every call on that tier errors rather
@@ -114,7 +114,7 @@ if [[ -n "$OFFENDERS" ]] && { [[ -z "$BASE_HOST" ]] || [[ "$BASE_HOST" == "anthr
 fi
 
 # Routed to a real non-Anthropic base. Flag an Anthropic OAuth token where the
-# routed provider expects its own API key (the x-db50 OAuth-scrub failure).
+# routed provider expects its own API key (the OAuth-scrub failure).
 # Checked across all five model vars, not just ANTHROPIC_MODEL: a
 # tier-default-only route (ANTHROPIC_MODEL unset, e.g.
 # ANTHROPIC_DEFAULT_HAIKU_MODEL foreign) is the same shape the drift scan

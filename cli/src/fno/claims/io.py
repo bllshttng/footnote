@@ -91,7 +91,7 @@ def global_claims_dir() -> Path:
     """The GLOBAL claims directory itself (``~/.fno/claims`` by default).
 
     ``claims_dir(global_claims_root())`` spelled once. Five production call
-    sites composed those two by hand, which is the shape x-3d21 R4 rules
+    sites composed those two by hand, which is the shape R4 rules
     against: a composition is not a resolver, so nothing can hang a receipt or
     a fence on it. ``fno.paths.STATE_FILES`` names this symbol as the owner of
     the ``claims`` row.
@@ -106,7 +106,7 @@ def global_claims_dir() -> Path:
 # - dispatch:<id>  the boot-window bridge token (same id space as node:)
 # - reconcile:<id> the merge-context sentinel (written in the blocker's repo,
 #                  read in the dependent's repo)
-# - session:<uuid> the single-writer guard for a claude session (G1 adopt, x-26df):
+# - session:<uuid> the single-writer guard for a claude session (G1 adopt):
 #                  a session is durable + cross-checkout, so two project checkouts
 #                  must coordinate on the SAME lock or both could drive its
 #                  transcript (codex P1).

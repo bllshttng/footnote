@@ -1,7 +1,7 @@
 """Keyed settings loader: the cache is keyed on its declaration, not on nothing.
 
 fno.config is over the file budget and shrink-only, so the keyed pair moved
-here (x-3d21 R5). The collaborators live in the package and are imported at
+here (R5). The collaborators live in the package and are imported at
 CALL time: a module-level import would be a cycle (the package re-exports
 ``load_settings`` from this module).
 """
@@ -150,7 +150,7 @@ def _load_settings_at(key: _SettingsKey) -> "SettingsModel":
     for _path, parsed in reversed(layers):
         raw = _deep_merge(raw, parsed)
 
-    # Per-worktree local override (x-cbce). A real, non-symlinked local file is
+    # Per-worktree local override. A real, non-symlinked local file is
     # layered only for the allowlisted collision keys.
     if candidates:
         raw = _layer_worktree_local_override(raw, candidates[0].parent)

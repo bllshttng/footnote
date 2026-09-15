@@ -185,7 +185,7 @@ def reconcile_gate(*, dry_run: bool, node: Optional[str], json_out: bool, pr_num
 
 
 def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
-    """Bound a live holder (x-626f: LIVE at 0.0 pct CPU, invisible to a pid
+    """Bound a live holder (: LIVE at 0.0 pct CPU, invisible to a pid
     probe): a SIGUSR1 stack file plus a thread that releases the flight and
     exits when the budget trips or an opted-in parent dies. The thread stops
     once the claim file is gone; os._exit is safe because graph writes commit

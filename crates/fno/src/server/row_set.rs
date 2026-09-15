@@ -90,7 +90,7 @@ impl Core {
                                 external: a.external,
                                 tab: Some(tab.id),
                                 seen: self.seen.contains(&pid),
-                                // (x-6851 US3) cwd basename on every row so the
+                                // (US3) cwd basename on every row so the
                                 // sideline can flag a foreign-cwd join.
                                 cwd_base: cwd_basename(&a.cwd),
                                 tombstone: false,
@@ -116,7 +116,7 @@ impl Core {
                                 // one field away: keep it so the client can
                                 // show activity when the badge goes quiet.
                                 pane_activity: pane_entry.map(|e| e.vt.shell_activity()),
-                                // (x-07c2) Decorative on a pane-hosted row (its
+                                // Decorative on a pane-hosted row (its
                                 // reach focuses the pane); carried so the field
                                 // never lies about the row's capability.
                                 reach: agents_view::thread_reach(
@@ -170,7 +170,7 @@ impl Core {
                                 // registry is not is-a-shell - it can be a
                                 // full agent with a live workload, so the row
                                 // carries the pane's OWN vt reading and the
-                                // drain-path activity stamp (x-d401).
+                                // drain-path activity stamp.
                                 pane_activity: e.map(|e| e.vt.shell_activity()),
                                 last_activity_age_s: e.map(|e| e.last_output.elapsed().as_secs()),
                                 updated_at: None,
@@ -206,7 +206,7 @@ impl Core {
                     // A same-session mux row whose pane left the tree entirely
                     // (fully reaped) is a dangling exited row - preserve the old
                     // behaviour (`find_pane` -> None squad, `exited`).
-                    // (x-5f7f) A same-session mux row whose pane left the
+                    // A same-session mux row whose pane left the
                     // tree is DEAD: its worker's pty is gone (a pane child of
                     // this server). Render it paneless rather than dangling -
                     // there is no pane to focus, and a paneless dead row can
@@ -288,9 +288,9 @@ impl Core {
                     let squad = self
                         .member_squad_for_agent(a)
                         .or_else(|| self.session.find_by_cwd(&a.cwd));
-                    // (x-6851 US3) Every row carries its cwd basename: an orphan
+                    // (US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
-                    // (x-0090 AC2-UI), a squad-matched row for the foreign-cwd
+                    // (AC2-UI), a squad-matched row for the foreign-cwd
                     // exception subline.
                     let cwd_base = cwd_basename(&a.cwd);
                     out.push(AgentRow {
@@ -335,7 +335,7 @@ impl Core {
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Watch-only paneless: no PTY, no vt reading.
                         pane_activity: None,
-                        // (x-07c2) The load-bearing site: a paneless live row's
+                        // The load-bearing site: a paneless live row's
                         // reach decides what its gesture opens. The attach_id
                         // half of the input re-reads the registry row (not the
                         // wire row's exited-gated copy) because the tier
@@ -401,7 +401,7 @@ impl Core {
                 }
             }
         }
-        // 4. External-lifecycle tombstone rows (x-7561): a persisted external
+        // 4. External-lifecycle tombstone rows: a persisted external
         //    record NOT currently live renders so `x` can act on it. The state
         //    maps onto the existing `exited` flag - stopped -> `exited` (rm);
         //    failed/unknown/stopping/removing -> `!exited` (stop / stop-retry),
@@ -430,7 +430,7 @@ impl Core {
                 S::Removing => (false, Some("removing…".to_string())),
             };
             let squad = self.session.find_by_cwd(&r.cwd);
-            // (x-6851 US3) Every row carries its cwd basename - including a
+            // (US3) Every row carries its cwd basename - including a
             // squad-matched external-lifecycle row, so its foreign-cwd subline
             // still renders (the "every row" wire contract; codex review).
             let cwd_base = cwd_basename(&r.cwd);

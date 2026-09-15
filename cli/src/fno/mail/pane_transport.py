@@ -11,7 +11,7 @@ command that wraps it, and FAILS CLOSED when that call cannot run -- there is no
 bare-paste fallback, because a silent fallback rebuilds the unattributed send
 this module exists to close, and does so exactly when something is already wrong.
 
-Neither caller renders an envelope of its own: node x-1904 deleted the Rust
+Neither caller renders an envelope of its own: node deleted the Rust
 mirror of :mod:`fno.mail.envelope` as dead code and this module does not
 reintroduce one.
 
@@ -33,7 +33,7 @@ from typing import Callable, Optional
 #: seed's own read (`_submit_spawn_seed`), so both look at the same window.
 GATE_FRAME_LINES = 40
 
-#: x-f579: undeclared harnesses whose not-prompt-gated note has printed once
+#: : undeclared harnesses whose not-prompt-gated note has printed once
 #: this process. Repeats are suppressed (see the comment at the print).
 _UNDECLARED_NOTED: set[str] = set()
 
@@ -268,7 +268,7 @@ def prompt_refusal(
     from fno.agents.harness_map import capabilities_or_undeclared
 
     if not capabilities_or_undeclared(harness)["declared"]:
-        # x-f579: an undeclared harness has NO manifest to evaluate, by
+        # an undeclared harness has NO manifest to evaluate, by
         # definition, so the detector cannot run for it ever. The undeclared
         # lane's contract gives mail by pane-send anyway (submit_keys=enter,
         # the visible-failure default the spawn receipt names), so the gate
@@ -444,7 +444,7 @@ def prepare(
         # module's refusal exists not to commit.
         from fno.agents.harness_map import capabilities_or_undeclared
 
-        # x-f579: the posture answers "enter" for an undeclared harness, so
+        # the posture answers "enter" for an undeclared harness, so
         # this stays the ordinary attribution refusal rather than a
         # capability-table raise - mail by pane-send stays reachable.
         if capabilities_or_undeclared(resolved).get("submit_keys") == ["unsupported"]:

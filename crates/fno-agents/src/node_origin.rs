@@ -278,7 +278,7 @@ mod tests {
             Some("retro_land"),
             Some("retro:2026-09-08"),
         );
-        let child = record(None, Some("decompose"), Some("parent:x-37af"));
+        let child = record(None, Some("decompose"), Some("parent:x-aaaa"));
         assert_eq!(resolve(&landed).origin, RequestOrigin::AutomatedFollowup);
         assert_eq!(resolve(&child).origin, RequestOrigin::AutomatedFollowup);
         // The same channels without evidence stay unknown.

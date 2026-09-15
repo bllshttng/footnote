@@ -1,5 +1,5 @@
 """Context-window usage probe: the single implementation behind ``fno whoami``,
-the hidden ``fno whoami context`` verb, and the skill-local shim (x-7685).
+the hidden ``fno whoami context`` verb, and the skill-local shim.
 
 Ported VERBATIM from ``skills/target/scripts/context-probe.sh``: the token sum
 (input + cache_creation + cache_read off the LAST assistant line carrying a

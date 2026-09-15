@@ -48,7 +48,7 @@ class ClaimState(str, Enum):
     - suspect: TTL unexpired but holder not provably alive (dead/replaced pid).
       The respawned-worker case: TTL still protects the slot, so acquire/
       dispatch treat it like `live` (never steal); only TTL expiry (-> stale)
-      frees it. (x-ba4b)
+      frees it.
     - stale: claim exists but holder is dead or expired (recoverable)
     - corrupted: claim file present but cannot be parsed
     """

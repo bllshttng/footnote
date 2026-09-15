@@ -1,4 +1,4 @@
-"""Per-spawn account overlay resolution (x-d012).
+"""Per-spawn account overlay resolution.
 
 `fno agents spawn --account <id>` pins one worker to one claude account
 *without* touching the daemon-wide active `~/.claude` slot. This module resolves
@@ -32,7 +32,7 @@ and a lane-1/2 config dir that is missing or holds no login (preflight before
 spawn - no zombie worker).
 
 Explicit operator intent ONLY: this never participates in dispatch defaults,
-failover, or exhaustion auto-switch (x-d6be lock).
+failover, or exhaustion auto-switch (lock).
 """
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ SCRUB_AUTH_VARS = (
     # account inherits its parent's environment, and without this it would
     # report the parent's provider while billing its own - and be handed that
     # provider's subagent budget for a review its own account can afford
-    # (x-c703). Set-or-clear, never inherit.
+    #. Set-or-clear, never inherit.
     "FNO_ROUTE_PROVIDER",
     # Reused, not restated: the routed-model set is the same set a route
     # composes, so a new Claude tier lands in both at once.
@@ -179,7 +179,7 @@ class CredentialDecision:
 
     Facts fno owns, never claims about what claude honored: composition is
     decided before the process starts, so the composed environment is a fact,
-    but only claude knows which credential it sent (the x-74ea boundary).
+    but only claude knows which credential it sent (the boundary).
     """
 
     profile: Optional[str]  # account id whose CLAUDE_CONFIG_DIR is set
@@ -268,7 +268,7 @@ def compose_worker_credentials(
 ) -> "tuple[dict[str, str], CredentialDecision]":
     """Apply the scrub/account/route precedence once and report the outcome.
 
-    THE composition rule, stated here and nowhere else (x-8552): scrub every
+    THE composition rule, stated here and nowhere else : scrub every
     ``SCRUB_AUTH_VARS`` entry from the inherited environment, layer the account
     overlay (profile + its own login), layer the route overlay last so it wins
     ``ANTHROPIC_BASE_URL``/``ANTHROPIC_AUTH_TOKEN`` and every model tier as one

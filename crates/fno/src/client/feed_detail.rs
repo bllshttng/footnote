@@ -117,7 +117,7 @@ fn pane_value(item: &FeedItem, dest: &Destination<'_>) -> String {
     match dest {
         // A removal is a normal end, not a failure - but NOT APPLICABLE is
         // positive evidence the pane concept cannot apply, and a removed
-        // session's pane can outlive its row for a day (x-1b90). No removal
+        // session's pane can outlive its row for a day. No removal
         // record carries the pane's stop measurement on a field of its own
         // yet; when one does, that field - not the recovery line - prints
         // here. Until then the honest answer is not recorded.

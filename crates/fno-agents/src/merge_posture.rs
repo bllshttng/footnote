@@ -1,5 +1,5 @@
 //! The merge-refusal carrier: ONE vocabulary table and the Rust engine over
-//! it (x-8151, standing law d-450caaeb: Rust is the product, Python is the
+//! it (standing law d-450caaeb: Rust is the product, Python is the
 //! compatibility shell). The `/target`-family spellings and the carrier
 //! tokens live in `merge_posture.toml` (canonical, `include_str!`ed here;
 //! `build.rs` distributes the byte copy Python reads), and the posture
@@ -210,7 +210,7 @@ mod tests {
         assert!(!message_carries_no_merge("/target x-1"));
         // A different flag with the same prefix is not the carrier (round 8).
         assert!(!message_carries_no_merge("/target --no-merge-guard x-1"));
-        // Prose mentioning the flag arms nothing (x-9d11).
+        // Prose mentioning the flag arms nothing.
         assert!(!message_carries_no_merge(
             "please run /target --no-merge for me"
         ));

@@ -2,7 +2,7 @@
 
 **Load when:** the pipeline appears done and target is preparing to emit `<promise>`.
 
-The mechanical session side-effects (the ledger session-record, plan stamp/graduate, and the end-of-session handoff artifact) are NO LONGER part of this sequence. They re-home into `fno-agents finalize`, which the stop-hook shim runs on the terminal-allow boundary so they fire in EVERY mode (attended, autonomous, megawalk worker) even when the agent's context compacted before reaching pre-promise (control-plane step 6, ab-f8e5f214). You do not run cost calculation, ledger writes, plan stamping, or handoff generation by hand anymore.
+The mechanical session side-effects (the ledger session-record, plan stamp/graduate, and the end-of-session handoff artifact) are NO LONGER part of this sequence. They re-home into `fno-agents finalize`, which the stop-hook shim runs on the terminal-allow boundary so they fire in EVERY mode (attended, autonomous, megawalk worker) even when the agent's context compacted before reaching pre-promise (control-plane step 6). You do not run cost calculation, ledger writes, plan stamping, or handoff generation by hand anymore.
 
 What remains here is the advisory judgment work only the agent can decide (memory pass, deferrals capture), plus the cross-project recap, the pre-promise self-check, and the promise output. None of these gate `<promise>`: completion authority is the three external reads (PR + CI + reviews) plus the budget ceiling, decided by `fno-agents loop-check`. A skipped advisory step never blocks the promise and never re-opens the loop.
 
@@ -89,7 +89,7 @@ fi
 
 Before outputting `<promise>`, verify the pipeline actually completed: sigma-review ran and found no blocking issues, tests pass, validate is green, a PR exists (unless no_ship), and external review is satisfied (unless no_external). These are not gate booleans to read from a file - they are things you did during the session. If any phase was skipped unintentionally, run it before emitting the promise.
 
-**PR→node link assertion (x-e106).** When this session is node-bound (a
+**PR→node link assertion.** When this session is node-bound (a
 `graph_node_id` other than `null` in the manifest body) and a PR was created,
 confirm `node.pr_number` equals the PR you are about to promise - the last-line
 assertion for any ship that reached pre-promise through a path that skipped the
@@ -119,7 +119,7 @@ fi
 
 The loop-check verb (`fno-agents loop-check`) will verify the world independently: PR exists for HEAD + CI green + reviewed. A premature promise does not close the loop - it blocks with the failing read named, and the session continues until the world catches up or the backstop fires.
 
-**Required-bot quota early warning (x-5d3e, advisory).** When a review gate would wait on a `config.review` required bot, a cached-quota check surfaces a coming wedge now instead of letting the gate hang silently for hours. Run it just before the promise; it is read-only, fail-open, and never gates:
+**Required-bot quota early warning (advisory).** When a review gate would wait on a `config.review` required bot, a cached-quota check surfaces a coming wedge now instead of letting the gate hang silently for hours. Run it just before the promise; it is read-only, fail-open, and never gates:
 
 ```bash
 fno config accounts required-bot-check
@@ -168,7 +168,7 @@ Candidate categories:
 - One-off task details with no reuse value.
 - Near-duplicates of existing memory entries. The writer's dedup (exit 2) catches exact-name collisions, but you should avoid semantic near-duplicates too - read MEMORY.md index before writing.
 
-### Blocklist (x-8fc0)
+### Blocklist
 
 Four lesson classes to never write, regardless of how confident the session felt writing them. Hermes bans the same classes for the same reason: "these harden into refusals the agent cites against itself for months after the actual problem was fixed."
 
@@ -207,7 +207,7 @@ BODY
 )" \
   '{type: $type, name: $name, description: $description, body: $body}')
 
-# Read-before-write (x-8fc0). A memory file with this name may already
+# Read-before-write. A memory file with this name may already
 # exist. If it does, the writer refuses the update without proof you read
 # the CURRENT content this turn - the guard against rewriting a rule from a
 # hallucinated memory of its contents. Compute the same target path the
@@ -278,7 +278,7 @@ When zero candidates pass the bar, write nothing. Silence is fine. An empty memo
 
 Sibling to the memory pass, but for the *substrate* rather than your memory. Scan this session for small follow-ups that surfaced and were deferred ("replace this lambda with a def", "add a `Literal[]` here", "audit the failure-path emits") - items too small for an idea node but worth not losing. These land in the backlog capture tier (`fno backlog capture`), a markdown holding-pen below idea nodes. See `docs/triage.md` in the footnote repo for the full triage + promotion flow.
 
-**The pass is advisory** (`deferrals_captured`, ab-d63cdd57): run-and-log, never a gate. It writes a `.fno/artifacts/deferrals-${session_id}.md` artifact and emits an `inbox_add`/`inbox_empty_pass` event for the session as an observable record, but its absence never blocks `<promise>` and never re-opens the loop (completion authority is the three external reads plus budget). Skipped entirely when `no_deferrals_capture: true` (S size).
+**The pass is advisory** (`deferrals_captured`): run-and-log, never a gate. It writes a `.fno/artifacts/deferrals-${session_id}.md` artifact and emits an `inbox_add`/`inbox_empty_pass` event for the session as an observable record, but its absence never blocks `<promise>` and never re-opens the loop (completion authority is the three external reads plus budget). Skipped entirely when `no_deferrals_capture: true` (S size).
 
 Run the mechanical scan first (it reads the transcript named by `claude_transcript_id`, or stdin):
 
@@ -333,7 +333,7 @@ Output the completion promise when the pipeline is done. Choose the variant that
 <promise>MISSION COMPLETE: all tasks done, tests passing, docs generated, PR #42 merged.</promise>
 
 # outcome: held (checks not green yet; retry when green - there is no queued
-# outcome, x-9d11: only fno-agents finalize arms GitHub's native queue)
+# outcome,: only fno-agents finalize arms GitHub's native queue)
 <promise>MISSION COMPLETE: all tasks done, tests passing, docs generated, PR #42 green; merge held for checks.</promise>
 
 # outcome: failed

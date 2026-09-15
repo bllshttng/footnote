@@ -81,7 +81,7 @@ def _find_by_name(registry: list[AgentEntry], name: str) -> Optional[AgentEntry]
 
 
 def _row_harness(entry: AgentEntry) -> str:
-    """This row's harness for matching (x-880e: harness is the sole identity axis;
+    """This row's harness for matching (: harness is the sole identity axis;
     a legacy row's provider is back-filled into harness at load)."""
     return (getattr(entry, "harness", None) or "").lower()
 
@@ -94,7 +94,7 @@ def _find_by_session(
     """Match a registry row whose recorded session id equals ``session_uuid``.
 
     Session ids are provider-local: the SAME id may be registered under different
-    harnesses, so when ``harness`` is known (x-ec59) matching is SCOPED to rows of
+    harnesses, so when ``harness`` is known matching is SCOPED to rows of
     that harness and to that harness's own id fields. This prevents a codex/gemini
     id from matching a same-id claude row, and stops a non-claude id from falling
     through to the claude short-id prefix (a 32-bit jobId prefix that could collide).

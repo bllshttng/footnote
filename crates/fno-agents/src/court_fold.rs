@@ -1,4 +1,4 @@
-//! `court-fold`: the crown scope fold for `fno agents court --nodes` (x-52d2).
+//! `court-fold`: the crown scope fold for `fno agents court --nodes`.
 //!
 //! Python passes the crowns `gather_court` already adjudicated; this verb
 //! reads the graph store (in-process, `backlog::api::rows`) and the claims

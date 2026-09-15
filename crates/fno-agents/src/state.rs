@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 // Current registry schema version.
 //
-// v4 (ab-a171ceb2) is a forward-compat bump for `host_mode`: v4 is
+// v4 is a forward-compat bump for `host_mode`: v4 is
 // structurally identical to v3 (host_mode is additive-optional and read
 // version-independently via absent==exec coercion), but stamping v4 forces a
 // pre-host_mode reader - which accepts only {1,2,3} and has no host_mode code
@@ -55,17 +55,17 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // `screen_state` verdict: absent reads as `None`, but a pre-v7 writer would
 // silently drop a stored verdict on write-back and blind the manifest rung
 // of the badge lattice. Accepted set widens to 1..=7.
-// v8 (x-ec59) is the canonical-identity bump for `harness` / `harness_session_id`
+// v8 is the canonical-identity bump for `harness` / `harness_session_id`
 // (mirrors Python's SCHEMA_VERSION): a pre-v8 reader rejects the store rather than
 // silently dropping the canonical fields on a read-modify-write.
 //
-// v9 (x-1b1e) removes `claude_short_id`: the claude jobId (a pure prefix of the
+// v9 removes `claude_short_id`: the claude jobId (a pure prefix of the
 // session UUID) now lives in `short_id`, unifying the transport-key field across
 // providers. A legacy row's `claude_short_id` backfills into `short_id` on load
 // (see `backfill_short_id`); a pre-v9 reader must reject a v9 store rather than
 // drop the jobId on a read-modify-write. Accepted set widens to 1..=9.
 //
-// v10 (x-880e) removes the on-disk `provider` field and the legacy per-provider
+// v10 removes the on-disk `provider` field and the legacy per-provider
 // session-id trio (`codex_session_id`, `gemini_session_id`, `claude_session_uuid`):
 // `harness` is the sole identity axis and `harness_session_id` the sole session id.
 // A legacy row's `provider` backfills `legacy_provider` -> `harness`, and each
@@ -80,20 +80,20 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // every written row, so a pre-v11 reader must reject a v11 store rather than
 // TypeError on the unknown keys. Accepted set widens to 1..=11.
 //
-// v12 (x-ae2d) adds `route_settings_path` - the route-settings file a routed
+// v12 adds `route_settings_path` - the route-settings file a routed
 // worker was launched with - mirrored here for the same reason as the crown
 // fields: a Python-only field is dropped when the daemon re-serializes the row,
 // which would leave the relaunch guard reading None on every row the daemon has
 // touched. Python's asdict emits the key on every written row, so a pre-v12
 // reader must reject a v12 store. Accepted set widens to 1..=12.
 //
-// v13 (x-0358) adds `fno_id` - the target-minted run id of an adopted /target
+// v13 adds `fno_id` - the target-minted run id of an adopted /target
 // orphan, so a revived session is durably linked to the node it was working
 // (recoverable even if the worktree moves). Same X3 passthrough rationale: a
 // Python-only field would be dropped on the daemon's read-modify-write.
 // Accepted set widens to 1..=13.
 //
-// v14 (x-e21e) adds `delivery_policy` - a recipient's mail delivery policy
+// v14 adds `delivery_policy` - a recipient's mail delivery policy
 // ("bus-only": never prompt-line inject, always the durable bus). A
 // DELIVERY-POLICY fact, never a liveness verdict (mail_inject.rs documents the
 // not-live misnomer that misled readers twice). Same X3 passthrough rationale:
@@ -104,19 +104,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // from the harness identity. Rows through v14 still treat an on-disk provider
 // as the removed harness alias and migrate it at the read choke point.
 //
-// v16 (x-944f) adds `origin` and `spawn_trigger` - two fields Python's
+// v16 adds `origin` and `spawn_trigger` - two fields Python's
 // AgentEntry has written for releases and Rust never modelled, so every Rust
 // write re-serialized the row from the typed struct and dropped them. Measured
 // 2026-08-20: 0 of 37 live rows carried either key. The bump is what turns a
 // pre-v16 binary's SILENT erasure into a loud refusal, which is the same
 // reason v11-v14 bumped for their own mirrors.
 //
-// v17 (x-d401) adds `model_basis`, the requested-vs-verified qualifier on
+// v17 adds `model_basis`, the requested-vs-verified qualifier on
 // `model`. Same rationale as v16: a pre-v17 binary re-serializes the row from
 // its typed struct and drops the key, and a pre-v17 Python reader would see an
 // unknown key AT its own schema and TypeError. Accepted set widens to 1..=17.
 //
-// v18 adds predecessor/fork lineage fields. v19 (x-de10) adds
+// v18 adds predecessor/fork lineage fields. v19 adds
 // `sandbox_posture` - the sandbox posture a codex thread was launched with,
 // applied by `thread/resume` across a daemon restart. Same additive-optional
 // shape as v11-v18: skip-when-None keeps old rows slim, and the bump turns a
@@ -126,12 +126,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // `related_session_id`. An older writer must refuse rather than erase those
 // fields during a read-modify-write. Accepted set widens to 1..=20.
 //
-// v21 (x-98ab) adds `node` - the backlog node a row works, stamped by the
+// v21 adds `node` - the backlog node a row works, stamped by the
 // Python spawn seams from resolved provenance so a reap decision never parses
 // the node out of a name. Additive-optional passthrough: without this mirror a
 // daemon read-modify-write drops the Python stamp. Accepted set widens to 1..=21.
 //
-// v22 (x-ac6b) adds `keeper_child_pid` - the process a lane-B keeper hosts,
+// v22 adds `keeper_child_pid` - the process a lane-B keeper hosts,
 // the daemon's restart-sweep assertion. The bump is not for the reader (an
 // absent key reads as None) but for the WRITER: a pre-v22 daemon accepts the
 // unknown key through serde and its next read-modify-write silently drops it,
@@ -140,7 +140,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // erasure into a loud refusal, the same reason v16 bumped for origin.
 // Accepted set widens to 1..=22.
 //
-// v23 (x-3837) adds `substrate` - the lane a row was spawned on ("pane",
+// v23 adds `substrate` - the lane a row was spawned on ("pane",
 // "thread", "headless"), stamped once at birth by the writer that resolved the
 // lane so a later restore reads the lane instead of guessing it off a mux ref
 // or a pid. `None` on rows whose writer cannot know (adopt, manifest
@@ -149,7 +149,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // erasure on read-modify-write is unrecoverable rather than self-healing.
 // Accepted set widens to 1..=23.
 //
-// v24 (x-2019) adds the requested axis - `requested_model` /
+// v24 adds the requested axis - `requested_model` /
 // `requested_provider` / `requested_effort`, the spawn REQUEST verbatim as
 // typed beside the observed axes, so a silent substitution is a one-line diff.
 // Same writer-protection rationale as v22/v23: a pre-v24 writer accepts the
@@ -173,7 +173,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // write) instead of TypeError on the unknown AgentEntry kwargs at an equal
 // version number. Accepted set widens to 1..=26.
 //
-// v27 (x-04ce) adds `launch_account_source` - WHO chose the row's
+// v27 adds `launch_account_source` - WHO chose the row's
 // `launch_account`: "caller" (a flag on this spawn's argv) or "config"
 // (accounts.quota.pick_on_launch picked it). None on every other row:
 // launch_account "default" already says nobody chose, a revive inherits the
@@ -185,7 +185,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // unknown keys and erases them on its next read-modify-write. Accepted set
 // widens to 1..=27.
 //
-// v28 (x-5283) adds `adopted_by_session` - the session that VOUCHED for an
+// v28 adds `adopted_by_session` - the session that VOUCHED for an
 // adopted row, split out so `spawned_by_session` keeps one meaning and
 // crowning cannot re-attribute a row's cost.
 //
@@ -260,7 +260,7 @@ pub struct Registry {
     /// leaves it readable by Python rather than stranding the surviving rows
     /// under an `entries` key Python ignores (Codex P1, PR #364). `alias =
     /// "entries"` keeps reading older daemon-written registries. Combined with
-    /// ab-e5a57efa this makes the typed read path parse Python registries.
+    /// this makes the typed read path parse Python registries.
     #[serde(default, rename = "agents", alias = "entries")]
     pub entries: Vec<RegistryEntry>,
 }
@@ -387,7 +387,7 @@ impl Registry {
     /// Find an entry by agent name or its canonical full harness session id.
     /// The one optional related id resolves at the same tier: a fork's full
     /// uuid addresses its row too (both ids stay valid forever). A
-    /// predecessor id resolves at the full tier only (x-dfe7): delivery
+    /// predecessor id resolves at the full tier only: delivery
     /// naming a succeeded session follows the row that now answers as its
     /// successor.
     pub fn find_name_or_full_session_id(&self, token: &str) -> Option<&RegistryEntry> {
@@ -468,7 +468,7 @@ pub enum InsideLegState {
 /// CONTRACT only -- the seq-drop, TTL-aging, and 3-tier authority BEHAVIOUR that
 /// consume these fields land in E3.2/E3.3. Mirrored in Python's `AgentEntry`
 /// (`inside_leg: Optional[dict]`, a lossless passthrough) so a row round-trips
-/// across the mixed-language registry (X3 / ab-b946b59c).
+/// across the mixed-language registry (X3 /).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InsideLegReport {
     pub state: InsideLegState,
@@ -494,7 +494,7 @@ pub struct StopRecord {
 }
 
 /// How long a codex thread's `working` inside-leg report stays authoritative
-/// (x-fd66). The thread's daemon refreshes it at half this cadence while the
+///. The thread's daemon refreshes it at half this cadence while the
 /// driver is answering, so only a stalled app-server lets the report age out
 /// - to liveness, which for a pane-less thread row is Unmeasured (`?`), never
 /// a cheerful default. A `done` report carries no ttl: a thread at its prompt
@@ -522,7 +522,7 @@ pub struct ScreenStateReport {
     pub at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_ms: Option<u64>,
-    /// (x-c929) The answerable-prompt payload when this `blocked` verdict came
+    /// The answerable-prompt payload when this `blocked` verdict came
     /// from a rule with an `[answer]` grammar and the region yielded a clean
     /// numbered menu; `None` for every other state or a focus-only blocked
     /// prompt. Rides the badge to the sideline (JSON passthrough); the mux
@@ -571,7 +571,7 @@ impl InsideLegReport {
     /// True when `received_at` is within `window_secs` of `now_secs` -- a plain
     /// recency test (distinct from `is_live_at`, which never ages a report that
     /// carries no `ttl_ms`). Used as the "provably live" signal that stops an
-    /// ask/mail routing miss from false-orphaning a live worker (x-c393). An
+    /// ask/mail routing miss from false-orphaning a live worker. An
     /// unparseable stamp fails CLOSED (not recent), so a corrupt row can never
     /// shield a dead session from orphaning.
     pub fn received_within(&self, now_secs: u64, window_secs: u64) -> bool {
@@ -584,7 +584,7 @@ impl InsideLegReport {
     }
 }
 
-/// True when a badge report ENTERS `target` from a different prior state (x-dd84).
+/// True when a badge report ENTERS `target` from a different prior state.
 /// This is the whole episode gate for the OS-notification wire: firing only on
 /// the edge INTO `blocked`/`done` means a repeat report at `target` (prev already
 /// `target`) does not re-fire, and a return to `working` then back to `blocked`
@@ -664,7 +664,7 @@ pub struct MuxRef {
 /// through this typed struct -- but ONLY for fields this struct models. A
 /// Python `AgentEntry` field with no counterpart here is DROPPED on the next
 /// Rust write, silently, because there is no serde catch-all. `origin` and
-/// `spawn_trigger` sat outside the struct that way until x-944f and read
+/// `spawn_trigger` sat outside the struct that way until and read
 /// 0-of-37 populated on the live fleet as a result. Adding a Python-only field
 /// means mirroring it here in the same commit.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -678,10 +678,10 @@ pub struct RegistryEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
     /// Daemon-set PTY field. Python's `AgentEntry` now mirrors it as
-    /// `short_id: str = ""` (ab-b946b59c) so a real PTY row in a mixed registry
+    /// `short_id: str = ""` so a real PTY row in a mixed registry
     /// is Python-readable and round-trips losslessly; `skip_serializing_if`
     /// still drops it when empty so a *Rust*-authored exec/ask row stays slim and
-    /// a round-tripped Python row omits it (default-to-empty on read, ab-e5a57efa;
+    /// a round-tripped Python row omits it (default-to-empty on read,;
     /// Codex P1, PR #364). A real daemon PTY agent always has a non-empty
     /// short_id, so it still serializes for those rows; conversely a one-shot
     /// `ask` row always has an empty short_id (no worker-socket identity). That
@@ -703,10 +703,10 @@ pub struct RegistryEntry {
     /// remain lossless when a Python writer adds the axis fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// (x-d401) The basis for `model`: "requested" (stamped at spawn from the
+    /// The basis for `model`: "requested" (stamped at spawn from the
     /// flag or route the caller named) or "verified" (read back from a
     /// verified pane status). A bare model is two facts in one field - the
-    /// x-aa8e shape - so the pair travels together; a row with a model and
+    /// shape - so the pair travels together; a row with a model and
     /// no basis predates this field and reads as unmarked, never as verified.
     /// Additive-optional like the field it qualifies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -735,7 +735,7 @@ pub struct RegistryEntry {
     pub harness_title: Option<String>,
     pub cwd: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
-    /// `project_root: str = ""` (ab-b946b59c; see `short_id`): default on read,
+    /// `project_root: str = ""` (; see `short_id`): default on read,
     /// skip-when-empty on write.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub project_root: String,
@@ -744,11 +744,11 @@ pub struct RegistryEntry {
     /// Python can read a Rust-written row (Codex P1). When a Rust PTY row DOES
     /// record one, Python's load_registry drops the key before constructing the
     /// entry and recomputes the same projection from the *_session_id fields
-    /// (ab-b946b59c).
+    ///.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// The FULL claude session UUID -- the stream-json `--resume` target,
-    /// distinct from the 8-hex jobId in `short_id`. v10 (x-880e): a load-derived
+    /// distinct from the 8-hex jobId in `short_id`. v10: a load-derived
     /// in-memory alias only. `skip_serializing` keeps it off disk (harness_session_id
     /// is the sole persisted session id); `backfill_harness_aliases` populates it
     /// from `harness_session_id` on load, so the ~30 daemon read sites need no churn.
@@ -756,7 +756,7 @@ pub struct RegistryEntry {
     /// at the write choke point (AC6-FR). [stream-json host lane node]
     #[serde(default, skip_serializing)]
     pub claude_session_uuid: Option<String>,
-    /// Canonical harness identity (x-ec59), mirroring Python's `AgentEntry`:
+    /// Canonical harness identity, mirroring Python's `AgentEntry`:
     /// `harness` is the harness name (identity only -- `provider` stays
     /// load-bearing for dispatch) and `harness_session_id` is the worker's own
     /// session id in its harness's store. Both additive-optional, back-filled
@@ -777,7 +777,7 @@ pub struct RegistryEntry {
     /// full session id and stable fno id rather than sharing a mutable row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_session_id: Option<String>,
-    /// The ACCOUNT axis this worker was launched under (x-d285, v20). Three
+    /// The ACCOUNT axis this worker was launched under (v20). Three
     /// values, never two: `Some("default")` (the spawn positively pinned no
     /// account), `Some(<account-id>)` (explicit or headroom-picked), `None`
     /// (legacy row or a mint that cannot know - never readable as default,
@@ -788,7 +788,7 @@ pub struct RegistryEntry {
     /// drops a Python-stamped account.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_account: Option<String>,
-    /// WHO chose `launch_account` (x-04ce, v26): `"caller"` (a flag on this
+    /// WHO chose `launch_account` (v26): `"caller"` (a flag on this
     /// spawn's argv) or `"config"` (`accounts.quota.pick_on_launch` picked
     /// it). `None` when launch_account is `"default"` (nobody chose - the
     /// value already says so), when a revive inherited the account, and on
@@ -800,13 +800,13 @@ pub struct RegistryEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_account_source: Option<String>,
     /// The SECOND valid session id an additive fork/background minted on this
-    /// row (x-d285, v20). Both ids stay valid forever and resolve to the same
+    /// row (v20). Both ids stay valid forever and resolve to the same
     /// row and launch binding; neither replaces the other, and at most ONE
     /// optional id exists (no list, edge, or lineage graph). Mirrors Python's
     /// `AgentEntry.related_session_id`; same X3 passthrough.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub related_session_id: Option<String>,
-    /// The backlog node this row WORKS (x-98ab, v21), mirroring Python's
+    /// The backlog node this row WORKS (v21), mirroring Python's
     /// `AgentEntry.node`: stamped once at birth by the Python spawn seams from
     /// the spawn's resolved provenance and by the client-side ask lanes from
     /// their inherited `FNO_NODE`, so a reap decision reads the node instead of
@@ -818,7 +818,7 @@ pub struct RegistryEntry {
     /// re-serializes must keep the stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
-    /// v23 (x-2019): the spawn REQUEST, verbatim as the flags spelled it (any
+    /// v23: the spawn REQUEST, verbatim as the flags spelled it (any
     /// `[1m]` suffix included), stamped once at birth beside the observed
     /// axes. `model`/`model_basis` flip to a verified observation; these never
     /// do, so requested-vs-observed stays a one-line diff. Absence means
@@ -851,11 +851,11 @@ pub struct RegistryEntry {
     pub model_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_record_id: Option<String>,
-    /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
+    /// Daemon-set PTY field, mirrored in Python's `AgentEntry`:
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messaging_socket_path: Option<String>,
-    // v10 (x-880e): load-derived in-memory aliases only; skip_serializing keeps
+    // v10: load-derived in-memory aliases only; skip_serializing keeps
     // them off disk (harness_session_id is the sole persisted session id) and
     // backfill_harness_aliases populates them on load, so daemon read sites need
     // no churn. A post-load mutation syncs back at the write choke point (AC6-FR).
@@ -876,7 +876,7 @@ pub struct RegistryEntry {
     /// absent==exec rule lives in one place. [interactive-drive node]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_mode: Option<String>,
-    /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
+    /// Daemon-set PTY field, mirrored in Python's `AgentEntry`:
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cc_session_id: Option<String>,
@@ -885,21 +885,21 @@ pub struct RegistryEntry {
     pub last_message_at: Option<String>,
     pub created_at: String,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` as
-    /// `pid: Optional[int]` (ab-b946b59c): skip when absent so a round-tripped
+    /// `pid: Optional[int]`: skip when absent so a round-tripped
     /// Python row stays slim and Python-readable (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
     /// The worker process's start time, captured alongside `pid` at spawn, used
     /// to detect PID reuse: a liveness/reap/signal decision treats `pid` as "our
     /// worker" only if the live process's start time still matches this
-    /// (ab-d19e6458). Per-host, per-boot value (Linux: `/proc/<pid>/stat` field
+    ///. Per-host, per-boot value (Linux: `/proc/<pid>/stat` field
     /// 22 in clock ticks; macOS: `kinfo_proc` start `timeval` in microseconds) —
     /// only ever compared for equality against a fresh read of the SAME pid, so
     /// the unit/epoch difference across platforms is irrelevant. Daemon-set PTY
-    /// field, mirrored in Python's `AgentEntry` (ab-b946b59c); skip when absent.
+    /// field, mirrored in Python's `AgentEntry`; skip when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_start_time: Option<u64>,
-    /// The KEEPER's child pid for a lane-B thread row (x-ac6b): the process
+    /// The KEEPER's child pid for a lane-B thread row: the process
     /// the keeper hosts, learned from the spawn Identify reply and re-asserted
     /// unchanged by the registry-side keeper sweep on every daemon start. A
     /// changed pid means something respawned and is wearing the row's name -
@@ -924,7 +924,7 @@ pub struct RegistryEntry {
     /// Timestamp of the most recent reconcile probe (finding #1 High): the
     /// reconcile sweep orders entries by ASC `last_reconciled_at` so a
     /// budget-exhausted sweep stays fair across a large registry. Daemon-set,
-    /// mirrored in Python's `AgentEntry` (ab-b946b59c); skip when absent (Codex P1).
+    /// mirrored in Python's `AgentEntry`; skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reconciled_at: Option<String>,
     /// Latest inside-leg report for this row's claude pane (inside-out E3,
@@ -932,12 +932,12 @@ pub struct RegistryEntry {
     /// pre-existing row, and for any provider/lane that does not run a hook).
     /// Skip-when-`None` so a row without a report stays slim and a stale reader
     /// rejects via the v5 schema bump rather than silently dropping it. Mirrored
-    /// in Python's `AgentEntry` as `inside_leg: Optional[dict]` (X3 / ab-b946b59c).
+    /// in Python's `AgentEntry` as `inside_leg: Optional[dict]` (X3 /).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inside_leg: Option<InsideLegReport>,
     /// When reconcile's Exited transition proved this row's backing process
     /// gone (ISO 8601 UTC), cleared again if current evidence contradicts it.
-    /// Retirement no longer reads it (x-c672: the reverse join plus transcript
+    /// Retirement no longer reads it (: the reverse join plus transcript
     /// quiet decide); the liveness ladder's heartbeat rung does, treating a
     /// heartbeat advancing past it as life. Deliberately NOT `last_reconciled_at`
     /// (reconcile re-stamps that on every probe, so it can't anchor a stable
@@ -990,7 +990,7 @@ pub struct RegistryEntry {
     pub crown_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_grantor: Option<String>,
-    /// Route-settings path (x-ae2d, v12): the `route-settings/<sha16>.json`
+    /// Route-settings path (v12): the `route-settings/<sha16>.json`
     /// this worker was launched with, or `None` when it was never routed. The
     /// Python spawn seams are the sole writers and the Python relaunch paths
     /// the sole readers; the daemon only custodies it so a stamped path
@@ -1001,7 +1001,7 @@ pub struct RegistryEntry {
     /// live `ANTHROPIC_AUTH_TOKEN`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_settings_path: Option<String>,
-    /// fno do target run id (x-0358, v13): the `fno_id` of the /target session an
+    /// fno do target run id (v13): the `fno_id` of the /target session an
     /// adopted orphan was working, so the revived session is linked to its node.
     /// Set by the adopt verb from the matched `.fno/target-state.md`; `None` for
     /// every row that did not come from a target manifest. Identity-adjacent
@@ -1010,7 +1010,7 @@ pub struct RegistryEntry {
     /// `route_settings_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fno_id: Option<String>,
-    /// Mail delivery policy (x-e21e, v14): `Some("bus-only")` means mail to
+    /// Mail delivery policy (v14): `Some("bus-only")` means mail to
     /// this recipient never prompt-line injects and always takes the durable
     /// bus; `None` is the default injectable policy every worker keeps. A
     /// DELIVERY-POLICY fact, never a liveness verdict - the same distinction
@@ -1022,7 +1022,7 @@ pub struct RegistryEntry {
     /// daemon's read-modify-write would drop a Python-stamped policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_policy: Option<String>,
-    /// Sandbox posture the worker was LAUNCHED with (x-de10, v19):
+    /// Sandbox posture the worker was LAUNCHED with (v19):
     /// `Some("danger-full-access")` for a `--yolo` codex thread,
     /// `Some("workspace-write")` for the bounded default. Recorded at spawn by
     /// the codex thread lane and applied by `thread/resume`, so a daemon
@@ -1041,7 +1041,7 @@ pub struct RegistryEntry {
     /// stamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_grant: Option<String>,
-    /// Registration origin (x-944f, v16), mirroring Python's `AgentEntry`:
+    /// Registration origin (v16), mirroring Python's `AgentEntry`:
     /// `Some("operator")` for a session a human started by hand (`fno agents
     /// register`, `/fno-me`), `Some("spawn")` for a footnote-created worker,
     /// `Some("adopted")` for one the harness-store healer found already
@@ -1061,14 +1061,14 @@ pub struct RegistryEntry {
     /// loses every operator row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
-    /// What caused this spawn (x-42c5), mirroring Python's `AgentEntry`. Same
+    /// What caused this spawn, mirroring Python's `AgentEntry`. Same
     /// X3 passthrough as `origin` and erased by the same defect: it shipped
     /// Python-only and read 0-of-37 on the live fleet. Distinct from `origin`,
     /// which answers only human-or-not; this carries the cause.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_trigger: Option<String>,
-    /// The spawn-time parent edge (x-132c), mirroring Python's `AgentEntry`
-    /// (x-30f6): ambient-captured at every mint site, never required of a
+    /// The spawn-time parent edge, mirroring Python's `AgentEntry`
+    /// ambient-captured at every mint site, never required of a
     /// caller. Same X3 passthrough as `origin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_session: Option<String>,
@@ -1076,7 +1076,7 @@ pub struct RegistryEntry {
     pub spawned_by_harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_cwd: Option<String>,
-    /// x-5283 LD3: the session that VOUCHED for an adopted row (X3 passthrough).
+    /// LD3: the session that VOUCHED for an adopted row (X3 passthrough).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopted_by_session: Option<String>,
     /// The sandbox posture the codex app-server RESOLVED for a thread row, in
@@ -1098,7 +1098,7 @@ pub struct RegistryEntry {
     /// `workspaceWrite` alone are different workers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted_writable_roots: Vec<String>,
-    /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
+    /// v9 backfill-only: the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
     /// `short_id` at load and clears it, so it never round-trips. This is the
@@ -1179,7 +1179,7 @@ pub fn validate_single_live_ref(entry: &RegistryEntry) -> Result<(), String> {
     Ok(())
 }
 
-/// The resolvable-handle invariant (x-7bcd): at creation, every registry row
+/// The resolvable-handle invariant: at creation, every registry row
 /// carries at least one handle an outside observer can resolve without asking
 /// the worker anything. Any one of three legs satisfies it: (1) `pid` +
 /// `pid_start_time`, when the writer owns the process; (2) a non-empty
@@ -1214,13 +1214,13 @@ pub const HOST_MODE_EXEC: &str = "exec";
 pub const HOST_MODE_INTERACTIVE: &str = "interactive";
 
 /// The env key the Python spawn seam sets when an account overlay was applied
-/// (x-d285). An `--account` bg spawn execs into this binary with the overlay
+///. An `--account` bg spawn execs into this binary with the overlay
 /// in `os.environ`; the account ID itself has no argv carrier, so the seam
 /// publishes it here for the row mint to stamp. Absent on route-bearing and
 /// pane spawns, which never leave Python.
 pub const LAUNCH_ACCOUNT_ENV_KEY: &str = "FNO_LAUNCH_ACCOUNT";
 
-/// The launch-account value a Rust mint seam stamps (x-d285). Three-valued,
+/// The launch-account value a Rust mint seam stamps. Three-valued,
 /// mirroring Python: an explicit `FNO_LAUNCH_ACCOUNT` wins; else an ambient
 /// `CLAUDE_CONFIG_DIR` means a config namespace is in play this mint cannot
 /// attribute, so the row records unknown (`None`) rather than "default";
@@ -1244,7 +1244,7 @@ pub fn launch_account_from_env() -> Option<String> {
 /// An id-adjacent adjective, never a credential.
 pub const LAUNCH_ACCOUNT_SOURCE_ENV_KEY: &str = "FNO_LAUNCH_ACCOUNT_SOURCE";
 
-/// WHO chose the row's launch account (x-04ce). A source rides a concrete
+/// WHO chose the row's launch account. A source rides a concrete
 /// account: only when `launch_account_from_env()` named a specific id (not
 /// `"default"`, not unknown) does a source exist, and the carrier must then
 /// speak the vocabulary (`"caller"` / `"config"`); anything else reads as the
@@ -1261,14 +1261,14 @@ pub fn launch_account_source_from_env() -> Option<String> {
     }
 }
 
-/// The launch-account pair a mint seam stamps (x-04ce): the row's
+/// The launch-account pair a mint seam stamps: the row's
 /// `launch_account` fact plus WHO chose it. One read so a seam cannot take
 /// the two env reads at different moments.
 pub fn launch_provenance_from_env() -> (Option<String>, Option<String>) {
     (launch_account_from_env(), launch_account_source_from_env())
 }
 /// `host_mode` value for an ADOPTED `claude --bg` session footnote holds live via
-/// a daemon `control.sock` attach (G1 held-attach substrate, x-26df). Distinct
+/// a daemon `control.sock` attach (G1 held-attach substrate). Distinct
 /// from `interactive` (a footnote-SPAWNED PTY worker): an `attached` row's process
 /// is Claude's, not footnote's, and it is driven over the held attach, not a
 /// worker socket. G2 teaches grid to consume it; the standard worker reconcile
@@ -1383,7 +1383,7 @@ impl RegistryEntry {
     }
 
     /// Two-way sync of `harness`/`harness_session_id` with the legacy
-    /// per-provider identity fields (x-ec59), the Rust mirror of Python's
+    /// per-provider identity fields, the Rust mirror of Python's
     /// `harness_identity.sync_harness_aliases` + the registry harness back-fill.
     /// Applied at load so a Rust reader of a legacy row and a Python reader of a
     /// Rust-minted canonical row both resolve. `harness` adopts `provider` when
@@ -1450,7 +1450,7 @@ impl RegistryEntry {
         }
     }
 
-    /// v9 transport-key backfill (x-1b1e), the Rust mirror of Python's
+    /// v9 transport-key backfill, the Rust mirror of Python's
     /// `load_registry` popping the removed `claude_short_id` into `short_id`.
     /// Applied at load, before [`validate_single_live_ref`]: a legacy row's
     /// jobId (deserialized into `legacy_claude_short_id`) moves into an empty
@@ -1473,16 +1473,16 @@ impl RegistryEntry {
         }
     }
 
-    /// The provider transport key (v9, x-1b1e), or `None` when this row has
+    /// The provider transport key (v9), or `None` when this row has
     /// none: the non-empty `short_id`. For claude it is the jobId (`claude
     /// attach/logs <jobId>`); for a daemon PTY row the worker-socket key. The
     /// single accessor consumers use to reach a session's wire handle, so no
-    /// verb re-implements the empty-string guard. [x-1b1e transport extraction]
+    /// verb re-implements the empty-string guard. [ transport extraction]
     pub fn transport_short(&self) -> Option<&str> {
         (!self.short_id.is_empty()).then_some(self.short_id.as_str())
     }
 
-    /// The row's harness name as a required-string view (x-880e). The single
+    /// The row's harness name as a required-string view. The single
     /// accessor every RegistryEntry consumer uses instead of the raw identity
     /// field, so the provider->harness migration touches one place. `harness` is
     /// set on load by [`RegistryEntry::backfill_harness_aliases`]; during the
@@ -1523,9 +1523,9 @@ impl RegistryEntry {
     /// invariant documented on the `short_id` field ("a real daemon PTY agent
     /// always has a non-empty short_id"). Reconcile uses this to settle a
     /// finished ask to `exited` by process-liveness alone, never consulting
-    /// session-file reachability for status. [plan ab-70faa65b, Locked Decision #1]
+    /// session-file reachability for status. [plan, Locked Decision #1]
     pub fn is_one_shot_ask(&self) -> bool {
-        // v9 (x-1b1e) moved the claude jobId from `claude_short_id` into
+        // v9 moved the claude jobId from `claude_short_id` into
         // `short_id`, so a claude shellout (`ask`/`--bg`) row now carries a
         // non-empty short_id and the empty-short_id proxy no longer catches it.
         // Mirror recover()'s provider+host_mode guard: a non-interactive claude
@@ -1699,7 +1699,7 @@ pub fn load_registry(path: &Path) -> Result<Registry, StateError> {
 }
 
 /// [`load_registry`] plus the raw on-disk row count the typed decode must be
-/// reconciled against. The daemon's startup assertion (x-4c87 AC5) reads both:
+/// reconciled against. The daemon's startup assertion (AC5) reads both:
 /// a registry whose rows the typed reader dropped (today only a future-schema
 /// partial read) must refuse to serve, never publish the dropped subset as the
 /// complete roster.
@@ -1731,7 +1731,7 @@ pub fn load_registry_with_counts(path: &Path) -> Result<(Registry, usize), State
     result
 }
 
-/// The raw on-disk row count the typed decode is reconciled against (x-4c87):
+/// The raw on-disk row count the typed decode is reconciled against:
 /// the canonical `agents` array, falling back to the legacy `entries` alias,
 /// mirroring [`Registry`]'s serde rename/alias precedence. A missing or
 /// non-array key counts as 0 (a valid empty registry, not a divergence).
@@ -1744,9 +1744,9 @@ fn registry_raw_row_count(probe: &serde_json::Value) -> usize {
         .unwrap_or(0)
 }
 
-/// The x-4c87 refusal text: name the registry path, both row counts, and the
+/// The refusal text: name the registry path, both row counts, and the
 /// comparison to run. Names no force/skip/ignore/bypass/no-verify remedy --
-/// there is deliberately no override that defeats this check (x-d19e wording
+/// there is deliberately no override that defeats this check (wording
 /// rule, scoped to diagnostics this change introduces).
 pub fn registry_row_divergence_msg(path: &Path, raw_rows: usize, decoded_rows: usize) -> String {
     format!(
@@ -1769,7 +1769,7 @@ pub fn registry_row_divergence_msg(path: &Path, raw_rows: usize, decoded_rows: u
 /// is therefore real corruption, not the transient partial read the prior
 /// `unwrap_or_default()` was excusing.
 ///
-/// Returns the typed registry plus the RAW array row count (x-4c87): a
+/// Returns the typed registry plus the RAW array row count: a
 /// positive raw count whose typed decode loses rows is an
 /// `InvariantViolation` carrying both counts and the comparison to run, never a
 /// successful empty roster. The one exception stays the forward-schema retry
@@ -1785,7 +1785,7 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
     let raw_rows = registry_raw_row_count(&probe);
     let mut reg: Registry = match serde_json::from_str::<Registry>(&buf) {
         Ok(reg) => {
-            // The same-schema success guard (x-4c87 AC3): serde cannot drop
+            // The same-schema success guard (AC3): serde cannot drop
             // elements from a `Vec` today, so this holds by construction -- but
             // the invariant is load-bearing enough (a changed reader mapping a
             // nonempty array to the default empty vec would publish a false
@@ -1809,7 +1809,7 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
             // Retry per row, keeping the ones this binary can represent, but ONLY
             // when the store says it is newer than us. At or below our own schema
             // an unparseable row is a writer bug and stays fatal -- and since
-            // x-4c87 it is fatal BY NAME when rows were on disk: the error
+            // it is fatal BY NAME when rows were on disk: the error
             // carries the raw and decoded counts so a lost roster can never read
             // as a valid empty one downstream.
             let on_disk = probe
@@ -1863,7 +1863,7 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
             }
         }
     };
-    // Harness identity back-fill (x-ec59): canonical fields resolve from the
+    // Harness identity back-fill: canonical fields resolve from the
     // legacy per-provider fields on every load, so a legacy row read by Rust and
     // a canonical row written by Rust both round-trip. Applied here (the single
     // read choke point) covers both load_registry and update_registry's RMW read.
@@ -1875,7 +1875,7 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
         // harness back-fill above, which is what resolves harness_session_id
         // on a legacy row.
         entry.backfill_fno_id();
-        // v9 transport-key backfill (x-1b1e): move a legacy row's
+        // v9 transport-key backfill: move a legacy row's
         // `claude_short_id` into `short_id`. A conflicting pair keeps `short_id`
         // and warns once (never silently prefers the legacy value).
         if let Some(legacy) = entry.backfill_short_id() {
@@ -1885,7 +1885,7 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
             );
         }
     }
-    // Forward-compat guard on the TYPED daemon path (Codex P2, ab-a171ceb2):
+    // Forward-compat guard on the TYPED daemon path (Codex P2):
     // the raw client path (client_verbs::load_registry_entries) already rejects
     // unsupported versions, but the daemon reads through here and previously
     // accepted any u32. Reject anything outside 1..=REGISTRY_SCHEMA_VERSION so a
@@ -1992,10 +1992,10 @@ fn source_root_for_detached_build() -> Option<PathBuf> {
 
 /// Refuse to RAISE the shared registry's schema from a source-built binary.
 ///
-/// The Rust half of x-665d, and the exact mirror of Python's
+/// The Rust half of, and the exact mirror of Python's
 /// `_refuse_source_ahead_schema_bump`. `registry.json` has writers in two
 /// languages: a guard on one leaves the daemon, mux, and every client verb
-/// still able to poison the file, which is the lesson x-d07d recorded when its
+/// still able to poison the file, which is the lesson recorded when its
 /// own read fix had to land on four readers rather than one.
 ///
 /// Fires only when all three hold: the target IS the process-global registry
@@ -2116,7 +2116,7 @@ where
             max: REGISTRY_SCHEMA_VERSION,
         });
     }
-    // The other direction of the same comparison (x-665d). The check above stops
+    // The other direction of the same comparison. The check above stops
     // a stale writer erasing fields it cannot see; this one stops a SOURCE-run
     // writer creating those stale readers, by refusing the bump at line
     // `registry.schema_version = REGISTRY_SCHEMA_VERSION` below. Inside the lock
@@ -2125,14 +2125,14 @@ where
     refuse_source_ahead_schema_bump(path, registry.schema_version)?;
     // The rows themselves, not just their signatures: a receipt for a removed
     // row must be built from the row the closure is about to drop, and the
-    // closure leaves no other copy (x-a879). The vector is small.
+    // closure leaves no other copy. The vector is small.
     let before_entries = registry.entries.clone();
     let before = before_entries
         .iter()
         .map(|entry| (entry.name.clone(), identity_signature(entry)))
         .collect::<BTreeMap<_, _>>();
     let out = f(&mut registry);
-    // Write-path harness sync (x-880e, AC6-FR): a closure that mutated a legacy
+    // Write-path harness sync (AC6-FR): a closure that mutated a legacy
     // session-id field (the stream-json adopt path writes claude_session_uuid on a
     // uuid-less bg row) must land the value in harness_session_id before serde
     // drops the now-skip_serializing legacy key. backfill adopts legacy->canonical
@@ -2151,7 +2151,7 @@ where
             return Err(StateError::InvariantViolation(msg));
         }
     }
-    // Resolvable-handle invariant (x-7bcd), scoped to new rows only via the
+    // Resolvable-handle invariant, scoped to new rows only via the
     // pre-write `before` snapshot already built above for identity checks --
     // a pre-existing violating row is never re-validated (AC3-FR).
     for entry in &registry.entries {
@@ -2161,7 +2161,7 @@ where
             }
         }
     }
-    // Upgrade-on-write (Codex P2, ab-a171ceb2): stamp the current schema version
+    // Upgrade-on-write (Codex P2): stamp the current schema version
     // so a Rust write of an older (e.g. v3) store bumps it to v4, matching
     // Python's write_registry (which always writes SCHEMA_VERSION). Without this,
     // adding host_mode to an existing v3 registry would leave schema_version:3 and
@@ -2169,7 +2169,7 @@ where
     // bump for every store that predates it (the common case).
     registry.schema_version = REGISTRY_SCHEMA_VERSION;
     write_json_atomic(path, &registry)?;
-    // Removal accounting (x-a879) runs AFTER the write persisted: a removal
+    // Removal accounting runs AFTER the write persisted: a removal
     // that failed to persist never happened, and announcing it would be a
     // false alarm. Within the accounting the receipt still precedes its own
     // event.
@@ -2344,7 +2344,7 @@ pub(crate) fn rename_response(
     }
 }
 
-/// Removal accounting at the write choke point (x-a879): every row the
+/// Removal accounting at the write choke point: every row the
 /// closure dropped gets a recovery receipt staged first and a
 /// `registry_row_removed` event naming the row, the remover and the reason,
 /// whatever door dropped it. Both the home and the event stream derive from
@@ -2406,7 +2406,7 @@ fn account_for_removed_rows(path: &Path, before: &[RegistryEntry], after: &[Regi
     for entry in &removed {
         crate::receipt::stage_removal_accounting(&home, entry, &remover, &emitter);
     }
-    // One grouped `registry_rows_lost` beside the per-row events (x-f0d2): the
+    // One grouped `registry_rows_lost` beside the per-row events: the
     // per-row events carry receipts, this one names the writer, pid and verb,
     // so a save that drops rows can no longer vanish without a door being
     // named. Emitted after the per-row events, so a reader taking the first
@@ -2710,7 +2710,7 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), StateEr
 mod tests;
 
 // ---------------------------------------------------------------------------
-// v23 (x-2019): the substitution verdict. The Rust twin of
+// v23: the substitution verdict. The Rust twin of
 // fno.agents.row_contradiction.model_substitution - one comparison, two
 // languages, so the daemon's list rows and Python's emitters cannot disagree
 // about which row substituted.

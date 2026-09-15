@@ -1,4 +1,4 @@
-//! The `fno mux retire-session` verb (v75, x-7649): the thin transport for
+//! The `fno mux retire-session` verb (v75): the thin transport for
 //! the exact-session retirement. A child module of `mux_cli`: the file
 //! budget gate keeps the parent shrink-only, and `use super::*` keeps every
 //! helper in one place.

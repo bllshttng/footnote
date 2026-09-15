@@ -1,4 +1,4 @@
-# kimi readiness manifest (x-83e7) - full-roster parity port from
+# kimi readiness manifest - full-roster parity port from
 # the reference manifest for kimi per ADAPTING.md.
 #
 # UNVALIDATED + INERT: kimi has no fno provider host (no build_pane_argv arm /

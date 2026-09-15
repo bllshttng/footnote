@@ -1,4 +1,4 @@
-//! Pure layout-template topology (x-c4d4). A named shape plus a slot count
+//! Pure layout-template topology. A named shape plus a slot count
 //! becomes a pane tree of slot-indexed leaves - no side effects, no server
 //! state, exhaustively unit-testable in isolation. The server (`server.rs`)
 //! substitutes real `PaneId`s for the slot-index leaves and validates fit.
@@ -129,7 +129,7 @@ pub fn topology(name: TemplateName, k: usize) -> Result<Node, TemplateError> {
 }
 
 // ---------------------------------------------------------------------------
-// typed layout tree (x-6928): template -> LayoutTreeSpec, spec validation
+// typed layout tree: template -> LayoutTreeSpec, spec validation
 // ---------------------------------------------------------------------------
 
 /// Max leaves / nesting a layout spec may carry. Bounds malformed or
@@ -464,7 +464,7 @@ mod tests {
         assert_valid(&topology(TemplateName::MainTop, 6).unwrap(), 6);
     }
 
-    // -- x-6928 typed-tree compilation + spec validation --
+    // -- typed-tree compilation + spec validation --
 
     fn child(weight: f32, tree: LayoutTreeSpec) -> LayoutTreeChild {
         LayoutTreeChild { weight, tree }

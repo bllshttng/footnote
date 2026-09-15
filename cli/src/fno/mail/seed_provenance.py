@@ -10,7 +10,7 @@ a worker could not attribute and an auditor could not find.
 **The envelope cannot share the payload, and that is why this is a sidecar.**
 ``skills/agent/scripts/normalize.sh:710`` classifies a payload by a LEADING
 slash (``case "$msg" in /*) payload_mode="passthrough"``), so an envelope in
-front of ``/fno:target x-1234`` destroys routing. Putting it after the verb line
+front of ``/fno:target `` destroys routing. Putting it after the verb line
 is no better: the harness REPL is a second reader we do not control, and for
 ``/fno:target <node>`` the arguments are load-bearing, so an envelope swallowed
 into them is a real failure rather than a cosmetic one.

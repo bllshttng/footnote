@@ -456,7 +456,7 @@ def _event_in_window(e: dict, cutoff, now) -> bool:
     return dt is not None and cutoff <= dt <= now
 
 
-# ── verifier calibration (W6 x-f063) ────────────────────────────────────────
+# ── verifier calibration (W6) ────────────────────────────────────────
 
 _CALIBRATION_MIN_VERDICTS = 10
 _COUNTABLE_VERDICTS = ("pass", "concerns", "fail")
@@ -551,7 +551,7 @@ def build_calibration(
     }
 
 
-# ── skill-outcome attribution (x-4829, loops roadmap W1) ────────────────────
+# ── skill-outcome attribution (loops roadmap W1) ────────────────────
 #
 # NO new events, NO new state files (telemetry locked rule) - this folds two
 # things that already exist: the Skill tool_use blocks Claude Code already
@@ -849,7 +849,7 @@ def build_skill_scoreboard(
     }
 
 
-# ── lane truth (x-a4a1) ─────────────────────────────────────────────────────
+# ── lane truth ─────────────────────────────────────────────────────
 
 _LANE_COVERAGE_FLOOR = 5
 
@@ -980,7 +980,7 @@ def build_lanes(
     }
 
 
-# ── provider-outcome attribution (x-140c) ───────────────────────────────────
+# ── provider-outcome attribution ───────────────────────────────────
 #
 # What does a shipped PR cost on each provider/model, and whose work bounces
 # most after shipping. One more group-by on the same fold: reuses
@@ -1105,12 +1105,12 @@ def build_provider_scoreboard(
     }
 
 
-# ── session-efficiency fold (x-c284) ─────────────────────────────────────────
+# ── session-efficiency fold ─────────────────────────────────────────
 #
 # Grades the PROCESS, not just the terminal state: a session that ships
 # merged_clean but fired loop_check 132x and pushed red CI twice should read
 # poorly on efficiency. Pure fold over telemetry that already exists (ledger row
-# + loop_check events + graph), NO new events / state files (extends the x-4829
+# + loop_check events + graph), NO new events / state files (extends the
 # locked rule). CI-red data comes from recorded loop_check `ci` values, never a
 # gh call at fold time - the fold stays deterministic and offline.
 
@@ -1387,7 +1387,7 @@ def build_efficiency(
     }
 
 
-# ── context-to-outcome trace (x-2e3c) ───────────────────────────────────────
+# ── context-to-outcome trace ───────────────────────────────────────
 
 CONTEXT_TRACE_EVENT_KINDS = {
     "claim_acquired",

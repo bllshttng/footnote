@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # post-peer-review.sh - Post a harness peer's review to a PR under a DISTINCT
-# machine identity so it satisfies the login-based loop-check gate (x-4baa).
+# machine identity so it satisfies the login-based loop-check gate.
 #
 # The trust invariant this preserves: a peer verdict is (1) a different model
 # than the author, (2) an immutable posted PR review, (3) able to BLOCK. This

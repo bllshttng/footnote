@@ -11,7 +11,7 @@ use crate::spawn_journal::ReentryVerdict;
 /// twin of `reentry::REENTRY_REFUSED_EXIT`.
 const REENTRY_REFUSED_EXIT: i32 = 3;
 
-/// Why `run_resume_argv` failed. The split is load-bearing (x-3954): the mux
+/// Why `run_resume_argv` failed. The split is load-bearing: the mux
 /// gesture fail-opens to the declared-form render ONLY on `Unavailable`; a
 /// `Refused` line names the door that restores the route and spawns nothing.
 pub(super) enum ResumeArgvError {
@@ -23,12 +23,12 @@ pub(super) enum ResumeArgvError {
     Unavailable(String),
 }
 
-/// (x-eb79) Shell `fno-agents resume-argv <harness> <sid> --cwd <dir> [--cd]
+/// Shell `fno-agents resume-argv <harness> <sid> --cwd <dir> [--cd]
 /// --json` OFF the core loop, bounded like `run_reentry_plan`. The one
 /// implementation of the codex resume argv the gestures consume - this
 /// server never rebuilds it. Every failure shape (timeout, missing binary,
 /// unparseable JSON) is a typed `Unavailable` the caller fail-opens to the
-/// declared-form render; exit 3 from the verb is a `Refused` (x-3954): the
+/// declared-form render; exit 3 from the verb is a `Refused`: the
 /// reason names the restoring door, and nothing spawns.
 pub(super) async fn run_resume_argv(
     harness: &str,
@@ -101,14 +101,14 @@ pub(super) async fn run_resume_argv(
     }
 }
 
-/// Shell `fno-agents <verb> <name>` for a sideline lifecycle gesture (x-76ea),
+/// Shell `fno-agents <verb> <name>` for a sideline lifecycle gesture,
 /// bounded + fail-open (the `run_dispatch_one` idiom): a short outcome notice,
 /// never a wedge. The registry poll owns the row's truth, so a lost/failed
 /// notice degrades to "the row updates a beat later or stays put", not a silent
 /// mutation. `verb` is always a fixed literal; the argv is never a shell string.
 /// The raw outcome of one `fno-agents <verb> <name>` lifecycle shell. The
 /// captured output rides along so a caller composing several verbs into one
-/// notice can quote what the daemon actually said (x-f191).
+/// notice can quote what the daemon actually said.
 struct AgentVerbResult {
     ok: bool,
     stdout: String,
@@ -190,7 +190,7 @@ fn daemon_verdict(stdout: &str) -> Option<&str> {
         .filter(|v| !v.is_empty())
 }
 
-/// (x-a33f) The remove leg: rm alone. Since law d-81c6da7e the daemon's rm
+/// The remove leg: rm alone. Since law d-81c6da7e the daemon's rm
 /// ends a live row's process itself, so the gesture never composes a stop.
 pub(super) async fn run_remove(name: &str) -> String {
     let rm = run_agent_verb("rm", name).await;
@@ -223,7 +223,7 @@ fn reap_notice(stdout: &str) -> String {
     }
 }
 
-/// Shell `fno-agents reap --json` once for the bulk-reap gesture (x-7561),
+/// Shell `fno-agents reap --json` once for the bulk-reap gesture,
 /// bounded + fail-open like [`run_agent_action`]: on success parse the `reaped`
 /// array length into a visible `reaped N` count (zero is a successful `reaped
 /// 0`), else a bounded failure notice. The argv is a fixed literal.
@@ -232,12 +232,12 @@ pub(super) async fn run_reap() -> String {
     let mut command =
         crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
     command
-        // (x-91eb) --no-mux keeps this gesture on its registry-row contract:
+        // --no-mux keeps this gesture on its registry-row contract:
         // the 20s bound kills only the direct child, so a mux tab sweep that
         // outlives it would keep closing visible tabs detached. That half
         // needs the operator verb, which has no fixed bound.
         .args(["reap", "--json", "--no-mux"])
-        // (x-f191) The bounded caller reads partial stderr on a timeout; the
+        // The bounded caller reads partial stderr on a timeout; the
         // env asks the sweep for its per-row progress lines. A sweep run
         // without a reader (the daemon's idle tick) stays silent.
         .env("FNO_REAP_PROGRESS", "1")
@@ -249,7 +249,7 @@ pub(super) async fn run_reap() -> String {
         Ok(c) => c,
         Err(_) => return "reap: unavailable".to_string(),
     };
-    // (x-f191) Drain both pipes concurrently so a timeout can still read how
+    // Drain both pipes concurrently so a timeout can still read how
     // far the sweep got: the child's partial stderr progress names rows
     // scanned / removed / the row in flight (gc_sweep's stderr lines).
     let stdout_task = child.stdout.take().map(|mut pipe| {
@@ -290,7 +290,7 @@ pub(super) async fn run_reap() -> String {
     }
 }
 
-/// (x-f191) Compress the sweep's partial stderr progress into one clause:
+/// Compress the sweep's partial stderr progress into one clause:
 /// rows scanned, rows removed before the deadline, and the row in flight.
 /// One line prefix (`reap: `) with a word per phase; anything unparseable
 /// degrades to "no rows scanned" in the notice rather than a guessed count.
@@ -311,7 +311,7 @@ fn reap_notice_maps_reaped_count() {
     assert_eq!(reap_notice("not json"), "reap: done");
 }
 
-/// (x-f191) Compress the sweep's partial stderr progress into one clause:
+/// Compress the sweep's partial stderr progress into one clause:
 /// rows scanned, rows removed before the deadline, and the row in flight.
 /// One line prefix (`reap: `) with a word per phase; anything unparseable
 /// degrades to "no rows scanned" in the notice rather than a guessed count.
@@ -374,7 +374,7 @@ pub(super) async fn run_agent_rename(token: &str, new_name: &str) -> Result<Stri
     }
 }
 
-/// (x-d285) Resolve one row's re-entry plan through the canonical resolver
+/// Resolve one row's re-entry plan through the canonical resolver
 /// (`fno-agents reentry-plan <name> --transition <t>`), OFF the core loop and
 /// bounded. The account/route verdict is the one implementation every gesture
 /// consumes - this server never rebuilds it. Every failure shape (timeout,
@@ -417,7 +417,7 @@ pub(super) async fn run_reentry_plan(
     }
 }
 
-/// (x-9c5f) Shell `fno agents mail send <name> <text>` off-loop, bounded + capturing:
+/// Shell `fno agents mail send <name> <text>` off-loop, bounded + capturing:
 /// the CLI's one-line stdout verdict (`msg-<id> delivered|queued`) becomes the
 /// notice verbatim; a nonzero exit surfaces the first stderr line. Never silent
 /// (Locked Decision 6). Uses the `fno` porcelain; argv array only.
@@ -446,7 +446,7 @@ pub(super) async fn run_mail_send(name: &str, text: &str) -> String {
 }
 
 impl super::Core {
-    /// Shell `fno-agents <verb> <name>` OFF the core loop (x-76ea), mirroring
+    /// Shell `fno-agents <verb> <name>` OFF the core loop, mirroring
     /// `dispatch_next`: the one-line outcome routes back as a `DispatchResult`
     /// notice, but the AUTHORITATIVE row change is the registry poll's exited
     /// flip / row vanish, not this notice. `verb` is a fixed literal
@@ -476,7 +476,7 @@ impl super::Core {
         });
     }
 
-    /// (x-a33f) The remove gesture: rm alone, off-loop like the sibling
+    /// The remove gesture: rm alone, off-loop like the sibling
     /// actions. The daemon's rm ends a live row's process itself.
     pub(super) fn remove_agent_action(&self, id: u64, name: String) {
         let core_tx = self.self_tx.clone();
@@ -489,7 +489,7 @@ impl super::Core {
     }
 }
 
-/// (x-a6b9) Resolve the restore verb's claude re-entry plans OFF the core
+/// Resolve the restore verb's claude re-entry plans OFF the core
 /// loop: squad members resolve their `resume` transition, held portals their
 /// `attach` transition (keyed `portal:<name>` so one row that is both a
 /// member and a held portal resolves each transition it actually needs).
@@ -525,13 +525,13 @@ pub(super) async fn resolve_restore_plans(
 mod tests {
     use super::*;
 
-    // (x-a33f) The old `remove_agent_live_row_refused_stop_first` and the
+    // The old `remove_agent_live_row_refused_stop_first` and the
 
     // stop-then-rm composition tests are gone with the contracts they
     // pinned: RemoveAgent shells rm alone, covered end to end by the
     // fake-binary test below.
 
-    // -- x-f191 corpse-safe stop + honest reap timeout -----------------------
+    // -- corpse-safe stop + honest reap timeout -----------------------
 
     fn verb_result(ok: bool, stdout: &str, stderr: &str) -> AgentVerbResult {
         AgentVerbResult {
@@ -550,7 +550,7 @@ mod tests {
     #[test]
 
     fn render_agent_verb_quotes_daemon_reason_on_failure() {
-        // x-f191: a bare "stop X: failed" is the same silence the reap timeout
+        // a bare "stop X: failed" is the same silence the reap timeout
 
         // used to end with; the daemon's reason is the operator's next action.
 
@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn measure_remove_notice_quotes_the_daemon_verdict() {
-        // (x-b5d1) rm ok with a daemon verdict: the notice quotes it
+        // rm ok with a daemon verdict: the notice quotes it
         // verbatim and names the row, so the client's row stamp resolves.
         let rm = verb_result(
             true,
@@ -585,10 +585,10 @@ mod tests {
 
     #[test]
     fn measure_remove_notice_names_the_refusal() {
-        // (x-b5d1) rm refused (the roster still lists the session): the
+        // rm refused (the roster still lists the session): the
         // notice names the row and the reason, failure-marked, so the row
         // stays stamped with why. The quoted reason is rm's own claude
-        // refusal shape (x-a33f): rm ran its stop, the roster still lists.
+        // refusal shape: rm ran its stop, the roster still lists.
         let rm = verb_result(
             false,
             "",
@@ -603,7 +603,7 @@ mod tests {
     #[test]
 
     fn reap_progress_note_names_scanned_removed_and_in_flight() {
-        // x-f191: the timeout notice must say how far the sweep got.
+        // the timeout notice must say how far the sweep got.
 
         let stderr = "reap: scan alpha\nreap: scan beta\nreap: removed 1\nreap: cascade beta\n";
 
@@ -698,13 +698,13 @@ mod tests {
     #[tokio::test]
 
     async fn remove_press_shells_rm_alone() {
-        // (x-a33f) AC5-HP: one remove press shells `fno-agents rm` exactly
+        // AC5-HP: one remove press shells `fno-agents rm` exactly
         // once and never `fno-agents stop` - the daemon's rm ends a live
         // row's process itself, so no caller composes a stop leg.
 
         let _serial = fno_env_lock();
 
-        let tmp = std::env::temp_dir().join(format!("fno-x-a33f-rm-{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("fno-x-aaaa-rm-{}", std::process::id()));
 
         corpse_fixture(&tmp);
 

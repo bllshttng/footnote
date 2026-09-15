@@ -1,11 +1,11 @@
-//! Resume's preserved-record fallback (x-70e1 task 4): where a resume
+//! Resume's preserved-record fallback (task 4): where a resume
 //! finds a retired session.
 
 use std::path::Path;
 
 use crate::paths::AgentsHome;
 
-/// The preserved-record fallback (x-70e1 task 4): a session-shaped resume
+/// The preserved-record fallback (task 4): a session-shaped resume
 /// miss consults the reap-receipts store before refusing. A retirement that
 /// already removed the registry row keeps the resume tokens and the store
 /// context on disk; this prints [`resume_hint`]'s text (never launching), so

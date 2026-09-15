@@ -2,7 +2,7 @@
 
 Computes a lightweight relatedness map from signals already in ``graph.json``
 - shared domain, shared epic (roadmap_id/parent), and token overlap over
-title+slug+details - and persists it to a sidecar the offer path (x-9ed6) and
+title+slug+details - and persists it to a sidecar the offer path and
 ``/triage`` read. Pure logic here; CLI wiring lives in ``graph/cli.py``.
 
 The map is a regenerable artifact (like codemap): last-writer-wins, atomic
@@ -39,7 +39,7 @@ _DOMAIN_BONUS = 0.10
 _EPIC_BONUS = 0.25
 
 # Filing-time dedup floor: above this an existing node is surfaced as a likely
-# duplicate when a new node is born. Evidence-based (plan x-6ac7 Overview):
+# duplicate when a new node is born. Evidence-based (plan Overview):
 # real specimen duplicates score 0.568 and 0.447, the epic-sibling noise pair
 # sits at 0.234, and the floor is 0/1558 false positives on the live graph.
 _DEDUP_MIN_SCORE = 0.30
@@ -215,7 +215,7 @@ class NoMapError(Exception):
     """The relatedness sidecar does not exist / could not be read.
 
     Distinct from "node has no related edges" (a valid empty list) so callers
-    (x-9ed6's offer path) can fall back correctly.
+    (offer path) can fall back correctly.
     """
 
 

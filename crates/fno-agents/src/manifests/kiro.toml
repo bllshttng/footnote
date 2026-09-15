@@ -1,4 +1,4 @@
-# kiro readiness manifest (x-83e7) - full-roster parity port from
+# kiro readiness manifest - full-roster parity port from
 # the reference manifest for kiro per ADAPTING.md.
 #
 # UNVALIDATED + INERT: kiro has no fno provider host (no build_pane_argv arm /

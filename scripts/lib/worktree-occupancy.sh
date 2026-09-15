@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Worktree occupancy classification bridge (x-0396).
+# Worktree occupancy classification bridge.
 #
 # wt_classify_pids <worktree> <newline-separated pids>
 #

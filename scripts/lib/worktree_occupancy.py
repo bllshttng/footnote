@@ -1,4 +1,4 @@
-"""Classify the processes rooted in a worktree: holder or inert (x-0396).
+"""Classify the processes rooted in a worktree: holder or inert.
 
 The sweep's process step (``_wt_pids``) enumerates truthfully and decides
 coarsely: any pid keeps the tree, forever, because nothing retires a leaked

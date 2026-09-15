@@ -1,4 +1,4 @@
-"""Auto-stamp the invoking session's own identity + model into a2a envelopes (x-605c).
+"""Auto-stamp the invoking session's own identity + model into a2a envelopes.
 
 The a2a reply protocol is: an agent reads ``<fno_mail from=H ...>`` and runs
 ``fno agents mail send H``. For that return leg to resolve, the OUTBOUND envelope must
@@ -36,7 +36,7 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
         # self-blind exactly where nothing proves self.
         return row_owning_session_id(session_id, self_binding=own_pair)
 
-    # Same injection seam as collide; claims cannot import agents (x-a409).
+    # Same injection seam as collide; claims cannot import agents.
     from fno.agents.codex_rollout import codex_rollout_witness
 
     return _resolve_self_identity(
@@ -50,7 +50,7 @@ def identity_ambiguity_message(identity) -> str:
     The strip lines are the self-rescue: stripping the foreign family's
     markers restores self-resolution. Built from
     :func:`fno.harness_identity.ambient_identity_strip_flags`, which reads the
-    same list the scrub reads, so the text cannot drift from behavior (x-b57a).
+    same list the scrub reads, so the text cannot drift from behavior.
     """
     from fno.harness_identity import ambient_identity_strip_flags
 
@@ -82,7 +82,7 @@ def identity_ambiguity_message(identity) -> str:
         else ""
     )
     rejection = identity.rejected[0] if identity.rejected else None
-    # owned_by_live_row is a different ambiguity than mixed families (x-a409).
+    # owned_by_live_row is a different ambiguity than mixed families.
     if rejection:
         opening = (
             "cannot decide which session is 'self': id "

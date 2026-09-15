@@ -4,7 +4,7 @@ One versioned table from a *capability* to each harness's concrete value, so
 dispatch is provider-neutral instead of claude-shaped by accident. Every
 autonomous launcher (dispatch-node.sh, backlog advance, /think handoff, the
 active_backlog daemon) resolves argv through :func:`resolve_dispatch` instead of
-hand-rolling it - the duplicated-spawn bug class (x-2c27 fixed three of four
+hand-rolling it - the duplicated-spawn bug class (fixed three of four
 copies and missed the fourth) disappears when exactly one resolver owns the
 (harness, substrate, command) decision (Locked Decision 10).
 
@@ -63,7 +63,7 @@ _SLASH, _CODEX_SKILL, _REFUSED = "slash", "codex-skill", "refused"
 #
 # The `--no-merge` flag is the merge POSTURE, resolved from
 # config.auto_merge.grant rather than baked in. It was the free-text
-# `no-merge` token until x-8e59 (config-deaf) and x-9d11 (free text stopped
+# `no-merge` token until (config-deaf) and x-aaaa (free text stopped
 # being a control input): the flag is the deterministic carrier that survives
 # `fno do target start` resolving its argument to a bare node id, and unlike the
 # token it cannot be manufactured by prose an LLM wrote into a brief.
@@ -74,7 +74,7 @@ _AUTONOMOUS_COMMAND_MERGE = "/target {id}"
 @cache
 def _carrier_vocab() -> tuple[tuple[str, ...], str, str]:
     """The carrier vocabulary from the ONE canonical merge_posture table
-    (x-8151): authored in the Rust tree, shipped here as generated package
+    : authored in the Rust tree, shipped here as generated package
     data. The Rust engine and these readers cannot drift."""
     import tomllib
     from importlib.resources import files
@@ -178,7 +178,7 @@ def inject_no_merge_into_command(command: str) -> str:
     """Insert the ``--no-merge`` flag into a /target-family command, right
     after the verb token. Skipped when a standalone flag is already present
     (word-padded, so ``--no-merge-guard`` never counts). Non-family commands
-    pass through untouched: a prose brief carries its posture in prose (x-9d11)."""
+    pass through untouched: a prose brief carries its posture in prose."""
     _spellings, flag, _legacy = _carrier_vocab()
     if not is_target_family(command):
         return command
@@ -240,7 +240,7 @@ def _refused_reason(harness: str) -> str:
     )
 
 # capability -> per-harness value, keyed by the READABLE_PROVIDERS set. Each
-# harness carries a `command_surface` (x-a5e4): the invocation form its native
+# harness carries a `command_surface`: the invocation form its native
 # footnote skill takes, or `refused` where the harness is deprecated. A slash
 # harness also carries `slash_prefix` (the plugin namespace). The thread seat
 # is not stored: it derives from `features.spawn` reading `native` (fno's own
@@ -301,7 +301,7 @@ def _validate_row(harness: str, caps: dict) -> None:
 
     The per-harness loop body of :func:`parse_capability_contract`,
     extracted so the config-override merge can gate a candidate row
-    through the SAME validation the bundled table ships under (x-244c).
+    through the SAME validation the bundled table ships under.
     Raises :class:`DispatchResolveError` naming harness + field on the
     first bad field."""
     required = {
@@ -484,7 +484,7 @@ def _validate_row(harness: str, caps: dict) -> None:
     # loop through a shell hook and a `none` row closes it through nothing.
     # The converse is legal and load-bearing - an `extension` row with an
     # EMPTY path is a harness whose extension fno has not written yet, and
-    # :func:`check_loop_participation` refuses a looping dispatch at it.
+    #:func:`check_loop_participation` refuses a looping dispatch at it.
     if caps["loop_participation"] != "extension" and caps.get("loop_extension"):
         raise _contract_error(
             harness, "loop_extension",
@@ -549,7 +549,7 @@ _PROBE_KINDS = {"declared", "behavioral", "unprobeable"}
 
 
 def _validate_probe_decls(probe: object) -> None:
-    """Validate the ``[probe.*]`` instrument declarations (x-244c): a kind
+    """Validate the ``[probe.*]`` instrument declarations : a kind
     may carry only the fields its instrument needs, and a declared pattern
     must compile. A declaration IS an instrument spec; a spec that cannot
     run is a guess with extra steps."""
@@ -763,7 +763,7 @@ def verb_fired_marker(message: str) -> Optional[str]:
 
 def render_seed(message: str, harness: str) -> str:
     """Prose verbatim; a verb-shaped seed gate-checked then normalized by the
-    one shared fire-test predicate (``is_verb_seed``, x-413d)."""
+    one shared fire-test predicate (``is_verb_seed``, x-bbbb)."""
     from fno.agents.spawn_defaults import is_verb_seed
 
     if not is_verb_seed(message):
@@ -915,7 +915,7 @@ assert _BUNDLED_CAPS and set(_BUNDLED_CAPS) <= set(KNOWN_HARNESSES)
 #: working harness: the bundled row stays and the mistake is on the record.
 OVERRIDE_WARNINGS: list[str] = []
 
-# The x-6678 shallow lane keys an override may still use, mapped into the
+# The shallow lane keys an override may still use, mapped into the
 # bundled row's nested paths so ONE override shape feeds both readers.
 _LANE_ALIAS_PATHS = {
     "attach": ("resume_strategy", "forms", "interactive_attach"),
@@ -1045,7 +1045,7 @@ def capabilities(harness: str) -> dict:
 # The posture for a harness with NO capability row. Every value is the
 # fail-closed one, chosen without reading any declared harness's row - the
 # whole point is that an unknown harness answers "undeclared" by NAME rather
-# than inheriting claude's defaults (the x-ea37 shape).
+# than inheriting claude's defaults (the shape).
 UNDECLARED_POSTURE: dict = {
     "declared": False,
     "autonomous_pane": False,
@@ -1241,7 +1241,7 @@ def thread_lane(harness: str) -> str:
     subcommand). This split exists for a harness that ships no attach
     subcommand at all, yet has a real, working thread destination reached
     through the daemon-kept lane - a fact its own ``features.attach`` claim
-    already records (x-df08). A row with no ``features.attach`` stanza at
+    already records. A row with no ``features.attach`` stanza at
     all reads as absent, never as a claim, so this never promotes a row
     silently.
     """
@@ -1278,7 +1278,7 @@ def effort_values(harness: str) -> list[str]:
 
 
 #: claude's own --permission-mode vocabulary, its --help being the authority
-#: (x-8975); the CLI help and the doctor readout spell it from here.
+#: ; the CLI help and the doctor readout spell it from here.
 CLAUDE_PERMISSION_MODES = frozenset(
     {"default", "acceptEdits", "auto", "dontAsk", "plan", "bypassPermissions"}
 )
@@ -1290,7 +1290,7 @@ CLAUDE_PERMISSION_HELP = (
 #: The full --permission-mode help text: every harness's answer vocabulary is
 #: a harness_map question, so the whole option help lives beside the maps.
 PERMISSION_MODE_HELP = (
-    "Permission/approval mode forwarded to the provider (x-dfa4). "
+    "Permission/approval mode forwarded to the provider. "
     f"Provider-native values, fail-closed: {CLAUDE_PERMISSION_HELP}; "
     "gemini --approval-mode "
     "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
@@ -1314,7 +1314,7 @@ _BRIEF_MAX_BYTES = 8192
 # _HARNESS_CAPS), not a single template - see the resolve builtin branch.
 
 
-#: The verbs the x-ebd2 lifecycle table owns; anything else abstains.
+#: The verbs the lifecycle table owns; anything else abstains.
 _TARGET_FAMILY_VERBS = ("/target", "/blueprint")
 #: Intake keys on difficulty (law d-834b6ff1); re-dispatch on the plan's rung.
 _DIFFICULTY_ANSWERS = {"low": "/target", "medium": "/blueprint", "high": "/blueprint"}
@@ -1389,7 +1389,7 @@ def resolve_dispatch(
     Full contract: docs/architecture/backlog-graph-verb-contracts.md. Field
     precedence (each independent): harness explicit > stage table >
     ``claude``; substrate explicit > config > per-harness default; command
-    explicit > x-ebd2 lifecycle derivation > node ``verb`` (allowlist-checked;
+    explicit > lifecycle derivation > node ``verb`` (allowlist-checked;
     a graph field is a trust boundary) > ``config.dispatch.command`` >
     per-harness builtin. ``difficulty``/``plan_rung`` feed the lifecycle
     derivation (see :func:`resolve_effective_verb`), which runs BEFORE the
@@ -1400,7 +1400,7 @@ def resolve_dispatch(
     the harness ("" when unset), returned so a caller forwarding the harness
     can forward the vendor too. ``trigger`` is autonomous or attended (pane
     needs the capability). ``node_id`` substitutes the command's ``{id}``.
-    ``merge_posture`` (x-8151): no-merge injects, allow overrides the config
+    ``merge_posture`` : no-merge injects, allow overrides the config
     read (an explicit template is never edited), from-config reads the grant.
 
     Raises :class:`DispatchResolveError` on an unknown/refused harness, a
@@ -1424,7 +1424,7 @@ def resolve_dispatch(
     )
     # The verb lane vendor rides the same stage-table row the harness does:
     # an autonomous dispatch that names the harness but not the route sends a
-    # routed model to the default endpoint (x-14d4: HTTP 404 model_not_found).
+    # routed model to the default endpoint (: HTTP 404 model_not_found).
     route_value = str(cfg.get("route", "") or "")
     if route_value:
         decision.append(f"route=config({route_value})")
@@ -1594,11 +1594,11 @@ def resolve_dispatch(
             template = f"{chosen_verb} {{id}}"
             decision.append(f"command=verb({chosen_verb})")
     else:
-        # Per-harness builtin (x-a5e4): the normalize of `/target --no-merge {id}` -
+        # Per-harness builtin: the normalize of `/target --no-merge {id}` -
         # codex `$fno:target`, claude/agy `/target`, opencode `/fno:target`, gemini
         # refused. config.dispatch.command overrides.
         #
-        # The merge posture comes from config.auto_merge.grant (x-8e59/x-4be1).
+        # The merge posture comes from config.auto_merge.grant (/).
         # It applies to the builtin only: an explicit `command` or a node
         # `dispatch_verb` already spells out what to run, and silently editing
         # a caller's own template would be the surprising read.
@@ -1617,7 +1617,7 @@ def resolve_dispatch(
 
     if not template:
         raise DispatchResolveError("resolved command is empty")
-    # Single normalization seam (x-f0e2): a footnote slash command (`/verb ...`)
+    # Single normalization seam: a footnote slash command (`/verb ...`)
     # is canonical claude syntax on EVERY rung - normalize it once here, per the
     # chosen harness, before `{id}` substitution. This stops the config and
     # explicit rungs handing a codex worker a raw `/target` (or opencode an
@@ -1655,7 +1655,7 @@ def resolve_dispatch(
 
     # 4. brief -> TARGET_BRIEF env only (never the command line). Byte-capped at
     # the 8 KB env budget; an oversized brief is an explicit error, not truncation.
-    # x-9d11 refusal carrier, at the ONE choke point every spawn surface resolves
+    # x-aaaa refusal carrier, at the ONE choke point every spawn surface resolves
     # through (skill spawn.sh, dispatch.py pane, advance/recovery/keep_going bg):
     # when the command carries the refusal, the env carries it too, so a worker
     # that drops the flag post-compaction still folds the refusal at init.
@@ -1667,7 +1667,7 @@ def resolve_dispatch(
     if normalized != resolved_command:
         resolved_command = normalized
         decision.append("command=legacy-no-merge->--no-merge")
-    # x-8151: a no-merge posture injects after the legacy rewrite, on EVERY
+    # a no-merge posture injects after the legacy rewrite, on EVERY
     # rung. allow never edits a template: a refusal it carries wins.
     if posture == "no-merge":
         injected = inject_no_merge_into_command(resolved_command)
@@ -1694,7 +1694,7 @@ def resolve_dispatch(
         "substrate": chosen_substrate,
         "route": route_value,
         "command": resolved_command,
-        # x-ebd2: the lifecycle-derived canonical verb, or None when the table
+        # the lifecycle-derived canonical verb, or None when the table
         # abstained (bare resolve, explicit command, out-of-family declared
         # verb) - the raw source state stays in the caller's verb_source.
         "verb": lifecycle_verb,
@@ -1746,7 +1746,7 @@ def _load_dispatch_cfg(settings: object, verb: Optional[str] = None) -> dict:
     harness_value, harness_note = configured_dispatch_harness(settings, verb=verb or "target")
     route_value = configured_dispatch_route(settings, verb=verb or "target")
     d = getattr(settings, "dispatch", None)
-    # The grant lives in config.auto_merge, NOT under dispatch (x-4be1), so it
+    # The grant lives in config.auto_merge, NOT under dispatch, so it
     # is read before the dispatch-block gate: a settings object carrying an
     # auto_merge block but no dispatch overlay still resolves its grant, and a
     # stub without either degrades to no-grant.

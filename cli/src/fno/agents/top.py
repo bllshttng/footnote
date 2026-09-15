@@ -1,11 +1,11 @@
-"""``fno agents top`` (x-c5cc): every live worker process with tree RSS.
+"""``fno agents top`` : every live worker process with tree RSS.
 
 One table over the SAME union the spawn gate counts (``spawn_gate.census``,
 never duplicated), so the debugging surface and the enforcement surface can
 never disagree. Python-only by design (LD8). The cost column is the worker's
-whole process TREE off the resolved session pid (x-3f84 W2) - a recorded pid
+whole process TREE off the resolved session pid (W2) - a recorded pid
 alone prices the PTY host and misses the per-session MCP servers.
-``--subagents`` (x-af92) appends a display-only sidechain section: never
+``--subagents`` appends a display-only sidechain section: never
 slot-counted, observable, not addressable.
 """
 from __future__ import annotations
@@ -112,7 +112,7 @@ def _crown_map() -> dict[str, str]:
 
 
 def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
-    """One registry read feeding both session-id joins (x-1379): ``handles``
+    """One registry read feeding both session-id joins : ``handles``
     is the session uuid -> handle bridge (a foreign claude row is labelled by
     the FIRST 8 hex of that uuid, the registry handle is the LAST 8 - the
     mismatch that once read as "all agents are dead"), ``nodes`` is the
@@ -134,7 +134,7 @@ def _registry_maps() -> tuple[dict[str, str], dict[str, Optional[str]]]:
 
 
 class RowTruth(NamedTuple):
-    """What one transcript read says about a census row (x-6d89): ``reach``
+    """What one transcript read says about a census row : ``reach``
     is the verdict the old ``_progress_map`` computed and threw away.
     ``progress`` is None exactly when the row has no registry entry, which
     alone lacks the harness/route context a refusal verdict needs."""
@@ -150,7 +150,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
     """name -> :class:`RowTruth`, one transcript read per row, every row:
     progress and the reachability verdict beside RSS (the surface that once
     showed 8513 MB across 31 live pids with no way to see which were
-    parked), from ONE read, the shape ``fno.agents.read`` uses (x-6d89)."""
+    parked), from ONE read, the shape ``fno.agents.read`` uses."""
     from fno.agents.reachability import (
         classify_progress,
         classify_reachability,
@@ -172,7 +172,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
 
     out: dict[str, RowTruth] = {}
     for w in workers:
-        # The session uuid joins first (x-1379): the registry keys a foreign
+        # The session uuid joins first: the registry keys a foreign
         # claude row by its handle, not by this view's first-8-hex label.
         entry = by_session.get(w.session_id or "")
         if entry is None:
@@ -212,7 +212,7 @@ def _row_truth(workers: list[LiveWorker]) -> dict[str, RowTruth]:
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     handles, reg_nodes = _registry_maps()
     truth_map = _row_truth(workers)
-    # One retirement read for the whole roster (x-1379), keyed by the
+    # One retirement read for the whole roster, keyed by the
     # REGISTRY identity: the first-8-hex census label resolves no node.
     from fno.agents.retirement import verdicts
 
@@ -240,28 +240,28 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 # HARNESS, not PROVIDER (the CLI, never the model vendor).
                 "harness": w.harness,
                 "substrate": w.substrate,
-                # The king that spawned this worker (x-3f84 W4): which king
+                # The king that spawned this worker (W4): which king
                 # owns the cost; None for operator-run / legacy rows.
                 "king": (w.spawned_by or "")[:8] or None,
-                # The process that IS the session (x-3f84 W2): a bg row's
+                # The process that IS the session (W2): a bg row's
                 # recorded pid names the PTY HOST, not the worker.
                 "pid": w.session_pid or w.pid,
                 "rss_mb": tree_rss_mb(w.session_pid or w.pid),
-                # (x-c672, AC7) Served activity from the one truth read the
+                # (AC7) Served activity from the one truth read the
                 # progress axis uses; the stored token rides `stored_status`.
                 "status": activity,
                 "status_age_s": age,
                 "stored_status": w.status,
-                # (x-d401) Why `stored_status` is not the registry's token.
+                # Why `stored_status` is not the registry's token.
                 "status_basis": w.status_basis,
                 # The orthogonal axis beside `status`: null for a foreign
                 # claude row this view has no harness/route context to judge.
                 "progress": row_truth.progress if row_truth else None,
-                # x-6d89: the verdict the row always computed and never
+                # x-aaaa: the verdict the row always computed and never
                 # showed, with the basis that says which question it answered.
                 "reach": row_truth.reach if row_truth else None,
                 "reach_basis": row_truth.reach_basis if row_truth else None,
-                # x-1379: has this worker's node already shipped. Null node is
+                # has this worker's node already shipped. Null node is
                 # a real answer (unresolvable name), never a lookup miss.
                 "node": v.node if v else None,
                 "node_basis": v.node_basis if v else None,
@@ -276,7 +276,7 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
 
 
 def _run_ended_rows(crowns: dict[str, str]) -> list[dict]:
-    """Registry rows whose RUN ended but whose session still answers (x-74aa).
+    """Registry rows whose RUN ended but whose session still answers.
 
     census() counts runs holding a process, so a parked row drops out of the
     table while its transcript keeps moving, and absence licensed a second
@@ -338,7 +338,7 @@ def _fmt_age(seconds: float) -> str:
 
 
 def _subagent_section() -> dict:
-    """Read-only sidechain rows for the --subagents section (x-af92): the
+    """Read-only sidechain rows for the --subagents section : the
     rendered rows, any scan warning, and the live threshold for the header."""
     found, warnings = discover_subagents()
     rows = [
@@ -410,7 +410,7 @@ def pane_counter_rows(events_path: Optional[Path] = None) -> dict:
     renders it here and the spawn gate's pane-vs-bg-session pricing imports
     this same function. The mux emits monotonic TOTALS, never rates. Both
     the main and the ``.ephemeral`` sibling journal (retention routing,
-    x-add3) are scanned, oldest first. Returns ``{status, rows, born, gone,
+) are scanned, oldest first. Returns ``{status, rows, born, gone,
     session, window_s}``; a broken journal is ``unreadable``, never an empty
     table that reads as "no cost". Samples are grouped by mux session and
     differenced within the journal-latest one; a DECREASE means the server
@@ -562,7 +562,7 @@ def _render_pane_stats_lines(section: dict) -> list[str]:
 
 
 def _retirable_lines(rows: list[dict], lanes: list[dict]) -> list[str]:
-    """One line per lane holder whose node already shipped (x-1379).
+    """One line per lane holder whose node already shipped.
 
     The provider comes from the SAME ``lane_rows`` output the LANES block
     rendered, never recounted. A holder no lane names still gets its line:
@@ -609,7 +609,7 @@ def render_top(
     as_json: bool = False, include_subagents: bool = False, include_pane_stats: bool = False
 ) -> str:
     """Render the union table (or its JSON mirror - same rows, LD: parity).
-    ``include_subagents`` appends the sidechain section (x-af92);
+    ``include_subagents`` appends the sidechain section ;
     ``include_pane_stats`` appends the per-pane mux counter deltas."""
     c = census()
     crowns = _crown_map()
@@ -659,7 +659,7 @@ def render_top(
     elif long_holds["lines"]:
         out.extend(long_holds["lines"])
         out.append("")
-    # The retirable line leads with the lanes (x-1379): the same shape of
+    # The retirable line leads with the lanes: the same shape of
     # fact as a full lane - a cap refusing spawns the table calls healthy.
     retirable = _retirable_lines(rows, lanes)
     if retirable:

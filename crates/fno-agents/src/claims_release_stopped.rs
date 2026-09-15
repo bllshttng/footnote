@@ -1,4 +1,4 @@
-//! Release-on-stop (x-9c91 change 5): stopping a worker releases its claims.
+//! Release-on-stop (change 5): stopping a worker releases its claims.
 //! One implementation serves the daemon (direct call) and the Python leg (through the release-stopped op), so no parity guard is needed.
 
 use crate::claims::{
@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
-// Release-on-stop (x-9c91 change 5): stopping a worker releases its claims
+// Release-on-stop (change 5): stopping a worker releases its claims
 // ---------------------------------------------------------------------------
 
 /// The stopped worker whose claims a stop/rm releases: the worker NAME and,
@@ -56,7 +56,7 @@ const SESSION_HOLDER_PREFIXES: [&str; 3] = ["target-session:", "review-session:"
 /// Does this record belong to the stopped holder?
 ///
 /// A handover claim records the SPAWNER's session through an ambient pid
-/// (measured 2026-09-11: `node:x-9c91` held by `spawn-handover:target-x-9c91-…`
+/// (measured 2026-09-11: `node:x-aaaa` held by `spawn-handover:target-x-aaaa-…`
 /// with the blueprint session's id and a dead pid). A session-id match alone
 /// would hand a freshly spawned worker's node to the next spawn when the
 /// spawner is stopped, so `spawn-handover:<other>` never releases unless

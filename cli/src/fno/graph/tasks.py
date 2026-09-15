@@ -1,4 +1,4 @@
-"""Task-grain rows under a backlog node (epic x-09d7, group 3).
+"""Task-grain rows under a backlog node (epic, group 3).
 
 A node's graph entry may carry a ``tasks`` key: one row per task the bound
 plan's ``## Execution Strategy`` declares::

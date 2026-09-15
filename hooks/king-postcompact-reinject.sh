@@ -11,7 +11,7 @@
 # Carrier: shared with target-postcompact-reinject.sh in
 # scripts/lib/postcompact-carrier.sh - on Claude SessionStart(source=="compact")
 # via hookSpecificOutput.additionalContext, on Codex PostCompact via
-# systemMessage. Never re-derive the carrier here; x-841a shipped a hook that
+# systemMessage. Never re-derive the carrier here; shipped a hook that
 # emitted a payload no harness delivered and it went unnoticed for months.
 #
 # NEVER blocks. A compaction is often triggered to recover from a context-limit
@@ -190,7 +190,7 @@ $USER_NOTES"
     fi
 fi
 
-# Reign limb (x-7b36): when the crowned scope's manifest reports a shape AND
+# Reign limb: when the crowned scope's manifest reports a shape AND
 # names THIS session, this is a tenured reign, and its beat needs re-teaching
 # after a compact. Reads the same manifest every king arm resolves; a missing
 # manifest or a foreign session id means the brief above is the

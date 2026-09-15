@@ -1,4 +1,4 @@
-//! The process-end legs `fno agents rm` owns since x-a33f (law d-81c6da7e:
+//! The process-end legs `fno agents rm` owns since (law d-81c6da7e:
 //! remove needs no prior stop).
 //!
 //! Two legs moved out of daemon.rs so the lifecycle verbs share them: the

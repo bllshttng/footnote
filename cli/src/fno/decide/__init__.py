@@ -31,7 +31,7 @@ DECISION_EVENT_TYPES = frozenset({DECISION_EVENT, RETRACTION_EVENT})
 AUTHORITY_LANE_CUTOVER = "2026-08-21T00:00:00Z"
 
 # Enforced on the WRITE path only, never in schema.yaml. The index on disk
-# already holds `crown-l1`, `crown-l2-x-f3d0` and `crown-l2-x-b79f` in this
+# already holds `crown-l1`, `crown-l2-x-aaaa` and `crown-l2-x-bbbb` in this
 # field, invented by kings who had no correct value to pass. A JSON-Schema enum
 # would make `fno backlog decide-reindex` reject those rows as unusable and silently
 # drop recall for real rulings, so the closed set binds where the value is
@@ -972,7 +972,7 @@ def _subject_matcher(subject: str, entries: "list[dict] | None" = None):
     def matches(recorded: str) -> bool:
         # Casefold on this branch too. The resolver's id tier is
         # case-sensitive, so without it a ruling recorded as `X-7D94` answers
-        # nothing for `x-7d94` while the unresolved branch folds case happily -
+        # nothing for `` while the unresolved branch folds case happily -
         # and the doc promises every spelling, "any case", for a node subject.
         if recorded.strip().casefold() == want:
             return True
@@ -1132,8 +1132,8 @@ def near_miss_subjects(
     """Recorded subjects that nearly match, newest-heaviest first.
 
     A near miss is indistinguishable from a real absence today: four rulings
-    filed under the free-text subject ``x-f7b9 scope`` are invisible to
-    ``--subject x-f7b9``, and recovering them needed a raw grep of the index.
+    filed under the free-text subject `` scope`` are invisible to
+    ``--subject ``, and recovering them needed a raw grep of the index.
     Containment in EITHER direction counts, because the writer is as likely to
     have recorded the longer spelling as the shorter one.
 
@@ -1142,7 +1142,7 @@ def near_miss_subjects(
 
     A subject the exact matcher already answered is NOT a near miss. The same
     predicate decides both, so the two cannot disagree: `--subject f7b9`
-    resolves through the node tier to `x-f7b9`, prints that row, and must not
+    resolves through the node tier to ``, prints that row, and must not
     then report it as something it failed to reach.
 
     Counted by distinct ``decision_id``, matching how ``list_decisions``

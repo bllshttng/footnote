@@ -1,4 +1,4 @@
-//! The mux keystroke's launch machinery (x-3873 change 3): board selection
+//! The mux keystroke's launch machinery (change 3): board selection
 //! inputs, the door argv, the bounded shell-out, and the notice mapping.
 //! Lifted out of `server.rs` as its own module named by the question it
 //! answers - "how does a mux dispatch launch a node?" - so the shrink-only
@@ -9,13 +9,13 @@ use std::time::Duration;
 /// Bounded + fail-open (the digest_overlay idiom): read the board, launch the
 /// door, turn the outcome into the client notice. An empty return says nothing
 /// (the launched pane speaks for itself); every error path yields a visible
-/// notice rather than a silent no-op (x-6f77).
+/// notice rather than a silent no-op.
 pub(crate) fn dispatch_timeout() -> Duration {
     Duration::from_secs(75)
 }
 
-/// The launch argv for a dispatch (x-3873 change 3, step 3): pure so a unit
-/// test can pin it. The door is the ONE launcher (x-e53e) and now the mux's
+/// The launch argv for a dispatch (change 3, step 3): pure so a unit
+/// test can pin it. The door is the ONE launcher and now the mux's
 /// direct target too - no `--harness`, `--model`, `--route` and no message
 /// ride, so the grid picks the lane while the axes are free and the door
 /// renders the seed; the door takes the family-2 guard, the spawn gate, and
@@ -40,7 +40,7 @@ pub(crate) fn dispatch_spawn_argv(
         "--no-wait".to_string(),
     ]
     .to_vec();
-    // (x-c914) The client's session-local active account rides the same flag
+    // The client's session-local active account rides the same flag
     // the old porcelain pinned; the mux only forwards the id.
     if let Some(a) = account {
         argv.push("--account".to_string());
@@ -79,7 +79,7 @@ pub(crate) fn node_identity(stdout: &str) -> Option<(String, Option<String>, Opt
     found
 }
 
-/// One bounded `fno` shell-out capturing both streams (x-3873 change 3): the
+/// One bounded `fno` shell-out capturing both streams (change 3): the
 /// board reads need stdout; the spawn leg needs the door's stderr for the
 /// refusal-reason mapping. `None` on a timeout or a failed spawn - the caller
 /// renders its own notice for that.
@@ -109,7 +109,7 @@ pub(crate) async fn run_fno_captured(
     }
 }
 
-/// Map a dispatch launch to the one-line client notice (x-3873 change 3,
+/// Map a dispatch launch to the one-line client notice (change 3,
 /// step 4). Exit 0 with a pane receipt (a JSON line carrying `pane_id`)
 /// renders `dispatched <slug or id>`; the seed / pane_observation doubt text
 /// carries over verbatim. The door's family-2 refusal naming an

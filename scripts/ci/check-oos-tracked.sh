@@ -161,7 +161,7 @@ fi
   echo "                   call for a small find - see AGENTS.md principle 4)"
   echo "  - or cut it:     remove the line if it names no real deferred work"
   echo "  - file a node:   fno backlog idea \"<the deferred work>\"   then add its id"
-  echo "                   to the item, e.g. '... - tracked as x-1a2b'"
+  echo "                   to the item, e.g. '... - tracked as x-aaaa'"
   echo "  - or a carveout: fno backlog carveout add --kind deferred \"<...>\"  (harvested at merge)"
   echo "  - or, if there is genuinely nothing to track (already covered elsewhere),"
   echo "    waive it: add 'oos-ok: <why nothing to track>' on the item, or one"

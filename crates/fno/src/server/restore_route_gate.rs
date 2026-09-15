@@ -1,4 +1,4 @@
-//! (x-3954) The workspace-restore gate for a routed codex member: the row's
+//! The workspace-restore gate for a routed codex member: the row's
 //! `route_provider_id` names a route (set, non-empty, not the `openai`
 //! sentinel), so the pane door refuses by name and the member is marked
 //! refused in the restore receipt. `crates/fno` never links fno-agents, so

@@ -25,7 +25,7 @@
 #     async work is live.
 #   - A repeated firing (executionNum increments) is safe: loop-check is idempotent.
 #
-# ACTIVE-SESSION-AWARE error handling (x-984e, porting x-81d9): the state file
+# ACTIVE-SESSION-AWARE error handling (porting): the state file
 # `.fno/target-state.md` is the active-session discriminator, checked BEFORE any
 # error path. With NO state file there is nothing to gate, so every failure emits
 # `{}` (allow) as before. With a state file present, a broken checker (missing jq,

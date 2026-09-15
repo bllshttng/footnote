@@ -4,7 +4,7 @@
 # Sourced (never executed) by hooks/target-postcompact-reinject.sh and
 # hooks/king-postcompact-reinject.sh. No side effects at source time.
 #
-# The carrier rule this lib encodes (learned the hard way in x-841a, hardened in
+# The carrier rule this lib encodes (learned the hard way in, hardened in
 # 502af79f2): on Claude, SessionStart with source=="compact" is the only
 # post-compaction event that injects into MODEL context, and it delivers through
 # hookSpecificOutput.additionalContext; PostCompact output on Claude reaches

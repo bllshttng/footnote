@@ -4,8 +4,8 @@
 #
 # After Phase 03 of the path-config migration (plan 2026-05-14-path-config-impl),
 # all path resolution must go through:
-#   Python : from fno import paths  (paths.state_dir(), paths.graph_json(), ...)
-#   Bash   : source "$(fno config paths shell-stub)"  then use $STATE_DIR, $GRAPH_JSON_PATH, etc.
+#   Python: from fno import paths  (paths.state_dir(), paths.graph_json(), ...)
+#   Bash  : source "$(fno config paths shell-stub)"  then use $STATE_DIR, $GRAPH_JSON_PATH, etc.
 #
 # Run: bash scripts/ci/check-no-hardcoded-paths.sh
 # Exits 0 when no violations found; exits 1 with a report when violations detected.
@@ -22,7 +22,7 @@
 #   - fno/adapters/providers/staging.py  - has try/except fallback for providers
 #   - graph/_constants.py             - uses _state_dir() helper with try/except
 #   - cost/_register.py, cost/_session_cost.py - the moved standalone metric
-#       scripts (ab-58645f63: former scripts/metrics/register-task.py +
+#       scripts (: former scripts/metrics/register-task.py +
 #       session-cost.py). They keep their home-anchored ledger literal
 #       (~/.fno/ledger.json), which is exactly what paths.ledger_json() defaults
 #       to; the move-not-rewrite preserved them verbatim (no logic change).

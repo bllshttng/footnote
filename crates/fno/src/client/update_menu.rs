@@ -1,4 +1,4 @@
-//! The update menu surface (x-f188): the readiness payload structs, the
+//! The update menu surface : the readiness payload structs, the
 //! off-loop `--check` probe, the sideline menu + update modal builders, and
 //! the queued `fno agents restart` verb. Split out of client.rs so the
 //! over-budget file shrinks; everything here reaches the client's private
@@ -20,7 +20,7 @@ pub(crate) struct UpdateReadiness {
     pub(crate) changelog: Vec<String>,
     pub(crate) guidance: String,
     pub(crate) degraded: Option<String>,
-    /// One row per running long-lived process (x-f188 change 7). Tolerated
+    /// One row per running long-lived process (change 7). Tolerated
     /// absent so a payload from an older fno still parses; an empty list
     /// offers no restart action.
     #[serde(default)]
@@ -142,7 +142,7 @@ pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>
             ));
             actions.push(AuxAction::OpenUpdate);
         }
-        // x-f188 change 7: stale long-lived processes are their own reason
+        // change 7: stale long-lived processes are their own reason
         // to open the modal, even with no update pending.
         Some(UpdateOutcome::Ok(r)) if r.running_stale > 0 => {
             rows.push(entry(
@@ -202,7 +202,7 @@ pub(crate) fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
             }
             rows.push(PopupRow::Rule);
             rows.push(PopupRow::Header(r.guidance.clone()));
-            // x-f188 change 7: one row per stale process naming what a
+            // change 7: one row per stale process naming what a
             // restart does and what survives, then the fixed promise. The
             // tap is the confirmation, because the modal named every effect.
             let stale: Vec<&RunningRow> = r
@@ -255,7 +255,7 @@ pub(crate) fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
     }
 }
 
-/// Run `fno agents restart` off the UI loop (x-f188 change 7) and return
+/// Run `fno agents restart` off the UI loop (change 7) and return
 /// its verdict line for the notice: the last `fno agents restart:` stdout
 /// line the verb printed, whatever it said. Text mode, never --json: the
 /// verdict line IS the human receipt. Never --mux, never --force.

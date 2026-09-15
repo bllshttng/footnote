@@ -529,7 +529,7 @@ def offer_prompt_provenance(
     shell_snippet_path: Optional[Path] = None,
     shell_rc: Optional[Path] = None,
 ) -> dict:
-    """Opt-in offer to render fno pane provenance in the user's prompt (x-84a8).
+    """Opt-in offer to render fno pane provenance in the user's prompt.
 
     Two renderers, each prompted separately (default No), so the feature never
     assumes starship: a starship custom module AND a portable bash/zsh ``$PS1``
@@ -649,7 +649,7 @@ def wizard_cmd(
 
     offer_recommended_rules(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
 
-    # Optional capstone: render fno pane provenance in the prompt (x-84a8) via
+    # Optional capstone: render fno pane provenance in the prompt via
     # a starship module and/or a portable bash/zsh segment. Opt-in, default No;
     # only appends on explicit yes. Engine-neutral - starship is not assumed.
     offer_prompt_provenance(confirm_fn=rules_confirm_fn, echo_fn=typer.echo)
@@ -699,7 +699,7 @@ def wizard_cmd(
 
     # Machine check, last: the wizard configures preferences, `fno doctor`
     # knows the machine. Run it in process so a stale-install user gets a
-    # real answer, not the deployed binary's (x-75dc).
+    # real answer, not the deployed binary's.
     report_machine_blockers(echo_fn=typer.echo)
 
     raise typer.Exit(0)
@@ -717,7 +717,7 @@ def migrate_paths_cmd(
 
 @app.command("migrate-config")
 def migrate_config_cmd() -> None:
-    """Convert legacy settings.yaml -> flat config.toml (x-8526 hard cut).
+    """Convert legacy settings.yaml -> flat config.toml (hard cut).
 
     Walks the settings candidate chain (worktree, canonical, global), writes an
     equivalent flat config.toml sibling for each settings.yaml, and deletes the

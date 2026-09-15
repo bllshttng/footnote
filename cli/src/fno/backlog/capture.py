@@ -50,7 +50,7 @@ VALID_PRIORITIES = {"p0", "p1", "p2", "p3"}
 # MINTED fu-id grammar: 6 lowercase hex (mint_fu_id). Used for collision
 # avoidance (_existing_ids) and the bare-token unparseable-line warning. The
 # RECOGNITION grammar (_FU_TOKEN) is broader: it also matches hand-authored slug
-# ids like fu-cwd339 / fu-codex-errpaths that live inboxes carry (ab-932f5a92),
+# ids like fu-cwd339 / fu-codex-errpaths that live inboxes carry,
 # so the checkbox-line item parsers see them while minting stays strictly 6-hex.
 FU_RE = re.compile(r"fu-[0-9a-f]{6}")
 _FU_TOKEN = r"fu-[a-z0-9][a-z0-9-]*"
@@ -60,7 +60,7 @@ _MEMORY_SLUG_RE = re.compile(r"^\s*\[\[.*\]\]\s*$")
 # read/write paths (parse_items/list, promote, dismiss, archive_struck, triage)
 # keep working after `tidy` normalizes separators to hyphen. add/promote/dismiss
 # now WRITE the hyphen (Phase 2 separator migration). The fu-token is _FU_TOKEN
-# (minted 6-hex OR a hand-authored slug, ab-932f5a92); minting stays 6-hex.
+# (minted 6-hex OR a hand-authored slug); minting stays 6-hex.
 _ITEM_RE = re.compile(r"^- \[([ x\-])\]\s+(" + _FU_TOKEN + r")\s+(?:—|-)\s+(.*?)\s*$")
 _PRIORITY_SUFFIX_RE = re.compile(r"\s*\((p[0-3])\)\s*$")
 
@@ -171,7 +171,7 @@ def find_unparseable_fu_lines(text: str) -> list[tuple[int, str]]:
 #
 # A *managed item* is a checkbox line that carries a type token. Four types:
 #   followup  fu-XXXXXX    (minted 6-hex OR a hand-authored slug like fu-cwd339,
-#                           ab-932f5a92; only 6-hex is MINTED, see mint_fu_id)
+#                         ; only 6-hex is MINTED, see mint_fu_id)
 #   carveout  cv-XXXXXXXX  (8 hex; lifecycle owned by carveouts.jsonl + retro)
 #   node      ab-XXXXXXXX  (8 hex; transient - Phase 2 `tidy` ejects filed nodes)
 #   human     a maintainer-marker tag (config-driven via post_merge.maintainer_marker;
@@ -1542,7 +1542,7 @@ def cmd_list(
         text = path.read_text(encoding="utf-8") if path.exists() else ""
     except (OSError, UnicodeDecodeError) as exc:
         # A present-but-unreadable inbox (permission denied / non-UTF-8) must exit
-        # cleanly, not dump a raw traceback (ab-0625107e).
+        # cleanly, not dump a raw traceback.
         typer.echo(f"error: cannot read inbox {path}: {exc}", err=True)
         raise typer.Exit(code=1)
     if by_type:

@@ -8,7 +8,7 @@ your-move / working / stalled) need the transcript TAIL, not process state.
 
 Liveness here is transcript-keyed ONLY. argv, pid, the daemon record, and
 state.json's ``state`` field were EACH caught lying about a live session in one
-evening (x-a472 forensics: a claimed bg-spare keeps the blank's ``bg-spare``
+evening (forensics: a claimed bg-spare keeps the blank's ``bg-spare``
 argv for life, its agent-view row freezes at Idle, and state.json wrote ``done``
 mid-conversation). The transcript was the only surface that told the truth at
 every point, so it is the only one this module reads.
@@ -17,14 +17,14 @@ State precedence (a content signal in the last assistant turn beats the mtime
 fallback, EXPIRED past ``STALLED_AFTER_S``: a tag describes a TURN, and a turn
 stops being news once the transcript has been silent past the bound. An old
 ``<promise>`` is still ``done`` because a promise is a turn OUTCOME, not news;
-an old ``<watching>`` or old question decays to ``stalled`` -- x-c1a3 measured
+an old ``<watching>`` or old question decays to ``stalled`` -- measured
 a dead worker reading ``watching`` at any age, and a wedged node blocked on it):
 
     <promise ...>                 -> done         (mission declared complete, any age)
     <watching ...>                -> watching     (fresh; past the bound -> stalled)
     starts 'API Error'            -> stalled      (the turn IS the error; any age)
     ends in '?' OR <help ...>     -> your-move    (fresh; past the bound -> stalled)
-    ends in [Y/n] / (y/N) / etc.  -> your-move    (an option prompt, x-1182; fresh)
+    ends in [Y/n] / (y/N) / etc.  -> your-move    (an option prompt, ; fresh)
     (none) transcript fresh       -> working
     (none) silent for hours       -> stalled
     unresolvable / no records     -> unknown      (hands off, fail-quiet)
@@ -58,7 +58,7 @@ _HELP_RE = re.compile(r"<help[>\s]")
 # prefix is the family and the sentence after it is not.
 _API_ERROR_RE = re.compile(r"^API Error\b")
 
-# A trailing interactive option prompt (x-1182): [Y/n], [y/N], (y/N), (Y/n),
+# A trailing interactive option prompt: [Y/n], [y/N], (y/N), (Y/n),
 # or a bracketed numbered menu like [1/2/3]. Matched only at the END of the
 # rstripped tail, same position as the trailing "?" check below - a [Y/n]
 # mentioned mid-paragraph is prose about a prompt, not a prompt. This is a
@@ -113,7 +113,7 @@ def classify_tail(
     per-session file mtime), so stalled cannot be proven and the fallback is
     ``working`` -- truth never falsely asserts a silent session.
 
-    Expiry (x-c1a3): a tag describes a turn, and a turn stops being news once
+    Expiry : a tag describes a turn, and a turn stops being news once
     the transcript has been silent past ``stalled_after_s`` -- the content arms
     checked the age AFTER answering, which made the bound unreachable for
     exactly the two states a liveness reader trusts. ``done`` is a turn OUTCOME
@@ -158,10 +158,10 @@ def _transcript_age_s(
     from two reads is how a stamp and an age disagree about one transcript.
     ``basis`` names the instrument that answered - ``mtime`` (a file stat,
     which OVERSTATES liveness: trailing untimestamped records keep the file
-    young while the conversation is silent, x-54cf) or ``opencode-db`` (the
+    young while the conversation is silent) or ``opencode-db`` (the
     store's newest message time).
 
-    Uses the x-a472 transcript resolver (content-aware across all project dirs),
+    Uses the transcript resolver (content-aware across all project dirs),
     so a jsonl age reflects the LIVE transcript, not a stale stub. For opencode
     the store is shared, so a per-file mtime is meaningless; the age comes from
     the session's newest message timestamp instead (the store already indexes
@@ -225,7 +225,7 @@ def newest_entry_epoch(path: Path, tail_bytes: Optional[int] = _ENTRY_TAIL_BYTES
     """Newest top-level ``timestamp`` in a jsonl transcript, in epoch SECONDS.
 
     The age primitive the file stat must not be: trailing untimestamped
-    records keep the file young while the conversation is silent (x-54cf).
+    records keep the file young while the conversation is silent.
     ``tail_bytes=None`` reads the whole file (the adopt stamp), so its window
     is never narrower than truth's own read. None when unreadable or
     stamp-free; the caller falls back and names it."""
@@ -333,7 +333,7 @@ def resolve_session_truth(
     observed_model, harness_title, suggestions}``.
     ``state`` is one of done | watching | your-move | working | stalled |
     unknown; ``reason`` is set only for ``unknown`` (``not-found``/``no-records``)
-    and for the x-b250 API-error tail (``api-error-tail`` -- a ``stalled`` that
+    and for the API-error tail (``api-error-tail`` -- a ``stalled`` that
     is an error, not silence);
     ``last_event_at`` is the absolute ISO8601 UTC stamp of the newest transcript
     activity and ``last_message`` the flattened text of the LAST turn (compact

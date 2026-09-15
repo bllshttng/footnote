@@ -1,4 +1,4 @@
-//! Daemon-side `agent.logs` streaming handler (Category C / ab-d82655d7).
+//! Daemon-side `agent.logs` streaming handler (Category C /).
 //!
 //! Honors Locked Decision #5: `fno agents logs <name> --follow` for codex/gemini
 //! reuses the same WebSocket-upgrade transport `drive` established (Wave 4)

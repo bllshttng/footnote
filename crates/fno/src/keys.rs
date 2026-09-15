@@ -13,9 +13,9 @@
 //! select tab · `&` close tab · `w` sideline row selector · `b` toggle sideline ·
 //! `s` toggle status row · `?` key-table overlay · `d` detach · `[`/`]` jump
 //! prev/next command block · `v` select block · `y` copy selection · `r` rerun
-//! block (x-38c4) · `R` ask the pane to repaint (x-a600) · `,` rename tab
-//! (x-c150) · prefix-prefix = one literal
-//! prefix byte · `<`/`>` reorder the active tab (x-0333). Prefix + anything
+//! block · `R` ask the pane to repaint · `,` rename tab
+//! · prefix-prefix = one literal
+//! prefix byte · `<`/`>` reorder the active tab. Prefix + anything
 //! unmapped is swallowed with BEL - a chord typo must never leak half a chord
 //! into the pane (AC2-UI's never-leak guarantee).
 //!
@@ -347,8 +347,8 @@ pub const PANE_IDS_REPEAT_WINDOW: Duration = Duration::from_millis(750);
 const PASTE_OPEN: &[u8] = b"\x1b[200~";
 const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 
-/// (x-e10f) The GLOBAL sideline chord's prefix: Ctrl+Opt+arrow is
-/// `ESC [ 1 ; 7 X` (xterm modifier 7 = 1 + Alt 2 + Ctrl 4), the rung above
+/// The GLOBAL sideline chord's prefix: Ctrl+Opt+arrow is
+/// `ESC [ 1; 7 X` (xterm modifier 7 = 1 + Alt 2 + Ctrl 4), the rung above
 /// the prefix-gated ctrl(5)/shift(2) arrows in [`esc_chord`]. Shared by the
 /// `ChordEsc` scanner branch (which holds and releases candidates against it)
 /// and [`esc_chord`] itself, so the scanner and the parser cannot disagree
@@ -361,10 +361,10 @@ const GLOBAL_CHORD_PREFIX: &[u8] = b"\x1b[1;7";
 pub enum Event {
     Forward(Vec<u8>),
     Cmd(Command),
-    /// Digit tab jump (x-cf97): select the tab at this 1-BASED ordinal - the
+    /// Digit tab jump: select the tab at this 1-BASED ordinal - the
     /// number the operator reads off the tab strip. The scanner only knows the
     /// ordinal; the client resolves it to a stable `TabId` against its last
-    /// `Layout` (v3: `SelectTab` names ids, not indices). x-1499's caution
+    /// `Layout` (v3: `SelectTab` names ids, not indices). caution
     /// lives at that resolution: the ordinal is the SHIFTING identifier space
     /// and is resolved to the id once, at keypress, never carried.
     SelectTabIdx(usize),
@@ -372,23 +372,23 @@ pub enum Event {
     /// Open the sideline selector (prefix+w). Selector-mode keys are
     /// interpreted by the client's view layer, not here.
     OpenSelector,
-    /// Open the answer overlay (prefix+a, x-c929). Overlay-mode keys (a digit
+    /// Open the answer overlay (prefix+a). Overlay-mode keys (a digit
     /// answers, `n`/`N` cycle the blocked queue, Enter focuses, Esc closes) are
     /// interpreted by the client's view layer, not here (like OpenSelector).
     OpenAnswers,
-    /// Open the yard overlay (prefix+m, x-b2bf): the fleet as f[no]nimals -
+    /// Open the yard overlay (prefix+m): the fleet as f[no]nimals -
     /// collection - one eye glyph per citizen, one spotlight sprite at a
     /// time. Overlay-mode keys (`n`/`N` pick, `q`/Esc close) are interpreted
     /// by the client's view layer, not here (like OpenAnswers).
     OpenYard,
-    /// (x-3cb3, redefined by x-aeab) Toggle the court block on the left
+    /// (redefined by) Toggle the court block on the left
     /// sideline between its three-line glance and the full reading: load
     /// against the cap, what saturates the box, the working/idle/dead
     /// census, and the lane advisor's own answer. The block is always
     /// visible; this only expands or collapses it, and the client's view
     /// layer interprets that, not here.
     OpenCourt,
-    /// Toggle the activity feed panel on the right edge (e, x-4433):
+    /// Toggle the activity feed panel on the right edge (e):
     /// questions, decisions and node lifecycle, newest first. The panel is
     /// chrome and consumes no keys; a click deep-links a row and the border
     /// drags (interpreted by the client's view layer, like OpenAnswers).
@@ -398,11 +398,11 @@ pub enum Event {
     FocusFeed,
     /// Show/hide the sideline (prefix+b).
     TogglePanel,
-    /// (x-b186) Cycle the sideline density slim -> regular -> extended
+    /// Cycle the sideline density slim -> regular -> extended
     /// (prefix+B). Orthogonal to [`Event::TogglePanel`]: this changes how much
     /// each row shows, that changes whether the panel renders at all.
     CycleDensity,
-    /// (x-b186) Toggle the extended table's order between by-squad and
+    /// Toggle the extended table's order between by-squad and
     /// by-status (prefix+o). Inert in the other densities, which render no
     /// table - but the preference still persists, so the choice survives a
     /// round trip through slim.
@@ -415,39 +415,39 @@ pub enum Event {
     /// dismisses it (US4, AC4-EDGE).
     ShowKeys,
     /// Jump the focused pane's shared scroll to the prev/next command block
-    /// (prefix+`[` / prefix+`]`, x-38c4). The client resolves the focused pane.
+    /// (prefix+`[` / prefix+`]`). The client resolves the focused pane.
     BlockJump(BlockDir),
-    /// Move the focused pane's block selection (prefix+v walks older, x-38c4).
+    /// Move the focused pane's block selection (prefix+v walks older).
     BlockSelect(BlockDir),
-    /// Rerun the focused pane's selected block command (prefix+r, x-38c4).
+    /// Rerun the focused pane's selected block command (prefix+r).
     BlockRerun,
     /// Dispatch the next ready backlog node into a new pane (prefix+g, "grab
-    /// work", x-6f77). The server shells the Python porcelain; no-work and
+    /// work"). The server shells the Python porcelain; no-work and
     /// refusal outcomes come back as a one-line notice.
     DispatchNext,
-    /// Open in-scrollback search on the focused pane (prefix+/, x-e780). The
+    /// Open in-scrollback search on the focused pane (prefix+/). The
     /// client enters a local typing mode; the query and n/N/Esc are interpreted
     /// by the client's view layer, not here (like OpenSelector / OpenAnswers).
     SearchOpen,
-    /// Open the session navigator (prefix+f, x-653d): a global goto picker over
+    /// Open the session navigator (prefix+f): a global goto picker over
     /// a flat catalog of every squad/tab/agent/card. The client owns the typing
     /// mode (text filter, Tab state filter, Ctrl-n/p cursor, Enter goto); the
     /// chord only opens it (like SearchOpen).
     OpenNav,
     /// Open the rename-tab name overlay for the active tab (prefix+,, tmux
-    /// `rename-window` convention, x-c150). The client owns the typing mode
+    /// `rename-window` convention). The client owns the typing mode
     /// and resolves the active tab's stable id; the chord only opens it.
     OpenRename,
-    /// Open the move-tab-to-position prompt (prefix+#, x-cf97): type the
+    /// Open the move-tab-to-position prompt (prefix+#): type the
     /// 1-based destination ordinal. The client owns the typing mode, computes
     /// the delta against the tab's current index, and sends ONE
     /// `Command::ReorderTab`; the chord only opens the prompt.
     OpenMoveTo,
     /// Reorder the active tab one slot within its squad (prefix+`<`/`>`,
-    /// x-0333). The client resolves the active tab's stable id before sending.
+    ///). The client resolves the active tab's stable id before sending.
     ReorderTab(i32),
     /// Cycle the ACTIVE squad's sideline section one step through
-    /// expanded -> live-only -> collapsed (prefix+z, x-975a). The client owns
+    /// expanded -> live-only -> collapsed (prefix+z). The client owns
     /// the state and resolves the active squad; the chord only fires the step.
     CycleSection,
     /// Swallowed unmapped chord: the client sounds BEL.
@@ -459,8 +459,8 @@ enum State {
     /// Bytes forward; `usize` is the rolling PASTE_OPEN match index (how
     /// many marker bytes the forwarded tail already matches).
     Normal(usize),
-    /// (x-e10f) Accumulating a GLOBAL chord candidate that began in `Normal`
-    /// (Ctrl+Opt+Left = `ESC [ 1 ; 7 D`): bytes are HELD, not forwarded, and
+    /// Accumulating a GLOBAL chord candidate that began in `Normal`
+    /// (Ctrl+Opt+Left = `ESC [ 1; 7 D`): bytes are HELD, not forwarded, and
     /// release to the pane the moment the sequence diverges from the chord
     /// prefix - with the paste-open roll re-run over the released bytes - so
     /// a partial chord never leaks mid-sequence and a lone Esc is released as
@@ -468,7 +468,7 @@ enum State {
     ChordEsc(Vec<u8>),
     /// Saw the prefix; the next key (or escape sequence) is a chord.
     Prefix,
-    /// (x-cf97) Holding a tab number: the digits typed so far after a prefix
+    /// Holding a tab number: the digits typed so far after a prefix
     /// digit or an Alt+digit. More digits keep appending; Enter, any
     /// non-digit, or the caller's quiet-window flush resolves the ordinal.
     /// Bytes stored are the raw digit bytes so the parse (and its cap) lives
@@ -539,7 +539,7 @@ impl Scanner {
         while i < bytes.len() {
             let b = bytes[i];
             i += 1;
-            // (x-e10f fix) A released chord candidate re-dispatches its LAST
+            // (fix) A released chord candidate re-dispatches its LAST
             // byte through the Normal arms (see ChordEsc below): replay drops
             // the pre-increment so the same byte runs again in the new state.
             let mut replay = false;
@@ -552,7 +552,7 @@ impl Scanner {
                         flush(&mut plain, &mut out);
                         self.state = State::Prefix;
                     } else if b == 0x1b {
-                        // (x-e10f) A bare ESC may open the global sideline
+                        // A bare ESC may open the global sideline
                         // chord (Ctrl+Opt+Left). Hold it in ChordEsc instead
                         // of forwarding; it releases on the next byte unless
                         // the chord prefix keeps matching. A non-repeat byte
@@ -599,7 +599,7 @@ impl Scanner {
                     }
                 }
                 State::ChordEsc(mut seq) => {
-                    // (x-e10f) Held global-chord candidate. Accumulate only
+                    // Held global-chord candidate. Accumulate only
                     // while the bytes still spell the Ctrl+Opt-arrow prefix;
                     // a completed prefix plus its final byte resolves through
                     // `esc_chord` - the SAME parse the prefix path uses, not a
@@ -614,7 +614,7 @@ impl Scanner {
                     if GLOBAL_CHORD_PREFIX.starts_with(&seq) {
                         self.state = State::ChordEsc(seq);
                     } else if seq.len() == 2 && seq[1].is_ascii_digit() {
-                        // (x-cf97) Alt+digit arms the same tab-number buffer
+                        // Alt+digit arms the same tab-number buffer
                         // the prefix digit path arms: ESC + digit is the one
                         // representable modifier form of a digit (Ctrl+digit
                         // is not, Locked Decision 1), and later PLAIN digits
@@ -662,7 +662,7 @@ impl Scanner {
                     if b == 0x1b {
                         self.state = State::PrefixEsc(vec![0x1b]);
                     } else if b.is_ascii_digit() {
-                        // (x-cf97) A digit holds instead of firing: more
+                        // A digit holds instead of firing: more
                         // digits keep appending (tab 34 is reachable), Enter
                         // or a non-digit resolves, and the caller's
                         // quiet-window flush covers the number-then-nothing
@@ -720,7 +720,7 @@ impl Scanner {
                         // accumulating (split-across-reads safe).
                         self.state = State::PrefixEsc(seq);
                     } else if seq.len() == 2 && seq[1].is_ascii_digit() {
-                        // (x-cf97) Alt+digit after the prefix: same buffer, so
+                        // Alt+digit after the prefix: same buffer, so
                         // both modifier forms reach one gesture.
                         self.state = State::Digits(vec![seq[1]]);
                     } else {
@@ -743,7 +743,7 @@ impl Scanner {
         out
     }
 
-    /// (x-e10f) A global-chord candidate is held, waiting for more bytes.
+    /// A global-chord candidate is held, waiting for more bytes.
     /// The client read loop polls this to arm its quiet-window flush, the
     /// analog of tmux's escape-time: a lone Esc must not wait for the next
     /// keypress forever.
@@ -751,7 +751,7 @@ impl Scanner {
         matches!(self.state, State::ChordEsc(_))
     }
 
-    /// (x-e10f fix) Release a held global-chord candidate once input has gone
+    /// (fix) Release a held global-chord candidate once input has gone
     /// quiet past the flush window: the held bytes forward to the pane exactly
     /// as a divergence release would send them, and the paste-open roll
     /// resumes where the hold paused it. `None` when nothing is held. This is
@@ -768,7 +768,7 @@ impl Scanner {
         }
     }
 
-    /// (x-cf97) A tab number is being held, waiting for Enter, a non-digit,
+    /// A tab number is being held, waiting for Enter, a non-digit,
     /// or the caller's quiet-window flush. The client read loop polls this to
     /// arm that window - a number typed and then left alone must still land,
     /// without waiting for the next keypress forever.
@@ -776,7 +776,7 @@ impl Scanner {
         matches!(self.state, State::Digits(_))
     }
 
-    /// (x-cf97) Resolve a held tab number once input has gone quiet past the
+    /// Resolve a held tab number once input has gone quiet past the
     /// flush window. `None` when nothing is held.
     pub fn flush_digits(&mut self) -> Option<Event> {
         if let State::Digits(digits) = std::mem::replace(&mut self.state, State::Normal(0)) {
@@ -850,7 +850,7 @@ fn flush(plain: &mut Vec<u8>, out: &mut Vec<Event>) {
     }
 }
 
-/// (x-e10f) Release a held global-chord candidate to the forwarded stream,
+/// Release a held global-chord candidate to the forwarded stream,
 /// re-running the paste-open roll over every released byte (the hold paused
 /// the roll, so it catches up byte-for-byte). Rolling from 0 is exact: the
 /// candidate starts with ESC, and `roll` reaches 1 on an ESC from ANY prior
@@ -873,7 +873,7 @@ fn paste_state(idx: usize) -> State {
     }
 }
 
-/// Which help-modal section a prefix chord belongs to (x-8ccf). Declaration
+/// Which help-modal section a prefix chord belongs to. Declaration
 /// order is the render order the which-key modal groups by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySection {
@@ -881,7 +881,7 @@ pub enum KeySection {
     Navigation,
     WorkspacesTabs,
     Panes,
-    /// (x-f300) Bare keys the sideline handles on the SELECTED row - no prefix.
+    /// Bare keys the sideline handles on the SELECTED row - no prefix.
     /// They are not chords, so they carry no [`KeyBinding`]; the modal shows them
     /// through [`meta_rows`] purely as reference, which is why removing a dead
     /// row was undiscoverable before.
@@ -902,7 +902,7 @@ impl KeySection {
 }
 
 /// One prefix-chord binding: the single source of truth shared by the chord
-/// dispatcher ([`chord`]) and the which-key modal renderer (x-8ccf, Locked 3).
+/// dispatcher ([`chord`]) and the which-key modal renderer (Locked 3).
 /// Help that reads THIS cannot drift from what the dispatcher runs; the parity
 /// test (`bindings_are_the_chord_table`) fails loudly if the two disagree.
 pub struct KeyBinding {
@@ -1268,13 +1268,13 @@ pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
         action: "move-tab-right",
         key: b'>',
     },
-    // (x-cf97) The move-to prompt: same byte as its prefix chord, one
+    // The move-to prompt: same byte as its prefix chord, one
     // vocabulary inside the menu and out.
     MenuKeyBinding {
         action: "move-tab-to",
         key: b'#',
     },
-    // (x-d545) The row-menu verbs, teachable by keyboard now. Letters reuse
+    // The row-menu verbs, teachable by keyboard now. Letters reuse
     // the sideline's own vocabulary so the two scopes teach one keyboard:
     // `s` stop (the sideline spends `x` on stop-then-remove and `X` on bulk
     // reap, so the menu's own free mnemonic takes Stop), `p` peek (the
@@ -1406,7 +1406,7 @@ pub fn prefix_hint() -> String {
 pub fn meta_rows() -> Vec<(String, String, KeySection)> {
     let p = key_disp(prefix());
     vec![
-        // (x-cf97) The digit jump reads arbitrary numbers now, so the row
+        // The digit jump reads arbitrary numbers now, so the row
         // names the resolve doors instead of a nine-tab ceiling: Enter is the
         // explicit one, the quiet window covers number-then-nothing, and a
         // non-digit ends the number and falls through to the next chord.
@@ -1420,7 +1420,7 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             format!("literal {p}"),
             KeySection::Global,
         ),
-        // (x-e10f) The global sideline chord: a multi-byte CSI, so it lives
+        // The global sideline chord: a multi-byte CSI, so it lives
         // HERE with the other display-only rows rather than in the single-byte
         // key_bindings table the modal executes from - the scanner's ChordEsc
         // branch dispatches it, not chord().
@@ -1429,7 +1429,7 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             "sideline (global, no prefix)".into(),
             KeySection::Global,
         ),
-        // (x-f300) The dead-row removal paths. Bare sideline keys, not chords -
+        // The dead-row removal paths. Bare sideline keys, not chords -
         // listed here so the reference names them; Enter on them BELs.
         (
             "x".into(),
@@ -1441,10 +1441,10 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
             "reap all exited agents".into(),
             KeySection::SidelineRows,
         ),
-        // (x-8f9d) Enter reaches portal 0; P opens the next free portal so a
+        // Enter reaches portal 0; P opens the next free portal so a
         // second thread lands BESIDE the first instead of repointing it. The
         // tab menu's Join actions then tile them. Like the 1-9 row, it states
-        // its own ceiling and names the way past it (x-0719): any portal is
+        // its own ceiling and names the way past it: any portal is
         // findable by index through the navigator.
         (
             "P".into(),
@@ -1453,10 +1453,10 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         ),
         (
             "right-click".into(),
-            // (x-7683) All three triggers of the same menu, so a terminal that
+            // All three triggers of the same menu, so a terminal that
             // never forwards the button does not read as a dead feature. The
             // header-only clear-dead action stays named here too - it was the
-            // only in-app documentation of that behavior (x-7683 review). The
+            // only in-app documentation of that behavior (review). The
             // hold duration formats from the client's one constant, so a
             // retune can never leave this label stale.
             format!(
@@ -1491,7 +1491,7 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
 /// structural specials; every other byte is resolved from [`key_bindings`], the
 /// same table the which-key modal renders, so dispatch and help cannot diverge.
 /// Resolve a post-prefix byte to its [`Event`] as if the prefix were held - the
-/// which-key modal's execution path (x-8ccf US3): a keypress in the modal runs
+/// which-key modal's execution path (US3): a keypress in the modal runs
 /// EXACTLY what `prefix+<key>` runs, because both go through this one table.
 /// `Event::Bell` means the byte is unbound (the modal dismisses on it).
 pub fn resolve_chord(byte: u8) -> Event {
@@ -1502,7 +1502,7 @@ fn chord(b: u8) -> Event {
     chord_for(&keymap(), b)
 }
 
-/// (x-cf97) Parse held digit bytes into the 1-based ordinal event. An
+/// Parse held digit bytes into the 1-based ordinal event. An
 /// unparseable or zero reading still emits the event: the CLIENT resolves it
 /// against the live layout and answers with a notice naming the miss, never a
 /// silent BEL - a number that does nothing reads as a dead keybind.
@@ -1518,7 +1518,7 @@ fn chord_for(map: &Keymap, b: u8) -> Event {
     match b {
         // prefix-prefix = one literal prefix byte, whatever the prefix now is.
         _ if b == map.prefix => Event::Forward(vec![b]),
-        // (x-cf97) 1-based ordinal; the scan loop routes digits into the
+        // 1-based ordinal; the scan loop routes digits into the
         // multi-digit buffer before this table is consulted, so a lone
         // resolution here only serves `resolve_chord` callers.
         b'1'..=b'9' => Event::SelectTabIdx((b - b'0') as usize),
@@ -1536,10 +1536,10 @@ enum EscScan {
     Invalid,
 }
 
-/// Arrows (`ESC [ A..D` -> focus), Ctrl-arrows (`ESC [ 1 ; 5 A..D` -> resize),
-/// Shift-arrows (`ESC [ 1 ; 2 A..D` -> move the pane, x-aa95) after the
-/// prefix, and the one GLOBAL rung: Ctrl+Opt-Left (`ESC [ 1 ; 7 D` -> open
-/// the sideline, x-e10f), which the `ChordEsc` branch also reaches without a
+/// Arrows (`ESC [ A..D` -> focus), Ctrl-arrows (`ESC [ 1; 5 A..D` -> resize),
+/// Shift-arrows (`ESC [ 1; 2 A..D` -> move the pane) after the
+/// prefix, and the one GLOBAL rung: Ctrl+Opt-Left (`ESC [ 1; 7 D` -> open
+/// the sideline), which the `ChordEsc` branch also reaches without a
 /// prefix. Anything that stops matching every prefix is swallowed as one Bell.
 /// (The paste-open marker is peeled off by the caller before this runs.)
 ///
@@ -1571,14 +1571,14 @@ fn esc_chord(seq: &[u8]) -> EscScan {
             return EscScan::Invalid;
         }
     }
-    // Complete Ctrl-arrow: ESC [ 1 ; 5 X
+    // Complete Ctrl-arrow: ESC [ 1; 5 X
     if seq.len() == 6 && seq.starts_with(CTRL) {
         return match arrow(seq[5]) {
             Some(dir) => EscScan::Complete(Event::Cmd(Command::ResizeDir(dir))),
             None => EscScan::Invalid,
         };
     }
-    // Complete Shift-arrow: ESC [ 1 ; 2 X. `target: None` - the server resolves
+    // Complete Shift-arrow: ESC [ 1; 2 X. `target: None` - the server resolves
     // the destination by direction, so this rides the same `move_leaf` the drop
     // path does (Locked Decision 4: one mutation path, two gestures).
     if seq.len() == 6 && seq.starts_with(SHIFT) {
@@ -1591,7 +1591,7 @@ fn esc_chord(seq: &[u8]) -> EscScan {
             None => EscScan::Invalid,
         };
     }
-    // Complete Ctrl+Opt-arrow: ESC [ 1 ; 7 X. Only Left (D) is bound - the
+    // Complete Ctrl+Opt-arrow: ESC [ 1; 7 X. Only Left (D) is bound - the
     // sideline chord. From the prefix this rung is Invalid on the other
     // finals (one Bell, like any unbound chord); from the global ChordEsc
     // branch the caller forwards them instead.
@@ -1671,7 +1671,7 @@ mod tests {
             vec![Event::Cmd(Command::ResizeDir(Dir::Up))]
         );
         assert_eq!(scan_all(&[b"\x02x"]), vec![Event::Cmd(Command::ClosePane)]);
-        // (x-cf97) Digits hold into the multi-digit buffer instead of firing:
+        // Digits hold into the multi-digit buffer instead of firing:
         // a lone digit waits for the caller's flush, Enter resolves
         // explicitly, and a non-digit resolves AND forwards - the old
         // single-digit muscle memory (tab, then next key) is preserved.
@@ -1698,7 +1698,7 @@ mod tests {
         assert_eq!(scan_all(&[b"\x02?"]), vec![Event::ShowKeys]);
         assert_eq!(scan_all(&[b"\x02d"]), vec![Event::Detach]);
         assert_eq!(scan_all(&[b"\x02g"]), vec![Event::DispatchNext]);
-        // prefix+/ opens in-scrollback search (x-e780); the `/` never leaks.
+        // prefix+/ opens in-scrollback search; the `/` never leaks.
         let searched = scan_all(&[b"a\x02/b"]);
         assert_eq!(
             searched,
@@ -1708,7 +1708,7 @@ mod tests {
                 Event::Forward(b"b".to_vec()),
             ]
         );
-        // prefix+f opens the session navigator (x-653d); the `f` never leaks,
+        // prefix+f opens the session navigator; the `f` never leaks,
         // and prefix+g stays "grab work" (DispatchNext, unchanged).
         assert_eq!(
             scan_all(&[b"a\x02fb"]),
@@ -1746,7 +1746,7 @@ mod tests {
 
     #[test]
     fn client_keys_shift_arrow_moves_the_pane() {
-        // x-aa95: the arrow ladder is plain=focus, ctrl=resize, shift=move.
+        // the arrow ladder is plain=focus, ctrl=resize, shift=move.
         // Both ids ride as None - the bind knows a direction and nothing else,
         // so the server resolves the focused pane and its neighbour.
         assert_eq!(
@@ -1812,7 +1812,7 @@ mod tests {
 
     #[test]
     fn client_keys_block_navigation_chords_map_and_never_leak() {
-        // AC-HP (Change 3): the x-38c4 chords produce their events and the chord
+        // AC-HP (Change 3): the chords produce their events and the chord
         // bytes never reach the pane. `x` stays ClosePane (block-select is `v`).
         assert_eq!(
             scan_all(&[b"\x02["]),
@@ -2166,8 +2166,8 @@ mod tests {
         // The 'q' must NOT be forwarded - swallow + BEL.
         assert_eq!(scan_all(&[b"\x02q"]), vec![Event::Bell]);
 
-        // (x-3e17, AC2-INV) The never-leak guarantee, swept over the whole byte
-        // space rather than one specimen. x-cf97 adds ONE deliberate held-byte
+        // (AC2-INV) The never-leak guarantee, swept over the whole byte
+        // space rather than one specimen. adds ONE deliberate held-byte
         // state, the tab-number buffer, so the digits 0-9 join the exclusion
         // set: a digit after the prefix holds into the buffer (with its own
         // out-of-range notice downstream) instead of answering one Bell. If a
@@ -2193,7 +2193,7 @@ mod tests {
 
     #[test]
     fn bindings_are_the_chord_table() {
-        // x-8ccf Locked 3 / parity: the which-key modal renders `key_bindings()`;
+        // Locked 3 / parity: the which-key modal renders `key_bindings()`;
         // `chord()` dispatches through the same table. Assert they cannot diverge:
         // every table row's key resolves (via the real chord path) to exactly the
         // event the row advertises, and every key is listed once.
@@ -2221,7 +2221,7 @@ mod tests {
 
     #[test]
     fn menu_accelerators_round_trip_and_stay_out_of_the_prefix_scope() {
-        // x-91a1 AC1: every menu binding resolves to a glyph and back to the
+        // AC1: every menu binding resolves to a glyph and back to the
         // same byte/action pair, the prefix table keeps its own meanings
         // untouched (menu `x` did not rebind prefix+x), and a prefix-only
         // action has no menu key to advertise.
@@ -2329,7 +2329,7 @@ mod tests {
 
     #[test]
     fn client_keys_global_ctrl_opt_left_opens_selector_consumed() {
-        // x-e10f AC12: ESC[1;7D with NO prefix fires OpenSelector and the
+        // AC12: ESC[1;7D with NO prefix fires OpenSelector and the
         // bytes are consumed, never forwarded - the accepted cost of a global
         // grab (a pane program binding Ctrl+Opt+Arrow loses it). Surrounding
         // typing still forwards, in order, on both sides of the chord.
@@ -2356,7 +2356,7 @@ mod tests {
 
     #[test]
     fn client_keys_global_chord_hold_releases_non_chord_escapes() {
-        // x-e10f: the hold is invisible to everything that is not the chord -
+        // the hold is invisible to everything that is not the chord -
         // bare arrows, Opt+arrow word motion, Alt+x, a lone Esc answered by a
         // later key, and whole pastes all forward byte-exact, paste mode
         // still engages under the hold, and the chord fires after a
@@ -2552,7 +2552,7 @@ mod tests {
     #[test]
     fn repeat_window_esc_disarms_immediately() {
         // AC5-FR: Esc is the explicit hatch - it disarms the window and no
-        // resize fires from it. Since x-e10f a lone ESC is also the first
+        // resize fires from it. Since a lone ESC is also the first
         // byte of the global chord, so it is HELD until the next byte says
         // it is not the chord (ChordEsc); it then forwards with that byte,
         // byte-exact. The disarm itself is unchanged and immediate.

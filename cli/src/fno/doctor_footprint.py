@@ -205,7 +205,7 @@ def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
 class AttributionGap:
     """Live worker rows this reading could not attribute to processes.
 
-    Not an error: the measurement stands and the gap names what is missing; a spawn gate reads a gapped share as unknown, never headroom (x-e040).
+    Not an error: the measurement stands and the gap names what is missing; a spawn gate reads a gapped share as unknown, never headroom.
     """
 
     def __init__(self, text: str) -> None:
@@ -218,7 +218,7 @@ class AttributionGap:
 def _pidless_route(row: Any) -> str | None:
     """Name the bg-socket route that can resolve this pidless row, or None.
 
-    Never a harness-name gate: the predicate is the property - an identity handle some route accepts (x-e040). A short_id is the claude bg rv-map handle; a claude row without one derives it from the session id. A codex row's route is the rollout-fd oracle, partitioned separately in `_live_root_pids`; None here sends it there, not to the gap.
+    Never a harness-name gate: the predicate is the property - an identity handle some route accepts. A short_id is the claude bg rv-map handle; a claude row without one derives it from the session id. A codex row's route is the rollout-fd oracle, partitioned separately in `_live_root_pids`; None here sends it there, not to the gap.
     """
     if getattr(row, "short_id", None):
         return "bg-socket"
@@ -228,7 +228,7 @@ def _pidless_route(row: Any) -> str | None:
 
 
 def _row_is_advancing(row: Any) -> bool:
-    """Positive transcript evidence this pidless row is advancing: the shared classifier's own ADVANCING verdict, a working/watching reading inside STALE_ATTENTION_S (x-9958). Never raises: an unreadable probe proves nothing and the row stays judged by the witness, which fails closed to a gap."""
+    """Positive transcript evidence this pidless row is advancing: the shared classifier's own ADVANCING verdict, a working/watching reading inside STALE_ATTENTION_S. Never raises: an unreadable probe proves nothing and the row stays judged by the witness, which fails closed to a gap."""
     try:
         from fno.agents import session_truth
         from fno.agents.reachability import ADVANCING, classify_progress, classify_reachability
@@ -246,7 +246,7 @@ _SHARED_DAEMON_BY_HARNESS: dict[str, str] = {"codex": "codex-app-server"}
 
 
 def _shared_daemon_label(row: Any) -> str | None:
-    """Name the shared daemon hosting this row's work, or None (x-cb2b).
+    """Name the shared daemon hosting this row's work, or None.
 
     Deliberately not a ``_pidless_route`` widening: a shared-daemon row
     resolves to no process of its own. A table, so the next harness with a
@@ -380,7 +380,7 @@ def _live_root_pids(
         ]
         serves = serves or {}
         # A row whose work runs inside a shared daemon is attributed by that
-        # daemon's verdict, not by an identity route of its own (x-cb2b). A
+        # daemon's verdict, not by an identity route of its own. A
         # live verdict means the cost already sits inside the attributed
         # shared root; any other verdict falls through to the per-row
         # identity chain below (the rollout fd, then advancing, then the
@@ -397,7 +397,7 @@ def _live_root_pids(
         unrouted_rows = [row for row in own_rows if _pidless_route(row) is None]
         routed_rows = [row for row in own_rows if _pidless_route(row) is not None]
         routed_keys = [(_row_transport_key(row), row) for row in routed_rows]
-        # x-9958: a codex thread row's session id has an accepting route (the
+        # a codex thread row's session id has an accepting route (the
         # rollout fd) even though the claude short-id oracle cannot answer for
         # it; resolved rows attribute like any root, unresolved ones ride the
         # gap path below.
@@ -423,9 +423,9 @@ def _live_root_pids(
                     return roots, "worker root liveness unavailable"
                 roots.add(pid)
                 resolved_codex_ids.add(id(row))
-        # x-e040: a routless row is a NAMED gap, not a dead reading - x-a457:
+        # a routless row is a NAMED gap, not a dead reading -:
         # only while a witness says the cost is real; past it all stay gaps.
-        # x-9958: a row advancing by transcript evidence is a live worker whose
+        # a row advancing by transcript evidence is a live worker whose
         # pid no route can see, never an unattributable process - it drops from
         # the gap and the reading stands as an undercount (an undercount is
         # recoverable, a void is not).
@@ -462,7 +462,7 @@ def _live_root_pids(
         )
         missing = [pair for pair in routed_keys if pair[0] not in socket_pids]
         if missing:
-            # x-a457: the socket map is the FIRST oracle; a key in neither is a
+            # the socket map is the FIRST oracle; a key in neither is a
             # corpse, an unreadable roster stays a gap, the read may spend the deadline.
             spent = deadline is not None and time.monotonic() >= deadline
             roster_pids = None if spent else roster_pid_map()
@@ -503,7 +503,7 @@ def _live_root_pids(
 
 
 def _codex_app_server_serve(snapshot_pids: set[int] | None) -> tuple[set[int], str]:
-    """The shared codex app-server's live root and its verdict (x-cb2b).
+    """The shared codex app-server's live root and its verdict.
 
     The verdict is ``live``, ``absent`` (every oracle cleanly names no live
     process) or ``unreadable`` (some oracle could not be read, so absence is
@@ -632,7 +632,7 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
     attribution_gap = None
     if isinstance(root_error, AttributionGap):
         # The reading stands with a named gap; the fleet share above it is an
-        # undercount, which the gates must read as unknown (x-e040).
+        # undercount, which the gates must read as unknown.
         attribution_gap = root_error.text
         root_error = None
     if root_error is not None:
@@ -646,7 +646,7 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
         threshold_excluded_root_pids=shared_serve_pids | codex_roots,
     )
     if reading.unparsed_lines:
-        # Three arms replace any-count-refuses (x-46cb): no ratio is
+        # Three arms replace any-count-refuses: no ratio is
         # defensible (the measured event is 4 of 1163 rows) and a count arm
         # took the fleet's dispatch offline over rows nobody read. Relevance
         # and total failure refuse; anything else keeps the reading.
@@ -815,7 +815,7 @@ def cpu_admission(
     cpus: int,
 ) -> Admission:
     """The one CPU-axis decider, consumed by both gates and every readout
-    (x-7783 LD1/LD3). The fleet's attributed share decides; a gap widens it
+    (LD1/LD3). The fleet's attributed share decides; a gap widens it
     to an interval bounded above by the machine's measured CPU, so a ceiling
     above the interval admits, below its floor holds, and inside it refuses.
     The 15-minute load is the absolute backstop and refuses first; disabled
@@ -907,7 +907,7 @@ def cpu_admission(
 
 class MachinePressure(NamedTuple):
     """The whole-machine band's verdict, read verbatim by machine_watch
-    (x-d6ad LD3); ``load_15m`` and ``runnable`` are context, never deciders."""
+    (LD3); ``load_15m`` and ``runnable`` are context, never deciders."""
 
     verdict: str
     busy_fraction: float | None
@@ -930,7 +930,7 @@ def machine_pressure(
     throttle_minutes: int,
     failure: str | None = None,
 ) -> MachinePressure:
-    """The one whole-machine decider (x-d6ad LD2/LD4). A ``None`` reading is
+    """The one whole-machine decider (LD2/LD4). A ``None`` reading is
     ``unreadable``, never calm. Pure: no clocks, no subprocesses, no config."""
     if reading is None:
         busy = None
@@ -1036,12 +1036,12 @@ def _payload(
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
         "leak_verdict": leak_verdict(reading.direct_process_count, process_threshold),
-        # x-7783 AC8: the CPU axis's decision, computed once and carried on
+        # AC8: the CPU axis's decision, computed once and carried on
         # every emission; both spawn gates read THIS object, never the exit
         # code. `capacity_verdict` stays one release as an alias of the verdict.
         "admission": admission._asdict(),
         "capacity_verdict": admission.verdict,
-        # x-d6ad LD3: the whole-machine verdict on every emission (cause-only
+        # LD3: the whole-machine verdict on every emission (cause-only
         # included); the machine_watch arm reads THIS and computes none of its own.
         "machine": _compute_machine_pressure(reading, load_snapshot)._asdict(),
         "load_1m": getattr(load_snapshot, "load_1m", None),
@@ -1099,7 +1099,7 @@ def _emit_result(
     if not cause_only:
         leak = leak_verdict(reading.direct_process_count, process_threshold)
         # The CPU axis keeps the historical exit (callers depend on 3);
-        # x-7783 AC8: it fires on hold, undecidable, or the backstop - an
+        # AC8: it fires on hold, undecidable, or the backstop - an
         # attribution gap no longer forces an exit, because both gates read
         # the admission interval, not the gap. When BOTH alarms fire, the
         # CPU axis wins the exit and the leak still prints.
@@ -1268,7 +1268,7 @@ def footprint_command(
         # The roster is an ENRICHMENT: it sets the process threshold. On
         # roster failure the measurement still prints, with the threshold
         # degraded away and the reason named - a 5s roster timeout under load
-        # is exactly when this reading matters (x-e040). _emit_result raises
+        # is exactly when this reading matters. _emit_result raises
         # with its own verdict, so the CPU threshold still applies here.
         _emit_result(
             reading,

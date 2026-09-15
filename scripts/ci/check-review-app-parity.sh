@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # scripts/ci/check-review-app-parity.sh
 #
-# Cross-language review-App login + usage-marker parity check (node x-0eaf).
+# Cross-language review-App login + usage-marker parity check (node).
 #
 # The set of GitHub review Apps footnote recognizes is declared THREE times in
 # two languages:
 #
-#   - Rust  : BOT_PROFILES              in crates/fno-agents/src/loopcheck.rs
+#   - Rust : BOT_PROFILES              in crates/fno-agents/src/loopcheck.rs
 #             (the gate's review classifier, refusal detection, nudging)
 #   - Python: DEFAULT_OPTIONAL_APPS            in cli/src/fno/pr/_reviews.py
 #             (the optional-review signal on `fno do pr status`)

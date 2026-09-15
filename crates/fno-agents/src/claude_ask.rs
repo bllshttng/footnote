@@ -1,4 +1,4 @@
-//! Client-side `claude --bg` ask path (ab-cc926b4e).
+//! Client-side `claude --bg` ask path.
 //!
 //! `claude` is a self-supervised `claude --bg` shellout, not a PTY-managed
 //! agent: it runs its own background daemon, a rendezvous Unix socket, and a
@@ -11,7 +11,7 @@
 //! the BG8 envelope bytes on the wire, events.jsonl fields) must match the
 //! Python implementation. This module is a faithful port; divergences are
 //! bugs. The MCP-channel transport (US6) and the auto-route flip belong to the
-//! follow-up node ab-0429c6e1 (carveout cv-827faf2b) and are intentionally
+//! follow-up node (carveout cv-827faf2b) and are intentionally
 //! absent here.
 //!
 //! Scope of this file: Wave 1 primitives (registry-read + socket + pure
@@ -75,7 +75,7 @@ pub enum OrphanReason {
     NotFound,
     /// Socket exists but a connect probe failed.
     LivenessFailed,
-    /// x-2681: the session is live in the daemon roster but the control.sock
+    /// the session is live in the daemon roster but the control.sock
     /// fallback inject did not confirm -- a delivery failure, NOT a dead
     /// session, so the orchestration layer must NOT stamp it orphaned.
     RosterLiveInjectFailed,
@@ -126,7 +126,7 @@ pub enum AskError {
     /// masking it as a 600s timeout; we surface it as a fatal exit-1 error.
     Io { message: String },
     /// The message being framed for a peer turn carries a forged `<fno_mail>`
-    /// or `</cross-session-message>` tag (x-4ce4): refused before any byte is
+    /// or `</cross-session-message>` tag: refused before any byte is
     /// sent. Mirrors Python's `build_cross_session_container`
     /// (`fno.agents.harnesses.claude`), which is a separate producer this
     /// Rust ask/BG8 path never calls through.
@@ -645,7 +645,7 @@ fn head_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// x-b6e2: the Tier-3 harness-native passthrough flags that claude maps but the
+/// the Tier-3 harness-native passthrough flags that claude maps but the
 /// other providers largely don't. Bundled so the deep claude dispatch chain
 /// threads ONE param, not four. Each is an opaque value forwarded to claude's
 /// own flag; empty/None = the flag is omitted. codex/agy take only `add_dir`
@@ -710,7 +710,7 @@ pub fn state_dirs_from_env() -> Vec<String> {
 
 /// Render the argv for `claude --bg` (`_build_argv`). When `use_stdin`, the
 /// message is omitted from argv and fed via stdin instead. A non-empty `model`
-/// (x-571f per-node pin) appends `--model <m>` between `--name` and the
+/// (per-node pin) appends `--model <m>` between `--name` and the
 /// message, scoping the pin to this session; empty/None means today's argv
 /// byte-for-byte (parity with Python's falsy-`model` check).
 pub fn build_argv(
@@ -728,7 +728,7 @@ pub fn build_argv(
         "--name".to_string(),
         name.to_string(),
     ];
-    // x-dfa4: exact passthrough to claude's own --permission-mode. The caller
+    // exact passthrough to claude's own --permission-mode. The caller
     // resolves --yolo -> bypassPermissions before this point; empty/None = the
     // claude default (unchanged argv).
     if let Some(m) = permission_mode.filter(|m| !m.is_empty()) {
@@ -739,7 +739,7 @@ pub fn build_argv(
         argv.push("--effort".to_string());
         argv.push(value.to_string());
     }
-    // x-b6e2: Tier-3 passthrough (--add-dir/--agent/--allowedTools/
+    // Tier-3 passthrough (--add-dir/--agent/--allowedTools/
     // --disallowedTools). Kept identical to the Python _build_argv (parity).
     flags.push_onto(&mut argv);
     if let Some(m) = model.filter(|m| !m.is_empty()) {
@@ -772,12 +772,12 @@ pub fn use_stdin_for(message: &str) -> bool {
 /// Wrap `message` in the cross-session-message container that marks it as a peer
 /// turn (`build_cross_session_container`). `from_name` is html-attribute-escaped;
 /// `message` is inserted raw, so it is refused first if it carries a forged
-/// `<fno_mail>` or `</cross-session-message>` tag (x-4ce4 codex P1: this is an
+/// `<fno_mail>` or `</cross-session-message>` tag (codex P1: this is an
 /// independent Rust producer with no shared code path to Python's
 /// `build_cross_session_container`, which already refuses the same forgery -
 /// the Python fix covered only the mux/socket ask lane that routes through
 /// Python, not this BG8/control.sock lane). Shared by the BG8 envelope
-/// ([`build_envelope`]) and the x-2681 control.sock ask fallback, so both
+/// ([`build_envelope`]) and the control.sock ask fallback, so both
 /// frame a peer turn identically and both inherit the refusal.
 pub fn build_cross_session_container(message: &str, from_name: &str) -> Result<String, String> {
     if crate::mail_inject::contains_fno_mail_tag_anywhere(message)
@@ -1406,7 +1406,7 @@ pub fn bg_create(
 ) -> Result<CreateResult, AskError> {
     use std::process::{Command, Stdio};
 
-    // x-413d: the sigil says WHO WROTE the seed, never which harness runs it,
+    // the sigil says WHO WROTE the seed, never which harness runs it,
     // so a codex-authored `$fno:verb` reaches claude as `/fno:verb`. Bound
     // here (not in `build_argv`) so the stdin path on argv overflow carries
     // the same normalized text as the argv value.
@@ -1696,7 +1696,7 @@ pub fn wait_for_reply(
 /// reply text (`""` when the recipient produced none). The baseline is captured
 /// BEFORE the send so a stale `output.result` cannot impersonate the reply.
 #[allow(clippy::too_many_arguments)]
-/// x-2681: true iff `short_id` is present in the daemon roster under `home`.
+/// true iff `short_id` is present in the daemon roster under `home`.
 /// Lenient -- a missing/torn/type-drifted roster yields false, never an error. A
 /// cheap pre-check for the control.sock ask fallback; the deliver step's own
 /// connect is the authoritative liveness gate, so roster PRESENCE (not
@@ -1708,7 +1708,7 @@ fn roster_live(home: &ClaudeHome, short_id: &str) -> bool {
     }
 }
 
-/// x-2681 ask-lane fallback: deliver `message` to a roster-live but socket-null
+/// ask-lane fallback: deliver `message` to a roster-live but socket-null
 /// session over the daemon `control.sock` (the single wire vehicle,
 /// [`crate::mail_inject::deliver_via_control_sock`]), then collect the reply from
 /// the bg jobs-dir. Mirrors Python's `_ask_via_control_sock`:
@@ -1739,7 +1739,7 @@ fn ask_via_control_sock(
         &wrapped,
         crate::mail_inject::DEFAULT_ATTEMPTS,
         crate::mail_inject::DEFAULT_INTERVAL_MS,
-        // claude-only lane: the recipient row is always claude (x-4b0b made the
+        // claude-only lane: the recipient row is always claude (made the
         // delay recipient-resolved; this call site stays pinned to Claude).
         crate::mail_inject::default_enter_delay_ms(crate::mail_inject::MailInjectHarness::Claude),
     )
@@ -1783,7 +1783,7 @@ pub fn ask_followup(
         Some(l) => l,
         None => {
             let reason = classify_orphan_reason(home, claude_short_id);
-            // x-2681: a socket-null session that is live in the daemon roster is
+            // a socket-null session that is live in the daemon roster is
             // reachable over the daemon control.sock. Fall back before orphaning.
             // A miss falls through to family-1 transcript truth before orphaning.
             if reason == OrphanReason::SocketNull && roster_live(home, claude_short_id) {
@@ -1879,7 +1879,7 @@ const LOCK_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How recent an inside-leg report must be for a worker to count as "provably
-/// live" when a follow-up fails to route (x-c393). A bg `/target` worker reports
+/// live" when a follow-up fails to route. A bg `/target` worker reports
 /// at least per turn, but a long turn can leave a multi-minute gap, so the
 /// window is generous; `fno agents reconcile` (the `claude logs` probe) is the
 /// eventual authority that orphans a genuinely dead worker. ponytail: a fixed
@@ -1887,7 +1887,7 @@ const DEFAULT_SPAWN_TIMEOUT: Duration = Duration::from_secs(120);
 const PROVABLY_LIVE_WINDOW_SECS: u64 = 3600;
 
 /// Whether a row is "provably live": it carries an inside-leg report recent
-/// enough that a follow-up routing miss is a gap, not a death (x-c393). Checked
+/// enough that a follow-up routing miss is a gap, not a death. Checked
 /// against the CURRENT row under the registry lock at stamp time -- not a
 /// pre-ask snapshot -- so a report that landed during a long ask is not missed
 /// (codex P2). A live row must NOT be stamped orphaned; that would mislead
@@ -1982,7 +1982,7 @@ fn now_iso() -> String {
 /// only. Python's `emit_with_context` also flattens a 13-field `EventContext`
 /// (from_*/to_*/caller_kind/transport/request_id/target_session_id) onto
 /// success events; porting `build_context` is deferred to the observability
-/// surface (ab-85119580 / the ab-0429c6e1 cutover). Failure events already
+/// surface (/ the cutover). Failure events already
 /// match Python's plain `events.emit` (no context).
 pub fn emit_event(events_path: &Path, kind: &str, fields: &[(&str, serde_json::Value)]) {
     // ensure_ascii parity with Python's json.dumps: encode every string scalar
@@ -2265,7 +2265,7 @@ pub fn dispatch_claude_spawn(
     permission_mode: Option<&str>,
     effort: Option<&str>,
     flags: HarnessFlags,
-    // x-85fe: append the effective `cwd` to the receipt (LAST key). True only on
+    // append the effective `cwd` to the receipt (LAST key). True only on
     // the DEFAULT canonical move (no explicit --cwd, cwd differs from caller),
     // coupled with the redirect note the caller already emitted. False keeps the
     // receipt byte-identical (explicit --cwd, --here, or a stay-put spawn).
@@ -2322,7 +2322,7 @@ pub fn dispatch_claude_spawn(
         );
     }
 
-    // x-dfa4: --yolo now maps to bypassPermissions for claude (was a no-op); an
+    // --yolo now maps to bypassPermissions for claude (was a no-op); an
     // explicit --permission-mode wins (the two are mutually exclusive upstream).
     // Resolved once here so the receipt below can name the applied mode.
     let effective_mode: Option<&str> = match permission_mode {
@@ -2423,7 +2423,7 @@ pub fn dispatch_claude_spawn(
     } else {
         "spawning"
     };
-    // Locked Decision 5, renamed by x-74ea/x-d401: name the REQUESTED mode
+    // Locked Decision 5, renamed by / name the REQUESTED mode
     // (flag or yolo-derived) so an audit of "why did this worker have edit
     // rights" has a durable answer - and only as a request, because fno
     // cannot back the outcome (a forced-default environment ignores the flag
@@ -2442,7 +2442,7 @@ pub fn dispatch_claude_spawn(
         Some(m) => format!(r#", "permission_mode_requested": {}"#, json_string_ascii(m)),
         None => String::new(),
     };
-    // (x-d401, seventh surface) The model the worker was launched with: an
+    // (seventh surface) The model the worker was launched with: an
     // explicit --model reaches claude as its own flag, so it wins the receipt
     // too - Python's `model or route_model` rule verbatim; this Rust lane is
     // reached only without a route flag, so no route twin exists here.
@@ -2455,7 +2455,7 @@ pub fn dispatch_claude_spawn(
         Some(m) => format!(", \"model\": {}", json_string_ascii(m)),
         None => String::new(),
     };
-    // x-85fe: append the effective launch dir on the default canonical move
+    // append the effective launch dir on the default canonical move
     // (surface_cwd, decided by the caller alongside the redirect note), so the
     // move is legible in the receipt too. LAST key, so an unmoved / explicit-cwd
     // receipt is byte-identical (Python cmd_spawn parity, AC1-EDGE). Full
@@ -2479,7 +2479,7 @@ pub fn dispatch_claude_spawn(
     }
 }
 
-/// Dispatch a `claude -p` truly-headless one-shot (x-2c27 `headless` substrate).
+/// Dispatch a `claude -p` truly-headless one-shot (`headless` substrate).
 ///
 /// Unlike [`dispatch_claude_spawn`] (the detached `--bg` thread, which returns a
 /// short-id receipt), this runs `claude -p` SYNCHRONOUSLY to completion, prints
@@ -2519,7 +2519,7 @@ pub fn dispatch_claude_headless(
     let effective = if message.is_empty() { "hello" } else { message };
     let use_stdin = use_stdin_for(effective);
 
-    // x-dfa4: an explicit --permission-mode replaces the hardcoded
+    // an explicit --permission-mode replaces the hardcoded
     // --dangerously-skip-permissions for the headless lane; unset keeps the
     // skip (a headless one-shot cannot answer permission prompts).
     let mut argv: Vec<String> = vec!["claude".into(), "-p".into()];
@@ -2530,7 +2530,7 @@ pub fn dispatch_claude_headless(
         }
         None => argv.push("--dangerously-skip-permissions".into()),
     }
-    // x-c772: an explicit --model is forwarded to `claude -p --model <m>`
+    // an explicit --model is forwarded to `claude -p --model <m>`
     // (empty/None = claude default). Exact passthrough, no fuzzy resolution.
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         argv.push("--model".to_string());
@@ -2540,7 +2540,7 @@ pub fn dispatch_claude_headless(
         argv.push("--effort".to_string());
         argv.push(value.to_string());
     }
-    // x-b6e2: Tier-3 passthrough, same token order as the Python headless_create.
+    // Tier-3 passthrough, same token order as the Python headless_create.
     flags.push_onto(&mut argv);
     if !use_stdin {
         // Behind `--` like every other claude seed: a leading-flag seed must
@@ -2548,7 +2548,7 @@ pub fn dispatch_claude_headless(
         argv.push("--".to_string());
         argv.push(effective.to_string());
     }
-    // QoS (x-c5cc): a headless one-shot is an fno-spawned child — exec-wrap it
+    // QoS: a headless one-shot is an fno-spawned child — exec-wrap it
     // at background priority (worker_qos=utility) so it never starves the
     // foreground. Identity when worker_qos=off.
     let argv = crate::spawn_gate::qos_wrap(cwd, argv);
@@ -2690,7 +2690,7 @@ fn followup(
     timeout: Option<Duration>,
 ) -> AskOutcome {
     // An INTERACTIVE stream-json claude row carries the daemon worker/socket id
-    // in short_id, NOT a claude --bg jobId (v9, x-1b1e). `ask` followup's
+    // in short_id, NOT a claude --bg jobId (v9). `ask` followup's
     // locate_session expects a jobId, so never route a worker id as one: treat an
     // interactive row as having no jobId and refuse (pre-v9 these had
     // claude_short_id=None and refused identically). Only a claude shellout
@@ -2789,10 +2789,10 @@ fn followup(
             // arm once wrote is the t-x30c2-w1 lie: `orphaned` on a session
             // that exited 0). The provably-live check still reads the CURRENT
             // row - an inside-leg report that landed during a long ask is not
-            // missed (x-c393; codex P2) - and decides only which failure the
+            // missed (; codex P2) - and decides only which failure the
             // OPERATOR sees: routing-gap (live, unroutable) vs orphan.
             let now = now_epoch_secs();
-            // x-2681: "roster-live-inject-failed" means the control.sock fallback
+            // "roster-live-inject-failed" means the control.sock fallback
             // delivery failed on a session that IS live in the daemon roster --
             // a routing gap, never a death.
             let routing_gap = matches!(
@@ -2942,7 +2942,7 @@ fn create(
     timeout: Option<Duration>,
     extra_env: &[(&str, &str)],
     model: Option<&str>,
-    // x-dfa4: the already-resolved permission mode (dispatch_claude_spawn folds
+    // the already-resolved permission mode (dispatch_claude_spawn folds
     // --yolo -> bypassPermissions before calling); None = the claude default.
     permission_mode: Option<&str>,
     effort: Option<&str>,
@@ -3018,7 +3018,7 @@ fn create(
     };
 
     let short_id = result.short_id.clone();
-    // Bounded full session-UUID capture (ab-f1b0ccd1, AC1-HP): persist the
+    // Bounded full session-UUID capture (AC1-HP): persist the
     // stream-json `--resume` target alongside the 8-hex short-id so the worker
     // is adoptable by the live `chat` lane. Runs after the receipt is captured;
     // a miss leaves the field None but is made visible in both row and receipt.
@@ -3026,7 +3026,7 @@ fn create(
     // harnesses/claude.py's resolution.
     let session_uuid = resolve_session_uuid_at_spawn(claude_home, &short_id);
     let identity_complete = session_uuid.is_some();
-    // Create the file the row records (x-7bcd AC4): a log_path pointing at
+    // Create the file the row records (AC4): a log_path pointing at
     // nothing is a claim, not evidence, and the resolvable-handle guard only
     // checks the field is non-empty, not that the file exists. Record the
     // path only if the touch actually succeeded (disk full, EROFS, a
@@ -3042,13 +3042,13 @@ fn create(
         .append(true)
         .open(&log_path)
         .is_ok();
-    // The spawning session's ambient identity (x-132c): create runs in the
+    // The spawning session's ambient identity: create runs in the
     // CLIENT process, which inherited the spawning session's env, so the
     // markers read here name this row's true parent.
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
     let (launch_account, launch_account_source) = crate::state::launch_provenance_from_env();
     let new_entry = RegistryEntry {
-        // x-98ab: client-side mint - this process inherited the spawning
+        // client-side mint - this process inherited the spawning
         // session's env, so the exported FNO_NODE names the node THIS spawn
         // is for.
         node: std::env::var("FNO_NODE").ok().filter(|v| !v.is_empty()),
@@ -3065,7 +3065,7 @@ fn create(
         launch_account_source,
         legacy_provider: String::new(),
         provider: Some("anthropic".to_string()),
-        // (x-d401) The model the worker was launched with, and the basis
+        // The model the worker was launched with, and the basis
         // marking it REQUESTED - this is the spawn's own claim, never an
         // observed reading. The caller's model was in hand here and was
         // dropped (receipt named it, row read None), the exact
@@ -3075,19 +3075,19 @@ fn create(
             .filter(|m| !m.is_empty())
             .map(|_| "requested".to_string()),
         effort: None,
-        // v23 (x-2019): the request beside the effect. This lane never
+        // v23: the request beside the effect. This lane never
         // resolves a vendor (the binary refuses --provider), so the provider
         // request stays None; model and effort ride through verbatim.
         requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
         requested_provider: None,
         requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
-        // Canonical identity at birth (x-ec59): the session id rides the
+        // Canonical identity at birth: the session id rides the
         // struct-update base below. A bounded miss stays a named spawning row,
         // so the constructor's Option is exactly the observed semantics.
         harness: Some("claude".to_string()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
-        // x-d285: the client env is the spawn seam's verbatim, so the three-valued read is honest.
+        // the client env is the spawn seam's verbatim, so the three-valued read is honest.
         launch_account: launch_account.clone(),
         related_session_id: None,
         // v25: the route axes this lane actually used, stamped so the
@@ -3257,7 +3257,7 @@ mod tests {
         assert_eq!(spawn_create_timeout(Some(explicit)), explicit);
     }
 
-    // --- is_provably_live_report (x-c393) ----------------------------------
+    // --- is_provably_live_report ----------------------------------
 
     fn report_at(stamp: &str) -> crate::state::InsideLegReport {
         crate::state::InsideLegReport {
@@ -3507,7 +3507,7 @@ mod tests {
         );
     }
 
-    // x-dfa4: an explicit --permission-mode rides between --name and --model as
+    // an explicit --permission-mode rides between --name and --model as
     // an exact passthrough; empty/None is byte-identical to today (AC1-HP/AC7).
     #[test]
     fn build_argv_appends_permission_mode() {
@@ -3559,7 +3559,7 @@ mod tests {
         .any(|t| t == "--dangerously-skip-permissions"));
     }
 
-    // x-571f: a per-node model pin appends `--model <m>` between --name and the
+    // a per-node model pin appends `--model <m>` between --name and the
     // message; an empty/None pin is byte-identical to today (AC1-EDGE), and the
     // argv must match Python's `_build_argv` (AC2-FR parity).
     #[test]
@@ -3619,7 +3619,7 @@ mod tests {
         );
     }
 
-    // x-b6e2: the Tier-3 passthrough bundle maps to claude's own spellings, in a
+    // the Tier-3 passthrough bundle maps to claude's own spellings, in a
     // fixed order (--add-dir, --agent, --allowedTools, --disallowedTools), riding
     // after --effort and before the message. Empty/None fields are omitted. This
     // token order must match the Python _build_argv (AC2-EDGE parity).
@@ -3843,7 +3843,7 @@ mod tests {
         assert!(locate_session(&ch, "abcd1234").is_none());
     }
 
-    // --- resolve_session_uuid / resolve_session_uuid_at_spawn (ab-f1b0ccd1) ---
+    // --- resolve_session_uuid / resolve_session_uuid_at_spawn ---
 
     #[test]
     fn resolve_session_uuid_resolves_idle_bg() {
@@ -4361,7 +4361,7 @@ mod tests {
         ));
     }
 
-    // --- x-2681 ask-lane control.sock fallback ---
+    // --- ask-lane control.sock fallback ---
 
     // daemon_roster_path reads FNO_CLAUDE_DAEMON_DIR, a process-global. Serialize
     // the env-touching tests below (cargo runs tests in parallel threads; no
@@ -4389,7 +4389,7 @@ mod tests {
 
     #[test]
     fn build_cross_session_container_refuses_a_close_tag_breakout() {
-        // x-4ce4 codex P1: this is an independent Rust producer from
+        // codex P1: this is an independent Rust producer from
         // Python's build_cross_session_container, which already refused this
         // same forgery. A peer follow-up over the BG8/control.sock lane must
         // not smuggle a forged <fno_mail> past this door either.
@@ -4420,7 +4420,7 @@ mod tests {
 
     #[test]
     fn daemon_roster_path_honors_env_override_first() {
-        // x-2681 / codex P2: the roster pre-check must honor FNO_CLAUDE_DAEMON_DIR
+        // / codex P2: the roster pre-check must honor FNO_CLAUDE_DAEMON_DIR
         // (a supported alt-daemon override) the SAME way the deliver path does, or
         // the fallback silently skips in an alt-daemon setup.
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

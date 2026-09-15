@@ -1,6 +1,6 @@
-//! The activity-feed shell-out leg (x-4433): a bounded, fail-open shell-out to
+//! The activity-feed shell-out leg : a bounded, fail-open shell-out to
 //! `fno agents feed --json`, in the same shape as [`crate::court_overlay`]'s
-//! fold (x-d15a: the 800ms cap it first copied was half the projection's
+//! fold (: the 800ms cap it first copied was half the projection's
 //! measured runtime, so the feed could never render).
 //!
 //! The projection itself lives in `fno-agents` (`feed.rs`): it joins
@@ -58,7 +58,7 @@ pub struct FeedItem {
 
 /// Why a feed fold failed. Each variant is a different user action - retune a
 /// budget, free an admission slot, read the projection's stderr - which is
-/// why they stopped collapsing into one `None` (x-d15a).
+/// why they stopped collapsing into one `None`.
 #[derive(Debug, Clone)]
 pub enum FeedError {
     /// The projection outlived [`SHELLOUT_TIMEOUT`].
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn sample_deserializes() {
-        let body = br#"[{"ts":"2026-09-02T17:12:52Z","kind":"node_started","node":"x-9223","session_id":"s-do","harness":"claude","title":"port the claim classifier","ref":null},{"ts":"2026-09-02T18:27:06Z","kind":"pr_created","node":"x-9223","session_id":"s-ship","title":"PR 1395","ref":"1395"}]"#;
+        let body = br#"[{"ts":"2026-09-02T17:12:52Z","kind":"node_started","node":"x-aaaa","session_id":"s-do","harness":"claude","title":"port the claim classifier","ref":null},{"ts":"2026-09-02T18:27:06Z","kind":"pr_created","node":"x-aaaa","session_id":"s-ship","title":"PR 1395","ref":"1395"}]"#;
         let items = parse_feed(body, b"").expect("a well-formed body parses");
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].kind, "node_started");
@@ -178,7 +178,7 @@ mod tests {
         assert!(rendered.contains("skipped 3 malformed question lines"));
     }
 
-    // x-d15a regression: the timeout names itself and its duration, so the
+    // regression: the timeout names itself and its duration, so the
     // rendered line is a budget statement, never the old generic failure.
     #[test]
     fn timeout_renders_the_budget_it_outran() {

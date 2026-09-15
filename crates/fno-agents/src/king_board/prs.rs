@@ -32,7 +32,7 @@ pub(crate) fn branch_node_ids(head_ref: &str) -> Vec<String> {
     let b = head_ref.as_bytes();
     let mut ids: Vec<String> = Vec::new();
     // Non-overlapping left-to-right scan, exactly like Python's finditer: a
-    // match is consumed and the scan resumes after it, so "feature/x-cdef-1234"
+    // match is consumed and the scan resumes after it, so "feature/x-aaaa-1234"
     // never yields the bogus "cdef-1234" from inside the first match's tail.
     let mut i = 0;
     while i < b.len() {
@@ -233,7 +233,7 @@ fn read_pr_gate(cwd: &Path, number: i64, timeout: Duration) -> Result<Value, Str
 }
 
 /// Ask the merge gate about every candidate the listing called green
-/// (x-b9e1: the queue's only evidence was that the PR is open; a live review
+/// (: the queue's only evidence was that the PR is open; a live review
 /// hold or an uncovered head made it unfusable and nothing said so). The
 /// candidates read four at a time under ONE budgeted slice; a PR whose gate
 /// call fails or whose slice runs out is simply absent from the answer, and
@@ -643,16 +643,16 @@ mod tests {
     #[test]
     fn branch_ids_never_match_a_partial_hex_prefix() {
         assert_eq!(
-            branch_node_ids("feature/x-cdef-1234"),
-            vec!["x-cdef".to_string()]
+            branch_node_ids("feature/x-aaaa-1234"),
+            vec!["x-aaaa".to_string()]
         );
         assert_eq!(
-            branch_node_ids("x-5b667-fixes-x-5b66"),
-            vec!["x-5b667".to_string(), "x-5b66".to_string()]
+            branch_node_ids("x-5b667-fixes-x-bbbb"),
+            vec!["x-5b667".to_string(), "x-bbbb".to_string()]
         );
         // Uppercase is not id body ([0-9a-f], not [0-9a-fA-F]): the hex run
-        // stops at 'E', so "x-abcd" binds and the tail never reads as id.
-        assert_eq!(branch_node_ids("x-abcd-EF12"), vec!["x-abcd".to_string()]);
+        // stops at 'E', so "x-cccc" binds and the tail never reads as id.
+        assert_eq!(branch_node_ids("x-cccc-EF12"), vec!["x-cccc".to_string()]);
         assert!(branch_node_ids("main").is_empty());
     }
 
@@ -717,7 +717,7 @@ mod tests {
     fn binding_warns_untracked_when_no_key_names_the_node() {
         // AC5: an unbindable PR is named in the warnings instead of dropped
         // from every queue.
-        let entries = vec![json!({"id": "x-1a2b"})];
+        let entries = vec![json!({"id": "x-dddd"})];
         let rows = vec![pr_row(
             5,
             "chore/tidy-docs",
@@ -737,26 +737,26 @@ mod tests {
         // AC1: a trailer-only row resolves through the body; without a
         // back-pointer it takes the existing missing warning, with one it
         // binds.
-        let entries = vec![json!({"id": "x-0001"})];
+        let entries = vec![json!({"id": "x-eeee"})];
         let rows = vec![pr_row_with_body(
             5,
             "fix/descriptive-name",
             "https://github.com/o/r/pull/5",
-            "Summary.\n\nBacklog-Closure: x-0001\n",
+            "Summary.\n\nBacklog-Closure: x-eeee\n",
         )];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
         assert!(bound.is_empty());
         assert!(warnings
             .iter()
-            .any(|w| w.contains("pr_node_binding_missing") && w.contains("x-0001")));
+            .any(|w| w.contains("pr_node_binding_missing") && w.contains("x-eeee")));
 
         let entries = vec![json!({
-            "id": "x-0001", "pr_number": 5,
+            "id": "x-eeee", "pr_number": 5,
             "pr_url": "https://github.com/o/r/pull/5",
         })];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
         assert_eq!(bound.len(), 1);
-        assert_eq!(s_str(&bound[0], "id"), Some("x-0001"));
+        assert_eq!(s_str(&bound[0], "id"), Some("x-eeee"));
         assert!(warnings.is_empty());
     }
 
@@ -764,7 +764,7 @@ mod tests {
     fn binding_ignores_prose_and_reads_only_the_last_trailer_line() {
         // Only a line starting with the trailer key counts (prose never
         // becomes a claim), and only the LAST such line wins.
-        let entries = vec![json!({"id": "x-0001"}), json!({"id": "x-prose"})];
+        let entries = vec![json!({"id": "x-eeee"}), json!({"id": "x-prose"})];
         let rows = vec![pr_row_with_body(
             5,
             "chore/tidy-docs",
@@ -781,23 +781,23 @@ mod tests {
             5,
             "chore/tidy-docs",
             "https://github.com/o/r/pull/5",
-            "backlog-closure: x-prose\nBacklog-Closure: x-0001",
+            "backlog-closure: x-prose\nBacklog-Closure: x-eeee",
         )];
-        let entries = vec![json!({"id": "x-0001"})];
+        let entries = vec![json!({"id": "x-eeee"})];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
         assert!(bound.is_empty());
         assert!(warnings
             .iter()
-            .any(|w| w.contains("pr_node_binding_missing") && w.contains("x-0001")));
+            .any(|w| w.contains("pr_node_binding_missing") && w.contains("x-eeee")));
         assert!(!warnings.iter().any(|w| w.contains("x-prose")));
 
         let entries = vec![json!({
-            "id": "x-0001", "pr_number": 5,
+            "id": "x-eeee", "pr_number": 5,
             "pr_url": "https://github.com/o/r/pull/5",
         })];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
         assert_eq!(bound.len(), 1);
-        assert_eq!(s_str(&bound[0], "id"), Some("x-0001"));
+        assert_eq!(s_str(&bound[0], "id"), Some("x-eeee"));
         assert!(warnings.is_empty());
     }
 
@@ -805,34 +805,34 @@ mod tests {
     fn binding_refuses_when_the_trailer_names_several_real_nodes() {
         // Several trailer claims are ambiguous, never a list-order pick.
         let url = "https://github.com/o/r/pull/5";
-        let entries = vec![json!({"id": "x-1a2b"}), json!({"id": "x-cdef"})];
+        let entries = vec![json!({"id": "x-dddd"}), json!({"id": "x-aaaa"})];
         let rows = vec![pr_row_with_body(
             5,
             "chore/no-node-here",
             url,
-            "Backlog-Closure: x-1a2b, x-cdef",
+            "Backlog-Closure: x-dddd, x-aaaa",
         )];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
         assert!(bound.is_empty());
         assert!(warnings
             .iter()
             .any(|w| w.contains("pr_node_binding_ambiguous")
-                && w.contains("x-1a2b")
-                && w.contains("x-cdef")));
+                && w.contains("x-dddd")
+                && w.contains("x-aaaa")));
     }
 
     #[test]
     fn binding_sibling_guard_makes_branch_and_trailer_prs_ambiguous() {
         // One node named by a branch PR and a trailer PR has two open PRs,
         // so neither row binds alone.
-        let entries = vec![json!({"id": "x-1a2b"})];
+        let entries = vec![json!({"id": "x-dddd"})];
         let rows = vec![
-            pr_row(5, "feature/x-1a2b", "https://github.com/o/r/pull/5"),
+            pr_row(5, "feature/x-dddd", "https://github.com/o/r/pull/5"),
             pr_row_with_body(
                 6,
                 "target/other-work",
                 "https://github.com/o/r/pull/6",
-                "Backlog-Closure: x-1a2b",
+                "Backlog-Closure: x-dddd",
             ),
         ];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
@@ -846,7 +846,7 @@ mod tests {
         // Modeled on a real open PR whose branch carried no id while its node
         // carried the back-pointer the resolver never read.
         let entries = vec![json!({
-            "id": "x-b527", "pr_number": 1476,
+            "id": "x-ffff", "pr_number": 1476,
             "pr_url": "https://github.com/o/r/pull/1476",
         })];
         let rows = vec![pr_row(
@@ -856,7 +856,7 @@ mod tests {
         )];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
         assert_eq!(bound.len(), 1);
-        assert_eq!(s_str(&bound[0], "id"), Some("x-b527"));
+        assert_eq!(s_str(&bound[0], "id"), Some("x-ffff"));
         assert_eq!(s_i64(&bound[0], "pr_number"), Some(1476));
         assert!(warnings.is_empty());
     }
@@ -866,8 +866,8 @@ mod tests {
         // AC2/AC6: several reverse hits are ambiguous, never a list-order pick.
         let url = "https://github.com/o/r/pull/1476";
         let entries = vec![
-            json!({"id": "x-1a2b", "pr_number": 1476, "pr_url": url}),
-            json!({"id": "x-cdef", "pr_number": 1476, "pr_url": url}),
+            json!({"id": "x-dddd", "pr_number": 1476, "pr_url": url}),
+            json!({"id": "x-aaaa", "pr_number": 1476, "pr_url": url}),
         ];
         let rows = vec![pr_row(1476, "chore/no-node-here", url)];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
@@ -875,15 +875,15 @@ mod tests {
         assert!(warnings
             .iter()
             .any(|w| w.contains("pr_node_binding_ambiguous")
-                && w.contains("x-1a2b")
-                && w.contains("x-cdef")));
+                && w.contains("x-dddd")
+                && w.contains("x-aaaa")));
     }
 
     #[test]
     fn binding_reverse_key_is_scoped_by_url() {
         // AC4/AC6: a same-numbered PR on another owner/repo never binds.
         let entries = vec![json!({
-            "id": "x-1a2b", "pr_number": 1476,
+            "id": "x-dddd", "pr_number": 1476,
             "pr_url": "https://github.com/o/other/pull/1476",
         })];
         let rows = vec![pr_row(
@@ -893,7 +893,7 @@ mod tests {
         )];
         let (bound, warnings) = classify_pr_bindings(&rows, &entries);
         assert!(bound.is_empty());
-        // The verdict is unchanged (never binds cross-repo); since x-9588 the
+        // The verdict is unchanged (never binds cross-repo); since the
         // row is named in the warnings instead of dropped silently.
         assert!(warnings
             .iter()
@@ -902,28 +902,28 @@ mod tests {
 
     #[test]
     fn the_shared_predicate_reports_bound_through_each_of_the_three_keys() {
-        let entries = vec![json!({"id": "x-1a2b"})];
+        let entries = vec![json!({"id": "x-dddd"})];
         let url = "https://github.com/o/r/pull/5";
         // Branch key: the head names a real node.
-        let keys = pr_binding_keys(5, "feature/x-1a2b", Some(url), None, &entries);
-        assert_eq!(keys.branch, vec!["x-1a2b".to_string()]);
+        let keys = pr_binding_keys(5, "feature/x-dddd", Some(url), None, &entries);
+        assert_eq!(keys.branch, vec!["x-dddd".to_string()]);
         assert_eq!(keys.unbound_detail(), None);
         // Trailer key: a nodeless head, the node named on the body.
         let keys = pr_binding_keys(
             5,
             "fix/descriptive",
             Some(url),
-            Some("Backlog-Closure: x-1a2b"),
+            Some("Backlog-Closure: x-dddd"),
             &entries,
         );
-        assert_eq!(keys.trailer, vec!["x-1a2b".to_string()]);
+        assert_eq!(keys.trailer, vec!["x-dddd".to_string()]);
         assert_eq!(keys.unbound_detail(), None);
         // Backref key: a nodeless head, the node carries the back-pointer.
         let carrying = vec![json!({
-            "id": "x-1a2b", "pr_number": 5, "pr_url": url,
+            "id": "x-dddd", "pr_number": 5, "pr_url": url,
         })];
         let keys = pr_binding_keys(5, "fix/descriptive", Some(url), None, &carrying);
-        assert_eq!(keys.backrefs, vec!["x-1a2b".to_string()]);
+        assert_eq!(keys.backrefs, vec!["x-dddd".to_string()]);
         assert_eq!(keys.unbound_detail(), None);
     }
 
@@ -931,7 +931,7 @@ mod tests {
     fn the_shared_predicate_reports_unbound_when_all_three_keys_miss() {
         // AC2-ERR: no node id on the branch, no carrying node, and a body
         // that is absent or names only an id the graph does not have.
-        let entries = vec![json!({"id": "x-1a2b"})];
+        let entries = vec![json!({"id": "x-dddd"})];
         let url = "https://github.com/o/r/pull/5";
         for body in [None, Some("Backlog-Closure: x-9999")] {
             let keys = pr_binding_keys(5, "docs/crown-succeed-faq", Some(url), body, &entries);

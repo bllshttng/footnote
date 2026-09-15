@@ -125,7 +125,7 @@ def _basename_candidate(path: str) -> str:
 
 
 def _branch_candidate(branch: Optional[str]) -> Optional[str]:
-    """Last ``/``-delimited segment: `feature/x-ab12` -> `x-ab12`."""
+    """Last ``/``-delimited segment: `feature/x-aaaa` -> `x-aaaa`."""
     if not branch:
         return None
     return branch.rsplit("/", 1)[-1]
@@ -373,7 +373,7 @@ def _emit_sweep_event(
     the subprocess form had regardless of process cost: `stranded_sweep`
     was never registered in events/schema.yaml, so every emit here was
     silently failing validation - and `--node` on the CLI form is a no-op
-    for any non-x-dbaf-family type (envelope stays None), so `node` goes in
+    for any non-id-family type (envelope stays None), so `node` goes in
     `data` instead, where it is actually stored."""
     data = {
         "path": row.facts.get("path"),

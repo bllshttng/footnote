@@ -1,6 +1,6 @@
 """Per-turn provider attribution sidecar.
 
-Phase 02 of provider rotation failover (ab-9728b70b). The transcript
+Phase 02 of provider rotation failover. The transcript
 jsonl is owned by Claude Code and fno cannot modify what Claude
 Code writes. The stamp lands instead in a sidecar fno owns:
 ``.fno/turn-attribution.jsonl``. One line per assistant turn,

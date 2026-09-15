@@ -1,4 +1,4 @@
-"""The forwarding shim over the Rust retirement verdict (x-1379, x-70e1).
+"""The forwarding shim over the Rust retirement verdict.
 
 The policy no longer lives here: one decision is computed in the Rust GC
 (``fno-agents reap --dry-run --json``), and this module only MAPS its
@@ -82,7 +82,7 @@ def _bucket_reasons(summary: dict) -> dict[str, Retirement]:
     for row in summary.get("kept_active", []):
         out[row["id"]] = Retirement(None, None, False, f"active: written {row['age_s']}s ago")
     for row in summary.get("kept_transcript_unresolved", []):
-        # (x-1b90 change 3) The hold names its age; an old hold on done work
+        # (change 3) The hold names its age; an old hold on done work
         # asks for a decision, and rm proves the death it prints.
         held_s = row.get("held_s", 0)
         reason = f"transcript unresolved for {_fmt_age(held_s)}"
@@ -93,7 +93,7 @@ def _bucket_reasons(summary: dict) -> dict[str, Retirement]:
         out[row["id"]] = Retirement(None, None, False, f"stop refused: {row['reason']}")
     for row in summary.get("kept_no_receipt", []):
         out[row["id"]] = Retirement(None, None, False, f"no receipt: {row['reason']}")
-    # The hold clock (x-e3cc): every held row maps with its age and basis,
+    # The hold clock: every held row maps with its age and basis,
     # so a reader of this projection answers the same question the reap
     # report does. A row its own bucket already mapped keeps that verdict.
     for row in summary.get("holds", []):

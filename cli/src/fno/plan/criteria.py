@@ -5,7 +5,7 @@ Multiple author source shapes enter; one ordered, strict semantic
 representation leaves: criterion records carrying a stable code, the original
 statement text, a behavior kind, and a source position for diagnostics.
 
-Source shapes accepted (the six families locked in design x-f905):
+Source shapes accepted (the six families locked in design):
 
   - legacy bold labels:   ``**AC1-HP:** Given ... when ... then ...``
   - headings:             ``### AC1-HP: Title``  or  ``### Title``
@@ -70,7 +70,7 @@ class Criterion:
 # ---------------------------------------------------------------------------
 
 # An optional lowercase letter suffix on the number allows a sub-criterion
-# spelling like AC3b / AC3b-HP (x-cdc5): without it, a letter-suffixed bold
+# spelling like AC3b / AC3b-HP: without it, a letter-suffixed bold
 # label matched NEITHER regex and compiled to nothing - silently dropped from
 # the contract, no error. The suffix is lowercase to stay distinct from the
 # uppercase -TYPE kind suffix. AC3 and AC3-HP still match ([a-z]* is empty).

@@ -1,6 +1,6 @@
 """Lane-slot claims: the atomic concurrency cap for parallel-mode dispatch.
 
-Parallel mode (epic x-42d5, group 1) runs up to ``max_lanes`` background
+Parallel mode (epic, group 1) runs up to ``max_lanes`` background
 worktree lanes at once. The cap MUST NOT be a stored integer that dispatch
 ticks read-modify-write: two ticks both reading ``count < max`` and both
 spawning blows past the cap and defeats the CI-cost bound (design Locked

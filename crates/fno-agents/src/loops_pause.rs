@@ -86,7 +86,7 @@ impl PauseState {
     }
 }
 
-/// The effective dispatch pause (x-39f4): what a dispatch-oriented poller
+/// The effective dispatch pause: what a dispatch-oriented poller
 /// must obey. Combines the operator's manual sentinel with the fleet
 /// incident verdict. Both block; when both are present the manual one wins
 /// only for display, because it names the operator's own hand. `Clear` is
@@ -363,7 +363,7 @@ pub fn run_loops(args: &[String]) -> i32 {
     let rest = &args[1..];
     let json_out = rest.iter().any(|arg| arg == "--json");
     let output = match action {
-        // x-39f4: `paused` answers the combined dispatch verdict (manual OR
+        // `paused` answers the combined dispatch verdict (manual OR
         // fleet); `status` stays about the manual sentinel only.
         "paused" => paused_json(),
         "status" => read_state().json(),

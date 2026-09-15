@@ -1,4 +1,4 @@
-//! Client interceptor for the `ask` verb on an opencode target (x-51f6), plus
+//! Client interceptor for the `ask` verb on an opencode target, plus
 //! the headless one-shot dispatch (`dispatch_opencode_once`).
 //!
 //! opencode is hosted two ways: a serve thread (the `ask` resume path) and an
@@ -223,11 +223,11 @@ pub(crate) fn apply_opencode_variant_at(
     result
 }
 
-/// The one opencode prompt envelope (x-c976): a footnote verb seed (`/fno:verb
+/// The one opencode prompt envelope: a footnote verb seed (`/fno:verb
 /// ...`, either sigil) is a command dispatch, not a conversational message, so
 /// it rides WITHOUT the `[from:]` envelope (`opencode run --command`; an
 /// envelope would demote it to prose no-op). A prose message keeps the
-/// courtesy envelope (x-de43).
+/// courtesy envelope.
 pub fn opencode_envelope(effective_message: &str, from_name: &str) -> String {
     let first = effective_message.split_whitespace().next().unwrap_or("");
     if crate::provider::parse_verb_token(first).is_some() {
@@ -244,7 +244,7 @@ pub fn opencode_envelope(effective_message: &str, from_name: &str) -> String {
 /// docs' `--auto` is stale - the shipped binary renamed it). The trailing argv
 /// is built by `opencode_run_tail`: a footnote slash command rides `--command`
 /// (opencode expands the plugin command), a prose prompt stays the message
-/// positional (x-de43 / codex P1).
+/// positional (/ codex P1).
 fn build_opencode_argv(prompt: &str, model: Option<&str>, harness_args: &[String]) -> Vec<String> {
     let mut argv = vec![
         "opencode".to_string(),
@@ -581,13 +581,13 @@ mod tests {
     #[test]
     fn argv_routes_footnote_slash_command_via_command_flag() {
         // A rendered `/fno:verb` rides `--command` so opencode expands the plugin
-        // command instead of running it as prose (x-de43 / codex P1). A
+        // command instead of running it as prose (/ codex P1). A
         // LEADING-DASH args tail rides as separate WORDS behind a `--`
         // separator (a single "--no-merge x" element would read as an unknown
-        // flag to the CLI's argv parser, x-9d11 round 7); any other args keep
+        // flag to the CLI's argv parser, round 7); any other args keep
         // the one-positional shape (round 11).
         assert_eq!(
-            build_opencode_argv("/fno:target --no-merge x-abcd", None, &[]),
+            build_opencode_argv("/fno:target --no-merge x-aaaa", None, &[]),
             vec![
                 "opencode",
                 "run",
@@ -596,7 +596,7 @@ mod tests {
                 "fno:target",
                 "--",
                 "--no-merge",
-                "x-abcd"
+                "x-aaaa"
             ]
         );
         // No leading dash: no separator, one positional - multiword free-text

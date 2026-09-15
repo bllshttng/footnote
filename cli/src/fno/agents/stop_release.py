@@ -1,4 +1,4 @@
-"""Stopping an agent releases the claims it holds (x-9c91 change 5).
+"""Stopping an agent releases the claims it holds (change 5).
 
 The stop stays in :mod:`fno.agents.dispatch`; the release leg lives here so
 the oversized dispatch file keeps shrinking. The native op resolves the

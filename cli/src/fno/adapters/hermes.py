@@ -1,7 +1,7 @@
 """Hermes Agent CLI adapter - concrete RuntimeAdapter implementation.
 
-Plan A3 of the cross-CLI bundle (ab-39195ebd). Second non-Claude adapter;
-verifies the pattern established by Plan A2 (Codex, ab-c2194947) generalizes.
+Plan A3 of the cross-CLI bundle. Second non-Claude adapter;
+verifies the pattern established by Plan A2 (Codex) generalizes.
 
 Hermes Agent (https://github.com/NousResearch/hermes-agent) is an
 open-source AI agent platform with persistent memory and tool-calling.

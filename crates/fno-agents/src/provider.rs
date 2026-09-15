@@ -173,7 +173,7 @@ pub trait ProviderWithPty: Provider {
 pub struct ClaudeProvider;
 
 /// The stream-json host-lane resume argv for claude adoption (Group 1,
-/// ab-5896938c). The daemon builds this to launch the per-session stream worker.
+///). The daemon builds this to launch the per-session stream worker.
 ///
 /// Unlike [`ClaudeProvider::create_argv`] (which uses `--bg`, the subscription
 /// lane), the stream-json host lane REQUIRES `claude -p`: `--input-format
@@ -434,7 +434,7 @@ impl ProviderWithPty for ClaudeInteractiveProvider {
 /// `cli/tests/agents/fixtures/codex-jsonl-sample.jsonl`.
 pub struct CodexProvider;
 
-/// The verb-token shape every reader shares (x-c976): a leading `/` or `$`
+/// The verb-token shape every reader shares: a leading `/` or `$`
 /// sigil, no second `/` inside the token (an absolute path never matches),
 /// an optional `fno:` namespace, and a lowercase-word remainder. Returns
 /// `(verb, namespaced)`; both sigils parse.
@@ -540,9 +540,9 @@ fn plugin_root() -> Option<PathBuf> {
     }
 }
 
-/// The ONE verb-seed renderer (x-c976): parse the message's FIRST token and
+/// The ONE verb-seed renderer: parse the message's FIRST token and
 /// render it for `harness` from the capability row. A seed's sigil says WHO
-/// WROTE it, never which harness runs it (x-413d). The rest of the message
+/// WROTE it, never which harness runs it. The rest of the message
 /// is kept byte for byte; a first token that does not parse, a harness the
 /// contract cannot answer for, or a bare `$verb` on a codex-skill surface
 /// returns the message unchanged.
@@ -1167,7 +1167,7 @@ impl ProviderWithPty for GeminiProvider {
 /// lives in `agy_ask.rs`). `-p`/`--print` takes the prompt as its VALUE, so it
 /// is appended LAST in every argv.
 ///
-/// x-3ab8 caveat — STATELESS interactive: a plain `spawn --provider agy` now
+/// caveat — STATELESS interactive: a plain `spawn --provider agy` now
 /// defaults to an owned interactive pane (like the other PTY providers), and the
 /// pane is drivable WHILE attached. But because agy mints no session id, there is
 /// NO re-attach after it settles — nothing to key a resume on (`resume_argv`
@@ -1266,7 +1266,7 @@ impl ProviderWithPty for AgyProvider {
 // Opencode — PTY-managed pane, PLAIN-TEXT (v1 hosts the TUI; acp is a future lane).
 // ---------------------------------------------------------------------------
 
-/// opencode provider (x-51f6). v1 hosts the interactive PTY-TUI — bare
+/// opencode provider. v1 hosts the interactive PTY-TUI — bare
 /// `opencode`, with the message on `--prompt` (the positional is a PROJECT
 /// PATH, not a prompt) — mirroring the codex/gemini pane pattern; opencode's
 /// structured `acp` protocol is a documented future lane, not wired here.
@@ -1275,7 +1275,7 @@ impl ProviderWithPty for AgyProvider {
 /// `opencode run` shapes, carried for trait completeness — no client-side
 /// one-shot lane is wired in v1 (`spawn --substrate headless` refuses with a
 /// pointer to `pane`). Session ids are captured at spawn, probed against
-/// opencode's own store, and resumable (x-830c) — unlike agy, whose rows stay
+/// opencode's own store, and resumable — unlike agy, whose rows stay
 /// live-only.
 /// Trailing argv for an `opencode run` dispatch: route a footnote slash command
 /// through `--command`, else pass a prose prompt as the message positional.
@@ -1284,7 +1284,7 @@ impl ProviderWithPty for AgyProvider {
 /// expand the plugin command (verified against v1.14.50: `run "/fno:target ..."`
 /// starts a model turn on the literal text). The fno opencode plugin registers
 /// the footnote verbs, so a rendered `/fno:verb args` must ride `opencode run
-/// --command fno:verb <args>` to actually invoke the command (x-de43 / codex P1).
+/// --command fno:verb <args>` to actually invoke the command (/ codex P1).
 /// A non-slash prompt (a plain `ask`/build message) passes through unchanged.
 pub(crate) fn opencode_run_tail(message: &str) -> Vec<String> {
     if let Some(rest) = message.strip_prefix('/') {
@@ -1333,7 +1333,7 @@ impl Provider for OpencodeProvider {
         // `opencode run [prompt]` is the headless one-shot;
         // `--dangerously-skip-permissions` (auto-approve permissions) is the
         // never-prompt lane so an unattended run cannot wedge on its first
-        // approval. Confirmed vs opencode v1.14.50 `run --help` (x-567d); the
+        // approval. Confirmed vs opencode v1.14.50 `run --help`; the
         // docs' `--auto` is stale.
         let mut argv =
             crate::harness_capabilities::render_session_argv("opencode", "headless_create", None)
@@ -1419,7 +1419,7 @@ pub(crate) fn is_opencode_session_id(s: &str) -> bool {
 /// opencode reachability: membership in opencode's own session store, the same
 /// question codex's probe answers ("does the session still exist" = resumable),
 /// NOT "is the pane live" — a default TUI leaves no on-disk liveness artifact,
-/// so liveness stays the registry row's pid axis (x-5e58).
+/// so liveness stays the registry row's pid axis.
 ///
 /// Tri-state mirrors codex: id present -> `Ok(true)`, clean query without it ->
 /// `Ok(false)`, any infrastructure failure -> `Err` (inconclusive), so a missing
@@ -1525,7 +1525,7 @@ impl ProviderWithPty for OpencodeProvider {
 }
 
 // ---------------------------------------------------------------------------
-// pi — DUAL-LANE: `--mode rpc` drives, the plain TUI watches (x-c198).
+// pi — DUAL-LANE: `--mode rpc` drives, the plain TUI watches.
 // ---------------------------------------------------------------------------
 
 /// pi (`@earendil-works/pi-coding-agent`) provider.
@@ -1770,7 +1770,7 @@ pub fn gemini_session_id_from_blob(blob: &str) -> Option<String> {
 }
 
 /// The provider roster: every provider name the Rust side can DISPATCH/host —
-/// the spawn gates in `bin/client.rs` and [`for_name`] ride THIS list (x-51f6
+/// the spawn gates in `bin/client.rs` and [`for_name`] ride THIS list (
 /// US1: one source of truth, no per-site `matches!` copies).
 ///
 /// grok provider, roster parity like cursor's: the lanes fno dispatches on
@@ -1814,7 +1814,7 @@ impl Provider for GrokProvider {
     }
 
     fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
-        // `grok -p` prints plain text (exercised once in the x-fd31
+        // `grok -p` prints plain text (exercised once in the
         // measurement); a chunk is reply text, same reading as pi's.
         if chunk.trim().is_empty() {
             ParsedEvent::Unknown {
@@ -1843,7 +1843,7 @@ impl Provider for GrokProvider {
     }
 }
 
-/// NAMING SKEW (x-8dfc, Discretion 4 — commented, not lockstep-renamed, to keep
+/// NAMING SKEW (Discretion 4 — commented, not lockstep-renamed, to keep
 /// the diff small): this 5-name list mirrors Python's `READABLE_PROVIDERS` (the
 /// spawn/pane read-tolerance roster), NOT Python's narrower 3-name
 /// `KNOWN_PROVIDERS` (its dispatch set). A cli test pins this == READABLE.
@@ -2123,7 +2123,7 @@ mod tests {
 
     /// AC7-ERR: a non-repo cwd never panics. The GIT grant is absent (no repo
     /// to resolve), but the plan-dir grant is independent of git-repo-ness and
-    /// still applies (x-6163).
+    /// still applies.
     #[test]
     fn codex_create_argv_outside_a_repo_omits_only_the_git_grant() {
         let argv = CodexProvider.create_argv(&create_ctx());
@@ -2194,18 +2194,18 @@ mod tests {
     #[test]
     fn codex_create_and_resume_normalize_direct_slash_commands() {
         let mut create = create_ctx();
-        create.message = "  /fno:target x-81ad  ".into();
+        create.message = "  /fno:target x-aaaa  ".into();
         assert_eq!(
             CodexProvider
                 .create_argv(&create)
                 .last()
                 .map(String::as_str),
-            Some("$fno:target x-81ad")
+            Some("$fno:target x-aaaa")
         );
 
         let resume = ResumeContext {
             session_id: "uuid-1".into(),
-            message: "  /fno:target x-81ad  ".into(),
+            message: "  /fno:target x-aaaa  ".into(),
             cwd: PathBuf::from("/x"),
             from_name: None,
             yolo: false,
@@ -2215,7 +2215,7 @@ mod tests {
                 .resume_argv(&resume)
                 .last()
                 .map(String::as_str),
-            Some("$fno:target x-81ad")
+            Some("$fno:target x-aaaa")
         );
 
         assert_eq!(
@@ -2224,25 +2224,25 @@ mod tests {
         );
     }
 
-    /// x-413d: the sigil says WHO WROTE the seed, never which harness runs
+    /// the sigil says WHO WROTE the seed, never which harness runs
     /// it. A codex-authored `$fno:verb` command reaching a claude target is
     /// rewritten to claude's native `/fno:verb`; a slash seed is already
     /// claude's spelling, and prose or an inline mention is never touched.
     #[test]
     fn claude_create_and_resume_normalize_codex_dollar_commands() {
         let mut create = create_ctx();
-        create.message = "  $fno:target x-81ad  ".into();
+        create.message = "  $fno:target x-aaaa  ".into();
         assert_eq!(
             ClaudeProvider
                 .create_argv(&create)
                 .last()
                 .map(String::as_str),
-            Some("/fno:target x-81ad")
+            Some("/fno:target x-aaaa")
         );
 
         let resume = ResumeContext {
             session_id: "uuid-1".into(),
-            message: "  $fno:blueprint x-81ad  ".into(),
+            message: "  $fno:blueprint x-aaaa  ".into(),
             cwd: PathBuf::from("/x"),
             from_name: None,
             yolo: false,
@@ -2252,7 +2252,7 @@ mod tests {
                 .resume_argv(&resume)
                 .last()
                 .map(String::as_str),
-            Some("/fno:blueprint x-81ad")
+            Some("/fno:blueprint x-aaaa")
         );
 
         assert_eq!(render_verb_seed("/fno:target x", "claude"), "/fno:target x");
@@ -2266,15 +2266,15 @@ mod tests {
         );
     }
 
-    /// x-c976: the one renderer reads every sigil spelling and renders per
+    /// the one renderer reads every sigil spelling and renders per
     /// harness. Codex receives `$fno:verb` from all three seed spellings;
     /// its native verbs and foreign prose stay literal.
     #[test]
     fn render_verb_seed_codex_accepts_every_sigil_and_keeps_natives() {
-        for seed in ["/fno:target x-81ad", "/target x-81ad", "$fno:target x-81ad"] {
+        for seed in ["/fno:target x-aaaa", "/target x-aaaa", "$fno:target x-aaaa"] {
             assert_eq!(
                 render_verb_seed(seed, "codex"),
-                "$fno:target x-81ad",
+                "$fno:target x-aaaa",
                 "seed: {seed}"
             );
         }
@@ -2291,7 +2291,7 @@ mod tests {
         }
     }
 
-    /// x-c976: slash surfaces render the namespaced spelling per row; agy
+    /// slash surfaces render the namespaced spelling per row; agy
     /// strips the namespace it injects natively.
     #[test]
     fn render_verb_seed_slash_surfaces_render_per_harness() {
@@ -2311,7 +2311,7 @@ mod tests {
         );
     }
 
-    /// x-c976: the parse owner reads both sigils with the shared shape rule.
+    /// the parse owner reads both sigils with the shared shape rule.
     #[test]
     fn parse_verb_token_reads_both_sigils_and_rejects_paths() {
         assert_eq!(parse_verb_token("/fno:target"), Some(("target", true)));
@@ -2330,7 +2330,7 @@ mod tests {
         }
     }
 
-    /// The plan-dir grant is independent of git-repo-ness (x-6163), so even a
+    /// The plan-dir grant is independent of git-repo-ness, so even a
     /// non-repo cwd re-pins `writable_roots` on resume unless yolo.
     #[test]
     fn codex_resume_argv_grants_plan_dir_outside_a_repo_unless_yolo() {
@@ -2424,7 +2424,7 @@ mod tests {
 
     // ---- ClaudeInteractiveProvider (E1 keystone) ----
 
-    // ---- OpencodeProvider (x-51f6) ----
+    // ---- OpencodeProvider ----
 
     #[test]
     fn opencode_create_argv_is_headless_run_never_bare_tui() {
@@ -2448,9 +2448,9 @@ mod tests {
     fn opencode_create_argv_routes_slash_command_via_command_flag() {
         // A rendered footnote slash command rides `--command <verb>` (opencode
         // expands the plugin command) with the rest as args - NOT a prose prompt
-        // that `run` would run verbatim (x-de43 / codex P1).
+        // that `run` would run verbatim (/ codex P1).
         let mut ctx = create_ctx();
-        ctx.message = "/fno:target --no-merge x-abcd".into();
+        ctx.message = "/fno:target --no-merge x-bbbb".into();
         assert_eq!(
             OpencodeProvider.create_argv(&ctx),
             vec![
@@ -2461,7 +2461,7 @@ mod tests {
                 "fno:target",
                 "--",
                 "--no-merge",
-                "x-abcd"
+                "x-bbbb"
             ]
         );
     }
@@ -2510,7 +2510,7 @@ mod tests {
         assert!(OpencodeProvider.as_pty().is_some());
         // An id-less row has nothing to look up, so the probe stays inconclusive
         // and never orphans the pane. A row WITH an id is probed for real
-        // (x-830c) - see the opencode store-probe cases above.
+        // - see the opencode store-probe cases above.
         let entry = AgentEntry {
             name: "oc".into(),
             provider: "opencode".into(),
@@ -2528,7 +2528,7 @@ mod tests {
         // for_name is the LD8 single registration point; a copy-paste slip
         // (e.g. "codex" => GeminiProvider) would pass every other test, so
         // assert each name resolves to a provider reporting that same name.
-        // Iterating KNOWN_PROVIDERS (x-51f6 US1 / AC1-FR) makes this the
+        // Iterating KNOWN_PROVIDERS (US1 / AC1-FR) makes this the
         // roster-parity gate too: a name added to the const without a
         // for_name arm fails here, and the consolidation can never silently
         // narrow the roster (the old hardcoded list had already drifted —
@@ -2748,7 +2748,7 @@ mod tests {
         }
     }
 
-    // -- opencode store probe (x-830c) ------------------------------------
+    // -- opencode store probe ------------------------------------
     // Every case drives an injected runner, so the suite never shells out to a
     // real opencode binary or reads ~/.local/share/opencode.
 

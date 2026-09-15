@@ -240,7 +240,7 @@ def _machine_cpu_arm(
         value={
             "busy_fraction": round(busy, 3),
             "capacity_cores": _cpu_capacity_cores(),
-            # x-d6ad AC10: census rides the fleet read; unknown, never guessed.
+            # AC10: census rides the fleet read; unknown, never guessed.
             "runnable": getattr(footprint, "runnable_count", None),
             "processes": getattr(footprint, "machine_process_count", None),
         },
@@ -348,10 +348,10 @@ def _census(
     """The court census: kings, workers, tests.
 
     Kings and workers are ROW counts, tests is a PROCESS count, never folded
-    together. The gap rides as its own field for the same reason (x-e040).
+    together. The gap rides as its own field for the same reason.
     Full rule: docs/architecture/resource-meter.md.
     """
-    # The caller's own share reading (x-5283), from the ONE gate's probe
+    # The caller's own share reading, from the ONE gate's probe
     # answer - the same share the gate refuses on; None when it cannot be read.
     try:
         from fno.agents.spawn_gate import probe_capacity
@@ -413,7 +413,7 @@ def read_lanes(
     reading = LaneReading()
     load_arm = _cpu_admission_arm()
     # One fleet read serves the census, the per-lane divisor, and the machine
-    # arm's counts (x-d6ad AC10); taken before the refusal branch.
+    # arm's counts (AC10); taken before the refusal branch.
     footprint, rows, rows_error, read_ms = _fleet_snapshot()
     cpu_arm = _machine_cpu_arm(sample, macmon_reason, footprint)
     mem_arm = _memory_arm(sample, macmon_reason)
@@ -455,7 +455,7 @@ def read_lanes(
     ):
         # The CPU axis is not admitting, or never answered: a dark sensor is
         # never headroom, and neither is a hold, an undecidable band, or a
-        # refusal (x-7783 AC12).
+        # refusal (AC12).
         answer = 0
         cap_why = (
             "dark"
