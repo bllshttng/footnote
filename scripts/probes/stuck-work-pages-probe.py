@@ -113,7 +113,6 @@ def checkin_attends(scope: str, pid: int, cwd: pathlib.Path) -> tuple[bool, str]
 
 
 def run_live(scope: str, cwd: pathlib.Path) -> int:
-    journal_list = journals()
     cursor_path = phone_cursor(cwd)
     started_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -140,7 +139,9 @@ def run_live(scope: str, cwd: pathlib.Path) -> int:
         budget = POLL_BUDGET_S
         found = None
         while budget > 0:
-            found = find_notice(journal_list, sleeper.pid, started_ts)
+            # Re-resolved per tick: a mid-poll rotation moves rows into a
+            # .1 file a pre-poll snapshot would never see.
+            found = find_notice(journals(), sleeper.pid, started_ts)
             if found:
                 break
             time.sleep(15)
