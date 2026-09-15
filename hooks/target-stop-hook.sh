@@ -285,8 +285,6 @@ else
     done
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
-DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
-trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 
 # Second candidate: a king session. Its manifest is a separate file because a
 # king runs in the canonical checkout where a target manifest may also exist,
@@ -557,11 +555,6 @@ fi
 # and the captured exit code is the binary's own. (Trailing newline added by
 # <<< is harmless: serde_json tolerates trailing whitespace.)
 mkdir -p "$SPACE_DIR" 2>/dev/null || true
-CANDIDATE_READY=0
-if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-    && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
-    CANDIDATE_READY=1
-fi
 LOOP_CHECK_LOG="${SPACE_DIR}/loop-check.stderr.log"
 DECISION_JSON=""
 verb_rc=0
@@ -688,10 +681,18 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
     esac
     FINALIZE_STATE="$STATE_FILE"
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
-        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-            && { [[ $CANDIDATE_READY -ne 1 ]] \
-                || ! mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE"; }; then
-            emit_block_for_harness "generic delivery state could not be preserved; will retry"
+        # The retry state is staged here and nowhere earlier. The manifest is
+        # write-once, so this copy matches one taken before loop-check, and a
+        # stop that is not a delivery writes nothing.
+        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]]; then
+            [[ -n "$DELIVERY_PENDING_STATE" ]] \
+                || emit_block_for_harness "generic delivery state could not be preserved; will retry"
+            PENDING_TMP="${DELIVERY_PENDING_STATE}.tmp.$$"
+            if ! cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
+                || ! mv "$PENDING_TMP" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+                rm -f "$PENDING_TMP" 2>/dev/null || true
+                emit_block_for_harness "generic delivery state could not be preserved; will retry"
+            fi
         fi
         FINALIZE_STATE="$DELIVERY_PENDING_STATE"
     fi
