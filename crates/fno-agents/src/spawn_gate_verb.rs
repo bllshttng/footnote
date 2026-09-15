@@ -242,7 +242,7 @@ mod probe {
                         "min_free_gb": floor_gb,
                         "swap_used_pct": mem.swap,
                         "max_swap_pct": swap_cap,
-                        "swapin_mib_per_s": mem.swapin_bps.map(|r| r / (1024.0 * 1024.0)),
+                        "swapin_mib_per_s": mem.swapin_bps.map(|r| r / spawn_gate::MIB),
                     }),
                     &make_rows(None, slots, cap, ram_row, Vec::new()),
                     out,
@@ -516,7 +516,7 @@ fn ram_floor_row(
         "not sampled (under cap)".to_string()
     } else {
         mem.swapin_bps
-            .map(|r| format!("{:.1} MiB/s", r / (1024.0 * 1024.0)))
+            .map(|r| format!("{:.1} MiB/s", r / spawn_gate::MIB))
             .unwrap_or_else(|| "unreadable".into())
     };
     let mut row = Map::new();

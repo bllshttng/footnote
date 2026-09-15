@@ -376,11 +376,13 @@ pub(crate) fn parse_proc_vmstat_pswpin(text: &str) -> Option<u64> {
 
 /// Sample window for the swap-in rate.
 const SWAPIN_WINDOW: Duration = Duration::from_secs(1);
+/// One mebibyte, the unit every swap-in rate renders in.
+pub(crate) const MIB: f64 = 1024.0 * 1024.0;
 /// Swap-in rate at or above this refuses beside an over-cap allocation. A
 /// calibration choice, not a derived number: idle windows on machines at 94.7%
 /// and 64.8% swap allocation read 0 swap-ins, and 1 MiB/s sits above stray
 /// single-page touches.
-pub(crate) const SWAPIN_REFUSE_BYTES_PER_S: f64 = 1024.0 * 1024.0;
+pub(crate) const SWAPIN_REFUSE_BYTES_PER_S: f64 = MIB;
 
 /// Cumulative swap-in pages plus the page size: macOS runs `vm_stat`
 /// (`Swapins:`), Linux reads `/proc/vmstat` (`pswpin`, page size from
@@ -1842,7 +1844,7 @@ pub(crate) fn ram_floor_term(
                 "swap {:.1}% used is at or above the max_swap_pct cap {max_swap_pct:.0}% and \
                  swap-in is {:.1} MiB/s",
                 swap.unwrap(),
-                swapin_bps.unwrap() / (1024.0 * 1024.0),
+                swapin_bps.unwrap() / MIB,
             ),
         ));
     }
@@ -1859,21 +1861,31 @@ pub(crate) fn ram_floor_term(
 fn check_ram_floor(floor_gb: f64, max_swap_pct: f64) -> Result<(), Refusal> {
     let m = read_memory(floor_gb, max_swap_pct);
     if floor_gb > 0.0 || max_swap_pct > 0.0 {
-        let swapin_word: String = if m.swap.is_none_or(|s| s < max_swap_pct) {
+        // A disabled term renders `off`, never `unreadable`: it was not read
+        // because it is disabled, and a broken sensor must not read as a
+        // tuned knob.
+        let off_or = |disabled: bool, value: &Option<f64>, unit: &str| -> String {
+            if disabled {
+                "off".into()
+            } else {
+                value
+                    .map(|v| format!("{v:.1}{unit}"))
+                    .unwrap_or_else(|| "unreadable".into())
+            }
+        };
+        let swapin_word: String = if max_swap_pct <= 0.0 {
+            "off".into()
+        } else if m.swap.is_none_or(|s| s < max_swap_pct) {
             "not sampled (under cap)".into()
         } else {
             m.swapin_bps
-                .map(|r| format!("{:.1} MiB/s", r / (1024.0 * 1024.0)))
+                .map(|r| format!("{:.1} MiB/s", r / MIB))
                 .unwrap_or_else(|| "unreadable".into())
         };
         eprintln!(
             "spawn-gate: ram readings: available {} (floor {floor_gb:.1}GB), swap {} (cap {max_swap_pct:.0}%), swap-in {swapin_word}",
-            m.avail
-                .map(|v| format!("{v:.1}GB"))
-                .unwrap_or_else(|| "unreadable".into()),
-            m.swap
-                .map(|v| format!("{v:.1}%"))
-                .unwrap_or_else(|| "unreadable".into()),
+            off_or(floor_gb <= 0.0, &m.avail, "GB"),
+            off_or(max_swap_pct <= 0.0, &m.swap, "%"),
         );
     }
     match ram_floor_term(m.avail, floor_gb, m.swap, m.swapin_bps, max_swap_pct) {
@@ -1888,7 +1900,7 @@ fn check_ram_floor(floor_gb: f64, max_swap_pct: f64) -> Result<(), Refusal> {
                     "min_free_gb": floor_gb,
                     "swap_used_pct": m.swap,
                     "max_swap_pct": max_swap_pct,
-                    "swapin_mib_per_s": m.swapin_bps.map(|r| r / (1024.0 * 1024.0)),
+                    "swapin_mib_per_s": m.swapin_bps.map(|r| r / MIB),
                 }),
             ))
         }
