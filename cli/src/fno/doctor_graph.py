@@ -44,6 +44,12 @@ def _gate_gaps(client) -> list[str]:
     return gaps
 
 
+def _keeper_gaps(client) -> list[str]:
+    """The soak clock alone, for the read-only status watch: no copy, no
+    temp keeper, no negative control."""
+    return list(client.request("backend_gate", {}).get("gaps") or [])
+
+
 def _keepers() -> str:
     from fno import paths
     from fno.graph.store import _Keeper
@@ -107,7 +113,7 @@ def graph_backend(
         typer.echo(
             f"backend={state.get('backend')} since={since_text} days={days} keepers={_keepers()}"
         )
-        gaps = _gate_gaps(client)
+        gaps = _keeper_gaps(client)
         if gaps:
             for gap in gaps:
                 typer.echo(f"gate: {gap}")

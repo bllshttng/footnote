@@ -72,6 +72,9 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(
         doctor_graph, "_gate_gaps", lambda client: list(gaps)
     )
+    monkeypatch.setattr(
+        doctor_graph, "_keeper_gaps", lambda client: list(gaps)
+    )
     return {
         "graph": graph,
         "tmp": tmp_path,

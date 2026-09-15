@@ -253,19 +253,27 @@ fn rebuild_if_schema_v2(connection: &mut Connection, graph: &Path) -> Result<(),
     if backend(graph) == Backend::Sqlite {
         return stamp_meta(connection, "schema_version", SCHEMA_VERSION);
     }
-    // The rebuild reads graph.json; a file that does not parse is left for
-    // the next open, and parity surfaces the gap loudly meanwhile.
-    let rows: Vec<Value> = match std::fs::read_to_string(graph) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(doc) => doc
-                .get("entries")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
-            Err(_) => return Ok(()),
-        },
-        Err(_) => return Ok(()),
-    };
+    // The rebuild reads graph.json; a file that does not parse, or that
+    // carries no entries ARRAY, is left for the next open, and parity
+    // surfaces the gap loudly meanwhile. An entries-less json is refused
+    // by parity too: it is malformed for this store, never an empty
+    // authority, so it must not read as "delete every db row".
+    let doc = std::fs::read_to_string(graph)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let has_entries_array = doc
+        .as_ref()
+        .map(|doc| doc.get("entries").map(Value::is_array).unwrap_or(false))
+        .unwrap_or(false);
+    if !has_entries_array {
+        return Ok(());
+    }
+    let rows: Vec<Value> = doc
+        .expect("checked above")
+        .get("entries")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -1637,6 +1645,27 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn flipgate_schema_v3_entriesless_json_never_wipes_the_db() {
+        // A json that parses but holds no entries array is malformed for
+        // this store, never an empty authority: the rebuild skips it and
+        // the db rows stay.
+        let dir = TempDir::new().unwrap();
+        let graph = schema2_graph_with_stale_rows(&dir);
+        std::fs::write(&graph, b"{\"entries\": null}").unwrap();
+        let entries = read_entries(&graph).unwrap();
+        assert_eq!(entries[0]["title"], "One", "the rows survived");
+        let connection = open(&graph).unwrap();
+        let schema: String = connection
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(schema, "2", "no rebuild stamp on a malformed authority");
     }
 
     #[test]
