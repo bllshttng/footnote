@@ -36,7 +36,9 @@ Exit is blocked while actionable rows exist. The stop hook reads board truth. A 
 
 ## The dispatch exception and its journal row
 
-A reign does not dispatch. The single exception is a provably dead dispatching arm: a red row in `fno agents status`. That spawn is journaled `reign_dispatch_exception`, naming the arm and the node, BEFORE it fires. A spawn without that row is a defect.
+A reign does not dispatch. The single exception is a provably dead dispatching arm: a red row in `fno agents status`. That spawn is journaled `reign_dispatch_exception`, naming the arm and the node, BEFORE it fires. A spawn without that row is a defect. The journal row is emitted with:
+
+`fno doctor event emit -t reign_dispatch_exception -s loop -d '{"scope":"<scope>","arm":"<arm>","node":"<id>"}'`
 
 ## The check-in journal: write canonical, read it back
 
@@ -44,7 +46,7 @@ Every `reign_checkin` row carries the canonical keys `scope` and `change`, plus 
 
 `fno agents king checkin` runs the check-in body as one verb. It gathers the readings the skill names and prints them in a fixed order. It diffs the previous canonical row for the scope. It emits the `reign_checkin` row from the same dict it printed, so the row and the lines cannot disagree. Coverage is per reading. A reader that fails prints `READER FAILED <name>: <reason>` on its own line. The beat continues without it. The row names the failure under `readers_failed`, and `coverage` drops below nine. `change` is derived from the diff. `no change` is refused while any reader failed, because an unread axis cannot be known unchanged. The verb never decides. It holds no graph write, no spawn and no reap. The levers stay the king's judgment. The skill's check-in body is this verb's documented output contract.
 
-`fno agents king history` reads one crown's rows back, newest first, complete payloads. It never generates a summary. Legacy alias rows count as rejected evidence. It never silently accepts them. It reads every journal ``paths.event_journals`` resolves: live files, rotations, mirrors. A zero-match answer still names every journal it read, with each file's scanned row count. An empty history is a measurement, not an absence. `fno agents court -n` answers a different question: who holds which crown right now.
+`fno agents king history` reads one crown's rows back, newest first, complete payloads. It never generates a summary. Legacy alias rows count as rejected evidence. It never silently accepts them. It reads the `events.db` store beside every journal ``paths.event_journals`` resolves, ingesting first (the store holds every durable row the files' single rotation generation would otherwise drop), and answers from an index on `(scope, type, ts_ms)` instead of scanning raw rows. A zero-match answer still names every store it read, with each journal's ingested and reign-row counts. An empty history is a measurement, not an absence. `fno agents court -n` answers a different question: who holds which crown right now.
 
 ## The reign ledger page
 

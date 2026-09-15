@@ -3,23 +3,29 @@
 //!
 //! Python resolves the caller's crown scope (harness identity and registry
 //! rows are Python-owned), passes every journal `paths.event_journals`
-//! returns (the three live journals plus their rotations and mirrors), and
-//! relays here; the scan is a native read with the same treatment `board`
-//! and `court-fold` got. One reign outlives many journal rotations, so a
-//! single-file scan reads a fraction of the history: the payload names
-//! every file it read and each file's contributed row count. Selection is EXACT `data.scope` equality: rows are
-//! written through the crown canonicalization, so a second normalizer here
-//! could only disagree with it. Legacy rows (the refused
+//! returns, and relays here. The paths reduce to unique live journals (the
+//! `.ephemeral` siblings never carry durable rows, and a `.1` generation is
+//! the same journal its live path names); each live journal's `events.db`
+//! store is synced FIRST (`events_store::sync`, which ingests the rotated
+//! generation and then the live file), and the read is an indexed
+//! `(scope, type, ts_ms)` select instead of a scan of every row ever
+//! journaled. Selection is EXACT `data.scope` equality via the store's
+//! `scope` column: rows are written through the crown canonicalization, so
+//! a second normalizer here could only disagree with it; a stored row whose
+//! `data.scope` was not canonical carries `scope IS NULL` and reaches the
+//! legacy classifier through the same query. Legacy rows (the refused
 //! `crown_scope`/`crown`/`result` aliases, or a missing canonical key)
-//! stay byte-preserved evidence: counted in `rejected`, attributed by line
-//! number in `rejected_legacy` when one of their scope spellings equals
-//! the requested scope. The output is read-back, never a generated
-//! summary; a zero-match answer still names the journal and the scanned
-//! count, so an empty history is a measurement, not an absence.
+//! stay byte-preserved evidence: counted in `rejected`, listed in
+//! `rejected_legacy` by store and `ts`, because a line number does not
+//! survive rotation. The output is read-back, never a generated summary; a
+//! zero-match answer still names every store and its counts, so an empty
+//! history is a measurement, not an absence. A store that cannot be opened
+//! is an error (rc 1), never an empty history.
 
+use rusqlite::Connection;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub(crate) const REIGN_CHECKIN: &str = "reign_checkin";
 pub(crate) const FORBIDDEN_ALIASES: [&str; 3] = ["crown", "crown_scope", "result"];
@@ -28,95 +34,83 @@ fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
 }
 
-/// One journal's readback: the file's own counts plus its matches in file
-/// order (appends are chronological within one file).
-struct JournalScan {
-    scanned: u64,
-    rejected: u64,
-    events: Vec<Value>,
-    rejected_legacy: Vec<Value>,
-}
-
-fn scan_one(events_path: &Path, scope: &str) -> Result<JournalScan, String> {
-    let mut out = JournalScan {
-        scanned: 0,
-        rejected: 0,
-        events: Vec::new(),
-        rejected_legacy: Vec::new(),
+/// One stored row's verdict: matched, rejected (with optional legacy
+/// evidence when one of its scope spellings names the requested crown).
+/// Shared by scope-stamped and NULL-scope result sets, so the canonical and
+/// legacy tests apply identically to both.
+fn classify(event: &Value, scope: &str) -> (bool, bool, Option<Value>) {
+    let Some(data) = event.get("data").and_then(|d| d.as_object()) else {
+        // A reign_checkin without an object payload is legacy evidence
+        // too; it names no scope, so it counts but attributes nowhere.
+        return (false, true, None);
     };
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        // A missing journal is a positive zero, not an error: the caller's
-        // per-journal row still names the file with zero rows read.
-        if !events_path.exists() {
-            return Ok(out);
-        }
-        return Err(format!("{}: unreadable journal", events_path.display()));
-    };
-    for (lineno, raw) in content.lines().enumerate() {
-        let lineno = lineno + 1;
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let event: Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(format!(
-                    "{}:{lineno}: corrupt JSON line: {e}",
-                    events_path.display()
-                ))
-            }
-        };
-        if !event.is_object() {
-            return Err(format!(
-                "{}:{lineno}: line is not a JSON object",
-                events_path.display()
-            ));
-        }
-        out.scanned += 1;
-        if s_str(&event, "type") != Some(REIGN_CHECKIN) {
-            continue;
-        }
-        let Some(data) = event.get("data").and_then(|d| d.as_object()) else {
-            // A reign_checkin without an object payload is legacy evidence
-            // too; it names no scope, so it counts but attributes nowhere.
-            out.rejected += 1;
-            continue;
-        };
-        let data = Value::Object(data.clone());
-        let aliases: Vec<&str> = FORBIDDEN_ALIASES
+    let data = Value::Object(data.clone());
+    let aliases: Vec<&str> = FORBIDDEN_ALIASES
+        .iter()
+        .filter(|k| data.get(**k).is_some())
+        .copied()
+        .collect();
+    let row_scope = s_str(&data, "scope").unwrap_or("");
+    let canonical = !row_scope.is_empty() && data.get("change").is_some() && aliases.is_empty();
+    if canonical {
+        return (row_scope == scope, false, None);
+    }
+    let names_this_crown =
+        row_scope == scope || aliases.iter().any(|k| s_str(&data, k) == Some(scope));
+    let legacy = names_this_crown.then(|| {
+        let missing: Vec<&str> = ["scope", "change"]
             .iter()
-            .filter(|k| data.get(**k).is_some())
+            .filter(|k| data.get(**k).is_none())
             .copied()
             .collect();
-        let row_scope = s_str(&data, "scope").unwrap_or("");
-        let canonical = !row_scope.is_empty() && data.get("change").is_some() && aliases.is_empty();
-        if canonical {
-            if row_scope == scope {
-                out.events.push(event);
-            }
-            continue;
-        }
-        out.rejected += 1;
-        let names_this_crown =
-            row_scope == scope || aliases.iter().any(|k| s_str(&data, k) == Some(scope));
-        if names_this_crown {
-            let missing: Vec<&str> = ["scope", "change"]
-                .iter()
-                .filter(|k| data.get(**k).is_none())
-                .copied()
-                .collect();
-            out.rejected_legacy.push(json!({
-                "line": lineno,
-                "forbidden": aliases,
-                "missing": missing,
-            }));
-        }
-    }
-    Ok(out)
+        json!({
+            "forbidden": aliases,
+            "missing": missing,
+        })
+    });
+    (false, true, legacy)
+}
+
+/// The stored reign rows for one store: exact-scope rows, then NULL-scope
+/// rows (non-canonical scope spellings), each oldest first within its set.
+fn reign_rows(store: &Connection, scope: &str) -> Result<Vec<String>, String> {
+    let mut rows: Vec<String> = Vec::new();
+    let read = |stmt: &mut rusqlite::Statement,
+                args: &[&dyn rusqlite::ToSql],
+                rows: &mut Vec<String>|
+     -> Result<(), String> {
+        let found = stmt
+            .query_map(args, |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows.extend(found);
+        Ok(())
+    };
+    let mut scoped = store
+        .prepare("SELECT line FROM events WHERE scope = ?1 AND type = ?2 ORDER BY ts_ms")
+        .map_err(|e| e.to_string())?;
+    read(&mut scoped, &[&scope, &REIGN_CHECKIN], &mut rows)?;
+    let mut legacy = store
+        .prepare("SELECT line FROM events WHERE scope IS NULL AND type = ?1 ORDER BY ts_ms")
+        .map_err(|e| e.to_string())?;
+    read(&mut legacy, &[&REIGN_CHECKIN], &mut rows)?;
+    Ok(rows)
 }
 
 pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, String> {
+    // Generations and mirrors collapse here: one live journal, one store.
+    let mut lives: Vec<PathBuf> = Vec::new();
+    for path in events_paths {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.contains(crate::events::EPHEMERAL_SUFFIX) {
+            continue;
+        }
+        let live = crate::events_store::live_journal(path);
+        if !lives.contains(&live) {
+            lives.push(live);
+        }
+    }
     let mut payload = json!({
         "scope": scope,
         "journals": Vec::<Value>::new(),
@@ -126,6 +120,7 @@ pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, Strin
         "rejected": 0,
         "rejected_legacy": Vec::<Value>::new(),
         "duplicates": 0,
+        "ingested": 0,
     });
     let mut events: Vec<Value> = Vec::new();
     let mut rejected_legacy: Vec<Value> = Vec::new();
@@ -135,28 +130,50 @@ pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, Strin
     // are counted, not silently dropped.
     let mut seen: HashSet<String> = HashSet::new();
     let mut duplicates: u64 = 0;
-    for path in events_paths {
-        let scan = scan_one(path, scope)?;
-        journals.push(json!({
-            "path": path.display().to_string(),
-            "scanned": scan.scanned,
-            "matched": scan.events.len(),
-            "rejected": scan.rejected,
-        }));
-        payload["scanned"] = json!(payload["scanned"].as_u64().unwrap_or(0) + scan.scanned);
-        payload["rejected"] = json!(payload["rejected"].as_u64().unwrap_or(0) + scan.rejected);
-        for mut legacy in scan.rejected_legacy {
-            legacy["file"] = json!(path.display().to_string());
-            rejected_legacy.push(legacy);
-        }
-        for event in scan.events {
-            let key = serde_json::to_string(&event).unwrap_or_default();
-            if seen.insert(key) {
-                events.push(event);
-            } else {
-                duplicates += 1;
+    for live in &lives {
+        let receipt = crate::events_store::sync(live)?;
+        let store = crate::events_store::open_read(&receipt.store)?;
+        let rows = reign_rows(&store, scope)?;
+        let mut scanned = 0u64;
+        let mut matched = 0u64;
+        let mut rejected = 0u64;
+        for line in rows {
+            scanned += 1;
+            let Ok(event) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let (hit, rejected_row, legacy) = classify(&event, scope);
+            let ts_val = event.get("ts").cloned().unwrap_or(Value::Null);
+            if hit {
+                matched += 1;
+                let key = serde_json::to_string(&event).unwrap_or_default();
+                if seen.insert(key) {
+                    events.push(event);
+                } else {
+                    duplicates += 1;
+                }
+            }
+            if rejected_row {
+                rejected += 1;
+                if let Some(mut detail) = legacy {
+                    detail["file"] = json!(receipt.store.display().to_string());
+                    detail["ts"] = ts_val;
+                    rejected_legacy.push(detail);
+                }
             }
         }
+        journals.push(json!({
+            "path": live.display().to_string(),
+            "store": receipt.store.display().to_string(),
+            "ingested": receipt.ingested,
+            "corrupt": receipt.corrupt,
+            "scanned": scanned,
+            "matched": matched,
+            "rejected": rejected,
+        }));
+        payload["scanned"] = json!(payload["scanned"].as_u64().unwrap_or(0) + scanned);
+        payload["rejected"] = json!(payload["rejected"].as_u64().unwrap_or(0) + rejected);
+        payload["ingested"] = json!(payload["ingested"].as_u64().unwrap_or(0) + receipt.ingested);
     }
     // Across rotations one reign spans several files, so file order is no
     // longer display order; the envelope's own ts is.
@@ -166,6 +183,13 @@ pub(crate) fn scan(events_paths: &[PathBuf], scope: &str) -> Result<Value, Strin
             .cmp(s_str(a, "ts").unwrap_or(""))
     });
     payload["events"] = Value::Array(events);
+    // The store returns the scoped set before the NULL-scope set; evidence
+    // reads chronologically, so the legacy rows sort by their own ts.
+    rejected_legacy.sort_by(|a, b| {
+        s_str(a, "ts")
+            .unwrap_or("")
+            .cmp(s_str(b, "ts").unwrap_or(""))
+    });
     payload["rejected_legacy"] = Value::Array(rejected_legacy);
     payload["journals"] = Value::Array(journals);
     payload["duplicates"] = json!(duplicates);
@@ -201,9 +225,10 @@ fn render(payload: &Value) -> String {
         }
     }
     lines.push(format!(
-        "history: {} canonical check-in(s) for {}, scanned {} rows across {} journal(s), {} legacy-invalid reign row(s)",
+        "history: {} canonical check-in(s) for {}, read {} reign row(s) from {} store(s), {} row(s) ingested, {} legacy-invalid reign row(s)",
         payload["matched"], payload["scope"], payload["scanned"],
         payload["journals"].as_array().map(|a| a.len()).unwrap_or(0),
+        payload["ingested"],
         payload["rejected"]
     ));
     if payload["duplicates"].as_u64().unwrap_or(0) > 0 {
@@ -214,15 +239,19 @@ fn render(payload: &Value) -> String {
     }
     for journal in payload["journals"].as_array().unwrap() {
         lines.push(format!(
-            "  {}: {} row(s) scanned, {} matched",
-            journal["path"], journal["scanned"], journal["matched"]
+            "  {}: store {}, {} row(s) ingested, {} reign row(s) read, {} matched",
+            journal["path"],
+            journal["store"],
+            journal["ingested"],
+            journal["scanned"],
+            journal["matched"]
         ));
     }
     for entry in payload["rejected_legacy"].as_array().unwrap() {
         lines.push(format!(
-            "  rejected legacy row at {}:{}: forbidden={} missing={}",
+            "  rejected legacy row in {} at {}: forbidden={} missing={}",
             entry["file"],
-            entry["line"],
+            entry["ts"].as_str().unwrap_or(""),
             serde_json::to_string(&entry["forbidden"]).unwrap_or_default(),
             serde_json::to_string(&entry["missing"]).unwrap_or_default(),
         ));
@@ -232,7 +261,8 @@ fn render(payload: &Value) -> String {
 
 /// `king-history --scope SCOPE --events-path PATH [--events-path PATH ...] [--json]`
 ///
-/// rc 0 read (any match count), 1 corrupt journal line, 2 usage failure.
+/// rc 0 read (any match count), 1 a store that cannot be opened or synced
+/// (the message names the store path), 2 usage failure.
 pub fn run_king_history(args: &[String]) -> i32 {
     let mut scope = String::new();
     let mut events_paths: Vec<PathBuf> = Vec::new();
@@ -322,7 +352,7 @@ mod tests {
             ),
         ]);
         let payload = scan(std::slice::from_ref(&path), "x-a792").unwrap();
-        assert_eq!(payload["scanned"], json!(4));
+        assert_eq!(payload["scanned"], json!(2), "only reign rows are read");
         assert_eq!(payload["matched"], json!(2));
         let events = payload["events"].as_array().unwrap();
         assert_eq!(events[0]["data"]["open_prs_fleet"], json!(3));
@@ -348,7 +378,6 @@ mod tests {
         assert_eq!(payload["rejected"], json!(3));
         let legacy = payload["rejected_legacy"].as_array().unwrap();
         assert_eq!(legacy.len(), 2);
-        assert_eq!(legacy[0]["line"], json!(1));
         assert_eq!(legacy[0]["forbidden"], json!(["crown_scope"]));
         assert_eq!(legacy[0]["missing"], json!(["scope"]));
         assert_eq!(legacy[1]["forbidden"], json!(["result"]));
@@ -371,14 +400,19 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_line_names_the_line() {
+    fn corrupt_line_is_stored_and_history_still_reads() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
         let mut fh = std::fs::File::create(&path).unwrap();
         writeln!(fh, "{{not json").unwrap();
         drop(fh);
-        let err = scan(std::slice::from_ref(&path), "x-a792").unwrap_err();
-        assert!(err.contains(":1:"), "err: {err}");
+        // A corrupt line is stored with its reject_reason; it is never a
+        // reign row, so the read succeeds and reports zero.
+        let payload = scan(std::slice::from_ref(&path), "x-a792").unwrap();
+        assert_eq!(payload["scanned"], json!(0));
+        assert_eq!(payload["matched"], json!(0));
+        let journals = payload["journals"].as_array().unwrap();
+        assert_eq!(journals[0]["corrupt"], json!(1));
     }
 
     #[test]
@@ -425,14 +459,19 @@ mod tests {
         assert_eq!(events[1]["data"]["change"], json!("older"));
         assert_eq!(events[2]["data"]["change"], json!("rotated past"));
         let journals = payload["journals"].as_array().unwrap();
-        assert_eq!(journals.len(), 2);
+        // Generations collapse: one live journal, one store entry naming it.
+        assert_eq!(journals.len(), 1);
         assert!(journals[0]["path"]
             .as_str()
             .unwrap()
-            .ends_with("events.jsonl.1"));
-        assert_eq!(journals[0]["scanned"], json!(2));
-        assert_eq!(journals[0]["matched"], json!(2));
-        assert_eq!(journals[1]["scanned"], json!(1));
+            .ends_with("events.jsonl"));
+        assert!(journals[0]["store"]
+            .as_str()
+            .unwrap()
+            .ends_with("events.db"));
+        assert_eq!(journals[0]["ingested"], json!(3));
+        assert_eq!(journals[0]["scanned"], json!(3));
+        assert_eq!(journals[0]["matched"], json!(3));
     }
 
     #[test]
@@ -472,10 +511,21 @@ mod tests {
         let payload = scan(std::slice::from_ref(&rotated), "x-a792").unwrap();
         let legacy = payload["rejected_legacy"].as_array().unwrap();
         assert_eq!(legacy.len(), 1);
-        assert!(legacy[0]["file"]
-            .as_str()
-            .unwrap()
-            .ends_with("events.jsonl.1"));
+        assert!(
+            legacy[0]["file"].as_str().unwrap().ends_with("events.db"),
+            "a line number does not survive rotation; the store does"
+        );
+        assert_eq!(legacy[0]["ts"], json!("2026-09-10T08:00:00Z"));
+    }
+
+    #[test]
+    fn unreadable_store_errors_and_names_it() {
+        // AC4-ERR: a blocked store is an error, never an empty history.
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("events.jsonl");
+        std::fs::create_dir(dir.path().join("events.db")).unwrap();
+        let err = scan(std::slice::from_ref(&live), "x-a792").unwrap_err();
+        assert!(err.contains("events.db"), "err: {err}");
     }
 
     #[test]
