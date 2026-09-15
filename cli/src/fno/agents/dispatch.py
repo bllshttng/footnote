@@ -58,7 +58,6 @@ from fno.agents.stop_release import stop_agent  # noqa: F401 - re-exported publi
 from fno.agents.sender_provenance import (
     _proven_self_sender,
     _resolve_sender_entry,
-    _sender_provenance,
     stamped_provenance as _stamped_sender_provenance,
 )
 from fno.agents import launch_provenance
