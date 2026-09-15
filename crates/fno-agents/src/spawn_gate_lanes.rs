@@ -774,6 +774,54 @@ pub(crate) fn check_account_quota_lock(
     ))
 }
 
+/// The same wall on the ROUTE axis: a route-keyed spawn (`--provider zai`,
+/// no `--account`) never reaches the account check above, so the lane
+/// snapshot the daemon persists every PROVIDER_CAP_INTERVAL_S — armed or
+/// not — is the provider-keyed lock it refuses on. A missing or unreadable
+/// snapshot reads unlocked, exactly as the unreadable runtime-state arm
+/// does; a reset at or before now reads unlocked (the lane is returning).
+pub(crate) fn check_lane_quota_lock(
+    home_root: &Path,
+    provider: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(), crate::spawn_gate::Refusal> {
+    use crate::spawn_gate::{Refusal, EXIT_PROVIDER_CAP};
+    if provider.is_empty() {
+        return Ok(());
+    }
+    let home = crate::paths::AgentsHome::at(home_root.to_path_buf());
+    let Some(snapshot) = crate::provider_cap::read_persisted_snapshot(&home) else {
+        return Ok(());
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let Some(lane) = snapshot.lanes.iter().find(|l| {
+        l.provider == provider
+            && l.state == "open"
+            && l.reset_epoch.map(|r| r as f64 > now).unwrap_or(false)
+    }) else {
+        return Ok(());
+    };
+    let reset = lane.reset_epoch.unwrap_or_default() as f64;
+    let when = chrono_like_iso(reset);
+    warnings.push(format!(
+        "spawn-gate: provider lane {} is rate-limited until {when}; refusing; no worker launched",
+        lane.lane
+    ));
+    Err(Refusal::with_receipt(
+        EXIT_PROVIDER_CAP,
+        serde_json::json!({
+            "status": "refused",
+            "reason": "provider_quota_lock",
+            "provider": provider,
+            "lane": lane.lane,
+            "resets_at": reset,
+        }),
+    ))
+}
+
 /// The provider runtime-state payload: `$FNO_RUNTIME_STATE_PATH`, else the
 /// configured state root's `provider-runtime-state.json`. An unreadable file
 /// is an empty payload (unlocked), matching the Python reader's None arm.
@@ -1351,6 +1399,57 @@ mod tests {
         assert!(check_account_quota_lock(&dir, "acct-a", &mut warnings).is_ok());
 
         std::env::remove_var("FNO_RUNTIME_STATE_PATH");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The route lane lock: a fresh open lane with a future reset refuses
+    /// exit 78 provider_quota_lock naming the lane; another provider, a
+    /// passed reset, and a missing snapshot all read unlocked.
+    #[test]
+    fn lane_quota_lock_refuses_the_walled_provider_route() {
+        let dir = std::env::temp_dir().join(format!("fno-lanes-lanequota-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let lane_json = |reset: i64| {
+            format!(
+                r#"{{"lanes":[{{"lane":"zai:default","provider":"zai","account":"default","reset_epoch":{reset},"reset_passed_epoch":null,"missing_reset_timezone":[],"state":"open","members":[]}}],"measured_at":"probe","measured_at_epoch":{now}}}"#
+            )
+        };
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            lane_json(now + 600),
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let err = check_lane_quota_lock(&dir, "zai", &mut warnings).unwrap_err();
+        assert_eq!(err.exit_code, crate::spawn_gate::EXIT_PROVIDER_CAP);
+        assert_eq!(
+            err.receipt.as_ref().unwrap()["reason"],
+            "provider_quota_lock"
+        );
+        assert_eq!(err.receipt.as_ref().unwrap()["lane"], "zai:default");
+        assert_eq!(
+            err.receipt.as_ref().unwrap()["resets_at"].as_f64(),
+            Some((now + 600) as f64)
+        );
+
+        warnings.clear();
+        assert!(check_lane_quota_lock(&dir, "anthropic", &mut warnings).is_ok());
+
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            lane_json(now - 60),
+        )
+        .unwrap();
+        warnings.clear();
+        assert!(check_lane_quota_lock(&dir, "zai", &mut warnings).is_ok());
+
+        warnings.clear();
+        assert!(check_lane_quota_lock(&dir.join("absent"), "zai", &mut warnings).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
