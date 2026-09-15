@@ -157,6 +157,23 @@ def self_test() -> int:
     return 1 if failed else 0
 
 
+def default_events_paths() -> list:
+    """The journals to read when --events is absent.
+
+    The fno import is a convenience, not a requirement: a pinned probe line
+    runs under bare python3, where the package is not importable. The space
+    glob is the honest superset - the row lands in the dispatching project's
+    journal, and this probe does not know which project that was.
+    """
+    try:
+        from fno.paths import project_events_json
+
+        return [project_events_json()]
+    except Exception:  # noqa: BLE001 - an unimportable fno falls back to the glob
+        pass
+    return sorted((pathlib.Path.home() / ".fno" / "spaces").glob("*/events.jsonl"))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--since", help="window lower bound, <N>h (e.g. 6h)")
@@ -181,24 +198,23 @@ def main() -> int:
     if not args.since:
         ap.error("--since is required (e.g. --since 6h) unless --self-test")
 
-    events_path = args.events
-    if events_path is None:
-        try:
-            from fno.paths import project_events_json
+    events_paths = [args.events] if args.events else default_events_paths()
+    if not events_paths:
+        print(
+            "no events journal resolvable under ~/.fno/spaces; pass --events <path>",
+            file=sys.stderr,
+        )
+        return 2
 
-            events_path = project_events_json()
-        except Exception as exc:  # noqa: BLE001 - no resolvable journal: name the flag
-            print(
-                f"no events journal resolvable ({exc}); pass --events <path>",
-                file=sys.stderr,
-            )
-            return 2
-
-    ok, line = check(events_path, args.registry, parse_since(args.since))
-    if ok:
-        print(line)
-        return 0
-    print(f"FAIL: {line}", file=sys.stderr)
+    first_failure = ""
+    for events_path in events_paths:
+        ok, line = check(events_path, args.registry, parse_since(args.since))
+        if ok:
+            print(line)
+            return 0
+        if not first_failure:
+            first_failure = line
+    print(f"FAIL: {first_failure}", file=sys.stderr)
     return 1
 
 
