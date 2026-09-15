@@ -988,7 +988,12 @@ def test_subjectless_outstanding_answer_gets_a_reserved_recovery_subject(
 ):
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns this question?"])
+    asked = runner.invoke(
+        outstanding_app,
+        # --blocks satisfies the ask law's pointer rule while node stays None,
+        # so the cleared decision's subject still derives to question:<qid>.
+        ["ask", "which lane owns this question?", "--blocks", "x-0000000c"],
+    )
     question_id = asked.stdout.strip().splitlines()[-1]
     cleared = runner.invoke(
         outstanding_app,
@@ -1541,7 +1546,11 @@ def test_a_subjectless_decision_is_reachable_only_without_a_subject(
     decision with subject=None. A subject-less list is the only way to it."""
     from fno.outstanding.cli import outstanding_app
 
-    asked = runner.invoke(outstanding_app, ["ask", "which lane owns the retry?"])
+    asked = runner.invoke(
+        outstanding_app,
+        # --blocks satisfies the ask law's pointer rule while node stays None.
+        ["ask", "which lane owns the retry?", "--blocks", "x-0000000c"],
+    )
     assert asked.exit_code == 0, asked.output
     qid = asked.stdout.strip().splitlines()[-1]
 
@@ -2072,7 +2081,9 @@ def test_the_second_producer_also_refuses_to_ask_for_a_retry(
     from fno.outstanding.cli import outstanding_app
 
     qid = runner.invoke(
-        outstanding_app, ["ask", "which lane owns the retry?"]
+        outstanding_app,
+        # --blocks satisfies the ask law's pointer rule while node stays None.
+        ["ask", "which lane owns the retry?", "--blocks", "x-0000000c"],
     ).stdout.strip().splitlines()[-1]
 
     real = events_mod.append_event

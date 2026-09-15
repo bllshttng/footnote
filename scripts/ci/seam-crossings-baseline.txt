@@ -27,7 +27,8 @@ crossing	crates/fno-agents/src/finalize.rs	1979	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2351	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2433	let ok = Command::new("fno")
 crossing	crates/fno-agents/src/finalize.rs	2803	let out = match Command::new("fno")
-crossing	crates/fno-agents/src/finalize.rs	2823	let mut cmd = Command::new("fno");
+crossing	crates/fno-agents/src/finalize.rs	2843	let note = Command::new("fno")
+crossing	crates/fno-agents/src/finalize.rs	2855	match Command::new("fno")
 crossing	crates/fno-agents/src/gc.rs	927	let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
 crossing	crates/fno-agents/src/gc_native.rs	216	let mut child = std::process::Command::new(crate::scrape::fno_bin())
 crossing	crates/fno-agents/src/king_checkin.rs	143	let mut argv = vec![fno_bin()];

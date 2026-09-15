@@ -48,7 +48,8 @@ def _render(
 
 def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str | None",
              cwd: Path, *, live: "bool | None" = None,
-             unknown_reason: "str | None" = None) -> "tuple[str, str]":
+             unknown_reason: "str | None" = None,
+             scope: "str | None" = None) -> "tuple[str, str]":
     """Record one operator question for this stalled set.
 
     Returns ``(outcome, question_id)`` where outcome is ``recorded``,
@@ -59,6 +60,7 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     either way.
     """
     from fno.agents.stale_escalate import dedupe_key, reconcile_channel
+    from fno.graph._constants import extract_node_ids, is_wellformed_node_id
     from fno.harness_identity import canonical_handle
 
     ids = sorted(set(stalled_ids))
@@ -69,6 +71,10 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
     answer = _render(ids, key, reason, live=live, unknown_reason=unknown_reason)
     if not answer.get("ok"):
         raise ValueError(answer.get("message", "king escalation refused"))
+    # The pointer rule, met from the run's own facts: the reign scope when it
+    # spells a node, plus every node id inside a stalled id. Shape only.
+    node = scope if is_wellformed_node_id(scope) else None
+    blocks = sorted({nid for raw in ids for nid in extract_node_ids(raw)})
     outcome, qid = reconcile_channel(
         ids,
         root=root,
@@ -86,6 +92,8 @@ def escalate(stalled_ids: "list[str]", reason: str, root: Path, session_id: "str
         # is dead by then, but the durable mail tier reaches its successor;
         # an asker-less row can only ever be answered into the void.
         asker=canonical_handle(session_id) if session_id else None,
+        node=node,
+        blocks=blocks or (),
     )
     return ("recorded", qid) if outcome == "asked" else (outcome, qid)
 

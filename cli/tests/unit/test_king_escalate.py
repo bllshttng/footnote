@@ -25,15 +25,20 @@ STALLED = ["undispatched:x-1234", "undispatched:x-5678"]
 
 def _fake_render(ids, key, reason, *, live=None, unknown_reason=None) -> dict:
     """The renderer runs in the fno-agents crate; the fake keeps its
-    contract where the fold tests depend on it: the marker+key leads."""
+    contract where the fold tests depend on it: the marker+key leads, and
+    the id list caps at three like the real renderer (the ask gate caps
+    the line, so an inlined 150-id list would refuse)."""
+    shown = ", ".join(ids[:3])
+    if len(ids) > 3:
+        shown += f", and {len(ids) - 3} more"
     return {
         "ok": True,
         "question": (
             f"[king-escalation:{key}] The king stopped on {len(ids)} board "
-            f"row(s) nothing is clearing: {', '.join(ids)}. "
-            f"Reason given: {reason}. body"
+            f"row(s) nothing is clearing: {shown}. "
+            f"Reason: {reason}. body"
         ),
-        "mail": f"A crown under yours stopped on {len(ids)} rows. Reason given: {reason}.",
+        "mail": f"A crown under yours stopped on {len(ids)} rows. Reason: {reason}.",
     }
 
 
@@ -144,6 +149,37 @@ def test_a_failed_supersede_close_still_records_the_new_ask(
     assert qid in [q.id for q in read_open_questions(tmp_path)]
 
 
+def test_a_failed_reign_read_still_escalates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`reign_state()` raising must not UnboundLocalError past the record: the
+    scope falls back to None and the escalation fires (the codex P1 on 1847)."""
+    from typer.testing import CliRunner
+
+    import fno.king.state as state_mod
+    from fno.king.cli import agents_king_app
+
+    def boom(session_id=None):
+        raise RuntimeError("reader exploded")
+
+    monkeypatch.setattr(state_mod, "reign_state", boom)
+    # escalate_cmd imports this name from fno.king.escalate at call time: the
+    # patch must land there, or a live crown on the test machine gets mailed.
+    monkeypatch.setattr(
+        "fno.king.escalate.resolve_presiding_king", lambda session_id: None
+    )
+    monkeypatch.setattr(
+        "fno.king.escalate.mail_presiding_king", lambda holder, ids, reason: False
+    )
+    result = CliRunner().invoke(
+        agents_king_app,
+        ["escalate", "--stalled", "undispatched:x-1234", "--reason", "NoProgress"],
+    )
+    assert result.exit_code == 0, result.output
+    (question,) = read_open_questions(tmp_path)
+    assert question.node is None
+
+
 def test_the_key_ignores_order_and_repeats(tmp_path: Path) -> None:
     assert dedupe_key(["b", "a"]) == dedupe_key(["a", "b", "a"])
     assert dedupe_key(["a"]) != dedupe_key(["a", "b"])
@@ -203,6 +239,19 @@ def test_the_fold_renders_with_the_dedupe_key_of_its_ids(
     assert seen["ids"] == sorted(STALLED)
     assert seen["key"] == dedupe_key(STALLED)
     assert seen["reason"] == "NoProgress"
+
+
+def test_the_question_names_the_rows_and_carries_the_key(tmp_path: Path) -> None:
+    key = dedupe_key(STALLED)
+    _run(tmp_path, STALLED)
+    (question,) = read_open_questions(tmp_path)
+
+    assert f"[king-escalation:{key}]" in question.question
+    assert "undispatched:x-1234" in question.question
+    assert "undispatched:x-5678" in question.question
+    # The ids also land in blocks, so the pointer rule is met from the run's
+    # own facts; the one-line text names only the first three rows.
+    assert set(question.blocks) == {"x-1234", "x-5678"}
 
 
 def test_an_unreadable_store_is_not_an_empty_one(tmp_path: Path) -> None:

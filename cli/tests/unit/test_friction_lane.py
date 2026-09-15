@@ -89,8 +89,10 @@ def test_one_question_names_every_friction_row(tmp_path: Path) -> None:
     [question] = read_open_questions(tmp_path)
     assert question.id == qid
     assert "[watchdog-friction:" in question.question
-    assert "3 contention/polling row(s)" in question.question
-    assert "w1" in question.question and "w3" in question.question
+    assert "3 contention or polling row(s)" in question.question
+    # These rows carry no node ids, so blocks stays empty: the law moved the
+    # row list out of the text, and `fno agents watchdog` lists the rows.
+    assert not question.blocks
     assert "fno agents watchdog --only contended" in question.ask
 
 

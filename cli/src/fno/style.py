@@ -39,7 +39,7 @@ MESSAGE_WORD_CAP = 80
 # Membership decides WHETHER a cap applies; the ``word_cap`` argument decides
 # what the number is. Config may move the number and can never add a surface,
 # so a project cannot cap a surface this module says is uncapped.
-CAPPED_SURFACES = frozenset({"mail", "encounter"})
+CAPPED_SURFACES = frozenset({"mail", "encounter", "ask"})
 
 # Rule 3. Matched lowercase, whole-word. "may" is lowercase-only so the month
 # "May" never fires; the other four carry no capitalized homonym in prose.

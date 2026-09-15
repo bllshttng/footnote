@@ -13,10 +13,10 @@ only aged does not re-ask.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from pathlib import Path
 
 MARKER = "watchdog-unfinished-work"
-MAX_LISTED_ROWS = 10
 
 #: Severity order for the question's rows and its ask line: the same order
 #: the report's digest uses, so "clear the top finding first" names the
@@ -39,26 +39,15 @@ def _unique(findings):
 
 
 def question_text(findings, key: str, unknown_dimensions=()) -> str:
+    """One line: count, marker, pointer to the report. Rows live in `blocks`."""
     unique = _unique(findings)
-    shown = [
-        f"{f.kind} {f.subject}: {f.basis} -> clear: {f.clear_command}"
-        for f in unique[:MAX_LISTED_ROWS]
-    ]
-    if len(unique) > MAX_LISTED_ROWS:
-        shown.append(f"and {len(unique) - MAX_LISTED_ROWS} more")
     # An incomplete scan escalates what it DID reach and names what it did
     # not. Withholding the whole ask instead made the sweep permanently mute
     # wherever a deleted worktree root can never be fetched again.
-    caveat = ""
-    if unknown_dimensions:
-        caveat = (
-            f" The scan was INCOMPLETE - {', '.join(sorted(unknown_dimensions))} "
-            f"went unread, so more findings may exist."
-        )
+    caveat = " The scan was incomplete." if unknown_dimensions else ""
     return (
-        f"[{MARKER}:{key}] The fleet watchdog found {len(unique)} "
-        f"unfinished-work finding(s). Each names the one command that clears "
-        f"it.{caveat} Findings: {'; '.join(shown)}"
+        f"[{MARKER}:{key}] The watchdog found {len(unique)} unfinished-work "
+        f"finding(s). List them with fno agents watchdog.{caveat}"
     )
 
 
@@ -226,12 +215,14 @@ def reconcile_channel(
     pairs, *, root: Path, session_id: "str | None", cwd: Path,
     marker: str, subject: str, identities: "list[str]",
     question, ask, asker: "str | None" = None,
+    node: "str | None" = None, blocks: "Sequence[str]" = (),
 ) -> "tuple[str, str]":
     """Reconcile ONE durable ``[<marker>:<key>]`` operator question to the
     measured ``pairs``: same set is a duplicate, a changed set supersedes,
     an empty set closes, and a set a human already answered stays answered.
     ``question``/``ask`` are callables taking the dedupe ``key``; outcome in
-    ``none | duplicate | answered | asked | closed``."""
+    ``none | duplicate | answered | asked | closed``. ``node``/``blocks``
+    carry the pointer the ask law wants, met from the run's own facts."""
     key = dedupe_key(identities)
 
     if not pairs:
@@ -275,6 +266,8 @@ def reconcile_channel(
             asker=asker,
             ask=ask(key),
             source="daemon",
+            node=node,
+            blocks=sorted(set(blocks)) or None,
         ),
         root,
     )
@@ -318,5 +311,8 @@ def escalate_unfinished(
         identities=[f"{f.kind}:{f.subject}" for f in unique],
         question=lambda key: question_text(unique, key, unknown_dimensions),
         ask=lambda _key: f"clear the top finding first: {_ask_line(unique)}",
+        # Every finding's node, so the pointer rule is met from the run's
+        # own facts and the operator can jump straight to the subject.
+        blocks=sorted({f.node_id for f in unique if getattr(f, "node_id", None)}),
     )
     return ("recorded", qid) if outcome == "asked" else (outcome, qid)
