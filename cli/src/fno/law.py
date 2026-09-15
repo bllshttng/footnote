@@ -28,7 +28,7 @@ def validate_durable_law(
     """Refuse a statement that is not durable law. Raises, or returns None.
 
     A coordination note recorded as law is a lie a later reader cannot detect.
-    The four statement rules and the node-id subject refusal live in the
+    The statement rules and the node-id subject refusal live in the
     `law-match` crate verb (mode validate); this wrapper is the fail-closed
     transport, and an unavailable validator is a refusal, never a pass.
     """

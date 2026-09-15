@@ -617,10 +617,7 @@ fn is_decision_id(s: &str) -> bool {
     let Some(rest) = s.strip_prefix("d-") else {
         return false;
     };
-    rest.len() == 8
-        && rest
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && b.is_ascii_lowercase() || b.is_ascii_digit())
+    rest.len() == 8 && rest.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// `^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$`, the node-id shape
