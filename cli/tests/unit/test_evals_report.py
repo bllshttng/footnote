@@ -373,3 +373,100 @@ def test_fold_symbols_are_gone_from_python() -> None:
     for gone in ("compare_windows", "window_rows", "graduation_candidates",
                  "compare_variants", "_pair_verdict", "_common_rev"):
         assert not hasattr(report_module, gone)
+
+
+# --- attempt-aware denominators (x-ecda AC3-HP, AC3-EDGE) -------------------
+
+def _modern_row(task_id: str, tier: str, passed: bool, **extra) -> dict:
+    return {
+        "task_id": task_id, "tier": tier, "pass": passed,
+        "obs": {"fixture_prepared": True, "worker_required": False,
+                "grader_ran": True, "grader_passed": passed},
+        **extra,
+    }
+
+
+def _verdict(line: int, status: str, *, graded=None, rev_match: bool = True) -> dict:
+    return {"line": line, "status": status, "graded": graded,
+            "retryable": status != "graded", "rev_match": rev_match}
+
+
+def test_infrastructure_failure_never_drags_the_pass_rate() -> None:
+    """AC3-HP: an infra attempt stays visible but never dilutes correctness."""
+    rows = [
+        _modern_row("t", "regression", True),
+        {"task_id": "t", "tier": "regression", "pass": False,
+         "obs": {"fixture_prepared": False}},
+    ]
+    verdicts = {0: _verdict(1, "graded", graded=True),
+                1: _verdict(2, "infrastructure")}
+    task = build_report(rows, verdicts)["tasks"][0]
+    assert task["runs"] == 2 and task["grades"] == 1 and task["passes"] == 1
+    assert task["pass_at_1"] == 1.0  # not 0.5: infra is not a task failure
+    assert task["attempts"]["infrastructure"] == 1
+    assert task["legacy_fold"] is False
+
+
+def test_task_failure_is_a_valid_grade_and_fires_the_alarm() -> None:
+    rows = [_modern_row("r", "regression", False)]
+    verdicts = {0: _verdict(1, "graded", graded=False)}
+    report = build_report(rows, verdicts)
+    assert report["tasks"][0]["pass_at_1"] == 0.0
+    assert report["tasks"][0]["grades"] == 1
+    assert "r" in report["regression_alarm"]  # a real task failure alarms
+    assert report["tasks"][0]["legacy_fold"] is False
+
+
+def test_all_legacy_task_keeps_the_boolean_fold() -> None:
+    rows = [_row("old", "regression", True), _row("old", "regression", False)]
+    task = build_report(rows)["tasks"][0]
+    assert task["runs"] == 2 and task["passes"] == 1
+    assert task["pass_at_1"] == 0.5
+    assert task["legacy_fold"] is True
+    assert task["grades"] == 0
+
+
+def test_retry_then_pass_counts_correctly_once() -> None:
+    """AC3-EDGE: attempt 0 failed to launch, attempt 1 passed. Both stay
+    attributable; the slot's correctness is one valid grade, not a dilution."""
+    rows = [
+        {"task_id": "t", "tier": "regression", "pass": False,
+         "obs": {"fixture_prepared": True, "worker_required": True, "worker_started": False},
+         "attempt_index": 0},
+        _modern_row("t", "regression", True, attempt_index=1),
+    ]
+    verdicts = {0: _verdict(1, "unavailable"),
+                1: _verdict(2, "graded", graded=True)}
+    task = build_report(rows, verdicts)["tasks"][0]
+    assert task["runs"] == 2
+    assert task["grades"] == 1 and task["passes"] == 1
+    assert task["pass_at_1"] == 1.0
+    assert task["attempts"]["unavailable"] == 1
+    assert task["attempts"]["legacy"] == 0
+
+
+def test_mixed_modern_and_legacy_tasks_keep_their_own_denominators() -> None:
+    rows = [_modern_row("new", "regression", True),
+            _row("old", "regression", False)]
+    verdicts = {0: _verdict(1, "graded", graded=True)}
+    report = build_report(rows, verdicts)
+    new_task = next(t for t in report["tasks"] if t["task_id"] == "new")
+    old_task = next(t for t in report["tasks"] if t["task_id"] == "old")
+    assert new_task["legacy_fold"] is False and new_task["pass_at_1"] == 1.0
+    assert old_task["legacy_fold"] is True and old_task["pass_at_1"] == 0.0
+    # Tier rate: 1 pass over 1+1 grade denominators, never over raw rows.
+    assert report["tiers"]["regression"]["pass_rate"] == 0.5
+
+
+def test_health_summary_folds_verdicts_into_the_alarm(tmp_path: Path, monkeypatch) -> None:
+    """The health summary projects native verdicts: a graded regression fail
+    drives the pass rate over grades (0.0 here), with no legacy reinterpretation."""
+    monkeypatch.setattr("fno.evals.report._native_summary_reads", lambda _p, _d: ([], []))
+    monkeypatch.setattr("fno.evals.report._native_attempt_verdicts",
+                        lambda _p: {1: _verdict(1, "graded", graded=False)})
+    hp = tmp_path / "h.jsonl"
+    _history.append_row(hp, _modern_row("r", "regression", False, ts=_days_ago(1)))
+    summary = evals_health_summary(hp, stale_days=7, now=_NOW)
+    assert summary is not None
+    assert summary["regression_pass_rate"] == 0.0
+    assert summary["flake_count"] == 0
