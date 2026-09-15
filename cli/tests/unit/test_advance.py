@@ -21,6 +21,7 @@ exactly where advance reads them.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -284,6 +285,45 @@ def test_node_already_claimed(iso, monkeypatch):
 
     assert res.decision == "skipped"
     assert res.reason == "held: claim live held by test-holder"
+
+
+def test_blueprint_planning_claim_blocks_dispatch(iso, monkeypatch):
+    """x-f81f: a live blueprint-session node claim - the shape `session open`
+    writes (no TTL, live pid) - means a planner is writing the plan -> skip,
+    no spawn, so auto-continue never double-plans the node."""
+    key = f"node:{NODE['id']}"
+    acquire_claim(
+        key,
+        "blueprint-session:planner-a",
+        pid=os.getpid(),
+        root=adv._claims_root_for(key),
+    )
+    spawned = []
+    monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
+    monkeypatch.setattr(adv, "_spawn_worker", lambda *a, **k: spawned.append(a))
+
+    res = adv.advance(project="fno", events_path=iso)
+
+    assert res.decision == "skipped"
+    assert res.reason.startswith("held: claim live held by blueprint-session:planner-a")
+    assert spawned == []
+
+
+def test_blueprint_planning_claim_dead_pid_frees_node(iso, monkeypatch):
+    """x-f81f: the same claim on an exited pid with no TTL reads stale at
+    once, so planner death never wedges dispatch - the bound the no-TTL
+    shape buys over the crown workaround's --ttl suspect window."""
+    child = _subprocess_module.Popen(["true"])
+    child.wait()
+    key = f"node:{NODE['id']}"
+    acquire_claim(
+        key,
+        "blueprint-session:planner-a",
+        pid=child.pid,
+        root=adv._claims_root_for(key),
+    )
+
+    assert adv._node_dispatch_block_reason(NODE["id"]) is None
 
 
 def test_dispatch_reservation_held(iso, monkeypatch):
