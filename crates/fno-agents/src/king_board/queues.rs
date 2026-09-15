@@ -173,16 +173,31 @@ pub(crate) fn resolve_blocked_child_candidates(
     out
 }
 
-/// `to == session && ts > cutoff` across the live bus log plus its rotated
-/// `.N` segments, oldest first - the mail-answered signal AC3-EDGE names.
-/// Read-only and mechanical (no rotation/locking, the writer's job), so it
-/// stays a native Rust read rather than a Python subprocess per Change 1's
-/// own file list.
+/// Does a bus address reach this blocked row? A target row is keyed by its
+/// run id, which the bus never addresses; the node's live claim names the
+/// harness session the bus does address. The harness-shape guard keeps a run
+/// id from matching by its first 8 characters, which are a date - valid hex,
+/// so a bare handle could collide with it.
+pub(crate) fn addresses_row(addr: &str, row_session: &str, holder: Option<&str>) -> bool {
+    addr == row_session
+        || (crate::identity::harness_of_session_id(row_session).is_some()
+            && crate::identity::session_handle_tier(addr, row_session).is_some())
+        || holder.is_some_and(|h| crate::identity::session_handle_tier(addr, h).is_some())
+}
+
+/// Mail answered a row when a bus line reaches it (row key or live claim
+/// holder) after the row's ts and does not also come from the row itself -
+/// self-sends (a worker's own review triggers) are not answers, and a line
+/// with no `from` is not a self-send. Candidates are `(row session, holder
+/// session, row ts)`; the result stays keyed by row session.
 pub(crate) fn mail_answered_since(
     live_log: &Path,
-    cutoffs: &HashMap<String, String>,
+    candidates: &[(String, Option<String>, String)],
 ) -> HashMap<String, bool> {
-    let mut answered: HashMap<String, bool> = cutoffs.keys().map(|s| (s.clone(), false)).collect();
+    let mut answered: HashMap<String, bool> = candidates
+        .iter()
+        .map(|(s, _, _)| (s.clone(), false))
+        .collect();
     for segment in bus_segments_oldest_first(live_log) {
         let Ok(text) = std::fs::read_to_string(&segment) else {
             continue;
@@ -194,8 +209,15 @@ pub(crate) fn mail_answered_since(
             let (Some(to), Some(ts)) = (s_str(&v, "to"), s_str(&v, "ts")) else {
                 continue;
             };
-            if cutoffs.get(to).is_some_and(|cutoff| ts > cutoff.as_str()) {
-                answered.insert(to.to_string(), true);
+            let from = s_str(&v, "from");
+            for (session, holder, cutoff) in candidates {
+                let holder = holder.as_deref();
+                if ts > cutoff.as_str()
+                    && addresses_row(to, session, holder)
+                    && !from.is_some_and(|f| addresses_row(f, session, holder))
+                {
+                    answered.insert(session.clone(), true);
+                }
             }
         }
     }
@@ -249,6 +271,20 @@ pub(crate) fn filter_unanswered_by_mail(
             })
         })
         .collect()
+}
+
+/// The watchdog verdict for a blocked row: the payload is keyed by harness
+/// session, so look up the row key first and the claim holder session second.
+pub(crate) fn verdict_for(
+    payload: Option<&Value>,
+    row_session: &str,
+    holder: Option<&str>,
+) -> Option<String> {
+    let p = payload?;
+    p.get(row_session)
+        .or_else(|| holder.and_then(|h| p.get(h)))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// One row per node whose plan artifacts hold an open prove-it FAIL
@@ -1859,6 +1895,16 @@ mod tests {
         );
     }
 
+    /// Bus fixture for the answered-row tests: the given bus lines into a
+    /// tempdir `messages.jsonl`, as the measured specimen lines land on disk.
+    fn bus_with(lines: &[Value]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("messages.jsonl");
+        let text: String = lines.iter().map(|v| format!("{}\n", v)).collect();
+        std::fs::write(&live, text).unwrap();
+        (dir, live)
+    }
+
     #[test]
     fn mail_answered_since_reads_a_rotated_segment_not_just_the_live_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -1869,18 +1915,120 @@ mod tests {
         )
         .unwrap();
         std::fs::write(&live, "not json\n").unwrap();
-        let mut cutoffs = HashMap::new();
-        cutoffs.insert("cx-1".to_string(), "2026-09-08T20:00:00Z".to_string());
-        let answered = mail_answered_since(&live, &cutoffs);
+        let candidates = vec![("cx-1".to_string(), None, "2026-09-08T20:00:00Z".to_string())];
+        let answered = mail_answered_since(&live, &candidates);
         assert_eq!(answered.get("cx-1"), Some(&true));
     }
 
     #[test]
     fn mail_answered_since_a_missing_bus_reads_unanswered_not_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cutoffs = HashMap::new();
-        cutoffs.insert("cx-1".to_string(), "2026-09-08T20:00:00Z".to_string());
-        let answered = mail_answered_since(&dir.path().join("messages.jsonl"), &cutoffs);
+        let candidates = vec![("cx-1".to_string(), None, "2026-09-08T20:00:00Z".to_string())];
+        let answered = mail_answered_since(&dir.path().join("messages.jsonl"), &candidates);
         assert_eq!(answered.get("cx-1"), Some(&false));
+    }
+
+    #[test]
+    fn a_run_keyed_row_is_answered_by_mail_to_the_holder_handle() {
+        let (_dir, live) = bus_with(&[json!({
+            "from": "278c9a89", "to": "77393822", "ts": "2026-09-15T07:28:11Z"
+        })]);
+        let candidates = vec![(
+            "20260915T033130Z-cl38242-b8e631".to_string(),
+            Some("77393822-9c90-4fa9-bdb1-def84b6178f8".to_string()),
+            "2026-09-15T06:31:48Z".to_string(),
+        )];
+        let answered = mail_answered_since(&live, &candidates);
+        assert_eq!(answered.get("20260915T033130Z-cl38242-b8e631"), Some(&true));
+    }
+
+    #[test]
+    fn a_self_send_to_the_holder_does_not_answer() {
+        let (_dir, live) = bus_with(&[
+            json!({"from": "77393822", "to": "77393822", "ts": "2026-09-15T11:18:17Z"}),
+            json!({"from": "77393822", "to": "77393822", "ts": "2026-09-15T11:38:33Z"}),
+        ]);
+        let candidates = vec![(
+            "20260915T033130Z-cl38242-b8e631".to_string(),
+            Some("77393822-9c90-4fa9-bdb1-def84b6178f8".to_string()),
+            "2026-09-15T06:31:48Z".to_string(),
+        )];
+        let answered = mail_answered_since(&live, &candidates);
+        assert_eq!(
+            answered.get("20260915T033130Z-cl38242-b8e631"),
+            Some(&false)
+        );
+    }
+
+    #[test]
+    fn mail_to_the_holder_before_the_help_does_not_answer() {
+        let (_dir, live) = bus_with(&[json!({
+            "from": "278c9a89", "to": "77393822", "ts": "2026-09-15T05:30:11Z"
+        })]);
+        let candidates = vec![(
+            "20260915T033130Z-cl38242-b8e631".to_string(),
+            Some("77393822-9c90-4fa9-bdb1-def84b6178f8".to_string()),
+            "2026-09-15T06:31:48Z".to_string(),
+        )];
+        let answered = mail_answered_since(&live, &candidates);
+        assert_eq!(
+            answered.get("20260915T033130Z-cl38242-b8e631"),
+            Some(&false)
+        );
+    }
+
+    #[test]
+    fn a_harness_keyed_row_is_answered_at_its_first_eight() {
+        let (_dir, live) = bus_with(&[json!({
+            "from": "278c9a89", "to": "77393822", "ts": "2026-09-15T07:28:11Z"
+        })]);
+        let candidates = vec![(
+            "77393822-9c90-4fa9-bdb1-def84b6178f8".to_string(),
+            None,
+            "2026-09-15T06:31:48Z".to_string(),
+        )];
+        let answered = mail_answered_since(&live, &candidates);
+        assert_eq!(
+            answered.get("77393822-9c90-4fa9-bdb1-def84b6178f8"),
+            Some(&true)
+        );
+    }
+
+    #[test]
+    fn a_run_keyed_row_with_no_holder_answers_only_at_its_run_id() {
+        let (_dir, live) = bus_with(&[
+            json!({"from": "278c9a89", "to": "77393822", "ts": "2026-09-15T07:28:11Z"}),
+            json!({"from": "fno", "to": "20260915", "ts": "2026-09-15T08:00:00Z"}),
+            json!({"from": "278c9a89", "to": "20260915T033130Z-cl38242-b8e631", "ts": "2026-09-15T09:00:00Z"}),
+        ]);
+        let candidates = vec![(
+            "20260915T033130Z-cl38242-b8e631".to_string(),
+            None,
+            "2026-09-15T06:31:48Z".to_string(),
+        )];
+        let answered = mail_answered_since(&live, &candidates);
+        assert_eq!(answered.get("20260915T033130Z-cl38242-b8e631"), Some(&true));
+    }
+
+    #[test]
+    fn a_run_id_never_matches_by_its_first_eight() {
+        assert!(!addresses_row(
+            "20260915",
+            "20260915T033130Z-cl38242-b8e631",
+            None
+        ));
+    }
+
+    #[test]
+    fn verdict_for_falls_back_to_the_holder_session() {
+        let payload = json!({"77393822-9c90-4fa9-bdb1-def84b6178f8": "ghost"});
+        let verdict = verdict_for(
+            Some(&payload),
+            "20260915T033130Z-cl38242-b8e631",
+            Some("77393822-9c90-4fa9-bdb1-def84b6178f8"),
+        );
+        assert_eq!(verdict.as_deref(), Some("ghost"));
+        let no_holder = verdict_for(Some(&payload), "20260915T033130Z-cl38242-b8e631", None);
+        assert_eq!(no_holder, None);
     }
 }

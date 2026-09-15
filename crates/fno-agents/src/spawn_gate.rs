@@ -371,6 +371,8 @@ pub(crate) fn parse_vm_stat_swapins(text: &str) -> Option<(u64, u64)> {
 
 /// Parse Linux `/proc/vmstat` for the cumulative `pswpin` page count. `None`
 /// without the line.
+/// Dead off Linux except in tests, which parse the fixture on every platform.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn parse_proc_vmstat_pswpin(text: &str) -> Option<u64> {
     let line = text.lines().find(|l| l.starts_with("pswpin "))?;
     line.split_whitespace().nth(1)?.parse().ok()
