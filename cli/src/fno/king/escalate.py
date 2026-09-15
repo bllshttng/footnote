@@ -1,11 +1,10 @@
 """Escalate a stalled king board to the operator, exactly once per stalled set.
 
 A king terminating ``NoProgress`` exits quietly: work pending, nothing moving,
-nobody told. The escalation is the telling, a question in the operator queue
-because the queue survives the next turn. Idempotence keys on the stalled id
-set within the king's own channel: a respawned king meeting the same board
-records no second question, and a changed board supersedes only that king's
-stale row.
+nobody told. The escalation is the telling, a question in the operator queue.
+Idempotence keys on the stalled id set within the king's own channel: a
+respawned king meeting the same board records no second question, and a
+changed board supersedes only that king's stale row.
 
 The operator-facing text renders in the ``fno-agents`` crate
 (``king-escalation-text``, x-ff27); this module keeps the fold and the
