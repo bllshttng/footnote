@@ -798,11 +798,22 @@ def test_refresh_verb_bounces_when_no_tick_runs(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _patch_heal_claims(monkeypatch, *, held=False):
-    """Stub the claim single-flight so tests never touch the real claims root."""
+def _patch_heal_claims(monkeypatch, *, held=False, probe=None, probe_raises=False):
+    """Stub the claim single-flight and the liveness probe so tests never
+    touch the real claims root, event log or launchctl."""
     import fno.claims as claims
 
     acquired: list = []
+
+    import fno.pr_watch._install as m
+    if probe_raises:
+        def _raise():
+            raise RuntimeError("probe unavailable")
+        monkeypatch.setattr(m, "liveness_report_live", _raise)
+    else:
+        if probe is None:
+            probe = {"bounce_pending": False}
+        monkeypatch.setattr(m, "liveness_report_live", lambda: probe)
 
     def _acquire(key, holder, **kw):
         if held:
@@ -812,6 +823,47 @@ def _patch_heal_claims(monkeypatch, *, held=False):
     monkeypatch.setattr(claims, "acquire_claim", _acquire)
     monkeypatch.setattr(claims, "release_claim", lambda *a, **kw: None)
     return acquired
+
+
+def test_heal_verb_skips_while_a_bounce_awaits_its_tick(monkeypatch):
+    """A bounce inside the healthy-pending grace is not a wedge to cure:
+    healing again re-arms the grace over the same fault. Skip quietly."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    _patch_heal_claims(
+        monkeypatch,
+        probe={"verdict": "wedged", "bounce_pending": True,
+               "detail": "bounced 49s ago over 16 consecutive broken ticks"},
+    )
+    import fno.pr_watch._install as m
+    monkeypatch.setattr(
+        m, "refresh_watcher", lambda **kw: pytest.fail("a pending bounce must not heal")
+    )
+
+    result = CliRunner().invoke(app, ["pr-watch", "heal"])
+    assert result.exit_code == 0
+    assert "bounce is pending" in result.stdout
+    assert "fno do pr watch refresh" in result.stdout
+
+
+def test_heal_verb_heals_when_the_probe_raises(monkeypatch):
+    """A probe that cannot read never blocks a cure."""
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.pr_watch.cli as cli_mod
+    monkeypatch.setattr(cli_mod, "load_settings", lambda: _settings_with_pr_watch(True))
+    monkeypatch.setattr(cli_mod, "_resolve_fno_binary", lambda: "/x/fno-py")
+    _patch_heal_claims(monkeypatch, probe_raises=True)
+    import fno.pr_watch._install as m
+    calls: list = []
+    monkeypatch.setattr(m, "refresh_watcher", lambda **kw: calls.append(kw) or ("bounced", 0))
+
+    result = CliRunner().invoke(app, ["pr-watch", "heal"])
+    assert result.exit_code == 0
+    assert len(calls) == 1
+    assert calls[0]["caller"] == "heal"
 
 
 def test_heal_verb_never_installs_when_disabled(monkeypatch):
@@ -1673,13 +1725,61 @@ def test_liveness_wedged_knob_is_honored():
     assert v["verdict"] == "healthy"
 
 
-def test_liveness_wedged_streak_never_defeats_the_install_grace():
-    # A just-refreshed plist awaits its first tick; ends that predate it are
-    # the OLD install's failures. Grace holds until the watcher has had its
-    # chance, else a refresh could never clear the verdict.
+def test_liveness_refresh_over_broken_streak_is_not_pending():
+    # A refresh over a broken streak is NOT a cure: the just-rewritten plist
+    # would read healthy-pending for 2x interval while every tick still dies
+    # (the 2026-09-15 wedge loop). Ends that predate it are the failures the
+    # bounce was supposed to cure; only a tick that ends ok clears the verdict.
     v = _live(last_tick_ts=None, plist_mtime=100.0, now=200.0,
               recent_ends=[_end_at(50), _end_at(80), _end_at(95)])
-    assert v["verdict"] == "healthy-pending"
+    assert v["verdict"] == "wedged"
+    assert v["fix"] == "fno agents status"
+    assert v["bounce_pending"] is True
+    assert "no completed tick recorded" in v["detail"]
+
+
+def test_liveness_bounce_over_broken_streak_reads_wedged():
+    # The 2026-09-15T00:35Z specimen: heal rewrote the plist 49s ago, after
+    # the newest of 16 consecutive timeout ends, with the last completed tick
+    # 12500s old. The grace window held, so status read healthy-pending over
+    # three and a half hours of failed ticks.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    now = tick + 12500
+    plist = now - 49
+    ends = [_end_at(plist - 23 - 600 * (15 - i)) for i in range(16)]
+    v = _live(interval_seconds=600, last_tick_ts="2026-06-14T01:00:00Z",
+              plist_mtime=plist, now=now, last_end=ends[-1], recent_ends=ends)
+    assert v["verdict"] == "wedged"
+    assert v["fix"] == "fno agents status"
+    assert v["bounce_pending"] is True
+    assert "16 consecutive broken ticks" in v["detail"]
+    assert "bounced 49s ago" in v["detail"]
+
+
+def test_liveness_bounce_clears_on_first_ok_end():
+    # AC3-HP: a bounce that is followed by a tick which completes ok is a real
+    # recovery - healthy-pending, and bounce_pending drops.
+    from datetime import datetime as _dt, timezone as _tz
+
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    plist = tick + 10000
+    tick_iso = _dt.fromtimestamp(plist + 300, _tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ends = [_end_at(plist - 600), _end_at(plist - 300),
+            _end_at(plist + 290, outcome="ok")]
+    v = _live(plist_mtime=plist, now=plist + 310, last_tick_ts=tick_iso,
+              last_end=ends[-1], recent_ends=ends)
+    assert v["verdict"] == "healthy"
+    assert v["bounce_pending"] is False
+
+
+def test_liveness_not_loaded_inside_window_is_not_pending():
+    # AC4-ERR: a plist rewritten but never loaded must still heal - the
+    # disabled/not-loaded early returns never carry bounce_pending.
+    tick = _install()._parse_ts("2026-06-14T01:00:00Z")
+    v = _live(loaded=False, last_tick_ts=None, plist_mtime=tick + 5000,
+              now=tick + 5010)
+    assert v["verdict"] == "dead"
+    assert v["bounce_pending"] is False
 
 
 def test_liveness_live_passes_recent_ends_to_the_verdict(tmp_path, monkeypatch):
