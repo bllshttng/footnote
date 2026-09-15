@@ -111,7 +111,14 @@ Then read the tenure verdict with `fno agents king verdict` and print its first 
 
 ## Recording a ruling
 
-A crowned king is not an operator, and `fno backlog decide` refuses every agent session, crowned included: operator authority is never inherited by an agent. Do not spend three calls discovering the door is shut. The king's channels:
+A crowned king answers the open questions in its scope, and escalates only what the superuser must decide. The rules:
+
+- **Answer.** An open question in scope gets `fno inbox outstanding clear <qid> --answer "<answer, with one line of why>" --authority crown`. The answer records as coordination and closes the question.
+- **Escalate the four classes only.** `public-surface` (a new public command, flag or API shape), `irreversible` (deleting data, a force push, a merge override, publishing outside the machine), `money-security` (money, accounts or security), and `law-change` (changing or retiring a law the superuser made). Everything else, decide and log. The escalation is one note in the escalations directory (`fno-agents state path escalations`) with the five sections: what is being decided, why it matters now, options with what happens next, the recommendation, and what happens on silence. State a deadline. No bare ids.
+- **Silence has a default.** Past the deadline the check-in names the default: take the recommended option and record it with `fno inbox decide`, or wait when the call is irreversible.
+- **When the superuser answers in chat, record it.** `fno inbox law set` for a law change, else `fno inbox decide <node> "<answer>" --authority crown --rationale "superuser in chat: <their words>"`, and set the note's `status`. A harness with a push notification tool also sends one that names the note.
+
+A crowned king is not an operator: the `operator` authority is refused on an agent session, and law stays superuser tier. The king's channels:
 
 - `fno backlog note <node> <text>` for a finding or a ruling against a row. It mails the row's live holder and the epic's king, so a ruling reaches the worker without a second call. When nobody bound to the row would be told, it exits 3 and writes nothing; read the refusal, then mail a reader by name or pass `--quiet`. `--quiet` writes the note and mails nobody. A ruling that CONDITIONS A MERGE needs more than a note: a note reaches the worker, but only the hold reaches the merge gate. Set it through the authorized-merge payload field: `printf '{"op":"hold-set","node":"<id>","reason":"<condition>","release_when":"<proof>","set_by":"<crown>"}' | fno-agents authorized-merge`; the worker or the crown lifts it with `printf '{"op":"hold-release","node":"<id>","evidence":"<proof>"}' | fno-agents authorized-merge`.
 - `fno inbox law set <subject> <decision> --rationale "<why>"` for a durable rule the OPERATOR asked for. It records a chat-attested row and can never supersede the operator's own law.

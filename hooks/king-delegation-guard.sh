@@ -12,9 +12,11 @@
 # (encounter, update, undefer, supersede, note, advance, rank), fno inbox,
 # fno doctor event emit, any write whose path resolves inside the plans
 # directory (king-for-a-day authors quick plans for small in-scope nodes;
-# plan-location-guard polices where those land), and the crown's own handoff
+# plan-location-guard polices where those land), the crown's own handoff
 # doc (a king fills its judgment halves there; writer, guard and postcompact
-# reader resolve the same path through fno config paths handoff --scope). A
+# reader resolve the same path through fno config paths handoff --scope), and
+# the escalations directory (an escalation note is the one superuser-tier
+# lane a king files, resolved through fno-agents state path escalations). A
 # bare `fno ...` verb needs no carveout: the Bash branch keys on shell write
 # operators, and a verb that writes state internally binds no redirect.
 #
@@ -68,7 +70,7 @@ _deny_text() {
     # target and the allowed roots. Delegation advice would misstate it.
     printf '%s\n' \
 "king-delegation-guard: write target '$1' is outside the allowed roots for a crowned session.
-Allowed roots: the plans directory (${PLANS_DIR:-<unresolved>}), the crown handoff doc (${HANDOFF_PATH:-<unresolved>}), and auto-memory (${HOME:-~}/.claude/projects/*/memory/)."
+Allowed roots: the plans directory (${PLANS_DIR:-<unresolved>}), the crown handoff doc (${HANDOFF_PATH:-<unresolved>}), the escalations directory (${ESCALATIONS_DIR:-<unresolved>}), and auto-memory (${HOME:-~}/.claude/projects/*/memory/)."
 }
 _block() {
     _guard_mark king-delegation-guard block 2>/dev/null || true
@@ -264,6 +266,34 @@ sys.exit(0 if len(parts) >= 2 and parts[1] == "memory" else 1)
 ' "$p" "$CWD" "${HOME:-}/.claude/projects" 2>/dev/null
 }
 
+# ── 6e. Escalations carve-out: an escalation note is the one surface a
+#      superuser-tier call travels on. A king files it, and the superuser
+#      reads it in the vault with no session open. Resolved through
+#      fno-agents state path escalations, run from the payload's cwd. An
+#      unresolved directory leaves only this carve-out off: it does NOT
+#      approve every write. Plans and handoff already fail open on their
+#      resolvers; a third fail-open would turn a missing binary into no
+#      guard. ────────────────────────────────────────────────────────────
+ESCALATIONS_DIR="$(cd "$CWD" 2>/dev/null && fno-agents state path escalations 2>/dev/null || true)"
+in_escalations_dir() {
+    local p="$1"
+    [[ -n "$p" && -n "$ESCALATIONS_DIR" ]] || return 1
+    printf '%s' "$p" | python3 -c '
+import os, sys
+p, cwd, root = sys.argv[1], sys.argv[2], sys.argv[3]
+if not p:
+    sys.exit(1)
+if not os.path.isabs(p):
+    p = os.path.join(cwd or os.getcwd(), p)
+# realpath both sides: the vault can sit behind a symlink, and a session
+# holding the post-symlink spelling must still match (same reason 6b uses
+# realpath).
+p = os.path.realpath(p)
+root = os.path.realpath(root)
+sys.exit(0 if p == root or p.startswith(root + os.sep) else 1)
+' "$p" "$CWD" "$ESCALATIONS_DIR" 2>/dev/null
+}
+
 # ── 6c. Limb carve-out: a Task subagent of this very court is a limb, not the
 #      king. Its payload carries the parent's session_id, so sections 2-4 see
 #      the crown. The harness marks subagent-borne tool calls with a non-empty
@@ -331,7 +361,7 @@ fi
 DENIED=""
 case "$TOOL" in
   Edit|Write|NotebookEdit)
-    if in_plans_dir "$FILE_PATH" || in_handoff "$FILE_PATH" || in_memory_dir "$FILE_PATH"; then
+    if in_plans_dir "$FILE_PATH" || in_handoff "$FILE_PATH" || in_memory_dir "$FILE_PATH" || in_escalations_dir "$FILE_PATH"; then
         _approve
     fi
     DENIED="$FILE_PATH"
@@ -431,6 +461,9 @@ sys.stdout.write("\n".join(t for t in targets if t))
         fi
         if in_memory_dir "$p"; then
             continue  # auto-memory is not implementation
+        fi
+        if in_escalations_dir "$p"; then
+            continue  # escalation notes are the superuser-tier lane
         fi
         if ! in_plans_dir "$p"; then
             ALLOW=0

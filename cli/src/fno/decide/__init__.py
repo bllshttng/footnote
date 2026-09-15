@@ -326,25 +326,13 @@ def _resolve_decider(
     )
 
 
-def require_operator_session() -> Provenance:
-    """Return positive operator provenance or refuse the decision write.
-
-    Decision writes are operator-only unless the caller records the honest
-    ``chat_attested`` value instead. This reuses the existing positive identity
-    contract: a proven harness session refuses, an attended terminal permits,
-    and an unattributed process fails closed. The one-step chat law door
-    (``fno inbox law set``) resolves its own authority in :mod:`fno.law`.
-    """
-    return _resolve_decider(None, "operator")
-
-
 def require_marked_caller() -> str:
     """Return the honest law authority for this caller, or refuse the write.
 
-    The sibling of :func:`require_operator_session` for the one-step chat law
-    door. Same three states, same fail-closed third, but state 1 answers
-    ``chat_attested`` instead of refusing: a session that a person typed into
-    is allowed to record law, and the row says exactly that much and no more.
+    The gate for the one-step chat law door. Same three states, same
+    fail-closed third, but state 1 answers ``chat_attested`` instead of
+    refusing: a session that a person typed into is allowed to record law, and
+    the row says exactly that much and no more.
 
     This lives here rather than in :mod:`fno.law` so there is ONE resolver. The
     CLI is not the only caller of :func:`record_decision`, and a gate that only
@@ -534,8 +522,6 @@ def record_decision(
             rationale=rationale,
             supersedes=supersedes,
         )
-    else:
-        require_operator_session()
     graduation = normalize_graduation(graduation)
 
     # The event records this value, so the floor must bind here, not only in

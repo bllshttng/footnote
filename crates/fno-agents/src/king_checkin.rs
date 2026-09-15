@@ -31,10 +31,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-/// The ten readings of the check-in body, in print order.
-const READING_NAMES: [&str; 10] = [
+/// The eleven readings of the check-in body, in print order.
+const READING_NAMES: [&str; 11] = [
     "user_notes",
     "board",
+    "escalations",
     "blocked_child",
     "court",
     "territory",
@@ -46,10 +47,12 @@ const READING_NAMES: [&str; 10] = [
 ];
 
 /// The numeric keys this verb owns and diffs versus the previous beat.
-const NUMERIC_DIFF_KEYS: [&str; 6] = [
+const NUMERIC_DIFF_KEYS: [&str; 8] = [
     "open_prs",
     "free_claim_no_driver",
     "blocked",
+    "escalations_open",
+    "escalations_overdue",
     "active_nodes",
     "live_workers",
     "undelivered",
@@ -376,6 +379,65 @@ fn r_board(
     }))
 }
 
+/// Open escalation notes in the king's scope (or scopeless), with the default
+/// each overdue call takes. Unreadable is a reading that says so, never a
+/// zero: a blind spot must not read as a quiet board.
+fn r_escalations(cwd: &Path, folded: &Result<Value, String>) -> Result<Value, String> {
+    let dir = crate::escalation::dir(cwd);
+    let notes = crate::escalation::scan(&dir).map_err(|e| format!("unreadable ({e})"))?;
+    let folded = folded
+        .clone()
+        .map_err(|e| format!("board fold unreadable, so scope filtering is down ({e})"))?;
+    let scope_ids: std::collections::HashSet<&str> = folded
+        .get("fold")
+        .and_then(|f| f.get("nodes"))
+        .and_then(|n| n.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|n| n.get("id").and_then(|v| v.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let now: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
+    let mut rows = Vec::new();
+    let mut open = 0i64;
+    let mut overdue = 0i64;
+    for note in notes {
+        if note.status != "open" {
+            continue;
+        }
+        if let Some(node) = &note.node {
+            if !scope_ids.contains(node.as_str()) {
+                continue;
+            }
+        }
+        open += 1;
+        let state = if crate::escalation::overdue(&note, now) {
+            overdue += 1;
+            match (
+                note.class.as_str(),
+                note.on_silence.as_str(),
+                note.recommend,
+            ) {
+                ("irreversible", _, _) => "overdue: waits (irreversible)".to_string(),
+                (_, "take-recommended", Some(n)) if n >= 1 => {
+                    format!("overdue: take option {n} and record it")
+                }
+                _ => "overdue: waits (on_silence wait)".to_string(),
+            }
+        } else {
+            "open".to_string()
+        };
+        rows.push(json!({
+            "title": note.title,
+            "class": note.class,
+            "deadline": note.deadline,
+            "state": state,
+        }));
+    }
+    Ok(json!({"open": open, "overdue": overdue, "rows": rows}))
+}
+
 fn r_blocked_child(board: &Result<Value, String>) -> Result<Value, String> {
     let board = board.clone()?;
     let rows = board_queue(&board, "blocked_child")?
@@ -673,6 +735,12 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     };
     take("user_notes", r_user_notes(ctx));
     take("board", r_board(&beat.board, &beat.folded, open_pr_count()));
+    take(
+        "escalations",
+        std::env::current_dir()
+            .map_err(|e| format!("unreadable (process cwd: {e})"))
+            .and_then(|cwd| r_escalations(&cwd, &beat.folded)),
+    );
     take("blocked_child", r_blocked_child(&beat.board));
     take("court", r_court(&beat.folded));
     take("territory", r_territory(ctx));
@@ -697,6 +765,12 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
                 key.into(),
                 board.value.get(key).cloned().unwrap_or(Value::Null),
             );
+        }
+    }
+    if let Some(esc) = get("escalations").filter(|r| r.ok) {
+        if esc.value.get("unreadable").is_none() {
+            data.insert("escalations_open".into(), esc.value["open"].clone());
+            data.insert("escalations_overdue".into(), esc.value["overdue"].clone());
         }
     }
     if let Some(child) = get("blocked_child").filter(|r| r.ok) {
@@ -862,6 +936,32 @@ fn render_lines(
                 text.push_str(&format!(" (on: {})", blocked_on.join("; ")));
             }
             lines.push(text);
+        }
+    }
+
+    match failed("escalations") {
+        Some(r) => lines.push(format!("READER FAILED escalations: {}", r.error)),
+        None => {
+            let reading = by_name("escalations")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let rows = reading
+                .get("rows")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let open = reading.get("open").and_then(|v| v.as_i64()).unwrap_or(0);
+            let overdue = reading.get("overdue").and_then(|v| v.as_i64()).unwrap_or(0);
+            lines.push(format!("escalations: open {open}, overdue {overdue}"));
+            for row in rows.iter().take(MAX_COURT_ROWS) {
+                lines.push(format!(
+                    "  {} ({}), deadline {}, {}",
+                    dash(row.get("title")),
+                    dash(row.get("class")),
+                    dash(row.get("deadline")),
+                    dash(row.get("state")),
+                ));
+            }
         }
     }
 
@@ -1374,6 +1474,134 @@ mod tests {
         assert_eq!(sanitize_scope_key("///"), "");
     }
 
+    /// A repo fixture whose escalations dir resolves deterministically through
+    /// the vault branch: `[project] id` names the project, `[obsidian]`
+    /// enabled+vault names the vault root under `home`.
+    fn escalations_fixture(dir_name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let base =
+            std::env::temp_dir().join(format!("fno-checkin-esc-{dir_name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".fno")).unwrap();
+        std::fs::write(
+            repo.join(".fno/config.toml"),
+            "[project]\nid = \"fno\"\n\n[obsidian]\nenabled = true\nvault = \"c3po\"\n",
+        )
+        .unwrap();
+        let dir = base.join("c3po/internal/fno/escalations");
+        std::fs::create_dir_all(&dir).unwrap();
+        (base, repo, dir)
+    }
+
+    /// HOME rides the fixture base for the duration of `f`, restored after.
+    fn with_fixture_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+        let backup = std::env::var_os("HOME");
+        std::env::set_var("HOME", home);
+        let out = f();
+        match backup {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        out
+    }
+
+    #[test]
+    fn escalations_reading_names_overdue_defaults() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (base, repo, dir) = escalations_fixture("overdue");
+        with_fixture_home(&base, || {
+            let past = "2026-09-01T00:00:00Z";
+            std::fs::write(
+                dir.join("20260901-0900-a.md"),
+                escalation_note("x-1", "money-security", "take-recommended", 2, past),
+            )
+            .unwrap();
+            std::fs::write(
+                dir.join("20260901-0901-b.md"),
+                escalation_note("x-2", "irreversible", "wait", 1, past),
+            )
+            .unwrap();
+            // Out of scope: counted and printed by neither.
+            std::fs::write(
+                dir.join("20260901-0902-c.md"),
+                escalation_note("x-outside", "money-security", "wait", 1, past),
+            )
+            .unwrap();
+            // A malformed note (take-recommended, no recommend) reads as a
+            // wait, never "take option 0".
+            let malformed = escalation_note("x-3", "money-security", "take-recommended", 2, past)
+                .replace("recommend: 2\n", "");
+            std::fs::write(dir.join("20260901-0903-d.md"), malformed).unwrap();
+            let folded = Ok(json!({
+                "fold": {"nodes": [{"id": "x-1"}, {"id": "x-2"}, {"id": "x-3"}]}
+            }));
+            let reading = r_escalations(&repo, &folded).unwrap();
+            assert_eq!(reading["open"], 3);
+            assert_eq!(reading["overdue"], 3);
+            let rows = reading["rows"].as_array().unwrap();
+            assert!(
+                rows.iter().any(|r| r["state"]
+                    .as_str()
+                    .unwrap()
+                    .contains("take option 2 and record it")),
+                "{rows:?}"
+            );
+            assert!(
+                rows.iter()
+                    .any(|r| r["state"].as_str().unwrap() == "overdue: waits (irreversible)"),
+                "{rows:?}"
+            );
+            assert!(
+                rows.iter()
+                    .any(|r| r["state"].as_str().unwrap() == "overdue: waits (on_silence wait)"),
+                "{rows:?}"
+            );
+            assert!(
+                !rows
+                    .iter()
+                    .any(|r| r["state"].as_str().unwrap().contains("option 0")),
+                "{rows:?}"
+            );
+            assert!(
+                !rows
+                    .iter()
+                    .any(|r| r["title"].as_str().unwrap().contains("outside")),
+                "out-of-scope notes print no row: {rows:?}"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn escalations_reading_says_unreadable_when_the_path_is_a_file() {
+        let _lock = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (base, repo, dir) = escalations_fixture("unreadable");
+        with_fixture_home(&base, || {
+            std::fs::remove_dir_all(&dir).unwrap();
+            std::fs::write(&dir, "not a directory").unwrap();
+            let folded = Ok(json!({"fold": {"nodes": []}}));
+            let err = r_escalations(&repo, &folded).unwrap_err();
+            assert!(err.starts_with("unreadable ("), "{err}");
+        });
+    }
+
+    /// One escalation note's frontmatter plus stub sections.
+    fn escalation_note(
+        node: &str,
+        class: &str,
+        on_silence: &str,
+        recommend: usize,
+        deadline: &str,
+    ) -> String {
+        format!(
+            "---\nclass: {class}\nstatus: open\nnode: {node}\nraised_by: king\nraised_at: 2026-09-01T00:00:00Z\ndeadline: {deadline}\nrecommend: {recommend}\non_silence: {on_silence}\n---\n# t\n\n## What is being decided\nd\n\n## Why it matters now\nw\n\n## Options\n1. A. What happens next: n.\n2. B. What happens next: m.\n\n## Recommendation\nr\n\n## If no answer by the deadline\nx\n"
+        )
+    }
+
     #[test]
     fn user_marker_grabs_between_fences() {
         let doc = "intro\n<!-- fno:user -->\nline one\n<!-- /fno:user -->\ntail\n";
@@ -1529,7 +1757,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 9 of 10 readings ok")));
+            .any(|l| l.starts_with("coverage: 9 of 11 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -1561,8 +1789,9 @@ mod tests {
     fn prev_row() -> Value {
         json!({"ts": "2026-09-10T12:00:00Z", "type": "reign_checkin", "source": "loop",
             "data": {"scope": "x-a792", "change": "no change", "open_prs": 9,
-                     "free_claim_no_driver": 1, "blocked": 2, "active_nodes": 4,
-                     "live_workers": 3, "undelivered": 9}})
+                     "free_claim_no_driver": 1, "blocked": 2,
+                     "escalations_open": 0, "escalations_overdue": 0,
+                     "active_nodes": 4, "live_workers": 3, "undelivered": 9}})
     }
 
     #[test]

@@ -2358,16 +2358,11 @@ def test_ask_and_clear_state_when_the_cap_truncated_the_text(root: Path):
     assert str(QUESTION_CAP) in cleared.output
 
 
-def test_operator_authority_refusal_names_the_chat_door(
+def test_operator_authority_refusal_names_the_drop_flag_remedy(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """An agent refused here must be told the path that needs no terminal.
-
-    Specimen d-796ed205: the operator's real instruction existed, the worker
-    could not carry it, and the refusal named no remedy, so nothing moved until
-    a second terminal was opened. The refusal is CORRECT and stays; only its
-    silence about `/fno:law` was the defect.
-    """
+    """The superuser lane is not an agent's to claim, and the remedy is the
+    flag drop: an agent answer records as agent or crown."""
     from types import SimpleNamespace
 
     qid = (
@@ -2392,21 +2387,11 @@ def test_operator_authority_refusal_names_the_chat_door(
     assert refused.exit_code == 3, refused.output
     # The refusal itself survives: this is the unforgeable half.
     assert "cannot record under operator authority" in refused.output
-    # The all-or-nothing statement survives too.
     assert "Nothing was closed" in refused.output
-    # And the door is now named.
-    assert "/fno:law" in refused.output
-    # The advised retry must actually work. `record_decision` calls
-    # `require_operator_session()` before it reads authority at all, so EVERY
-    # --answer from an agent refuses and no --authority value changes that.
-    # Advising a different flag would loop forever; the message must say so
-    # and point at the close that records nothing.
-    assert "cannot record ANY answer here" in refused.output
-    assert "NO --answer" in refused.output
-    assert "WITHOUT --authority" not in refused.output
-    # Canonical spelling only: `fno law` is a retired root (d-add90c60).
-    assert "fno inbox law set" in refused.output
-    assert "`fno law set" not in refused.output
+    # The remedy is the flag drop, not a second door.
+    assert "An agent answers as agent or crown" in refused.output
+    assert "Drop --authority operator" in refused.output
+    assert "/fno:law" not in refused.output
 
     # The question really is still open: a refused answer must never retire it.
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)

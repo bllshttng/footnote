@@ -100,6 +100,7 @@ pub mod disposition_gate;
 pub mod distress;
 pub mod drift;
 pub mod envelope;
+pub mod escalation;
 pub mod evals_arm;
 pub mod evals_macro;
 pub mod evals_trend;
