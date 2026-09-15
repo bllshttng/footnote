@@ -1306,9 +1306,11 @@ def main(argv: Sequence[str]) -> int:
         # CLI path only - library callers read `_proc.GH_CALLS` directly.
         import sys
 
-        from fno.pr import _proc
+        from fno.pr import _proc, _quota
 
-        sys.stderr.write(f"note: {_proc.GH_CALLS} gh call(s) this invocation\n")
+        sys.stderr.write(
+            f"note: {_proc.GH_CALLS} gh call(s) this invocation{_quota.budget_note()}\n"
+        )
         return rc
     except ToolMissing:
         import sys

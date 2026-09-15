@@ -299,6 +299,13 @@ def cached_status(pr: str, cwd: Optional[str] = None, *, refresh: bool = False) 
         return run_status(pr, cwd)
 
     slug_key = slug.replace("/", "--")
+    if refresh:
+        # --refresh never asks the fleet ledger, so a budget note left by an
+        # earlier call in this process would describe a probe this read did
+        # not make (x-c770).
+        import fno.pr._quota as _quota
+
+        _quota.LAST_BUDGET = None
     # Backoff pre-check, zero network: when the fleet budget ledger holds a
     # live refusal backoff, the HEAD read itself would be a held call, so
     # every waiter's tick short-circuits to the newest cached row instead of

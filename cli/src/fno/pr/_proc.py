@@ -10,6 +10,7 @@ fields, parse JSON in one spot).
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from typing import Mapping, Optional, Sequence
@@ -63,7 +64,9 @@ def run(
     exit code rather than surfacing a Python traceback.
     """
     global GH_CALLS
-    if cmd and cmd[0] == "gh":
+    # By basename, not raw argv[0]: the GraphQL broker spawns an absolute gh
+    # path (resolve_real_gh), and those spawns went uncounted (x-c770).
+    if cmd and os.path.basename(str(cmd[0])) == "gh":
         GH_CALLS += 1
     try:
         proc = subprocess.run(
