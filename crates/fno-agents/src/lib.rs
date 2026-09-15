@@ -153,6 +153,7 @@ pub mod machine_watch;
 pub mod mail_inject;
 pub mod manifest;
 pub mod manifest_lookup;
+pub mod merge_close;
 pub mod merge_hold;
 pub mod merge_posture;
 pub mod merge_reap;
