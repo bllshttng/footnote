@@ -21,7 +21,8 @@ use serde_json::Map;
 use serde_json::Value;
 
 const EXIT_USAGE: i32 = 2;
-const USAGE: &str = "usage: fno-agents evals-attempt (--row-json '<json>' | --rows <jsonl> | --cohorts '<json>' [--known-ids '<json>'] [--task-ids '<json>']) [--expected-rev <sha>]";
+const EXIT_REFUSED: i32 = 3;
+const USAGE: &str = "usage: fno-agents evals-attempt (--row-json '<json>' | --rows <jsonl> | --cohorts '<json>' | --cohorts-yaml <path> | --aggregate | --export-train --out <file>) [--known-ids '<json>'] [--task-ids '<json>'] [--expected-rev <sha>] [--repo <dir>]";
 
 /// Validate a declared cohort split and (optionally) resolve membership.
 ///
@@ -236,13 +237,214 @@ pub fn classify_rows(text: &str, expected_rev: Option<&str>) -> Value {
     Value::Array(out)
 }
 
+/// Load a `cohorts.yaml` declaration: YAML -> JSON, missing role keys default
+/// to empty lists, `bank_rev` must be a non-empty string. The semantic rules
+/// stay in `validate_cohorts`; this is shape only.
+fn load_cohorts_yaml(path: &str) -> Result<Value, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let raw: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&text).map_err(|e| format!("malformed YAML in {path}: {e}"))?;
+    let mut decl: Value = serde_json::to_value(raw)
+        .map_err(|e| format!("unconvertible cohort declaration in {path}: {e}"))?;
+    if !decl.is_object() {
+        return Err(format!("{path}: top level must be a mapping"));
+    }
+    match decl.get("bank_rev").and_then(Value::as_str) {
+        Some(rev) if !rev.trim().is_empty() => {}
+        _ => return Err(format!("{path}: 'bank_rev' must be a non-empty string")),
+    }
+    for role in ["train", "validation", "qualification"] {
+        if decl.get(role).is_none() {
+            decl[role] = json!([]);
+        }
+    }
+    Ok(decl)
+}
+
+/// True when the bank files are unchanged from *rev* in the repo at *dir*.
+/// The split pins the bank, not the whole repo; an unreadable rev voids it.
+fn bank_unchanged(dir: &str, rev: &str) -> bool {
+    let verify = std::process::Command::new("git")
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])
+        .current_dir(dir)
+        .output();
+    match verify {
+        Ok(o) if o.status.success() => {}
+        _ => return false,
+    }
+    let diff = std::process::Command::new("git")
+        .args(["diff", "--quiet", rev, "HEAD", "--", "evals/bank"])
+        .current_dir(dir)
+        .output();
+    matches!(diff, Ok(o) if o.status.success())
+}
+
+/// The qualify fold: validate the declared split (existence vs *known*,
+/// uniqueness, disjointness, bank-rev currency), then fold the history rows
+/// of the qualification cohort into the allowed aggregate projection. Every
+/// refusal reports `{"qualified": false, "reason": ...}`; a valid fold never
+/// carries a held-out prompt, trace, or per-attempt row.
+fn qualify_aggregate(
+    rows_text: &str,
+    decl: &Value,
+    known: Option<&Value>,
+    repo: Option<&str>,
+    expected_rev: Option<&str>,
+) -> Value {
+    let (ok, errors, _roles) = validate_cohorts(decl, known, None);
+    if !ok {
+        return json!({"qualified": false, "reason": errors.join("; ")});
+    }
+    let pinned_rev = decl.get("bank_rev").and_then(Value::as_str).unwrap_or("");
+    if let Some(dir) = repo {
+        if !bank_unchanged(dir, pinned_rev) {
+            return json!({
+                "qualified": false,
+                "reason": format!("bank changed since the pinned rev {}", &pinned_rev[..12.min(pinned_rev.len())]),
+            });
+        }
+    }
+    let qual_ids: Vec<&str> = decl
+        .get("qualification")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if qual_ids.is_empty() {
+        return json!({"qualified": false, "reason": "no declared qualification cohort"});
+    }
+    let want_rev = expected_rev
+        .map(String::from)
+        .unwrap_or_else(|| pinned_rev.to_string());
+    let mut by_status: Map<String, Value> = Map::new();
+    let mut valid = 0usize;
+    let mut passes = 0usize;
+    let mut covered: Vec<String> = Vec::new();
+    let mut wrong_rev = 0usize;
+    let mut legacy = 0usize;
+    for line in rows_text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            legacy += 1;
+            continue;
+        };
+        let Some(task_id) = row.get("task_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !qual_ids.contains(&task_id) {
+            continue;
+        }
+        let verdict = classify(&row, Some(&want_rev));
+        if verdict.status == "legacy" {
+            legacy += 1;
+            continue;
+        }
+        if verdict.rev_match == Some(false) {
+            wrong_rev += 1;
+            continue;
+        }
+        let entry = by_status
+            .entry(verdict.status.to_string())
+            .or_insert(json!(0));
+        *entry = json!(entry.as_u64().unwrap_or(0) + 1);
+        if verdict.status == "graded" {
+            valid += 1;
+            if verdict.graded == Some(true) {
+                passes += 1;
+            }
+            if !covered.contains(&task_id.to_string()) {
+                covered.push(task_id.to_string());
+            }
+        }
+    }
+    let declared = qual_ids.len();
+    json!({
+        "qualified": true,
+        "bank_rev": pinned_rev,
+        "declared_tasks": declared,
+        "tasks_with_valid_grades": covered.len(),
+        "missing_tasks": declared - covered.len(),
+        "valid_grades": valid,
+        "passes": passes,
+        "attempts": Value::Object(by_status),
+        "excluded": {"wrong_rev": wrong_rev, "legacy": legacy},
+    })
+}
+
+/// The tuning export: validate the declared split, then write ONLY train
+/// rows (each tagged `role: train`) to *out_path*. Held-out trajectories
+/// never enter the file. Err text is a refusal reason for the caller.
+fn export_train(
+    rows_text: &str,
+    decl: &Value,
+    known: Option<&Value>,
+    repo: Option<&str>,
+    out_path: &str,
+) -> Result<Value, String> {
+    let (ok, errors, _roles) = validate_cohorts(decl, known, None);
+    if !ok {
+        return Err(errors.join("; "));
+    }
+    if let Some(dir) = repo {
+        let pinned_rev = decl.get("bank_rev").and_then(Value::as_str).unwrap_or("");
+        if !bank_unchanged(dir, pinned_rev) {
+            return Err(format!(
+                "cohort split is pinned to bank rev {} but the bank changed since; redeclare cohorts.yaml against the current bank",
+                &pinned_rev[..12.min(pinned_rev.len())]
+            ));
+        }
+    }
+    let train: Vec<&str> = decl
+        .get("train")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let mut out = String::new();
+    let mut count = 0usize;
+    for line in rows_text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(mut row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(task_id) = row.get("task_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !train.contains(&task_id) {
+            continue;
+        }
+        if let Value::Object(map) = &mut row {
+            map.insert("role".into(), json!("train"));
+        }
+        out.push_str(&serde_json::to_string(&row).unwrap_or_default());
+        out.push('\n');
+        count += 1;
+    }
+    std::fs::write(out_path, out).map_err(|e| format!("cannot write {out_path}: {e}"))?;
+    Ok(json!({"exported": count, "train_tasks": train.len(), "out": out_path}))
+}
+
 pub fn run_evals_attempt(args: &[String]) -> i32 {
     let mut row_json: Option<String> = None;
     let mut rows_path: Option<String> = None;
     let mut cohorts_json: Option<String> = None;
+    let mut cohorts_yaml: Option<String> = None;
     let mut known_ids: Option<String> = None;
     let mut task_ids: Option<String> = None;
     let mut expected_rev: Option<String> = None;
+    let mut repo: Option<String> = None;
+    let mut aggregate = false;
+    let mut export_train_flag = false;
+    let mut out_path: Option<String> = None;
     let mut i = 0usize;
     while i < args.len() {
         let arg = args[i].clone();
@@ -279,6 +481,20 @@ pub fn run_evals_attempt(args: &[String]) -> i32 {
                 Ok(v) => cohorts_json = Some(v),
                 Err(()) => return EXIT_USAGE,
             },
+            "--cohorts-yaml" => match value("--cohorts-yaml") {
+                Ok(v) => cohorts_yaml = Some(v),
+                Err(()) => return EXIT_USAGE,
+            },
+            "--repo" => match value("--repo") {
+                Ok(v) => repo = Some(v),
+                Err(()) => return EXIT_USAGE,
+            },
+            "--out" => match value("--out") {
+                Ok(v) => out_path = Some(v),
+                Err(()) => return EXIT_USAGE,
+            },
+            "--aggregate" => aggregate = true,
+            "--export-train" => export_train_flag = true,
             "--known-ids" => match value("--known-ids") {
                 Ok(v) => known_ids = Some(v),
                 Err(()) => return EXIT_USAGE,
@@ -298,11 +514,48 @@ pub fn run_evals_attempt(args: &[String]) -> i32 {
             }
         }
     }
-    let has_row = row_json.is_some();
-    let has_rows = rows_path.is_some();
-    let has_cohorts = cohorts_json.is_some();
-    if has_row as u8 + has_rows as u8 + has_cohorts as u8 != 1 {
-        eprintln!("evals-attempt: exactly one of --row-json, --rows or --cohorts is required");
+    if args.is_empty() {
+        // stdin classify: a JSON payload on stdin (the verb_call shape),
+        // `{"op": "classify", "row": {...}, "expected_rev": "..."}`.
+        use std::io::Read;
+
+        let mut buf = String::new();
+        if std::io::stdin().read_to_string(&mut buf).is_ok() {
+            if let Ok(v) = serde_json::from_str::<Value>(&buf) {
+                if v.get("op").and_then(Value::as_str) == Some("classify") {
+                    if let Some(row) = v.get("row") {
+                        let rev = v.get("expected_rev").and_then(Value::as_str);
+                        println!(
+                            "{}",
+                            serde_json::to_string(&classify(row, rev).to_json())
+                                .unwrap_or_default()
+                        );
+                        return 0;
+                    }
+                }
+            }
+        }
+        eprintln!("{USAGE}");
+        return EXIT_USAGE;
+    }
+    let mut mode_count = 0usize;
+    if row_json.is_some() {
+        mode_count += 1;
+    }
+    if rows_path.is_some() && !aggregate && !export_train_flag {
+        mode_count += 1;
+    }
+    if (cohorts_json.is_some() || cohorts_yaml.is_some()) && !aggregate && !export_train_flag {
+        mode_count += 1;
+    }
+    if aggregate {
+        mode_count += 1;
+    }
+    if export_train_flag {
+        mode_count += 1;
+    }
+    if mode_count != 1 {
+        eprintln!("evals-attempt: exactly one mode is required");
         eprintln!("{USAGE}");
         return EXIT_USAGE;
     }
@@ -318,48 +571,122 @@ pub fn run_evals_attempt(args: &[String]) -> i32 {
         );
         return 0;
     }
-    if let Some(raw) = cohorts_json {
-        let Ok(decl) = serde_json::from_str::<Value>(&raw) else {
+    let parse_json_flag = |raw: &Option<String>, what: &str| -> Option<Value> {
+        let raw = raw.as_deref()?;
+        match serde_json::from_str::<Value>(raw) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                eprintln!("evals-attempt: {what} is not valid JSON");
+                None
+            }
+        }
+    };
+    let known = parse_json_flag(&known_ids, "--known-ids");
+    let interest = parse_json_flag(&task_ids, "--task-ids");
+    if (known_ids.is_some() && known.is_none()) || (task_ids.is_some() && interest.is_none()) {
+        return EXIT_USAGE;
+    }
+    let decl: Option<Value> = if let Some(ref raw) = cohorts_json {
+        serde_json::from_str::<Value>(&raw).ok()
+    } else if let Some(path) = cohorts_yaml.as_deref() {
+        match load_cohorts_yaml(path) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("evals-attempt: {e}");
+                return EXIT_USAGE;
+            }
+        }
+    } else {
+        None
+    };
+    if (cohorts_json.is_some() || cohorts_yaml.is_some()) && decl.is_none() {
+        // An unparseable declaration is a usage error, never a silent pass.
+        if cohorts_json.is_some() {
             eprintln!("evals-attempt: --cohorts is not valid JSON");
+        }
+        return EXIT_USAGE;
+    }
+    if aggregate || export_train_flag {
+        let Some(decl) = decl.clone() else {
+            eprintln!("evals-attempt: aggregate/export-train need a --cohorts-yaml declaration");
+            eprintln!("{USAGE}");
             return EXIT_USAGE;
         };
-        let parse = |raw: &Option<String>, what: &str| -> Option<Value> {
-            let raw = raw.as_deref()?;
-            match serde_json::from_str::<Value>(raw) {
-                Ok(v) => Some(v),
-                Err(_) => {
-                    eprintln!("evals-attempt: {what} is not valid JSON");
-                    None
+        let Some(path) = rows_path.clone() else {
+            eprintln!("evals-attempt: aggregate/export-train need --rows");
+            eprintln!("{USAGE}");
+            return EXIT_USAGE;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("evals-attempt: cannot read {path}");
+            return EXIT_USAGE;
+        };
+        if export_train_flag {
+            let Some(out) = out_path.clone() else {
+                eprintln!("evals-attempt: --export-train needs --out");
+                return EXIT_USAGE;
+            };
+            match export_train(&text, &decl, known.as_ref(), repo.as_deref(), &out) {
+                Ok(v) => {
+                    println!("{}", serde_json::to_string(&v).unwrap_or_default());
+                    0
+                }
+                Err(e) => {
+                    // A refusal text, echoed for the caller to map to its exit.
+                    println!(
+                        "{}",
+                        serde_json::to_string(&json!({"error": e})).unwrap_or_default()
+                    );
+                    3
                 }
             }
-        };
-        let known = parse(&known_ids, "--known-ids");
-        let interest = parse(&task_ids, "--task-ids");
-        if (known_ids.is_some() && known.is_none()) || (task_ids.is_some() && interest.is_none()) {
-            return EXIT_USAGE;
+        } else {
+            println!(
+                "{}",
+                serde_json::to_string(&qualify_aggregate(
+                    &text,
+                    &decl,
+                    known.as_ref(),
+                    repo.as_deref(),
+                    expected_rev.as_deref(),
+                ))
+                .unwrap_or_default()
+            );
+            0
         }
+    } else if let Some(decl) = decl {
         let (ok, errors, roles) = validate_cohorts(&decl, known.as_ref(), interest.as_ref());
+        let mut bank_unchanged_field: Value = json!(null);
+        if ok {
+            if let Some(dir) = repo.as_deref() {
+                let pinned = decl.get("bank_rev").and_then(Value::as_str).unwrap_or("");
+                bank_unchanged_field = json!(bank_unchanged(dir, pinned));
+            }
+        }
         println!(
             "{}",
             serde_json::to_string(&json!({
                 "ok": ok,
                 "errors": errors,
                 "roles": Value::Object(roles),
+                "bank_unchanged": bank_unchanged_field,
             }))
             .unwrap_or_default()
         );
-        return 0;
+        0
+    } else {
+        let path = rows_path.unwrap_or_default();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("evals-attempt: cannot read {path}");
+            return EXIT_USAGE;
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&classify_rows(&text, expected_rev.as_deref()))
+                .unwrap_or_default()
+        );
+        0
     }
-    let path = rows_path.unwrap_or_default();
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        eprintln!("evals-attempt: cannot read {path}");
-        return EXIT_USAGE;
-    };
-    println!(
-        "{}",
-        serde_json::to_string(&classify_rows(&text, expected_rev.as_deref())).unwrap_or_default()
-    );
-    0
 }
 
 #[cfg(test)]

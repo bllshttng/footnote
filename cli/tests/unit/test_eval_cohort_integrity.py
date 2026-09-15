@@ -1,9 +1,11 @@
 """Cohort integrity: declared splits validated natively before any worker
-call; tuning exports are train-only; held-out reporting is aggregate-only
-(x-ecda AC2-HP, AC2-EDGE)."""
+call; tuning exports are train-only; held-out reporting is aggregate-only.
+The load/validate/fold logic is native (fno-agents evals-attempt); these
+tests pin the Python transport shapes around that door."""
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -12,13 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 import fno.evals.bank as bank_mod
-from fno.evals.bank import (
-    COHORTS_FILENAME,
-    CohortDecl,
-    CohortError,
-    bank_unchanged_since,
-    load_cohorts,
-)
+from fno.evals.bank import COHORTS_FILENAME, cohorts_gate
 from fno.evals.cli import evals_app
 from fno.rust_binary import find_dev_binary
 
@@ -88,111 +84,18 @@ def _grader_row(task_id: str, *, passed: bool, bank_rev: Optional[str] = None) -
     return row
 
 
-# --------------------------------------------------------------------------- #
-# load_cohorts
-# --------------------------------------------------------------------------- #
+def _patch_repo_root(monkeypatch, root: Path) -> None:
+    """Point resolve_canonical_repo_root at the tmp repo (the commands import
+    it from fno.paths at call time)."""
+    import fno.paths
 
-def test_load_cohorts_missing_file_returns_none(tmp_path: Path) -> None:
-    assert load_cohorts(tmp_path / "bank") is None
-
-
-def test_load_cohorts_valid_declaration_loads(tmp_path: Path) -> None:
-    bank = tmp_path / "bank"
-    bank.mkdir()
-    _write_decl(bank, train=["t1", "t2"], validation=["v1"], qualification=["q1"],
-                bank_rev="abc123")
-    decl = load_cohorts(bank)
-    assert decl is not None
-    assert decl.bank_rev == "abc123"
-    assert decl.train == ["t1", "t2"]
-    assert decl.validation == ["v1"]
-    assert decl.qualification == ["q1"]
+    monkeypatch.setattr(fno.paths, "resolve_canonical_repo_root", lambda: root)
 
 
-def test_load_cohorts_malformed_yaml_raises(tmp_path: Path) -> None:
-    bank = tmp_path / "bank"
-    bank.mkdir()
-    (bank / COHORTS_FILENAME).write_text("bank_rev: [unclosed\n", encoding="utf-8")
-    with pytest.raises(CohortError):
-        load_cohorts(bank)
+def _stub_gate(monkeypatch, verdict: Optional[dict]) -> None:
+    """Canned cohorts_gate verdict; None = no declared split."""
+    monkeypatch.setattr(bank_mod, "cohorts_gate", lambda bank_dir, **kw: verdict or {})
 
-
-def test_load_cohorts_bad_shape_raises(tmp_path: Path) -> None:
-    bank = tmp_path / "bank"
-    bank.mkdir()
-    (bank / COHORTS_FILENAME).write_text("train: [t1]\n", encoding="utf-8")
-    with pytest.raises(CohortError):
-        load_cohorts(bank)
-    (bank / COHORTS_FILENAME).write_text(
-        "bank_rev: abc\ntrain: not-a-list\n", encoding="utf-8")
-    with pytest.raises(CohortError):
-        load_cohorts(bank)
-
-
-# --------------------------------------------------------------------------- #
-# bank_unchanged_since (the pinned-revision check)
-# --------------------------------------------------------------------------- #
-
-def test_bank_unchanged_true_when_no_bank_change_since_pin(tmp_path: Path) -> None:
-    root, _bank, rev = _repo_with_bank(tmp_path, ["t1"])
-    decl = CohortDecl(bank_rev=rev, train=["t1"])
-    assert bank_unchanged_since(decl, root) is True
-
-
-def test_bank_unchanged_false_after_bank_change(tmp_path: Path) -> None:
-    root, bank, rev = _repo_with_bank(tmp_path, ["t1"])
-    (bank / "t2.yaml").write_text(_task_yaml("t2"), encoding="utf-8")
-    def g(*a: str) -> None:
-        subprocess.run(["git", *a], cwd=str(root), check=True, capture_output=True)
-    g("add", "-A")
-    g("commit", "-qm", "grow the bank")
-    decl = CohortDecl(bank_rev=rev, train=["t1"])
-    assert bank_unchanged_since(decl, root) is False
-
-
-def test_bank_unchanged_false_when_pin_unreadable(tmp_path: Path) -> None:
-    root = tmp_path / "repo"
-    root.mkdir()
-    def g(*a: str) -> None:
-        subprocess.run(["git", *a], cwd=str(root), check=True, capture_output=True)
-    g("init", "-q")
-    decl = CohortDecl(bank_rev="no-such-rev-000000")
-    assert bank_unchanged_since(decl, root) is False
-
-
-# --------------------------------------------------------------------------- #
-# native door (integration through the compiled binary, skipped without it)
-# --------------------------------------------------------------------------- #
-
-@requires_rust
-def test_native_door_validates_and_resolves_roles(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
-    decl = CohortDecl(bank_rev="abc", train=["t1", "t2"], validation=["v1"],
-                      qualification=["q1"])
-    verdict = bank_mod.cohorts_verdict(decl, known_ids=["t1", "v1", "q1"],
-                                       task_ids=["t1", "q1", "zz"])
-    assert verdict["ok"] is False
-    assert any("t2" in e for e in verdict["errors"])
-    verdict2 = bank_mod.cohorts_verdict(
-        CohortDecl(bank_rev="abc", train=["t1"], validation=["v1"], qualification=["q1"]),
-        known_ids=["t1", "v1", "q1"], task_ids=["t1", "q1", "zz"])
-    assert verdict2["ok"] is True
-    assert verdict2["roles"] == {"t1": "train", "q1": "qualification", "zz": None}
-
-
-@requires_rust
-def test_native_door_fail_closed_when_binary_absent(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("FNO_AGENTS_BIN", "/nonexistent/fno-agents-probe")
-    monkeypatch.setattr(bank_mod, "_door_binary", lambda: None)
-    decl = CohortDecl(bank_rev="abc", train=["t1"], validation=[], qualification=[])
-    verdict = bank_mod.cohorts_verdict(decl)
-    assert verdict["ok"] is False
-    assert "unreachable" in verdict["errors"][0]
-
-
-# --------------------------------------------------------------------------- #
-# run gating: validation fires BEFORE any worker call
-# --------------------------------------------------------------------------- #
 
 def _stub_run_pipeline(monkeypatch, calls: dict) -> None:
     """Stub the spawn-side of `evals run`: sweep_orphans + run_task."""
@@ -208,62 +111,77 @@ def _stub_run_pipeline(monkeypatch, calls: dict) -> None:
     monkeypatch.setattr(runner_mod, "sweep_orphans", lambda root: 0)
 
 
-def _patch_repo_root(monkeypatch, root: Path) -> None:
-    """Point resolve_canonical_repo_root at the tmp repo (the commands import
-    it from fno.paths at call time)."""
-    import fno.paths
+# --------------------------------------------------------------------------- #
+# the gate (native through the compiled binary, skipped without it)
+# --------------------------------------------------------------------------- #
 
-    monkeypatch.setattr(fno.paths, "resolve_canonical_repo_root", lambda: root)
-
-
-def _stub_verdict(monkeypatch, *, ok: bool, errors: Optional[list[str]] = None,
-                  roles: Optional[dict] = None) -> None:
-    """Canned native door verdict for the run/export/qualify gates."""
-    monkeypatch.setattr(
-        bank_mod, "cohorts_verdict",
-        lambda decl, **kw: {"ok": ok, "errors": errors or [], "roles": roles or {}},
-    )
-
-
-def test_run_refuses_overlap_before_any_spawn(tmp_path, monkeypatch) -> None:
-    calls: dict = {}
-    _stub_run_pipeline(monkeypatch, calls)
+@requires_rust
+def test_gate_validates_and_checks_the_bank_rev(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     root, bank, rev = _repo_with_bank(tmp_path, ["t1", "t2"])
-    _write_decl(bank, train=["t1"], validation=["t1"], qualification=[])
-    _patch_repo_root(monkeypatch, root)
-    _stub_verdict(monkeypatch, ok=False,
-                  errors=["task id 't1' is in both 'train' and 'validation'"])
-    res = runner.invoke(evals_app, ["run", "--bank", str(bank), "--yes"])
-    assert res.exit_code == 2
-    assert "cohort split refused" in res.stdout + (res.stderr or "")
-    assert calls.get("run", 0) == 0  # no worker call
+    _write_decl(bank, train=["t1"], validation=["t2"], qualification=[], bank_rev=rev)
+    verdict = cohorts_gate(bank, known_ids=["t1", "t2"], repo_root=root)
+    assert verdict["ok"] is True
+    assert verdict["bank_unchanged"] is True
+    bad = cohorts_gate(bank, known_ids=["t1"], repo_root=root)
+    assert bad["ok"] is False
+    assert any("t2" in e for e in bad["errors"])
 
 
-def test_run_refuses_unknown_declared_id(tmp_path, monkeypatch) -> None:
-    calls: dict = {}
-    _stub_run_pipeline(monkeypatch, calls)
-    root, bank, _rev = _repo_with_bank(tmp_path, ["t1"])
-    _write_decl(bank, train=["t1", "ghost"], validation=[], qualification=[])
-    _patch_repo_root(monkeypatch, root)
-    _stub_verdict(monkeypatch, ok=False, errors=["unknown task id 'ghost' in 'train'"])
-    res = runner.invoke(evals_app, ["run", "--bank", str(bank), "--yes"])
-    assert res.exit_code == 2
-    assert calls.get("run", 0) == 0
-
-
-def test_run_refuses_stale_bank_pin(tmp_path, monkeypatch) -> None:
-    calls: dict = {}
-    _stub_run_pipeline(monkeypatch, calls)
+@requires_rust
+def test_gate_reports_a_stale_pin(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     root, bank, rev = _repo_with_bank(tmp_path, ["t1"])
     (bank / "t2.yaml").write_text(_task_yaml("t2"), encoding="utf-8")
     def g(*a: str) -> None:
         subprocess.run(["git", *a], cwd=str(root), check=True, capture_output=True)
     g("add", "-A")
     g("commit", "-qm", "grow the bank")
-    _write_decl(bank, train=["t1"], validation=[], qualification=[],
-                bank_rev=rev)  # pinned BEFORE the growth commit
+    _write_decl(bank, train=["t1"], validation=[], qualification=[], bank_rev=rev)
+    verdict = cohorts_gate(bank, known_ids=["t1"], repo_root=root)
+    assert verdict["ok"] is True
+    assert verdict["bank_unchanged"] is False
+
+
+def test_gate_fail_closed_when_binary_absent(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("fno.rust_binary.find_dev_binary", lambda: None)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
+    root, bank, rev = _repo_with_bank(tmp_path, ["t1"])
+    _write_decl(bank, train=["t1"], validation=[], qualification=[], bank_rev=rev)
+    verdict = cohorts_gate(bank, known_ids=["t1"])
+    assert verdict["ok"] is False
+    assert "unreachable" in verdict["errors"][0]
+
+
+def test_gate_no_declaration_returns_empty(tmp_path) -> None:
+    assert cohorts_gate(tmp_path / "bank") == {}
+
+
+# --------------------------------------------------------------------------- #
+# run gating: validation fires BEFORE any worker call
+# --------------------------------------------------------------------------- #
+
+def test_run_refuses_door_refusal_before_any_spawn(tmp_path, monkeypatch) -> None:
+    calls: dict = {}
+    _stub_run_pipeline(monkeypatch, calls)
+    root, bank, rev = _repo_with_bank(tmp_path, ["t1", "t2"])
+    _write_decl(bank, train=["t1"], validation=["t1"], qualification=[])
     _patch_repo_root(monkeypatch, root)
-    _stub_verdict(monkeypatch, ok=True)
+    _stub_gate(monkeypatch, {"ok": False,
+                             "errors": ["task id 't1' is in both 'train' and 'validation'"]})
+    res = runner.invoke(evals_app, ["run", "--bank", str(bank), "--yes"])
+    assert res.exit_code == 2
+    assert "cohort split refused" in res.stdout + (res.stderr or "")
+    assert calls.get("run", 0) == 0  # no worker call
+
+
+def test_run_refuses_stale_bank_pin(tmp_path, monkeypatch) -> None:
+    calls: dict = {}
+    _stub_run_pipeline(monkeypatch, calls)
+    root, bank, rev = _repo_with_bank(tmp_path, ["t1"])
+    _write_decl(bank, train=["t1"], validation=[], qualification=[])
+    _patch_repo_root(monkeypatch, root)
+    _stub_gate(monkeypatch, {"ok": True, "bank_unchanged": False})
     res = runner.invoke(evals_app, ["run", "--bank", str(bank), "--yes"])
     assert res.exit_code == 2
     assert "redeclare" in res.stdout + (res.stderr or "")
@@ -276,19 +194,69 @@ def test_run_with_valid_split_proceeds_and_announces(tmp_path, monkeypatch) -> N
     root, bank, rev = _repo_with_bank(tmp_path, ["t1", "t2"])
     _write_decl(bank, train=["t1"], validation=["t2"], qualification=[])
     _patch_repo_root(monkeypatch, root)
-    _stub_verdict(monkeypatch, ok=True)
+    _stub_gate(monkeypatch, {"ok": True, "bank_unchanged": True})
     res = runner.invoke(evals_app, ["run", "--bank", str(bank), "--yes"])
     assert res.exit_code == 0
     assert "validated cohort split" in res.stdout
     assert calls.get("run", 0) == 2  # both tasks ran
 
 
+def test_run_without_declaration_is_unchanged(tmp_path, monkeypatch) -> None:
+    calls: dict = {}
+    _stub_run_pipeline(monkeypatch, calls)
+    root, bank, _rev = _repo_with_bank(tmp_path, ["t1"])
+    _patch_repo_root(monkeypatch, root)
+    _stub_gate(monkeypatch, None)
+    res = runner.invoke(evals_app, ["run", "--bank", str(bank), "--yes"])
+    assert res.exit_code == 0
+    assert "validated cohort split" not in res.stdout
+    assert calls.get("run", 0) == 1
+
+
 # --------------------------------------------------------------------------- #
 # tuning export: train-only, refused without a current declared split
 # --------------------------------------------------------------------------- #
 
+def _fake_binary(tmp_path: Path, stdout: str, *, exit_code: int = 0) -> str:
+    """A stub fno-agents binary that prints canned output and exits."""
+    script = tmp_path / "fake-agents.sh"
+    script.write_text(
+        "#!/bin/sh\nprintf '%s' " + shlex.quote(stdout) + f"\nexit {exit_code}\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return str(script)
+
+
+def test_export_requires_a_declared_split(tmp_path, monkeypatch) -> None:
+    root, bank, _rev = _repo_with_bank(tmp_path, ["t1"])
+    _patch_repo_root(monkeypatch, root)
+    out = tmp_path / "tuning.jsonl"
+    res = runner.invoke(evals_app, ["export", "--bank", str(bank),
+                                    "--out", str(out)])
+    assert res.exit_code == 1
+    assert "no declared cohort split" in res.stdout + (res.stderr or "")
+    assert not out.exists()
+
+
+def test_export_maps_door_refusal_to_exit_2(tmp_path, monkeypatch) -> None:
+    root, bank, rev = _repo_with_bank(tmp_path, ["t1"])
+    _write_decl(bank, train=["t1"], validation=[], qualification=[], bank_rev=rev)
+    _patch_repo_root(monkeypatch, root)
+    fake = _fake_binary(tmp_path, json.dumps(
+        {"error": "task id 't1' is in both 'train' and 'validation'"}), exit_code=3)
+    monkeypatch.setattr(bank_mod, "_door_binary", lambda: fake)
+    out = tmp_path / "tuning.jsonl"
+    res = runner.invoke(evals_app, ["export", "--bank", str(bank), "--out", str(out)])
+    assert res.exit_code == 2
+    assert "in both" in res.stdout + (res.stderr or "")
+    assert not out.exists()
+
+
 @requires_rust
-def test_export_is_train_only(tmp_path, monkeypatch) -> None:
+def test_export_is_train_only_end_to_end(tmp_path, monkeypatch) -> None:
+    """The real door writes the file: only train rows, each tagged role=train."""
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     root, bank, rev = _repo_with_bank(tmp_path, ["t1", "t2", "q1"])
     _write_decl(bank, train=["t1", "t2"], validation=[], qualification=["q1"],
                 bank_rev=rev)
@@ -305,37 +273,8 @@ def test_export_is_train_only(tmp_path, monkeypatch) -> None:
     assert all(r["role"] == "train" for r in lines)
 
 
-def test_export_requires_a_declared_split(tmp_path, monkeypatch) -> None:
-    root, bank, _rev = _repo_with_bank(tmp_path, ["t1"])
-    _patch_repo_root(monkeypatch, root)
-    out = tmp_path / "tuning.jsonl"
-    res = runner.invoke(evals_app, ["export", "--bank", str(bank),
-                                    "--out", str(out)])
-    assert res.exit_code == 1
-    assert "no declared cohort split" in res.stdout + (res.stderr or "")
-    assert not out.exists()
-
-
-@requires_rust
-def test_export_refuses_stale_bank_pin(tmp_path, monkeypatch) -> None:
-    root, bank, rev = _repo_with_bank(tmp_path, ["t1"])
-    (bank / "t2.yaml").write_text(_task_yaml("t2"), encoding="utf-8")
-    def g(*a: str) -> None:
-        subprocess.run(["git", *a], cwd=str(root), check=True, capture_output=True)
-    g("add", "-A")
-    g("commit", "-qm", "grow the bank")
-    _write_decl(bank, train=["t1"], validation=[], qualification=[], bank_rev=rev)
-    _patch_repo_root(monkeypatch, root)
-    out = tmp_path / "tuning.jsonl"
-    res = runner.invoke(evals_app, ["export", "--bank", str(bank),
-                                    "--out", str(out)])
-    assert res.exit_code == 2
-    assert "redeclare" in res.stdout + (res.stderr or "")
-    assert not out.exists()
-
-
 # --------------------------------------------------------------------------- #
-# qualify: the allowed aggregate projection
+# qualify: the allowed aggregate projection, folded natively
 # --------------------------------------------------------------------------- #
 
 def test_qualify_reports_unqualified_without_declaration(tmp_path, monkeypatch) -> None:
@@ -348,59 +287,20 @@ def test_qualify_reports_unqualified_without_declaration(tmp_path, monkeypatch) 
     assert "no declared cohort split" in payload["reason"]
 
 
-def test_qualify_reports_unqualified_with_empty_qualification(tmp_path, monkeypatch) -> None:
-    root, bank, rev = _repo_with_bank(tmp_path, ["t1"])
-    _write_decl(bank, train=["t1"], validation=[], qualification=[], bank_rev=rev)
-    _patch_repo_root(monkeypatch, root)
-    res = runner.invoke(evals_app, ["qualify", "--bank", str(bank)])
-    assert res.exit_code == 0
-    payload = json.loads(res.stdout)
-    assert payload == {"qualified": False, "reason": "no declared qualification cohort"}
-
-
-def test_qualify_reports_unqualified_when_door_refuses(tmp_path, monkeypatch) -> None:
+@requires_rust
+def test_qualify_aggregate_end_to_end(tmp_path, monkeypatch) -> None:
+    """The native fold: valid grades own correctness; infra stays visible;
+    legacy and wrong-rev rows are excluded from a modern qualified cohort."""
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     root, bank, rev = _repo_with_bank(tmp_path, ["q1"])
     _write_decl(bank, train=[], validation=[], qualification=["q1"], bank_rev=rev)
     _patch_repo_root(monkeypatch, root)
-    _stub_verdict(monkeypatch, ok=False, errors=["unknown task id 'ghost' in 'qualification'"])
-    res = runner.invoke(evals_app, ["qualify", "--bank", str(bank)])
-    assert res.exit_code == 0
-    payload = json.loads(res.stdout)
-    assert payload["qualified"] is False
-    assert "ghost" in payload["reason"]
-
-
-def _fake_batch_binary(tmp_path: Path, verdicts: list[dict]) -> str:
-    """A stub binary that answers any evals-attempt --rows call with canned verdicts."""
-    import shlex
-
-    script = tmp_path / "fake-agents.sh"
-    script.write_text(
-        "#!/bin/sh\nprintf '%s' " + shlex.quote(json.dumps(verdicts)) + "\n",
-        encoding="utf-8",
-    )
-    script.chmod(0o755)
-    return str(script)
-
-
-def test_qualify_aggregates_only_valid_grades(tmp_path, monkeypatch) -> None:
-    root, bank, rev = _repo_with_bank(tmp_path, ["q1"])
-    _write_decl(bank, train=[], validation=[], qualification=["q1"], bank_rev=rev)
-    _patch_repo_root(monkeypatch, root)
-    _stub_verdict(monkeypatch, ok=True, roles={"q1": "qualification"})
     hp = tmp_path / "h.jsonl"
     _history_append(hp, _grader_row("q1", passed=True, bank_rev=rev))
-    _history_append(hp, {"task_id": "q1", "pass": False,
+    _history_append(hp, {"task_id": "q1", "pass": False, "bank_rev": rev,
                          "obs": {"fixture_prepared": False}})
-    _history_append(hp, {"task_id": "q1", "pass": False})  # legacy: no obs
+    _history_append(hp, {"task_id": "q1", "pass": False})  # legacy: no obs, no rev
     _history_append(hp, _grader_row("q1", passed=True, bank_rev="different-rev"))
-    fake = _fake_batch_binary(tmp_path, [
-        {"line": 1, "status": "graded", "graded": True, "retryable": False, "rev_match": True},
-        {"line": 2, "status": "infrastructure", "graded": None, "retryable": True, "rev_match": True},
-        {"line": 3, "status": "legacy", "graded": None, "retryable": False, "rev_match": True},
-        {"line": 4, "status": "graded", "graded": True, "retryable": False, "rev_match": False},
-    ])
-    monkeypatch.setattr("fno.rust_binary.find_dev_binary", lambda: fake)
     res = runner.invoke(evals_app, ["qualify", "--bank", str(bank), "--history", str(hp)])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
@@ -413,17 +313,14 @@ def test_qualify_aggregates_only_valid_grades(tmp_path, monkeypatch) -> None:
     assert payload["missing_tasks"] == 0
 
 
+@requires_rust
 def test_qualify_missing_tasks_are_reported_not_dropped(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     root, bank, rev = _repo_with_bank(tmp_path, ["q1", "q2"])
     _write_decl(bank, train=[], validation=[], qualification=["q1", "q2"], bank_rev=rev)
     _patch_repo_root(monkeypatch, root)
-    _stub_verdict(monkeypatch, ok=True, roles={"q1": "qualification", "q2": "qualification"})
     hp = tmp_path / "h.jsonl"
     _history_append(hp, _grader_row("q1", passed=False, bank_rev=rev))  # q2 never ran
-    fake = _fake_batch_binary(tmp_path, [
-        {"line": 1, "status": "graded", "graded": False, "retryable": False, "rev_match": True},
-    ])
-    monkeypatch.setattr("fno.rust_binary.find_dev_binary", lambda: fake)
     res = runner.invoke(evals_app, ["qualify", "--bank", str(bank), "--history", str(hp)])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout)
@@ -431,3 +328,13 @@ def test_qualify_missing_tasks_are_reported_not_dropped(tmp_path, monkeypatch) -
     assert payload["missing_tasks"] == 1
     assert payload["valid_grades"] == 1
     assert payload["passes"] == 0  # the one valid grade is a failure
+
+
+def test_qualify_maps_door_failure_to_exit_2(tmp_path, monkeypatch) -> None:
+    root, bank, rev = _repo_with_bank(tmp_path, ["q1"])
+    _write_decl(bank, train=[], validation=[], qualification=["q1"], bank_rev=rev)
+    _patch_repo_root(monkeypatch, root)
+    fake = _fake_binary(tmp_path, "{}", exit_code=1)
+    monkeypatch.setattr(bank_mod, "_door_binary", lambda: fake)
+    res = runner.invoke(evals_app, ["qualify", "--bank", str(bank)])
+    assert res.exit_code == 2

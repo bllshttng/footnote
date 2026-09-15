@@ -26,7 +26,6 @@ The two disciplines this enforces at load time (develop-tests.md):
 """
 from __future__ import annotations
 
-import subprocess
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -220,77 +219,7 @@ def resolve_lane(name: str, *, settings: object = None):
     return row
 
 
-class CohortError(ValueError):
-    """A cohort declaration is malformed, stale, or fails native validation."""
-
-
 COHORTS_FILENAME = "cohorts.yaml"
-
-
-@dataclass(frozen=True)
-class CohortDecl:
-    """A declared train/validation/qualification split pinned to a bank rev.
-
-    Stored exactly as declared; the NATIVE door owns membership rules -
-    load_cohorts only parses the YAML shape.
-    """
-
-    bank_rev: str
-    train: list[str] = field(default_factory=list)
-    validation: list[str] = field(default_factory=list)
-    qualification: list[str] = field(default_factory=list)
-    source_path: Optional[Path] = None
-
-
-def load_cohorts(bank_dir: Path) -> Optional[CohortDecl]:
-    """Load ``cohorts.yaml``; None = no declared split. Raises CohortError
-    on a malformed file."""
-    path = bank_dir / COHORTS_FILENAME
-    if not path.exists():
-        return None
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except OSError as exc:
-        raise CohortError(f"cannot read {path}: {exc}") from exc
-    except yaml.YAMLError as exc:
-        raise CohortError(f"malformed YAML in {path}: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise CohortError(f"{path}: top level must be a mapping")
-    bank_rev = raw.get("bank_rev")
-    if not isinstance(bank_rev, str) or not bank_rev.strip():
-        raise CohortError(f"{path}: 'bank_rev' must be a non-empty string (the pinned revision)")
-    roles: dict[str, list[str]] = {}
-    for role in ("train", "validation", "qualification"):
-        val = raw.get(role, [])
-        if not isinstance(val, list) or not all(isinstance(t, str) for t in val):
-            raise CohortError(f"{path}: '{role}' must be a list of task ids")
-        roles[role] = val
-    return CohortDecl(
-        bank_rev=bank_rev,
-        train=roles["train"],
-        validation=roles["validation"],
-        qualification=roles["qualification"],
-        source_path=path,
-    )
-
-
-def bank_unchanged_since(decl: CohortDecl, repo_root: Path) -> bool:
-    """True when the bank files are unchanged from the pinned rev. The split
-    pins the BANK, not the repo; an unreadable pin voids it too."""
-    try:
-        verify = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", f"{decl.bank_rev}^{{commit}}"],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=10,
-        )
-        if verify.returncode != 0:
-            return False
-        diff = subprocess.run(
-            ["git", "diff", "--quiet", f"{decl.bank_rev}", "HEAD", "--", "evals/bank"],
-            cwd=str(repo_root), capture_output=True, text=True, timeout=10,
-        )
-    except Exception:  # noqa: BLE001 - an unreadable git state never certifies the bank
-        return False
-    return diff.returncode == 0
 
 
 def _door_binary():
@@ -300,45 +229,45 @@ def _door_binary():
     return find_dev_binary() or resolve_binary()
 
 
-def cohorts_verdict(
-    decl: CohortDecl,
+def cohorts_gate(
+    bank_dir: Path,
     *,
     known_ids: Optional[list[str]] = None,
-    task_ids: Optional[list[str]] = None,
+    repo_root: Optional[Path] = None,
 ) -> dict[str, Any]:
-    """The one native membership decision: `{"ok", "errors", "roles"}`.
-    Fail-closed - an unreachable door is a refusal, never a silent pass."""
+    """One native door call for a run gate: load `cohorts.yaml`, validate
+    membership against *known_ids*, and (with *repo_root*) check the bank
+    rev. `None` = no declared split. Fail-closed: an unreachable door is a
+    refusal, never a silent pass."""
     import json
     import subprocess
 
-    binary = _door_binary()
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    path = bank_dir / COHORTS_FILENAME
+    if not path.exists():
+        return {}
+    binary = find_dev_binary() or resolve_binary()
     if binary is None:
-        return {"ok": False, "errors": ["native cohort door unreachable: fno-agents binary not found"],
-                "roles": {}}
-    payload = json.dumps({
-        "bank_rev": decl.bank_rev,
-        "train": decl.train,
-        "validation": decl.validation,
-        "qualification": decl.qualification,
-    })
-    argv = [str(binary), "evals-attempt", "--cohorts", payload]
+        return {"ok": False, "errors": ["native cohort door unreachable: fno-agents binary not found"]}
+    argv = [str(binary), "evals-attempt", "--cohorts-yaml", str(path)]
     if known_ids is not None:
         argv += ["--known-ids", json.dumps(known_ids)]
-    if task_ids is not None:
-        argv += ["--task-ids", json.dumps(task_ids)]
+    if repo_root is not None:
+        argv += ["--repo", str(repo_root)]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
     except Exception as exc:  # noqa: BLE001 - a failed door read refuses
-        return {"ok": False, "errors": [f"native cohort door failed: {exc}"], "roles": {}}
+        return {"ok": False, "errors": [f"native cohort door failed: {exc}"]}
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "door failed").strip().splitlines()[-1:]
-        return {"ok": False, "errors": [f"native cohort door refused: {tail[0]}"], "roles": {}}
+        return {"ok": False, "errors": [f"native cohort door refused: {tail[0]}"]}
     try:
         verdict = json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return {"ok": False, "errors": ["native cohort door returned unreadable output"], "roles": {}}
+        return {"ok": False, "errors": ["native cohort door returned unreadable output"]}
     if not isinstance(verdict, dict) or "ok" not in verdict:
-        return {"ok": False, "errors": ["native cohort door returned an unexpected shape"], "roles": {}}
+        return {"ok": False, "errors": ["native cohort door returned an unexpected shape"]}
     return verdict
 
 

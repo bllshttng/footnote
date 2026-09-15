@@ -11,7 +11,6 @@ path keeps provider rotation and the spawn cap in play).
 """
 from __future__ import annotations
 
-import json
 import os
 import re
 import subprocess
@@ -250,26 +249,18 @@ def sweep_orphans(repo_root: Path) -> int:
 
 
 def _native_verdict(row: dict[str, object]) -> Optional[dict[str, object]]:
-    """Ask the native door (fno-agents evals-attempt) to classify one attempt
-    from its structured observations. None when the binary is unreachable -
-    the row still persists with its observations, and the read side re-asks
-    natively over the batch. The verdict is NEVER re-derived in Python."""
-    from fno.evals.bank import _door_binary
+    """Ask the native door (fno-agents evals-attempt, stdin classify) to
+    classify one attempt from its structured observations. None when the
+    door is unreachable - the row still persists with its observations, and
+    the read side re-asks natively over the batch. The verdict is NEVER
+    re-derived in Python."""
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-    binary = _door_binary()
-    if binary is None:
-        return None
     try:
-        proc = subprocess.run(
-            [str(binary), "evals-attempt", "--row-json", json.dumps(row)],
-            capture_output=True, text=True, timeout=30,
-        )
-        if proc.returncode != 0:
-            return None
-        last = proc.stdout.strip().splitlines()[-1:]
-        return json.loads(last[0]) if last else None
-    except Exception:  # noqa: BLE001 - a failed verdict read persists unclassified
+        verdict = verb_call("evals-attempt", {"op": "classify", "row": row})
+    except VerbUnavailable:
         return None
+    return verdict if isinstance(verdict, dict) else None
 
 
 def run_task(
