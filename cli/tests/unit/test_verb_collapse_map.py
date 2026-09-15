@@ -229,8 +229,9 @@ def test_map_covers_current_surface_once():
     # verdict read: the direct binary spelling `agents king-verdict` took a
     # row and then gave it back (law d-fe66560a refuses the new client
     # action, so the verdict rides `king-history --verdict` and the dashed
-    # leaf is gone again): counted from the merged file, 626 -> 627.
-    assert len(mapped) == 627, (
+    # leaf is gone again): counted from the merged file, 626 -> 627. The
+    # node-seed seam verb takes the next row: 628.
+    assert len(mapped) == 628, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
