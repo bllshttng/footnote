@@ -85,9 +85,8 @@ def _patch_claim_receipt_identity(
             session_id=session_id, harness="codex", disposition="proven"
         ),
     )
-    # These tests isolate the post-write claim receipt. The operator-only
-    # writer gate has dedicated engine and CLI coverage below.
-    monkeypatch.setattr("fno.decide.require_operator_session", lambda: None)
+    # These tests isolate the post-write claim receipt; decision authority
+    # gating has its own coverage below.
     monkeypatch.setattr("fno.claims.io.claims_root_for", lambda _key: claims_root)
     return claims_root
 
@@ -2303,24 +2302,32 @@ def test_a_row_the_schema_rejects_does_not_wedge_the_recovery_verb(
     assert "the schema will not accept" in res.output
 
 
-def test_resolved_agent_identity_refuses_decision_write(
+def test_resolved_agent_identity_records_decision_in_coord(
     root: Path,
     tmp_graph: Path,
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Agents answer by default (2026-09-14 ruling). The row is coordination,
+    never law."""
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",
         lambda: SimpleNamespace(session_id=session_id, harness="codex", disposition="single"),
     )
 
-    refused = runner.invoke(
+    written = runner.invoke(
         decide_app, ["--subject", "pr-923", "--decision", "merged"]
     )
-    assert refused.exit_code == 3, refused.output
-    assert "fno inbox law set <subject> <decision>" in refused.output
-    assert "fno backlog note" in refused.output
+    assert written.exit_code == 0, written.output
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    decision = payload["decisions"][0]
+    assert decision["lane"] == "coord"
+    assert decision["decided_by"] == "019f48e1"
+    assert decision["authority_source"] == "agent"
 
 
 def test_no_identity_at_a_terminal_names_the_operator_but_claims_no_authority(
@@ -2378,10 +2385,20 @@ def test_no_identity_and_no_terminal_refuses_operator_authority(
         decide_app,
         ["--subject", "pr-923", "--decision", "a note", "--decided-by", "J.N. Choi"],
     )
-    assert refused_without_flag.exit_code == 3, refused_without_flag.output
+    # No gate since 2026-09-14: the unattributed caller records into the
+    # unattributed lane, and the stated name is a claim, not the decider.
+    assert refused_without_flag.exit_code == 0, refused_without_flag.output
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    unattributed_rows = [
+        d for d in payload["decisions"] if d["lane"] == "unattributed"
+    ]
+    assert len(unattributed_rows) == 1
+    assert unattributed_rows[0]["decided_by"] == "unattributed-caller"
 
     # Positive control: the attended operator reaches both stores, and its one
-    # id proves neither refused invocation wrote first.
+    # id proves the refused operator-authority invocation wrote first nothing.
     monkeypatch.setattr(decide_mod, "_attended_terminal", lambda: True)
     allowed = runner.invoke(
         decide_app,
@@ -2389,21 +2406,27 @@ def test_no_identity_and_no_terminal_refuses_operator_authority(
     )
     assert allowed.exit_code == 0, allowed.output
     decision_id = allowed.stdout.strip().splitlines()[-1]
-    assert [e["data"]["decision_id"] for e in _events(root)] == [decision_id]
+    assert [e["data"]["decision_id"] for e in _events(root)] == [
+        unattributed_rows[0]["decision_id"],
+        decision_id,
+    ]
     assert [
         json.loads(line)["data"]["decision_id"]
         for line in index.read_text(encoding="utf-8").splitlines()
         if line.strip()
-    ] == [decision_id]
+    ] == [
+        unattributed_rows[0]["decision_id"],
+        decision_id,
+    ]
 
 
-def test_an_agent_cannot_type_a_name_or_authority_into_a_decision(
+def test_an_agent_stated_name_is_a_claim_never_the_decider(
     root: Path,
     tmp_graph: Path,
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Names and authority flags cannot route around the operator-only gate."""
+    """A stated name is a claim the row records, never the decider."""
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",
@@ -2414,19 +2437,12 @@ def test_an_agent_cannot_type_a_name_or_authority_into_a_decision(
         decide_app,
         ["--subject", "pr-923", "--decision", "merged", "--decided-by", "J.N. Choi"],
     )
-    granted = runner.invoke(
-        decide_app,
-        [
-            "--subject", "pr-921",
-            "--decision", "held",
-            "--decided-by", "worker-a",
-            "--authority", "beastmode",
-        ],
+    assert named.exit_code == 0, named.output
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
     )
-    assert named.exit_code == 3, named.output
-    assert granted.exit_code == 3, granted.output
-    assert "fno backlog note" in named.output
-    assert "fno inbox law" in granted.output
+    assert payload["decisions"][0]["decided_by"] == "019f48e1"
 
 
 def test_record_decision_refuses_agent_operator_authority_before_either_write(
@@ -2435,7 +2451,8 @@ def test_record_decision_refuses_agent_operator_authority_before_either_write(
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """The engine is the choke point for every current and future CLI spelling."""
+    """The engine is the choke point for the superuser claim, for every current
+    and future CLI spelling."""
     from fno import harness_identity
     from fno.decide import RefusedAuthorityError, record_decision
 
@@ -2446,14 +2463,13 @@ def test_record_decision_refuses_agent_operator_authority_before_either_write(
         lambda: SimpleNamespace(session_id=session_id, harness="codex", disposition="single"),
     )
 
-    for authority in (None, "agent", "crown", "beastmode", "operator"):
-        with pytest.raises(RefusedAuthorityError, match=handle):
-            record_decision(
-                subject="pr-923",
-                decision="agent-authored ruling",
-                authority_source=authority,
-                events_root=root,
-            )
+    with pytest.raises(RefusedAuthorityError, match=handle):
+        record_decision(
+            subject="pr-923",
+            decision="agent-authored ruling",
+            authority_source="operator",
+            events_root=root,
+        )
 
     from fno import decide as decide_mod
 
@@ -2484,14 +2500,16 @@ def test_record_decision_refuses_agent_operator_authority_before_either_write(
     ]
 
 
-@pytest.mark.parametrize("authority", [None, "agent", "crown", "beastmode", "operator"])
-def test_backlog_decide_refuses_every_non_operator_authority_before_any_write(
+@pytest.mark.parametrize("authority", [None, "agent", "crown", "beastmode"])
+def test_backlog_decide_records_non_operator_authority_in_coord(
     authority: str | None,
     root: Path,
     tmp_graph: Path,
     index: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    """Agents answer by default (2026-09-14 ruling): a non-operator authority
+    records one coord row in both stores."""
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",
@@ -2503,7 +2521,51 @@ def test_backlog_decide_refuses_every_non_operator_authority_before_any_write(
     if authority is not None:
         args.extend(["--authority", authority])
 
-    refused = runner.invoke(decide_app, args)
+    written = runner.invoke(decide_app, args)
+    assert written.exit_code == 0, written.output
+
+    payload = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-923", "--json"]).stdout
+    )
+    decision = payload["decisions"][0]
+    assert decision["lane"] == ("grant" if authority == "beastmode" else "coord")
+    assert decision["authority_source"] == (authority or "agent")
+    assert [e["data"]["decision_id"] for e in _events(root)] == [
+        decision["decision_id"]
+    ]
+    assert [
+        json.loads(line)["data"]["decision_id"]
+        for line in index.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ] == [decision["decision_id"]]
+
+
+def test_backlog_decide_still_refuses_operator_authority_before_any_write(
+    root: Path,
+    tmp_graph: Path,
+    index: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The superuser lane is not an agent's to claim."""
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id=session_id, harness="codex", disposition="single"
+        ),
+    )
+
+    refused = runner.invoke(
+        decide_app,
+        [
+            "--subject",
+            "pr-923",
+            "--decision",
+            "agent-authored ruling",
+            "--authority",
+            "operator",
+        ],
+    )
 
     assert refused.exit_code == 3, refused.output
     assert "fno inbox law" in refused.output
@@ -3122,8 +3184,13 @@ def test_only_an_attended_caller_writes_attested_by(
     refused = runner.invoke(
         decide_app, ["--subject", "pr-921", "--decision", "held"]
     )
-    assert refused.exit_code == 3, refused.output
-    assert "fno backlog note" in refused.output
+    # Agents answer by default (2026-09-14): the row records, attests nothing.
+    assert refused.exit_code == 0, refused.output
+    agent_row = json.loads(
+        runner.invoke(decide_app, ["list", "--subject", "pr-921", "--json"]).stdout
+    )["decisions"][0]
+    assert agent_row["decided_by"] == "019f48e1"
+    assert not agent_row.get("attested_by")
 
 
 def test_operator_recording_own_name_records_no_relayed_by(
