@@ -1278,7 +1278,7 @@ PYEOF
                 done < <(_acknowledged_ids "$file")
                 local s_created s_did s_subj stage_missing=0
                 s_created=$(_plan_created_date "$file")
-                for s_line in "${stage_laws[@]}"; do
+                for s_line in ${stage_laws[@]+"${stage_laws[@]}"}; do
                     s_did="${s_line%%$'\t'*}"
                     s_subj="${s_line#*$'\t'}"
                     if [[ -n "$acked_list" ]] \
@@ -1495,7 +1495,9 @@ check_python_rows_file() {
     done <<< "$surfaces"
 
     local f
-    for f in "${findings[@]}"; do
+    # ${findings[@]+"${findings[@]}"}: bash 3.2 under set -u refuses an
+    # empty array expansion, and a clean plan reaches this loop empty.
+    for f in ${findings[@]+"${findings[@]}"}; do
         if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
             error "$label: $f (and no readable created: date to tell this plan from a pre-gate one)"
         elif [[ "$created" > "$python_row_gate_date" ]]; then
