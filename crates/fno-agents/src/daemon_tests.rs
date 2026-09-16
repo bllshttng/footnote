@@ -1492,17 +1492,23 @@ fn reconcile_reaps_a_dead_interactive_host_to_exited() {
     // Codex P2 (PR #373): a genuinely dead interactive worker (store-miss AND
     // pid no longer live) must be reaped to Exited DURING reconcile, not left
     // Live until a daemon restart. A live interactive host (pid_live) on the
-    // same store-miss stays Live.
+    // same store-miss stays Live, and a pid-less one is left alone: the real
+    // pid_live maps a missing pid to true ("a row with no pid is left
+    // alone"), so only a recorded dead pid proves death.
     let mut dead = rentry("dead-tui", AgentStatus::Live, None);
     dead.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+    dead.pid = Some(4241);
     let mut live = rentry("live-tui", AgentStatus::Live, None);
     live.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
-    let entries = vec![dead, live];
+    live.pid = Some(4242);
+    let mut pidless = rentry("pidless-tui", AgentStatus::Live, None);
+    pidless.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+    let entries = vec![dead, live, pidless];
     let (changes, out) = plan_reconcile(
         &entries,
-        |_| Ok(false), // both store-miss
+        |_| Ok(false), // all store-miss
         || false,
-        |e| e.name == "live-tui", // only live-tui's worker pid is alive
+        |e| e.pid.map_or(true, |_| e.name == "live-tui"),
         |_| false,
         |_| false,
         |_| false,
@@ -1517,6 +1523,10 @@ fn reconcile_reaps_a_dead_interactive_host_to_exited() {
     assert_eq!(
         changes[1].new_status, None,
         "a live interactive host is left untouched"
+    );
+    assert_eq!(
+        changes[2].new_status, None,
+        "a pid-less interactive host is left untouched (pid_live maps None to true)"
     );
     // Reaped to Exited, never orphaned.
     assert!(out.orphans.is_empty());
@@ -1630,9 +1640,32 @@ fn reconcile_served_word_on_pane_rows_follows_the_pid_even_when_the_probe_errs()
         Some("alive"),
         "an interactive host's served word follows its pid too"
     );
-    for ch in &changes {
-        assert_eq!(ch.new_status, None, "an Err probe never flips status");
-    }
+    // The pid hoist sits ABOVE the probe match: a recorded dead pid is a
+    // process fact, so it reaps to Exited even when the store probe answers
+    // Err (an Err says nothing about the process - it was exactly the
+    // status/served-word split brain this hoist retires). Rows the pid cannot
+    // decide keep the Err mapping: never flip on an inconclusive probe.
+    assert_eq!(
+        changes[1].new_status,
+        Some(AgentStatus::Exited),
+        "a proven-dead pid reaps even on an Err probe"
+    );
+    assert!(
+        changes[1].pid_proven,
+        "the exit came from the row's own pid"
+    );
+    assert_eq!(
+        changes[0].new_status, None,
+        "a live pane never flips on an Err probe"
+    );
+    assert_eq!(
+        changes[2].new_status, None,
+        "a pid-less pane never flips on an Err probe"
+    );
+    assert_eq!(
+        changes[3].new_status, None,
+        "a live interactive host never flips on an Err probe"
+    );
     assert!(out.orphans.is_empty());
 }
 
