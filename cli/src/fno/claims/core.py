@@ -2232,8 +2232,8 @@ def _configured_claim_root() -> Optional[Path]:
     return Path(value) if value else None
 
 
-def _legacy_claim_call(root: Optional[Path]) -> bool:
-    return root is not None or _python_claim_runtime()
+def _legacy_claim_call(key: str, root: Optional[Path]) -> bool:
+    return root is not None or _python_claim_runtime() or claims_root_for(key) is None
 
 
 _LEGACY_ACQUIRE_CLAIM = _legacy_acquire_claim
@@ -2262,7 +2262,7 @@ def acquire_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Claim:
-    if _legacy_claim_call(root):
+    if _legacy_claim_call(key, root):
         return _LEGACY_ACQUIRE_CLAIM(key, holder, reason=reason, ttl_ms=ttl_ms, metadata=metadata, pid=pid, pid_unavailable=pid_unavailable, host=host, harness=harness, pid_provenance=pid_provenance, harness_session_id=harness_session_id, root=root, _attempt=_attempt)  # noqa: E501
     del host, harness, pid_provenance, harness_session_id, _attempt
     _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
@@ -2292,7 +2292,7 @@ def release_claim(
     root: Optional[Path] = None,
     sync_graph_mirror: bool = True,
 ) -> Optional[Claim]:
-    if _legacy_claim_call(root):
+    if _legacy_claim_call(key, root):
         return _LEGACY_RELEASE_CLAIM(
             key,
             holder,
@@ -2322,7 +2322,7 @@ def refresh_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Optional[Claim]:
-    if _legacy_claim_call(root):
+    if _legacy_claim_call(key, root):
         return _LEGACY_REFRESH_CLAIM(
             key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt
         )
@@ -2354,7 +2354,7 @@ def refresh_claim(
 
 
 def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
-    if _legacy_claim_call(root):
+    if _legacy_claim_call(key, root):
         return _LEGACY_CLAIM_STATUS(key, root=root)
     if not key:
         raise ClaimValidationError("key must be non-empty")
@@ -2367,7 +2367,7 @@ def list_claims(
     include_stale: bool = False,
     root: Optional[Path] = None,
 ) -> list[dict[str, Any]]:
-    if _legacy_claim_call(root):
+    if root is not None or _python_claim_runtime():
         return _LEGACY_LIST_CLAIMS(
             prefix=prefix, include_stale=include_stale, root=root
         )
@@ -2386,7 +2386,7 @@ def list_claims_with_counts(
     include_stale: bool = False,
     root: Optional[Path] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
-    if _legacy_claim_call(root):
+    if root is not None or _python_claim_runtime():
         return _LEGACY_LIST_CLAIMS_WITH_COUNTS(
             prefix=prefix, include_stale=include_stale, root=root
         )
@@ -2411,7 +2411,7 @@ def force_release_claim(
     root: Optional[Path] = None,
     holding_recovery_lock: bool = False,
 ) -> ForceReleaseOutcome:
-    if _legacy_claim_call(root):
+    if _legacy_claim_call(key, root):
         return _LEGACY_FORCE_RELEASE_CLAIM(
             key,
             reason,
