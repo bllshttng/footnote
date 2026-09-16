@@ -823,3 +823,24 @@ def test_an_undelivered_receipt_never_reaches_stdout(monkeypatch) -> None:
     assert "noted x-0d08: the finding" in result.stdout
     assert "notify FAILED sess-worker" in result.stderr
     assert "notify FAILED" not in result.stdout
+
+
+def test_a_keeper_error_reply_reaches_the_honest_refusal(monkeypatch, tmp_path) -> None:
+    """x-786d: the keeper answering the rows op with an error reply must land
+    on the could-not-read refusal, never on no-node-resolves. The crate fix
+    makes the reply an error; no cli/src edit belongs in this node. The fake
+    client raises through the real error-reply parser, the act the real
+    ``request`` performs on that reply."""
+
+    from fno.graph.store import _raise_store_error
+
+    class _ErrKeeper:
+        def request(self, method: str, params: dict) -> dict:
+            _raise_store_error("corrupt", "graph.json is not valid JSON")
+            raise AssertionError("unreachable")
+
+    monkeypatch.setattr("fno.graph.api._client_for", lambda path, **kw: _ErrKeeper())
+    got = readers_before_append("x-786d", tmp_path / "graph.json")
+    assert isinstance(got, Refused)
+    assert "could not read who is bound" in got.message
+    assert "no node resolves" not in got.message
