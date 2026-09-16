@@ -619,6 +619,7 @@ def record_decision(
         source=source,
     )
     append_event(event, events_path=events_path(events_root))
+    append_event(event, events_path=paths.decisions_jsonl())
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:
@@ -699,6 +700,7 @@ def retract_decision(
 
     events_root = resolve_carveout_root()
     append_event(event, events_path=events_path(events_root))
+    append_event(event, events_path=paths.decisions_jsonl())
     try:
         graph_api.decision_retract(event, path=paths.graph_json())
     except Exception as exc:  # noqa: BLE001 - durable event must not be retried blindly
@@ -794,11 +796,47 @@ def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list
     from fno import paths
     from fno.graph import api as graph_api
 
-    del path, warn
+    if path is not None:
+        return _read_legacy_index(Path(path), warn=warn)
     # The graph resolves at CALL time: api.py's path default froze at import,
     # so a redirected state dir (a hermetic test, a state_dir override) would
     # otherwise read the import-time machine store.
-    return graph_api.decisions(path=paths.graph_json()), 0
+    try:
+        rows = graph_api.decisions(path=paths.graph_json())
+    except Exception:
+        rows = []
+    if rows:
+        return rows, 0
+    # Older callers and rollback windows still expose the machine-wide JSONL
+    # index. Use it only when the new store is empty so an import can migrate
+    # it without changing the post-migration source of truth.
+    return _read_legacy_index(paths.decisions_jsonl(), warn=warn)
+
+
+def _read_legacy_index(path: "Path", *, warn: bool = True) -> "tuple[list[dict], int]":
+    """Read the pre-wave-12 JSONL index for compatibility and migration."""
+    rows: list[dict] = []
+    damaged = 0
+    for line in _read_lines(path):
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            damaged += 1
+            continue
+        data = event.get("data") if isinstance(event, dict) else None
+        if not isinstance(event, dict) or event.get("type") not in DECISION_EVENT_TYPES:
+            damaged += 1
+            continue
+        if not isinstance(data, dict):
+            damaged += 1
+            continue
+        row = dict(data)
+        row["ts"] = event.get("ts")
+        row["_event_type"] = event.get("type")
+        rows.append(row)
+    if damaged and warn:
+        print(f"decide: {damaged} damaged row(s) in {path} were skipped.", file=sys.stderr)
+    return rows, damaged
 
 
 def _graph_entries(*, required: bool = False) -> "list[dict]":
@@ -1495,6 +1533,71 @@ def _journal_events(paths: "list[Path]") -> "list[dict]":
                 ):
                     events.append(rec)
     return events
+
+
+def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
+    """Backfill the compatibility JSONL index from durable event journals.
+
+    The graph store is the normal reader after wave 12. This bounded recovery
+    door remains for pre-migration files and older callers; it is idempotent by
+    event identity and never mints a second decision id.
+    """
+    from fno import paths
+    from fno.events import append_event
+
+    index = Path(paths.decisions_jsonl())
+    existing, damaged = _read_legacy_index(index, warn=False)
+    prior_keys = {
+        (
+            str(row.get("_event_type") or DECISION_EVENT),
+            str(
+                row.get("decision_id")
+                or row.get("retraction_id")
+                or row.get("target_decision_id")
+                or ""
+            ),
+        )
+        for row in existing
+    }
+    known = set(prior_keys)
+    counted: set[tuple[str, str]] = set()
+    already = 0
+    added = 0
+    event_sources = list(sources) if sources is not None else _default_journals()
+    events = _journal_events(event_sources)
+    try:
+        events += _projection_events()
+    except Exception:
+        pass
+    for event in events:
+        data = event.get("data") if isinstance(event, dict) else None
+        event_type = str(event.get("type") or "") if isinstance(event, dict) else ""
+        if event_type not in DECISION_EVENT_TYPES or not isinstance(data, dict):
+            continue
+        event_id = str(
+            data.get("decision_id")
+            or data.get("retraction_id")
+            or data.get("target_decision_id")
+            or ""
+        )
+        if not event_id:
+            continue
+        key = (event_type, event_id)
+        if key in known:
+            if key in prior_keys and key not in counted:
+                counted.add(key)
+                already += 1
+            continue
+        append_event(event, events_path=index)
+        known.add(key)
+        added += 1
+    return {
+        "added": added,
+        "already": already,
+        "repaired": damaged,
+        "invalid": 0,
+        "unusable": 0,
+    }
 
 
 def _read_lines(path: Path) -> "list[str]":

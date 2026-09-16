@@ -108,12 +108,14 @@ cli.add_typer(_batch_cli, name="batch", hidden=True)
 from fno.decide.cli import (  # noqa: E402
     backlog_decide,
     backlog_decide_retract,
+    backlog_decide_reindex,
     backlog_decisions,
 )
 
 cli.command("decide", hidden=True)(backlog_decide)
 cli.command("decisions", hidden=True)(backlog_decisions)
 cli.command("decide-retract", hidden=True)(backlog_decide_retract)
+cli.command("decide-reindex", hidden=True)(backlog_decide_reindex)
 
 
 # Node-lifecycle sub-apps folded under backlog (unit 6 of the  reorg):

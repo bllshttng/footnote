@@ -600,6 +600,21 @@ def backlog_decisions(
     _list_decisions(subject, limit, lane, state, review_list, output, output_format, as_json)
 
 
+@shim_app.command("decide-reindex", hidden=True)
+def decide_reindex_cmd() -> None:
+    """Backfill the pre-wave-12 JSONL decision index."""
+    from fno.decide import reindex
+
+    try:
+        typer.echo(json.dumps(reindex(), separators=(",", ":")))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"backlog decide-reindex: failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+
+backlog_decide_reindex = decide_reindex_cmd
+
+
 def _resolve_output_format(path: str, requested: Optional[str]) -> str:
     allowed = {"json", "markdown"}
     fmt = (requested or "").strip().lower() or None
