@@ -37,7 +37,7 @@ use std::path::PathBuf;
 
 use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
 use crate::daemon::CascadeOutcome;
-use crate::gc_sweep::{provenance_verdict, GraphRead};
+use crate::gc_sweep::{open_pr_verdict, provenance_verdict, GraphRead, OpenPrVerdict};
 use crate::graph_store::WorkState;
 use crate::state::RegistryEntry;
 
@@ -330,31 +330,24 @@ pub(crate) fn run(
                         Some(crate::node_route::NodeSource::Sessions)
                             | Some(crate::node_route::NodeSource::Registry)
                     );
-                // The open-PR keep at scope all: an open node whose PR is
-                // unmerged and whose driver is THIS session keeps its row
-                // even on a terminal roster state - the tree's branch is
-                // unmerged and the PR needs its driver alive. The default
-                // scope is unchanged.
+                // The open-PR keep at scope all, asked through the one
+                // predicate the registry sweep runs: the graph record names
+                // the candidate and both sweeps read the same answer. No
+                // GitHub reader is supplied here, so a candidate holds as it
+                // always has - the record alone decides at this scope. The
+                // default scope is unchanged.
                 if scope_all_strong {
-                    let pr = graph.pr_number.get(n).copied().flatten();
-                    let merged = graph
-                        .pr_state
-                        .get(n)
-                        .and_then(|(merge_status, _, _)| merge_status.clone())
-                        .as_deref()
-                        == Some("merged");
-                    let drives = graph
-                        .do_nodes
-                        .get(&sid.to_ascii_lowercase())
-                        .is_some_and(|set| set.contains(n));
-                    if let Some(pr) = pr.filter(|_| !merged && drives) {
-                        summary.kept.push(judgement(
-                            &ident,
-                            Some(n.clone()),
-                            format!("open pr: {n} #{pr}"),
-                            false,
-                        ));
-                        continue;
+                    match open_pr_verdict(graph, sid, n, &entry.cwd, true, None) {
+                        OpenPrVerdict::Holds { node, pr } | OpenPrVerdict::Unread { node, pr } => {
+                            summary.kept.push(judgement(
+                                &ident,
+                                Some(node.clone()),
+                                format!("open pr: {node} #{pr}"),
+                                false,
+                            ));
+                            continue;
+                        }
+                        _ => {}
                     }
                 }
                 match &open_release {
@@ -386,13 +379,25 @@ pub(crate) fn run(
                 }
             }
             WorkState::NoProvenance => {
-                summary.kept.push(judgement(
-                    &ident,
-                    None,
-                    crate::gc::KeepReason::NoProvenance.as_str().to_string(),
-                    false,
-                ));
-                continue;
+                // The registry sweep's decision with the roster's own
+                // witness: a harness state of `done` is the row's own
+                // finished report, so it falls to the quiet gate every
+                // other state takes below. `stopped` and `failed` are not
+                // that report, and a row still working keeps.
+                if terminal == Some("done") {
+                    format!(
+                        "no provenance; harness state {state} is the row's own finished report",
+                        state = terminal.unwrap_or_default()
+                    )
+                } else {
+                    summary.kept.push(judgement(
+                        &ident,
+                        None,
+                        crate::gc::KeepReason::NoProvenance.as_str().to_string(),
+                        false,
+                    ));
+                    continue;
+                }
             }
         };
         // The quiet gate: an unresolved transcript is never quiet, and the
@@ -816,7 +821,9 @@ mod tests {
     }
 
     // No provenance keeps the row: the positive reason is named, never an
-    // absence dressed as a removal.
+    // absence dressed as a removal. The row's harness state reads done, so
+    // the fall-through lands at the quiet gate, whose unresolved arm names
+    // the real reason the row cannot retire.
     #[test]
     fn unresolved_provenance_keeps_the_row() {
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("hand-typed-name"))];
@@ -835,7 +842,7 @@ mod tests {
         );
         assert!(summary.retired.is_empty());
         assert!(
-            summary.kept[0].reason.contains("no provenance"),
+            summary.kept[0].reason.contains("transcript unresolved"),
             "{summary:?}"
         );
     }
@@ -1122,12 +1129,15 @@ mod tests {
     // no scope reaches a row with no provenance. ---
 
     // THE law under every setting: a session with no fno node is never a
-    // retire candidate. At `off` the sweep does not even judge the row, so
-    // the reason names the scope; at `provenanced` and `all` it names the
-    // missing provenance.
+    // retire candidate unless its own done report took it to the quiet
+    // gate. This row is still working, so the missing provenance keeps it
+    // at every scope. At `off` the sweep does not even judge the row, so
+    // the reason names the scope.
     #[test]
     fn no_provenance_row_is_never_a_candidate_at_any_scope() {
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("hand-typed-name"))];
+        let mut r = row("ab12cd34", Some("sid-1"), Some("hand-typed-name"));
+        r.state = Some("working".into());
+        let rows = vec![r];
         let scopes = [RosterScope::Off, RosterScope::Provenanced, RosterScope::All];
         for scope in scopes {
             let summary = run(
