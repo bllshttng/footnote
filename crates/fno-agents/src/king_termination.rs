@@ -42,7 +42,11 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
             "fno_id" => out.fno_id = value,
             "scope" => out.scope = value,
             "created_at" => out.created_at = Some(value),
-            "harness_session_id" => out.harness_session_id = Some(value),
+            "harness_session_id" => {
+                if !value.is_empty() && value != "null" {
+                    out.harness_session_id = Some(value);
+                }
+            }
             "shape" => out.shape = value,
             "budget_max_iterations" => {
                 if let Ok(n) = value.parse::<u64>() {
@@ -525,6 +529,13 @@ pub(crate) fn bound_breached(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_null_harness_session_is_treated_as_legacy_missing_identity() {
+        let manifest = parse_king_manifest("---\nfno_id: k\nharness_session_id: null\n---\n")
+            .expect("manifest parses");
+        assert!(manifest.harness_session_id.is_none());
+    }
 
     fn board_with_queues(queues: Value) -> Value {
         json!({

@@ -285,7 +285,10 @@ fn king_spawn_with(
         .env("FNO_CLAIMS_ROOT", home)
         .env("FNO_HOME", home)
         .env("FNO_AGENTS_HOME", home.join("agents"))
-        .env("FNO_OPERATOR_CAPTURE_DIR", home.join(".fno/operator-capture"))
+        .env(
+            "FNO_OPERATOR_CAPTURE_DIR",
+            home.join(".fno/operator-capture"),
+        )
         // The board resolves its fno-py shellout FNO_PY-first, ahead of PATH
         // (scrape::fno_py), so a machine with the wheel installed under the uv
         // tools bin runs the REAL CLI against the real machine-wide question
