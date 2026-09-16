@@ -733,7 +733,7 @@ fn parse_ownership_defect(text: &str) -> Result<OwnershipDefect, String> {
     })
 }
 
-/// The single-row recompute (x-20d2 wave 11): one projection query loads the
+/// The single-row recompute: one projection query loads the
 /// status-relevant columns of every live node, the derivation runs over that
 /// projection in memory, and only rows whose status changed are UPDATEd, in
 /// the caller's transaction. The plan-rung ladder (idea/design/ready) is
@@ -799,7 +799,7 @@ pub fn recompute_status(connection: &Connection) -> Result<(), String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     // Open do rows with their timestamps, for the ownership-defect quality
-    // read (x-f8b1 port): one query for the whole projection.
+    // read (quality port): one query for the whole projection.
     let mut do_rows: std::collections::HashMap<String, Vec<(String, String)>> = Default::default();
     let mut do_statement = connection
         .prepare(
@@ -824,7 +824,7 @@ pub fn recompute_status(connection: &Connection) -> Result<(), String> {
     // superseded, deferred, PR, held. Otherwise the stored status keeps.
     // The ownership defect clears every pass and restamps only for a live
     // (non-terminal) row whose lock or open-do timestamp reads stale, the
-    // same diagnostic the whole-graph pass writes (x-f8b1 shape).
+    // same diagnostic the whole-graph pass writes.
     let fresh_defect = std::collections::HashMap::<String, Option<String>>::new();
     let mut stamp_defect: std::collections::HashMap<String, Option<String>> = fresh_defect;
     for row in &mut rows {

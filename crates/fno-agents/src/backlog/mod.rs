@@ -460,7 +460,7 @@ pub fn authoritative_sync(
     Ok(version)
 }
 
-/// The single-row mutation path (x-20d2 wave 11): under the sqlite backend,
+/// The single-row mutation path: under the sqlite backend,
 /// one `BEGIN IMMEDIATE` transaction reads the CURRENT authoritative rows,
 /// applies the mutation, writes only the changed nodes' aggregates, runs the
 /// single-row status recompute, and stamps a fresh content version. The
@@ -1843,7 +1843,7 @@ mod tests {
         assert_eq!(schema, SCHEMA_VERSION);
     }
 
-    // -- single-row mutations (x-20d2 wave 11) ----------------------------
+    // -- single-row mutations --------------------------------------------
 
     /// Pins both state roots the emit path resolves, so a test's gate event
     /// lands in the redirected space journal and never the operator's home.

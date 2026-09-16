@@ -123,7 +123,7 @@ pub const CANONICAL_FIELD_ORDER: &[&str] = &[
 /// CHILD_SUMMARY_FIELDS).
 pub const CHILD_SUMMARY_FIELDS: &[&str] = &["id", "title", "project", "status"];
 
-/// Fields whose change marks a node as human-curated "just now" (x-7dcb).
+/// Fields whose change marks a node as human-curated "just now".
 pub(crate) const CURATION_FIELDS: &[&str] =
     &["status", "priority", "rank", "parent", "blocked_by", "size"];
 

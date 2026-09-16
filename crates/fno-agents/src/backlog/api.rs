@@ -490,7 +490,7 @@ fn mutate(
     mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
 ) -> Result<bool, ApiError> {
     if crate::backlog::backend(&store.graph) == crate::backlog::Backend::Sqlite {
-        // Single-row path (x-20d2 wave 11): the immediate transaction reads
+        // Single-row path: the immediate transaction reads
         // the current authoritative rows, writes only the changed node's
         // aggregates, and the gate event names this mutation (AC24).
         return crate::backlog::mutate_single_row(&store.graph, mutation, |rows| apply(rows))

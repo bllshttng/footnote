@@ -29,7 +29,7 @@ def main() -> int:
         print(f"graph write gate: unmeasured ({exc})")
         return 2
     rows = [row.get("data", row) for row in rows if row.get("type") in (None, "graph_write_gate")]
-    # Per-mutation rows (x-20d2 wave 11) carry a `mutation` name and describe
+    # Per-mutation rows carry a `mutation` name and describe
     # a zero-length window; they are not mergeable histogram windows, so the
     # audit keeps them out of the window stats and counts them instead.
     mutation_rows = [row for row in rows if isinstance(row, dict) and row.get("mutation")]
