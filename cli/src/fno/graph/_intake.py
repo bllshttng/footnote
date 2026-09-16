@@ -1293,7 +1293,7 @@ def _prepare_intake(
 
 def _refuse_filename_claim_mismatch(plan_path: str, cli_claim: str | None) -> None:
     """Refuse identity disagreement across filename, frontmatter, and CLI claim."""
-    from fno.plan.identity import plan_filename_node_id
+    from fno.paths import plan_filename_node_id
 
     declared = {
         claim

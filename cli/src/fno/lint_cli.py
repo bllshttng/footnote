@@ -216,7 +216,7 @@ def plan_filenames() -> None:
     from fno.graph._constants import LEGACY_PREFIX, is_wellformed_node_id, node_id_prefix
     from fno.graph._intake import plan_claims
     from fno.paths import plans_content_dir
-    from fno.plan.identity import plan_filename_node_id
+    from fno.paths import plan_filename_node_id
 
     plans_dir = plans_content_dir()
     if not plans_dir.is_dir():
