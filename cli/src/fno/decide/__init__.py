@@ -789,12 +789,21 @@ def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list
     if path is not None:
         return _read_legacy_index(Path(path), warn=warn)
     try:
-        rows = graph_api.decisions(path=paths.graph_json())
+        db_rows = graph_api.decisions(path=paths.graph_json())
     except Exception:
-        rows = []
-    if rows:
-        return rows, 0
-    return _read_legacy_index(paths.decisions_jsonl(), warn=warn)
+        db_rows = []
+    legacy_rows, damaged = _read_legacy_index(paths.decisions_jsonl(), warn=warn)
+    if not db_rows:
+        return legacy_rows, damaged
+    def row_key(row: dict) -> tuple[str, str]:
+        return (
+            str(row.get("_event_type") or DECISION_EVENT),
+            str(row.get("decision_id") or row.get("retraction_id")
+                or row.get("target_decision_id") or ""),
+        )
+    known = {row_key(row) for row in db_rows}
+    merged = [*db_rows, *(row for row in legacy_rows if row_key(row) not in known)]
+    return merged, damaged
 
 
 def _read_legacy_index(path: "Path", *, warn: bool = True) -> "tuple[list[dict], int]":
@@ -1515,7 +1524,10 @@ def _journal_events(paths: "list[Path]") -> "list[dict]":
 def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
     """Backfill the compatibility JSONL index without minting new ids."""
     from fno import paths
-    from fno.events import append_event
+    from fno.events import append_event, validate
+
+    if sources is None:
+        _graph_entries(required=True)
 
     index = Path(paths.decisions_jsonl())
     existing, damaged = _read_legacy_index(index, warn=False)
@@ -1527,7 +1539,7 @@ def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
     }
     known = set(prior_keys)
     counted: set[tuple[str, str]] = set()
-    already = added = 0
+    already = added = invalid = unusable = 0
     events = _journal_events(list(sources) if sources is not None else _default_journals())
     try:
         events += _projection_events()
@@ -1548,11 +1560,20 @@ def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
                 counted.add(key)
                 already += 1
             continue
-        append_event(event, events_path=index)
+        try:
+            validate(event)
+        except Exception:
+            unusable += 1
+            continue
+        try:
+            append_event(event, events_path=index)
+        except Exception:
+            invalid += 1
+            continue
         known.add(key)
         added += 1
     return {"added": added, "already": already, "repaired": damaged,
-            "invalid": 0, "unusable": 0}
+            "invalid": invalid, "unusable": unusable, "total": len(known)}
 
 
 def _read_lines(path: Path) -> "list[str]":

@@ -2282,6 +2282,21 @@ def _native_claim_model(payload: dict[str, Any]) -> Claim:
     if not isinstance(body, dict):
         raise ClaimVerdictError("fno-agents claim returned no claim object")
     return Claim.model_validate(body)
+
+
+def _python_claim_runtime() -> bool:
+    return os.environ.get("FNO_AGENTS_RUNTIME", "").strip().lower() == "python"
+
+
+def _configured_claim_root() -> Optional[Path]:
+    value = os.environ.get("FNO_CLAIMS_ROOT", "").strip()
+    return Path(value) if value else None
+
+
+def _legacy_claim_call(root: Optional[Path]) -> bool:
+    return root is not None or _python_claim_runtime()
+
+
 _LEGACY_ACQUIRE_CLAIM = _legacy_acquire_claim
 _LEGACY_RELEASE_CLAIM = _legacy_release_claim
 _LEGACY_REFRESH_CLAIM = _legacy_refresh_claim
@@ -2308,10 +2323,11 @@ def acquire_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Claim:
-    if root is not None:
+    if _legacy_claim_call(root):
         return _LEGACY_ACQUIRE_CLAIM(key, holder, reason=reason, ttl_ms=ttl_ms, metadata=metadata, pid=pid, pid_unavailable=pid_unavailable, host=host, harness=harness, pid_provenance=pid_provenance, harness_session_id=harness_session_id, root=root, _attempt=_attempt)  # noqa: E501
     del host, harness, pid_provenance, harness_session_id, _attempt
     _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
+    native_root = root or _configured_claim_root()
     flags = ["--holder", holder]
     if ttl_ms is not None:
         flags.extend(("--ttl-ms", str(ttl_ms)))
@@ -2325,7 +2341,7 @@ def acquire_claim(
         flags.extend(("--pid", str(pid if pid is not None else os.getpid())))
     if pid_unavailable:
         flags.append("--pid-unavailable")
-    flags.extend(_native_root_flags(root))
+    flags.extend(_native_root_flags(native_root))
     return _native_claim_model(_native_claim("acquire", key, flags))
 
 
@@ -2337,7 +2353,7 @@ def release_claim(
     root: Optional[Path] = None,
     sync_graph_mirror: bool = True,
 ) -> Optional[Claim]:
-    if root is not None:
+    if _legacy_claim_call(root):
         return _LEGACY_RELEASE_CLAIM(
             key,
             holder,
@@ -2348,13 +2364,14 @@ def release_claim(
     del sync_graph_mirror
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
-    prior_payload = _native_claim("status", key, _native_root_flags(root))
+    native_root = root or _configured_claim_root()
+    prior_payload = _native_claim("status", key, _native_root_flags(native_root))
     prior = None
     if prior_payload.get("state") not in {None, "free"} and prior_payload.get("holder"):
         prior = Claim.model_validate(prior_payload)
         if prior.holder != holder and strict:
             raise HolderMismatch(holder, prior.holder, key)
-    _native_claim("release", key, ["--holder", holder, *_native_root_flags(root)])
+    _native_claim("release", key, ["--holder", holder, *_native_root_flags(native_root)])
     return prior if prior is not None and prior.holder == holder else None
 
 
@@ -2366,14 +2383,15 @@ def refresh_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Optional[Claim]:
-    if root is not None:
+    if _legacy_claim_call(root):
         return _LEGACY_REFRESH_CLAIM(
             key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt
         )
     del _attempt
     if ttl_ms is not None and ttl_ms <= 0:
         raise ClaimValidationError("ttl_ms must be positive")
-    flags = _native_root_flags(root)
+    native_root = root or _configured_claim_root()
+    flags = _native_root_flags(native_root)
     if ttl_ms is None:
         status = _native_claim("status", key, flags)
         state = status.get("state")
@@ -2397,11 +2415,11 @@ def refresh_claim(
 
 
 def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
-    if root is not None:
+    if _legacy_claim_call(root):
         return _LEGACY_CLAIM_STATUS(key, root=root)
     if not key:
         raise ClaimValidationError("key must be non-empty")
-    return _native_claim("status", key, _native_root_flags(root))
+    return _native_claim("status", key, _native_root_flags(root or _configured_claim_root()))
 
 
 def list_claims(
@@ -2410,11 +2428,11 @@ def list_claims(
     include_stale: bool = False,
     root: Optional[Path] = None,
 ) -> list[dict[str, Any]]:
-    if root is not None:
+    if _legacy_claim_call(root):
         return _LEGACY_LIST_CLAIMS(
             prefix=prefix, include_stale=include_stale, root=root
         )
-    flags = _native_root_flags(root)
+    flags = _native_root_flags(root or _configured_claim_root())
     if prefix is not None:
         flags.extend(("--prefix", prefix))
     if include_stale:
@@ -2429,7 +2447,7 @@ def list_claims_with_counts(
     include_stale: bool = False,
     root: Optional[Path] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
-    if root is not None:
+    if _legacy_claim_call(root):
         return _LEGACY_LIST_CLAIMS_WITH_COUNTS(
             prefix=prefix, include_stale=include_stale, root=root
         )
@@ -2454,7 +2472,7 @@ def force_release_claim(
     root: Optional[Path] = None,
     holding_recovery_lock: bool = False,
 ) -> ForceReleaseOutcome:
-    if root is not None:
+    if _legacy_claim_call(root):
         return _LEGACY_FORCE_RELEASE_CLAIM(
             key,
             reason,
@@ -2467,7 +2485,8 @@ def force_release_claim(
     if not reason:
         raise ClaimValidationError("reason must be non-empty for force-release")
     payload = _native_claim(
-        "force-release", key, ["--reason", reason, *_native_root_flags(root)]
+        "force-release", key,
+        ["--reason", reason, *_native_root_flags(root or _configured_claim_root())],
     )
     return ForceReleaseOutcome(
         path=Path(str(payload.get("path") or "")),
@@ -2484,7 +2503,7 @@ def reap_dead_claims(
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     optout_sink: Optional[list[Claim]] = None,
 ) -> dict[str, Any]:
-    if roots is not None:
+    if roots is not None or _python_claim_runtime():
         return _LEGACY_REAP_DEAD_CLAIMS(
             roots=roots,
             apply=apply,
@@ -2494,7 +2513,7 @@ def reap_dead_claims(
         )
     del abandonment_probe, node_settlement, optout_sink
     flags: list[str] = ["--apply"] if apply else []
-    for root in roots or [None]:
-        if root is not None:
-            flags.extend(("--root", str(root)))
+    native_root = _configured_claim_root()
+    if native_root is not None:
+        flags.extend(("--root", str(native_root)))
     return _native_claim("reap", "", flags)

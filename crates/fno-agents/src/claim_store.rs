@@ -257,10 +257,22 @@ fn insert_db_record(connection: &Connection, record: &ClaimRecord) -> Result<(),
 
 fn status_json(record: &ClaimRecord) -> Value {
     let mut value = serde_json::to_value(record).unwrap_or_else(|_| json!({}));
-    let state = claims::classify(record, None).as_str();
+    let now = claims::now_ms();
+    let probe = |pid| claims::probe_pid(pid);
+    let (state, basis) = claims::classify_with_basis(record, Some(now), &probe);
+    let (provably_dead, bucket) = claims::classify_for_sweep(record, Some(now), &probe, None, None);
+    let expired = record
+        .expires_at
+        .is_some_and(|expires_at| now >= expires_at);
     if let Value::Object(map) = &mut value {
-        map.insert("state".to_string(), Value::String(state.to_string()));
-        map.insert("basis".to_string(), Value::String("native-db".to_string()));
+        map.insert(
+            "state".to_string(),
+            Value::String(state.as_str().to_string()),
+        );
+        map.insert("basis".to_string(), Value::String(basis.to_string()));
+        map.insert("expired".to_string(), Value::Bool(expired));
+        map.insert("provably_dead".to_string(), Value::Bool(provably_dead));
+        map.insert("bucket".to_string(), Value::String(bucket.to_string()));
     }
     value
 }
@@ -280,7 +292,12 @@ pub fn acquire_db(key: &str, holder: &str, options: &AcquireOpts) -> Result<Valu
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
-    if let Some(existing) = record_for(&transaction, key)? {
+    let existing = record_for(&transaction, key)?;
+    let previous_acquired_at = existing
+        .as_ref()
+        .filter(|record| record.holder == holder)
+        .map(|record| record.acquired_at);
+    if let Some(existing) = existing {
         let state = claims::classify(&existing, None);
         if existing.holder != holder && matches!(state, ClaimState::Live | ClaimState::Suspect) {
             return Ok(json!({
@@ -300,6 +317,18 @@ pub fn acquire_db(key: &str, holder: &str, options: &AcquireOpts) -> Result<Valu
     let mut value = status_json(&record);
     if let Value::Object(map) = &mut value {
         map.insert("outcome".to_string(), Value::String("acquired".to_string()));
+    }
+    if let Some(previous_acquired_at) = previous_acquired_at {
+        let mut data = claims::common_event_data(&record);
+        data.insert(
+            "previous_acquired_at".to_string(),
+            Value::Number(previous_acquired_at.into()),
+        );
+        claims::emit_audit_event(
+            options.events_dir.as_deref(),
+            "claim_idempotent_reacquired",
+            data,
+        );
     }
     Ok(value)
 }
@@ -436,6 +465,11 @@ pub fn reap_db(root: Option<&Path>, apply: bool) -> Result<Value, String> {
         .filter(|row| row.get("state").and_then(Value::as_str) == Some("stale"))
         .filter_map(|row| row.get("key").and_then(Value::as_str).map(str::to_string))
         .collect();
+    let count = |state: &str| {
+        rows.iter()
+            .filter(|row| row.get("state").and_then(Value::as_str) == Some(state))
+            .count()
+    };
     if apply && !stale.is_empty() {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -453,6 +487,14 @@ pub fn reap_db(root: Option<&Path>, apply: bool) -> Result<Value, String> {
         "would_reap": stale.len(),
         "reaped": if apply { stale.len() } else { 0 },
         "reap_failed": [],
+        "kept_live": count("live"),
+        "kept_suspect": count("suspect"),
+        "kept_suspect_alive": 0,
+        "kept_suspect_unprobed": count("suspect"),
+        "kept_offhost": count("offhost"),
+        "corrupted": count("corrupted"),
+        "vanished": 0,
+        "contended": 0,
     }))
 }
 

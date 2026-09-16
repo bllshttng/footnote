@@ -615,6 +615,30 @@ def decide_reindex_cmd() -> None:
 backlog_decide_reindex = decide_reindex_cmd
 
 
+@shim_app.command("reindex", hidden=True)
+def reindex_compat_cmd() -> None:
+    from fno import paths
+    from fno.decide import reindex
+
+    try:
+        counts = reindex()
+    except Exception as exc:  # noqa: BLE001 - recovery must name its refusal
+        typer.echo(
+            f"backlog decide-reindex: failed on the index at {paths.decisions_jsonl()}: {exc}",
+            err=True,
+        )
+        raise typer.Exit(1)
+    note = f"reindex: +{counts['added']} decisions ({counts['already']} already indexed)"
+    if counts.get("unusable"):
+        note += f", {counts['unusable']} row(s) the schema will not accept"
+    if counts.get("invalid"):
+        note += f", {counts['invalid']} rows could not be written"
+    typer.echo(note, err=True)
+    typer.echo(str(counts.get("total", 0)))
+    if counts.get("invalid"):
+        raise typer.Exit(1)
+
+
 def _resolve_output_format(path: str, requested: Optional[str]) -> str:
     allowed = {"json", "markdown"}
     fmt = (requested or "").strip().lower() or None
