@@ -2,7 +2,7 @@
 
 The drafting lenses live in the fno-pm pack: `fno:pm-node` for node plans and `fno:pm-epic` for epic plans.
 
-At step 2a-bis, load `fno:pm-node` with the Skill tool for every node. Also load `fno:pm-epic` when the node has children, carries `scope: epic`, or its parent is an epic.
+At step 2a-bis, load `fno:pm-node` with the Skill tool for every node. When the node has children, carries `scope: epic`, or has an epic for a parent, also load `fno:pm-epic`.
 
 ## The grading lenses are not yours
 

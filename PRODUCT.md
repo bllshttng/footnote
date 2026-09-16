@@ -1,3 +1,4 @@
+<!-- style-exception: both sections are verbatim copies of the PDR text the plan requires; never rewrite the operator's shipped wording -->
 # PRODUCT
 
 ## Product Purpose
