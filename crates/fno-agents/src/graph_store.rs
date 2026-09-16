@@ -123,8 +123,9 @@ pub const CANONICAL_FIELD_ORDER: &[&str] = &[
 /// CHILD_SUMMARY_FIELDS).
 pub const CHILD_SUMMARY_FIELDS: &[&str] = &["id", "title", "project", "status"];
 
-/// Fields whose change marks a node as human-curated "just now".
-const CURATION_FIELDS: &[&str] = &["status", "priority", "rank", "parent", "blocked_by", "size"];
+/// Fields whose change marks a node as human-curated "just now" (x-7dcb).
+pub(crate) const CURATION_FIELDS: &[&str] =
+    &["status", "priority", "rank", "parent", "blocked_by", "size"];
 
 /// Legacy `priority` vocabulary -> current (constants.PRIORITY_MIGRATION).
 const PRIORITY_MIGRATION: &[(&str, &str)] = &[("high", "p1"), ("medium", "p2"), ("low", "p3")];
@@ -1885,7 +1886,7 @@ pub fn ensure_slugs(entries: &mut [Value]) -> usize {
 // Curation key + touched_at stamping
 // ---------------------------------------------------------------------------
 
-fn curation_key(entry: &Value) -> Value {
+pub(crate) fn curation_key(entry: &Value) -> Value {
     let mut parts = Vec::with_capacity(CURATION_FIELDS.len());
     for f in CURATION_FIELDS {
         match entry.get(*f) {

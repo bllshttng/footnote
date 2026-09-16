@@ -880,32 +880,37 @@ pub fn recompute_status(connection: &Connection) -> Result<(), String> {
         .filter(|parent| by_id.contains_key(parent))
         .collect();
     let mut depth: std::collections::HashMap<String, usize> = Default::default();
+    // `visiting` breaks a corrupted parent cycle: the whole-graph rollup
+    // defends the same way, and a cycle here would recurse to overflow.
     fn depth_of(
         id: &str,
         by_id: &std::collections::HashMap<String, usize>,
         rows: &[Driver],
         depth: &mut std::collections::HashMap<String, usize>,
+        visiting: &mut std::collections::HashSet<String>,
     ) -> usize {
         if let Some(known) = depth.get(id) {
             return *known;
         }
+        if !visiting.insert(id.to_string()) {
+            return 0;
+        }
         let parent = by_id.get(id).and_then(|index| rows[*index].parent.clone());
         let value = match parent {
-            Some(parent) if valid_ids_contains(by_id, &parent) => {
-                1 + depth_of(&parent, by_id, rows, depth)
+            Some(parent) if by_id.contains_key(&parent) => {
+                1 + depth_of(&parent, by_id, rows, depth, visiting)
             }
             _ => 0,
         };
+        visiting.remove(id);
         depth.insert(id.to_string(), value);
         value
-    }
-    fn valid_ids_contains(by_id: &std::collections::HashMap<String, usize>, id: &str) -> bool {
-        by_id.contains_key(id)
     }
     let mut parents: Vec<(String, usize)> = valid_parents
         .into_iter()
         .map(|pid| {
-            let d = depth_of(&pid, &by_id, &rows, &mut depth);
+            let mut visiting = std::collections::HashSet::new();
+            let d = depth_of(&pid, &by_id, &rows, &mut depth, &mut visiting);
             (pid, d)
         })
         .collect();
