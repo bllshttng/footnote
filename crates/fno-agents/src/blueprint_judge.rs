@@ -1074,7 +1074,7 @@ mod tests {
             String::new(),
             HashMap::from([("epic_fit".to_string(), "argue from the source".to_string())]),
         );
-        let bundle = "x-7868 done Board queue for undriven PRs";
+        let bundle = "a done sibling already ships Board queue for undriven PRs";
         let reply = "the epic already covers this\nEVIDENCE: \"Board queue for undriven PRs\"\nVERDICT: fail";
         let spawn = move |_name: &str, _: &str, _: &Path, _: u64, _: &str| {
             Ok((0, reply.to_string(), String::new()))
@@ -1099,7 +1099,7 @@ mod tests {
             String::new(),
             HashMap::from([("epic_fit".to_string(), "argue from the source".to_string())]),
         );
-        let bundle = "x-7868 done Board queue for undriven PRs";
+        let bundle = "a done sibling already ships Board queue for undriven PRs";
         let reply = "made up\nEVIDENCE: \"a wholly invented line that proves it\"\nVERDICT: fail";
         let spawn = move |_name: &str, _: &str, _: &Path, _: u64, _: &str| {
             Ok((0, reply.to_string(), String::new()))
