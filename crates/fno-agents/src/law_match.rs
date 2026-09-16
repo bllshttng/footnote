@@ -1400,7 +1400,7 @@ mod tests {
             "tool_name": "Skill",
             "tool_input": {
                 "skill": "fno:blueprint",
-                "args": "x-4f35"
+                "args": "x-aaaa"
             }
         });
         let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
@@ -1421,10 +1421,10 @@ mod tests {
                 stage_row(
                     "d-epic0001",
                     "epic-merge-authority",
-                    "The x-5317 epic keeps merge authority with the crown.",
+                    "The x-bbbb epic keeps merge authority with the crown.",
                 ),
                 stage_row(
-                    "x-4f35",
+                    "x-aaaa",
                     "a ruling found only by the node's own id",
                     "unfindable by topic",
                 ),
@@ -1435,10 +1435,23 @@ mod tests {
             "tool_name": "Skill",
             "tool_input": {
                 "skill": "fno:blueprint",
-                "args": "x-4f35"
+                "args": "x-aaaa"
             }
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+        // Hermetic graph fixture: the epic read must never lean on the
+        // machine's live graph.json.
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::json!({
+                "entries": [
+                    {"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}
+                ]
+            })
+            .to_string(),
+        )
+        .expect("writes");
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path), Some(&graph));
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("context present");
@@ -1463,7 +1476,7 @@ mod tests {
         for hook in [
             serde_json::json!({
                 "hook_event_name": "UserPromptSubmit",
-                "prompt": "/fno:target x-4f35"
+                "prompt": "/fno:target x-aaaa"
             }),
             serde_json::json!({
                 "hook_event_name": "UserPromptSubmit",
@@ -1483,14 +1496,14 @@ mod tests {
     fn payload_node_id_extracts_from_skill_args_or_prompt() {
         let skill = serde_json::json!({
             "tool_name": "Skill",
-            "tool_input": { "skill": "fno:blueprint", "args": "x-4f35" }
+            "tool_input": { "skill": "fno:blueprint", "args": "x-aaaa" }
         });
-        assert_eq!(payload_node_id(&skill).as_deref(), Some("x-4f35"));
+        assert_eq!(payload_node_id(&skill).as_deref(), Some("x-aaaa"));
         let prompt = serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
-            "prompt": "/fno:target x-4f35 now"
+            "prompt": "/fno:target x-aaaa now"
         });
-        assert_eq!(payload_node_id(&prompt).as_deref(), Some("x-4f35"));
+        assert_eq!(payload_node_id(&prompt).as_deref(), Some("x-aaaa"));
         let no_node = serde_json::json!({
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:target auto-merge \"a feature\""
@@ -1506,14 +1519,14 @@ mod tests {
             &graph,
             serde_json::json!({
                 "entries": [
-                    {"id": "x-4f35", "parent": "x-5317", "project": "fno"}
+                    {"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}
                 ]
             })
             .to_string(),
         )
         .expect("writes");
-        let idents = node_subject_idents("x-4f35", Some(&graph));
-        assert_eq!(idents, vec!["fno", "x-4f35", "x-5317"]);
+        let idents = node_subject_idents("x-aaaa", Some(&graph));
+        assert_eq!(idents, vec!["fno", "x-aaaa", "x-bbbb"]);
         let missing = node_subject_idents("x-ffff", Some(&graph));
         assert_eq!(missing, vec!["x-ffff"]);
     }
