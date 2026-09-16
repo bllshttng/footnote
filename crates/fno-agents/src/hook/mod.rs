@@ -11,7 +11,7 @@
 pub mod king_guard;
 pub mod stop;
 
-use serde_json::{json, Value};
+use serde_json::json;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 

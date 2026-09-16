@@ -162,7 +162,7 @@ fn spawn_loop_check(fx: &Fixture, stdin_payload: Option<&str>) -> (i32, serde_js
         .arg("--global-settings")
         .arg("/nonexistent/global-settings.yaml")
         // ab-098967b4: disable the P2 inbox-nudge shell-out so the e2e block
-        // path does not spawn `fno agents nudge-peek` (latency + real-bus side
+        // path never touches the announcement bus (latency + real-bus side
         // effects); the nudge enrichment is unit-tested separately.
         .env("FNO_NUDGE_DISABLED", "1")
         .current_dir(&fx.cwd)

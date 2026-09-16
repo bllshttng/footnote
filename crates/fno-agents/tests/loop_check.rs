@@ -313,7 +313,7 @@ exit 1
 /// be called after `fs::create_dir_all(cwd.join(".fno"))`.
 fn isolate_settings(cwd: &Path) {
     // ab-098967b4: disable the P2 inbox-nudge shell-out so in-process decide()
-    // calls never spawn `fno agents nudge-peek` (latency + real-bus side
+    // calls never touch the announcement bus (latency + real-bus side
     // effects). Idempotent set; never unset, so it is parallel-safe.
     std::env::set_var("FNO_NUDGE_DISABLED", "1");
     // Pin the streak debounce OFF so this suite keeps counting FIRES, which is

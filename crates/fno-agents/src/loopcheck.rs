@@ -1,4 +1,4 @@
-//! `fno-agents loop-check` verb (Task 1.1).
+//! `fno-agents loop-check` verb (Task 1.1, ab-d0337fbc).
 //!
 //! Single entry-point decision-maker for the target stop hook. Reads external
 //! state (manifest, transcript, git, gh, events, ledger) and returns a JSON
@@ -24,7 +24,7 @@ use crate::{
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
 use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
-use crate::king_termination::{bound_breached, king_output, king_quiet_body};
+use crate::king_termination::{bound_breached, king_quiet_body};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -60,11 +60,11 @@ pub enum TerminationReason {
     DoneAwaitingMerge,
     /// A PR is green, mergeable, and nothing objected - but nothing reviewed it
     /// either (coverage 0 or Unknown; the old conjuncts all asked "did anyone
-    /// object", never "did anyone review"). Terminal on the first
+    /// object", never "did anyone review", x-0eaf). Terminal on the first
     /// evaluation (no iteration spent waiting) and NOT a ship reason, shaped
     /// like `DoneAwaitingMerge`: `should_arm_auto_merge` arms only on
     /// `DonePRGreen`, so a human merge plus reconcile closes it. The
-    /// discriminator is coverage, NOT the `attended` manifest field (:
+    /// discriminator is coverage, NOT the `attended` manifest field (x-be78:
     /// that field lies for spawned workers).
     DoneUnreviewed,
     /// Work complete (PR open, green, HEAD shipped) but `done()` fails because a
@@ -77,7 +77,7 @@ pub enum TerminationReason {
     /// / a local review and a re-run), then the out-of-band-merge reconcile
     /// path closes it. This is the fail-closed flip of the old "drop the bot
     /// and proceed" behavior that let ~10 PRs (#890-#912) merge unreviewed
-    ///.
+    /// (x-9ab2).
     DoneAwaitingReview,
     /// A plan-only thread reached the plan boundary cleanly (manifest `planned`
     /// flag + a promise). It produced planning output, not a delivery, so it is
@@ -271,13 +271,13 @@ pub(crate) struct Settings {
     unattended_wall_cap_minutes: Option<Result<u64, String>>,
     /// config.budget.unattended.cost_cap_usd
     unattended_cost_cap_usd: Option<Result<f64, String>>,
-    /// flat budget_cap: (folds in) - applies as cost cap for both modes
+    /// flat budget_cap: (folds in ab-41b13d9d) - applies as cost cap for both modes
     flat_budget_cap: Option<Result<f64, String>>,
     /// config.ci.declared_none: true
     ci_declared_none: bool,
     /// config.external_reviewers list
     external_reviewers: Vec<String>,
-    /// config.review.github_apps (; the GitHub App bot logins gate).
+    /// config.review.github_apps (x-4baa; the GitHub App bot logins gate).
     /// None = key absent -> code default (empty, no gate).
     /// Some([]) = explicitly `[]` -> declared no-review-gate path.
     /// Some(list) = every listed login must have a completed review pass.
@@ -297,7 +297,7 @@ pub(crate) struct Settings {
     /// one still holds the gate until addressed ("honor if present"). None =
     /// no optional reviewers.
     optional_apps: Option<Vec<String>>,
-    /// config.review.reviewers (Phase 2): local reviewer names (sigma |
+    /// config.review.reviewers (x-e703, Phase 2): local reviewer names (sigma |
     /// code-review | declare) satisfied by a head-pinned `review_attestation`
     /// event in events.jsonl, NOT a GitHub login. Empty = no reviewers gate
     /// (additive to the login gate; no "declared empty" distinction needed). A
@@ -339,12 +339,12 @@ pub(crate) struct Settings {
     /// from the older head still carries. `0` disables the arm. Parsed in the
     /// same block as `max_rounds`; resolved by `carry_interdiff_lines_resolved`.
     carry_interdiff_lines: Option<i64>,
-    /// config.review.nudge: per-login overrides for the bot-review
+    /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
     /// malformed entry degrades that login to non-nudgeable, never panics (AC8).
     nudge_overrides: Vec<NudgeOverride>,
-    /// Top-level `done_probes`: the repo-wide probe list, evaluated
+    /// Top-level `done_probes` (x-a534): the repo-wide probe list, evaluated
     /// alongside the plan's own. The file is FLAT, so this reads off the TOML
     /// root, not out of a `config` table. None = key absent (no project gate);
     /// Some(Err(why)) = present but not an array of strings, which BLOCKS - a
@@ -395,7 +395,7 @@ fn strip_inline_comment(raw: &str) -> &str {
     }
 }
 
-/// Fail-closed sentinel for an unparseable config.toml ((c)). A
+/// Fail-closed sentinel for an unparseable config.toml (x-81d9 (c)). A
 /// scanner error (e.g. tab-indentation, which YAML forbids) previously caused
 /// the hand-parser to silently drop the whole config.review subtree, yielding
 /// zero required_bots and shipping the PR unreviewed. Now such a file fails
@@ -456,7 +456,7 @@ fn value_as_login_list(v: &toml::Value) -> Option<Vec<String>> {
     }
 }
 
-/// One `[review.nudge]` per-login override. Every field is optional in
+/// One `[review.nudge]` per-login override (x-b167). Every field is optional in
 /// TOML; a value of the wrong type sets `malformed` so that login degrades to
 /// non-nudgeable rather than panicking - the stop gate must never panic (AC8).
 #[derive(Debug, Clone, Default)]
@@ -526,7 +526,7 @@ fn value_as_nudge_overrides(v: &toml::Value) -> Vec<NudgeOverride> {
     out
 }
 
-/// Classify a config.review.reviewers value (local-attestation gate).
+/// Classify a config.review.reviewers value (x-e703 local-attestation gate).
 /// Unlike the login lists, a structurally-wrong mapping fails CLOSED (Python
 /// raises) via the unsatisfiable sentinel, never a silent empty gate. A leading
 /// '/' is normalized off each entry.
@@ -681,7 +681,7 @@ pub(crate) fn value_as_probe_list(v: &toml::Value) -> Result<Vec<String>, String
 }
 
 /// Settings with the login gate pinned unsatisfiable - the fail-closed result
-/// when config.toml cannot be parsed as TOML at all ((c)). The
+/// when config.toml cannot be parsed as TOML at all (x-81d9 (c)). The
 /// sentinel goes into BOTH github_apps and required_bots: resolved_required_bots
 /// prefers github_apps.or(required_bots), so pinning required_bots alone would
 /// be silently outranked by a parseable global file's github_apps during the
@@ -699,7 +699,7 @@ fn fail_closed_settings() -> Settings {
 /// Parse config.toml with the `toml` crate (stage 3), replacing the
 /// former hand-rolled indent state machine that derived one global indent unit
 /// and silently dropped the config.review subtree on tabs or mixed widths
-/// ((c)). A genuine YAML scanner error (e.g. tab indentation) returns
+/// (x-81d9 (c)). A genuine YAML scanner error (e.g. tab indentation) returns
 /// Err so the caller can fail closed + emit an event, rather than silently
 /// zeroing the gate. The typed-Value classification preserves every semantic
 /// the old ListForm branches encoded (see the value_as_* helpers).
@@ -712,7 +712,7 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         s.flat_budget_cap = read_f64_cap(v, "budget_cap");
     }
 
-    // Top-level flat `done_probes`. Presence is recorded even when the
+    // Top-level flat `done_probes` (x-a534). Presence is recorded even when the
     // value is junk: the Err arm blocks downstream rather than degrading to
     // "no probes declared".
     if let Some(v) = root.get("done_probes") {
@@ -911,7 +911,7 @@ enum Intent {
     Aborted {
         reason: String,
     },
-    /// Agent-declared async watch: it has armed a harness-tracked
+    /// Agent-declared async watch (x-e2c8): it has armed a harness-tracked
     /// watcher and wants the session to idle until that watcher fires rather
     /// than re-blocking every stop tick. All attributes are advisory (used for
     /// the event and the lease math), never load-bearing: external truth
@@ -950,7 +950,7 @@ fn extract_assistant_text(val: &Value) -> String {
 }
 
 /// Detect intent with proper attribute extraction. Precedence within one
-/// message: aborted > watching > promise. aborted is the hardest stop;
+/// message: aborted > watching > promise (x-e2c8). aborted is the hardest stop;
 /// watching outranks promise so a session that both promises and asks to idle
 /// idles (its promise is re-evaluated on the next wake).
 fn detect_intent_from_text(text: &str) -> Intent {
@@ -987,7 +987,7 @@ pub(crate) fn parse_xml_attr(tag_text: &str, attr: &str) -> Option<String> {
 }
 
 /// Extract `last_assistant_message` from the Stop-hook stdin JSON
-///. The harness emits it as a plain string (the stopping
+/// (ab-223d2dae). The harness emits it as a plain string (the stopping
 /// turn's final assistant text, blocks joined by newline and trimmed),
 /// omitted when empty. Any parse failure -> None so the caller falls back
 /// to the transcript scan.
@@ -1002,7 +1002,7 @@ fn extract_last_assistant_message(hook_input: &str) -> Option<String> {
     }
 }
 
-/// A-primary, B-fallback intent read. A present payload is the
+/// A-primary, B-fallback intent read (ab-223d2dae). A present payload is the
 /// stopping turn's final text - recomputed per fire, race-free, overwrite-
 /// proof - and is authoritative, INCLUDING its "no tag" answer. Falling
 /// through to the transcript behind a tag-less payload would resurrect the
@@ -1018,7 +1018,7 @@ fn detect_intent(
     }
 }
 
-/// Fallback transcript scan (B): bounded lookback over the
+/// Fallback transcript scan (ab-223d2dae, B): bounded lookback over the
 /// newest INTENT_LOOKBACK_ENTRIES assistant text entries instead of
 /// last-line-only. Newest tag wins; a tag-less entry no longer ends the
 /// scan, which covers the promise-overwritten-by-block-feedback shape when
@@ -1035,7 +1035,7 @@ fn detect_intent_full(transcript_path: &Path) -> Intent {
     let lines: Vec<&str> = content.lines().collect();
     let mut scanned: usize = 0;
     // `watching` is honored ONLY from the single newest assistant entry
-    // a stale watch-request from earlier work must not idle a session
+    // (x-e2c8): a stale watch-request from earlier work must not idle a session
     // that has since moved on. `promise`/`aborted` keep their bounded lookback.
     let mut newest_entry = true;
     for line in lines.iter().rev() {
@@ -1178,7 +1178,7 @@ struct PrInfo {
     /// Required bots with no completed review pass (names the gap in the
     /// block message, AC1-UI).
     missing_bots: Vec<String>,
-    /// Per-missing-bot nudge classification for this fire, same order
+    /// Per-missing-bot nudge classification for this fire (x-b167), same order
     /// as `missing_bots`. Empty when the review reads were skipped or there is no
     /// PR. `missing_bots` stays the gate; this only changes idling and messaging.
     /// An EMPTY list with a non-empty `missing_bots` means "not classified" and
@@ -1212,7 +1212,7 @@ struct PrInfo {
     /// across two producer axes (github_app review objects; local_attestation
     /// head-pinned passes). Terminal selection consumes this: a run that would
     /// report `DonePRGreen` at coverage 0/Unknown reports `DoneUnreviewed`
-    /// instead. Never cached, never inferred from `reviewed`.
+    /// instead (x-0eaf). Never cached, never inferred from `reviewed`.
     coverage: CoverageReport,
     /// The resolved review-posture verdict , computed alongside
     /// coverage when the caller supplied a resolved `review.posture`. None on
@@ -1338,7 +1338,7 @@ fn harness_can_self_review(_harness: Option<&str>) -> bool {
 /// floors.
 const KNOWN_VERBLESS_HARNESSES: &[&str] = &[];
 
-/// The self-review FLOOR policy on the author harness. Distinct from
+/// The self-review FLOOR policy on the author harness (x-129b). Distinct from
 /// the capability question above: `None` answers "unattributable", not
 /// "verbless". With the owned lane as the default reviewer no KNOWN harness
 /// escapes the floor - claude and codex never did, and gemini/agy/opencode
@@ -1515,12 +1515,12 @@ fn classify_payload_for_floor(
     }
 }
 
-// ── review freshness: one predicate, both producers (/) ─────────
+// ── review freshness: one predicate, both producers (x-5b99 / x-62a1) ─────────
 //
 // The predicate, its git reads, and the resolver live in
 // `review_freshness.rs`, a module named by their question: `loopcheck.rs` is
 // over the file budget and shrink-only, so the freshness machinery moved there
-// rather than growing here. The interdiff-carry arm (law d-608344c1)
+// rather than growing here. The x-82ac interdiff-carry arm (law d-608344c1)
 // rode the same move.
 
 #[cfg(test)]
@@ -1538,6 +1538,7 @@ mod attestation_journal;
 mod authorship;
 mod awaiting_merge;
 mod coverage_receipt;
+mod king_decide;
 mod review_count;
 mod review_state;
 use attestation_journal::missing_global_attestations;
@@ -1568,7 +1569,7 @@ use watch_lease::{harness_can_idle, watch_window_ms};
 /// reviewer's worktree necessarily carries a branch of its own (git refuses
 /// two worktrees on one branch), so a branch-only match would read its
 /// exact-HEAD pass as out of scope. The branch arm is what survives a head
-/// move: a same-branch attestation can still carry, while a foreign
+/// move: a same-branch attestation can still carry (x-62a1), while a foreign
 /// branch at a different head stays out of scope - the cherry-pick shape.
 ///
 /// Named, not closed: a shared sha proves COMMIT identity, not PR identity.
@@ -1823,7 +1824,6 @@ struct GraphqlQuota {
 /// Below this GraphQL remaining count, a no-promise fire stands down entirely:
 /// the last of the budget belongs to the operation that
 /// ships. Code default, named in the PR body - never the operator's config.
-const GRAPHQL_FLOOR: i64 = 200;
 
 fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
     // Advisory by contract: any failure (including a timeout kill) is None -
@@ -2063,7 +2063,7 @@ fn scan_unrecorded_decisions(
 }
 
 /// The `config.review.reviewers` entries NOT satisfied by a head-pinned
-/// `review_attestation` event (Phase 2; list form added by). A
+/// `review_attestation` event (x-e703 Phase 2; list form added by x-cdc7). A
 /// reviewer is satisfied when events.jsonl carries a line with
 /// `type == "review_attestation"`, `data.reviewer` matching (leading '/'
 /// stripped on both sides), the line in scope for this PR
@@ -2077,9 +2077,9 @@ fn scan_unrecorded_decisions(
 ///
 /// Fail closed everywhere: an empty/unreadable events file, a stale head_sha
 /// (attestation for a prior commit), or a `fail` verdict leaves the reviewer
-/// UNSATISFIED - except ONE softening directly below. An empty
+/// UNSATISFIED - except x-aecc's ONE softening directly below. An empty
 /// reviewer list is vacuously satisfied (no reviewers gate).
-/// the one softening of the `fail` arm - a `fail` whose own chain
+/// x-aecc: the one softening of the `fail` arm - a `fail` whose own chain
 /// raised keyed findings that are all terminally dispositioned ANSWERS this
 /// head, so it satisfies the reviewer exactly like a pass ("answered at this
 /// head", never "clean at this head"). A findings-free fail and a RETRACTION
@@ -2124,7 +2124,7 @@ pub fn unattested_reviewers_scan(
     )
 }
 
-/// An operator review finding still open: a `review_finding` event for
+/// An operator review finding (x-f8d4) still open: a `review_finding` event for
 /// the node with no later `review_finding_resolved` for the same id.
 #[derive(Debug, Clone)]
 struct OpenFinding {
@@ -2272,7 +2272,7 @@ fn read_pr_info(
     } else {
         "pr_checks_parse"
     };
-    // An explicit PR selector for the branch-resolved gh calls:
+    // An explicit PR selector for the branch-resolved gh calls (x-3a3f):
     // Some(n) inserts the number (`gh pr view <n>`, `gh pr checks <n>`) so the
     // standalone review-coverage verb can evaluate a PR from a checkout that is
     // NOT on its branch (`fno do pr merge <n>` from canonical); None keeps the
@@ -2351,7 +2351,7 @@ fn read_pr_info(
         .unwrap_or("UNKNOWN")
         .to_string();
 
-    // One freshness resolver for every reviewer on this PR (/).
+    // One freshness resolver for every reviewer on this PR (x-5b99 / x-62a1).
     // Both producers and both presence scans read it, so there is one rule
     // rather than the two divergent ones this replaces. Memoized per reviewed
     // sha, and the HEAD identity is computed lazily, so a PR whose reviewers
@@ -2395,7 +2395,7 @@ fn read_pr_info(
         max_rounds,
     );
 
-    // (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
+    // x-8b64 (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
     // web/mobile, or `gh pr merge`) is done regardless of whether the required
     // bot ever reviewed it or whether CI is still green post-merge - the merge
     // IS the authority. Short-circuit the now-irrelevant CI + review polls
@@ -2475,7 +2475,7 @@ fn read_pr_info(
     // Skip the review reads only when there is NOTHING to honor: no required
     // login AND no optional login. An optional-only gate still reads (to catch
     // an optional blocking finding), but its presence is never required.
-    // the gate is a strict conjunction over the union of GitHub-login
+    // x-e703: the gate is a strict conjunction over the union of GitHub-login
     // evidence (github_apps/peers via optional_bots+required_bots) AND the
     // local-attestation `reviewers`. Each satisfied by its own evidence source,
     // so the two skips are INDEPENDENT: `no_external` (and an empty login set)
@@ -2484,7 +2484,7 @@ fn read_pr_info(
     // repo that pins `reviewers: [sigma]` still requires that local pass even
     // when a session runs `--no-external` to skip usage-wedged App bots
     // (fixes a fail-open the sigma review caught). `reviewers` is empty for
-    // every pre-change config, so `reviewers_all_attested` is vacuously true
+    // every pre-x-e703 config, so `reviewers_all_attested` is vacuously true
     // there and this changes nothing for them.
     let login_gate_active = !required_bots.is_empty() || optional_lane_configured;
     let login_skipped = no_external || !login_gate_active;
@@ -2565,7 +2565,7 @@ fn read_pr_info(
         // mut so the arm's tuple below answers from whatever budget this arm
         // ends on.
         let mut reviewers_ok = reviewers_ok;
-        // the round budget counts the GitHub reviews axis on THIS arm
+        // x-2219: the round budget counts the GitHub reviews axis on THIS arm
         // too. A stock install (no required bots, no optional lane) never
         // reached the external arm's refresh, so rounds the connector posted
         // read 0 here and the cap could not fire on exactly the lane that
@@ -2675,7 +2675,7 @@ fn read_pr_info(
         // optional login's blocking P1 still holds the gate ("honor if
         // present"). A dedup keeps a login that is in both lists counted once.
         let info = compute_review_info(&reviews_json, required_bots, &freshness);
-        // Per-outstanding-bot nudge classification, computed AFTER the
+        // Per-outstanding-bot nudge classification (x-b167), computed AFTER the
         // usage-limit retain (which happened inside compute_review_info) so
         // the two give-up paths never compose (AC6): a usage_limited bot is
         // already out of missing_bots and is never classified here. A STALE
@@ -2804,7 +2804,7 @@ fn read_pr_info(
         // inline-only review traffic advances the fingerprint (closes the
         // false-NoProgress hole).
         let activity_ts = max_ts(&info.latest_ts, &inline_ts);
-        // the login gate AND the local-attestation reviewers gate must
+        // x-e703: the login gate AND the local-attestation reviewers gate must
         // both clear. reviewers is usually empty (vacuously true) so this is a
         // no-op for login-only configs.
         // (a) Record the rate-limit drop so a post-hoc audit sees why the gate
@@ -2919,7 +2919,7 @@ fn read_pr_info(
     // run from canonical read `<canonical>/.fno/events.jsonl` - a satisfied
     // gate reading as an unsatisfiable one, silently, with a refusal that
     // named a count and not a location. The global log is the one file both
-    // stand in; `repo` in the payload keeps it scoped.
+    // stand in; `repo` in the payload keeps it scoped (x-f43c).
     // The posture verdict rides the same emit: coverage computed the verdicts,
     // so satisfaction against the resolved rung is one predicate here rather
     // than a reclassification on the Python side (AC6-HP).
@@ -3021,7 +3021,7 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     // `gh pr checks --json` classifies each check into a rollup `bucket`:
     // pass | fail | pending | skipping | cancel. (`conclusion` is NOT an
     // available field on this subcommand; requesting it errored the read on
-    // every fire - follow-on, previously masked by the budget
+    // every fire - ab-610d2ee3 follow-on, previously masked by the budget
     // bug terminating sessions before this read ran.) Unknown or missing
     // buckets fail closed as Pending - never green.
     let bucket_of = |check: &Value| -> String {
@@ -3144,7 +3144,7 @@ pub(crate) fn loopcheck_fno_bin() -> String {
 
 /// `$HOME/.fno/events.jsonl`, the global-log fallback every direct-dispatch
 /// verb reaches for when no `--global-events` override is given. Hand-built
-/// (no Rust resolver for events.jsonl exists yet, debt this file
+/// (no Rust resolver for events.jsonl exists yet, x-1571 debt this file
 /// already carries) rather than a new duplicate of the same literal in
 /// every caller.
 pub(crate) fn default_global_events_path() -> std::path::PathBuf {
@@ -3166,7 +3166,7 @@ fn best_effort_notify(title: &str, body: &str) {
     crate::operator_notice::notify_operator_with(&fno_bin, title, body, None);
 }
 
-/// Post a bot's review trigger to the PR once, returning true on success (
+/// Post a bot's review trigger to the PR once, returning true on success (x-b167
 /// section 5). `FNO_LOOPCHECK_NO_COMMENT=1` suppresses the post so the test suite
 /// never comments on a real PR, mirroring `FNO_LOOPCHECK_NO_NOTIFY`.
 ///
@@ -3736,7 +3736,7 @@ fn publish_coverage_status(
     );
 }
 
-/// The give-up line for an unresponsive nudged bot (AC13): the operator's
+/// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
 /// two questions ("will it finish, must I act") answered in one line.
 fn nudge_giveup_message(n: &BotNudge) -> String {
     format!(
@@ -3757,7 +3757,7 @@ fn nudge_giveup_message(n: &BotNudge) -> String {
 ///   - `reply_handle`  what an in-thread reply must ADDRESS to reach the bot
 /// A `github-app` reviewer that reviews on mention (not on push) is `nudgeable`:
 /// footnote may post its `review_handle` to un-stick a required gate that nobody
-/// mentioned. Nudge timing (`wait_minutes`, `ceiling`, `enabled`) is
+/// mentioned (x-b167). Nudge timing (`wait_minutes`, `ceiling`, `enabled`) is
 /// config, not code - see `[review.nudge]` / `resolved_nudge_configs`.
 struct BotProfile {
     login: &'static str,
@@ -3815,7 +3815,7 @@ const BOT_PROFILES: &[BotProfile] = &[
 /// The profile for an actual review/comment AUTHOR login (may carry gh's `[bot]`
 /// suffix or be the full login): the profile login is a substring of the author,
 /// matching `login_matches_bot(author, profile.login)`. Used to reach a finding
-/// author's `reply_handle` (AC14).
+/// author's `reply_handle` (x-b167 AC14).
 fn profile_by_author(author: &str) -> Option<&'static BotProfile> {
     BOT_PROFILES
         .iter()
@@ -3830,13 +3830,13 @@ fn logins_correspond(a: &str, b: &str) -> bool {
     login_matches_bot(a, b) || login_matches_bot(b, a)
 }
 
-/// Default nudge cadence. 15 minutes is the observed 6m55s worst-case
+/// Default nudge cadence (x-b167). 15 minutes is the observed 6m55s worst-case
 /// latency on PR #618 with headroom, not a guess; 3 nudges bounds the give-up at
 /// ~45 minutes of *asked-for* waiting versus the unbounded budget burn today.
 const DEFAULT_NUDGE_WAIT_MINUTES: i64 = 15;
 const DEFAULT_NUDGE_CEILING: usize = 3;
 
-/// Sanity ceilings for `[review.nudge]` override integers. A value
+/// Sanity ceilings for `[review.nudge]` override integers (x-b167). A value
 /// beyond these is a typo, not a cadence: `wait_minutes` is bounded well under
 /// `i64::MAX/60` so `chrono::Duration::minutes` can never overflow-panic in the
 /// stop gate, and a nudge cadence past a week / 1000 asks is meaningless anyway.
@@ -3911,7 +3911,7 @@ fn nudge_config_for<'a>(configs: &'a [NudgeConfig], bot: &str) -> Option<&'a Nud
     configs.iter().find(|c| logins_correspond(&c.login, bot))
 }
 
-/// A missing bot's nudge classification for this fire. Derived fresh
+/// A missing bot's nudge classification for this fire (x-b167). Derived fresh
 /// from PR comments every fire - no durable counter - so a mention posted by a
 /// human, `/fno:pr check`, or a sibling worktree counts identically and
 /// self-heals across restart / compaction / handoff.
@@ -4377,13 +4377,13 @@ fn resolved_required_bots(settings: &Settings) -> Vec<String> {
 }
 
 /// The set of expected review logins that must have passed for the gate to
-/// clear: `github_apps` (or its legacy `required_bots` alias) UNION
+/// clear (x-4baa): `github_apps` (or its legacy `required_bots` alias) UNION
 /// the resolved posting identity of each identity-backed `peers` entry.
 /// Identity-free peers are resolved separately into local reviewer evidence.
 ///
 /// `author_harness` is the invoking harness (`claude`/`codex`/`gemini`), resolved
 /// from the ambient env markers by the caller. When it resolves to a model
-/// family, the same-model guard replaces any peer login backed ONLY by
+/// family, the same-model guard (x-c2e7) replaces any peer login backed ONLY by
 /// the author's own model with SAME_MODEL_PEER_SENTINEL, so a codex-authored run
 /// with `peers: [codex]` can no longer review its own work and clear the gate.
 /// `None` (unknown authorship) leaves the login set byte-identical - fail open.
@@ -4424,7 +4424,7 @@ fn resolved_required_bots_for_author(
         }
     }
 
-    // Same-model guard: a peer login backed ONLY by the author's own
+    // Same-model guard (x-c2e7): a peer login backed ONLY by the author's own
     // model cannot honestly satisfy the cross-model gate. Inert unless the
     // author harness resolves to a family (fail open on unknown authorship, so
     // the block above stays byte-identical). The GITHUB_APPS base set is never
@@ -4544,7 +4544,7 @@ const DEFAULT_OPTIONAL_APPS: [&str; 2] = ["gemini-code-assist", "chatgpt-codex-c
 
 /// The OPTIONAL reviewer logins (config.review.optional_apps): honored-if-
 /// present but never required. Their blocking findings hold the gate, but their
-/// absence never does ("honor if present"). Unset resolves to the
+/// absence never does (x-4baa "honor if present"). Unset resolves to the
 /// built-in default; an explicit `[]` is a real opt-out and wins over it.
 fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
     match settings.optional_apps.clone() {
@@ -4614,7 +4614,7 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
 /// Unioned rather than scoped per-login to stay byte-identical to the old flat
 /// `USAGE_LIMIT_MARKERS` const it replaced.
 ///
-/// The asymmetry here INVERTED with and the marker list must be read in
+/// The asymmetry here INVERTED with x-9ab2 and the marker list must be read in
 /// the new direction: an under-match leaves the bot in `missing_bots`, which
 /// blocks (safe, just slow), while an over-match now PARKS the PR at
 /// `DoneAwaitingReview` with no automatic path back, rather than dropping the
@@ -4864,7 +4864,7 @@ fn marker_at_sentence_end(lower: &str, marker: &str) -> bool {
 /// this ONE question through this ONE predicate: independent scans of the
 /// same payload are how a PR ends up `all_required_passed` while coverage
 /// reads `Refused` (or the inverse) and the run wedges between two gates
-/// that never reconcile - the reader-divergence class exists to
+/// that never reconcile - the reader-divergence class x-e601 exists to
 /// delete. Precedence, each rule falling through only when its evidence is
 /// absent or does not count:
 /// 1. a review object whose commit still matches HEAD -> `Reviewed`
@@ -5081,7 +5081,7 @@ fn compute_review_info(
     // else an explicit refusal comment. Computing this with independent
     // scans is how `all_required_passed` reads true while coverage reads
     // `Refused` (or the inverse) and the run wedges between two gates that
-    // never reconcile - the reader-divergence class exists to delete.
+    // never reconcile - the reader-divergence class x-e601 exists to delete.
     // A STALE verdict lands in `stale_bots`, keeping the sha it read: the
     // remedy is a re-read, a different one from "has not reviewed", and the
     // block message must be able to say which. The gate weight is
@@ -5110,7 +5110,7 @@ fn compute_review_info(
     }
 }
 
-// ── review coverage ──────────────────────────────────────────────────
+// ── review coverage (x-0eaf) ──────────────────────────────────────────────────
 //
 // The old gate's `reviewed` boolean (loopcheck.rs `let reviewed =
 // all_required_passed() && unaddressed.is_empty() && reviewers_ok`) was a claim
@@ -5127,12 +5127,12 @@ fn compute_review_info(
 // name "codex": the `chatgpt-codex-connector` GitHub App (posts review objects,
 // can refuse on quota) and the local `codex` CLI (posts none, never rate-limited
 // by the App's quota). They are told apart by `CoverageProducer`, never by the
-// reviewer string (one-word-two-entities disease). A third local lane,
+// reviewer string (x-9ae8's one-word-two-entities disease). A third local lane,
 // claude `/code-review`, shares the `LocalAttestation` axis.
 
 /// The channel a review verdict came from. Two producers that share a name (the
 /// `chatgpt-codex-connector` App vs the local `codex` CLI) are distinguished by
-/// this axis, never by the reviewer string alone.
+/// this axis, never by the reviewer string alone (x-9ae8, x-0eaf).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CoverageProducer {
@@ -5145,7 +5145,7 @@ pub enum CoverageProducer {
     LocalAttestation,
 }
 
-/// One verdict for one reviewer over one producer axis. `reviewed` here
+/// One verdict for one reviewer over one producer axis (x-0eaf). `reviewed` here
 /// is derived from observed evidence, unlike the old boolean of the same name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -5155,7 +5155,7 @@ pub enum CoverageVerdict {
     /// counts toward coverage.
     Reviewed,
     /// Responded, but against a commit whose code no longer matches HEAD
-    ///. Positive evidence that a reviewer READ AN OLDER COMMIT, which
+    /// (x-5b99). Positive evidence that a reviewer READ AN OLDER COMMIT, which
     /// is a different fact from `Absent` (never responded) and needs a
     /// different response: nudge for a re-read, do not wait for a first read.
     /// Recorded rather than dropped so the trail shows what happened; excluded
@@ -5178,7 +5178,7 @@ pub enum CoverageVerdict {
 /// honest). Collapsing an API error into 0 produces false refusals; collapsing
 /// it into a count reproduces the bug.
 ///
-/// NOTE (finding 4): a FAILED GitHub reviews read still never yields
+/// NOTE (x-0eaf finding 4): a FAILED GitHub reviews read still never yields
 /// `Unknown` - `read_pr_info` returns `Err` and the caller block-retries
 /// (fail-safe: the session retries, it does not green or merge). `Unknown` IS
 /// reachable in production through the login_skipped arm: a `no_external`
@@ -5260,7 +5260,7 @@ pub struct ReviewerVerdict {
     /// unknowable (a review object with no commit, a verdict with no review),
     /// which [`review_freshness`] treats as `Stale` - fail closed.
     ///
-    /// This is the field whose absence WAS the defect: the event pinned
+    /// This is the field whose absence WAS the x-5b99 defect: the event pinned
     /// the head at EVAL time, so a bot verdict rendered twelve hours and two
     /// commits earlier serialized as coverage for a commit its author never
     /// saw.
@@ -5303,7 +5303,7 @@ pub struct ReviewerVerdict {
     /// Whether the review behind this verdict PASSED: a local attestation with
     /// `verdict == pass`, or a GitHub review object that approved. The counted
     /// axis (`Reviewed`) says the reviewer READ the head whatever it concluded
-    ///, so the pass subset lives here and reaches the row only as the
+    /// (x-aecc), so the pass subset lives here and reaches the row only as the
     /// aggregate `passed_count` - never serialized per verdict, because no
     /// reader keys on it and the schema stays byte-stable.
     #[serde(skip)]
@@ -5399,7 +5399,7 @@ fn default_true() -> bool {
 }
 
 /// One reviewer's latest attestation, the commit it pinned, and whether that
-/// verdict was `pass` (: a `fail` whose findings are all terminal
+/// verdict was `pass` (x-aecc: a `fail` whose findings are all terminal
 /// answers the head too, so the coverage axis needs the verdict, not just the
 /// pass subset).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5419,7 +5419,7 @@ struct LocalPass {
     is_pass: bool,
     /// The line that produced this entry was a RETRACTION
     /// (`retracts_attester`): it revokes, it never covers - the answered-fail
-    /// arm must not resurrect the pass it killed (review, finding 1).
+    /// arm must not resurrect the pass it killed (x-aecc review, finding 1).
     is_retraction: bool,
     /// Positive fresh-context provenance from the attestation
     /// (`reviewer_context`: fresh | shared | unknown). None on events that
@@ -5464,7 +5464,7 @@ pub struct RangeTiling {
     /// The `config.review.max_rounds` budget `rounds_exhausted` was computed
     /// against, carried so the row is self-contained: `fno do pr status`
     /// prints the gate's pair verbatim instead of re-reading config (one
-    /// producer per number;).
+    /// producer per number; x-027b).
     pub rounds_max: i64,
     /// Whether `rounds_used` reaches the resolved `config.review.max_rounds`.
     /// At the cap the review obligation is satisfied - the merge gate
@@ -5482,7 +5482,7 @@ pub struct RangeTiling {
 /// with the legacy exact-head admission, both verdicts, head-pinned lines
 /// only. ONE parse serves every consumer (disposition blockers, tiling
 /// ranges, the answered-fail predicates); a second hand-copy of this loop is
-/// how the gates drift (review, finding 4).
+/// how the gates drift (x-aecc review, finding 4).
 fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<Value> {
     let mut chain: Vec<Value> = Vec::new();
     for line in events_text.lines() {
@@ -5548,7 +5548,7 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
 }
 
 /// The PR's review-round total, on two evidence axes. The operator's ruling
-/// (2026-08-27) made this a PER-PR TOTAL: `max_rounds` counts rounds
+/// (x-2219, 2026-08-27) made this a PER-PR TOTAL: `max_rounds` counts rounds
 /// across the whole life of the PR, and a `verdict: pass` refunds nothing -
 /// it is one round like any verdict, and its coverage role lives elsewhere
 /// (the pass scan and the classify), never here. The name survives from the
@@ -5805,7 +5805,7 @@ pub fn compute_range_tiling(
 
 /// Distinct `(reviewer, attester_session_id)` pairs' LATEST in-scope
 /// attestation, each with the head it pinned and whether its verdict was
-/// `pass` (the caller decides whether an answered `fail` counts;).
+/// `pass` (the caller decides whether an answered `fail` counts; x-aecc).
 /// Keying on the pair - not the reviewer name alone -
 /// keeps a same-session re-run collapsed (one key, last-writer-wins, retraction
 /// intact) while letting two sessions attesting under the same reviewer label
@@ -5834,7 +5834,7 @@ pub fn compute_range_tiling(
 /// still skipped - absence must not be read as "had files".
 /// Whether a `review_attestation` line carries at least one keyed finding -
 /// the answered-fail evidence predicate, ONE spelling for the reviewers scan
-/// and the coverage promotion (review 2, finding 4: the hand-copied
+/// and the coverage promotion (x-aecc review 2, finding 4: the hand-copied
 /// pair had already been flagged as the drift shape).
 fn line_carries_keyed_findings(val: &Value) -> bool {
     val.pointer("/data/findings")
@@ -6060,7 +6060,7 @@ fn local_latest_attestations(
             .pointer("/data/reviewer_context")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        // a fail that RAISED keyed findings marks its own pair as
+        // x-aecc: a fail that RAISED keyed findings marks its own pair as
         // answer-capable. Per-pair, never chain-global: a bystander's
         // findings-free fail must not ride another reviewer's dispositions
         // (review finding 2), and a retraction line marks nothing. The mark
@@ -6144,7 +6144,7 @@ fn author_is_bot(author: &str, github_app_logins: &[String]) -> bool {
 }
 
 /// One local-attestation verdict from a pair's latest attestation, shared by
-/// the pass arm and answered-fail arm so the two can never drift.
+/// the pass arm and x-aecc's answered-fail arm so the two can never drift.
 /// Counts (`Reviewed`) when the attestation's head is fresh OR a member of a
 /// tiled chain; the authorship label and scope marker come off the entry.
 fn local_attestation_verdict(
@@ -6196,7 +6196,7 @@ fn local_attestation_verdict(
 /// makes coverage `Unknown` UNLESS the local axis carries a head-pinned pass:
 /// positive local evidence survives a bot outage, because the local lane is
 /// never rate-limited by the bot's quota (the PR #214 failure in a new hat,
-/// which this node exists to escape).
+/// which this node exists to escape). (x-0eaf)
 ///
 /// `author_session` is the manifest's `harness_session_id` (the session that ran
 /// `fno do target init` in this worktree). Each local attestation's
@@ -6460,7 +6460,7 @@ pub fn classify_coverage_tiled(
     }
 
     // local_attestation axis: one verdict per distinct latest attestation -
-    // every `pass`, plus (guards below) an ANSWERED `fail` - labeled
+    // every `pass`, plus (x-aecc, guards below) an ANSWERED `fail` - labeled
     // with whether the authoring session emitted it, and pinned to the head the
     // attestation itself recorded rather than to the head at eval time.
     // A verdict also counts when the branch's attestation CHAIN tiles
@@ -6469,7 +6469,7 @@ pub fn classify_coverage_tiled(
     // disciplined fix-and-re-review loop still cannot terminate. Tiling is
     // what makes the later rounds of that loop count.
     //
-    // a latest-`fail` pair whose chain findings are all terminally
+    // x-aecc: a latest-`fail` pair whose chain findings are all terminally
     // dispositioned ANSWERS this head and counts exactly like a pass here.
     // The pass condition is answered-at-this-head, never clean-at-this-head,
     // so declining everything terminates the loop instead of demanding the
@@ -6804,7 +6804,7 @@ fn coverage_event_data_full(
         // classify_attestation_origin labels a present-attester verdict
         // Unmeasured (or Unknown when the attester is absent too), so
         // `self_attested_count()` would read 0 while the truth is unmeasured
-        // - a measured-zero shape (: an aggregate reporting a state
+        // - a measured-zero shape (x-62a1: an aggregate reporting a state
         // its inputs do not support). The field is omitted instead, never 0,
         // so the day a gate enforces it, absence reads unmeasured rather
         // than "no self-attest" and cannot serve as the bypass. After a
@@ -6843,7 +6843,7 @@ fn coverage_event_data_full(
         data["rounds_used"] = serde_json::json!(t.rounds_used);
         // The budget beside the count, so the row is the one producer of the
         // pair: `fno do pr status` reads both from here instead of re-reading
-        // config (: two readers of one number disagreed on PR 1380).
+        // config (x-027b: two readers of one number disagreed on PR 1380).
         data["rounds_max"] = serde_json::json!(t.rounds_max);
         data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
     }
@@ -7114,7 +7114,7 @@ fn min_fire_gap_secs() -> i64 {
 fn read_prior_fires(
     events_path: &Path,
     session_id: &str,
-    current_fp: &str,
+    current_fp: Option<&str>,
     now: DateTime<Utc>,
     min_gap_secs: i64,
 ) -> (u64, u64, Option<String>, i64) {
@@ -7174,9 +7174,16 @@ fn read_prior_fires(
         if last_fp.is_none() && !fp.is_empty() {
             last_fp = Some(fp.to_string());
         }
+        // With no explicit reference, the streak counts against the NEWEST
+        // recorded fingerprint: the journal IS the observation history when
+        // this fire reads no PR state .
+        let reference = match current_fp {
+            Some(fp) => fp,
+            None => last_fp.as_deref().unwrap_or(""),
+        };
         // A CHANGED fingerprint breaks the streak at ANY spacing - progress is
         // never debounced. This check precedes the gap check on purpose.
-        if fp != current_fp {
+        if fp != reference {
             break;
         }
         // Debounce. A fire we cannot place in time is skipped transparently
@@ -7207,6 +7214,37 @@ fn read_prior_fires(
     (total, consecutive, last_fp, streak_window_secs)
 }
 
+/// The newest recorded loop_check row's `pr_state`/`ci` components for this
+/// session: the journal's copy of the last observed world, so a fire that
+/// reads no PR state can still record comparable row fields .
+fn read_last_row_fields(events_path: &Path, session_id: &str) -> (String, String) {
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        return ("none".to_string(), "none".to_string());
+    };
+    for line in content.lines().rev() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("loop_check") {
+            continue;
+        }
+        if val.pointer("/data/session_id").and_then(|v| v.as_str()) != Some(session_id) {
+            continue;
+        }
+        return (
+            val.pointer("/data/pr_state")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string(),
+            val.pointer("/data/ci")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string(),
+        );
+    }
+    ("none".to_string(), "none".to_string())
+}
+
 // ── event emission ────────────────────────────────────────────────────────────
 
 /// Envelope struct for target-stream events. Field order ts,type,source,data is
@@ -7224,7 +7262,7 @@ struct LoopEventEnvelope<'a> {
     data: serde_json::Value,
 }
 
-// pub(crate): the `finalize` verb (step 6) reuses this so its
+// pub(crate): the `finalize` verb (step 6, ab-f8e5f214) reuses this so its
 // `session_finalized` events carry the identical RFC3339 timestamp shape.
 pub(crate) fn now_rfc3339_utc() -> String {
     // Seconds precision, Z suffix, as required by the envelope spec.
@@ -7271,7 +7309,7 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
 
 /// Append to both project and global event logs.
 ///
-/// pub(crate): the `finalize` verb (step 6) emits its
+/// pub(crate): the `finalize` verb (step 6, ab-f8e5f214) emits its
 /// `session_finalized` / `session_finalize_failed` events through the same
 /// writer so they land in both logs with the identical `{ts,type,source,data}`
 /// envelope loop-check uses.
@@ -7480,7 +7518,7 @@ fn check_budget(
 /// non-optional by construction (fu-4faa3d): `parse_args` validates them and
 /// returns `Err` on absence, so downstream code cannot forget to check.
 #[derive(Debug)]
-struct LoopCheckArgs {
+pub(crate) struct LoopCheckArgs {
     state_path: PathBuf,
     transcript_path: PathBuf,
     cwd: PathBuf,
@@ -7508,7 +7546,7 @@ struct LoopCheckArgs {
     author_harness_override: Option<String>,
     /// When set, the full Stop-hook JSON payload is read from stdin so
     /// `last_assistant_message` becomes the primary intent channel
-    ///. Flag-gated so manual terminal invocations never hang
+    /// (ab-223d2dae). Flag-gated so manual terminal invocations never hang
     /// on a stdin read.
     hook_input_stdin: bool,
     /// Which driver's `done()` this fire evaluates. `target` asks whether one
@@ -7526,7 +7564,7 @@ struct LoopCheckArgs {
     read_timeout_ms: Option<u64>,
 }
 
-fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
+pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut state_path: Option<PathBuf> = None;
     let mut transcript_path: Option<PathBuf> = None;
     let mut cwd: Option<PathBuf> = None;
@@ -7601,7 +7639,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             fno_bin = val;
         } else if arg == "--hook-input-stdin" {
             // Bare boolean flag (no value): try_flag_value would consume the
-            // next token as a value, so it is matched directly.
+            // next token as a value, so it is matched directly (ab-223d2dae).
             hook_input_stdin = true;
         }
         i += 1;
@@ -7660,7 +7698,7 @@ pub(crate) fn try_flag_value(
 
 /// The manifest-independent inputs every coverage/review evaluation needs:
 /// event-log paths, repo identity, the merged settings, and the reviewer sets
-/// derived from them. Extracted from `decide()` so the standalone
+/// derived from them. Extracted from `decide()` (x-3a3f) so the standalone
 /// `review-coverage` verb resolves EXACTLY what the stop hook resolves - one
 /// resolver, no second precedence implementation (the N-implementations trap).
 pub(crate) struct ReviewInputs {
@@ -7711,7 +7749,7 @@ pub(crate) fn resolve_review_inputs(
     // Scopes the review_coverage event written into the cross-project global
     // log. The git remote is the one identifier canonical and every one of its
     // worktrees agree on, which is exactly the agreement the coverage reader
-    // needs. It is the FULL `host/owner/repo`, not the last path
+    // needs (x-f43c). It is the FULL `host/owner/repo`, not the last path
     // segment: this key gates auto-merge, so `org-a/widget` aliasing
     // `org-b/widget` would let one repo's coverage clear the other's guard.
     // Empty when there is no remote; the payload then omits `repo` and no
@@ -7724,7 +7762,7 @@ pub(crate) fn resolve_review_inputs(
     // must not silently uncap the session). An explicit --settings path
     // replaces the merge entirely (tests rely on full isolation).
     //
-    // (c): a genuinely unparseable settings.yaml fails CLOSED (the login
+    // x-81d9 (c): a genuinely unparseable settings.yaml fails CLOSED (the login
     // gate is pinned unsatisfiable) and emits loop_check_settings_unparseable,
     // rather than silently zeroing the required bots and shipping unreviewed.
     let parse_or_emit = |content: &str, path: &Path| -> Settings {
@@ -7838,12 +7876,12 @@ pub(crate) fn resolve_review_inputs(
 
     // Resolve the must-have-reviewed list once (code default when unset). The
     // author harness (from the ambient env markers, shared with claims.rs) drives
-    // the same-model peer guard; None leaves the set unchanged.
+    // the same-model peer guard (x-c2e7); None leaves the set unchanged.
     // `--author-harness none` pins the no-harness case, which an absent flag
     // cannot express, and an absent flag keeps reading the ambient markers.
     // The pin is recorded separately: a PINNED none is the hermetic opt-out,
     // while an UNRESOLVED None (absent or ambiguous markers) floors the
-    // self-review reviewer instead of dropping it.
+    // self-review reviewer instead of dropping it (x-129b).
     let author_harness_pinned_none = matches!(author_harness_override, Some("none") | Some(""));
     let author_harness = match author_harness_override {
         Some("none") | Some("") => None,
@@ -7897,6 +7935,36 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             return (2, out.to_string());
         }
     };
+    // ab-223d2dae (A): the shim feeds the full Stop-hook JSON via stdin so
+    // the stopping turn's final text (`last_assistant_message`, recomputed
+    // per fire) is readable without racing the transcript flush. Read or
+    // parse failures degrade to None (transcript fallback), never an error -
+    // but a genuine I/O error is named on stderr so a sustained stdin failure
+    // is separable from an ordinary transcript-channel fire.
+    let hook_input: Option<String> = if parsed.hook_input_stdin {
+        match std::io::read_to_string(std::io::stdin()) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!(
+                    "loop-check: failed to read hook input from stdin: {e}; falling back to transcript scan"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    decide_with_payload(&parsed, hook_input.as_deref())
+}
+
+/// The decision core with the Stop payload as a parameter :
+/// the native `hook stop` handler calls this in process with the payload it
+/// already read, and tests replay recorded payloads, so the stdin handoff is
+/// no longer the only way in.
+pub(crate) fn decide_with_payload(
+    parsed: &LoopCheckArgs,
+    hook_input: Option<&str>,
+) -> (i32, String) {
     // Publish the fire bound and the king drain reserve before any read.
     let reserve_ms = if parsed.driver == "king" {
         stopgate_drain_reserve_ms()
@@ -7913,33 +7981,17 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     }
     // The king uses a separate manifest and decision path.
     if parsed.driver == "king" {
-        return king_decide(&parsed);
+        return king_decide::king_decide(&parsed);
     }
 
     let state_path = parsed.state_path.clone();
     let transcript_path = parsed.transcript_path.clone();
     let cwd = parsed.cwd.clone();
 
-    // (A): the shim feeds the full Stop-hook JSON via stdin so
-    // the stopping turn's final text (`last_assistant_message`, recomputed
-    // per fire) is readable without racing the transcript flush. Read or
-    // parse failures degrade to None (transcript fallback), never an error -
-    // but a genuine I/O error is named on stderr (-> the shim's
-    // loop-check.stderr.log) so a sustained stdin failure is separable from
-    // an ordinary transcript-channel fire in the forensic trail.
-    let last_assistant_message: Option<String> = if parsed.hook_input_stdin {
-        match std::io::read_to_string(std::io::stdin()) {
-            Ok(s) => extract_last_assistant_message(&s),
-            Err(e) => {
-                eprintln!(
-                    "loop-check: failed to read hook input from stdin: {e}; falling back to transcript scan"
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+    // ab-223d2dae (A): the payload text arrives as a parameter (see
+    // decide_with_payload); the message read degrades to the transcript scan.
+    let last_assistant_message: Option<String> =
+        hook_input.and_then(extract_last_assistant_message);
 
     // Parse manifest
     let manifest_content = match std::fs::read_to_string(&state_path) {
@@ -7949,14 +8001,16 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 "loop-check: cannot read state file {}: {e}",
                 state_path.display()
             );
-            let out = allow_output(
-                "allow",
-                None,
-                "corrupt/missing manifest; allowing exit",
+            return (
                 0,
-                None,
+                allow_output(
+                    "allow",
+                    None,
+                    "corrupt/missing manifest; allowing exit",
+                    0,
+                    None,
+                ),
             );
-            return (0, out);
         }
     };
 
@@ -7975,7 +8029,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         }
     };
 
-    // Lease renewal: keep this session's node claim fresh on every
+    // Lease renewal (x-ba4b): keep this session's node claim fresh on every
     // stop, so a worker whose supervisor pid died mid-run (and now runs under a
     // new pid) never loses its claim to TTL expiry. Best-effort and non-fatal:
     // renew only bumps expires_at when the on-disk holder still matches, so it
@@ -8000,7 +8054,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     }
 
     // Resolve paths + settings + reviewer sets through the ONE shared resolver
-    // the standalone review-coverage verb resolves exactly these,
+    // (x-3a3f): the standalone review-coverage verb resolves exactly these,
     // from the same overlay, so there is no second precedence implementation.
     let inputs = resolve_review_inputs(
         &cwd,
@@ -8040,7 +8094,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         emit_to_both(&project_events, &global_events, event_type, data);
     };
 
-    // <help> distress: parsed from the same stopping message the
+    // <help> distress (x-77a0): parsed from the same stopping message the
     // intent read uses, ahead of every branch below (including the advisory
     // no-gh mode), because it is a side channel that must fire once per stop
     // regardless of how the stop itself is decided. The node id is resolved
@@ -8183,497 +8237,48 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         );
         return (0, allow_output("block", None, &reason, 0, None));
     }
-    // ── Check gh binary availability ──────────────────────────────────────────
-    // Only a NotFound spawn reads as absence. Every other spawn failure is
-    // SpawnTrouble: gh exists but could not be spawned right now, which is
-    // not a fact about the world and must not degrade the session. The probe
-    // outcome is emitted as an event row so what it concluded is observable.
-    let gh_bin = &parsed.gh_bin;
-    let gh_probe = probe_gh_bin(gh_bin.as_ref(), &cwd);
-    // Type is deliberately NOT "loop_check": read_prior_fires treats every
-    // loop_check row for this session as a fire observation, and a probe row
-    // with no fingerprint would break the no-progress streak on each fire.
-    // The probe is its own observable, not a fire decision.
-    emit(
-        "gh_probe",
-        serde_json::json!({
-            "session_id": session_id,
-            "outcome": gh_probe.outcome_str(),
-            "detail": gh_probe.detail_str(),
-        }),
-    );
-    let gh_available = !matches!(gh_probe, GhProbeOutcome::Absent);
-
-    if !gh_available
-        && matches!(
-            generic,
-            crate::delivery_completion::DeliveryCompletion::Inactive
-        )
-    {
-        if !manifest.attended && !manifest.advisory {
-            // Unattended + no advisory + no gh -> Interrupted
-            emit(
-                "termination",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "reason": "Interrupted",
-                    "message": "gh binary not found; unattended sessions require gh"
-                }),
-            );
-            return (
-                0,
-                allow_output(
-                    "allow",
-                    Some(TerminationReason::Interrupted),
-                    "gh binary not found; unattended sessions require gh",
-                    0,
-                    None,
-                ),
-            );
-        }
-        // Attended or declared advisory -> advisory mode (promise + budget only).
-        // Budget was already checked above; honor intent here so a promise can
-        // terminate an advisory session (AC5-ERR) - gh reads are impossible, so
-        // the promise alone is the completion signal.
-        emit(
-            "loop_advisory_mode",
-            serde_json::json!({
-                "session_id": session_id,
-                "attended": manifest.attended
-            }),
-        );
-        let (advisory_intent, _advisory_intent_source) =
-            detect_intent(last_assistant_message.as_deref(), &transcript_path);
-        if let Intent::Aborted { ref reason } = advisory_intent {
-            emit(
-                "termination",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "reason": "Aborted",
-                    "message": reason
-                }),
-            );
-            return (
-                0,
-                allow_output(
-                    "allow",
-                    Some(TerminationReason::Aborted),
-                    "aborted tag detected (advisory mode)",
-                    0,
-                    None,
-                ),
-            );
-        }
-        if advisory_intent == Intent::Promise {
-            emit(
-                "termination",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "reason": "DoneAdvisory",
-                    "message": "promise accepted in advisory mode (gh unavailable)"
-                }),
-            );
-            return (
-                0,
-                allow_output(
-                    "allow",
-                    Some(TerminationReason::DoneAdvisory),
-                    "promise accepted in advisory mode (gh unavailable)",
-                    0,
-                    None,
-                ),
-            );
-        }
-        return (
-            0,
-            allow_output(
-                "block",
-                None,
-                "gh binary not found; running in advisory mode (promise + budget only)",
-                0,
-                None,
-            ),
-        );
-    }
-
     // ── Step 4: intent + backstop ─────────────────────────────────────────────
     let (intent, intent_source) =
         detect_intent(last_assistant_message.as_deref(), &transcript_path);
     let git_bin = &parsed.git_bin;
     let head_sha = git_head_sha(git_bin, &cwd);
-
-    // ── reserve a GraphQL floor for the merge guard ────────────────────────
-    // The GraphQL quota is per-USER and shared by every session on the machine;
-    // an idle fire's fingerprint reads are the unbounded low-value consumer that
-    // starves the bounded high-value one (the promise/merge evaluation). Below
-    // the floor, a fire carrying no promise intent STANDS DOWN: it spends no
-    // GraphQL at all rather than politely spending less. A promise-intent fire
-    // always proceeds - the floor belongs to it. The probe itself is REST and
-    // primary-exempt; a failed probe (None) changes nothing.
-    //
-    // The fleet's ONE GitHub request budget answers before anything here
-    // spends: a live refusal backoff, or a 60s window already at its point
-    // cap, skips the probe entirely. The measured 2026-09-13 refusal window
-    // kept 160 stand-downs alive by probing through them; a stand-down under
-    // the ledger now spends ZERO GitHub requests. The ledger
-    // (`fno-agents fleet-incident gh-budget status`) is also the fleet-wide
-    // refusal memory:
-    // every gh call this machine admits is stamped there, and a GitHub 403
-    // any caller records opens the same fleet-wide backoff - the secondary
-    // limit is per-USER, so one session's refusal must stand every member
-    // down, not just the one that hit it.
+    let gh_bin = &parsed.gh_bin;
+    // The fleet's ONE GitHub request budget ledger: the stand-down below and
+    // the failed-read refusal recording both key off it.
     let budget_ledger = parsed
         .gh_budget_ledger
         .clone()
         .unwrap_or_else(crate::gh_budget::ledger_path);
-    let budget = crate::gh_budget::snapshot(&budget_ledger, now.timestamp_millis());
-    let budget_cause: Option<&'static str> = if budget.backoff_remaining_s > 0 {
-        Some("backoff")
-    } else if budget.points_60s >= budget.cap as i64 {
-        Some("budget")
-    } else {
-        None
-    };
-    let quota_probe = if budget_cause.is_none() {
-        probe_graphql_quota(gh_bin, &cwd)
-    } else {
-        None
-    };
-    let secondary_refusal = budget_cause.is_some();
-    let below_primary_floor = quota_probe
-        .as_ref()
-        .map(|q| q.remaining < GRAPHQL_FLOOR)
-        .unwrap_or(false);
-    if below_primary_floor || secondary_refusal {
-        // Aborted is exempt too: honoring a cancel spends no GraphQL (the
-        // Aborted terminal in done() reads nothing), so blocking it here
-        // would trap a cancelled session behind the floor for a whole reset
-        // window - the operator's cancel outranks the reserve.
-        if !matches!(intent, Intent::Promise | Intent::Aborted { .. }) {
-            let remaining_field = quota_probe.as_ref().map(|q| q.remaining);
-            let remaining_display = remaining_field
-                .map(|r| r.to_string())
-                .unwrap_or_else(|| "unknown (probe failed)".to_string());
-            let cause: String = if secondary_refusal {
-                format!(
-                    "the fleet GitHub request budget is holding calls ({}: {}/{} points in 60s, \
-                     backoff {}s left) - `fno-agents fleet-incident gh-budget status` reads the \
-                     ledger",
-                    budget_cause.unwrap_or("budget"),
-                    budget.points_60s,
-                    budget.cap,
-                    budget.backoff_remaining_s
-                )
-            } else {
-                "GraphQL primary quota".to_string()
-            };
-            // Lease-only exemption for a WATCHING fire (review finding on the
-            // floor): the watch-idle branch below is unreachable from here, so
-            // without this a quota window converts every watching fire into a
-            // "continue working" block - killing watch-idle exactly when quota
-            // is low - and the claim lease never renews. The wait class itself
-            // CANNOT be verified (that needs the reads we are refusing to
-            // spend), so this idles on the tag + lease alone, only on a
-            // harness that self-wakes, and the message says the state was not
-            // verified. The watcher's exit re-evaluates with fresh quota.
-            let mut lease_note = String::new();
-            if let Intent::Watching {
-                ref reason,
-                ref timeout,
-                ref pr,
-            } = intent
-            {
-                if harness_can_idle(
-                    author_harness.as_deref(),
-                    std::env::var("FNO_DRIVER_LIB").is_ok(),
-                ) {
-                    let window_ms = watch_window_ms(timeout.as_deref());
-                    let claim = watch_lease::claim_pair(&manifest_content);
-                    let renew_outcome = claim
-                        .as_ref()
-                        .map(|(key, holder)| crate::claims::renew(key, holder, window_ms, None));
-                    let renewed = matches!(renew_outcome.as_ref(), Some(Ok(true)));
-                    lease_note =
-                        watch_lease::permanent_lease_note(claim.as_ref(), renew_outcome.as_ref());
-                    if renewed {
-                        // The tag's own `pr=`/`reason=` attributes are the only
-                        // source here (the stand-down verifies nothing), so
-                        // `blocker` is only as trustworthy as the agent's tag:
-                        // pass the declared reason through when it is one of
-                        // the two real classes, else the honest "unknown"
-                        // (schema-valid) rather than guessing.
-                        let blocker = match reason.as_str() {
-                            "ci" => "ci",
-                            "review" => "review",
-                            _ => "unknown",
-                        };
-                        emit(
-                            "loop_check_watch_idle",
-                            serde_json::json!({
-                                "session_id": session_id,
-                                "pr": pr.as_deref().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
-                                "blocker": blocker,
-                                "declared_timeout": timeout.clone().unwrap_or_default(),
-                                "reason": reason,
-                                "lease_ms": window_ms,
-                                "stand_down": true,
-                                "graphql_remaining": remaining_field,
-                                "secondary_refusal": secondary_refusal,
-                                "budget_cause": budget_cause
-                            }),
-                        );
-                        return (
-                            0,
-                            allow_output(
-                                "allow",
-                                None,
-                                &format!(
-                                    "watching under GraphQL stand-down ({cause}, remaining \
-                                     {remaining_display}): idling until the watcher fires. \
-                                     This fire verified NO PR state - the lease is renewed \
-                                     for the window and the watcher's exit re-evaluates."
-                                ),
-                                0,
-                                None,
-                            ),
-                        );
-                    }
-                    // renewal failed -> never idle without a lease: fall
-                    // through to the stand-down block below.
-                }
-            }
-            // A dedicated type, not "loop_check": this fire verified nothing
-            // (that is the point of standing down), so it has no real
-            // fingerprint. Emitting it AS a loop_check gave read_prior_fires an
-            // empty-string fingerprint that never matches current_fp, breaking
-            // the reverse-scan the instant it hit this row - one stand-down
-            // fire silently truncated the whole consecutive-unchanged streak
-            // for the session. loop_check_gh_error/_config are already
-            // siblings of loop_check for exactly this reason: an event whose
-            // fields do not fit the fingerprint contract does not overload it.
-            emit(
-                "loop_check_graphql_standdown",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "decision": "block",
-                    "intent": match &intent {
-                        Intent::Promise => "promise",
-                        Intent::Aborted { .. } => "aborted",
-                        Intent::Watching { .. } => "watching",
-                        Intent::None => "none",
-                    },
-                    "intent_source": intent_source,
-                    "standing_down": true,
-                    "graphql_remaining": remaining_field,
-                    "graphql_floor": GRAPHQL_FLOOR,
-                    "secondary_refusal": secondary_refusal,
-                    "budget_cause": budget_cause
-                }),
-            );
-            return (
-                0,
-                allow_output(
-                    "block",
-                    None,
-                    &format!(
-                        "standing down: {cause} (remaining {remaining_display}, floor \
-                         {GRAPHQL_FLOOR}), so this fire spends no GraphQL - `gh pr view` / \
-                         `gh pr checks` are SKIPPED, not retried. `fno do pr status <n>` still \
-                         answers its CI verdict on the REST budget (a cache hit skips the \
-                         review-thread read too, and REST shares the same secondary limit \
-                         as GraphQL, so porting a read to REST alone does not escape a \
-                         burst refusal). The next fire re-probes; a promise intent always \
-                         proceeds.{lease_note}"
-                    ),
-                    0,
-                    None,
-                ),
-            );
-        }
-    }
 
-    // Compute fingerprint from a quick PR state read (or "none" if no PR)
-    // We do a lightweight fingerprint computation even when intent is None,
-    // to check backstop.
+    // The fire history is JOURNAL truth now : one local read
+    // answers how many fires this session served, how many trailing fires
+    // shared the newest recorded fingerprint, and what that fingerprint (plus
+    // its pr_state/ci components) was. No PR read happens to decide routing.
     let backstop_n: u64 = if manifest.attended { 5 } else { 3 };
-
-    // Read PR info for fingerprint.
-    // On a hard gh failure (spawn error, non-zero exit, unparseable JSON), carry
-    // forward the most recent prior fingerprint so the consecutive-unchanged streak
-    // continues instead of resetting to "none|none|none" which would mask NoProgress.
-    // fp_read_failed is recorded in the event payload for observability.
-    let fp_read_result = bounded_read(
-        gh_bin.as_ref(),
-        &["pr", "view", "--json", "state,number,headRefName"],
-        &cwd,
-        "fingerprint_pr_view",
-        stopgate_read_timeout(),
-    );
-    let mut fp_timeout: Option<GhReadError> = fp_read_result
-        .as_ref()
-        .err()
-        .and_then(|e| (e.kind == ReadErrorKind::TimedOut).then(|| e.clone()));
-    let (fp_pr_state, fp_ci, fp_review_ts, fp_read_failed) = match fp_read_result {
-        Ok(o) if o.status.success() => {
-            let pv: Value = serde_json::from_slice(&o.stdout).unwrap_or(Value::Null);
-            let state =
-                PrState::from_gh_str(pv.get("state").and_then(|v| v.as_str()).unwrap_or("none"));
-
-            // Get CI
-            let ci = match bounded_read(
-                gh_bin.as_ref(),
-                &[
-                    "pr",
-                    "checks",
-                    "--json",
-                    "name,state,bucket,startedAt,workflow",
-                ],
-                &cwd,
-                "fingerprint_pr_checks",
-                stopgate_read_timeout(),
-            ) {
-                Ok(co) if co.status.success() => {
-                    let cv: Value = serde_json::from_slice(&co.stdout).unwrap_or(Value::Null);
-                    // The same truth table as the main CI read (one helper,
-                    // not a second spelling of dedup-plus-filter): the
-                    // fingerprint's CI arm must describe the latest run per
-                    // name, not a superseded one a newer push replaced, and
-                    // must agree with the main read about a coverage-only
-                    // rollup.
-                    classify_checks_payload(&cv)
-                        .map(|(c, _, _)| c)
-                        .unwrap_or(CiConclusion::None)
-                }
-                Err(e) if e.kind == ReadErrorKind::TimedOut => {
-                    fp_timeout = fp_timeout.or_else(|| Some(e.clone()));
-                    CiConclusion::None
-                }
-                _ => CiConclusion::None,
-            };
-
-            // Get review ts (skipped for no_external sessions and declared
-            // no-review repos, matching the done() Read 3/4 skip)
-            let rv_ts = if !manifest.no_external && !required_bots.is_empty() {
-                match bounded_read(
-                    gh_bin.as_ref(),
-                    &["pr", "view", "--json", "reviews,comments"],
-                    &cwd,
-                    "fingerprint_pr_reviews",
-                    stopgate_read_timeout(),
-                ) {
-                    Ok(ro) if ro.status.success() => {
-                        let rv: Value = serde_json::from_slice(&ro.stdout).unwrap_or(Value::Null);
-                        review_activity_ts(&rv)
-                    }
-                    Err(e) if e.kind == ReadErrorKind::TimedOut => {
-                        fp_timeout = fp_timeout.or_else(|| Some(e.clone()));
-                        "none".to_string()
-                    }
-                    _ => "none".to_string(),
-                }
-            } else {
-                "none".to_string()
-            };
-
-            (state, ci, rv_ts, false)
-        }
-        // No PR yet: a healthy fire with a "none" fingerprint (world-state,
-        // not an outage) - the backstop keeps ticking for a session that
-        // never ships a PR.
-        Ok(o) if is_no_pr_stderr(&o.stderr_tail) => {
-            (PrState::None, CiConclusion::None, "none".to_string(), false)
-        }
-        // Hard gh failure (spawn error, non-zero exit, or any remaining
-        // non-success shape): mark as failed; we will carry forward the prior
-        // fingerprint after reading the events log. A TIMEOUT additionally
-        // surfaces below as a named, event-emitted block reason rather than a
-        // silent carry-forward.
-        _ => (PrState::None, CiConclusion::None, "none".to_string(), true),
-    };
-
-    // A killed fingerprint read blocks this fire with its own name and bound,
-    // exactly like a hard done() read error. The NoProgress backstop stays
-    // safe because the loop_check row this path emits carries
-    // fp_read_failed=true, which read_prior_fires skips - the streak survives
-    // without the carry-forward logic below ever running (the return exits
-    // before it), so this comment must not point a maintainer at "logic
-    // below" as the mechanism.
-    if let Some(err) = &fp_timeout {
-        let quota = probe_graphql_quota(gh_bin, &cwd);
-        emit(
-            "loop_check_gh_error",
-            serde_json::json!({
-                "session_id": session_id,
-                "read": err.read,
-                "outcome": err.outcome(),
-                "stderr_tail": err.stderr_tail,
-                "elapsed_s": err.elapsed.map(|d| d.as_secs_f64()),
-                "graphql_remaining": quota.as_ref().map(|q| q.remaining),
-                "graphql_reset": quota.as_ref().map(|q| q.reset_epoch)
-            }),
-        );
-        emit(
-            "loop_check",
-            serde_json::json!({
-                "session_id": session_id,
-                "fingerprint": Value::Null,
-                "decision": "block",
-                "pr_state": "unknown",
-                "ci": "unknown",
-                "reviewed": false,
-                "fp_read_failed": true
-            }),
-        );
-        return (0, allow_output("block", None, &err.render(), 0, None));
-    }
-
-    // Build a tentative fingerprint from this fire's gh reads.
-    let tentative_fp = generic.delivery_fingerprint(make_fingerprint(
-        &head_sha,
-        fp_pr_state.as_str(),
-        &fp_ci.render(),
-        &fp_review_ts,
-    ));
-
-    // Read prior fires. We pass the tentative_fp for streak counting; if the gh
-    // read failed we'll override the fingerprint with the carried-forward value below.
     let min_fire_gap = min_fire_gap_secs();
-    let (prior_fires, consecutive_unchanged, last_recorded_fp, streak_window) = read_prior_fires(
-        &project_events,
-        &session_id,
-        &tentative_fp,
-        now,
-        min_fire_gap,
-    );
-
-    // If the pre-read gh call hard-failed, carry forward the prior fingerprint
-    // (so the streak continues) rather than resetting to "none|none|none".
-    let fingerprint = if fp_read_failed && !generic.is_active() {
-        last_recorded_fp.unwrap_or(tentative_fp)
-    } else {
-        tentative_fp
-    };
-
-    // Recount consecutive streak with the (possibly carried-forward) fingerprint.
-    // We already counted against the tentative_fp; if different, recount from the log.
-    let (consecutive_unchanged, streak_window) = if fp_read_failed && !generic.is_active() {
-        // Re-read the streak against the carried-forward fingerprint.
-        let (_, streak, _, window) = read_prior_fires(
-            &project_events,
-            &session_id,
-            &fingerprint,
-            now,
-            min_fire_gap,
-        );
-        (streak, window)
-    } else {
-        (consecutive_unchanged, streak_window)
-    };
-
+    let (prior_fires, journal_streak, last_recorded_fp, streak_window) =
+        read_prior_fires(&project_events, &session_id, None, now, min_fire_gap);
+    let (last_pr_state, last_ci) = read_last_row_fields(&project_events, &session_id);
+    // Fires that do not run done() inherit the last recorded fingerprint (a
+    // first fire with no journal starts at the no-PR basis), so their row
+    // stays comparable with its neighbors and only a done() read can move it.
+    let fingerprint = last_recorded_fp.clone().unwrap_or_else(|| {
+        generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"))
+    });
     let this_fire = prior_fires + 1;
+    // consecutive_unchanged counts prior identical fires; adding this fire.
+    let consecutive_after = journal_streak + 1;
+    let backstop_tripped = consecutive_after >= backstop_n;
+    let terminal = |dec: &str, r, m: &str| {
+        (
+            0,
+            allow_output(dec, r, m, this_fire, Some(fingerprint.clone())),
+        )
+    };
+
     // The harness caps consecutive Stop-hook blocks at
     // CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (Claude Code default 9) and force-ends the
-    // turn once it binds. Record the resolved cap on the first fire of
+    // turn once it binds (x-1680). Record the resolved cap on the first fire of
     // a session so a run ended by the harness override (last events are blocks
     // whose running consecutive count meets the cap, then silence) is
     // distinguishable from one ended by budget (a terminal budget decision).
@@ -8691,18 +8296,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             }),
         );
     }
-    // consecutive_unchanged counts prior identical fires; adding this fire.
-    // US4: a gh-errored fire is itself transparent - the count holds at its
-    // prior value instead of advancing (AC4-HP).
-    let consecutive_after = if fp_read_failed {
-        consecutive_unchanged
-    } else {
-        consecutive_unchanged + 1
-    };
 
-    let backstop_tripped = consecutive_after >= backstop_n;
-
-    // D: probe done() after MUTE_PROBE_N unchanged mute fires
+    // D (ab-223d2dae): probe done() after MUTE_PROBE_N unchanged mute fires
     // instead of waiting out the full backstop streak. A done-but-mute
     // session (all reads pass, no promise as final text) now resolves as a
     // late DonePRGreen in ~2 fires instead of 5/3 - the post-wedge events
@@ -8711,6 +8306,111 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // so the grilled-9 backstop semantics are intact; a probed fire whose
     // done() fails simply blocks with the named reason.
     const MUTE_PROBE_N: u64 = 2;
+
+    // ── Watching: the lease-only idle is now the ONLY watching path, and it
+    // runs ahead of every read . A <watching> tag on a
+    // harness that can self-wake idles on the tag plus a renewed claim lease:
+    // this fire reads NO PR state - the watcher's exit re-evaluates with
+    // fresh evidence. A harness that cannot idle, or a lease that will not
+    // renew, blocks locally with the named refusal - never a dead watch.
+    if let Intent::Watching {
+        ref reason,
+        ref timeout,
+        ref pr,
+    } = intent
+    {
+        let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
+        let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
+        let window_ms = watch_window_ms(timeout.as_deref());
+        let claim = watch_lease::claim_pair(&manifest_content);
+        let renew_outcome = claim
+            .as_ref()
+            .map(|(key, holder)| crate::claims::renew(key, holder, window_ms, None));
+        let renewed = matches!(renew_outcome.as_ref(), Some(Ok(true)));
+        if can_idle && renewed {
+            // The tag's own `pr=`/`reason=` attributes are the only source
+            // here (the idle verifies nothing), so `blocker` is only as
+            // trustworthy as the agent's tag: pass the declared reason
+            // through when it is one of the two real classes, else the
+            // honest "unknown".
+            let blocker = match reason.as_str() {
+                "ci" => "ci",
+                "review" => "review",
+                _ => "unknown",
+            };
+            emit(
+                "loop_check_watch_idle",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "pr": pr.as_deref().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0),
+                    "blocker": blocker,
+                    "declared_timeout": timeout.clone().unwrap_or_default(),
+                    "reason": reason,
+                    "lease_ms": window_ms
+                }),
+            );
+            emit(
+                "loop_check",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "fingerprint": fingerprint,
+                    "fires": this_fire,
+                    "consecutive_unchanged": consecutive_after,
+                    "streak_window_secs": streak_window,
+                    "decision": "allow",
+                    "intent": "watching",
+                    "intent_source": intent_source,
+                    "pr_state": last_pr_state,
+                    "ci": last_ci,
+                    "reviewed": false,
+                    "fp_read_failed": false
+                }),
+            );
+            return terminal(
+                "allow",
+                None,
+                "watching: idling until the watcher fires; this fire read no PR state",
+            );
+        }
+        // Not idlable, or the lease declined: block locally with the named
+        // refusal. No GitHub read decides the question.
+        let refusal = if !can_idle {
+            watch_lease::watching_harness_refusal(author_harness.as_deref(), is_loop_run_child)
+        } else {
+            let lease_cause = watch_lease::declined_cause(claim.as_ref(), renew_outcome.as_ref());
+            watch_lease::idle_refusal(
+                can_idle,
+                author_harness.as_deref(),
+                is_loop_run_child,
+                true,
+                0,
+                claim.is_some(),
+                lease_cause.as_ref(),
+            )
+            .reason
+        };
+        emit(
+            "loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "fingerprint": fingerprint,
+                "fires": this_fire,
+                "consecutive_unchanged": consecutive_after,
+                "streak_window_secs": streak_window,
+                "decision": "block",
+                "intent": "watching",
+                "intent_source": intent_source,
+                "pr_state": last_pr_state,
+                "ci": last_ci,
+                "reviewed": false,
+                "fp_read_failed": false
+            }),
+        );
+        return (
+            0,
+            allow_output("block", None, &refusal, this_fire, Some(fingerprint)),
+        );
+    }
 
     // node_id is resolved once above, beside the <help> distress emit.
     let (open_findings, malformed_findings) = match node_id.as_deref() {
@@ -8728,6 +8428,29 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         );
     }
 
+    // The two telemetry rows every path records, bound once: the fire's
+    // loop_check row carries the same nine base fields everywhere, merged
+    // with the fields the deciding arm adds.
+    let term_row = |reason: &str, message: &str| {
+        emit(
+            "termination",
+            serde_json::json!({"session_id": session_id, "reason": reason, "message": message}),
+        );
+    };
+    let fire_row = |dec: &str, name: &str, fp_bad: bool, extra: serde_json::Value| {
+        let mut row = serde_json::json!({
+            "session_id": session_id, "fingerprint": fingerprint,
+            "fires": this_fire, "consecutive_unchanged": consecutive_after,
+            "streak_window_secs": streak_window, "decision": dec,
+            "intent": name, "intent_source": intent_source,
+            "fp_read_failed": fp_bad
+        });
+        if let (Some(row), serde_json::Value::Object(extra)) = (row.as_object_mut(), extra) {
+            row.extend(extra);
+        }
+        emit("loop_check", row);
+    };
+
     // Run done() on active generic delivery, intent, backstop, or mute-probe; malformed findings cannot block.
     if generic.is_active()
         || intent != Intent::None
@@ -8736,44 +8459,89 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     {
         // Handle aborted first
         if let Intent::Aborted { ref reason } = intent {
-            emit(
-                "termination",
+            term_row("Aborted", reason);
+            fire_row(
+                "allow",
+                "aborted",
+                false,
                 serde_json::json!({
-                    "session_id": session_id,
-                    "reason": "Aborted",
-                    "message": reason
+                    "pr_state": last_pr_state,
+                    "ci": last_ci,
+                    "reviewed": false
                 }),
             );
-            emit(
-                "loop_check",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "fingerprint": fingerprint,
-                    "fires": this_fire,
-                    "consecutive_unchanged": consecutive_after,
-                    "streak_window_secs": streak_window,
-                    "decision": "allow",
-                    "intent": "aborted",
-                    "intent_source": intent_source,
-                    "pr_state": fp_pr_state.as_str(),
-                    "ci": fp_ci.render(),
-                    "reviewed": false,
-                    "fp_read_failed": fp_read_failed
-                }),
-            );
-            return (
-                0,
-                allow_output(
-                    "allow",
-                    Some(TerminationReason::Aborted),
-                    "aborted tag detected",
-                    this_fire,
-                    Some(fingerprint),
-                ),
+            return terminal(
+                "allow",
+                Some(TerminationReason::Aborted),
+                "aborted tag detected",
             );
         }
 
-        // Operator review-finding gate (Locked Decision 3): an open
+        // ── gh availability + advisory mode, for fires that would read gh ─────
+        // Moved inside the done gate  a no-intent fire beneath
+        // the mute probe blocks locally and execs no gh. Only a NotFound
+        // spawn reads as absence; every other spawn failure is SpawnTrouble
+        // and must not degrade the session. The probe outcome rides its own
+        // event row, never a loop_check row (a probe row with no fingerprint
+        // would break the no-progress streak read above).
+        let gh_probe = probe_gh_bin(gh_bin.as_ref(), &cwd);
+        emit(
+            "gh_probe",
+            serde_json::json!({
+                "session_id": session_id,
+                "outcome": gh_probe.outcome_str(),
+                "detail": gh_probe.detail_str(),
+            }),
+        );
+        let gh_available = !matches!(gh_probe, GhProbeOutcome::Absent);
+        if !gh_available
+            && matches!(
+                generic,
+                crate::delivery_completion::DeliveryCompletion::Inactive
+            )
+        {
+            if !manifest.attended && !manifest.advisory {
+                // Unattended + no advisory + no gh -> Interrupted
+                term_row(
+                    "Interrupted",
+                    "gh binary not found; unattended sessions require gh",
+                );
+                return terminal(
+                    "allow",
+                    Some(TerminationReason::Interrupted),
+                    "gh binary not found; unattended sessions require gh",
+                );
+            }
+            // Attended or declared advisory -> advisory mode (promise + budget
+            // only). Budget was checked above; honor intent here so a promise
+            // can terminate an advisory session (AC5-ERR) - gh reads are
+            // impossible, so the promise alone is the completion signal.
+            emit(
+                "loop_advisory_mode",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "attended": manifest.attended
+                }),
+            );
+            if intent == Intent::Promise {
+                term_row(
+                    "DoneAdvisory",
+                    "promise accepted in advisory mode (gh unavailable)",
+                );
+                return terminal(
+                    "allow",
+                    Some(TerminationReason::DoneAdvisory),
+                    "promise accepted in advisory mode (gh unavailable)",
+                );
+            }
+            return terminal(
+                "block",
+                None,
+                "gh binary not found; running in advisory mode (promise + budget only)",
+            );
+        }
+
+        // Operator review-finding gate (x-f8d4, Locked Decision 3): an open
         // review_finding for this node HOLDS every success terminal-allow
         // (DonePlanned / DoneAdvisory / DoneDelivery / DoneBatched / DonePRGreen) until an
         // explicit resolve - a promise cannot self-authorize past an operator's
@@ -8788,23 +8556,20 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             && (intent == Intent::Promise || consecutive_after >= MUTE_PROBE_N)
         {
             let reason = build_findings_block_reason(&open_findings, malformed_findings);
-            emit(
-                "loop_check",
+            fire_row(
+                "block",
+                if intent == Intent::Promise {
+                    "promise"
+                } else {
+                    "backstop"
+                },
+                false,
                 serde_json::json!({
-                    "session_id": session_id,
-                    "fingerprint": fingerprint,
-                    "fires": this_fire,
-                    "consecutive_unchanged": consecutive_after,
-                    "streak_window_secs": streak_window,
-                    "decision": "block",
-                    "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
-                    "intent_source": intent_source,
-                    "pr_state": fp_pr_state.as_str(),
-                    "ci": fp_ci.render(),
+                    "pr_state": last_pr_state,
+                    "ci": last_ci,
                     "reviewed": false,
                     "open_findings": open_findings.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
-                    "malformed_findings": malformed_findings,
-                    "fp_read_failed": fp_read_failed
+                    "malformed_findings": malformed_findings
                 }),
             );
             return (
@@ -8827,8 +8592,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             backstop_tripped,
             consecutive_after,
             streak_window,
-            fp_pr_state.as_str(),
-            &fp_ci.render(),
+            &last_pr_state,
+            &last_ci,
         ) {
             return (0, output);
         }
@@ -8838,79 +8603,41 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         // graduates the plan) and a plan-only thread must not graduate its own
         // plan. DonePlanned is benign: not a ship reason, not a postmortem.
         if manifest.planned && intent == Intent::Promise {
-            emit(
-                "termination",
+            term_row("DonePlanned", "promise in plan-only unit");
+            fire_row(
+                "allow",
+                "promise",
+                false,
                 serde_json::json!({
-                    "session_id": session_id,
-                    "reason": "DonePlanned",
-                    "message": "promise in plan-only unit"
+                    "pr_state": last_pr_state,
+                    "ci": last_ci,
+                    "reviewed": true
                 }),
             );
-            emit(
-                "loop_check",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "fingerprint": fingerprint,
-                    "fires": this_fire,
-                    "consecutive_unchanged": consecutive_after,
-                    "streak_window_secs": streak_window,
-                    "decision": "allow",
-                    "intent": "promise",
-                    "intent_source": intent_source,
-                    "pr_state": fp_pr_state.as_str(),
-                    "ci": fp_ci.render(),
-                    "reviewed": true,
-                    "fp_read_failed": fp_read_failed
-                }),
-            );
-            return (
-                0,
-                allow_output(
-                    "allow",
-                    Some(TerminationReason::DonePlanned),
-                    "promise + plan-only unit; done",
-                    this_fire,
-                    Some(fingerprint),
-                ),
+            return terminal(
+                "allow",
+                Some(TerminationReason::DonePlanned),
+                "promise + plan-only unit; done",
             );
         }
 
         // Advisory unit (no_ship or manifest advisory)
         if (manifest.no_ship || manifest.advisory) && intent == Intent::Promise {
-            emit(
-                "termination",
+            term_row("DoneAdvisory", "promise in advisory/no_ship unit");
+            fire_row(
+                "allow",
+                "promise",
+                false,
                 serde_json::json!({
-                    "session_id": session_id,
-                    "reason": "DoneAdvisory",
-                    "message": "promise in advisory/no_ship unit"
+                    "pr_state": last_pr_state,
+                    "ci": last_ci,
+                    "reviewed": true
                 }),
             );
-            emit(
-                "loop_check",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "fingerprint": fingerprint,
-                    "fires": this_fire,
-                    "consecutive_unchanged": consecutive_after,
-                    "streak_window_secs": streak_window,
-                    "decision": "allow",
-                    "intent": "promise",
-                    "intent_source": intent_source,
-                    "pr_state": fp_pr_state.as_str(),
-                    "ci": fp_ci.render(),
-                    "reviewed": true,
-                    "fp_read_failed": fp_read_failed
-                }),
-            );
-            return (
-                0,
-                allow_output(
-                    "allow",
-                    Some(TerminationReason::DoneAdvisory),
-                    "promise + advisory unit; done",
-                    this_fire,
-                    Some(fingerprint),
-                ),
+            return terminal(
+                "allow",
+                Some(TerminationReason::DoneAdvisory),
+                "promise + advisory unit; done",
             );
         }
 
@@ -8925,40 +8652,24 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         // AFTER the advisory arm (a batched unit is not advisory: it sets
         // neither no_ship nor advisory) and BEFORE run_done so no PR is polled.
         if manifest.batched && intent == Intent::Promise {
-            emit(
-                "termination",
+            term_row(
+                "DoneBatched",
+                "promise in batched unit; commit landed on shared branch",
+            );
+            fire_row(
+                "allow",
+                "promise",
+                false,
                 serde_json::json!({
-                    "session_id": session_id,
-                    "reason": "DoneBatched",
-                    "message": "promise in batched unit; commit landed on shared branch"
+                    "pr_state": last_pr_state,
+                    "ci": last_ci,
+                    "reviewed": true
                 }),
             );
-            emit(
-                "loop_check",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "fingerprint": fingerprint,
-                    "fires": this_fire,
-                    "consecutive_unchanged": consecutive_after,
-                    "streak_window_secs": streak_window,
-                    "decision": "allow",
-                    "intent": "promise",
-                    "intent_source": intent_source,
-                    "pr_state": fp_pr_state.as_str(),
-                    "ci": fp_ci.render(),
-                    "reviewed": true,
-                    "fp_read_failed": fp_read_failed
-                }),
-            );
-            return (
-                0,
-                allow_output(
-                    "allow",
-                    Some(TerminationReason::DoneBatched),
-                    "promise + batched unit; commit on shared branch, batch PR ships it",
-                    this_fire,
-                    Some(fingerprint),
-                ),
+            return terminal(
+                "allow",
+                Some(TerminationReason::DoneBatched),
+                "promise + batched unit; commit on shared branch, batch PR ships it",
             );
         }
 
@@ -8983,7 +8694,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         // The floor applies where a session can satisfy it: a harness with a
         // self-review verb (claude /code-review, codex /review, opencode
         // /review-changes), or a harness that could not be attributed at all -
-        // ambiguity is not permission. A KNOWN verbless harness
+        // ambiguity is not permission (x-129b). A KNOWN verbless harness
         // (gemini/agy) stays unfloored: the floor would demand an attestation no
         // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
         // those harnesses' path and is deferred.
@@ -8998,7 +8709,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         if let Some(floored) = self_review_floor.clone() {
             required_reviewers.push(floored);
         }
-        // DoneUnreviewed applies only when review is required. A stock
+        // x-0eaf: DoneUnreviewed applies only when review is required. A stock
         // install that opts out (self_review_required=false AND no lane, or a
         // harness with no self-review verb) has zero coverage as its configured
         // state, not a defect - those green PRs still reach DonePRGreen.
@@ -9042,37 +8753,62 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // Read 4's newest activity timestamp folds into the
                 // fingerprint's 4th component: a late inline finding advances
                 // the fingerprint (re-block, not NoProgress - the codex
-                // findings-minutes-after-summary shape). State/CI components
-                // stay on the pre-read basis so quiet fires stay comparable.
-                // Skipped entirely when the pre-read failed: its stale
-                // none|none components would leak into done_fp and manufacture
-                // a fingerprint change on a fire US4 declares transparent
-                // (sigma-review finding on this branch).
-                let (fingerprint, consecutive_after, streak_window) = if !fp_read_failed {
-                    let done_fp = make_fingerprint(
-                        &head_sha,
-                        fp_pr_state.as_str(),
-                        &fp_ci.render(),
-                        &max_ts(&fp_review_ts, &pr_info.latest_review_ts),
-                    );
-                    if done_fp != fingerprint {
-                        let (_, streak, _, window) = read_prior_fires(
-                            &project_events,
-                            &session_id,
-                            &done_fp,
-                            now,
-                            min_fire_gap,
-                        );
-                        (done_fp, streak + 1, window)
-                    } else {
-                        (fingerprint, consecutive_after, streak_window)
-                    }
+                // findings-minutes-after-summary shape). The PR fields are
+                // this fire's done() RESULT : the separate
+                // fingerprint pre-read is gone, so a changed world shows up
+                // here first, and the journal streak counted against the last
+                // recorded fingerprint needs no recount when the result
+                // matches it.
+                let done_fp = make_fingerprint(
+                    &head_sha,
+                    pr_info.state.as_str(),
+                    &pr_info.ci_conclusion.render(),
+                    &pr_info.latest_review_ts,
+                );
+                let (fingerprint, consecutive_after, streak_window) = if done_fp != fingerprint {
+                    (done_fp, 1, 0)
                 } else {
                     (fingerprint, consecutive_after, streak_window)
                 };
                 let backstop_tripped = consecutive_after >= backstop_n;
 
-                // section 5: post the trigger for any NeedsNudge bot ONCE,
+                // The arm-scoped row builders: the fingerprint trio rebound
+                // above and this PR read's five fields ride in the base.
+                let term_row = |reason: &str, message: &str| {
+                    emit(
+                        "termination",
+                        serde_json::json!({
+                            "session_id": session_id, "reason": reason, "message": message
+                        }),
+                    );
+                };
+                let fire_row = |dec: &str, name: &str, fp_bad: bool, extra: Value| {
+                    let mut row = serde_json::json!({
+                        "session_id": session_id, "fingerprint": fingerprint,
+                        "fires": this_fire, "consecutive_unchanged": consecutive_after,
+                        "streak_window_secs": streak_window, "decision": dec,
+                        "intent": name, "intent_source": intent_source,
+                        "fp_read_failed": fp_bad,
+                        "pr_state": pr_info.state.as_str(),
+                        "ci": pr_info.ci_conclusion.render(),
+                        "reviewed": pr_info.reviewed,
+                        "review_skipped": pr_info.review_skipped,
+                        "unaddressed_blocking": pr_info.unaddressed_findings.len()
+                    });
+                    if let (Some(row), Value::Object(extra)) = (row.as_object_mut(), extra) {
+                        row.extend(extra);
+                    }
+                    emit("loop_check", row);
+                };
+
+                let terminal = |dec: &str, r, m: &str| {
+                    (
+                        0,
+                        allow_output(dec, r, m, this_fire, Some(fingerprint.clone())),
+                    )
+                };
+
+                // x-b167 section 5: post the trigger for any NeedsNudge bot ONCE,
                 // then treat it as Awaiting for this fire's messaging + idle read.
                 // A NeedsNudge state means !reviewed, so no terminal below can
                 // fire (they require reviewed=true); posting here is safe. A
@@ -9153,7 +8889,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     }
                 }
 
-                // plan fidelity: the stop-gate half of AC5. A plan whose
+                // plan fidelity (x-cbab): the stop-gate half of AC5. A plan whose
                 // declared deliverables did not all ship blocks DonePRGreen until
                 // each shortfall carries a carveout - the agent files one and the
                 // next eval passes. Gated on the same conjuncts as done_probes and
@@ -9205,59 +8941,35 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         "PR #{} is green and shipped, but reviewer(s) {} refused to review; the review gate cannot be auto-satisfied. Run a local review at HEAD, wait for reviewer recovery, or merge manually after a real review.",
                         pr_info.number, reviewers
                     );
-                    emit(
-                        "termination",
+                    term_row("DoneAwaitingReview", &msg);
+                    fire_row(
+                        "allow",
+                        if intent == Intent::Promise {
+                            "promise"
+                        } else {
+                            "backstop"
+                        },
+                        false,
                         serde_json::json!({
-                            "session_id": session_id,
-                            "reason": "DoneAwaitingReview",
-                            "message": msg.clone()
-                        }),
-                    );
-                    emit(
-                        "loop_check",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "fingerprint": fingerprint,
-                            "fires": this_fire,
-                            "consecutive_unchanged": consecutive_after,
-                            "streak_window_secs": streak_window,
-                            "decision": "allow",
-                            "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
-                            "intent_source": intent_source,
-                            "pr_state": pr_info.state.as_str(),
-                            "ci": pr_info.ci_conclusion.render(),
-                            "reviewed": pr_info.reviewed,
-                            "review_skipped": pr_info.review_skipped,
-                            "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                            "review_state": "reviewer_refused",
-                            "fp_read_failed": fp_read_failed
+                            "review_state": "reviewer_refused"
                         }),
                     );
                     best_effort_notify(
                         &format!("PR #{} blocked - reviewer refused", pr_info.number),
                         &msg,
                     );
-                    return (
-                        0,
-                        allow_output(
-                            "allow",
-                            Some(TerminationReason::DoneAwaitingReview),
-                            &msg,
-                            this_fire,
-                            Some(fingerprint),
-                        ),
-                    );
+                    return terminal("allow", Some(TerminationReason::DoneAwaitingReview), &msg);
                 }
                 if pr_passes(pr_open, ci_ok, reviewed, head_shipped, probes_passed) {
-                    // Coverage gate: the three pr_passes conjuncts all ask
+                    // Coverage gate (x-0eaf): the three pr_passes conjuncts all ask
                     // "did anyone object"; coverage asks "did anyone review". A
                     // passing PR nothing reviewed terminates DoneUnreviewed, not
                     // DonePRGreen - terminal on first eval (no PR #214 wedge),
                     // never a ship reason (never arms auto-merge). The
                     // discriminator is coverage, NOT the `attended` manifest field
-                    // (: that field lies for spawned workers). A MERGED PR
+                    // (x-be78: that field lies for spawned workers). A MERGED PR
                     // is exempt: the merge (human out-of-band, or an earlier
-                    // autonomous arm) is the terminal authority, and
+                    // autonomous arm) is the terminal authority (x-8b64), and
                     // loop-check must not re-litigate review on an already-merged
                     // PR - the coverage fix prevents the autonomous MERGE (arming),
                     // not the post-merge terminal.
@@ -9313,55 +9025,35 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                                 "PR #{} is green but UNREVIEWED - {}. Not mergeable by the autonomous path (DoneUnreviewed); merge by hand or after a review.",
                                 pr_info.number, cov_line
                             );
-                            emit(
-                                "termination",
+                            term_row("DoneUnreviewed", &done_msg);
+                            fire_row(
+                                "allow",
+                                if intent == Intent::Promise {
+                                    "promise"
+                                } else {
+                                    "backstop"
+                                },
+                                false,
                                 serde_json::json!({
-                                    "session_id": session_id,
-                                    "reason": "DoneUnreviewed",
-                                    "message": done_msg.clone()
-                                }),
-                            );
-                            emit(
-                                "loop_check",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "fingerprint": fingerprint,
-                                    "fires": this_fire,
-                                    "consecutive_unchanged": consecutive_after,
-                                    "streak_window_secs": streak_window,
-                                    "decision": "allow",
-                                    "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
-                                    "intent_source": intent_source,
-                                    "pr_state": pr_info.state.as_str(),
-                                    "ci": pr_info.ci_conclusion.render(),
-                                    "reviewed": pr_info.reviewed,
-                                    "review_skipped": pr_info.review_skipped,
-                                    "unaddressed_blocking": pr_info.unaddressed_findings.len(),
                                     "coverage": coverage_event_data(pr_info.number, &pr_info.coverage, &head_sha, &repo_slug, manifest.harness_session_id.as_deref()),
-                                    "done_probes": probe_results,
-                                    "fp_read_failed": fp_read_failed,
+                                    "done_probes": probe_results
                                 }),
                             );
-                            return (
-                                0,
-                                allow_output(
-                                    "allow",
-                                    Some(TerminationReason::DoneUnreviewed),
-                                    &done_msg,
-                                    this_fire,
-                                    Some(fingerprint),
-                                ),
+                            return terminal(
+                                "allow",
+                                Some(TerminationReason::DoneUnreviewed),
+                                &done_msg,
                             );
                         }
                         waived_green_description = waiver;
                     }
-                    // A rate-limited bot now fails the gate closed, so a
+                    // A rate-limited bot now fails the gate closed (x-9ab2), so a
                     // green+reviewed DonePRGreen can never carry one: reaching
                     // here means every required bot has a real completed pass.
                     // The not-required arm must never say "reviewed": no
                     // coverage check ran, so the word would assert the exact
                     // opposite of the uncovered row this same fire emits
-                    // (: PR 1294's terminal said "green and reviewed"
+                    // (x-8cb6: PR 1294's terminal said "green and reviewed"
                     // while its coverage event said uncovered, and auto-merge
                     // acted on the terminal).
                     let done_msg = match waived_green_description {
@@ -9375,44 +9067,20 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         ),
                         None => format!("PR #{} is green and reviewed", pr_info.number),
                     };
-                    emit(
-                        "termination",
+                    term_row("DonePRGreen", &done_msg);
+                    fire_row(
+                        "allow",
+                        if intent == Intent::Promise {
+                            "promise"
+                        } else {
+                            "backstop"
+                        },
+                        false,
                         serde_json::json!({
-                            "session_id": session_id,
-                            "reason": "DonePRGreen",
-                            "message": done_msg.clone()
-                        }),
-                    );
-                    emit(
-                        "loop_check",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "fingerprint": fingerprint,
-                            "fires": this_fire,
-                            "consecutive_unchanged": consecutive_after,
-                            "streak_window_secs": streak_window,
-                            "decision": "allow",
-                            "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
-                            "intent_source": intent_source,
-                            "pr_state": pr_info.state.as_str(),
-                            "ci": pr_info.ci_conclusion.render(),
-                            "reviewed": pr_info.reviewed,
-                            "review_skipped": pr_info.review_skipped,
-                            "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                            "fp_read_failed": fp_read_failed,
                             "done_probes": probe_results
                         }),
                     );
-                    return (
-                        0,
-                        allow_output(
-                            "allow",
-                            Some(TerminationReason::DonePRGreen),
-                            &done_msg,
-                            this_fire,
-                            Some(fingerprint),
-                        ),
-                    );
+                    return terminal("allow", Some(TerminationReason::DonePRGreen), &done_msg);
                 }
 
                 // DoneAwaitingMerge (ruling hold): a crown's dispatch_hold on
@@ -9569,21 +9237,16 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                                     &msg,
                                 );
                             }
-                            return (
-                                0,
-                                allow_output(
-                                    "allow",
-                                    Some(TerminationReason::DoneAwaitingMerge),
-                                    &msg,
-                                    this_fire,
-                                    Some(fingerprint),
-                                ),
+                            return terminal(
+                                "allow",
+                                Some(TerminationReason::DoneAwaitingMerge),
+                                &msg,
                             );
                         }
                     }
                 }
 
-                // ── Watching idle-allow ─────────────────────────────
+                // ── Watching idle-allow (x-e2c8) ─────────────────────────────
                 // A verified async wait (CI pending or awaiting a bot review,
                 // head pushed, zero unaddressed findings) plus an agent-armed
                 // <watching> tag idles NON-terminally: the harness re-invokes the
@@ -9594,7 +9257,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // wait degrades to budget/claim-expiry, never a spurious kill.
                 //
                 // The observation is hoisted out of the intent arm on purpose
-                // async_wait_class reads external truth (PR open,
+                // (x-cd97): async_wait_class reads external truth (PR open,
                 // head shipped, no findings, the wait class) and the backstop
                 // below needs the same truth. The idle-allow only rescues a
                 // session whose lease renewal succeeds and whose harness can
@@ -9602,93 +9265,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // from absence.
                 let observed_async_wait =
                     async_wait_class(&pr_info, open_findings.is_empty(), head_shipped);
-                let watching_refusal = if let Intent::Watching {
-                    ref reason,
-                    ref timeout,
-                    ..
-                } = intent
-                {
-                    // Harness + substrate gate: only a Claude session self-wakes
-                    // on a background-task exit, and a `fno-agents loop run` child
-                    // (FNO_DRIVER_LIB, the same discriminator terminal_stop.rs
-                    // uses) exits on allow. codex/gemini keep today's block
-                    // behavior until their daemon-consumer waker ships (AC1-EDGE).
-                    let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
-                    let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
-                    let blocker = if can_idle { observed_async_wait } else { None };
-                    let claim = watch_lease::claim_pair(&manifest_content);
-                    let mut lease_cause: Option<watch_lease::RenewCause> = None;
-                    if let Some(blocker) = blocker {
-                        // Extend the node claim to cover the watch window BEFORE
-                        // idling, or the idle opens a dispatcher-stampede gap.
-                        // Renewal MUST pass an explicit --ttl (a default refresh
-                        // shrinks the lease to 1min) and MUST return Ok(true)
-                        // (holder match); anything else blocks (AC3-ERR).
-                        let window_ms = watch_window_ms(timeout.as_deref());
-                        let renew_outcome = claim.as_ref().map(|(key, holder)| {
-                            crate::claims::renew(key, holder, window_ms, None)
-                        });
-                        if matches!(renew_outcome.as_ref(), Some(Ok(true))) {
-                            emit(
-                                "loop_check_watch_idle",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "pr": pr_info.number,
-                                    "blocker": blocker,
-                                    "declared_timeout": timeout.clone().unwrap_or_default(),
-                                    "reason": reason,
-                                    "lease_ms": window_ms
-                                }),
-                            );
-                            emit(
-                                "loop_check",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "fingerprint": fingerprint,
-                                    "fires": this_fire,
-                                    "consecutive_unchanged": consecutive_after,
-                                    "streak_window_secs": streak_window,
-                                    "decision": "allow",
-                                    "intent": "watching",
-                                    "intent_source": intent_source,
-                                    "pr_state": pr_info.state.as_str(),
-                                    "ci": pr_info.ci_conclusion.render(),
-                                    "reviewed": pr_info.reviewed,
-                                    "review_skipped": pr_info.review_skipped,
-                                    "fp_read_failed": fp_read_failed
-                                }),
-                            );
-                            let msg = format!(
-                                "watching: idling until watcher fires (PR #{}, {blocker} pending)",
-                                pr_info.number
-                            );
-                            return (
-                                0,
-                                allow_output("allow", None, &msg, this_fire, Some(fingerprint)),
-                            );
-                        }
-                        lease_cause =
-                            watch_lease::declined_cause(claim.as_ref(), renew_outcome.as_ref());
-                        // renewal failed / holder mismatch -> fall through to the
-                        // block below (AC3-ERR): never idle without a lease.
-                    }
-                    // Not an async-wait class, or a loop-run child: fall through
-                    // with an explicit refusal before the real blocker.
-                    let refusal = watch_lease::idle_refusal(
-                        can_idle,
-                        author_harness.as_deref(),
-                        is_loop_run_child,
-                        blocker.is_none(),
-                        pr_info.unaddressed_findings.len(),
-                        claim.is_some(),
-                        lease_cause.as_ref(),
-                    );
-                    Some((refusal.reason, refusal.kind))
-                } else {
-                    None
-                };
 
-                // a freshly-posted nudge sits in Awaiting until
+                // x-b167: a freshly-posted nudge sits in Awaiting until
                 // wait_minutes elapses. On a harness that cannot idle on a
                 // `<watching>` tag (a loop-run child, codex/gemini, or a failed
                 // lease renewal) the fingerprint is stable, so without this guard
@@ -9710,7 +9288,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         .bot_nudges
                         .iter()
                         .any(|n| n.class == NudgeClass::Awaiting);
-                // the observation guard for BOTH async-wait classes. CI
+                // x-cd97: the observation guard for BOTH async-wait classes. CI
                 // still pending, or an outstanding bot in an idlable nudge state,
                 // is a runtime-OBSERVED wait (PR open, head shipped, no
                 // findings) - external truth that work is in flight. NoProgress
@@ -9718,7 +9296,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // regardless of whether the idle-allow engaged: its
                 // preconditions (lease renewal, harness idling) fail for reasons
                 // unrelated to liveness, and the fall-through is what wrote a
-                // terminal for a live CI-waiting session. The
+                // terminal for a live CI-waiting session (x-b57a). The
                 // same-model-peer sentinel is the deliberate exception: nothing
                 // can EVER satisfy that wait (the configured peer is the
                 // author's own model), so NoProgress is then true rather than a
@@ -9742,7 +9320,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     && !sole_blocker_is_awaiting
                     && !sole_blocker_is_observed_wait
                 {
-                    // Backstop tripped + done() false -> NoProgress. AC13:
+                    // Backstop tripped + done() false -> NoProgress. x-b167 AC13:
                     // when a nudged bot never answered, the operator's question is
                     // "is this going to finish, and must I do something" - so name
                     // the bot + nudge count + elapsed instead of a bare fingerprint
@@ -9767,31 +9345,12 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         );
                     }
                     // Backstop tripped + done() false -> NoProgress
-                    emit(
-                        "termination",
+                    term_row("NoProgress", &noprogress_msg);
+                    fire_row(
+                        "allow",
+                        "backstop",
+                        false,
                         serde_json::json!({
-                            "session_id": session_id,
-                            "reason": "NoProgress",
-                            "message": noprogress_msg
-                        }),
-                    );
-                    emit(
-                        "loop_check",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "fingerprint": fingerprint,
-                            "fires": this_fire,
-                            "consecutive_unchanged": consecutive_after,
-                            "streak_window_secs": streak_window,
-                            "decision": "allow",
-                            "intent": "backstop",
-                            "intent_source": intent_source,
-                            "pr_state": pr_info.state.as_str(),
-                            "ci": pr_info.ci_conclusion.render(),
-                            "reviewed": pr_info.reviewed,
-                            "review_skipped": pr_info.review_skipped,
-                            "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                            "fp_read_failed": fp_read_failed,
                             "done_probes": probe_results
                         }),
                     );
@@ -9807,20 +9366,11 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                             pr_info.reviewed
                         ),
                     };
-                    return (
-                        0,
-                        allow_output(
-                            "allow",
-                            Some(TerminationReason::NoProgress),
-                            &return_msg,
-                            this_fire,
-                            Some(fingerprint),
-                        ),
-                    );
+                    return terminal("allow", Some(TerminationReason::NoProgress), &return_msg);
                 }
 
                 // done() false on promise -> block with named reason. P2
-                // enrich with a loop-boundary inbox nudge.
+                // (ab-098967b4): enrich with a loop-boundary inbox nudge.
                 // A failed probe OR a fidelity refusal IS the blocker when
                 // everything else is green; build_block_reason would otherwise
                 // report a healthy PR.
@@ -9835,40 +9385,19 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                             head_shipped,
                         )
                     });
-                let block_reason = match watching_refusal {
-                    // The refusal already said no watcher can help here, so the
-                    // hint the classifier appended would contradict it inside
-                    // one message. Cut the hint, keep the blocker.
-                    Some(ref refusal) if watch_lease::refusal_is_permanent(&refusal.0) => {
-                        let rest = watch_lease::without_arm_hint(&block_reason);
-                        format!("{}; {rest}", refusal.0)
-                    }
-                    Some(ref refusal) => format!("{}; {}", refusal.0, block_reason),
-                    None => block_reason,
-                };
                 let reason = crate::nudge::append_inbox_nudge(&block_reason, &cwd, &session_id);
-                let mut block_event = serde_json::json!({
-                    "session_id": session_id,
-                    "fingerprint": fingerprint,
-                    "fires": this_fire,
-                    "consecutive_unchanged": consecutive_after,
-                    "streak_window_secs": streak_window,
-                    "decision": "block",
-                    "intent": if intent == Intent::Promise { "promise" } else { "none" },
-                    "intent_source": intent_source,
-                    "pr_state": pr_info.state.as_str(),
-                    "ci": pr_info.ci_conclusion.render(),
-                    "reviewed": pr_info.reviewed,
-                    "review_skipped": pr_info.review_skipped,
-                    "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                    "fp_read_failed": fp_read_failed,
-                    "done_probes": probe_results
-                });
-                watch_lease::attach_watch_refusal(
-                    &mut block_event,
-                    watching_refusal.as_ref().map(|(_, kind)| *kind),
+                fire_row(
+                    "block",
+                    if intent == Intent::Promise {
+                        "promise"
+                    } else {
+                        "none"
+                    },
+                    false,
+                    serde_json::json!({
+                        "done_probes": probe_results
+                    }),
                 );
-                emit("loop_check", block_event);
                 return (
                     0,
                     allow_output("block", None, &reason, this_fire, Some(fingerprint)),
@@ -9887,7 +9416,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // consecutive Stop-hook blocks (CLAUDE_CODE_STOP_HOOK_BLOCK_CAP,
                 // default 9) and force-ends the turn once it binds - which on
                 // the unraised harness happens long before budget, exactly the
-                // truncation. fno raises the cap for spawned workers
+                // x-1680 truncation. fno raises the cap for spawned workers
                 // (see _mesh_env_wrapper / the bg spawn_env), so its own
                 // NoProgress/budget terminals bind first in normal operation;
                 // but during a pure gh-read outage the (raised, finite) cap is
@@ -9912,7 +9441,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // reads as "stop retrying gh pr view" advice for a call that was
                 // never gh pr view and might succeed on the very next fire.
                 let is_graphql_read = is_graphql_read(&failed_read);
-                let quota = quota_probe.or_else(|| probe_graphql_quota(gh_bin, &cwd));
+                // The quota read stays on the failed-read path only :
+                // a healthy fire pays no `gh api rate_limit`.
+                let quota = probe_graphql_quota(gh_bin, &cwd);
                 // Classified against the LIVE exempt bucket, never wording
                 // (see `refusal_is_secondary`), and the verdict rides the
                 // event as a FIELD: journal readers match the field, so a
@@ -9948,21 +9479,18 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         "rate_limit_class": secondary.then_some("secondary")
                     }),
                 );
-                emit(
-                    "loop_check",
+                fire_row(
+                    "block",
+                    if intent == Intent::Promise {
+                        "promise"
+                    } else {
+                        "none"
+                    },
+                    true,
                     serde_json::json!({
-                        "session_id": session_id,
-                        "fingerprint": fingerprint,
-                        "fires": this_fire,
-                        "consecutive_unchanged": consecutive_after,
-                        "streak_window_secs": streak_window,
-                        "decision": "block",
-                        "intent": if intent == Intent::Promise { "promise" } else { "none" },
-                        "intent_source": intent_source,
                         "pr_state": "unknown",
                         "ci": "unknown",
-                        "reviewed": false,
-                        "fp_read_failed": true
+                        "reviewed": false
                     }),
                 );
                 // Checked BEFORE the primary-quota branch and independent of
@@ -10009,25 +9537,18 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     }
 
     // ── Step 5: no intent, no backstop -> block, record fingerprint ───────────
-    emit(
-        "loop_check",
+    fire_row(
+        "block",
+        "none",
+        false,
         serde_json::json!({
-            "session_id": session_id,
-            "fingerprint": fingerprint,
-            "fires": this_fire,
-            "consecutive_unchanged": consecutive_after,
-            "streak_window_secs": streak_window,
-            "decision": "block",
-            "intent": "none",
-            "intent_source": intent_source,
-            "pr_state": fp_pr_state.as_str(),
-            "ci": fp_ci.render(),
-            "reviewed": false,
-            "fp_read_failed": fp_read_failed
+            "pr_state": last_pr_state,
+            "ci": last_ci,
+            "reviewed": false
         }),
     );
 
-    // P2: the dominant loop-yield boundary. Enrich the continue
+    // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
         "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `fno do pr wait <N> --until settled --timeout=30m` - REST through the coalescing cache, 60s interval, never `gh pr checks --watch`, which spends the shared GraphQL quota; a review wait is `--until review`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
@@ -10124,7 +9645,7 @@ fn short_sha(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
-/// Plan-fidelity stop gate. The stop-gate half of AC5; the merge gate
+/// Plan-fidelity stop gate (x-cbab). The stop-gate half of AC5; the merge gate
 /// (`_merge.py`, which imports the core in-process) is the other. Shells
 /// `fno do plan fidelity --json <plan_path>` and blocks DonePRGreen when a planned
 /// deliverable is unjoined and uncovered by a carveout - the agent must file a
@@ -10139,7 +9660,7 @@ enum FidelityGate {
     Refused {
         reason: String,
     },
-    /// The child ran past `FIDELITY_TIMEOUT` and was killed. Fail
+    /// The child ran past `FIDELITY_TIMEOUT` and was killed (x-d21f). Fail
     /// open on the STOP decision like `Absent` - a hung probe must not wedge
     /// the gate that exists to let a finished session finally stop - but,
     /// unlike `Absent`, this is NAMED and carried into the emitted event so a
@@ -10150,7 +9671,7 @@ enum FidelityGate {
     },
 }
 
-/// Wall-clock ceiling for the `fno do plan fidelity` child. Same bound
+/// Wall-clock ceiling for the `fno do plan fidelity` child (x-d21f). Same bound
 /// as `PROBE_TIMEOUT`, under its own name because this and done_probes gate
 /// different things and must be free to drift independently.
 const FIDELITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -10172,7 +9693,7 @@ pub(crate) struct BoundedOutput {
 }
 
 /// Outcome of a bounded, killable child run: the whole point is that a hang
-/// inside the child (was one; nothing rules out another) can never
+/// inside the child (x-8ad8 was one; nothing rules out another) can never
 /// again read as "the read failed" or wedge forever - it reads as exactly
 /// what happened, with the verb and the elapsed time attached at the call
 /// site.
@@ -10198,7 +9719,7 @@ enum BoundedRun {
 /// the single transport boundary for synchronous external work on the stop
 /// path: `Command::output()` alone has no timeout, so it blocks until the
 /// child exits however long that takes, which is exactly how a hang three
-/// calls deep in `fno do plan fidelity` turned into loop-check
+/// calls deep in `fno do plan fidelity` (x-8ad8) turned into loop-check
 /// itself hanging forever and stranding the session behind it. stdout and
 /// stderr are drained on background threads for the same reason `run_probe`
 /// drains stderr that way: reading a pipe only after the child exits
@@ -10793,7 +10314,7 @@ fn build_block_reason(
             );
         }
         // Pending is "not green YET", not red. The MUTE_PROBE_N probe
-        // runs done() while CI is commonly still in flight,
+        // (ab-223d2dae) runs done() while CI is commonly still in flight,
         // so a "CI failed" message here would mislead the blocked agent
         // into debugging a nonexistent failure on every quiet fire.
         if pr.ci_conclusion == CiConclusion::Pending {
@@ -10830,7 +10351,7 @@ fn build_block_reason(
             } else {
                 String::new()
             };
-            // AC14: "reply in-thread" alone is a half-remedy - a reply
+            // x-b167 AC14: "reply in-thread" alone is a half-remedy - a reply
             // that does not address the bot by its full login never reaches it.
             // Name the handle when the finding author is a known bot.
             let reply_to = profile_by_author(&f.author)
@@ -10874,7 +10395,7 @@ fn build_block_reason(
             );
         }
         if !pr.unattested_reviewers.is_empty() {
-            // The branch that was missing. Without it a local-only
+            // The branch that was missing (x-cdc7). Without it a local-only
             // reviewers gate fell through to the generic string below and told
             // the session to wait on a bot that was never required.
             //
@@ -10989,11 +10510,11 @@ fn build_block_reason(
                 }
                 _ => String::new(),
             };
-            // render per nudge state. `hint("review")` is derived from
+            // x-b167: render per nudge state. `hint("review")` is derived from
             // async_wait_class, so it is EMPTY for NeedsNudge/Unresponsive (both
             // non-idlable) and PRESENT for Awaiting/NotNudgeable by construction -
             // the arm-and-tag ritual can never appear on a blocker the same file
-            // refuses to idle (the contradiction removed). NeedsNudge and
+            // refuses to idle (the contradiction x-cdc7 removed). NeedsNudge and
             // Unresponsive lead because they are work/decisions, not waits. These
             // branches come BEFORE the stale-only sentence on purpose: a stale
             // bot in NeedsNudge or Unresponsive state needs the concrete remedy
@@ -11069,11 +10590,11 @@ fn build_block_reason(
                 );
             }
             // All NotNudgeable (or not classified) + hint (AC5 - a non-nudgeable
-            // required bot keeps the pre-change behavior). The remedy must NOT
+            // required bot keeps the pre-x-b167 behavior). The remedy must NOT
             // say "trigger it": `nudge_class_idlable` counts NotNudgeable as
             // idlable, so `hint("review")` renders the arm-and-tag ritual right
             // after this sentence, and telling a session to act and to idle in
-            // one line is the contradiction removed.
+            // one line is the contradiction x-cdc7 removed.
             // A stale bot riding along in a mixed set keeps the note so its
             // entry does not read as "never responded" (each required bot is in
             // exactly one of the two lists, so no dedup is needed).
@@ -11171,319 +10692,25 @@ fn build_block_reason(
 
 pub(crate) use crate::king_termination::{parse_king_manifest, KingManifest};
 
-fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
-    // A missing manifest is the only safe silent allow, exactly as on the
-    // target path: a session nobody crowned is not a king, and blocking one
-    // would trap every ordinary session here.
-    let Ok(content) = std::fs::read_to_string(&parsed.state_path) else {
-        return (
-            0,
-            king_output("allow", None, "no king manifest; allowing exit", 0, 0),
-        );
-    };
-    let Some(manifest) = parse_king_manifest(&content) else {
-        eprintln!("loop-check: corrupt king manifest (no frontmatter)");
-        return (
-            0,
-            king_output("allow", None, "corrupt king manifest; allowing exit", 0, 0),
-        );
-    };
-
-    let project_events = parsed
-        .events_path
-        .clone()
-        .unwrap_or_else(|| crate::paths::events_path(&parsed.cwd));
-    let global_events = parsed
-        .global_events_path
-        .clone()
-        .unwrap_or_else(|| project_events.clone());
-    let session_id = std::env::var(crate::loop_king::WALK_SESSION_KEY_ENV)
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        .unwrap_or_else(|| manifest.fno_id.clone());
-    // A walk-spawned pass tags its terminal with the per-invocation key so
-    // the walk's resume guard never sees a PRIOR reign's terminal; every
-    // other reader still filters on the driver tag, so both spellings agree.
-    let emit = |event_type: &str, data: serde_json::Value| {
-        emit_to_both(&project_events, &global_events, event_type, data);
-    };
-    // Every NoProgress or Budget terminal escalates, in the shared closure: a
-    // king that quits with work pending is this feature's own failure, and
-    // 15 Budget ceiling hits once told nobody because only one terminal did.
-    let terminate = |reason: TerminationReason,
-                     message: &str,
-                     actionable: i64,
-                     fires: u64,
-                     stalled: &[String]| {
-        let mut message = message.to_string();
-        if matches!(
-            reason,
-            TerminationReason::NoProgress | TerminationReason::Budget
-        ) {
-            let outcome = crate::loop_king::escalate_stalled(
-                &parsed.fno_bin,
-                &parsed.cwd,
-                stalled,
-                &format!("{reason:?}"),
-                &manifest.scope,
-            );
-            message = format!("{message}; {outcome}");
-        }
-        emit(
-            "termination",
-            serde_json::json!({
-                "session_id": session_id,
-                "driver": "king",
-                "reason": format!("{reason:?}"),
-                "message": message,
-            }),
-        );
-        (
-            0,
-            king_output("allow", Some(reason), &message, actionable, fires),
-        )
-    };
-
-    if let Some(hit) = check_cancel_sentinel(
-        &parsed.cwd,
-        &parsed.state_path,
-        &manifest.created_at,
-        "king",
-    ) {
-        return terminate(
-            TerminationReason::Interrupted,
-            &format!("cancel sentinel present{}", hit.attribution()),
-            0,
-            0,
-            &[],
-        );
-    }
-
-    let history = crate::loop_king::king_fire_history(&project_events, &session_id);
-    // The hook's half of the reign record: a beat the model skipped still
-    // lands a row. Sits after the cancel-sentinel check, so a cancelled crown
-    // writes none. The return value is ignored, so no decision changes.
-    crate::king_checkin::hook_beat(
-        &project_events,
-        &parsed.cwd,
-        &manifest.scope,
-        &session_id,
-        &history,
-        chrono::Utc::now(),
-    );
-    let dry = history.dry;
-    // The bounds every block below owes, in one place, so no branch grows its own.
-    let bounded = |dry: u64, waiting: &str| {
-        bound_breached(history.total, dry, manifest.max_iterations, waiting)
-    };
-    let (reading, term_json) = crate::king_term::current_reading(&manifest);
-    let emit_term = |body| crate::king_term::emit_journal(&emit, &term_json, body);
-    // Shared spine of both blind-board blocks: bounded, quiet emit, block.
-    // The reading is what the branch measured, never a guess.
-    let blind_block = |reading: &str, message: &str, actionable: i64, dry: u64| -> (i32, String) {
-        if let Some(b) = bounded(dry, message) {
-            return terminate(b.reason, &b.message, 0, b.fires, &[reading.to_owned()]);
-        }
-        emit_term(king_quiet_body(&session_id, actionable));
-        (0, king_output("block", None, message, actionable, dry + 1))
-    };
-
-    if let Some(gate) =
-        crate::king_termination::stand_down_gate(&manifest, &parsed.transcript_path, &parsed.cwd)
-    {
-        return blind_block(&gate.reading, &gate.message, 0, dry);
-    }
-    if let Some(result) = crate::king_term::gate(&reading, &manifest.scope, dry, &blind_block) {
-        return result;
-    }
-
-    let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
-        Ok(b) => b,
-        Err(e) => {
-            // Blind is not clean. Block on exit 2, but bounded: a board
-            // that never answers still reaches a ceiling. The exit code
-            // marks the degraded path; the shim keys on the decision field.
-            if let Some(b) = bounded(dry, &format!("king board unreadable: {e}")) {
-                let reading = crate::king_escalation::reading_board_unreadable();
-                return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
-            }
-            emit_term(serde_json::json!({
-                "session_id": session_id,
-                "board_error": e,
-            }));
-            return (
-                2,
-                king_output(
-                    "block",
-                    None,
-                    &format!("king board unreadable: {e}"),
-                    0,
-                    dry + 1,
-                ),
-            );
-        }
-    };
-
-    if board.actionable == 0 {
-        if board.operator_questions_unreadable {
-            // Bounded, and each blocking fire emits its row so the counters advance.
-            return blind_block(
-                &crate::king_escalation::reading_questions_unreadable(),
-                "board clean but outstanding operator questions are unreadable; blocking completion",
-                0,
-                dry,
-            );
-        }
-        let open_question = board
-            .operator_question_sessions
-            .iter()
-            .any(|owner| owner == &session_id);
-        if open_question {
-            return (
-                0,
-                king_output(
-                    "block",
-                    None,
-                    "board clean but an operator question raised by this reign remains open",
-                    0,
-                    dry,
-                ),
-            );
-        }
-        // The goal keys completion on the crown draining, not on any queue
-        // (2026-09-06 ruling): a board clean while driven-but-unshipped rows
-        // sit is a quiet beat, never a finish line. An unreadable drain read
-        // must not certify drained; the dry-fire ceiling bounds the wait.
-        // Timeout and command failure demand opposite responses: both named.
-        let (undelivered, drain_error) = if manifest.scope.is_empty() {
-            (0, None)
-        } else {
-            crate::loop_king::scope_undelivered_with_reserve_watch(
-                &parsed.fno_bin,
-                &parsed.cwd,
-                &manifest.scope,
-                &session_id,
-                &emit,
-            )
-        };
-        if undelivered == 0 {
-            // a floor count cannot see blind queues; refuse to certify.
-            if board.unreadable_sources {
-                return blind_block(
-                    &crate::king_escalation::reading_sources_unreadable(),
-                    "board quiet but some sources are unreadable; blocking completion",
-                    0,
-                    dry,
-                );
-            }
-            return terminate(
-                TerminationReason::NoWork,
-                "board clean; exiting NoWork",
-                0,
-                dry,
-                &[],
-            );
-        }
-        let message =
-            crate::king_termination::king_quiet_message(undelivered, drain_error.as_ref());
-        let shrank = undelivered != i64::MAX
-            && history
-                .last_undelivered
-                .is_some_and(|prev| undelivered < prev);
-        let dry = if shrank { 0 } else { dry };
-        let reading = match &drain_error {
-            Some(_) => crate::king_escalation::reading_delivery_unreadable(&manifest.scope),
-            None => crate::king_escalation::reading_undelivered(&manifest.scope),
-        };
-        emit_term(crate::king_termination::king_undelivered_body(
-            &session_id,
-            undelivered,
-            shrank,
-        ));
-        if let Some(b) = bounded(dry, &message) {
-            return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
-        }
-        return (0, king_output("block", None, &message, 0, dry + 1));
-    }
-
-    // A row the previous fire called actionable and this one does not is work
-    // the king cleared - the progress signal, read off the board; applied
-    // BEFORE the bound, so a clearing fire is judged on its post-reset streak.
-    let cleared = crate::loop_king::king_cleared_a_row(&history.last_ids, &board.actionable_ids);
-    let dry = if cleared { 0 } else { dry };
-
-    // The bounds `--max-iterations` advertises, checked after NoWork so a
-    // clean board still exits clean; Budget before NoProgress names what
-    // actually stopped it.
-    let waiting = format!("{} rows still actionable", board.actionable);
-    if let Some(b) = bounded(dry, &waiting) {
-        // An actionable floor with no readable rows is the partially-blind
-        // board: it names its reading, never an empty set.
-        let stalled = if board.actionable_ids.is_empty() {
-            vec![crate::king_escalation::reading_board_unreadable()]
-        } else {
-            board.actionable_ids.clone()
-        };
-        return terminate(b.reason, &b.message, board.actionable, b.fires, &stalled);
-    }
-
-    match crate::king_termination::capacity_gate(
-        &board,
-        &parsed.fno_bin,
-        &parsed.cwd,
-        &session_id,
-        dry,
-        &emit,
-    ) {
-        Some(crate::king_termination::CapacityGate::Saturated {
-            message,
-            blocked,
-            fires,
-        }) => {
-            return terminate(TerminationReason::NoWork, &message, blocked, fires, &[]);
-        }
-        Some(crate::king_termination::CapacityGate::Split {
-            message,
-            actionable,
-            fires,
-            journal,
-        }) => {
-            emit_term(journal);
-            return (0, king_output("block", None, &message, actionable, fires));
-        }
-        None => {}
-    }
-
-    emit_term(serde_json::json!({
-        "session_id": session_id,
-        "actionable": board.actionable,
-        "actionable_ids": board.actionable_ids,
-        // Durable, because the dry-fire counter is rebuilt from this
-        // journal on every fire. A reset that lived only in the local
-        // binding was forgotten the moment this process exited.
-        "cleared": cleared,
-    }));
-    let top = board
-        .top_row
-        .unwrap_or_else(|| "an actionable queue".to_string());
-    // decide()'s documented contract, one screen up: exit 0 for allow and for
-    // this healthy block; the ONLY other verdict-bearing exit is the degraded
-    // unreadable-board block above, which carries the same payload on 2. Any
-    // non-zero without a `decision` field is an internal/CLI error. Encoding a
-    // healthy block in the exit code made the shim read it as a broken checker
-    // and count it toward the unavailable budget that ends in a ship-gate-off
-    // allow. The JSON `decision` field is the block signal; the exit code
-    // never is.
-    (
-        0,
-        king_output(
-            "block",
-            None,
-            &format!("{} actionable; next: {top}", board.actionable),
-            board.actionable,
-            dry + 1,
-        ),
-    )
+fn king_output(
+    decision: &str,
+    reason: Option<TerminationReason>,
+    message: &str,
+    actionable: i64,
+    fires: u64,
+) -> String {
+    serde_json::json!({
+        "driver": "king",
+        "decision": decision,
+        "termination_reason": reason,
+        // `reason` carries the human-readable why, distinct from the enum
+        // above: a stop hook reader wants the top actionable row, not a tag.
+        "reason": message,
+        "message": message,
+        "actionable": actionable,
+        "fires": fires,
+    })
+    .to_string()
 }
 
 // ── public entry points ───────────────────────────────────────────────────────
@@ -11583,7 +10810,7 @@ pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
 }
 
 /// `fno-agents review-coverage --cwd <dir> [--pr <n>] [--head <sha>] ...`
-///. The standalone review_coverage producer. The only writer of the
+/// (x-3a3f). The standalone review_coverage producer. The only writer of the
 /// event used to be `read_pr_info` past a streak counter inside `decide()`,
 /// so a session with no target manifest could never produce the row the
 /// merge gate demands. This verb exposes the SAME computation through the
@@ -12103,7 +11330,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     }
 }
 
-// ── unit tests ────────────────────────────────────────────────────────────────
+// ── unit tests ───────────────────────
 
 #[cfg(test)]
 mod tests {
