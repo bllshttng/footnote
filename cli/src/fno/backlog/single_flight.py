@@ -61,13 +61,15 @@ class Flight:
     held: bool = False
     held_for_s: int = 0
     requests: int = 0
+    root: Optional[Path] = None
+    expires: Optional[str] = None
 
     def release(self) -> None:
         try:
             _verb([
                 "claim", "flight-release", self.key,
                 "--holder", self.holder,
-                "--claims-root", str(claims_root_for(self.key)),
+                "--claims-root", str(self.root or claims_root_for(self.key)),
             ])
         except Exception:
             pass  # the TTL plus the pid probe retire it; never mask the work's outcome
@@ -76,18 +78,26 @@ class Flight:
         return {"held": True, "requests": self.requests, "holder": self.holder, "held_for_s": self.held_for_s}
 
 
-def acquire_flight(key: str, *, scope: str) -> Optional[Flight]:
+def acquire_flight(
+    key: str,
+    *,
+    scope: str,
+    name: str = "single-flight",
+    root: Optional[Path] = None,
+    ttl_ms: int = FLIGHT_TTL_MS,
+) -> Optional[Flight]:
     """Take the gate, or report it held. None (fail-open) when the lock itself
     is unavailable - no fno-agents binary, one older than the verb, spawn
-    trouble, a gate-side error - and the caller proceeds ungated, the
-    pre-gate behavior. The holder is unique per invocation and the claim
+    trouble, a gate-side error - and the CALLER owns its action: the backlog
+    verbs proceed ungated, the new callers skip. The holder is unique per invocation and the claim
     carries our pid, so the verb probes the pid and reclaims a dead holder
     itself: the holder here is a one-shot subprocess, so the
     transcript-liveness basis the claims layer prefers for node claims is the
     wrong policy."""
+    claims_root = root or claims_root_for(key)
     if resolve_binary() is None:
         typer.echo(
-            f"warning: single-flight gate unavailable for {key} (no fno-agents binary); proceeding ungated",
+            f"warning: single-flight gate unavailable for {key} (no fno-agents binary)",
             err=True,
         )
         return None
@@ -95,13 +105,13 @@ def acquire_flight(key: str, *, scope: str) -> Optional[Flight]:
         receipt = _verb([
             "claim", "flight-acquire", key,
             "--scope", scope,
-            "--ttl-ms", str(FLIGHT_TTL_MS),
-            "--holder", f"single-flight:{os.getpid()}:{uuid.uuid4().hex[:8]}",
+            "--ttl-ms", str(ttl_ms),
+            "--holder", f"{name}:{os.getpid()}:{uuid.uuid4().hex[:8]}",
             "--pid", str(os.getpid()),
-            "--claims-root", str(claims_root_for(key)),
+            "--claims-root", str(claims_root),
         ])
     except Exception as exc:  # noqa: BLE001 - fail open, never break the verb
-        typer.echo(f"warning: single-flight gate unavailable for {key} ({exc}); proceeding ungated", err=True)
+        typer.echo(f"warning: single-flight gate unavailable for {key} ({exc})", err=True)
         return None
     if receipt is None:
         return None
@@ -111,6 +121,8 @@ def acquire_flight(key: str, *, scope: str) -> Optional[Flight]:
         held=not receipt.get("acquired"),
         held_for_s=int(receipt.get("held_for_s") or 0),
         requests=int(receipt.get("requests") or 0),
+        root=root,
+        expires=receipt.get("expires"),
     )
 
 
