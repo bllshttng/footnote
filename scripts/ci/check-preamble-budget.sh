@@ -206,19 +206,6 @@ CEILING_BYTES=40216
 # than becoming headroom.
 #
 # Set the ceiling at measured + band/2, so both directions get the same room.
-# EXCEPTION, and it is the current state: 37181 is measured EXACTLY, with zero
-# spare, because the fund-by-trading lever it assumes is exhausted (see the
-# ceiling comment above and the refusal text below). Do not "restore" this to
-# measured + band/2 as a tidy-up; that silently undoes the zero-spare intent
-# and hands back the headroom the measurement was spent to remove.
-#
-# The last 6 bytes came from deleting a false absolute in the corpus header
-# ("never by raising the ceiling"), not from a trade. This ceiling followed
-# that saving DOWN rather than banking it as slack, because zero spare is the
-# whole point: a saving kept as headroom is a saving spent by the next edit.
-# Sitting just under the band instead leaves almost no slack for a cut, and the
-# gate then fires on the very edits it wants to encourage; sitting at
-# measured + band leaves none at all, since any cut at all trips it.
 RATCHET_NUDGE_BYTES=2000
 
 # Second budget: the `description` of every model-invoked skill and agent. These
@@ -333,6 +320,29 @@ for rule in "$REPO_ROOT"/.claude/rules/*.md; do
 done
 shopt -u nullglob
 
+# Reach: which sessions actually pay for a file's bytes. hooks/codex-hooks.json
+# SessionStart runs hooks/session-start.sh, which calls
+# session-start-using-fno.sh, so using-fno is hook-injected (claude plus
+# top-level codex sessions, but not codex subagent threads) rather than absent
+# from codex. CLAUDE.md and the rules directory reach claude only. A byte that
+# must reach a session type none of these cover can live only in AGENTS.md,
+# which is exactly the trade the refusal text below names.
+reach_of() {
+  case "$1" in
+    AGENTS.md) echo "every harness" ;;
+    skills/using-fno/SKILL.md) echo "hook: claude, top-level codex; shipped to every consumer" ;;
+    CLAUDE.md | .claude/rules/*.md) echo "claude only" ;;
+    *)
+      echo "check-preamble-budget: no reach label for file-set path: $1" >&2
+      exit 1
+      ;;
+  esac
+}
+
+REACH_EVERY=0
+REACH_HOOK=0
+REACH_CLAUDE=0
+
 TOTAL_BYTES=0
 RECORDS=""
 MANIFEST_RECORDS=""
@@ -357,8 +367,13 @@ for path in "${FILES[@]}"; do
   bytes=$((bytes))
   content_hash=$(hash_file "$path")
   TOTAL_BYTES=$((TOTAL_BYTES + bytes))
+  case "$(reach_of "$relative")" in
+    "every harness") REACH_EVERY=$((REACH_EVERY + bytes)) ;;
+    hook:*) REACH_HOOK=$((REACH_HOOK + bytes)) ;;
+    "claude only") REACH_CLAUDE=$((REACH_CLAUDE + bytes)) ;;
+  esac
   RECORDS+="${bytes}"$'\t'"${relative}"$'\n'
-  MANIFEST_RECORDS+="${bytes}"$'\t'"${content_hash}"$'\t'"${relative}"$'\n'
+  MANIFEST_RECORDS+="${bytes}"$'\t'"${content_hash}"$'\t'"${relative}"$'\t'"$(reach_of "$relative")"$'\n'
 done
 
 APPROX_TOKENS=$((TOTAL_BYTES / 4))
@@ -481,18 +496,29 @@ import sys
 total = int(sys.argv[1])
 ceiling = int(sys.argv[2])
 sources = []
+reach_bytes = {}
 for raw in sys.stdin:
     raw = raw.rstrip("\n")
     if not raw:
         continue
-    size, content_hash, path = raw.split("\t", 2)
+    size, content_hash, path, reach = raw.split("\t", 3)
     size = int(size)
     sources.append({
         "path": path,
         "bytes": size,
         "estimated_tokens": (size + 3) // 4,
         "content_hash": content_hash,
+        "reach": reach,
     })
+    if reach == "every harness":
+        key = "every-harness"
+    elif reach == "claude only":
+        key = "claude-only"
+    elif reach.startswith("hook:"):
+        key = "hook"
+    else:
+        raise SystemExit(f"unknown reach label: {reach}")
+    reach_bytes[key] = reach_bytes.get(key, 0) + size
 descriptions = []
 for raw in sys.argv[5].splitlines():
     if not raw.strip():
@@ -504,6 +530,7 @@ print(json.dumps({
     "estimated_tokens": (total + 3) // 4,
     "ceiling_bytes": ceiling,
     "sources": sources,
+    "reach_bytes": reach_bytes,
     "descriptions": {
         "total_bytes": int(sys.argv[3]),
         "ceiling_bytes": int(sys.argv[4]),
@@ -524,10 +551,9 @@ else
 
   while IFS=$'\t' read -r bytes relative; do
     [[ -z "$relative" ]] && continue
-    marker=""
-    [[ "$relative" == "skills/using-fno/SKILL.md" ]] && marker="  [shipped to every consumer]"
-    printf '  %8d  %s%s\n' "$bytes" "$relative" "$marker"
+    printf '  %8d  %s  [%s]\n' "$bytes" "$relative" "$(reach_of "$relative")"
   done < <(printf '%s' "$RECORDS" | LC_ALL=C sort -rn -k1,1)
+  echo "  by reach: every harness ${REACH_EVERY} B, hook ${REACH_HOOK} B, claude only ${REACH_CLAUDE} B"
 
   if (( DESC_COUNT > 0 )); then
     echo
@@ -617,31 +643,86 @@ if (( ! QUIET && ! JSON_MODE )); then
     (( count == 3 )) && break
   done < <(printf '%s' "$RECORDS" | LC_ALL=C sort -rn -k1,1)
 
+  # Pre-change headroom: what the author had before this change, measured
+  # against the merge-base with origin/main so the refusal names the budget
+  # that was actually available, not just the overage it now sits past.
+  BASE_SHA="$(git -C "$REPO_ROOT" merge-base HEAD origin/main 2>/dev/null || true)"
+  HEADROOM_LINE="  Headroom before this change: unmeasured (no merge-base with origin/main)."
+  if [[ -n "$BASE_SHA" ]]; then
+    BASE_TOTAL=0
+    BASE_READ_OK=1
+    base_size() {
+      if git -C "$REPO_ROOT" cat-file -e "${BASE_SHA}:$1" 2>/dev/null; then
+        local sz
+        if sz="$(git -C "$REPO_ROOT" cat-file -s "${BASE_SHA}:$1" 2>/dev/null)"; then
+          echo "$sz"
+        else
+          echo 0
+          return 1
+        fi
+      else
+        echo 0
+      fi
+    }
+    for bpath in AGENTS.md CLAUDE.md skills/using-fno/SKILL.md; do
+      bsz="$(base_size "$bpath")" || BASE_READ_OK=0
+      BASE_TOTAL=$((BASE_TOTAL + bsz))
+    done
+    while IFS= read -r brule; do
+      [[ -z "$brule" ]] && continue
+      case "$brule" in
+        *.md)
+          bsz="$(base_size "$brule")" || BASE_READ_OK=0
+          BASE_TOTAL=$((BASE_TOTAL + bsz))
+          ;;
+      esac
+    done < <(git -C "$REPO_ROOT" ls-tree --name-only "$BASE_SHA" -- .claude/rules/ 2>/dev/null || true)
+    if (( BASE_READ_OK )); then
+      HEADROOM=$((CEILING_BYTES - BASE_TOTAL))
+      DELTA=$((TOTAL_BYTES - BASE_TOTAL))
+      SHORT_SHA="$(printf '%s' "$BASE_SHA" | cut -c1-7)"
+      if (( HEADROOM >= 0 )); then
+        HEADROOM_LINE="  Headroom before this change: ${HEADROOM} B at ${SHORT_SHA}; this change adds ${DELTA} B."
+      else
+        HEADROOM_LINE="  Headroom before this change: already $((-HEADROOM)) B over at ${SHORT_SHA}; this change adds ${DELTA} B."
+      fi
+    else
+      HEADROOM_LINE="  Headroom before this change: unmeasured (a base read failed)."
+    fi
+  fi
+
   {
     echo "check-preamble-budget: ${TOTAL_BYTES} bytes exceeds the ${CEILING_BYTES}-byte ceiling by ${OVERAGE} (~${OVERAGE_TOKENS} tok/turn)."
     echo "  Largest: ${LARGEST}"
+    echo "  by reach: every harness ${REACH_EVERY} B, hook ${REACH_HOOK} B, claude only ${REACH_CLAUDE} B"
+    echo "${HEADROOM_LINE}"
     echo
+    echo "  A line that must reach codex subagent threads or a harness without the"
+    echo "  fno hook can live only in AGENTS.md, so cutting hook or claude-only"
+    echo "  bytes funds it in this gate but removes nothing those sessions read."
     echo "  Every byte here is re-read on every turn of every session on every lane."
     echo "  Fix, in order of preference:"
-    echo "    1. Trade: cut an equivalent amount from the same file."
-    echo "       DO NOT TRY THIS ON THE AGENTS.md PITFALLS CORPUS as it stands."
-    echo "       The entries present on 2026-08-18 were measured at roughly 181"
-    echo "       tradeable bytes in 6089, and those 181 were ALREADY SPENT to set"
-    echo "       the current ceiling. Those entries are at their floor. Entries"
-    echo "       age out at 60 days and get replaced, so re-measure before"
-    echo "       trusting this against a corpus that has turned over."
-    echo "       Getting those 181 took three compression passes and two external"
-    echo "       reviews, which lost and recovered ELEVEN qualifiers - one of them"
-    echo "       reversing an entry's meaning. Everything still in that corpus"
-    echo "       carries a claim, however much it reads like restatement."
-    echo "       The corpus header used to say to fund growth by trading here and"
-    echo "       never by raising this ceiling. That instruction assumed tradeable"
-    echo "       restatement exists, the measurement showed it does not, and the"
-    echo "       header was corrected rather than worked around. Do not reach for"
-    echo "       the corpus again by quietly deleting a qualifier."
-    echo "    2. Move it out of the preamble: docs/ and linked rule files that the"
-    echo "       harness does not auto-load are not paid at startup."
+    echo "    1. Compress the addition itself."
+    echo "    2. Move it out of the preamble, only when no agent needs it at the"
+    echo "       moment it acts: docs/ and linked rule files that the harness does"
+    echo "       not auto-load are not paid at startup."
     echo "    3. Raise CEILING_BYTES in this script, in this PR, with the reason in the PR body."
+    echo
+    echo "  Trading against the AGENTS.md pitfalls corpus is BARRED as it stands."
+    echo "  The entries present on 2026-08-18 were measured at roughly 181"
+    echo "  tradeable bytes in 6089, and those 181 were ALREADY SPENT to set"
+    echo "  the current ceiling. Those entries are at their floor. Entries"
+    echo "  age out at 60 days and get replaced, so re-measure before"
+    echo "  trusting this against a corpus that has turned over."
+    echo "  Getting those 181 took three compression passes and two external"
+    echo "  reviews, which lost and recovered ELEVEN qualifiers - one of them"
+    echo "  reversing an entry's meaning. Everything still in that corpus"
+    echo "  carries a claim, however much it reads like restatement."
+    echo "  The corpus header used to say to fund growth by trading here and"
+    echo "  never by raising this ceiling. That instruction assumed tradeable"
+    echo "  restatement exists, the measurement showed it does not, and the"
+    echo "  header was corrected rather than worked around. Do not reach for"
+    echo "  the corpus again by quietly deleting a qualifier."
   } >&2
 fi
 exit 1
