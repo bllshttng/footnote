@@ -3364,6 +3364,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
     let mut params = Map::new();
     let mut positional: Vec<String> = Vec::new();
     let mut argv: Option<Vec<String>> = None;
+    // Where a `--` fence drained the remaining tokens, counted in pre-fence
+    // positionals; spawn uses it to tell a passthrough tail from a seed.
+    let mut fence_at: Option<usize> = None;
 
     // Click/Typer accepts `--flag=value` for every string option; the Python
     // path forwards e.g. `fno agents ask <name> <msg> --cwd=/repo --timeout=30
@@ -3769,6 +3772,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--" => {
                 // End-of-options: everything after is positional (the seed
                 // fence, same contract as the Python CLI's click parser).
+                fence_at = Some(positional.len());
                 for a in it.by_ref() {
                     positional.push(a);
                 }
@@ -3877,6 +3881,22 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("name".into(), Value::String(name.clone()));
                 1
             };
+            // A message already collected before the fence makes the fenced
+            // tail provider passthrough (the same harness_args list
+            // --harness-arg fills; the daemon-side vocabulary check stays the
+            // trust boundary). Without a message before the fence the tail is
+            // still the seed (the fenced `--timeout=5 do X` case).
+            if let Some(pre_len) = fence_at {
+                if pre_len > msg_from {
+                    let tail = positional.split_off(pre_len);
+                    let items = params
+                        .entry(String::from("harness_args"))
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if let Value::Array(list) = items {
+                        list.extend(tail.into_iter().map(Value::String));
+                    }
+                }
+            }
             if !params.contains_key("message") && positional.len() > msg_from {
                 params.insert(
                     "message".into(),

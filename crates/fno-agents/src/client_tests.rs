@@ -1335,6 +1335,60 @@ fn spawn_argv_payload_equals_form_survives_normalization() {
     assert!(params.get("cwd").is_none());
 }
 
+fn harness_args_of(params: &Value) -> Vec<String> {
+    params["harness_args"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn spawn_fence_after_a_message_is_harness_args() {
+    // A message already collected before the fence makes the tail provider
+    // passthrough, matching the Python front's stated contract (spawn_defaults).
+    let args = vec![
+        "--name".to_string(),
+        "bp-reader".to_string(),
+        "--substrate".to_string(),
+        "headless".to_string(),
+        "Reply OK".to_string(),
+        "--".to_string(),
+        "--strict-mcp-config".to_string(),
+        "--tools".to_string(),
+        String::new(),
+    ];
+    let (_m, params) = build_request("spawn", &args).unwrap();
+    assert_eq!(params["message"], "Reply OK");
+    assert_eq!(
+        harness_args_of(&params),
+        vec![
+            "--strict-mcp-config".to_string(),
+            "--tools".to_string(),
+            String::new(),
+        ]
+    );
+}
+
+#[test]
+fn spawn_fence_without_a_message_still_seeds() {
+    // No message before the fence: the tail is the seed (the fenced
+    // `--timeout=5 do X` case), never provider passthrough.
+    let args = vec![
+        "--name".to_string(),
+        "bp-reader".to_string(),
+        "--".to_string(),
+        "--timeout=5".to_string(),
+        "do X".to_string(),
+    ];
+    let (_m, params) = build_request("spawn", &args).unwrap();
+    assert_eq!(params["message"], "--timeout=5 do X");
+    assert!(params.get("harness_args").is_none());
+}
+
 #[test]
 fn mint_session_uuid_is_well_formed_v4() {
     let u = mint_session_uuid();
