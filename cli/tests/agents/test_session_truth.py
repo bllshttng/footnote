@@ -426,6 +426,20 @@ def test_render_states():
     assert "unknown" in unk and "not-found" in unk and "w1" in unk
 
 
+def test_truth_line_reads_dead_when_the_registry_falsifies_the_row():
+    from fno.agents.cli import _truth_line
+
+    result = {"handle": "king-4d9b-delivery", "state": "working", "reason": None,
+              "last_activity_age_s": 600, "last_activity_basis": "last-entry",
+              "observed_model": {"kind": "observed", "model": "gpt-6-astra", "samples": 2},
+              "session_id": "01a09bcd", "suggestions": []}
+    dead = _truth_line(result, "pane-gone")
+    assert dead.startswith("truth king-4d9b-delivery: dead")
+    assert "working" not in dead and "active" not in dead
+    assert dead.endswith("[unreachable: pane-gone]")
+    assert _truth_line(result, None).startswith("truth king-4d9b-delivery: working")
+
+
 def test_resolver_crash_is_distinct_from_a_routine_miss(tmp_path):
     """A crashing resolver must not share not-found's reason.
 
