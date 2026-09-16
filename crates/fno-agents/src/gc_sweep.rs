@@ -1535,6 +1535,8 @@ fn origin_corpse(
     }
     false
 }
+/// The one retirement pass. Every I/O seam (`read_graph`, `store_matches`,
+/// `age_many`, `stop_confirmed`, `tree_probe`, `prune_tree`) is injected so a
 /// test stages the world; production wiring is [`crate::gc::gc_sweep`] /
 /// [`crate::gc::gc_sweep_dry_run`]. `agents_read` is the same kind of seam
 /// for the `claude agents --json --all` snapshot: read at most once per
