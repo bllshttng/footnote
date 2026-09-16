@@ -1,4 +1,4 @@
-//! `fno-agents hook king-guard` - the PreToolUse court guard, native (x-09d2).
+//! `fno-agents hook king-guard` - the native PreToolUse court guard.
 //!
 //! Port of `hooks/king-delegation-guard.sh` policy: a session whose registry
 //! row carries a crown and whose reign manifest declares shape `court` is
@@ -19,15 +19,9 @@ use std::path::{Path, PathBuf};
 
 use crate::agents_config::config_lookup;
 
-/// Registry statuses that mean the crown row no longer answers. The Python
-/// `resolve_king_manifest_path` reads the same set.
-const TERMINAL_STATUSES: [&str; 4] = ["exited", "orphaned", "failed", "permanent_dead"];
-
 /// Entry: read the payload once, decide, print, always exit 0.
-pub fn run(args: &[String]) -> i32 {
-    let _ = args;
-    let input = super::read_stdin();
-    let payload: Value = serde_json::from_str(input.trim()).unwrap_or(Value::Null);
+pub fn run(_args: &[String]) -> i32 {
+    let payload: Value = serde_json::from_str(super::read_stdin().trim()).unwrap_or(Value::Null);
     let trace = std::env::var_os("FNO_GUARD_TRACE").is_some();
     let allow = |why: &str| -> i32 {
         if !why.is_empty() {
@@ -89,7 +83,9 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     // 5. Registry: the crown row.
-    let rows = load_registry_rows();
+    let rows = crate::state::load_registry(&crate::paths::AgentsHome::from_env().registry_json())
+        .map(|r| r.entries)
+        .map_err(|e| e.to_string());
     let Some(row) = rows
         .as_ref()
         .ok()
@@ -112,9 +108,16 @@ pub fn run(args: &[String]) -> i32 {
 
     // 6. Manifest: the reign declaration. Registry row, not file presence,
     //    proved authority; the manifest must name court for THIS session.
-    let cwd = payload_cwd(&payload);
-    let space = super::events_space(&cwd);
-    let manifest = space.join("kings").join(format!("{crown_scope}.md"));
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let manifest = super::events_space(&cwd)
+        .join("kings")
+        .join(format!("{crown_scope}.md"));
     if !crown_scope.is_empty()
         && (crown_scope.contains("..") || crown_scope.contains('/') || crown_scope.contains('\\'))
     {
@@ -126,10 +129,7 @@ pub fn run(args: &[String]) -> i32 {
     let Some(km) = crate::loopcheck::parse_king_manifest(&content) else {
         return allow("");
     };
-    if km.shape != "court" {
-        return allow("");
-    }
-    if km.harness_session_id.as_deref() != Some(sid.as_str()) {
+    if km.shape != "court" || km.harness_session_id.as_deref() != Some(sid.as_str()) {
         return allow("");
     }
 
@@ -143,13 +143,11 @@ pub fn run(args: &[String]) -> i32 {
 
     // 8. Allowed roots. Plans/handoff unresolvable ALLOWS everything (the
     //    never-block contract); escalations unresolved only turns off itself.
-    let plans_dir = plans_content_dir(&cwd);
-    let Some(plans_dir) = plans_dir else {
+    let Some(plans_dir) = plans_content_dir(&cwd) else {
         return allow("plans resolver unresolved; allowing");
     };
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let handoff = crown_handoff_path(&cwd, home.as_deref(), crown_scope, &sid);
-    let Some(handoff) = handoff else {
+    let Some(handoff) = crown_handoff_path(&cwd, home.as_deref(), crown_scope, &sid) else {
         return allow("handoff resolver unresolved; allowing");
     };
     let escalations = crate::escalation::dir(&cwd);
@@ -158,30 +156,32 @@ pub fn run(args: &[String]) -> i32 {
     let agent_id = payload
         .get("agent_id")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or("");
     let transcript = payload
         .get("transcript_path")
         .and_then(Value::as_str)
         .unwrap_or("");
     if !agent_id.is_empty() {
-        eprintln!(
-            "king-delegation-guard: limb (agent_id {agent_id}) of crowned session {sid}; allowing"
-        );
-        return allow("");
+        return allow(&format!(
+            "limb (agent_id {agent_id}) of crowned session {sid}; allowing"
+        ));
     }
     if is_subagent_transcript(transcript, &sid) {
-        eprintln!("king-delegation-guard: limb of crowned session {sid}; allowing");
-        return allow("");
+        return allow(&format!("limb of crowned session {sid}; allowing"));
     }
     if transcript_is_open_spawn(transcript) {
-        eprintln!(
-            "king-delegation-guard: limb of crowned session {sid} (open Task/Agent tool_use in the parent transcript); allowing"
-        );
-        return allow("");
+        return allow(&format!(
+            "limb of crowned session {sid} (open Task/Agent tool_use in the parent transcript); allowing"
+        ));
     }
 
-    // 10. Decide.
+    // 10. Decide: the write-path allowlist, one predicate for every tool.
+    let allowed = |t: &str| {
+        in_plans(t, &cwd, &plans_dir)
+            || real_eq(t, &cwd, &handoff)
+            || in_memory(t, &cwd, home.as_deref())
+            || real_prefix(t, &cwd, &escalations)
+    };
     let denied: Option<String> = match tool {
         "Edit" | "Write" | "NotebookEdit" => {
             let file = ti
@@ -189,34 +189,9 @@ pub fn run(args: &[String]) -> i32 {
                 .or_else(|| ti.get("notebook_path"))
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if file.is_empty() {
-                None
-            } else if in_plans(file, &cwd, &plans_dir)
-                || real_eq(file, &cwd, &handoff)
-                || in_memory(file, &cwd, home.as_deref())
-                || real_prefix(file, &cwd, &escalations)
-            {
-                None
-            } else {
-                Some(file.to_string())
-            }
+            (!file.is_empty() && !allowed(file)).then(|| file.to_string())
         }
-        _ => {
-            // Bash: every bound target must land inside a root.
-            let mut denied: Option<String> = None;
-            for t in &targets {
-                if real_eq(t, &cwd, &handoff)
-                    || in_memory(t, &cwd, home.as_deref())
-                    || real_prefix(t, &cwd, &escalations)
-                    || in_plans(t, &cwd, &plans_dir)
-                {
-                    continue;
-                }
-                denied = Some(t.clone());
-                break;
-            }
-            denied
-        }
+        _ => targets.iter().find(|t| !allowed(t)).map(|t| t.to_string()),
     };
 
     // 11. Telemetry: one row, one file, failure ignored.
@@ -232,24 +207,6 @@ pub fn run(args: &[String]) -> i32 {
     let text = deny_text(&denied, &plans_dir, &handoff, &escalations);
     eprint!("{text}");
     super::emit_block(&text)
-}
-
-/// The payload's cwd, falling back to the process cwd (the hook runner seeds
-/// it with the session cwd).
-fn payload_cwd(payload: &Value) -> PathBuf {
-    payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn load_registry_rows() -> Result<Vec<crate::state::RegistryEntry>, String> {
-    let home = crate::paths::AgentsHome::from_env();
-    let reg = crate::state::load_registry(&home.registry_json()).map_err(|e| e.to_string())?;
-    Ok(reg.entries)
 }
 
 /// The two-line refusal, byte-identical to the shell's `_deny_text`.
@@ -287,168 +244,142 @@ fn write_targets(command: &str) -> Vec<String> {
     let Some(tokens) = shlex::split(command) else {
         return Vec::new();
     };
-    use std::cell::RefCell;
-    let fd_dup = regex::Regex::new(r"[&\d]+").unwrap();
-    let redir_start = regex::Regex::new(r"^\d*&?>").unwrap();
-    let inplace = regex::Regex::new(r"--in-place|-[a-zA-Z]*i[a-zA-Z.]*").unwrap();
+    // Python's re.fullmatch over `[&\d]+`: a token made only of `&` and digits.
+    let is_fd = |t: &str| !t.is_empty() && t.bytes().all(|b| b == b'&' || b.is_ascii_digit());
     let bound = |t: &str| matches!(t, ";" | "|" | "&&" | "||" | "&");
-    let verbs = |t: &str| {
-        matches!(
-            t,
-            "tee"
-                | "sponge"
-                | "truncate"
-                | "cp"
-                | "mv"
-                | "install"
-                | "dd"
-                | "sed"
-                | "perl"
-                | "ed"
-                | "ex"
-        )
-    };
-    let is_opt = |t: &str| t.starts_with('-');
-
-    struct St {
-        verb: Option<String>,
-        pool: Vec<String>,
-        nxt: bool,
-        val: bool,
-    }
-    let st = RefCell::new(St {
-        verb: None,
-        pool: Vec::new(),
-        nxt: false,
-        val: false,
-    });
-    let targets: RefCell<Vec<String>> = RefCell::new(Vec::new());
-
-    // Python's re.fullmatch on the alternation; Rust regex is leftmost-first
-    // over the whole string with anchors added here.
-    let fullmatch = |re: &regex::Regex, t: &str| re.find(t).map(|m| m.as_str()) == Some(t);
-
-    let flush = || {
-        let mut st = st.borrow_mut();
-        let Some(verb) = st.verb.clone() else {
+    let flush = |verb: &Option<String>, pool: &[String], targets: &mut Vec<String>| {
+        let Some(verb) = verb else {
             return;
         };
-        let files: Vec<&str> = st
-            .pool
+        let files: Vec<&str> = pool
             .iter()
             .map(String::as_str)
-            .filter(|t| !t.is_empty() && !is_opt(t))
+            .filter(|t| !t.is_empty() && !t.starts_with('-'))
             .collect();
-        if matches!(verb.as_str(), "tee" | "sponge" | "truncate" | "ed" | "ex") {
-            for f in files {
-                targets.borrow_mut().push(f.to_string());
+        match verb.as_str() {
+            "tee" | "sponge" | "truncate" | "ed" | "ex" => {
+                targets.extend(files.into_iter().map(str::to_string));
             }
-        } else if matches!(verb.as_str(), "cp" | "mv" | "install") {
-            if let Some(last) = files.last() {
-                targets.borrow_mut().push((*last).to_string());
-            }
-        } else if verb == "dd" {
-            for t in &st.pool {
-                if let Some(rest) = t.strip_prefix("of=") {
-                    targets.borrow_mut().push(rest.to_string());
-                }
-            }
-        } else if verb == "sed" || verb == "perl" {
-            let has_inplace = st
-                .pool
-                .iter()
-                .filter(|t| is_opt(t))
-                .any(|t| fullmatch(&inplace, t));
-            if has_inplace {
+            "cp" | "mv" | "install" => {
                 if let Some(last) = files.last() {
-                    targets.borrow_mut().push(last.to_string());
+                    targets.push((*last).to_string());
                 }
             }
+            "dd" => {
+                targets.extend(
+                    pool.iter()
+                        .filter_map(|t| t.strip_prefix("of="))
+                        .map(str::to_string),
+                );
+            }
+            "sed" | "perl" => {
+                let inplace = pool
+                    .iter()
+                    .filter(|t| t.starts_with('-'))
+                    .any(|t| is_inplace(t));
+                if inplace {
+                    if let Some(last) = files.last() {
+                        targets.push((*last).to_string());
+                    }
+                }
+            }
+            _ => {}
         }
     };
-
+    let mut targets: Vec<String> = Vec::new();
+    let mut verb: Option<String> = None;
+    let mut pool: Vec<String> = Vec::new();
+    let mut nxt = false;
+    let mut val = false;
     for tok in &tokens {
         if bound(tok) {
-            flush();
-            let mut s = st.borrow_mut();
-            *s = St {
-                verb: None,
-                pool: Vec::new(),
-                nxt: false,
-                val: false,
-            };
-            continue;
-        }
-        if st.borrow().nxt {
-            st.borrow_mut().nxt = false;
-            let is_target = !bound(tok) && !tok.contains('>') && !fullmatch(&fd_dup, tok);
-            if is_target {
-                targets.borrow_mut().push(tok.clone());
+            flush(&verb, &pool, &mut targets);
+            verb = None;
+            pool.clear();
+            nxt = false;
+            val = false;
+        } else if nxt {
+            nxt = false;
+            if !bound(tok) && !tok.contains('>') && !is_fd(tok) {
+                targets.push(tok.clone());
             }
-            continue;
-        }
-        if redir_start.is_match(tok) {
-            // out_redirect: strip the leading fd, classify the operator.
+        } else if is_redirect(tok) {
             let rest = tok.trim_start_matches(|c: char| c.is_ascii_digit());
-            let kind: Option<Option<String>> = if let Some(stripped) = rest.strip_prefix("&>") {
+            if let Some(stripped) = rest.strip_prefix("&>") {
                 if stripped.is_empty() {
-                    Some(None) // &> : bare, target is next token
+                    nxt = true;
                 } else {
-                    Some(Some(stripped.to_string()))
+                    targets.push(stripped.to_string());
                 }
             } else if rest == ">&" {
-                Some(None)
+                nxt = true;
             } else {
-                let body = rest
-                    .trim_start_matches('&')
-                    .trim_start_matches('>')
-                    .trim_end_matches([';', '|', '&'])
-                    .to_string();
-                if matches!(rest.trim_start_matches('&'), ">" | ">>" | ">|" | ">!") {
-                    Some(None)
-                } else if !body.is_empty() && !fullmatch(&fd_dup, &body) {
-                    Some(Some(body))
+                let plain = rest.trim_start_matches('&');
+                if matches!(plain, ">" | ">>" | ">|" | ">!") {
+                    nxt = true;
                 } else {
-                    None
+                    let body = plain
+                        .trim_start_matches('>')
+                        .trim_end_matches([';', '|', '&']);
+                    if !body.is_empty() && !is_fd(body) {
+                        targets.push(body.to_string());
+                    }
                 }
-            };
-            match kind {
-                Some(None) => {
-                    st.borrow_mut().nxt = true;
-                }
-                Some(Some(t)) => {
-                    targets.borrow_mut().push(t);
-                }
-                None => {}
             }
-            continue;
-        }
-        if st.borrow().val {
-            st.borrow_mut().val = false;
-            continue;
-        }
-        if st.borrow().verb.is_none() {
-            if verbs(tok) {
-                let mut s = st.borrow_mut();
-                s.verb = Some(tok.clone());
-                s.pool = Vec::new();
+        } else if val {
+            val = false;
+        } else if verb.is_none() {
+            if matches!(
+                tok.as_str(),
+                "tee"
+                    | "sponge"
+                    | "truncate"
+                    | "cp"
+                    | "mv"
+                    | "install"
+                    | "dd"
+                    | "sed"
+                    | "perl"
+                    | "ed"
+                    | "ex"
+            ) {
+                verb = Some(tok.clone());
+                pool.clear();
             }
-            continue;
-        }
-        {
-            let mut s = st.borrow_mut();
-            s.pool.push(tok.clone());
+        } else {
             if matches!(tok.as_str(), "-e" | "-f" | "-i") {
-                s.val = true;
+                val = true;
             }
+            pool.push(tok.clone());
         }
     }
-    flush();
+    flush(&verb, &pool, &mut targets);
+    targets.retain(|t| !t.is_empty());
     targets
-        .into_inner()
-        .into_iter()
-        .filter(|t| !t.is_empty())
-        .collect()
+}
+
+/// `^\d*&?>`: optional leading fd digits, optional `&`, then a redirect.
+fn is_redirect(tok: &str) -> bool {
+    let rest = tok.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = rest.strip_prefix('&').unwrap_or(rest);
+    rest.starts_with('>')
+}
+
+/// `--in-place|-[a-zA-Z]*i[a-zA-Z.]*`, fullmatch. The first `i` is the only
+/// split a fullmatch can use: a later `i` puts the same bad byte in `head`.
+fn is_inplace(t: &str) -> bool {
+    if t == "--in-place" {
+        return true;
+    }
+    let Some(rest) = t.strip_prefix('-') else {
+        return false;
+    };
+    let Some(idx) = rest.find('i') else {
+        return false;
+    };
+    let (head, tail) = (&rest[..idx], &rest[idx + 1..]);
+    head.bytes().all(|b| b.is_ascii_alphabetic())
+        && tail.bytes().all(|b| b.is_ascii_alphabetic() || b == b'.')
 }
 
 // ── Session identity ─────────────────────────────────────────────────────────
@@ -497,13 +428,14 @@ fn resolve_sid(payload_sid: &str, transcript: &str) -> String {
 fn plans_content_dir(cwd: &Path) -> Option<PathBuf> {
     let root = crate::paths::worktree_repo_root(cwd);
     for name in ["settings.local.json", "settings.json"] {
-        let Ok(text) = std::fs::read_to_string(root.join(".claude").join(name)) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else {
-            continue;
-        };
-        if let Some(raw) = v.get("plansDirectory").and_then(Value::as_str) {
+        let parsed = std::fs::read_to_string(root.join(".claude").join(name))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        if let Some(raw) = parsed
+            .as_ref()
+            .and_then(|v| v.get("plansDirectory"))
+            .and_then(Value::as_str)
+        {
             if !raw.is_empty() {
                 let p = PathBuf::from(raw);
                 return Some(if p.is_absolute() { p } else { root.join(p) });
@@ -524,12 +456,7 @@ fn plans_dir(cwd: &Path) -> Option<PathBuf> {
         return Some(crate::paths::space_dir(cwd).join("plans"));
     }
     let leading = raw.trim_start();
-    let plain_relative = !leading.is_empty()
-        && !leading.starts_with('/')
-        && !leading.starts_with('~')
-        && !raw.contains('$')
-        && !raw.contains('{');
-    if plain_relative {
+    if !leading.is_empty() && !leading.starts_with(['/', '~']) && !raw.contains(['$', '{']) {
         return Some(
             crate::paths::worktree_repo_root(cwd)
                 .join(raw)
@@ -537,15 +464,11 @@ fn plans_dir(cwd: &Path) -> Option<PathBuf> {
                 .collect::<PathBuf>(),
         );
     }
-    expand_template(&raw, cwd)
-}
-
-/// `~`, `{vault}` and `{project}` expansion over the finalize.rs helpers;
-/// `None` when an `{...}` token stays unresolved.
-fn expand_template(raw: &str, cwd: &Path) -> Option<PathBuf> {
+    // Template form: ~, {vault}, {project} over the finalize.rs helpers;
+    // None when an {...} token stays unresolved.
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let project = crate::finalize::resolve_project_name(None, home.as_deref(), cwd);
-    let expanded = crate::finalize::expand_handoffs_template(raw, home.as_deref(), &project)?;
+    let expanded = crate::finalize::expand_handoffs_template(&raw, home.as_deref(), &project)?;
     // `{vault}` reaches here only as a literal-brace token: expansion refuses
     // unknown tokens, so resolve the vault root the way Python's _resolve did.
     if expanded.to_string_lossy().contains('{') {
@@ -558,10 +481,7 @@ fn expand_template(raw: &str, cwd: &Path) -> Option<PathBuf> {
         let raw = expanded
             .to_string_lossy()
             .replace("{vault}", &vroot.to_string_lossy());
-        if raw.contains('{') {
-            return None;
-        }
-        return Some(PathBuf::from(raw));
+        return (!raw.contains('{')).then(|| PathBuf::from(raw));
     }
     Some(expanded)
 }
@@ -572,44 +492,45 @@ fn expand_template(raw: &str, cwd: &Path) -> Option<PathBuf> {
 /// the sid>.md`. Unresolvable dir -> None (the caller allows).
 fn crown_handoff_path(cwd: &Path, home: Option<&Path>, scope: &str, sid: &str) -> Option<PathBuf> {
     let dir = crate::finalize::resolve_handoffs_dir(None, None, cwd, home);
+    let today = chrono::Local::now().format("%Y%m%d");
     if !scope.is_empty() {
         let key = format!("crown-{}", crate::king_checkin::sanitize_scope_key(scope));
-        let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
+        // The glob `*-<key>.md` takes ANY prefix, empty included; a bare
+        // `sibling<key>.md` without the separator must not match.
+        let newest: Option<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
                 let p = entry.path();
-                let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
-                let Some(name) = name else { continue };
+                let name = p.file_name()?.to_string_lossy().into_owned();
                 if name.starts_with('.') {
-                    continue;
+                    return None;
                 }
-                let Some(stem) = name.strip_suffix(".md") else {
-                    continue;
-                };
-                // The glob `*-<key>.md` takes ANY prefix, empty included; a
-                // bare `sibling<key>.md` without the separator must not.
+                let stem = name.strip_suffix(".md")?;
                 if !stem
                     .strip_suffix(&key)
                     .is_none_or(|head| head.ends_with('-') || head.is_empty())
                 {
-                    continue;
+                    return None;
                 }
                 let mtime = entry
                     .metadata()
                     .and_then(|m| m.modified())
                     .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                if newest.as_ref().is_none_or(|(_, best)| mtime > *best) {
-                    newest = Some((p, mtime));
-                }
-            }
-        }
-        return Some(newest.map(|(p, _)| p).unwrap_or_else(|| {
-            let today = chrono::Local::now().format("%Y%m%d");
-            dir.join(format!("{today}-{key}.md"))
-        }));
+                Some((p, mtime))
+            })
+            .fold(None, |best, (p, mtime)| match best {
+                best @ Some((_, b)) if mtime <= b => best,
+                _ => Some((p, mtime)),
+            });
+        return Some(
+            newest
+                .map(|(p, _)| p)
+                .unwrap_or_else(|| dir.join(format!("{today}-{key}.md"))),
+        );
     }
     let key: String = sid.chars().take(8).collect();
-    let today = chrono::Local::now().format("%Y%m%d");
     Some(dir.join(format!("{today}-{key}.md")))
 }
 
@@ -633,15 +554,14 @@ fn normpath(p: &Path) -> PathBuf {
     out
 }
 
-fn abs_norm(p: &str, cwd: &Path) -> PathBuf {
+fn abs_join(p: &str, cwd: &Path) -> PathBuf {
     let path = PathBuf::from(p);
-    let joined = if path.is_absolute() {
+    if path.is_absolute() {
         path
     } else {
         let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         cwd.join(path)
-    };
-    normpath(&joined)
+    }
 }
 
 /// realpath with Python's not-yet-existing-file semantics: canonicalize the
@@ -649,37 +569,23 @@ fn abs_norm(p: &str, cwd: &Path) -> PathBuf {
 /// resolves the same way for a file that does not exist yet), then append the
 /// non-existent tail.
 fn real_of(p: &str, cwd: &Path) -> PathBuf {
-    let path = PathBuf::from(p);
-    let joined = if path.is_absolute() {
-        path
-    } else {
-        let cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-        cwd.join(path)
-    };
+    let joined = abs_join(p, cwd);
     if let Ok(real) = std::fs::canonicalize(&joined) {
         return real;
     }
-    let mut prefix = joined.clone();
-    let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    loop {
-        match prefix.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => {
-                tail.push(
-                    prefix
-                        .file_name()
-                        .map(std::borrow::ToOwned::to_owned)
-                        .unwrap_or_default(),
-                );
-                prefix = parent.to_path_buf();
-                if let Ok(real) = std::fs::canonicalize(&prefix) {
-                    let mut real = real;
-                    for part in tail.iter().rev() {
-                        real.push(part);
-                    }
-                    return real;
-                }
-            }
-            _ => break,
+    let (mut prefix, mut tail) = (joined.clone(), Vec::new());
+    while let Some(parent) = prefix.parent().filter(|p| !p.as_os_str().is_empty()) {
+        tail.push(
+            prefix
+                .file_name()
+                .map(|n| n.to_os_string())
+                .unwrap_or_default(),
+        );
+        prefix = parent.to_path_buf();
+        if let Ok(real) = std::fs::canonicalize(&prefix) {
+            let mut real = real;
+            real.extend(tail.iter().rev().cloned());
+            return real;
         }
     }
     normpath(&joined)
@@ -687,7 +593,7 @@ fn real_of(p: &str, cwd: &Path) -> PathBuf {
 
 /// Plans containment (normpath, not realpath - the shell compared normpaths).
 fn in_plans(p: &str, cwd: &Path, plans: &Path) -> bool {
-    let p = abs_norm(p, cwd);
+    let p = normpath(&abs_join(p, cwd));
     let d = normpath(plans);
     p == d || p.starts_with(&d)
 }
@@ -707,38 +613,32 @@ fn real_prefix(p: &str, cwd: &Path, root: &Path) -> bool {
 
 /// Memory carve-out: exactly `$HOME/.claude/projects/<project>/memory/**`.
 fn in_memory(p: &str, cwd: &Path, home: Option<&Path>) -> bool {
-    let Some(home) = home else {
-        return false;
-    };
-    let root = home.join(".claude").join("projects");
-    let p = real_of(p, cwd);
-    let root = real_of(&root.to_string_lossy(), cwd);
-    if p == root || !p.starts_with(&root) {
-        return false;
-    }
-    let rel = p.strip_prefix(&root).unwrap();
-    let mut comps = rel.components();
-    let _project = comps.next();
-    comps.next().map(|c| c.as_os_str() == "memory") == Some(true)
+    home.is_some_and(|home| {
+        let root = real_of(
+            &home.join(".claude").join("projects").to_string_lossy(),
+            cwd,
+        );
+        let p = real_of(p, cwd);
+        p.starts_with(&root)
+            && p.strip_prefix(&root)
+                .unwrap()
+                .components()
+                .nth(1)
+                .is_some_and(|c| c.as_os_str() == "memory")
+    })
 }
 
 // ── Limb signatures ──────────────────────────────────────────────────────────
 
 fn is_subagent_transcript(transcript: &str, sid: &str) -> bool {
-    if transcript.is_empty() {
-        return false;
-    }
-    let path = Path::new(transcript);
-    let Some(parent) = path.parent() else {
+    let Some(parent) = Path::new(transcript).parent() else {
         return false;
     };
-    if parent.file_name().map(|n| n == "subagents") != Some(true) {
-        return false;
-    }
-    parent
-        .parent()
-        .map(|g| g.file_name().map(|n| n == sid).unwrap_or(false))
-        .unwrap_or(false)
+    parent.file_name().is_some_and(|n| n == "subagents")
+        && parent
+            .parent()
+            .and_then(|g| g.file_name())
+            .is_some_and(|n| n == sid)
 }
 
 /// The sync-limb shape: the transcript's newest tool_use is Task/Agent with no
@@ -748,21 +648,20 @@ fn transcript_is_open_spawn(transcript: &str) -> bool {
     if transcript.is_empty() {
         return false;
     }
-    let Ok(meta) = std::fs::metadata(transcript) else {
-        return false;
-    };
-    let size = meta.len() as usize;
-    let start = size.saturating_sub(262_144);
-    let Ok(file) = std::fs::File::open(transcript) else {
-        return false;
+    let (meta, mut file) = match (
+        std::fs::metadata(transcript),
+        std::fs::File::open(transcript),
+    ) {
+        (Ok(m), Ok(f)) => (m, f),
+        _ => return false,
     };
     use std::io::{Read as _, Seek, SeekFrom};
-    let mut file = file;
-    if file.seek(SeekFrom::Start(start as u64)).is_err() {
-        return false;
-    }
     let mut buf = String::new();
-    if file.read_to_string(&mut buf).is_err() {
+    if file
+        .seek(SeekFrom::Start(meta.len().saturating_sub(262_144)))
+        .is_err()
+        || file.read_to_string(&mut buf).is_err()
+    {
         return false;
     }
     let mut open_spawn: Option<String> = None;
@@ -785,11 +684,11 @@ fn transcript_is_open_spawn(transcript: &str) -> bool {
             match c.get("type").and_then(Value::as_str) {
                 Some("tool_use") => {
                     let name = c.get("name").and_then(Value::as_str).unwrap_or("");
-                    if name == "Task" || name == "Agent" {
-                        open_spawn = c.get("id").and_then(Value::as_str).map(str::to_string);
+                    open_spawn = if name == "Task" || name == "Agent" {
+                        c.get("id").and_then(Value::as_str).map(str::to_string)
                     } else {
-                        open_spawn = None;
-                    }
+                        None
+                    };
                 }
                 Some("tool_result") => {
                     if let Some(id) = c.get("tool_use_id").and_then(Value::as_str) {

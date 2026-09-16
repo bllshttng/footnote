@@ -1,4 +1,4 @@
-//! Per-turn hook latency and exec budgets (x-09d2).
+//! Per-turn hook latency and exec budgets.
 //!
 //! Each budget-table fixture replays a recorded Stop/PreToolUse payload
 //! through the real hook script in a pinned fixture environment, times the
@@ -450,12 +450,12 @@ fn shim_execs(log: &Path) -> Vec<String> {
         .collect()
 }
 
-struct FixtureSpec {
+struct FixtureSpec<'a> {
     /// The recorded payload (stdin).
     payload: Value,
     /// The manifest this fixture needs written under the space (keyed, so a
     /// re-run after a terminal-consuming fixture rewrites it).
-    manifest: &'static str,
+    manifest: &'a str,
     /// Extra setup run once before sampling (claim acquire for the watch lease).
     pre_setup: Option<&'static str>,
     /// p90 budget in ms (Linux-gated).
@@ -498,7 +498,7 @@ fn guard_payload(sid: &str, tool: &str, input: Value) -> Value {
 
 /// Run one fixture end to end: decision verification on every sample, budget
 /// and exec assertions on Linux (advisory print on macOS).
-fn run_fixture(name: &str, script: &str, spec: &FixtureSpec, verify: impl Fn(i32, &str, &str)) {
+fn run_fixture(name: &str, script: &str, spec: &FixtureSpec<'_>, verify: impl Fn(i32, &str, &str)) {
     let _guard = BENCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     require_idle();
     let b = bench();
@@ -557,8 +557,13 @@ fn run_fixture(name: &str, script: &str, spec: &FixtureSpec, verify: impl Fn(i32
         write(&b.global, "");
         write(&b.exec_log, "");
         write(&b.gh_calls, "");
-        let (ms, code, stdout, stderr) =
-            sample_once(&args, Some(&spec.payload), &env, &b.repo, trace_path);
+        let (ms, code, stdout, stderr) = sample_once(
+            &args,
+            Some(&spec.payload),
+            &env,
+            &b.repo,
+            trace_path.as_deref(),
+        );
         last = (code, stdout.clone(), stderr.clone());
         if i < 10 {
             continue; // warmup, recorded nowhere
@@ -682,14 +687,7 @@ fn latency_stop_visitor_no_message() {
             pre_setup: None,
             budget_p90_ms: 1000.0,
             ceiling_ms: 2500.0,
-            allowed_execs: &[
-                "bash",
-                "fno-agents",
-                "git",
-                "fno",
-                "python3",
-                "python",
-            ],
+            allowed_execs: &["bash", "fno-agents", "git", "fno", "python3", "python"],
             max_git: Some(2),
         },
         |code, stdout, stderr| {
@@ -992,5 +990,109 @@ fn latency_guard_court_plan_allow() {
                 "plan write must allow: {stdout} {stderr}"
             );
         },
+    );
+}
+
+/// AC12-HP: the per-turn hot path stays small. Ceilings freeze this branch's
+/// measured floors so the wrappers, the native handlers, and the decision
+/// core cannot quietly regrow. Physical counts for the wrappers and
+/// `loopcheck.rs`; nonblank noncomment counts for the Rust handlers (up to
+/// their `#[cfg(test)]`) and for the decision core.
+#[test]
+fn hook_sources_stay_small() {
+    fn physical(path: &str) -> usize {
+        std::fs::read_to_string(path).unwrap().lines().count()
+    }
+    /// Nonblank, noncomment lines. With `until_cfg_test`, stop at the first
+    /// column-0 `#[cfg(test)]` (the unit-test block is not production).
+    fn nbnc(path: &str, until_cfg_test: bool) -> usize {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .take_while(|l| !until_cfg_test || !l.starts_with("#[cfg(test)]"))
+            .filter(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.starts_with("//")
+            })
+            .count()
+    }
+    /// Brace-matched extent of `fn <name>(`, counting only code braces (a
+    /// mini scanner skips string and char literals so `json!` bodies and
+    /// format strings cannot desync the depth).
+    fn fn_nbnc(path: &str, name: &str) -> usize {
+        let src = std::fs::read_to_string(path).unwrap();
+        let sig = format!("fn {name}(");
+        let start = src
+            .match_indices(&sig)
+            .find(|(i, _)| {
+                let before = src[..*i].trim_end();
+                before.ends_with("pub")
+                    || before.ends_with("pub(crate)")
+                    || before.ends_with(')')
+                    || before.is_empty()
+                    || before.ends_with('*')
+            })
+            .map(|(i, _)| i)
+            .unwrap_or_else(|| panic!("{name} not found in {path}"));
+        let body_open = src[start..].find('{').unwrap() + start;
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut in_char = false;
+        let mut escaped = false;
+        let mut end = body_open;
+        for c in src[body_open..].chars() {
+            end += c.len_utf8();
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match c {
+                '\\' if in_string || in_char => escaped = true,
+                '"' if !in_char => in_string = !in_string,
+                '\'' if !in_string => in_char = !in_char,
+                '{' if !in_string && !in_char => depth += 1,
+                '}' if !in_string && !in_char => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        src[start..end]
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.starts_with("//")
+            })
+            .count()
+    }
+
+    let root = env!("CARGO_MANIFEST_DIR");
+    let repo = format!("{root}/../..");
+    assert!(
+        physical(&format!("{repo}/hooks/target-stop-hook.sh")) <= 20,
+        "target-stop-hook.sh must stay a tiny exec wrapper"
+    );
+    assert!(
+        physical(&format!("{repo}/hooks/king-delegation-guard.sh")) <= 20,
+        "king-delegation-guard.sh must stay a tiny exec wrapper"
+    );
+    assert!(
+        physical(&format!("{root}/src/loopcheck.rs")) <= 11_700,
+        "loopcheck.rs grew past its ceiling"
+    );
+    assert!(
+        nbnc(&format!("{root}/src/hook/stop.rs"), true) <= 850,
+        "hook/stop.rs grew past its ceiling"
+    );
+    assert!(
+        nbnc(&format!("{root}/src/hook/king_guard.rs"), true) <= 600,
+        "hook/king_guard.rs grew past its ceiling"
+    );
+    assert!(
+        fn_nbnc(&format!("{root}/src/loopcheck.rs"), "decide_with_payload") <= 1_090,
+        "the decision core grew past its ceiling"
     );
 }

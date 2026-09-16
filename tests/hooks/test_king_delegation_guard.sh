@@ -3,7 +3,7 @@
 # refused Edit/Write/NotebookEdit and shell writes to source, while its plans
 # dir, crown handoff doc, escalations dir and auto-memory stay writable.
 #
-# x-09d2: the policy moved into crates/fno-agents/src/hook/king_guard.rs and
+# The policy moved into crates/fno-agents/src/hook/king_guard.rs and
 # the script became an exec wrapper, so the fixtures are real files the
 # native guard reads (registry.json under FNO_AGENTS_HOME, the court manifest
 # under the space's kings/, config.toml at the payload cwd) instead of stubbed

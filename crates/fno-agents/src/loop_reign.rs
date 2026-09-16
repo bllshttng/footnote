@@ -115,7 +115,7 @@ pub(crate) fn find_by_session<'a>(
         r.harness_session_id.as_deref() == Some(sid)
             || r.cc_session_id.as_deref() == Some(sid)
             // The guard's jq select also matched the bare `session_id` field
-            // (x-09d2): one matcher keeps every caller on the same rows.
+            // One matcher keeps every caller on the same rows.
             || r.session_id.as_deref() == Some(sid)
     };
     match harness {

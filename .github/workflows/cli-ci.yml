@@ -487,6 +487,42 @@ jobs:
 
   test-agents:
     name: cargo test (fno-agents) + schema parity
+  hook-latency:
+    name: per-turn hook latency budgets
+    needs: [smoke-pytest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/build
+            crates/fno-agents/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Install strace
+        run: sudo apt-get update && sudo apt-get install -y strace
+      - name: Build release binary
+        run: cargo build --release --manifest-path crates/fno-agents/Cargo.toml --bin fno-agents
+      - name: Run latency budgets
+        env:
+          FNO_AGENTS_BIN: ${{ github.workspace }}/crates/fno-agents/target/release/fno-agents
+          FNO_HOOK_LATENCY_OUT: ${{ runner.temp }}/hook-latency
+        run: cargo test --release --manifest-path crates/fno-agents/Cargo.toml --test hook_latency -- --ignored --test-threads=1 --nocapture
+      - name: Upload samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hook-latency-samples
+          path: ${{ runner.temp }}/hook-latency
+
+  test:
+    name: cargo test + schema parity
     needs: [smoke-pytest]
     runs-on: ubuntu-latest
     # 40, kept from the old single `test` job, now over half the work. Split
