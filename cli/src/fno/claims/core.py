@@ -2231,7 +2231,6 @@ def _configured_claim_root() -> Optional[Path]:
     value = os.environ.get("FNO_CLAIMS_ROOT", "").strip()
     return Path(value) if value else None
 
-
 def _legacy_claim_call(key: str, root: Optional[Path]) -> bool:
     return root is not None or _python_claim_runtime() or (bool(key) and claims_root_for(key) is None)
 
