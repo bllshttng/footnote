@@ -535,8 +535,8 @@ mod tests {
         assert_eq!(text.matches("dispatch_hold:").count(), 1);
     }
 
-    /// x-786d: a corrupt store carries its own code (5) and names the read
-    /// failure; an absent id on a well-formed store stays exit 2.
+    /// A corrupt store carries its own code (5) and names the read failure;
+    /// an absent id on a well-formed store stays exit 2.
     #[test]
     fn corrupt_graph_refusal_is_its_own_code_not_absence() {
         let dir = tempfile::tempdir().unwrap();
