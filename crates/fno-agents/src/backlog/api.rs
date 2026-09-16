@@ -484,6 +484,50 @@ pub fn version(store: &Store) -> Result<i64, ApiError> {
 /// `graph_store::mutate_rows` (the one optimistic cycle every whole-graph
 /// writer shares). `Ok(false)` from `apply` is a domain refusal: nothing is
 /// written and the counter stays put, which is AC15's failed-mutation arm.
+pub fn decisions(
+    store: &Store,
+    node: Option<&str>,
+    decision_id: Option<&str>,
+) -> Result<Vec<Value>, ApiError> {
+    let connection = crate::backlog::open(&store.graph)?;
+    let rows = match node {
+        Some(node_id) => crate::backlog::decisions::node_decisions(&connection, node_id)?,
+        None => {
+            let mut rows = crate::backlog::decisions::read_rows(&connection)?.0;
+            if let Some(decision_id) = decision_id {
+                rows.retain(|row| {
+                    row.get("decision_id").and_then(Value::as_str) == Some(decision_id)
+                });
+            }
+            rows
+        }
+    };
+    Ok(rows)
+}
+
+pub fn decision_record(store: &Store, event: Value) -> Result<Payload<Value>, ApiError> {
+    let mut connection = crate::backlog::open(&store.graph)?;
+    crate::backlog::decisions::record_connected(&mut connection, &event, "decision_record")
+        .map_err(ApiError)?;
+    Ok(Payload {
+        success: true,
+        node: Some(event),
+        version: fresh_version(store),
+    })
+}
+
+pub fn decision_retract(store: &Store, event: Value) -> Result<Payload<Value>, ApiError> {
+    let mut connection = crate::backlog::write_connection(&store.graph)?;
+    crate::backlog::decisions::record_connected(&mut connection, &event, "decision_retract")
+        .map_err(ApiError)?;
+    Ok(Payload {
+        success: true,
+        node: Some(event),
+        version: fresh_version(store),
+    })
+}
+
+
 fn mutate(
     store: &Store,
     mutation: &str,

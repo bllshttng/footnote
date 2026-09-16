@@ -8,6 +8,7 @@
 
 pub mod api;
 pub mod commands;
+pub mod decisions;
 pub mod comments;
 pub mod encounters;
 pub mod model;
@@ -46,6 +47,8 @@ pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("encounters", "backlog/encounters.rs"),
     ("pull_requests", "backlog/pull_requests.rs"),
     ("sessions", "backlog/sessions.rs"),
+    ("decisions", "backlog/decisions.rs"),
+    ("node_decisions", "backlog/decisions.rs"),
 ];
 
 fn now_ms() -> u128 {
@@ -118,6 +121,12 @@ pub fn set_backend(graph: &Path, backend: Backend) -> Result<(), String> {
     Ok(())
 }
 
+/// A connection for a WRITE path: identical to [`open`], kept as a distinct
+/// name so the table-ownership scan can tell read-only opens from writes.
+pub(crate) fn write_connection(graph: &Path) -> Result<Connection, String> {
+    open(graph)
+}
+
 pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
     let path = database_path(graph);
     if let Some(parent) = path.parent() {
@@ -145,6 +154,8 @@ pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
     pull_requests::ensure_table(&connection)?;
     relations::ensure_table(&connection)?;
     import_if_needed(&mut connection, graph)?;
+    decisions::ensure_table(&connection)?;
+    decisions::import_if_needed(&mut connection, graph)?;
     Ok(connection)
 }
 
@@ -344,7 +355,7 @@ fn stamp_version_fields(connection: &Connection, version: &str) -> Result<(), St
 /// mutation counter by one. The lazy import does NOT take this path (a
 /// backfill is not a user-visible write; AC15 counts one bump per
 /// mutation), so it stamps fields only.
-fn stamp_version(connection: &Connection, version: &str) -> Result<(), String> {
+pub(crate) fn stamp_version(connection: &Connection, version: &str) -> Result<(), String> {
     stamp_version_fields(connection, version)?;
     bump_api_version(connection)?;
     Ok(())
@@ -392,7 +403,7 @@ pub fn api_version(graph: &Path) -> Result<i64, String> {
     }
 }
 
-fn stamp_meta(connection: &Connection, key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn stamp_meta(connection: &Connection, key: &str, value: &str) -> Result<(), String> {
     connection
         .execute(
             "INSERT INTO graph_meta(key, value) VALUES(?1, ?2)
@@ -573,7 +584,7 @@ fn mutate_single_row_once(
 /// (a zero-length window covering the write) plus the `mutation` name, so
 /// AC24 is measurable and the port-bar audit can tell these rows from the
 /// keeper's five-minute windows.
-fn emit_gate_event(mutation: &str, wait_ms: u128, retries: u32) {
+pub(crate) fn emit_gate_event(mutation: &str, wait_ms: u128, retries: u32) {
     let now = now_ms() as i64;
     // Best-effort: an undeclared state root (a hermetic test with no pins)
     // skips the emission instead of failing the mutation that earned it.
@@ -744,7 +755,7 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     Ok(entries)
 }
 
-fn meta(connection: &Connection, key: &str) -> Result<Option<String>, String> {
+pub(crate) fn meta(connection: &Connection, key: &str) -> Result<Option<String>, String> {
     connection
         .query_row(
             "SELECT value FROM graph_meta WHERE key = ?1",

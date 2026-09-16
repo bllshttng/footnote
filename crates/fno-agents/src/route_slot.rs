@@ -2666,51 +2666,51 @@ pub(crate) fn audit_load_snapshot(
     let mut view_rows: BTreeMap<String, (String, String, String)> = BTreeMap::new(); // subject -> (decision, ts, decision_id)
     let mut retired: BTreeMap<String, ()> = BTreeMap::new();
     let mut candidates: Vec<(String, String, String, String)> = Vec::new(); // subject, decision, ts, decision_id
-    match std::fs::read_to_string(state_root.join("decisions.jsonl")) {
-        Ok(text) => {
-            for line in text.lines() {
-                let Ok(row) = serde_json::from_str::<Value>(line) else {
-                    continue;
-                };
-                let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
-                let data = row.get("data").cloned().unwrap_or(json!({}));
-                if kind == "decision_retracted" {
-                    if let Some(target) = data.get("target_decision_id").and_then(Value::as_str) {
-                        if !target.is_empty() {
-                            retired.insert(target.to_string(), ());
-                        }
-                    }
-                    continue;
+    // Decisions read in-process through the typed API (x-20d2 wave 12): the
+    // store owns the index, so this consumer never reads a file. Rows are
+    // flattened: data fields at the top level plus ts and _event_type.
+    for row in crate::backlog::api::decisions(
+        &crate::backlog::api::Store::new(&state_root.join("graph.json")),
+        None,
+        None,
+    )
+    .unwrap_or_default()
+    {
+        let kind = row.get("_event_type").and_then(Value::as_str).unwrap_or("");
+        if kind == "decision_retracted" {
+            if let Some(target) = row.get("target_decision_id").and_then(Value::as_str) {
+                if !target.is_empty() {
+                    retired.insert(target.to_string(), ());
                 }
-                let subject = data.get("subject").and_then(Value::as_str).unwrap_or("");
-                if !subject.starts_with("routing-view:") {
-                    continue;
-                }
-                // A ruling naming another in `supersedes` retires it, the
-                // same derivation the Python decisions reader applies.
-                if let Some(superseded) = data.get("supersedes").and_then(Value::as_str) {
-                    if !superseded.is_empty() {
-                        retired.insert(superseded.to_string(), ());
-                    }
-                }
-                candidates.push((
-                    subject.to_string(),
-                    data.get("decision")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    row.get("ts")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    data.get("decision_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                ));
+            }
+            continue;
+        }
+        let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
+        if !subject.starts_with("routing-view:") {
+            continue;
+        }
+        // A ruling naming another in `supersedes` retires it, the same
+        // derivation the Python decisions reader applies.
+        if let Some(superseded) = row.get("supersedes").and_then(Value::as_str) {
+            if !superseded.is_empty() {
+                retired.insert(superseded.to_string(), ());
             }
         }
-        Err(_) => {} // no index: no view records, the verifier names the boundary
+        candidates.push((
+            subject.to_string(),
+            row.get("decision")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            row.get("ts")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            row.get("decision_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ));
     }
     for (subject, decision, ts, did) in candidates {
         if retired.contains_key(did.as_str()) {
@@ -4102,13 +4102,41 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::write(
-            state_root.join("decisions.jsonl"),
-            format!(
-                "{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view1\",\"subject\":\"routing-view:sid-1\",\"decision\":\"{{\\\"view\\\": \\\"claude-native\\\", \\\"fingerprint\\\": \\\"fp1\\\", \\\"session_id\\\": \\\"sid-1\\\"}}\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view2\",\"subject\":\"routing-view:sid-other\",\"decision\":\"x\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"decision_retracted\",\"data\":{{\"target_decision_id\":\"d-view2\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view3\",\"subject\":\"routing-view:sid-1\",\"decision\":\"older record\",\"supersedes\":\"d-view1\"}}}}\n"
-            ),
-        )
-        .unwrap();
+        // The store owns the decision index (x-20d2 wave 12): seed the db
+        // the audit reads, not a file.
+        {
+            let connection = crate::backlog::open(&state_root.join("graph.json")).unwrap();
+            let view = format!("{{\"view\": \"claude-native\", \"fingerprint\": \"fp1\", \"session_id\": \"sid-1\"}}");
+            for (kind, id, subject) in [
+                ("operator_decision", "d-view1", "routing-view:sid-1"),
+                ("operator_decision", "d-view2", "routing-view:sid-other"),
+                ("operator_decision", "d-view3", "routing-view:sid-1"),
+            ] {
+                crate::backlog::decisions::record(
+                    &connection,
+                    &json!({
+                        "type": kind,
+                        "ts": fresh,
+                        "data": {
+                            "decision_id": id,
+                            "subject": subject,
+                            "decision": if id == "d-view1" { view.clone() } else { "older record".into() },
+                            "supersedes": if id == "d-view3" { "d-view1" } else { "" },
+                        },
+                    }),
+                )
+                .unwrap();
+            }
+            crate::backlog::decisions::retract(
+                &connection,
+                &json!({
+                    "type": "decision_retracted",
+                    "ts": fresh,
+                    "data": {"target_decision_id": "d-view2"},
+                }),
+            )
+            .unwrap();
+        }
 
         let facts = json!({
             "fingerprint": "fp1",

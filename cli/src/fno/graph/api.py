@@ -120,3 +120,31 @@ def wire_rows(*, path: Path = GRAPH_JSON) -> list[dict]:
             dumped["status"] = dumped["persisted_status"]
         out.append(dumped)
     return out
+
+
+def decisions(
+    node: Optional[str] = None,
+    decision_id: Optional[str] = None,
+    *,
+    path: Path = GRAPH_JSON,
+) -> list[dict]:
+    """The flattened decision rows from the store's decisions table (x-20d2
+    wave 12): data fields at the top level plus ``ts`` and ``_event_type``,
+    the shape the file reader handed out. A node filter reads the node's
+    own list; no filter reads the machine-wide index in file order."""
+    params: dict = {}
+    if node:
+        params["node"] = node
+    if decision_id:
+        params["decision_id"] = decision_id
+    return _api("decisions", params, path=path).get("rows", [])
+
+
+def decision_record(event: dict, *, path: Path = GRAPH_JSON) -> dict:
+    """Append one ``operator_decision`` event row to the decisions table."""
+    return _api("decision_record", {"event": event}, path=path)
+
+
+def decision_retract(event: dict, *, path: Path = GRAPH_JSON) -> dict:
+    """Append one ``decision_retracted`` event row to the decisions table."""
+    return _api("decision_retract", {"event": event}, path=path)
