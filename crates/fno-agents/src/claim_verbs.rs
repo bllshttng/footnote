@@ -45,6 +45,9 @@ pub fn run_claim(args: &[String]) -> i32 {
     if op == "release-stopped" {
         return run_release_stopped(&args[1..]);
     }
+    if op == "reap" {
+        return run_claim_reap(&args[1..]);
+    }
     if op == "long-holds" {
         return crate::claims::run_claim_long_holds(&args[1..]);
     }
@@ -167,6 +170,61 @@ pub fn run_claim(args: &[String]) -> i32 {
                 }
             }
         }
+        "renew" => {
+            let Some(holder) = holder else {
+                eprintln!("fno-agents: claim renew requires --holder");
+                return 2;
+            };
+            let Some(ttl_ms) = opts.ttl_ms else {
+                eprintln!("fno-agents: claim renew requires --ttl-ms");
+                return 2;
+            };
+            match crate::claims::renew(&key, &holder, ttl_ms, opts.root.as_deref()) {
+                Ok(true) => {
+                    let (_, record) = crate::claims::status(&key, opts.root.as_deref());
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "renewed",
+                            "refreshed": true,
+                            "claim": record,
+                        })
+                    );
+                    0
+                }
+                Ok(false) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "outcome": "unchanged",
+                            "refreshed": false,
+                            "key": key,
+                        })
+                    );
+                    0
+                }
+                Err(error) => {
+                    eprintln!("fno-agents: claim renew failed: {error}");
+                    2
+                }
+            }
+        }
+        "force-release" => {
+            let Some(reason) = opts.reason.as_deref() else {
+                eprintln!("fno-agents: claim force-release requires --reason");
+                return 2;
+            };
+            match crate::claim_store::force_release(&key, reason, opts.root.as_deref()) {
+                Ok(payload) => {
+                    println!("{payload}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("fno-agents: claim force-release failed: {error}");
+                    2
+                }
+            }
+        }
         "status" => {
             let (state, rec) = crate::claims::status(&key, opts.root.as_deref());
             // Mirror the `fno agents claim status -J` dict shape so the compat
@@ -179,9 +237,42 @@ pub fn run_claim(args: &[String]) -> i32 {
         }
         other => {
             eprintln!(
-                "fno-agents: unknown claim operation: {other} (use acquire|release|status|list|sweep)"
+                "fno-agents: unknown claim operation: {other} (use acquire|release|renew|status|list|sweep|reap)"
             );
             2
+        }
+    }
+}
+
+fn run_claim_reap(args: &[String]) -> i32 {
+    let mut root: Option<PathBuf> = None;
+    let mut apply = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--root" => match it.next() {
+                Some(value) => root = Some(PathBuf::from(value)),
+                None => {
+                    eprintln!("fno-agents: claim reap: --root requires a value");
+                    return 2;
+                }
+            },
+            "--apply" => apply = true,
+            "--json" | "-J" => {}
+            other => {
+                eprintln!("fno-agents: claim reap: unknown flag {other}");
+                return 2;
+            }
+        }
+    }
+    match crate::claim_store::reap(root.as_deref(), apply) {
+        Ok(payload) => {
+            println!("{payload}");
+            0
+        }
+        Err(error) => {
+            eprintln!("fno-agents: claim reap failed: {error}");
+            1
         }
     }
 }

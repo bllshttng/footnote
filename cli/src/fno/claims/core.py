@@ -99,7 +99,7 @@ class ClaimValidationError(ValueError):
 
 
 class ClaimContended(Exception):
-    """acquire_claim/refresh_claim gave up after ACQUIRE_MAX_ATTEMPTS
+    """acquire_claim/refresh_claim gave up after the native retry budget
     contention retries on the same key's recovery mutex.
 
     A distinct type from ClaimHeldByOther (a live claim is held by someone
@@ -349,9 +349,8 @@ def acquire_claim(
 
     ``_attempt`` is internal bookkeeping only (never pass it): each
     contention/race branch recurses through ``_retry()``, which counts
-    attempts and raises ``ClaimContended`` after ``ACQUIRE_MAX_ATTEMPTS``
-    rather than recursing unbounded, mirroring Rust's bounded
-    ``ACQUIRE_MAX_ATTEMPTS`` for-loop (crates/fno-agents/src/claims.rs).
+    attempts and raises ``ClaimContended`` after the native retry budget
+    rather than recursing unbounded, mirroring the Rust claim loop.
     """
     _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
     path = claim_path(key, root=root)
@@ -364,9 +363,9 @@ def acquire_claim(
         # Every contention/race branch below re-dispatches by recursing with
         # the exact same arguments - one definition instead of the same
         # 9-line call restated at each of the seven sites that need it.
-        if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
+        if _attempt + 1 >= _PY_LEGACY_RETRY_LIMIT:
             raise ClaimContended(
-                f"acquire_claim gave up after {ACQUIRE_MAX_ATTEMPTS} contention retries on {key!r}"
+                f"acquire_claim gave up after {_PY_LEGACY_RETRY_LIMIT} contention retries on {key!r}"
             )
         return acquire_claim(
             key,
@@ -391,7 +390,7 @@ def acquire_claim(
         # `acquired_lock` is still True would have the recursive call poll
         # for the SAME per-key recovery mutex this frame is still sitting
         # on if it lands back in a mutex-taking branch - self-contention
-        # that only resolves via ACQUIRE_MAX_ATTEMPTS exhaustion instead of
+        # that only resolves via the legacy retry limit instead of
         # the near-instant re-dispatch (e.g. ClaimHeldByOther) it should.
         # Release first, from whichever branch currently holds it.
         nonlocal acquired_lock
@@ -1059,10 +1058,8 @@ RECOVERY_LOCK_SUFFIX = ".recovery.d"
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
 _RECOVERY_LOCK_MAX_WAIT_S = 5.0
 
-# Mirrors Rust's ACQUIRE_MAX_ATTEMPTS (crates/fno-agents/src/claims.rs):
-# acquire_claim/refresh_claim recurse on contention instead of Rust's bounded
-# for-loop, so an attempt counter caps the recursion depth the same way.
-ACQUIRE_MAX_ATTEMPTS = 5
+# Retained only by the legacy implementations while old imports drain.
+_PY_LEGACY_RETRY_LIMIT = 5
 
 
 def _claim_verdict(claim: Claim, *, root: Optional[Path] = None) -> dict[str, Any]:
@@ -1359,7 +1356,7 @@ def refresh_claim(
     legitimate PID-liveness no-op.
 
     ``_attempt`` is internal bookkeeping only (never pass it): on mutex
-    contention this recurses, bounded at ``ACQUIRE_MAX_ATTEMPTS`` (raises
+    contention this recurses, bounded at the legacy retry limit (raises
     ``ClaimContended`` past that), mirroring ``acquire_claim``.
 
     Raises:
@@ -1367,7 +1364,7 @@ def refresh_claim(
         ClaimGoneAway: claim was released between read and rewrite.
         ClaimValidationError: claim expired before the locked rewrite.
         ClaimCorrupted: existing file fails parse/schema validation.
-        ClaimContended: mutex contention exhausted ACQUIRE_MAX_ATTEMPTS retries.
+        ClaimContended: mutex contention exhausted the legacy retry limit.
     """
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
@@ -1394,9 +1391,9 @@ def refresh_claim(
             recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
         )
         if token is None:
-            if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
+            if _attempt + 1 >= _PY_LEGACY_RETRY_LIMIT:
                 raise ClaimContended(
-                    f"refresh_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
+                    f"refresh_claim gave up after {_PY_LEGACY_RETRY_LIMIT} "
                     f"contention retries on {key!r}"
                 )
             return refresh_claim(key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt + 1)
@@ -2247,3 +2244,215 @@ def _clear_lock_mirror_for_reaped(
 def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
     """Resolve + dedup an explicit ``--root`` list, returning the claims dirs."""
     return [cdir for _, cdir in dedup_claims_roots(roots)]
+
+
+def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
+    """Run one native claim operation and decode its JSON reply."""
+    import json
+    import subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        raise ClaimVerdictUnavailable(
+            "fno-agents claim unavailable: set FNO_AGENTS_BIN or reinstall fno"
+        )
+    command = [str(binary), "claim", operation]
+    if key:
+        command.append(key)
+    command.extend(flags)
+    command.append("--json")
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise ClaimVerdictUnavailable(f"fno-agents claim could not run: {exc}") from exc
+    try:
+        payload = json.loads(result.stdout) if result.stdout.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ClaimVerdictError(f"fno-agents claim returned invalid JSON: {exc}") from exc
+    if result.returncode == 1 and payload.get("outcome") == "held_by_other":
+        raise ClaimHeldByOther(
+            str(payload.get("holder") or "unknown"),
+            payload.get("pid"),
+            str(payload.get("host") or "unknown"),
+            key,
+        )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise ClaimVerdictError(f"fno-agents claim {operation} failed: {detail}")
+    if isinstance(payload, list) and operation == "list":
+        return {"rows": payload}
+    if not isinstance(payload, dict):
+        raise ClaimVerdictError("fno-agents claim returned a non-object JSON value")
+    return payload
+
+
+def _native_root_flags(root: Optional[Path]) -> list[str]:
+    return ["--root", str(root)] if root is not None else []
+
+
+def _native_claim_model(payload: dict[str, Any]) -> Claim:
+    body = payload.get("claim", payload)
+    if not isinstance(body, dict):
+        raise ClaimVerdictError("fno-agents claim returned no claim object")
+    return Claim.model_validate(body)
+
+
+# Native client compatibility surface. The legacy implementations above stay
+# available to old imports during the migration, but every public claim verb
+# resolves to this one Rust door below.
+def acquire_claim(
+    key: str,
+    holder: str,
+    *,
+    reason: Optional[str] = None,
+    ttl_ms: Optional[int] = None,
+    metadata: Optional[dict[str, Any]] = None,
+    pid: Optional[int] = None,
+    pid_unavailable: bool = False,
+    host: Optional[str] = None,
+    harness: Optional[str] = None,
+    pid_provenance: Optional[str] = None,
+    harness_session_id: Optional[str] = None,
+    root: Optional[Path] = None,
+    _attempt: int = 0,
+) -> Claim:
+    del host, harness, pid_provenance, harness_session_id, _attempt
+    _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
+    flags = ["--holder", holder]
+    if ttl_ms is not None:
+        flags.extend(("--ttl-ms", str(ttl_ms)))
+    if reason is not None:
+        flags.extend(("--reason", reason))
+    if metadata is not None:
+        import json
+
+        flags.extend(("--metadata", json.dumps(metadata, separators=(",", ":"))))
+    if not pid_unavailable:
+        flags.extend(("--pid", str(pid if pid is not None else os.getpid())))
+    if pid_unavailable:
+        flags.append("--pid-unavailable")
+    flags.extend(_native_root_flags(root))
+    return _native_claim_model(_native_claim("acquire", key, flags))
+
+
+def release_claim(
+    key: str,
+    holder: str,
+    *,
+    strict: bool = False,
+    root: Optional[Path] = None,
+    sync_graph_mirror: bool = True,
+) -> Optional[Claim]:
+    del sync_graph_mirror
+    if not key or not holder:
+        raise ClaimValidationError("key and holder must be non-empty")
+    prior_payload = _native_claim("status", key, _native_root_flags(root))
+    prior = None
+    if prior_payload.get("state") not in {None, "free"} and prior_payload.get("holder"):
+        prior = Claim.model_validate(prior_payload)
+        if prior.holder != holder and strict:
+            raise HolderMismatch(holder, prior.holder, key)
+    _native_claim("release", key, ["--holder", holder, *_native_root_flags(root)])
+    return prior if prior is not None and prior.holder == holder else None
+
+
+def refresh_claim(
+    key: str,
+    holder: str,
+    *,
+    ttl_ms: int,
+    root: Optional[Path] = None,
+    _attempt: int = 0,
+) -> Optional[Claim]:
+    del _attempt
+    if ttl_ms <= 0:
+        raise ClaimValidationError("ttl_ms must be positive")
+    payload = _native_claim(
+        "renew",
+        key,
+        ["--holder", holder, "--ttl-ms", str(ttl_ms), *_native_root_flags(root)],
+    )
+    if payload.get("refreshed") is False or payload.get("outcome") == "unchanged":
+        return None
+    return _native_claim_model(payload)
+
+
+def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
+    if not key:
+        raise ClaimValidationError("key must be non-empty")
+    return _native_claim("status", key, _native_root_flags(root))
+
+
+def list_claims(
+    *,
+    prefix: Optional[str] = None,
+    include_stale: bool = False,
+    root: Optional[Path] = None,
+) -> list[dict[str, Any]]:
+    flags = _native_root_flags(root)
+    if prefix is not None:
+        flags.extend(("--prefix", prefix))
+    if include_stale:
+        flags.append("--include-stale")
+    payload = _native_claim("list", "", flags)
+    return payload.get("rows", []) if isinstance(payload.get("rows"), list) else []
+
+
+def list_claims_with_counts(
+    *,
+    prefix: Optional[str] = None,
+    include_stale: bool = False,
+    root: Optional[Path] = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
+    rows = list_claims(prefix=prefix, include_stale=True, root=root)
+    counts = {state: 0 for state in ("live", "suspect", "stale", "corrupted", "free")}
+    states: dict[str, str] = {}
+    for row in rows:
+        state = str(row.get("state") or "corrupted")
+        counts[state] = counts.get(state, 0) + 1
+        if isinstance(row.get("key"), str):
+            states[row["key"]] = state
+    if not include_stale:
+        rows = [row for row in rows if row.get("state") in {"live", "suspect"}]
+    counts["total"] = sum(counts.values())
+    return rows, counts, states
+
+
+def force_release_claim(
+    key: str,
+    reason: str,
+    *,
+    root: Optional[Path] = None,
+    holding_recovery_lock: bool = False,
+) -> ForceReleaseOutcome:
+    del holding_recovery_lock
+    if not key:
+        raise ClaimValidationError("key must be non-empty")
+    if not reason:
+        raise ClaimValidationError("reason must be non-empty for force-release")
+    payload = _native_claim(
+        "force-release", key, ["--reason", reason, *_native_root_flags(root)]
+    )
+    return ForceReleaseOutcome(
+        path=Path(str(payload.get("path") or "")),
+        archived=bool(payload.get("archived")),
+        previous_holder=payload.get("previous_holder"),
+    )
+
+
+def reap_dead_claims(
+    *,
+    roots: Optional[list[Optional[Path]]] = None,
+    apply: bool = False,
+    abandonment_probe: Optional[Callable[..., Optional[bool]]] = None,
+    node_settlement: Optional[Callable[..., Optional[bool]]] = None,
+    optout_sink: Optional[list[Claim]] = None,
+) -> dict[str, Any]:
+    del abandonment_probe, node_settlement, optout_sink
+    flags: list[str] = ["--apply"] if apply else []
+    for root in roots or [None]:
+        if root is not None:
+            flags.extend(("--root", str(root)))
+    return _native_claim("reap", "", flags)

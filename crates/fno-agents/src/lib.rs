@@ -65,6 +65,7 @@ pub mod capability_leaves;
 pub mod census;
 pub mod check_supersession;
 pub mod claim_verbs;
+pub mod claim_store;
 pub mod claims;
 pub mod claude_adopt;
 pub mod claude_ask;
