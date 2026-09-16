@@ -174,7 +174,7 @@ def test_peek_mux_pane_refusal_names_working_surface(tmp_path, monkeypatch):
 def test_peek_gone_pane_names_the_exit_and_the_resume(tmp_path, monkeypatch):
     """A read failure the falsifier classifies as pane-gone is a DEAD pane:
     say so, name the resume command, and fall through to the registry row
-    instead of claiming the mux did not answer (x-459f reading 4)."""
+    instead of claiming the mux did not answer."""
     monkeypatch.setattr(
         "fno.agents.reachability.pane_falsifier", lambda mux: "pane-gone"
     )
