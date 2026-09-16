@@ -2374,7 +2374,7 @@ def refresh_claim(
     key: str,
     holder: str,
     *,
-    ttl_ms: int,
+    ttl_ms: Optional[int] = None,
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Optional[Claim]:
@@ -2383,12 +2383,25 @@ def refresh_claim(
             key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt
         )
     del _attempt
-    if ttl_ms <= 0:
+    if ttl_ms is not None and ttl_ms <= 0:
         raise ClaimValidationError("ttl_ms must be positive")
+    flags = _native_root_flags(root)
+    if ttl_ms is None:
+        status = _native_claim("status", key, flags)
+        state = status.get("state")
+        if state == "free":
+            raise ClaimGoneAway(str(claim_path(key, root=root)))
+        if state == "corrupted":
+            raise ClaimCorrupted(str(status.get("error") or key))
+        if state == "stale":
+            raise ClaimValidationError(f"claim {key!r} expired and cannot be refreshed")
+        if status.get("expires_at") is None:
+            return None
+        ttl_ms = MIN_TTL_MS
     payload = _native_claim(
         "renew",
         key,
-        ["--holder", holder, "--ttl-ms", str(ttl_ms), *_native_root_flags(root)],
+        ["--holder", holder, "--ttl-ms", str(ttl_ms), *flags],
     )
     if payload.get("refreshed") is False or payload.get("outcome") == "unchanged":
         return None

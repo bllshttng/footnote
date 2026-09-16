@@ -758,7 +758,10 @@ def refresh(
 ) -> None:
     """Extend a TTL claim's expires_at. No-op for PID-liveness claims."""
     try:
-        result = _claims_core.refresh_claim(key=key, holder=holder, ttl_ms=_parse_ttl(ttl), root=_node_aware_root(key))
+        parsed_ttl = _parse_ttl(ttl)
+        result = _claims_core.refresh_claim(
+            key=key, holder=holder, ttl_ms=parsed_ttl, root=_node_aware_root(key)
+        )
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
