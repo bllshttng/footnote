@@ -774,14 +774,19 @@ def _deep_unset(
 
 
 def resolve_dotted(root: BaseModel, parts: list[str]) -> tuple[bool, Any]:
-    """Walk ``parts`` off ``root`` the way a config reader does: model field,
-    then dict key. One resolver for get, unset's default and the
-    overridden-write check, so the three copied walks cannot drift again.
+    """Resolve ``parts`` against ``root``: one resolver for get, unset's
+    default and the overridden-write check, so the copied walks cannot drift.
 
     A ``dict[str, Model]`` hop with an ABSENT key still descends into a
     default-constructed Model, so an unset ``loops.<name>.level`` reads as the
-    LoopEntry default instead of "unknown". Any other miss is (False, None).
+    LoopEntry default instead of "unknown". A legacy leading ``config.`` is
+    dropped (the model is flat) and ``providers.`` aliases to ``accounts.``.
+    Any other miss is (False, None).
     """
+    if parts and parts[0] == "config":
+        parts = parts[1:]
+    if parts and parts[0] == "providers":
+        parts = ["accounts"] + parts[1:]
     node: Any = root
     map_model: Optional[type[BaseModel]] = None
     for part in parts:
@@ -806,20 +811,6 @@ def resolve_dotted(root: BaseModel, parts: list[str]) -> tuple[bool, Any]:
     return (True, node)
 
 
-def _model_default(parts: list[str]) -> Any:
-    """The value ``parts`` reverts to once unset: read off a default-constructed
-    ``SettingsModel`` by walking the dotted path. Returns None if not resolvable.
-    """
-    if parts and parts[0] == "config":
-        # Flat model: a legacy `config.` prefix resolves against the top level.
-        parts = parts[1:]
-    if parts and parts[0] == "providers":
-        # Pre-rename spelling: the default lives under `accounts`.
-        parts = ["accounts"] + parts[1:]
-    ok, node = resolve_dotted(SettingsModel(), parts)
-    return node if ok else None
-
-
 def unset_config_value(
     key: str,
     *,
@@ -842,7 +833,7 @@ def unset_config_value(
     if _resolve_parent_block(parts) is None:
         raise ConfigSetError(f"unknown config key {key!r}", 1)
 
-    default = _model_default(parts)
+    default = resolve_dotted(SettingsModel(), parts)[1]
     store_parts = _storage_parts(parts)
     # A key that resolves through the providers->accounts rename may still be
     # stored under the pre-rename [providers] block; unset removes both

@@ -1126,30 +1126,11 @@ def get_cmd(
     provenance_root: Optional[Path] = None if pinned_config else settings_root
     searched_candidates = describe_settings_for_repo(provenance_root)
 
-    def _traverse(dotted: str) -> tuple[bool, object]:
-        from fno.config.writer import resolve_dotted
+    from fno.config.writer import resolve_dotted
 
-        return resolve_dotted(root, dotted.split("."))
-
-    ok, node = _traverse(key)
-    if not ok and key.startswith("config."):
-        # The model is flat now (config fields at the top level); a legacy
-        # `config.`-prefixed key resolves once the prefix is dropped.
-        ok, node = _traverse(key[len("config.") :])
-    if not ok and not key.startswith("config."):
-        ok, node = _traverse(f"config.{key}")
-    if not ok and (
-        key.startswith("providers.")
-        or key.startswith("config.providers.")
-        or key == "providers"
-        or key == "config.providers"
-    ):
-        aliased = key.replace("providers", "accounts", 1)
-        ok, node = _traverse(aliased)
-        if not ok and aliased.startswith("config."):
-            ok, node = _traverse(aliased[len("config.") :])
-        if not ok and not aliased.startswith("config."):
-            ok, node = _traverse(f"config.{aliased}")
+    # One call resolves every spelling: the resolver itself drops a legacy
+    # `config.` prefix and aliases `providers` to `accounts`.
+    ok, node = resolve_dotted(root, key.split("."))
     if not ok:
         typer.echo(f"error: unknown config key '{key}'", file=sys.stderr)
         raise typer.Exit(code=1)
@@ -1369,8 +1350,6 @@ def _check_overridden_writes(results: list) -> None:
     """
     import sys
 
-    from pydantic import BaseModel
-
     from fno.config import _load_settings_at, load_settings, resolve_source
 
     # The verb just rewrote a config file at the SAME declaration key; the
@@ -1378,10 +1357,7 @@ def _check_overridden_writes(results: list) -> None:
     _load_settings_at.cache_clear()
     root = load_settings()
 
-    def _traverse(dotted: str) -> tuple[bool, object]:
-        from fno.config.writer import resolve_dotted
-
-        return resolve_dotted(root, dotted.split("."))
+    from fno.config.writer import resolve_dotted
 
     for r in results:
         source = resolve_source(r.key)
@@ -1393,11 +1369,7 @@ def _check_overridden_writes(results: list) -> None:
         except OSError:
             is_same_file = decider == r.path
         if not is_same_file:
-            ok, node = _traverse(r.key)
-            if not ok and r.key.startswith("config."):
-                ok, node = _traverse(r.key[len("config.") :])
-            if not ok and not r.key.startswith("config."):
-                ok, node = _traverse(f"config.{r.key}")
+            ok, node = resolve_dotted(root, r.key.split("."))
             effective_value = node if ok else None
             if effective_value != r.value:
                 target_flag = "--local" if r.scope == "global" else "--global"
