@@ -1161,7 +1161,7 @@ mod tests {
 
     #[test]
     fn ac4_hp_node_id_and_pr_subjects_are_refused() {
-        for subject in ["x-1df4", "pr-1157"] {
+        for subject in ["x-aaaa", "pr-1157"] {
             let req = validate_req(subject, "Two rounds.", Some("r"), None);
             let answer = validate_answer(&req);
             let refusal = answer["refusal"].as_str().expect("refusal");
@@ -1175,7 +1175,7 @@ mod tests {
 
     #[test]
     fn ac4_topic_a_topic_subject_with_a_cited_node_id_passes() {
-        let req = validate_req("review-rounds-cap", "Cite x-1df4 in text.", Some("r"), None);
+        let req = validate_req("review-rounds-cap", "Cite x-aaaa in text.", Some("r"), None);
         let answer = validate_answer(&req);
         assert_eq!(answer["refusal"], Value::Null);
     }
@@ -1208,7 +1208,7 @@ mod tests {
                 "the statement is coordination, not durable law",
             ),
             (
-                validate_req("subject", "Decision.", Some("r"), Some("x-1234")),
+                validate_req("subject", "Decision.", Some("r"), Some("x-bbbb")),
                 "supersedes must be a decision id",
             ),
         ];
