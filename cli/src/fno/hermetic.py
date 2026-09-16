@@ -115,8 +115,8 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     # ~/.local/share/uv layout instead of a developer's XDG customization.
     "XDG_DATA_HOME",
     # Where cargo writes build intermediates. A developer shell that exports it
-    # would point test-built artifacts at an arbitrary tree; _child_env re-sets
-    # it deliberately from the fno build base after this scrub.
+    # would point test-built artifacts at an arbitrary tree; neutralise re-pins
+    # it into the sandbox after this scrub.
     "CARGO_BUILD_BUILD_DIR",
     "STATE_FILE",
     "POSTMORTEMS_DIR",
@@ -364,6 +364,14 @@ def neutralise(
     # State: HOME (POSIX) and USERPROFILE (Windows, which Path.home() reads).
     out["HOME"] = str(home)
     out["USERPROFILE"] = str(home)
+    # Cargo intermediates are pinned into the sandbox like HOME: the scrubbed
+    # var would otherwise let cargo resolve its own default, and the tracked
+    # .cargo/config.toml template lands that default in the REAL
+    # ~/.cargo/build, which grew ~30 GiB/day of test orphans (x-19f1). Every
+    # tree (pytest, shell, cargo) routes through this function, so all three
+    # build into the sandbox; pytest_sessionfinish removes it, and reclaim's
+    # stale_test_scratch lane reaps what a crashed session leaves.
+    out["CARGO_BUILD_BUILD_DIR"] = f"{home / '.fno' / 'cargo-build'}/{{workspace-path-hash}}"
     for name in _XDG_SANDBOXED:
         out[name] = str(sandbox / "xdg" / name.lower())
 
