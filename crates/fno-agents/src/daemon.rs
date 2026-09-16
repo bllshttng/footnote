@@ -2242,10 +2242,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     ctx.opts.agents_config_cwd.clone(),
                     ctx.home.events_jsonl(),
                     retire_interval,
-                    // Default prune flags only: an orphaned worker tab closes
-                    // on the retire cadence; a human's spent shells stay
-                    // opt-in via the manual verb (Locked Decision 6).
                     || crate::gc::mux_tab_sweep(false, false),
+                    crate::gc::production_roster_sweep,
                 );
                 // Worktree sweep + merge reaper: the sweep backstops
                 // what the reaper cannot reach; the reaper is the merge-triggered
