@@ -2339,6 +2339,7 @@ mod tests {
             dry: 1,
             last_ids: vec!["undispatched:x-1".into()],
             last_undelivered: Some(4),
+            last_terminal: None,
         };
         let base = "2026-09-15T10:00:00Z"
             .parse::<chrono::DateTime<chrono::Utc>>()
@@ -2390,6 +2391,7 @@ mod tests {
             dry: 0,
             last_ids: vec![],
             last_undelivered: None,
+            last_terminal: None,
         };
         assert!(!hook_beat(
             &path,
