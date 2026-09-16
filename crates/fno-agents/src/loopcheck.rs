@@ -11535,11 +11535,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     };
     let term_reading =
         crate::king_term::reading(&manifest, chrono::Utc::now(), term_transcript.as_deref());
-    let term_json = serde_json::json!({
-        "spec": term_reading.spec,
-        "declared": term_reading.declared,
-        "state": crate::king_term::state_word(&term_reading.state),
-    });
+    let term_json = crate::king_term::journal_payload(&term_reading);
     let with_term = |mut v: serde_json::Value| -> serde_json::Value {
         if let Some(obj) = v.as_object_mut() {
             obj.insert("term".to_string(), term_json.clone());
@@ -11570,43 +11566,9 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     // by an open question (the defect this feature exists to close). Bounded
     // through the same `blind_block` spine, so a king that ignores it still
     // ends on Budget and escalates.
-    if !matches!(
-        term_reading.state,
-        crate::king_term::TermState::Within { .. }
-    ) {
-        let scope = if manifest.scope.is_empty() {
-            "<scope>"
-        } else {
-            manifest.scope.as_str()
-        };
-        let handoff = format!(
-            "Hand off: fno agents spawn --crown {scope} --succeed. Or extend with a written \
-             reason: fno agents king term <spec> --reason \"...\"."
-        );
-        let (reading_id, message) = match &term_reading.state {
-            crate::king_term::TermState::Reached { used, .. } => {
-                let default_note = if term_reading.declared {
-                    ""
-                } else {
-                    ", default"
-                };
-                (
-                    crate::king_escalation::reading_term_reached(),
-                    format!(
-                        "reign term reached ({}{default_note}; {used} used). {handoff}",
-                        term_reading.spec
-                    ),
-                )
-            }
-            crate::king_term::TermState::Unreadable(why) => (
-                crate::king_escalation::reading_term_unreadable(),
-                format!(
-                    "reign term unreadable ({}): {why}. {handoff}",
-                    term_reading.spec
-                ),
-            ),
-            crate::king_term::TermState::Within { .. } => unreachable!("gated on non-within state"),
-        };
+    if let Some((reading_id, message)) =
+        crate::king_term::gate_reading_and_message(&term_reading, &manifest.scope)
+    {
         return blind_block(&reading_id, &message, 0, dry);
     }
 

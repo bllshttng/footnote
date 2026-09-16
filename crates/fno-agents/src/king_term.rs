@@ -184,6 +184,48 @@ pub fn state_word(state: &TermState) -> &'static str {
     }
 }
 
+/// The `term` field every `king_loop_check` journal row carries, on every
+/// fire, so a reign's tenure is visible even when the board is clean and no
+/// gate fired.
+pub(crate) fn journal_payload(reading: &TermReading) -> serde_json::Value {
+    serde_json::json!({
+        "spec": reading.spec,
+        "declared": reading.declared,
+        "state": state_word(&reading.state),
+    })
+}
+
+/// The Stop-hook gate's reading id and message for a `Reached` or
+/// `Unreadable` term - `None` on `Within`, the caller's signal to fall
+/// through unchanged.
+pub(crate) fn gate_reading_and_message(
+    reading: &TermReading,
+    scope: &str,
+) -> Option<(String, String)> {
+    let scope = if scope.is_empty() { "<scope>" } else { scope };
+    let handoff = format!(
+        "Hand off: fno agents spawn --crown {scope} --succeed. Or extend with a written \
+         reason: fno agents king term <spec> --reason \"...\"."
+    );
+    match &reading.state {
+        TermState::Within { .. } => None,
+        TermState::Reached { used, .. } => {
+            let default_note = if reading.declared { "" } else { ", default" };
+            Some((
+                crate::king_escalation::reading_term_reached(),
+                format!(
+                    "reign term reached ({}{default_note}; {used} used). {handoff}",
+                    reading.spec
+                ),
+            ))
+        }
+        TermState::Unreadable(why) => Some((
+            crate::king_escalation::reading_term_unreadable(),
+            format!("reign term unreadable ({}): {why}. {handoff}", reading.spec),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
