@@ -469,10 +469,7 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
     // emit exits before cleanup, so the staged snapshot survives.
     write_same_harness_pending(&cwd);
     let fire1 = fire();
-    assert!(blocked(
-        &fire1,
-        "generic delivery finalization failed"
-    ));
+    assert!(blocked(&fire1, "generic delivery finalization failed"));
     assert_eq!(
         fs::read_to_string(cwd.join(".fno/finalize-count"))
             .unwrap()
@@ -483,7 +480,11 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
         &cwd,
         "fno-delivery-finalize-pending-sess-delivery-retry.sess-delivery-retry.md",
     );
-    assert!(retry.exists(), "missing retry snapshot at {}", retry.display());
+    assert!(
+        retry.exists(),
+        "missing retry snapshot at {}",
+        retry.display()
+    );
 
     // Fire 2: the manifest is gone and the pending scan picks up the stale
     // snapshot over the stale session-old and foreign candidates, so the
