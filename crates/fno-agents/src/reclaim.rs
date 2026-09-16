@@ -56,7 +56,7 @@ impl Lane {
 
 /// Recursive byte count that never follows a symlink out of the tree it was
 /// given: a link's target is someone else's tree, not this path's bulk.
-fn tree_bytes(path: &Path) -> u64 {
+pub(crate) fn tree_bytes(path: &Path) -> u64 {
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(_) => return 0,
