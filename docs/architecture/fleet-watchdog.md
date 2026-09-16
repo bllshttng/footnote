@@ -172,7 +172,7 @@ A fleet-watching agent was proposed and refused. The proposal's load-bearing arg
 
 ## One retirement owner
 
-Row retirement is the daemon GC sweep, not the watchdog. The classifier is `gc.rs`: work-done through the reverse join, or the planning lane, plus quiet past grace. The lifecycle is `gc_sweep.rs`: stop, active-surface removal, registry drop, tree prune. The native effects are `gc_native.rs`: the same removal cascade `fno agents rm` walks, typed per effect.
+Row retirement is the daemon GC sweep, not the watchdog. The classifier is `gc.rs`: work-done through the reverse join, or the planning lane, plus quiet past grace. The lifecycle is `gc_sweep.rs`: stop, active-surface removal, registry drop, tree prune. The native effects are `gc_native.rs`: the same removal cascade `fno agents rm` walks, typed per effect. The owner runs two passes on the retire tick. First the registry sweep over fno rows. Then the roster sweep (`roster_reap.rs`) over claude sessions no fno row owns, at the configured `agents.reap.roster_scope`. The tick detail carries both, `roster=retired <n> kept <m> refused <r>` beside `mux=` and `held=`.
 
 Only confirmed native effects let a retirement apply. Every applicable effect must confirm, and a failed or unverified one holds the row for retry.
 
