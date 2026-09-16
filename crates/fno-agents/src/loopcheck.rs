@@ -8256,15 +8256,35 @@ pub(crate) fn decide_with_payload(
     // its pr_state/ci components) was. No PR read happens to decide routing.
     let backstop_n: u64 = if manifest.attended { 5 } else { 3 };
     let min_fire_gap = min_fire_gap_secs();
-    let (prior_fires, journal_streak, last_recorded_fp, streak_window) =
-        read_prior_fires(&project_events, &session_id, None, now, min_fire_gap);
+    // A generic-delivery fire OBSERVED its world this fire (the evaluator ran
+    // above), so the streak counts against the observed revision: progress
+    // resets the streak the same way a moved PR head does. Every other fire
+    // compares journal rows against the journal's own newest fingerprint.
+    let generic_observed = generic.is_active();
+    let observed_fp =
+        generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"));
+    let (prior_fires, journal_streak, last_recorded_fp, streak_window) = read_prior_fires(
+        &project_events,
+        &session_id,
+        if generic_observed {
+            Some(&observed_fp)
+        } else {
+            None
+        },
+        now,
+        min_fire_gap,
+    );
     let (last_pr_state, last_ci) = read_last_row_fields(&project_events, &session_id);
     // Fires that do not run done() inherit the last recorded fingerprint (a
     // first fire with no journal starts at the no-PR basis), so their row
     // stays comparable with its neighbors and only a done() read can move it.
-    let fingerprint = last_recorded_fp.clone().unwrap_or_else(|| {
-        generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"))
-    });
+    let fingerprint = if generic_observed {
+        observed_fp
+    } else {
+        last_recorded_fp.clone().unwrap_or_else(|| {
+            generic.delivery_fingerprint(make_fingerprint(&head_sha, "none", "none", "none"))
+        })
+    };
     let this_fire = prior_fires + 1;
     // consecutive_unchanged counts prior identical fires; adding this fire.
     let consecutive_after = journal_streak + 1;
