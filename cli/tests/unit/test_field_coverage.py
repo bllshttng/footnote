@@ -78,9 +78,9 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # 58 -> 59. last_activity_basis joined the required list (the age's
     # instrument word): 43 -> 44. v32 added stop (fno's own stop record),
     # storage_only: 59 -> 60.
-    assert payload["declared_count"] == 60
-    assert payload["required_count"] == 44
-    assert payload["accounted_count"] == 60
+    assert payload["declared_count"] == 61
+    assert payload["required_count"] == 45
+    assert payload["accounted_count"] == 61
     assert payload["known_gaps"] == {}
 
 
