@@ -383,7 +383,7 @@ fn entry_line(entry: &Value) -> String {
     format!(
         "{} {} {}",
         s_str(entry, "id").unwrap_or("?"),
-        s_str(entry, "status").unwrap_or("?"),
+        crate::graph_get::entry_status(entry),
         s_str(entry, "title").unwrap_or("")
     )
     .trim_end()
@@ -1133,14 +1133,37 @@ mod tests {
         );
     }
 
+    fn fixture_entry(
+        id: &str,
+        parent: Option<&str>,
+        status: &str,
+        title: &str,
+        details: &str,
+    ) -> Value {
+        let mut m = serde_json::Map::new();
+        m.insert("id".to_string(), Value::String(id.to_string()));
+        if let Some(p) = parent {
+            m.insert("parent".to_string(), Value::String(p.to_string()));
+        }
+        m.insert(
+            crate::graph_get::STATUS_KEY.to_string(),
+            Value::String(status.to_string()),
+        );
+        m.insert("title".to_string(), Value::String(title.to_string()));
+        if !details.is_empty() {
+            m.insert("details".to_string(), Value::String(details.to_string()));
+        }
+        Value::Object(m)
+    }
+
     #[test]
     fn epic_fit_lists_siblings_from_a_fixture_graph() {
         let dir = tempfile::tempdir().unwrap();
         let entries = vec![
-            json!({"id": "x-e1", "status": "live", "title": "Epic", "details": "outcome A"}),
-            json!({"id": "x-a", "parent": "x-e1", "status": "ready", "title": "Node A"}),
-            json!({"id": "x-b", "parent": "x-e1", "status": "done", "title": "Node B"}),
-            json!({"id": "x-c", "parent": "x-other", "status": "ready", "title": "Node C"}),
+            fixture_entry("x-e1", None, "live", "Epic", "outcome A"),
+            fixture_entry("x-a", Some("x-e1"), "ready", "Node A", ""),
+            fixture_entry("x-b", Some("x-e1"), "done", "Node B", ""),
+            fixture_entry("x-c", Some("x-other"), "ready", "Node C", ""),
         ];
         let bundle = epic_bundle(Some("x-a"), &entries, dir.path()).expect("parent exists");
         assert!(bundle.contains("x-e1 live Epic"), "{bundle}");
