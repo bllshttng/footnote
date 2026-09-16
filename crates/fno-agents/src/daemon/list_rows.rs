@@ -171,7 +171,11 @@ pub(crate) fn progress_from_truth(
 }
 
 pub(crate) fn registry_truth_handle(entry: &RegistryEntry) -> String {
-    if let Some(session_id) = entry.harness_session_id.as_deref() {
+    if let Some(session_id) = entry
+        .harness_session_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+    {
         return session_id.to_string();
     }
     if !entry.short_id.is_empty() {
@@ -411,6 +415,27 @@ mod tests {
     };
     use crate::truth_probe::BatchOutcome::{self, Measured};
     use serde_json::json;
+
+    fn registry_entry(name: &str, session_id: Option<&str>, short_id: &str) -> RegistryEntry {
+        RegistryEntry {
+            name: name.to_string(),
+            harness_session_id: session_id.map(str::to_string),
+            short_id: short_id.to_string(),
+            ..RegistryEntry::default()
+        }
+    }
+
+    #[test]
+    fn empty_session_id_falls_back_to_short_id_then_name() {
+        assert_eq!(
+            registry_truth_handle(&registry_entry("worker", Some(""), "abc12345")),
+            "abc12345"
+        );
+        assert_eq!(
+            registry_truth_handle(&registry_entry("worker", Some(""), "")),
+            "worker"
+        );
+    }
 
     /// The verdict OUTRANKS the transcript state, which is the whole point of
     /// putting it on the wire: a session whose process died forty minutes ago
