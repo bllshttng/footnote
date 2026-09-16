@@ -96,7 +96,7 @@ def _parse_metadata(value: str) -> dict:
 
 #: Seconds the roster cross-check may spend shelling out to the harness.
 #: A status read is interactive, so it must answer late-but-honestly
-#: ("roster unavailable") rather than hang a king mid-decision.
+#: ("roster not consulted") rather than hang a king mid-decision.
 _ROSTER_CROSSCHECK_TIMEOUT_S = 10.0
 
 
@@ -853,7 +853,7 @@ def _roster_verdict_line(info: dict) -> str:
     # claim in the same breath.
     state = info.get("state") or "free"
     if not info.get("roster_consulted"):
-        return f"{state}, roster unavailable ({info.get('roster_skip_reason', 'unknown')})"
+        return f"{state}, roster not consulted ({info.get('roster_skip_reason', 'unknown')})"
     workers = info.get("roster_workers") or []
 
     # The overlay join is the occupancy authority, and its answer arrives as
@@ -1626,7 +1626,7 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
        window is observable: the mux pane the spawner created is ABSENT from
        every live listing AND the recorded pid is dead. Both absences together
        are the window over - a positive finding, never a failed lookup.
-    2. A roster reading that degraded (``roster unavailable``) is retried
+    2. A roster reading that degraded (``roster not consulted``) is retried
        ONCE before the sweep answers, so a transient ``claude not on PATH``
        does not strand the whole pass.
     3. A dead recorded pid with a parseable session id continues to the
@@ -1774,7 +1774,7 @@ def reap_cmd(
                 f"would reap {summary['would_reap']} of {summary['scanned']} scanned "
                 "(dry-run; pass --apply)"
             )
-        # "roster unavailable" only ever renders beside the token that
+        # "roster not consulted" only ever renders beside the token that
         # measured the degraded read, never as a blanket unprobed label.
         suspect = f"{summary['kept_suspect']} suspect"
         if summary["kept_suspect_alive"]:
@@ -1782,7 +1782,7 @@ def reap_cmd(
         unprobed_by = summary.get("kept_suspect_unprobed_by") or {}
         if summary["kept_suspect_unprobed"]:
             detail = ", ".join(
-                f"{token} {count} (roster unavailable)"
+                f"{token} {count} (roster not consulted)"
                 if token == "roster-read-degraded"
                 else f"{token} {count}"
                 for token, count in sorted(unprobed_by.items())

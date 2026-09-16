@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import os
 import socket
+from subprocess import PIPE as _SUBPROCESS_PIPE
+from subprocess import Popen as _SubprocessPopen
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
@@ -2178,7 +2180,6 @@ def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
 def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
     """Run one native claim operation and decode its JSON reply."""
     import json
-    import subprocess
     from fno.rust_binary import resolve_binary
     binary = resolve_binary()
     if binary is None:
@@ -2191,11 +2192,17 @@ def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
     command.extend(flags)
     command.append("--json")
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = _SubprocessPopen(
+            command,
+            stdout=_SUBPROCESS_PIPE,
+            stderr=_SUBPROCESS_PIPE,
+            text=True,
+        )
+        stdout, stderr = result.communicate()
     except OSError as exc:
         raise ClaimVerdictUnavailable(f"fno-agents claim could not run: {exc}") from exc
     try:
-        payload = json.loads(result.stdout) if result.stdout.strip() else {}
+        payload = json.loads(stdout) if stdout.strip() else {}
     except json.JSONDecodeError as exc:
         raise ClaimVerdictError(f"fno-agents claim returned invalid JSON: {exc}") from exc
     if result.returncode == 1 and payload.get("outcome") == "held_by_other":
@@ -2206,7 +2213,7 @@ def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
             key,
         )
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        detail = stderr.strip() or stdout.strip() or f"exit {result.returncode}"
         raise ClaimVerdictError(f"fno-agents claim {operation} failed: {detail}")
     if isinstance(payload, list) and operation == "list":
         return {"rows": payload}
@@ -2464,7 +2471,11 @@ def reap_dead_claims(
     legacy_roots = _legacy_sweep_roots_if_present()
     if legacy_roots is not None:
         return _LEGACY_REAP_DEAD_CLAIMS(
-            roots=legacy_roots,
+            # A rootless call owns the default graph mirror. The helper only
+            # detects lockfiles; passing its expanded probe list as explicit
+            # roots would silently turn this into an external-root sweep and
+            # suppress the mirror clear.
+            roots=None,
             apply=apply,
             abandonment_probe=abandonment_probe,
             node_settlement=node_settlement,

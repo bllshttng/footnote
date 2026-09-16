@@ -33,7 +33,8 @@ decide_app = shim_app
 
 _DEPRECATION_NOTICE = (
     "fno decide is now `fno inbox decide` (`fno decide list` -> "
-    "`fno inbox decisions`). This spelling is removed next release."
+    "`fno inbox decisions`, `fno decide reindex` -> `fno backlog "
+    "decide-reindex`). This spelling is removed next release."
 )
 
 
@@ -304,8 +305,8 @@ def _record(
         # mints a second id for one ruling.
         typer.echo(
             f"decide: recorded {exc.decision_id} to the project journal, but the "
-            f"recall store write failed: {exc}. Do NOT re-run decide; "
-            "that records it twice.",
+            f"recall store write failed: {exc}. Run `fno backlog decide-reindex` "
+            "to recover it. Do NOT re-run decide; that records it twice.",
             err=True,
         )
         raise typer.Exit(1)
@@ -466,7 +467,8 @@ def _retract(
     except OSError as exc:
         typer.echo(
             f"backlog decide-retract: cannot read the decision index: {exc}. "
-            "No retraction was recorded.",
+            "Restore the index or run `fno backlog decide-reindex`; no "
+            "retraction was recorded.",
             err=True,
         )
         raise typer.Exit(1) from exc
@@ -485,8 +487,8 @@ def _retract(
     except IndexWriteError as exc:
         typer.echo(
             f"backlog decide-retract: durable retraction for {exc.decision_id} "
-            f"was written, but the recall store append failed: {exc}. "
-            "Do not retry the retraction.",
+            f"was written, but the recall store append failed: {exc}. Run "
+            "`fno backlog decide-reindex`; do not retry the retraction.",
             err=True,
         )
         raise typer.Exit(1)
@@ -958,7 +960,14 @@ def _list_decisions(
                 )
                 return
 
-        hint = ""  # the store is the index; it is never a missing file
+        from fno import paths
+
+        hint = (
+            ""
+            if Path(paths.decisions_jsonl()).exists()
+            else " (no index yet on this machine - run `fno backlog "
+            "decide-reindex` to backfill what is already on disk)"
+        )
         # NEVER "no decisions recorded". That is a claim about the world, and
         # only a claim about the QUERY is true here. Say what is not indexed,
         # then name what is searchable.

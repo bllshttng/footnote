@@ -583,6 +583,13 @@ fn claim_status_value_with_witness(
         "expires_at".into(),
         rec.expires_at.map(Value::from).unwrap_or(Value::Null),
     );
+    out.insert(
+        "expired".into(),
+        Value::Bool(
+            rec.expires_at
+                .is_some_and(|expires_at| crate::claims::now_ms() >= expires_at),
+        ),
+    );
     if let Some(reason) = &rec.reason {
         out.insert("reason".into(), Value::String(reason.clone()));
     }

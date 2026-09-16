@@ -619,28 +619,36 @@ def record_decision(
         source=source,
     )
     append_event(event, events_path=events_path(events_root))
-    append_event(event, events_path=paths.decisions_jsonl())
+    try:
+        append_event(event, events_path=paths.decisions_jsonl())
+    except Exception as exc:  # noqa: BLE001 - the event id names recovery
+        raise IndexWriteError(decision_id, exc) from exc
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:
         graph_api.decision_record(event, path=paths.graph_json())
-    except Exception as exc:  # noqa: BLE001 - re-raised with what the caller must know
-        raise IndexWriteError(decision_id, exc) from exc
-    try:
-        node_id = _project(event)
-    except (Exception, SystemExit) as exc:  # noqa: BLE001
-        # The projection is the node VIEW, the third of three writes. Both
-        # durable stores already hold the decision, so failing the command here
-        # would report a lost capture and invite the retry that mints a second
-        # id. SystemExit is caught on purpose: locked_mutate_graph exits the
-        # process on a corrupt graph, and SystemExit is not an Exception.
-        print(
-            f"decide: recorded {decision_id}, but the graph projection failed: "
-            f"{exc}. The decision is durable and recoverable with "
-            f"`fno backlog decisions`; the subject node just does not show it.",
-            file=sys.stderr,
-        )
+    except (Exception, SystemExit):  # noqa: BLE001 - graph is a projection
+        # The project journal and compatibility index already hold the ruling.
+        # A corrupt or unavailable graph must degrade to that durable capture,
+        # matching the old JSONL-to-node projection path below.
+        _graph_entries()
         node_id = None
+    else:
+        try:
+            node_id = _project(event)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            # The projection is the node VIEW, the third of three writes. Both
+            # durable stores already hold the decision, so failing the command here
+            # would report a lost capture and invite the retry that mints a second
+            # id. SystemExit is caught on purpose: locked_mutate_graph exits the
+            # process on a corrupt graph, and SystemExit is not an Exception.
+            print(
+                f"decide: recorded {decision_id}, but the graph projection failed: "
+                f"{exc}. The decision is durable and recoverable with "
+                f"`fno backlog decisions`; the subject node just does not show it.",
+                file=sys.stderr,
+            )
+            node_id = None
     return {"decision_id": decision_id, "event": event, "node_id": node_id}
 
 
@@ -700,7 +708,10 @@ def retract_decision(
 
     events_root = resolve_carveout_root()
     append_event(event, events_path=events_path(events_root))
-    append_event(event, events_path=paths.decisions_jsonl())
+    try:
+        append_event(event, events_path=paths.decisions_jsonl())
+    except Exception as exc:  # noqa: BLE001 - the event id names recovery
+        raise IndexWriteError(str(target["decision_id"]), exc) from exc
     try:
         graph_api.decision_retract(event, path=paths.graph_json())
     except Exception as exc:  # noqa: BLE001 - durable event must not be retried blindly
@@ -808,6 +819,14 @@ def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list
 
 def _read_legacy_index(path: "Path", *, warn: bool = True) -> "tuple[list[dict], int]":
     """Read the pre-wave-12 JSONL index for compatibility and migration."""
+    try:
+        path.stat()
+    except FileNotFoundError:
+        try:
+            path.lstat()
+        except OSError:
+            return [], 0
+        raise
     rows: list[dict] = []
     damaged = 0
     for line in _read_lines(path):
@@ -821,7 +840,11 @@ def _read_legacy_index(path: "Path", *, warn: bool = True) -> "tuple[list[dict],
         row["_event_type"] = event.get("type")
         rows.append(row)
     if damaged and warn:
-        print(f"decide: {damaged} damaged row(s) in {path} were skipped.", file=sys.stderr)
+        print(
+            f"decide: {damaged} damaged row(s) in {path} were skipped. "
+            "Run `fno backlog decide-reindex` to recover them.",
+            file=sys.stderr,
+        )
     return rows, damaged
 
 
@@ -1530,7 +1553,8 @@ def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
         _graph_entries(required=True)
 
     index = Path(paths.decisions_jsonl())
-    existing, damaged = _read_legacy_index(index, warn=False)
+    repaired = _compact_index(index)
+    existing, _ = _read_legacy_index(index, warn=False)
     prior_keys = {
         (str(row.get("_event_type") or DECISION_EVENT),
          str(row.get("decision_id") or row.get("retraction_id")
@@ -1572,8 +1596,37 @@ def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
             continue
         known.add(key)
         added += 1
-    return {"added": added, "already": already, "repaired": damaged,
+    return {"added": added, "already": already, "repaired": repaired,
             "invalid": invalid, "unusable": unusable, "total": len(known)}
+
+
+def _compact_index(path: Path) -> int:
+    """Move damaged index rows aside, preserving a reversible recovery path."""
+    raw = _read_lines(path)
+    if not any(not _is_index_line(line) for line in raw):
+        return 0
+    from fno.mutex import acquire_dir_mutex, release_dir_mutex
+
+    resolved = path.resolve()
+    lock = resolved.parent / (resolved.name + ".lock.d")
+    token = acquire_dir_mutex(lock, 30)
+    if token is None:
+        raise TimeoutError(f"decisions.jsonl lock timeout: {lock}")
+    try:
+        raw = _read_lines(resolved)
+        good = [line for line in raw if _is_index_line(line)]
+        dropped = [line for line in raw if not _is_index_line(line)]
+        if dropped:
+            with resolved.with_suffix(resolved.suffix + ".corrupt").open(
+                "a", encoding="utf-8"
+            ) as corrupt:
+                corrupt.write("".join(line + "\n" for line in dropped))
+        tmp = resolved.with_suffix(resolved.suffix + ".compact")
+        tmp.write_text("".join(line + "\n" for line in good), encoding="utf-8")
+        tmp.replace(resolved)
+        return len(dropped)
+    finally:
+        release_dir_mutex(lock, token)
 
 
 def _read_lines(path: Path) -> "list[str]":

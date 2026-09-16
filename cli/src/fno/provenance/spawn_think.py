@@ -779,6 +779,17 @@ def _spawn_think_worker(
         else None
     )
 
+    # The conversational door is already an explicit operator opt-in. Keep
+    # `/think` reachable even when an ambient lifecycle allowlist was written
+    # for another set of automatic verbs; lifecycle calls still honor it.
+    dispatch_cfg = None
+    if reason == REASON_CONVERSATIONAL:
+        from fno.agents.harness_map import _load_dispatch_cfg
+
+        dispatch_cfg = _load_dispatch_cfg(settings_obj, verb="/think")
+        allowed = dispatch_cfg.get("allowed_verbs")
+        if isinstance(allowed, list):
+            dispatch_cfg["allowed_verbs"] = [*allowed, "/think"]
     resolved = resolve_dispatch(
         harness=(provider or "").strip() or None,
         substrate=legacy_substrate,
@@ -786,6 +797,7 @@ def _spawn_think_worker(
         verb="/think",
         trigger="autonomous",
         settings=settings_obj,
+        dispatch_cfg=dispatch_cfg,
     )
     resolved_harness = resolved["harness"]
     substrate = resolved["substrate"]
