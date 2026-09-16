@@ -1,7 +1,7 @@
 # One resolver for the fno-agents binary, most-local first. This is the shared
 # copy of the resolver that hooks/agy-target-stop-hook.sh and
 # hooks/inside-leg-report.sh inlined; target-stop-hook.sh keeps its own copy
-# (x-09d2 owns that file).
+# under separate ownership.
 fno_agents_bin() {
     local root="${1:-.}"
     if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
