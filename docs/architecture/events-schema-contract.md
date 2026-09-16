@@ -415,6 +415,14 @@ harnesses (`test-bash-validator`, `test-set-gate`,
 `test-target-ledger-set-gate`, `test-verify-child-promise`,
 `test-events-discipline`).
 
+## Data keys are open
+
+Event data is an open registry: `data.required` keys must be present and `data.forbidden` aliases are refused, but an undeclared key validates for every type. Extra keys are evidence, not series: trend and diff on the declared keys, and read one-off keys as the noise they are. The one closed exception is `protocol_family`, and it is closed at the envelope level, not inside event data.
+
+A typed builder can still refuse an unknown keyword. That refusal is a Python signature, not the contract. `phase_transition` rejects unknown kwargs because it is a keyword-only function. The schema and both validators accept the same key on the wire. The signature is a caller convenience. The `schema.yaml` entry is the rule.
+
+Provenance keys are reserved and writer-stamped from ambient identity at the mint. Journal rows that name the session that wrote them are a separate change. That change moves the events envelope across three writers and needs a hook-path cost measurement first.
+
 ## Adding a new event type
 
 1. Add an entry under `event_types` in
