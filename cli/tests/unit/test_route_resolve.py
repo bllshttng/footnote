@@ -856,8 +856,38 @@ def test_profile_fields_by_difficulty_is_json_serializable(tmp_path):
     settings = settings_from_files([cfg])
     profile = settings.agents.profiles["target"]
     fields = rr._profile_fields(profile)
-    assert fields["by_difficulty"]["high"]["lanes"] == ["claude-opus-5", "codex-sol"]
+    rung = fields["by_difficulty"]["high"]
+    assert rung["lanes"] == ["claude-opus-5", "codex-sol"]
+    # A plain model_dump() also fills in on_exhausted/on_low/on_unknown as
+    # "" for the fields the rung never set. An empty string reads as
+    # PRESENT to the Rust policy resolver's `overlay.or_else(|| base)`
+    # fallback (crates/fno-agents/src/route_slot.rs), so the base profile's
+    # own on_exhausted/on_unknown never gets consulted and the hardcoded
+    # default wins instead - silently flipping capacity policy (e.g.
+    # on_exhausted queue -> refuse) for every difficulty-scoped verb.
+    # exclude_unset=True keeps the rung to only the fields it declared.
+    assert set(rung) == {"lanes"}
     json.dumps(fields)  # must not raise TypeError
+
+
+def test_profile_fields_by_difficulty_keeps_an_explicit_empty_lanes(tmp_path):
+    """exclude_unset must not be swapped for filtering out empty/falsy
+    values: an explicitly declared ``lanes = []`` is a real refusal (an
+    overlay with no lanes), and has to survive the dump as an empty list,
+    not disappear as if it were merely unset."""
+    from fno.config import settings_from_files
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[agents.profiles.target.by_difficulty.high]\n"
+        "lanes = []\n",
+        encoding="utf-8",
+    )
+    settings = settings_from_files([cfg])
+    profile = settings.agents.profiles["target"]
+    fields = rr._profile_fields(profile)
+    rung = fields["by_difficulty"]["high"]
+    assert rung == {"lanes": []}
 
 
 @requires_rust

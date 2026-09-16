@@ -347,7 +347,10 @@ def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
            for k in ("on_exhausted", "on_low", "on_unknown")},
         "by_difficulty": (
             {
-                k: (v.model_dump() if callable(getattr(v, "model_dump", None)) else dict(v))
+                k: (
+                    v.model_dump(exclude_unset=True)
+                    if callable(getattr(v, "model_dump", None)) else dict(v)
+                )
                 for k, v in by_diff.items()
             }
             if isinstance(by_diff, Mapping) else {}
