@@ -519,15 +519,17 @@ fn stage_matching_lines(
     index: &decision_index::Index,
     keywords: &[&str],
     idents: &[String],
+    node_id: &str,
 ) -> Vec<String> {
     index
         .rows
         .iter()
         .filter(|row| {
             let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
-            let node_row = idents
-                .first()
-                .is_some_and(|nid| subject.trim().eq_ignore_ascii_case(nid));
+            // The node id is carried separately: `idents` is sorted, so its
+            // first element is whichever subject sorts smallest (often the
+            // project slug), never reliably the node id.
+            let node_row = !node_id.is_empty() && subject.trim().eq_ignore_ascii_case(node_id);
             !node_row
         })
         .filter_map(|row| {
@@ -626,7 +628,12 @@ fn stage_answer_with(
         let index_path = index_path.unwrap_or(&default_index);
         match decision_index::live_laws(index_path) {
             Ok(index) => {
-                let matching = stage_matching_lines(&index, keywords, &idents);
+                let matching = stage_matching_lines(
+                    &index,
+                    keywords,
+                    &idents,
+                    node_id.as_deref().unwrap_or(""),
+                );
                 if !matching.is_empty() {
                     hook_output = Some(json!({
                         "hookSpecificOutput": {
@@ -1423,10 +1430,11 @@ mod tests {
                     "epic-merge-authority",
                     "The x-bbbb epic keeps merge authority with the crown.",
                 ),
+                stage_row("d-node0001", "x-aaaa", "unfindable by topic"),
                 stage_row(
-                    "x-aaaa",
-                    "a ruling found only by the node's own id",
-                    "unfindable by topic",
+                    "d-fnos0001",
+                    "fno",
+                    "a ruling named for the project slug stands",
                 ),
             ],
         );
@@ -1459,6 +1467,10 @@ mod tests {
         assert!(
             !ctx.contains("unfindable by topic"),
             "node-subject row must be dropped: {ctx}"
+        );
+        assert!(
+            ctx.contains("d-fnos0001"),
+            "project-slug subject must not be dropped: {ctx}"
         );
     }
 
