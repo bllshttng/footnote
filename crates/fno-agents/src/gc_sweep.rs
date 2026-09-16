@@ -4480,8 +4480,10 @@ mod tests {
     fn a_name_contradicting_the_session_join_holds_the_row() {
         use crate::gc::KeepReason;
         use std::collections::HashMap;
-        let mut e =
-            crate::state::RegistryEntry::new(Some("sid-77".into()), crate::state::Lineage::none());
+        let mut e = crate::state::RegistryEntry::new(
+            Some("sid-77".into()),
+            crate::state::Lineage::unproven("test row"),
+        );
         e.name = "target-N2".into();
         e.origin = Some("spawn".into());
         let graph = GraphRead {

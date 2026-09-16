@@ -76,6 +76,7 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
         None,
         &[],
+        &serde_json::Value::Null,
     );
     assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
     assert!(
@@ -93,6 +94,7 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
         None,
         &[],
+        &serde_json::Value::Null,
     );
     assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
     assert!(!entry_posture_is_full_access(&bounded));
@@ -108,6 +110,7 @@ fn build_codex_thread_entry_stamps_the_launch_posture() {
         None,
         None,
         &[],
+        &serde_json::Value::Null,
     );
     assert_eq!(modeled.model.as_deref(), Some("gpt-5.6-sol"));
     assert_eq!(modeled.model_basis.as_deref(), Some("requested"));
@@ -172,6 +175,7 @@ fn build_codex_thread_entry_records_the_resolved_posture_and_its_roots() {
         None,
         None,
         &[],
+        &serde_json::Value::Null,
     );
     // The request says full access...
     assert_eq!(entry.sandbox_posture.as_deref(), Some("danger-full-access"));
@@ -214,6 +218,7 @@ fn build_codex_thread_entry_stamps_the_request_node() {
         Some("x-535c"),
         None,
         &[],
+        &serde_json::Value::Null,
     );
     assert_eq!(entry.node.as_deref(), Some("x-535c"));
 }
@@ -246,6 +251,7 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         None,
         Some("codex-main"),
         &[],
+        &serde_json::Value::Null,
     );
     assert_eq!(pinned.account_record_id.as_deref(), Some("codex-main"));
     let unpinned = build_codex_thread_entry(
@@ -258,6 +264,7 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         None,
         None,
         &[],
+        &serde_json::Value::Null,
     );
     assert_eq!(unpinned.account_record_id.as_deref(), Some("default"));
     let blank = build_codex_thread_entry(
@@ -270,8 +277,65 @@ fn build_codex_thread_entry_stamps_the_requested_account_verbatim() {
         None,
         Some("   "),
         &[],
+        &serde_json::Value::Null,
     );
     assert_eq!(blank.account_record_id.as_deref(), Some("default"));
+}
+
+#[test]
+fn build_codex_thread_entry_carries_the_request_parent_edge_or_names_why() {
+    // The daemon's env is scrubbed, so the parent edge rides the spawn
+    // REQUEST. A request with parent keys stamps them; an edge-less request
+    // stamps lineage_reason, so an origin=spawn row never says nothing.
+    let worktree = tempfile::tempdir().unwrap();
+    let _guard = crate::path_test_guard();
+    let start = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let _daemon = crate::codex_fake_daemon::FakeDaemon::start(
+                crate::codex_fake_daemon::Behavior::quick().with_thread_id("thread-lineage"),
+            );
+            crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
+                .await
+                .expect("yolo thread starts")
+        });
+    let linked = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &start,
+        None,
+        None,
+        true,
+        None,
+        None,
+        &[],
+        &serde_json::json!({
+            "spawned_by_session": "parent-1",
+            "spawned_by_harness": "claude",
+            "spawned_by_cwd": "/work"
+        }),
+    );
+    assert_eq!(linked.spawned_by_session.as_deref(), Some("parent-1"));
+    assert_eq!(linked.lineage_reason, None);
+    let orphan = build_codex_thread_entry(
+        "t",
+        worktree.path(),
+        &start,
+        None,
+        None,
+        true,
+        None,
+        None,
+        &[],
+        &serde_json::json!({}),
+    );
+    assert_eq!(orphan.spawned_by_session, None);
+    assert_eq!(
+        orphan.lineage_reason.as_deref(),
+        Some("daemon mint: spawn request carried no parent edge")
+    );
 }
 
 /// AC16: a codex PANE row (mux ref set) must refuse from the ask lane

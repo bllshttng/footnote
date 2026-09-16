@@ -23,6 +23,7 @@ def test_mint_without_session_identity_raises():
             spawned_by_session=None,
             spawned_by_harness=None,
             spawned_by_cwd=None,
+            lineage_reason=None,
             name="worker-1",
         )
 
@@ -35,12 +36,48 @@ def test_mint_without_parent_edge_raises():
         )
 
 
+def test_spawn_row_without_parent_or_reason_raises():
+    """AC8: an origin=spawn row naming neither parent nor reason refuses at
+    the mint, never half-writes a launch nobody can trace."""
+    with pytest.raises(ValueError, match="spawned_by_session or lineage_reason"):
+        mint_agent_entry(
+            harness_session_id="ses-1",
+            spawned_by_session=None,
+            spawned_by_harness=None,
+            spawned_by_cwd=None,
+            lineage_reason=None,
+            name="worker-1",
+            harness="claude",
+            cwd="/tmp/w",
+            log_path="/tmp/w/worker.log",
+            origin="spawn",
+        )
+
+
+def test_spawn_row_with_a_reason_but_no_parent_mints():
+    entry = mint_agent_entry(
+        harness_session_id="ses-1",
+        spawned_by_session=None,
+        spawned_by_harness=None,
+        spawned_by_cwd=None,
+        lineage_reason="identity disposition=absent, markers=no markers",
+        name="worker-1",
+        harness="claude",
+        cwd="/tmp/w",
+        log_path="/tmp/w/worker.log",
+        origin="spawn",
+    )
+    assert entry.spawned_by_session is None
+    assert entry.lineage_reason == "identity disposition=absent, markers=no markers"
+
+
 def test_mint_stamps_the_identity_and_lineage_fields():
     entry = mint_agent_entry(
         harness_session_id="ses-1",
         spawned_by_session="parent-1",
         spawned_by_harness="claude",
         spawned_by_cwd="/tmp/w",
+        lineage_reason=None,
         name="worker-1",
         harness="claude",
         cwd="/tmp/w",
@@ -50,6 +87,7 @@ def test_mint_stamps_the_identity_and_lineage_fields():
     assert entry.spawned_by_session == "parent-1"
     assert entry.spawned_by_harness == "claude"
     assert entry.spawned_by_cwd == "/tmp/w"
+    assert entry.lineage_reason is None
 
 
 def test_legacy_row_without_the_fields_still_loads():

@@ -1898,14 +1898,14 @@ pub(crate) fn stamp_command_env(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CanonicalDisposition {
+pub(crate) enum CanonicalDisposition {
     Absent,
     Invalid,
     NameOnly,
     Complete,
 }
 
-fn canonical_identity_from(
+pub(crate) fn canonical_identity_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> (Option<String>, Option<String>, CanonicalDisposition) {
     let raw_name = get(FNO_HARNESS_NAME);

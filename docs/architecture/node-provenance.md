@@ -24,6 +24,7 @@ Every graph node carries (all nullable, defaulted on read in `cli/src/fno/graph/
 | `spawned_by_session` | parent session that spawned the worker | worker spawn (registry row and, when the spawn names a node, the node) |
 | `spawned_by_harness` | parent harness | worker spawn |
 | `spawned_by_cwd` | parent cwd, for the transcript-path slug resolver | worker spawn |
+| `lineage_reason` | why no parent session could be proved: the identity disposition the capture read, or the daemon-mint miss. An origin=spawn row carries a session or a reason, never neither | worker spawn (schema v33) |
 
 The `agent_spawned` event (`cli/src/fno/events/schema.yaml`) carries the same `spawned_by_*` triple, so the durable event log keeps the parent edge even if a registry row is later rewritten.
 
@@ -41,14 +42,18 @@ Do not fill this field from `source_session_id`. They answer different questions
 
 The stamp refuses rather than half-writes. No node, no write. No proven parent session, no write, because a triple with a null session on a durable node asserts a launch nobody can trace. An existing edge is never overwritten: launch is the FIRST launch, so a second worker on the node does not rewrite who started it.
 
-**Reading a null parent.** `spawned_by_session` is null for more than one reason, and the harness half plus `spawn_trigger` say which:
+**Reading a null parent.** `spawned_by_session` is null for more than one reason, and the harness half plus `spawn_trigger` plus `lineage_reason` say which:
 
-| session | harness | spawn_trigger | means |
-|---|---|---|---|
-| set | set | - | full lineage |
-| null | set | - | a harness process spawned it; its session id could not be proved |
-| null | null | - | no harness ancestor: a human shell or a daemon |
-| null | set | `dispatch:<source>` | a dispatcher chose this spawn; the session that ran it did not ask |
+| session | harness | spawn_trigger | reason | means |
+|---|---|---|---|---|
+| set | set | - | - | full lineage |
+| null | set | - | - | a harness process spawned it; its session id could not be proved |
+| null | null | - | - | no harness ancestor: a human shell or a daemon |
+| null | set | `dispatch:<source>` | - | a dispatcher chose this spawn; the session that ran it did not ask |
+| null | - | - | `daemon mint: spawn request carried no parent edge` | a daemon minted the row and the spawn request carried no parent edge |
+| null | - | - | `identity disposition=..., markers=...` | the ambient capture resolved no parent; the disposition names what it read |
+
+A daemon mint reads the parent edge from the spawn REQUEST, never from the daemon's own environment. The daemon lazy-start scrubs the harness session markers. An ambient read there stamped None by construction: every row it minted lost who spawned it. The Rust spawn client stamps its own ambient `spawned_by_*` triple onto the request. The mint (`Lineage::from_request`) reads the request the way the `node` field is already trusted. A request with no parent edge stamps `lineage_reason` instead of a silent null. `fno agents registry-json` now projects `spawned_by_harness` and `lineage_reason` beside `spawned_by_session`, so this table applies through that reader too.
 
 When the spawning process carries NO identity marker at all, `_capture_parent_edge` takes the harness from the process-tree walk and leaves the session id null. The walk is the prover, and a harness ancestor cannot be a stranger the way an inherited marker can. The fallback is gated on an empty marker set, not on a missing harness. A marker that IS present and resolved to nothing is a contradiction, and a contradiction attributes nothing. The `agent_spawned` event carries the `lineage_reason` in every case.
 

@@ -241,7 +241,10 @@ pub(crate) fn run(
         // Built through the sanctioned constructor and then specialized -
         // the mint guard bars a default-based literal here, and the guard
         // is right that identity fields should be set on purpose.
-        let mut entry = RegistryEntry::new(row.session_id.clone(), crate::state::Lineage::none());
+        let mut entry = RegistryEntry::new(
+            row.session_id.clone(),
+            crate::state::Lineage::unproven("synthetic row for a read, never written"),
+        );
         entry.name = row.name.clone().unwrap_or_else(|| row.short_id.clone());
         entry.short_id = row.short_id.clone();
         entry.harness = Some("claude".into());

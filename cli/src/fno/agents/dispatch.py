@@ -730,10 +730,8 @@ def _codex_create_path(
     session_id = result.session_id
     assert session_id is not None  # codex.create raises NoSessionIdError otherwise
 
-    # The parent edge is captured BEFORE the row so the durable registry row
-    # and the lifecycle event name the same parent (: this path used to
-    # stamp the event only, leaving the row - the surface consumers read -
-    # without lineage).
+    # Parent edge captured BEFORE the row so the durable registry row and
+    # the lifecycle event name the same parent; this path once stamped the event only.
     _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
     _cx_lineage_reason = _report_unlinked_parent(_cx_session)
     new_entry = mint_agent_entry(
@@ -741,6 +739,7 @@ def _codex_create_path(
         spawned_by_session=_cx_session,
         spawned_by_harness=_cx_harness,
         spawned_by_cwd=_cx_cwd,
+        lineage_reason=_cx_lineage_reason,
         spawn_trigger=_capture_spawn_trigger(),
         name=name,
         cwd=str(cwd),
@@ -1169,12 +1168,12 @@ def _lane_b_thread_spawn(
             )
 
         _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
-        _report_unlinked_parent(_cx_session)
         new_entry = mint_agent_entry(
             harness_session_id=session_id,
             spawned_by_session=_cx_session,
             spawned_by_harness=_cx_harness,
             spawned_by_cwd=_cx_cwd,
+            lineage_reason=_report_unlinked_parent(_cx_session),
             spawn_trigger=spawn_trigger,
             name=name,
             cwd=str(cwd),
@@ -1747,6 +1746,7 @@ def _claude_create_path(
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,
+        lineage_reason=lineage_reason,
         name=name,
         cwd=str(cwd),
         log_path=str(touched_log_path) if touched_log_path is not None else "",
