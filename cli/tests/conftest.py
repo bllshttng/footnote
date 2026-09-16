@@ -37,32 +37,17 @@ def _quiet_gh_budget(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _sandbox_decision_index(tmp_path, monkeypatch):
-    """Keep the machine-wide decision stores out of the developer's ~/.fno.
+    """Keep the machine-wide decision index out of the developer's ~/.fno.
 
-    ``record_decision`` writes to both ``paths.decisions_jsonl()`` and
-    ``paths.graph_json()`` on every call, and those paths are deliberately
-    machine-wide: ``FNO_REPO_ROOT`` does not move them, so without this every
-    test that records a decision appends to the real stores and reads back
-    another test's rows. Autouse rather than opt-in because the write happens
-    two layers down from any test that calls ``fno outstanding clear --answer``,
-    which is not where anyone looks for it.
+    ``record_decision`` writes to ``paths.decisions_jsonl()`` on every call, and
+    that path is deliberately machine-wide: ``FNO_REPO_ROOT`` does not move it,
+    so without this every test that records a decision appends to the real
+    index and reads back another test's rows. Autouse rather than opt-in
+    because the write happens two layers down from any test that calls
+    ``fno outstanding clear --answer``, which is not where anyone looks for it.
     """
-    from fno import paths
-
-    decision_root = tmp_path / ".decision-index"
-    sandbox = decision_root / "decisions.jsonl"
-    initial_state_dir = Path(paths.state_dir())
-
-    def sandbox_graph_json():
-        # A test may deliberately redirect all state with use_tmpdir(); follow
-        # that root so its path-containment receipt remains meaningful.
-        current_state_dir = Path(paths.state_dir())
-        if current_state_dir != initial_state_dir:
-            return current_state_dir / "graph.json"
-        return decision_root / "graph.json"
-
+    sandbox = tmp_path / ".decision-index" / "decisions.jsonl"
     monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: sandbox)
-    monkeypatch.setattr("fno.paths.graph_json", sandbox_graph_json)
 
 
 @pytest.fixture(autouse=True)
