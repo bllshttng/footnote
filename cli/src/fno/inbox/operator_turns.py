@@ -208,7 +208,8 @@ def cmd_list(
     now = datetime.now(timezone.utc).timestamp()
     for t in pending:
         age = f"{int(now - t['ts_epoch'])}s" if t.get("ts_epoch") is not None else "age-unknown"
-        typer.echo(f"{t['turn_id']}\t{age}\t{t['excerpt']}")
+        marker = "[stand-down] " if t.get("stand_down") else ""
+        typer.echo(f"{t['turn_id']}\t{age}\t{marker}{t['excerpt']}")
 
 
 @operator_app.command("ack")
