@@ -1148,6 +1148,7 @@ def _prepare_intake(
     cli_project: str | None = None,
     cli_claim: str | None = None,
 ) -> _IntakeResult:
+    _refuse_filename_claim_mismatch(plan_path, cli_claim)
     # Claim resolution runs FIRST so a claim on an existing node (any state)
     # beats the plan_path-equality match. _resolve_claim raises ValueError on
     # bad input; the caller surfaces those as non-zero exits via Typer.
@@ -1288,6 +1289,40 @@ def _prepare_intake(
         "status": "ready",
         "node_spec": node_spec,
     }
+
+
+def _refuse_filename_claim_mismatch(plan_path: str, cli_claim: str | None) -> None:
+    """Refuse a node-bearing filename that disagrees with its claim.
+
+    A plan is one delivery unit, so its most-visible identity must agree across
+    the filename, declarative frontmatter, and strict CLI override. Ignore
+    id-less filenames and malformed frontmatter values; the existing claim
+    resolver owns those cases.
+    """
+    from fno.plan.identity import plan_filename_node_id
+
+    filename_node = plan_filename_node_id(plan_path)
+    if filename_node is None:
+        return
+
+    declared = {
+        claim
+        for claim in plan_claims(plan_path)
+        if is_wellformed_node_id(claim)
+    }
+    if len(declared) == 1:
+        frontmatter_node = next(iter(declared))
+        if filename_node != frontmatter_node:
+            raise ValueError(
+                f"plan {plan_path} filename names {filename_node}, but frontmatter "
+                f"claims {frontmatter_node}; rename the file or correct the claim"
+            )
+
+    if cli_claim and is_wellformed_node_id(cli_claim) and filename_node != cli_claim:
+        raise ValueError(
+            f"plan {plan_path} filename names {filename_node}, but --claims names "
+            f"{cli_claim}; rename the file or pass the matching claim"
+        )
 
 
 def _refuse_surfaceless_intake(paths: list[str], *, allow_no_surface: bool) -> None:
