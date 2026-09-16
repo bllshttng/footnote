@@ -704,6 +704,219 @@ pub fn stale_sweep(
     outcome
 }
 
+/// How long between park sweeps. A parked PR comes back on the next push,
+/// so the sweep's job is to notice the push; 6h bounds discovery lag on a
+/// clock that already ticks.
+const PARK_SWEEP_INTERVAL_SECS: i64 = 21_600;
+
+/// Park sweep on a 6h floor: un-parks open rows whose PR head moved since
+/// the park baseline or whose park passed 24 hours, and marks finished rows
+/// handled, over every repo root the registry knows. The verb inside
+/// (`fno-agents pr-park sweep`) is idempotent on an untouched store, so a
+/// re-run costs one head probe per open row and changes nothing.
+///
+/// Emits one `park_sweep` event per run INCLUDING on a zero-count or skipped
+/// run: a tick that stays silent when it finds nothing cannot be told from a
+/// tick that never ran. The run closure is injected so the policy is
+/// testable without shelling out.
+pub fn park_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    now: i64,
+    run: &dyn Fn() -> Option<(usize, usize, usize)>,
+) -> usize {
+    let stamp = home.root().join("park-sweep.stamp");
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if now.saturating_sub(last) < PARK_SWEEP_INTERVAL_SECS {
+        return 0;
+    }
+    // The sweep's child probes gh once per open parked row, so a dispatch
+    // pause suspends it on the same sidecar-stamp shape stale_sweep uses.
+    let pause = crate::loops_pause::dispatch_pause();
+    if pause.is_paused() {
+        let skip_stamp = home.root().join("park-sweep.skipstamp");
+        let last_skip = std::fs::read_to_string(&skip_stamp)
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        if now.saturating_sub(last_skip) >= PARK_SWEEP_INTERVAL_SECS {
+            let _ = emitter.emit(
+                "park_sweep",
+                &json!({
+                    "outcome": "skipped",
+                    "reason": pause.skip_reason(),
+                }),
+            );
+            let _ = std::fs::write(&skip_stamp, now.to_string());
+        }
+        return 0;
+    }
+    let (outcome, counts) = match run() {
+        Some((unparked, handled, total)) => ("ok", Some((unparked, handled, total))),
+        None => ("error", None),
+    };
+    let mut row = json!({"outcome": outcome});
+    if let Some((unparked, handled, total)) = counts {
+        row["unparked"] = json!(unparked);
+        row["handled"] = json!(handled);
+        row["total"] = json!(total);
+    }
+    let _ = emitter.emit("park_sweep", &row);
+    let _ = std::fs::write(&stamp, now.to_string());
+    1
+}
+
+/// One repo's worktree-sweep reading, parsed from the verb's `Summary:` line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorktreeSweepReport {
+    pub eligible: usize,
+    pub kept: usize,
+    pub dirty: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSweepOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeSweepOrderRead {
+    pub standing: Option<bool>,
+    pub exit_code: Option<i32>,
+    pub stderr: String,
+}
+
+impl From<bool> for WorktreeSweepOrderRead {
+    fn from(standing: bool) -> Self {
+        Self {
+            standing: Some(standing),
+            exit_code: Some(0),
+            stderr: String::new(),
+        }
+    }
+}
+
+/// Parse `fno agents workspace worktree cleanup --merged`'s summary line.
+///
+/// Returns `None` rather than a zeroed report when the line is absent. A sweep
+/// that could not read its own output must not report "0 eligible, 0 dirty",
+/// which is indistinguishable from a clean machine: an absence has two
+/// explanations and a count must only ever come from a real reading.
+///
+/// The verb differs by mode (`would archive` dry-run vs `archived` apply), so
+/// the eligible count reads from whichever the line carries.
+pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
+    let line = stdout
+        .lines()
+        .find(|l| l.trim_start().starts_with("Summary:"))?;
+    let num_before = |needle: &str| -> Option<usize> {
+        let idx = line.find(needle)?;
+        line[..idx].split_whitespace().last()?.parse().ok()
+    };
+    let eligible = num_before(" would archive").or_else(|| num_before(" archived"))?;
+    Some(WorktreeSweepReport {
+        eligible,
+        kept: num_before(" kept (")?,
+        dirty: num_before(" dirty")?,
+    })
+}
+
+/// Worktree sweep, one line per repo, on a 6h floor: report-only until a
+/// merge-minted cleanup request stands, then applying.
+///
+/// A timer tick proves nothing on its own, so an unearned tick still only
+/// REPORTS. Removal is merge-triggered: `fno do pr merge` (and the post-merge
+/// ritual, as its second mint site) writes the `merge_cleanup_requested`
+/// envelope, and while a pending request stands for a repository (`orders`
+/// injects that scoped read) that repository's pass runs with `--apply`. The
+/// primary consumer is the merge reaper (merge_reap.rs), which stops the
+/// harness, drops the rows, and takes the tree; this sweep only catches what
+/// that pass leaves behind. The sweep's own guards - reapable, live claim,
+/// rooted processes - still decide tree by tree. There is no config knob,
+/// because two off-switches for one decision strand whoever flips the wrong
+/// one.
+///
+/// `orders` and `run` are injected so the policy is testable without shelling
+/// out.
+pub fn worktree_sweep(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    now: i64,
+    roots: &[String],
+    orders: &dyn Fn(&str) -> WorktreeSweepOrderRead,
+    run: &dyn Fn(&str, bool) -> WorktreeSweepOutput,
+) -> usize {
+    let stamp = home.root().join("worktree-sweep.stamp");
+    let last = std::fs::read_to_string(&stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    if now.saturating_sub(last) < WORKTREE_SWEEP_INTERVAL_SECS as i64 {
+        return 0;
+    }
+    let mut swept = 0;
+    for root in roots {
+        let order_read = orders(root);
+        let Some(apply) = order_read.standing else {
+            let stderr = order_read.stderr.lines().next().unwrap_or("");
+            let _ = emitter.emit(
+                "worktree_sweep",
+                &json!({
+                    "repo": root,
+                    "error": "unreadable-orders",
+                    "exit_code": order_read.exit_code,
+                    "stderr": stderr,
+                }),
+            );
+            continue;
+        };
+        let mode = if apply { "apply-orders" } else { "report-only" };
+        // Emit for EVERY repo, including the ones that read zero. A tick that
+        // stays silent when it finds nothing cannot be told from a tick that
+        // never ran, and this sweep exists precisely to surface what the
+        // ritual missed.
+        let output = run(root, apply);
+        let report = (output.exit_code == Some(0))
+            .then(|| parse_worktree_sweep(&output.stdout))
+            .flatten();
+        match report {
+            Some(r) => {
+                let _ = emitter.emit(
+                    "worktree_sweep",
+                    &json!({
+                        "repo": root,
+                        "eligible": r.eligible,
+                        "kept": r.kept,
+                        "dirty": r.dirty,
+                        "mode": mode,
+                    }),
+                );
+                swept += 1;
+            }
+            None => {
+                let stderr = output.stderr.lines().next().unwrap_or("");
+                let _ = emitter.emit(
+                    "worktree_sweep",
+                    &json!({
+                        "repo": root,
+                        "mode": mode,
+                        "error": "unreadable-summary",
+                        "exit_code": output.exit_code,
+                        "stderr": stderr,
+                    }),
+                );
+            }
+        }
+    }
+    let _ = std::fs::write(&stamp, now.to_string());
+    swept
+}
+
 pub(crate) use crate::gc_inventory::index_tree;
 // the pane kill and its absence vocabulary moved to pane_stop.rs
 // with the stop helper that now shares them.
@@ -1979,6 +2192,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // beside it. The verb dedupes on outcome identity, so an extra run is a
     // no-op; the gate exists so a slow fleet probe never stacks.
     let stale_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Park sweep: same one-in-flight discipline. The verb is idempotent on a
+    // store nobody touched, so an extra run is a no-op; the gate exists so a
+    // slow head probe never stacks.
+    let park_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let idle_probe_verdict: Arc<
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
@@ -2178,6 +2395,43 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                 .ok()
                                 .filter(|o| o.status.success())
                                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        });
+                    });
+                }
+                // Park sweep, the arm beside `stale_sweep`: same doc comment
+                // there covers the one-in-flight shape. The run closure walks
+                // every repo root the registry knows, so parked rows of other
+                // repos are un-parked from THEIR checkout (the head probe
+                // resolves PR numbers against the repo they belong to).
+                if !park_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&park_sweep_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    tokio::task::spawn_blocking(move || {
+                        let _gate = SweepGate(flag);
+                        park_sweep(&home, &emitter, now_epoch_secs(), &|| {
+                            let paths = crate::pr_park::Paths::from_home();
+                            let mut unparked = 0usize;
+                            let mut handled = 0usize;
+                            let mut total = 0usize;
+                            for root in registry_repo_roots(&home) {
+                                let ctx = crate::pr_park::Ctx::live(
+                                    std::path::Path::new(&root),
+                                    paths.clone(),
+                                );
+                                if ctx.slug.is_empty() {
+                                    continue;
+                                }
+                                match crate::pr_park::sweep(&ctx) {
+                                    Ok(r) => {
+                                        unparked += r.unparked;
+                                        handled += r.handled;
+                                        total += r.total;
+                                    }
+                                    Err(_) => return None,
+                                }
+                            }
+                            Some((unparked, handled, total))
                         });
                     });
                 }

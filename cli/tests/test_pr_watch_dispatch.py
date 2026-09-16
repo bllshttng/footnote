@@ -2085,28 +2085,12 @@ class TestDispatchEntryGuards:
 
 
 class TestInstallParkedPrsGuards:
-    """AC-gemini-medium _install.py:367 and :394: dict-guard parsed events/state."""
+    """AC-gemini-medium _install.py:367: dict-guard parsed events/state.
 
-    def test_parked_prs_non_dict_entry_skipped(self, tmp_path):
-        """AC-gemini-medium _install:394: non-dict entry in state JSON -> skipped, no AttributeError."""
-        from fno.pr_watch._install import _parked_prs
-
-        state_path = tmp_path / "state.json"
-        # Mix: one valid dict entry, one corrupted non-dict entry
-        state_path.write_text(json.dumps({
-            "owner/repo#1": {"parked": "retries-exhausted", "retries": 3},
-            "owner/repo#2": "corrupted-non-dict",
-            "owner/repo#3": None,
-        }))
-
-        result = _parked_prs(state_path)
-
-        # Only the valid dict entry with parked set should appear
-        assert "owner/repo#1" in result
-        assert result["owner/repo#1"] == "retries-exhausted"
-        # Non-dict entries must not appear
-        assert "owner/repo#2" not in result
-        assert "owner/repo#3" not in result
+    The `_parked_prs` store-reader guards moved to the Rust action's own
+    tests (pr_park::tests) when the parked block was ported; the watermark
+    guard stays.
+    """
 
     def test_watermark_scan_non_dict_event_line_skipped(self, tmp_path):
         """AC-gemini-medium _install:367: non-dict JSON line in events.jsonl -> skipped, no crash."""

@@ -210,3 +210,115 @@ fn stale_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
         None => std::env::remove_var("FNO_AGENTS_HOME"),
     }
 }
+
+#[test]
+fn park_sweep_honours_its_own_6h_floor_and_emits_on_a_quiet_run() {
+    sandbox_pause_readers(|_| {
+        let home = tmp_home("park-sweep-floor");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let out = || Some((0usize, 0usize, 0usize));
+        let now = 1_000_000;
+
+        assert_eq!(park_sweep(&home, &emitter, now, &out), 1);
+        // Within the floor: skipped entirely, no second reading.
+        assert_eq!(park_sweep(&home, &emitter, now + 60, &out), 0);
+        // Past the floor: fires again.
+        assert_eq!(
+            park_sweep(&home, &emitter, now + PARK_SWEEP_INTERVAL_SECS + 1, &out),
+            1
+        );
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("park_sweep"));
+        assert!(log.contains("\"outcome\":\"ok\""));
+        assert!(
+            log.contains("\"unparked\":0"),
+            "a quiet run still emits counts"
+        );
+    });
+}
+
+/// x-6bf4: while an effective dispatch pause holds, the due park sweep never
+/// calls its closure and never writes its cadence stamp; it emits a positive
+/// skip row naming the pause, one per window.
+#[test]
+fn park_sweep_suspends_without_consuming_cadence_while_dispatch_paused() {
+    let _env = crate::claims::test_env_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp_home("park-sweep-paused");
+    let saved_home = std::env::var_os("HOME");
+    let saved_agents = std::env::var_os("FNO_AGENTS_HOME");
+    std::env::set_var("HOME", tmp.path());
+    let agents = tmp.path().join("agents-home");
+    std::fs::create_dir_all(&agents).unwrap();
+    std::env::set_var("FNO_AGENTS_HOME", &agents);
+    let stamp = home.root().join("park-sweep.stamp");
+
+    std::fs::write(
+        crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&agents)),
+        serde_json::to_string(&crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "stopped".into(),
+            generation: 5,
+            changed_at: "2026-09-16T01:07:00Z".into(),
+            changed_by: "op".into(),
+            reason: "load 385".into(),
+            source: Some("file".into()),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    let park_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let pc = Arc::clone(&park_calls);
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let run = move || {
+        pc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some((0usize, 0usize, 0usize))
+    };
+
+    let now = 1_000_000;
+    assert_eq!(park_sweep(&home, &emitter, now, &run), 0);
+    assert_eq!(park_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(
+        !stamp.exists(),
+        "a paused sweep must not consume its cadence"
+    );
+    let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+    assert!(log.contains("\"outcome\":\"skipped\"") && log.contains("fleet_stop"));
+    assert_eq!(park_sweep(&home, &emitter, now + 60, &run), 0);
+    let rows = std::fs::read_to_string(home.events_jsonl())
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("\"outcome\":\"skipped\""))
+        .count();
+    assert_eq!(rows, 1, "one skip row per window, not one per tick");
+
+    // Clear at generation 6: the overdue sweep runs exactly once.
+    std::fs::write(
+        crate::fleet_incident::fleet_stop_path(&crate::paths::AgentsHome::at(&agents)),
+        serde_json::to_string(&crate::fleet_incident::IncidentRecord {
+            version: crate::fleet_incident::STATE_VERSION,
+            state: "clear".into(),
+            generation: 6,
+            changed_at: "2026-09-16T01:08:00Z".into(),
+            changed_by: "op".into(),
+            reason: "resolved".into(),
+            source: Some("file".into()),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(park_sweep(&home, &emitter, now + 120, &run), 1);
+    assert_eq!(park_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(stamp.exists(), "the clear run writes its normal stamp");
+
+    match saved_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+    match saved_agents {
+        Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+        None => std::env::remove_var("FNO_AGENTS_HOME"),
+    }
+}
