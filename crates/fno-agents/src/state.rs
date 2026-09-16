@@ -1115,6 +1115,21 @@ pub struct RegistryEntry {
     /// raw row. Not part of identity; no consumer reads it directly.
     #[serde(default, rename = "claude_short_id", skip_serializing)]
     pub legacy_claude_short_id: Option<String>,
+    /// v33: the spawn-attempt id the coordinator allocated before
+    /// launch, correlating row, journal and receipt. `None` on rows that
+    /// predate the door or never came through it (adopt, operator register).
+    /// Skip-when-None keeps every other row slim; the v33 bump turns a
+    /// pre-v33 writer's silent erasure into a loud version refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_id: Option<String>,
+    /// v33: the structured birth provenance the spawn door validated
+    /// before launch - required origin plus a separate owner. `None` on
+    /// operator/adopted rows and on every row that predates the door, which
+    /// read as `legacy_missing` provenance (a visible defect), never as valid
+    /// new births. Same X3 passthrough duty as `origin`: a field this struct
+    /// does not know is dropped on write-back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_provenance: Option<crate::spawn_contract::SpawnProvenance>,
 }
 
 /// The spawn-time parent edge as one value. Ambient, never required of a
@@ -1201,6 +1216,59 @@ impl RegistryEntry {
             ..Default::default()
         }
     }
+
+    /// The coordinator's birth constructor: the only
+    /// sanctioned way to mint a row whose `origin` is `spawn`. Takes the
+    /// allocated spawn id and the VALIDATED provenance, and derives the
+    /// `spawned_by_*` compatibility triple from the origin so a new birth can
+    /// never disagree with its own provenance record. A caller holding only a
+    /// nullable `Lineage` has no door through this constructor.
+    pub fn new_spawn(spawn_id: &str, provenance: &crate::spawn_contract::SpawnProvenance) -> Self {
+        let mut entry = Self {
+            origin: Some("spawn".to_string()),
+            spawn_id: Some(spawn_id.to_string()),
+            spawn_provenance: Some(provenance.clone()),
+            ..Default::default()
+        };
+        if let crate::spawn_contract::SpawnOrigin::Session { parent, .. } = &provenance.origin {
+            entry.spawned_by_session = Some(parent.session_id.clone());
+            entry.spawned_by_harness = Some(parent.harness.clone());
+            entry.spawned_by_cwd = Some(parent.cwd.clone());
+        }
+        entry
+    }
+
+    /// The read-side provenance classification: `Ok` for a door birth whose
+    /// record is present, `LegacyMissing` for the rows that predate the door
+    /// (a visible defect, never silently blessed), `NotApplicable` for
+    /// non-spawn rows (adopt, operator register). The diagnostic readers
+    /// (tasks 6.1/7.1) surface these; a NEW row cannot read as legacy through
+    /// the door because `new_spawn` requires the record.
+    pub fn provenance_status(&self) -> ProvenanceStatus {
+        match self.origin.as_deref() {
+            Some("spawn") => match (&self.spawn_provenance, &self.spawn_id) {
+                (Some(_), Some(_)) => ProvenanceStatus::Ok,
+                (Some(_), None) => ProvenanceStatus::Malformed,
+                (None, _) => ProvenanceStatus::LegacyMissing,
+            },
+            _ => ProvenanceStatus::NotApplicable,
+        }
+    }
+}
+
+/// The read-side classification of a row's birth provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvenanceStatus {
+    /// A door birth with its record present.
+    Ok,
+    /// A `origin=spawn` row predating the door: defective legacy provenance,
+    /// readable and visible, never silently blessed.
+    LegacyMissing,
+    /// A door birth missing half its record (provenance without spawn_id):
+    /// a producer bug, surfaced by the diagnostic readers.
+    Malformed,
+    /// Adopt/operator rows carry no spawn provenance by design.
+    NotApplicable,
 }
 
 /// The one-live-ref invariant (brief Locked 7), checked at write time by both

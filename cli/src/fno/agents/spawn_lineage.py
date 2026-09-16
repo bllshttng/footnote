@@ -87,6 +87,71 @@ def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
     return reason
 
 
+def build_spawn_provenance(
+    *,
+    explicit_origin: Optional[dict] = None,
+    explicit_owner: Optional[dict] = None,
+    cause: Optional[str] = None,
+) -> Optional[dict]:
+    """The Python half of the one spawn door (v33): the validated origin+owner
+    record. ``None`` when a session caller cannot be proven. Explicit producers
+    MUST name a mission/crown owner; ``cause`` speaks the vocabulary minus ``sob``."""
+    if explicit_origin is not None and explicit_owner is not None:
+        _validate_explicit_provenance(explicit_origin, explicit_owner, cause)
+        return {"origin": explicit_origin, "owner": explicit_owner}
+
+    # Explicit dispatch context outranks ambient capture.
+    carried_origin = os.environ.get("FNO_SPAWN_ORIGIN")
+    carried_owner = os.environ.get("FNO_SPAWN_OWNER")
+    if carried_origin or carried_owner:
+        if not (carried_origin and carried_owner):
+            raise ValueError("FNO_SPAWN_ORIGIN and FNO_SPAWN_OWNER must be exported together")
+        import json as _json
+
+        origin = _json.loads(carried_origin)
+        owner = _json.loads(carried_owner)
+        return build_spawn_provenance(explicit_origin=origin, explicit_owner=owner, cause=cause)
+
+    from fno.claims.self_identity import resolve_self_identity
+
+    identity = resolve_self_identity()
+    session_id = identity.session_id
+    harness = identity.harness
+    cwd = (os.environ.get("PWD") or os.getcwd()).strip()
+    if not session_id or not harness:
+        return None
+    parent = {"harness": harness, "session_id": session_id, "cwd": cwd}
+    return {
+        "origin": {"kind": "session", "parent": parent, "invocation": None},
+        "owner": {"kind": "session", **parent},
+    }
+
+
+def _validate_explicit_provenance(origin: dict, owner: dict, cause: Optional[str]) -> None:
+    """Mirror the door's rules for explicit non-session provenance."""
+    source = origin.get("source") if origin.get("kind") == "non_session" else None
+    if source is None:
+        return
+    if source.get("kind") not in ("daemon", "launch_agent"):
+        return
+    if owner.get("kind") not in ("mission", "crown"):
+        raise ValueError(
+            "daemon/launch-agent origin requires a mission or crown owner; "
+            "the daemon starter is never substituted"
+        )
+    declared = source.get("cause")
+    if cause is not None and declared is None:
+        source["cause"] = cause
+        declared = cause
+    if declared == "sob":
+        raise ValueError("cause 'sob' is retired; it cannot ride a spawn")
+    if declared is not None:
+        from fno.agents.naming import dispatch_sources
+
+        if declared not in dispatch_sources():
+            raise ValueError(f"cause {declared!r} is not in the naming-codes vocabulary")
+
+
 # The prompt lane opens a row only for a message whose verb labels review
 # (infer_phase, the spawn_phase.toml table): the complaint shape is a
 # review worker spawned with the node id in its prompt. A do worker whose

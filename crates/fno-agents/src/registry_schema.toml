@@ -44,5 +44,8 @@
 # instead of a silent null. Same additive-optional writer-protection
 # rationale as v28: a pre-v33 writer accepts the unknown key and erases it
 # on its next read-modify-write. Rationale lives beside the column in
-# state.rs / registry.py.
+# state.rs / registry.py. v33 also adds `spawn_id` and structured
+# `spawn_provenance` - the coordinator's spawn-attempt id and the validated
+# origin+owner record every new birth carries; `spawned_by_*` become
+# generated compatibility fields derived from the origin at mint.
 version = 33

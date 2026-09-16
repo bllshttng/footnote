@@ -492,6 +492,12 @@ class AgentEntry:
     # enforce that.
     origin: Optional[str] = None
 
+    spawn_id: Optional[str] = None  # v33: door attempt id; X3.
+    # v33: the door's validated origin+owner record. None on
+    # operator/adopted and pre-door rows: ABSENCE on origin=spawn MEANS
+    # LEGACY DEFECT, the origin discipline.
+    spawn_provenance: Optional[dict] = None
+
     # ----------------------------------------------------------------------
     # Rust-daemon-only PTY fields. A genuine daemon PTY row
     # (spawn/host/promote) carries a non-empty short_id/project_root + pid +

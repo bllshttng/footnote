@@ -730,9 +730,7 @@ def _codex_create_path(
     session_id = result.session_id
     assert session_id is not None  # codex.create raises NoSessionIdError otherwise
 
-    # Parent edge captured BEFORE the row so the durable registry row and
-    # the lifecycle event name the same parent; this path once stamped the event only.
-    _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
+    _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()  # before the row
     _cx_lineage_reason = _report_unlinked_parent(_cx_session)
     new_entry = mint_agent_entry(
         harness_session_id=session_id,
@@ -741,6 +739,8 @@ def _codex_create_path(
         spawned_by_cwd=_cx_cwd,
         lineage_reason=_cx_lineage_reason,
         spawn_trigger=_capture_spawn_trigger(),
+        spawn_id=f"sp-{uuid.uuid4().hex[:16]}",
+        spawn_provenance=build_spawn_provenance(),
         name=name,
         cwd=str(cwd),
         log_path=str(output_path),
@@ -822,10 +822,7 @@ def _codex_create_path(
 
 
 # Moved to fno.agents.spawn_lineage (file budget); re-exported here.
-from fno.agents.spawn_lineage import (  # noqa: E402
-    _capture_parent_edge,
-    _report_unlinked_parent,
-)
+from fno.agents.spawn_lineage import _capture_parent_edge, _report_unlinked_parent, build_spawn_provenance  # noqa: E402
 
 
 def _reign_typed_message(
@@ -1175,6 +1172,8 @@ def _lane_b_thread_spawn(
             spawned_by_cwd=_cx_cwd,
             lineage_reason=_report_unlinked_parent(_cx_session),
             spawn_trigger=spawn_trigger,
+            spawn_id=f"sp-{uuid.uuid4().hex[:16]}",
+            spawn_provenance=build_spawn_provenance(),
             name=name,
             cwd=str(cwd),
             log_path=str(log_path),
@@ -1719,9 +1718,8 @@ def _claude_create_path(
             file=sys.stderr,
         )
 
-    # Capture the spawning session's ambient identity (Task 2.2).
-    # Best-effort: never raises, degrades to (None, None, None) when absent.
-    # spawn_trigger was already popped before bg_create above (ordering fix).
+    # Best-effort ambient capture; never raises. The
+    # spawn_trigger was already popped before bg_create above.
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
     lineage_reason = _report_unlinked_parent(spawned_by_session)
 
@@ -1747,6 +1745,8 @@ def _claude_create_path(
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,
         lineage_reason=lineage_reason,
+        spawn_id=f"sp-{uuid.uuid4().hex[:16]}",
+        spawn_provenance=build_spawn_provenance(),
         name=name,
         cwd=str(cwd),
         log_path=str(touched_log_path) if touched_log_path is not None else "",

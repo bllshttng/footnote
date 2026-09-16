@@ -2897,3 +2897,64 @@ fn resume_through_run_inside_a_runtime_refuses_16_without_panicking() {
         .block_on(run(vec!["resume".into(), "w1".into()]));
     assert_eq!(code, 16);
 }
+
+mod tier_remap_guard {
+    // The native tier-remap refusal: a direct native
+    // claude spawn naming a tier alias the ambient env redefines refuses
+    // before launch, matching the Python seam's semantics.
+
+    use super::*;
+    use fno_agents::spawn_context::refuse_inherited_tier_remap_with;
+
+    fn params_of(model: Option<&str>, provider: Option<&str>) -> serde_json::Map<String, Value> {
+        let mut m = serde_json::Map::new();
+        if let Some(model) = model {
+            m.insert("model".to_string(), Value::String(model.to_string()));
+        }
+        if let Some(provider) = provider {
+            m.insert("provider".to_string(), Value::String(provider.to_string()));
+        }
+        m
+    }
+
+    #[test]
+    fn foreign_remap_refuses_before_launch() {
+        let params = params_of(Some("opus"), Some("claude"));
+        let env =
+            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "glm-5.3[1m]".to_string());
+        let err = refuse_inherited_tier_remap_with(&params, env).expect_err("must refuse");
+        assert!(err.contains("No worker launched"), "{err}");
+    }
+
+    #[test]
+    fn anthropic_pin_is_not_a_conflict() {
+        let params = params_of(Some("opus"), Some("claude"));
+        let env =
+            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "claude-opus-4-1".to_string());
+        refuse_inherited_tier_remap_with(&params, env).expect("anthropic pin passes");
+    }
+
+    #[test]
+    fn absent_remap_passes() {
+        let params = params_of(Some("sonnet"), Some("claude"));
+        refuse_inherited_tier_remap_with(&params, |_| None).expect("no remap passes");
+    }
+
+    #[test]
+    fn composed_route_is_exempt() {
+        let mut params = params_of(Some("opus"), Some("claude"));
+        params.insert("account".to_string(), Value::String("work".to_string()));
+        let env =
+            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "glm-5.3[1m]".to_string());
+        refuse_inherited_tier_remap_with(&params, env)
+            .expect("a pinned account composes endpoint+model as one unit");
+    }
+
+    #[test]
+    fn non_claude_harness_is_exempt() {
+        let params = params_of(Some("opus"), Some("codex"));
+        let env =
+            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "glm-5.3[1m]".to_string());
+        refuse_inherited_tier_remap_with(&params, env).expect("non-claude unaffected");
+    }
+}

@@ -3945,6 +3945,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             if substrate == "pane" && pty_capable {
                 apply_interactive_defaults(&mut params);
             }
+            fno_agents::spawn_context::refuse_inherited_tier_remap(&params)?;
+            fno_agents::spawn_context::stamp_spawn_lineage(&mut params)?;
             "agent.spawn"
         }
         "ask" => {

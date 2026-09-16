@@ -194,6 +194,8 @@ def emit_identity_resolution(owned: Any, *, path: Optional[Path] = None) -> None
 # line.
 KIND_AGENT_SPAWNED = "agent_spawned"
 KIND_AGENT_SPAWN_FAILED = "agent_spawn_failed"
+# durable accepted record, pre-launch; correlated by spawn_id.
+KIND_AGENT_SPAWN_ACCEPTED = "agent_spawn_accepted"
 
 
 def daemon_lifecycle_log() -> Path:
@@ -297,6 +299,29 @@ def emit_spawn_failed(
     _emit_daemon_envelope(
         KIND_AGENT_SPAWN_FAILED,
         {"name": name, "provider": provider, "short_id": short_id, "reason": reason},
+    )
+
+
+def emit_spawn_accepted(
+    *,
+    spawn_id: str,
+    name: str,
+    origin: dict,
+    owner: dict,
+    substrate: Optional[str] = None,
+    harness: Optional[str] = None,
+) -> None:
+    # pre-launch accepted record; settled by birth/failure, same id.
+    _emit_daemon_envelope(
+        KIND_AGENT_SPAWN_ACCEPTED,
+        {
+            "spawn_id": spawn_id,
+            "name": name,
+            "origin": origin,
+            "owner": owner,
+            "substrate": substrate,
+            "harness": harness,
+        },
     )
 
 

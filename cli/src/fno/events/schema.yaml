@@ -2924,6 +2924,29 @@ event_types:
         archived_to:
           type: string
 
+  - name: agent_spawn_accepted
+    retention: durable
+    description: "The spawn coordinator accepted a validated spawn request and allocated its spawn_id; recorded BEFORE any backend launch. An accepted record is not a live worker: the birth settles with agent_spawned or agent_spawn_failed, correlated by spawn_id."
+    sources: [daemon]
+    data:
+      required: [spawn_id, name]
+      properties:
+        spawn_id:
+          type: string
+          description: "The coordinator-allocated spawn-attempt id; correlates accepted, birth and receipt."
+        name:
+          type: string
+        origin:
+          type: object
+          description: "The validated SpawnOrigin (session parent or named non-session source)."
+        owner:
+          type: object
+          description: "The validated SpawnOwner (session, mission, crown, operator or test run)."
+        substrate:
+          type: string
+        harness:
+          type: string
+
   - name: agent_spawn_failed
     description: "The agent worker process could not be launched (binary not found, exec error, etc.)."
     sources: [daemon]

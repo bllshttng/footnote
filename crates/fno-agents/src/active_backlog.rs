@@ -135,6 +135,10 @@ pub struct DrainConfig {
     pub fno_bin: String,
     /// The active mission's epic id - the `advance --epic <mission>` argument.
     pub mission: String,
+    /// The mission epic's own project: qualifies the owner carried
+    /// on every dispatch this loop makes, so an autonomous row never says
+    /// nothing about who answers for it.
+    pub project: String,
     /// The territory key: the canonical crown scope this loop drains.
     /// Empty on a legacy receipt; the loop then keys by `mission`.
     pub scope: String,
@@ -948,7 +952,8 @@ fn dispatch_member(
         .args(target_args.clone())
         .args(["--source", "ab"])
         .arg("--json")
-        .current_dir(&cfg.cwd);
+        .current_dir(&cfg.cwd)
+        .envs(spawn_provenance_env(cfg, "active-backlog"));
         crate::bounded_cmd::output_with_timeout_result(cmd, cfg.advance_timeout_s)
     }) {
         Ok(o) if o.status.success() => o,
@@ -1236,10 +1241,12 @@ fn blueprinter_tick(cfg: &DrainConfig, journal: &Journal) {
             status.worker_name_next.clone(),
             prompt,
         ];
+        let provenance = spawn_provenance_env(cfg, "blueprinter");
         let spawn = retry_etxtbsy(|| {
             fno_cmd(&cfg.fno_bin)
                 .args(&args)
                 .current_dir(&cfg.cwd)
+                .envs(provenance.clone())
                 .output()
         });
         match spawn {
@@ -1785,6 +1792,47 @@ fn journal_for(cwd: &Path) -> Journal {
     Journal::new(project_events, GlobalJournalPath(global_events))
 }
 
+/// The dispatch-provenance env carrier: the origin names THIS
+/// daemon arm (never a session - the daemon env is scrubbed by design), and
+/// the owner names the durable mission or crown scope the work answers to,
+/// kingless or not. `fno agents spawn` consumes these on the request and the
+/// row carries them; a session running `fno backlog advance` by hand exports
+/// neither, so its workers keep their ambient session parent.
+fn spawn_provenance_env(cfg: &DrainConfig, arm: &str) -> Vec<(String, String)> {
+    // A legacy receipt with neither project nor scope cannot honestly name an
+    // owner; exporting a blank one would refuse at the door, so the carrier
+    // is omitted and those dispatches keep today's shape.
+    if cfg.project.is_empty() && cfg.scope.is_empty() {
+        return Vec::new();
+    }
+    let origin = serde_json::json!({
+        "kind": "non_session",
+        "source": {
+            "kind": "daemon",
+            "exe": "fno-agents-daemon",
+            "arm": arm,
+            "cause": "ab",
+        },
+    });
+    let owner = if cfg.scope.is_empty() {
+        serde_json::json!({
+            "kind": "mission",
+            "project": cfg.project,
+            "mission": cfg.mission,
+        })
+    } else {
+        serde_json::json!({
+            "kind": "crown",
+            "project": cfg.project,
+            "scope": cfg.scope,
+        })
+    };
+    vec![
+        ("FNO_SPAWN_ORIGIN".to_string(), origin.to_string()),
+        ("FNO_SPAWN_OWNER".to_string(), owner.to_string()),
+    ]
+}
+
 /// Resolve a [`DrainConfig`] for a mission target, or `None` if the target
 /// carries no mission id (a malformed receipt). No driver-lib preflight: the
 /// worker drivers are resolved per CHILD project inside `advance --epic`, not at
@@ -1811,6 +1859,7 @@ fn drain_config_for(
         cwd: PathBuf::from(&target.cwd),
         fno_bin: fno_bin.to_string(),
         mission: target.mission.clone().unwrap_or_else(|| key.clone()),
+        project: target.project.clone(),
         scope: target.scope.clone(),
         kingless: target.kingless,
         members,
@@ -2461,6 +2510,7 @@ mod tests {
             cwd: tmp.to_path_buf(),
             fno_bin,
             mission: "x-epic".to_string(),
+            project: "fno".to_string(),
             scope: String::new(),
             kingless: false,
             members: Vec::new(),
