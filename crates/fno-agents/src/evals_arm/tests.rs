@@ -276,6 +276,7 @@ fn acquire_with(tmp: &TempDir, pid: u32) {
             ttl_ms: Some(3_600_000),
             reason: None,
             metadata: None,
+            pid_provenance: None,
             root: Some(tmp.path().join("claims-root")),
             events_dir: Some(tmp.path().to_path_buf()),
         },
