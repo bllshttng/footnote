@@ -184,7 +184,8 @@ def test_using_fno_reach_is_pinned_to_its_carriers() -> None:
         for hook in block.get("hooks", [])
     ]
     assert any(
-        command.endswith("hooks/context-run.sh codex-session-start")
+        command.endswith("hooks/session-start.sh")
+        or command.endswith("hooks/context-run.sh codex-session-start")
         for command in commands
     ), commands
     context_hooks = json.loads(
