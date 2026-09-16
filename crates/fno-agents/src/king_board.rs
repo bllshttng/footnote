@@ -2139,7 +2139,7 @@ mod tests {
         // spawn_gate.LIVE_STATUSES vocabulary.
         let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        crate::claims::pin_test_claims_root(dir.path());
+        crate::paths::pin_test_claims_root(dir.path());
         let agents_home = dir.path().join(".fno").join("agents");
         std::env::set_var("FNO_AGENTS_HOME", &agents_home);
         let path = agents_home.join("registry.json");
@@ -2195,7 +2195,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
         std::env::set_var("FNO_AGENTS_HOME", dir.path().join(".fno").join("agents"));
-        crate::claims::pin_test_claims_root(dir.path());
+        crate::paths::pin_test_claims_root(dir.path());
         let payload = read_board(&BoardOpts {
             budget_ms: 20_000,
             ..Default::default()
@@ -2243,7 +2243,7 @@ mod tests {
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nscope: not-a-real-thing\n---\n").unwrap();
         std::env::set_var("HOME", dir.path());
-        crate::claims::pin_test_claims_root(dir.path());
+        crate::paths::pin_test_claims_root(dir.path());
         let payload = read_board(&BoardOpts {
             budget_ms: 20_000,
             state_path: Some(state),
@@ -2264,7 +2264,7 @@ mod tests {
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nfno_id: k1\n---\n").unwrap();
         std::env::set_var("HOME", dir.path());
-        crate::claims::pin_test_claims_root(dir.path());
+        crate::paths::pin_test_claims_root(dir.path());
         let payload = read_board(&BoardOpts {
             budget_ms: 20_000,
             state_path: Some(state),

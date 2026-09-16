@@ -292,12 +292,10 @@ pub const MERGE_GATING_OPTOUT_KEYS: &[&str] = &[
 /// would silently fork the claims dir (the drive.rs empty-is-unset lesson).
 pub fn global_claims_root() -> Option<PathBuf> {
     let claims_root = std::env::var_os("FNO_CLAIMS_ROOT").filter(|v| !v.is_empty());
-    if claims_root.is_none() {
-        crate::paths::refuse_undeclared_home_fallback(
-            crate::paths::test_root_declared(),
-            "FNO_CLAIMS_ROOT",
-        );
-    }
+    crate::paths::refuse_undeclared_home_fallback(
+        claims_root.is_some() || crate::paths::test_root_declared(),
+        "FNO_CLAIMS_ROOT",
+    );
     global_claims_root_from(claims_root, std::env::var_os("HOME"))
 }
 
@@ -318,24 +316,6 @@ pub fn global_claims_root_from(
 /// hand-built `<root>/.fno/claims`).
 pub fn global_claims_dir() -> Option<PathBuf> {
     global_claims_root().map(|root| root.join(CLAIMS_DIRNAME))
-}
-
-/// Pin `FNO_CLAIMS_ROOT` to `dir` for a test whose transitive reads resolve
-/// the global claims root. Under a bare `cargo test` the
-/// `refuse_undeclared_home_fallback` guard refuses the ambient `$HOME`
-/// fallback, so a test the guard names pins here instead of weakening the
-/// guard. Set-if-unset: a test that pins its own root still wins. Callers
-/// mutating env under `test_env_lock` should already hold it.
-#[cfg(test)]
-pub fn pin_test_claims_root(dir: &Path) {
-    let unset = match std::env::var_os("FNO_CLAIMS_ROOT") {
-        None => true,
-        Some(v) => v.is_empty(),
-    };
-    if unset {
-        let _ = std::fs::create_dir_all(dir.join(CLAIMS_DIRNAME));
-        std::env::set_var("FNO_CLAIMS_ROOT", dir);
-    }
 }
 
 /// Resolve the claims ROOT for `key` by prefix (mirrors `io.claims_root_for`):
@@ -3007,71 +2987,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// A bare `cargo test` whose test resolves the claims root with no pin
-    /// used to fall to ambient `$HOME` and mint production reservations in
-    /// the operator's live `~/.fno/claims` (the 2026-09-15 probe-lane-lock
-    /// row). The guard names the pin instead. The receipt mirrors
-    /// paths.rs `an_undeclared_root_refuses_and_names_the_pin`.
-    #[test]
-    #[should_panic(expected = "FNO_CLAIMS_ROOT")]
-    fn undeclared_home_fallback_is_refused_under_test() {
-        crate::paths::refuse_undeclared_home_fallback(false, "FNO_CLAIMS_ROOT");
-    }
+    mod support;
+
+    use support::*;
 
     fn opts_in(root: &TempDir) -> AcquireOpts {
         AcquireOpts {
             root: Some(root.path().to_path_buf()),
             events_dir: Some(root.path().to_path_buf()),
             ..Default::default()
-        }
-    }
-
-    /// Pin FNO_AGENTS_HOME for a test whose renew call consults the session
-    /// witness (renew classifies through the registry leg), so an
-    /// ambient session id never reads the operator's real registry. Callers
-    /// hold test_env_lock; restore with restore_agents_home.
-    fn pin_agents_home(td: &TempDir) -> Option<std::ffi::OsString> {
-        let home = td.path().join("agents-home");
-        std::fs::create_dir_all(&home).unwrap();
-        let saved = std::env::var_os("FNO_AGENTS_HOME");
-        std::env::set_var("FNO_AGENTS_HOME", &home);
-        saved
-    }
-
-    fn restore_agents_home(saved: Option<std::ffi::OsString>) {
-        match saved {
-            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
-            None => std::env::remove_var("FNO_AGENTS_HOME"),
-        }
-    }
-
-    /// Scrub the ambient harness markers so `acquire` stamps no session id and
-    /// the renewal verdict never consults the session witness: no registry
-    /// read, no transcript probe, no latency under a parallel test load. The
-    /// cargo test binary runs inside a live claude session, so the vendor
-    /// markers are set. Callers hold test_env_lock.
-    fn scrub_session_markers() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
-        const VARS: [&str; 4] = [
-            "CLAUDE_CODE_SESSION_ID",
-            "CLAUDE_SESSION_ID",
-            "FNO_HARNESS_SESSION_ID",
-            "FNO_HARNESS_NAME",
-        ];
-        VARS.iter()
-            .map(|v| {
-                let saved = std::env::var_os(v);
-                std::env::remove_var(v);
-                (*v, saved)
-            })
-            .collect()
-    }
-
-    fn restore_session_markers(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
-        for (v, val) in saved {
-            match val {
-                Some(x) => std::env::set_var(v, x),
-                None => std::env::remove_var(v),
-            }
         }
     }
 
@@ -3240,29 +3164,6 @@ mod tests {
         assert_eq!(after.acquired_at, acquired_at, "acquired_at preserved");
         restore_session_markers(saved_markers);
         restore_agents_home(saved_home);
-    }
-
-    /// A pid the OS does not report, so `is_live` reads the claim as a corpse.
-    fn dead_pid() -> u32 {
-        let mut candidate = 999_999u32;
-        while std::path::Path::new(&format!("/proc/{candidate}")).exists()
-            || unsafe { libc::kill(candidate as i32, 0) } == 0
-        {
-            candidate += 1;
-        }
-        candidate
-    }
-
-    /// Point `FNO_BIN` at a stub answering `claim session-pid` with `pid`.
-    /// An empty `pid` reproduces the no-harness-ancestor degrade, which the
-    /// real verb signals with empty stdout and exit 0.
-    fn stub_session_pid(dir: &std::path::Path, pid: &str) -> PathBuf {
-        let script = dir.join("fno-stub");
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{pid}'\n")).unwrap();
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
-        script
     }
 
     #[test]

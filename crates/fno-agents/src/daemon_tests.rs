@@ -54,9 +54,7 @@ fn tmp_home(tag: &str) -> AgentsHome {
     ));
     let home = AgentsHome::at(&p);
     home.ensure_root().unwrap();
-    // Verbs like rm resolve the process-global claims root; pin it so a bare
-    // `cargo test` never lands reservations in the operator's HOME.
-    crate::claims::pin_test_claims_root(&p.join("claims-root"));
+    crate::paths::pin_test_claims_root(&p.join("claims-root"));
     home
 }
 
@@ -3149,10 +3147,8 @@ while IFS= read -r line; do
 done
 "#;
 
-/// A SHORT-path agents home under `/tmp` (not the long `/var/folders` temp
-/// dir): a worker's `<root>/<short_id>/worker.sock` must fit in SUN_LEN
-/// (~104 chars on macOS), so switchboard tests that bind real worker sockets
-/// need a short root. Mirrors the stream_worker test harness.
+/// A SHORT-path agents home under `/tmp`: a worker's `<root>/<short_id>/worker.sock`
+/// must fit in SUN_LEN (~104 chars on macOS) so switchboard tests bind real sockets.
 pub(super) fn short_home(tag: &str) -> AgentsHome {
     use std::sync::atomic::{AtomicU32, Ordering};
     static C: AtomicU32 = AtomicU32::new(0);
@@ -3160,9 +3156,7 @@ pub(super) fn short_home(tag: &str) -> AgentsHome {
     let p = PathBuf::from(format!("/tmp/fnosb{tag}{}_{n}", std::process::id()));
     let home = AgentsHome::at(&p);
     home.ensure_root().unwrap();
-    // rm/codex-thread tails resolve the process-global claims root; pin it so
-    // a bare `cargo test` never lands reservations in the operator's HOME.
-    crate::claims::pin_test_claims_root(&p.join("claims-root"));
+    crate::paths::pin_test_claims_root(&p.join("claims-root"));
     home
 }
 

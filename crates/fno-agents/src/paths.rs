@@ -73,6 +73,22 @@ pub(crate) fn refuse_undeclared_home_fallback(declared: bool, pin: &str) {
     );
 }
 
+/// Pin `FNO_CLAIMS_ROOT` to `dir` for a test whose transitive reads resolve
+/// the global claims root: the test-side complement of
+/// [`refuse_undeclared_home_fallback`]. Set-if-unset, so a test that pins its
+/// own root still wins. Callers mutating env should hold `test_env_lock`.
+#[cfg(test)]
+pub(crate) fn pin_test_claims_root(dir: &std::path::Path) {
+    let unset = match std::env::var_os("FNO_CLAIMS_ROOT") {
+        None => true,
+        Some(v) => v.is_empty(),
+    };
+    if unset {
+        let _ = std::fs::create_dir_all(dir.join(".fno").join("claims"));
+        std::env::set_var("FNO_CLAIMS_ROOT", dir);
+    }
+}
+
 /// Refuse a declared root outside the temp dir when the process root is
 /// sandboxed, the way the Python accessor fence refuses one.
 ///
@@ -1146,6 +1162,14 @@ mod tests {
     #[should_panic(expected = "FNO_SPACES_DIR")]
     fn an_undeclared_root_refuses_and_names_the_pin() {
         refuse_undeclared_home_fallback(false, "FNO_SPACES_DIR");
+    }
+
+    /// The claims pin reads the same receipt naming FNO_CLAIMS_ROOT, the pin
+    /// `global_claims_root` hands the guard on its `$HOME` arm.
+    #[test]
+    #[should_panic(expected = "FNO_CLAIMS_ROOT")]
+    fn an_undeclared_claims_root_refuses_and_names_its_pin() {
+        refuse_undeclared_home_fallback(false, "FNO_CLAIMS_ROOT");
     }
 
     /// A claimed sandbox that is not one is refused, not trusted. Nothing in

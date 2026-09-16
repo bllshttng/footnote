@@ -4309,12 +4309,10 @@ mod tests {
     }
 
     // Fixture: an auto-cleaned temp dir used as a fake $HOME under which the
-    // tests write bg session files. Returns a tempfile::TempDir (the pattern the
-    // rest of this module's tests use) so a panicking test never leaks a /tmp
-    // tree.
+    // tests write bg session files, so a panicking test never leaks a /tmp tree.
     fn cv_tmpdir() -> tempfile::TempDir {
         let td = tempfile::TempDir::new().unwrap();
-        crate::claims::pin_test_claims_root(td.path().join("claims-root").as_path());
+        crate::paths::pin_test_claims_root(td.path().join("claims-root").as_path());
         td
     }
 

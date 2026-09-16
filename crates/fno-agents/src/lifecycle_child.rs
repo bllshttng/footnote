@@ -419,7 +419,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        crate::claims::pin_test_claims_root(dir.path());
+        crate::paths::pin_test_claims_root(dir.path());
         let marker = dir.path().join("helper-cwd");
         let registry_marker = dir.path().join("helper-registry");
         marked_helper_fno(dir.path());

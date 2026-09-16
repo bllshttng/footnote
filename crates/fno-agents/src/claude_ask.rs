@@ -3393,7 +3393,7 @@ mod tests {
             seq
         ));
         fs::create_dir_all(&p).unwrap();
-        crate::claims::pin_test_claims_root(&p.join("claims-root"));
+        crate::paths::pin_test_claims_root(&p.join("claims-root"));
         p
     }
 
