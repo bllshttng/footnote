@@ -2675,7 +2675,7 @@ fn squad_target(squad: Option<String>) -> PaneTarget {
     }
 }
 
-/// `fno mux tab ls|create|rename|join|close ...` (x-d865).
+/// `fno mux tab ls|create|rename|join|close ...`.
 pub fn tab(op: crate::cli_args::TabOp, args: &[OsString], env_session: Option<&str>) -> i32 {
     // Flag pass over the tokens after the operation word (the typed tree
     // guarantees one was present and names this op).
@@ -2878,7 +2878,7 @@ fn load_spec_file(path: &str) -> Result<crate::proto::LayoutSpec, String> {
     })
 }
 
-/// `fno mux layout get|apply ...` (get: x-d865; apply: x-c4d4).
+/// `fno mux layout get|apply ...`.
 pub fn layout(op: crate::cli_args::LayoutOp, args: &[OsString], env_session: Option<&str>) -> i32 {
     let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
@@ -5816,7 +5816,7 @@ mod tests {
 
     #[test]
     fn pane_run_help_documents_the_worker_flag() {
-        // x-5f7f: the flag is the capture funnel's front door, so the run
+        // the flag is the capture funnel's front door, so the run
         // verb's own help names it and what it records. The group help
         // (after_help) and the -h inside the run tail reach the same text.
         let group_help = crate::cli_args::pane_group_help();

@@ -1,4 +1,4 @@
-//! The `mux block` argv grammars (x-fe8f pipe, x-f8d4 annotate): pure
+//! The `mux block` argv grammars (`block pipe`, `block annotate`): pure
 //! parsers, unit-testable without a socket. A child module of `mux_cli` on
 //! purpose: the file-budget gate keeps the parent shrink-only, and
 //! `use super::*` keeps the shared cli_args flag groups in one place.

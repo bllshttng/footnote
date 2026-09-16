@@ -71,11 +71,11 @@ enum Role {
     /// tree's verdict; the argv is the re-sliced family tail. No TTY needed
     /// (control verbs are scriptable one-shots).
     MuxPane(fno::cli_args::PaneOp),
-    /// `mux block <verb> ...`: block porcelain (`block pipe`, x-fe8f).
+    /// `mux block <verb> ...`: block porcelain (`block pipe`).
     MuxBlock(fno::cli_args::BlockOp),
-    /// (x-d865) `mux tab <verb> ...`: the layout-tab script verbs.
+    /// `mux tab <verb> ...`: the layout-tab script verbs.
     MuxTab(fno::cli_args::TabOp),
-    /// (x-d865) `mux layout <get|apply|graft> ...`: nested layout trees and specs.
+    /// `mux layout <get|apply|graft> ...`: nested layout trees and specs.
     MuxLayout(fno::cli_args::LayoutOp),
     ///  `mux rows [--json]`: the one row-set receipt - the last
     /// derived `layout.agents` with the paint verdict per row.
@@ -105,7 +105,7 @@ enum Role {
     /// location instead. Same carry-verbatim shape; `mux_cli::view`
     /// parses.
     MuxView(Vec<OsString>),
-    /// (x-a572) `mux workspace prune|restore ...`: workspace-store maintenance.
+    /// `mux workspace prune|restore ...`: workspace-store maintenance.
     MuxWorkspace(fno::cli_args::WorkspaceOp),
     /// `mux shell-init <zsh|bash> [--json]`: print the OSC 133 shell-integration
     /// snippet (v6). `None` / an unsupported shell is an error in the verb.

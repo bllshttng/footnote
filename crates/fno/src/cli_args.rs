@@ -80,7 +80,7 @@ pub enum MuxCmd {
         json: JsonOnly,
     },
     /// `mux serve --web|--stop|--status ...`: the read-only web bridge
-    /// (x-6a14). `--web`, `--stop` or `--status` is required; the flags are
+    /// `--web`, `--stop` or `--status` is required; the flags are
     /// the bridge's own (parse_web_args keeps them exact).
     #[command(disable_help_flag = true)]
     Serve(MuxTail),
@@ -102,7 +102,7 @@ pub enum MuxCmd {
         #[command(subcommand)]
         op: BlockOp,
     },
-    /// `mux tab ls|create|rename|join|move|close ...` (x-d865): the
+    /// `mux tab ls|create|rename|join|move|close ...`: the
     /// layout-tab script verbs.
     Tab {
         #[command(subcommand)]
@@ -121,11 +121,11 @@ pub enum MuxCmd {
     #[command(hide = true, disable_help_flag = true)]
     Rows(MuxTail),
     /// `mux where <fno_id-or-tab>`: resolve an fno session id to its
-    /// location (x-1499). The selector is required; a bare `mux where`
+    /// location. The selector is required; a bare `mux where`
     /// refuses.
     #[command(disable_help_flag = true)]
     Where(MuxTailReq),
-    /// `mux thread <name> [--portal N]` (x-07c2, hidden): show a thread
+    /// `mux thread <name> [--portal N]` (hidden): show a thread
     /// row through a portal; `mux thread reseat` (v72) moves a live
     /// pane-hosted worker into a portal seat instead.
     #[command(hide = true)]
@@ -134,16 +134,16 @@ pub enum MuxCmd {
         op: ThreadOp,
     },
     /// `mux retire-session ...`: the exact-session retirement door
-    /// (v75, x-7649, hidden). The selector is required.
+    /// (v75, hidden). The selector is required.
     #[command(hide = true, disable_help_flag = true)]
     RetireSession(MuxTailReq),
-    /// `mux view <selector> [--url] [--fzf] [--json]` (x-b80d): point the
+    /// `mux view <selector> [--url] [--fzf] [--json]`: point the
     /// operator's view at the pane hosting an agent. The selector is
     /// required; `-h` inside the tail stays the family's.
     #[command(disable_help_flag = true)]
     View(MuxTailReq),
     /// `mux workspace prune|restore ...`: workspace-store maintenance
-    /// (x-a572). A bare `mux workspace` refuses: clap requires the
+    /// A bare `mux workspace` refuses: clap requires the
     /// operation word.
     Workspace {
         #[command(subcommand)]
