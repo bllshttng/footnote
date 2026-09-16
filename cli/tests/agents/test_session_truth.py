@@ -1176,6 +1176,70 @@ def test_truth_batch_reads_the_registry_once_for_every_handle(monkeypatch):
     }
 
 
+def test_truth_batch_isolates_a_raising_registry_falsifier(monkeypatch):
+    """One malformed row must not discard truth for the other handles."""
+    from fno.agents import cli as agents_cli
+
+    rows = [
+        SimpleNamespace(name="bad", harness_session_id="sid-bad", short_id="bad1"),
+        SimpleNamespace(name="good", harness_session_id="sid-good", short_id="good1"),
+    ]
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+
+    def falsifier(row):
+        if row.name == "bad":
+            raise ValueError("broken row")
+        return "gone:good"
+
+    monkeypatch.setattr("fno.agents.reachability.registry_falsifier", falsifier)
+
+    assert agents_cli._registry_falsifiers(["bad", "good"]) == {
+        "bad": None,
+        "good": "gone:good",
+    }
+
+
+def test_truth_batch_reports_falsifier_error_on_only_the_bad_row(monkeypatch):
+    from typer.testing import CliRunner
+
+    from fno.agents import cli as agents_cli
+    from fno.agents import session_truth
+    from fno.cli import app
+
+    rows = [
+        SimpleNamespace(name="bad", harness_session_id="sid-bad", short_id="bad1"),
+        SimpleNamespace(name="good", harness_session_id="sid-good", short_id="good1"),
+    ]
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+
+    def falsifier(row):
+        if row.name == "bad":
+            raise ValueError("broken row")
+        return None
+
+    monkeypatch.setattr("fno.agents.reachability.registry_falsifier", falsifier)
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda handle, **_kwargs: {
+            "handle": handle,
+            "state": "unknown",
+            "reason": "not-found",
+            "last_activity_age_s": None,
+            "observed_model": None,
+        },
+    )
+    monkeypatch.setattr(agents_cli, "_batch_resolver", lambda: lambda handle: (None, []))
+
+    result = CliRunner().invoke(app, ["agents", "truth", "--handles", "bad,good", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["bad"]["falsifier_error"] == "ValueError"
+    assert payload["good"]["falsifier_error"] is None
+
+
 def test_resolve_session_truth_peer_mail_does_not_clear_question(tmp_path):
     """Trailing peer mail turns must not clear assistant question/help state."""
     from fno.agents.session_truth import resolve_session_truth
