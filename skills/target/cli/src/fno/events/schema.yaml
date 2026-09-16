@@ -1694,7 +1694,11 @@ event_types:
 
   - name: session_satisfied
     description: "Signals that a target session's work is complete; alternative to <promise> tag emission. The stop hook scans for these and may auto-release the Stop hook when a fresh event matches the current session and the three-factor gates are still satisfied. Data.source is the constrained subsystem that produced the signal (check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated); envelope source is the producer identity."
-    sources: [target, megawalk, fno-loop, hook]
+    # 'backlog' added: cli/src/fno/graph/_reconcile.py's
+    # emit_session_satisfied_for_record stamps envelope source "backlog" for
+    # the post-merge reconcile path (trigger=pr_merge), a real live producer
+    # the earlier declaration missed.
+    sources: [target, megawalk, fno-loop, hook, backlog]
     data:
       required: [source, reason, session_id, gate_state_hash]
       properties:
