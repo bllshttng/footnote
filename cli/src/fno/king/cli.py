@@ -447,6 +447,62 @@ def cancel_cmd(
         raise typer.Exit(1) from exc
 
 
+def _own_crown_argv(verb: str, scope: str) -> tuple[list[str], str]:
+    """The caller ladder every ``reign-*`` verb needs: resolve the caller's
+    own crown, refuse an unregistered caller or a foreign scope, resolve the
+    binary, and return the argv prefix (binary, verb, --scope, --root, and
+    --session when known) plus the resolved scope. Shared by ``shape`` and
+    ``term`` so the ladder is written once (law d-b6cc1a2a: new logic in
+    crates, this shell only relays).
+    """
+    from fno.agents.crown import (
+        AGENT_UNREGISTERED,
+        REGISTRY_UNREADABLE,
+        calling_agent_row,
+    )
+    from fno.king.state import _owner_state_root
+    from fno.rust_binary import resolve_binary
+
+    caller = calling_agent_row()
+    if caller is REGISTRY_UNREADABLE or caller is AGENT_UNREGISTERED:
+        _refuse(
+            "king: cannot resolve the caller's crown: this session carries an "
+            "agent identity the registry does not resolve to a row. Run /fno-me "
+            "or retry."
+        )
+    if caller is None:
+        _refuse(
+            "king: an attended shell holds no crown; the crowned session "
+            "declares its own reign from inside it."
+        )
+    own = getattr(caller, "crown_scope", None)
+    if not own:
+        _refuse("king: this session holds no crown, so there is no reign to declare on.")
+    if scope.strip() and scope != own:
+        _refuse(
+            f"king: refusing to act on {scope!r}: this session's crown is "
+            f"{own!r}, and a holder declares only its own reign."
+        )
+    session_id = (
+        getattr(caller, "harness_session_id", None)
+        or getattr(caller, "cc_session_id", None)
+        or ""
+    )
+    binary = resolve_binary()
+    if binary is None:
+        _refuse(
+            "king: the fno-agents binary was not found, and the write lives "
+            "there. Reinstall fno, run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN."
+        )
+    root = _owner_state_root(None)
+    argv = [str(binary), verb, "--scope", own,
+            "--root", str(root.parent if root.name == ".fno" else root)]
+    if session_id:
+        argv += ["--session", session_id]
+    return argv, own
+
+
 @king_app.command("shape")
 def shape_cmd(
     shape: str = typer.Argument(..., help="pass or court."),
@@ -462,59 +518,48 @@ def shape_cmd(
     import subprocess
 
     from fno._subprocess_util import propagate_returncode
-    from fno.agents.crown import (
-        AGENT_UNREGISTERED,
-        REGISTRY_UNREADABLE,
-        calling_agent_row,
-    )
-    from fno.king.state import _owner_state_root
-    from fno.rust_binary import resolve_binary
 
     if shape not in ("pass", "court"):
         _refuse("king: shape must be 'pass' or 'court'.")
-
-    caller = calling_agent_row()
-    if caller is REGISTRY_UNREADABLE or caller is AGENT_UNREGISTERED:
-        _refuse(
-            "king: cannot resolve the caller's crown: this session carries an "
-            "agent identity the registry does not resolve to a row. Run /fno-me "
-            "or retry."
-        )
-    if caller is None:
-        _refuse(
-            "king: an attended shell holds no crown; the crowned session "
-            "declares its own shape from inside the reign."
-        )
-    own = getattr(caller, "crown_scope", None)
-    if not own:
-        _refuse("king: this session holds no crown, so there is no reign to shape.")
-    if scope.strip() and scope != own:
-        _refuse(
-            f"king: refusing to reshape {scope!r}: this session's crown is "
-            f"{own!r}, and a holder declares only its own reign's shape."
-        )
-    session_id = (
-        getattr(caller, "harness_session_id", None)
-        or getattr(caller, "cc_session_id", None)
-        or ""
-    )
-    binary = resolve_binary()
-    if binary is None:
-        _refuse(
-            "king: the fno-agents binary was not found, and the shape write "
-            "lives there. Reinstall fno, run `fno doctor update --rust`, or "
-            "set FNO_AGENTS_BIN."
-        )
-    root = _owner_state_root(None)
-    argv = [str(binary), "reign-shape", "--scope", own, "--shape", shape,
-            "--root", str(root.parent if root.name == ".fno" else root)]
-    if session_id:
-        argv += ["--session", session_id]
+    argv, own = _own_crown_argv("reign-shape", scope)
+    argv += ["--shape", shape]
     result = subprocess.run(argv, capture_output=True, text=True, check=False)
     if result.returncode != 0:
         typer.echo(f"king: {result.stderr.strip()}", err=True)
         raise typer.Exit(code=propagate_returncode(result.returncode))
     typer.echo(f"king: shape declared: {result.stdout.strip()}")
+    typer.echo(f"scope:  {own}")
+
+
+@king_app.command("term")
+def term_cmd(
+    spec: str = typer.Argument(..., help="span:<N>[smhd] or compactions:<N>."),
+    reason: str = typer.Option(
+        "", "--reason", help="Required to replace a declared or reached term: the receipt."
+    ),
+    scope: str = typer.Option(
+        "", "--scope", help="Crown scope to declare on. Default: this session's own crown."
+    ),
+) -> None:
+    """Declare or extend this reign's term: the bound past which the Stop
+    hook demands a handoff receipt (``--succeed``) or a written ``--reason``.
+
+    Undeclared reads a 96h default. The write lives in Rust; this shell
+    keeps the caller ladder (Python self-stamp).
+    """
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+
+    argv, own = _own_crown_argv("reign-term", scope)
+    argv += ["--term", spec]
+    if reason.strip():
+        argv += ["--reason", reason]
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        typer.echo(f"king: {result.stderr.strip()}", err=True)
+        raise typer.Exit(code=propagate_returncode(result.returncode))
+    typer.echo(f"king: term declared: {result.stdout.strip()}")
     typer.echo(f"scope:  {own}")
 
 
