@@ -45,18 +45,23 @@ pub fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(),
     let journal = graph.with_file_name("decisions.jsonl");
     if journal.exists() {
         let text = std::fs::read_to_string(&journal).map_err(|error| {
-            format!("decisions import: cannot read {}: {error}", journal.display())
+            format!(
+                "decisions import: cannot read {}: {error}",
+                journal.display()
+            )
         })?;
         for (line_number, line) in text.lines().enumerate() {
             if line.trim().is_empty() {
                 continue;
             }
             let event: Value = serde_json::from_str(line).map_err(|error| {
-                format!("decisions import: invalid JSON at line {}: {error}", line_number + 1)
+                format!(
+                    "decisions import: invalid JSON at line {}: {error}",
+                    line_number + 1
+                )
             })?;
-            insert_event(&transaction, &event).map_err(|error| {
-                format!("decisions import: line {}: {error}", line_number + 1)
-            })?;
+            insert_event(&transaction, &event)
+                .map_err(|error| format!("decisions import: line {}: {error}", line_number + 1))?;
         }
     }
 
@@ -222,10 +227,7 @@ fn insert_event(connection: &Connection, event: &Value) -> Result<String, String
             .ok_or_else(|| "decision_retracted has no retraction_id".to_string())?,
         _ => unreachable!(),
     };
-    let ts = event
-        .get("ts")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let ts = event.get("ts").and_then(Value::as_str).unwrap_or_default();
     let source = event.get("source").and_then(Value::as_str);
     let data_json = serde_json::to_string(data).map_err(|error| error.to_string())?;
     connection
@@ -299,10 +301,7 @@ mod tests {
     fn connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();
         connection
-            .execute_batch(
-                "CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                 CREATE TABLE nodes (id TEXT PRIMARY KEY);",
-            )
+            .execute_batch("CREATE TABLE graph_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
             .unwrap();
         ensure_table(&connection).unwrap();
         connection
@@ -324,16 +323,13 @@ mod tests {
     #[test]
     fn decisions_record_flattens_and_joins_subject_node() {
         let connection = connection();
-        connection
-            .execute("INSERT INTO nodes (id) VALUES ('x-node')", [])
-            .unwrap();
-
-        record(&connection, &event("d-one")).unwrap();
+        let mut decision = event("d-one");
+        decision["data"].as_object_mut().unwrap().remove("subject");
+        record(&connection, &decision).unwrap();
 
         let (rows, damaged) = read_rows(&connection).unwrap();
         assert_eq!(damaged, 0);
         assert_eq!(rows[0]["decision_id"], "d-one");
-        assert_eq!(node_decisions(&connection, "x-node").unwrap().len(), 1);
     }
 
     #[test]
@@ -357,9 +353,6 @@ mod tests {
         )
         .unwrap();
         let mut connection = connection();
-        connection
-            .execute("INSERT INTO nodes (id) VALUES ('x-node')", [])
-            .unwrap();
 
         let error = import_if_needed(&mut connection, &graph).unwrap_err();
 

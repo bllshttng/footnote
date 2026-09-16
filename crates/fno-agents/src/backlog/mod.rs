@@ -8,8 +8,8 @@
 
 pub mod api;
 pub mod commands;
-pub mod decisions;
 pub mod comments;
+pub mod decisions;
 pub mod encounters;
 pub mod model;
 pub mod node_state;

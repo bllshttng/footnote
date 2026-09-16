@@ -527,7 +527,6 @@ pub fn decision_retract(store: &Store, event: Value) -> Result<Payload<Value>, A
     })
 }
 
-
 fn mutate(
     store: &Store,
     mutation: &str,
