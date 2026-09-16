@@ -258,9 +258,9 @@ fn an_exited_keeper_pane_leaves_no_zombie_under_its_server() {
     // name alone (a name sweep once deleted live trees).
     let deadline = Instant::now() + Duration::from_secs(10);
     let keeper_pid = loop {
-        let under_server: Vec<(i32, i32, String, String)> = ps_rows()
+        let under_server: Vec<(i32, i32, String)> = ps_rows()
             .into_iter()
-            .filter(|(_, ppid, _, cmd)| {
+            .filter(|(_, ppid, cmd)| {
                 *ppid == server_pid as i32 && cmd.contains("fno-agents-worker")
             })
             .collect();
@@ -296,10 +296,12 @@ fn an_exited_keeper_pane_leaves_no_zombie_under_its_server() {
     }
 }
 
-/// One `ps` snapshot parsed into `(pid, ppid, stat, command)` rows. Both
-/// macOS and Linux accept this form; `command=` is last so a fixed-width
-/// split of four keeps whole command lines.
-fn ps_rows() -> Vec<(i32, i32, String, String)> {
+/// One `ps` snapshot parsed into `(pid, ppid, command)` rows. Both macOS and
+/// Linux accept this form. Linux procps pads every column to header width, so
+/// the first two fields are tokenized on whitespace RUNS and the command is
+/// whatever the line still holds after the stat column - a single-space
+/// split reads empty fields and silently drops every row.
+fn ps_rows() -> Vec<(i32, i32, String)> {
     let out = std::process::Command::new("ps")
         .args(["-A", "-o", "pid=,ppid=,stat=,command="])
         .output()
@@ -307,13 +309,19 @@ fn ps_rows() -> Vec<(i32, i32, String, String)> {
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .filter_map(|line| {
-            let mut parts = line.splitn(4, ' ');
-            Some((
-                parts.next()?.trim().parse().ok()?,
-                parts.next()?.trim().parse().ok()?,
-                parts.next()?.trim().to_string(),
-                parts.next().unwrap_or("").trim().to_string(),
-            ))
+            let rest = line.trim_start();
+            let mut pos = 0usize;
+            let field = |pos: &mut usize| -> Option<String> {
+                let start = rest[*pos..].trim_start();
+                *pos = rest.len() - start.len();
+                let end = start.find(char::is_whitespace).unwrap_or(start.len());
+                *pos += end;
+                Some(start[..end].to_string())
+            };
+            let pid = field(&mut pos)?.parse().ok()?;
+            let ppid = field(&mut pos)?.parse().ok()?;
+            let _stat = field(&mut pos)?;
+            Some((pid, ppid, rest[pos..].trim().to_string()))
         })
         .collect()
 }

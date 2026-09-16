@@ -319,10 +319,7 @@ fn default_true() -> bool {
 /// v80: `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
 /// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
 /// v82: `AgentRow.lineage_kind` (serde default), the served CHILD/PEER word;
-/// the sideline nests only CHILD rows; floor stays 58. Same version carries
-/// the `AgentNoPaneReason::BackendNotLive` removal: a positive dead reading
-/// resumes, so no row emits it, and a removed variant breaks decode like an
-/// added one.
+/// the sideline nests only CHILD rows; `BackendNotLive` also removed here.
 pub const PROTO_VERSION: u32 = 82;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
