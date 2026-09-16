@@ -341,25 +341,46 @@ pub fn acquire_db(key: &str, holder: &str, options: &AcquireOpts) -> Result<Valu
             "claim_idempotent_reacquired",
             data,
         );
+    } else {
+        let mut data = claims::common_event_data(&record);
+        if let Some(reason) = &record.reason {
+            data.insert("reason".to_string(), Value::String(reason.clone()));
+        }
+        claims::emit_audit_event(options.events_dir.as_deref(), "claim_acquired", data);
     }
     Ok(value)
 }
 
-pub fn release_db(key: &str, holder: &str, root: Option<&Path>) -> Result<Value, String> {
+pub fn release_db(
+    key: &str,
+    holder: &str,
+    root: Option<&Path>,
+    events_dir: Option<&Path>,
+) -> Result<Value, String> {
     let mut connection = open_for_key(key, root)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
     let existing = record_for(&transaction, key)?;
-    if existing
+    let released = existing
         .as_ref()
-        .is_some_and(|record| record.holder == holder)
-    {
+        .is_some_and(|record| record.holder == holder);
+    if released {
         transaction
             .execute("DELETE FROM claims WHERE key = ?1", params![key])
             .map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
+    if released {
+        if let Some(record) = existing {
+            let mut data = claims::common_event_data(&record);
+            data.insert(
+                "duration_held_ms".to_string(),
+                Value::Number((claims::now_ms() - record.acquired_at).max(0).into()),
+            );
+            claims::emit_audit_event(events_dir, "claim_released", data);
+        }
+    }
     Ok(json!({"outcome": "released", "key": key}))
 }
 
@@ -417,6 +438,7 @@ pub fn renew_db(
     holder: &str,
     ttl_ms: i64,
     root: Option<&Path>,
+    events_dir: Option<&Path>,
 ) -> Result<Value, String> {
     if ttl_ms <= 0 {
         return Err("ttl_ms must be positive".to_string());
@@ -431,6 +453,7 @@ pub fn renew_db(
     if record.holder != holder || record.expires_at.is_none() {
         return Ok(json!({"outcome": "unchanged", "refreshed": false, "key": key}));
     }
+    let previous_expires_at = record.expires_at;
     record.expires_at = Some(claims::now_ms().saturating_add(ttl_ms));
     transaction
         .execute(
@@ -439,10 +462,21 @@ pub fn renew_db(
         )
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
+    let mut data = claims::common_event_data(&record);
+    data.insert(
+        "previous_expires_at".to_string(),
+        previous_expires_at.map(Value::from).unwrap_or(Value::Null),
+    );
+    claims::emit_audit_event(events_dir, "claim_refreshed", data);
     Ok(json!({"outcome": "renewed", "refreshed": true, "claim": status_json(&record)}))
 }
 
-pub fn force_release_db(key: &str, reason: &str, root: Option<&Path>) -> Result<Value, String> {
+pub fn force_release_db(
+    key: &str,
+    reason: &str,
+    root: Option<&Path>,
+    events_dir: Option<&Path>,
+) -> Result<Value, String> {
     if reason.trim().is_empty() {
         return Err("reason must be non-empty for force-release".to_string());
     }
@@ -450,12 +484,21 @@ pub fn force_release_db(key: &str, reason: &str, root: Option<&Path>) -> Result<
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
-    let previous_holder = record_for(&transaction, key)?.map(|record| record.holder);
+    let previous = record_for(&transaction, key)?;
+    let previous_holder = previous.as_ref().map(|record| record.holder.clone());
     let archived = previous_holder.is_some();
     transaction
         .execute("DELETE FROM claims WHERE key = ?1", params![key])
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
+    if let Some(record) = previous {
+        let mut data = claims::common_event_data(&record);
+        data.insert(
+            "override_reason".to_string(),
+            Value::String(reason.to_string()),
+        );
+        claims::emit_audit_event(events_dir, "claim_force_overridden", data);
+    }
     Ok(json!({
         "key": key,
         "path": database_path(root)?,

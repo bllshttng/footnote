@@ -190,7 +190,12 @@ pub fn run_claim(args: &[String]) -> i32 {
                     }
                 };
             }
-            match crate::claim_store::release_db(&key, &holder, opts.root.as_deref()) {
+            match crate::claim_store::release_db(
+                &key,
+                &holder,
+                opts.root.as_deref(),
+                opts.events_dir.as_deref(),
+            ) {
                 Ok(payload) => {
                     println!("{payload}");
                     0
@@ -237,7 +242,13 @@ pub fn run_claim(args: &[String]) -> i32 {
                     }
                 };
             }
-            match crate::claim_store::renew_db(&key, &holder, ttl_ms, opts.root.as_deref()) {
+            match crate::claim_store::renew_db(
+                &key,
+                &holder,
+                ttl_ms,
+                opts.root.as_deref(),
+                opts.events_dir.as_deref(),
+            ) {
                 Ok(payload) => {
                     println!("{payload}");
                     0
@@ -265,7 +276,12 @@ pub fn run_claim(args: &[String]) -> i32 {
                     }
                 };
             }
-            match crate::claim_store::force_release_db(&key, reason, opts.root.as_deref()) {
+            match crate::claim_store::force_release_db(
+                &key,
+                reason,
+                opts.root.as_deref(),
+                opts.events_dir.as_deref(),
+            ) {
                 Ok(payload) => {
                     println!("{payload}");
                     0
