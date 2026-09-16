@@ -137,7 +137,7 @@ Every dispatch path mints its worker name through one contract in `cli/src/fno/a
 ```
 
 - **Source** names who launched the worker. The codes:
-- `ab` active-backlog daemon, `ac` merge continuation, `sob` spawn-on-blueprint, `rd` reconcile de-stub.
+- `ab` active-backlog daemon, `ac` merge continuation, `rd` reconcile de-stub.
 - `th` spawn_think, `pm` post-merge judgment, `pw` pr-watch, `rec` recovery.
 - `kg` keep-going, `gr` groom, `ro` restart revive, `ev` evals, `kl` king loop.
 - `oh` outage handoff, `sh` self-handoff, `ex` foreign wave, `jn` backlog join.
@@ -148,7 +148,7 @@ Every dispatch path mints its worker name through one contract in `cli/src/fno/a
 
 Legacy names (`target-<node>-*`, `think-<node>-*`, `reconcile-*`, `j-*`) still resolve through the read-side fallbacks in `parse_node_id` / `parse_worker_mission` and the reaper's legacy prefix path. This is the legacy-read window. Recovery and restart preserve the predecessor name as a registry alias on the new row.
 
-The inventory is ratcheted. `fno agents autonomy provenance` prints every path with its codes and the positive marker `dispatch provenance: 18/18 coded`. `scripts/ci/check-autonomy-registry.sh` fails CI when a registered path loses its code.
+The inventory is ratcheted. `fno agents autonomy provenance` prints every path with its codes and the positive marker `dispatch provenance: 17/17 coded`. When a registered path loses its code, `scripts/ci/check-autonomy-registry.sh` fails CI.
 
 ## Events
 

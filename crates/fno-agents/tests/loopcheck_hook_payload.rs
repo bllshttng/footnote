@@ -442,6 +442,7 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
             .env("FNO_AGENTS_BIN", &mock)
             .env("MOCK_ROOT", &cwd)
             .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
         child
@@ -450,11 +451,31 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
             .unwrap()
             .write_all(payload.as_bytes())
             .unwrap();
-        child.wait().unwrap().code()
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        (output.status.code(), stdout)
+    };
+    // A block travels two ways: exit 2 with the reason on stderr, or the
+    // decision JSON on stdout with exit 0. Which one fires depends on the
+    // environment the test inherits (CLAUDECODE selects the JSON transport),
+    // so a block is asserted on either shape.
+    let blocked = |result: &(Option<i32>, String), reason: &str| {
+        result.0 == Some(2) || result.1.contains(reason)
     };
 
+    // Fire 1: loop-check answers DoneDelivery but its fixture deletes the live
+    // manifest mid-flight. Staging recovers from the entry snapshot, so the
+    // first finalize attempt still runs and fails; the block names it and the
+    // emit exits before cleanup, so the staged snapshot survives.
     write_same_harness_pending(&cwd);
-    assert_eq!(fire(), Some(2));
+    let fire1 = fire();
+    assert!(blocked(&fire1, "generic delivery finalization failed"));
+    assert_eq!(
+        fs::read_to_string(cwd.join(".fno/finalize-count"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
     let retry = git_path(
         &cwd,
         "fno-delivery-finalize-pending-sess-delivery-retry.sess-delivery-retry.md",
@@ -476,8 +497,13 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
                 .collect::<Vec<_>>())
             .unwrap_or_default(),
     );
+
+    // Fire 2: the manifest is gone and the pending scan picks up the staged
+    // snapshot over the stale session-old and foreign candidates, so the
+    // retry engages and the second finalize attempt succeeds.
     write_other_pending(&cwd);
-    assert_eq!(fire(), Some(0));
+    let fire2 = fire();
+    assert_eq!(fire2.0, Some(0));
     assert!(cwd.join(".fno/finalize-complete").exists());
     assert_eq!(
         fs::read_to_string(cwd.join(".fno/finalize-count"))
@@ -485,11 +511,27 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
             .trim(),
         "2"
     );
+
+    // Fire 3: the stale session-old candidate retries next and succeeds.
+    let fire3 = fire();
+    assert_eq!(fire3.0, Some(0));
     assert_eq!(
-        fs::read_to_string(cwd.join(".fno/loop-count"))
+        fs::read_to_string(cwd.join(".fno/finalize-count"))
             .unwrap()
             .trim(),
-        "1"
+        "3"
+    );
+
+    // Fire 4: with every same-owner candidate consumed, the foreign pending
+    // file is never picked and the stop stays a silent allow.
+    let fire4 = fire();
+    assert_eq!(fire4.0, Some(0));
+    assert!(git_path(&cwd, "fno-delivery-finalize-pending-000-other.md").exists());
+    assert_eq!(
+        fs::read_to_string(cwd.join(".fno/finalize-count"))
+            .unwrap()
+            .trim(),
+        "3"
     );
 }
 
@@ -523,13 +565,27 @@ fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
         String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
     };
 
+    // Fire 1: loop-check answers DoneDelivery but its fixture deletes the live
+    // manifest mid-flight. Staging recovers from the entry snapshot, so the
+    // first finalize attempt still runs and fails; the emit exits before
+    // cleanup, so the staged snapshot survives.
     write_same_harness_pending(&cwd);
     assert!(fire().contains("generic delivery finalization failed"));
+    assert_eq!(
+        fs::read_to_string(cwd.join(".fno/finalize-count"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
     assert!(git_path(
         &cwd,
         "fno-delivery-finalize-pending-sess-delivery-retry.sess-delivery-retry.md",
     )
     .exists());
+
+    // Fire 2: the manifest is gone and the pending scan picks up the staged
+    // snapshot over the stale session-old and foreign candidates, so the
+    // retry engages and the second finalize attempt succeeds.
     write_other_pending(&cwd);
     assert_eq!(fire().trim(), "{}");
     assert!(cwd.join(".fno/finalize-complete").exists());
@@ -539,11 +595,25 @@ fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
             .trim(),
         "2"
     );
+
+    // Fire 3: the stale session-old candidate retries next and succeeds.
+    assert_eq!(fire().trim(), "{}");
     assert_eq!(
-        fs::read_to_string(cwd.join(".fno/loop-count"))
+        fs::read_to_string(cwd.join(".fno/finalize-count"))
             .unwrap()
             .trim(),
-        "1"
+        "3"
+    );
+
+    // Fire 4: with every same-owner candidate consumed, the foreign pending
+    // file is never picked and the stop stays a silent allow.
+    assert_eq!(fire().trim(), "{}");
+    assert!(git_path(&cwd, "fno-delivery-finalize-pending-000-other.md").exists());
+    assert_eq!(
+        fs::read_to_string(cwd.join(".fno/finalize-count"))
+            .unwrap()
+            .trim(),
+        "3"
     );
 }
 

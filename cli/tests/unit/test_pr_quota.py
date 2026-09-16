@@ -713,6 +713,53 @@ def test_admit_fails_open_when_the_verb_is_unavailable(monkeypatch, capsys):
     assert "ledger unavailable, admitting" in capsys.readouterr().err
 
 
+def _budget_raising(monkeypatch, exc):
+    from fno.rust_binary import VerbUnavailable
+
+    monkeypatch.setattr(_quota, "admit", _REAL_ADMIT)
+
+    def unavailable(payload):
+        raised = VerbUnavailable(exc.pop("message"))
+        returncode = exc.get("returncode")
+        if returncode is not None:
+            raised.returncode = returncode
+        raise raised
+
+    monkeypatch.setattr(_quota, "_gh_budget", unavailable)
+
+
+def test_admit_refuses_when_the_reader_was_signalled(monkeypatch):
+    _budget_raising(
+        monkeypatch,
+        {"message": "fno-agents fleet-incident exited -9: ", "returncode": -9},
+    )
+    refusal = _quota.admit(["pr", "view", "1"])
+    assert refusal is not None
+    assert "-9" in refusal
+    assert "signalled" in refusal
+
+
+def test_admit_refuses_on_shell_sigkill_137(monkeypatch):
+    _budget_raising(
+        monkeypatch,
+        {"message": "fno-agents fleet-incident exited 137: ", "returncode": 137},
+    )
+    refusal = _quota.admit(["pr", "view", "1"])
+    assert refusal is not None
+    assert "137" in refusal
+
+
+def test_admit_admits_on_clean_reader_exit_and_names_the_code(monkeypatch, capsys):
+    _budget_raising(
+        monkeypatch,
+        {"message": "fno-agents fleet-incident exited 1: no ledger", "returncode": 1},
+    )
+    assert _quota.admit(["pr", "view", "1"]) is None
+    err = capsys.readouterr().err
+    assert "ledger unavailable, admitting" in err
+    assert "exited 1" in err
+
+
 def test_backoff_live_reads_the_status_answer(monkeypatch):
     monkeypatch.setattr(_quota, "backoff_live", _REAL_BACKOFF_LIVE)
     answers = iter([{"backoff_remaining_s": 42}, {"backoff_remaining_s": 0}])

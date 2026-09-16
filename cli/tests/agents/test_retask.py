@@ -1658,7 +1658,7 @@ def _pick(graph, rows, node_id="x-bbbb"):
 def test_finished_planner_picks_the_earliest_finished_row_on_the_epic(monkeypatch):
     monkeypatch.setattr("fno.agents.retask.parse_many", _fake_parse_many)
     late = _eligible_row(
-        name="sob-bp-x-aaaa-late",
+        name="ab-bp-x-aaaa-late",
         inside_leg={"state": "done", "received_at": "2026-09-15T01:00:00Z"},
     )
     early = _eligible_row()

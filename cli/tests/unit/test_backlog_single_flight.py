@@ -32,7 +32,7 @@ from fno.backlog.single_flight import (
     reconcile_flight_key,
 )
 from fno.claims.core import acquire_claim, claim_status
-from fno.claims.io import claims_root_for
+from fno.claims.io import claim_path, claims_root_for
 from fno.cli import app
 from fno.rust_binary import find_dev_binary
 
@@ -202,6 +202,77 @@ def test_a_dead_holder_does_not_wedge_the_scope(iso):
     gate = acquire_flight(key, scope="advance")
     assert gate is not None and not gate.held, "a dead holder must never read as held"
     gate.release()
+
+
+# ---------------------------------------------------------------------------
+# x-eb02: the gate serves the holder-process leases. A caller names its lease
+# (name/root/ttl_ms); the lockfile stamps holder-process so a live writing
+# session never heals the expired lease, and a killed holder is reclaimed.
+# ---------------------------------------------------------------------------
+
+_SIGKILL_CHILD_HOLDER = """
+import sys, time
+from pathlib import Path
+from fno.backlog.single_flight import acquire_flight
+
+flight = acquire_flight(sys.argv[1], scope="post-merge canonical sync",
+                        name="sync-canonical:99", root=Path(sys.argv[2]), ttl_ms=600_000)
+assert flight is not None and not flight.held, flight
+print("held", flush=True)
+time.sleep(120)
+"""
+
+
+def _wait_for_claim(key: str, root: Path, proc: "subprocess.Popen | None", timeout: float = 8.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if claim_path(key, root=root).exists():
+            return
+        if proc is not None and proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    stderr = proc.stderr.read()[:400] if proc is not None and proc.stderr else b""
+    raise AssertionError(f"child never took the flight {key} (rc={proc.poll() if proc else 'n/a'}); stderr: {stderr}")
+
+
+@requires_rust
+def test_acquire_flight_takes_a_name_root_and_ttl(iso):
+    key = "post-merge-sync"
+    root = iso / "canonical"
+    flight = acquire_flight(
+        key, scope="post-merge canonical sync", name="sync-canonical:7",
+        root=root, ttl_ms=60_000,
+    )
+    assert flight is not None and not flight.held
+    assert flight.holder.startswith("sync-canonical:7:"), flight.holder
+    lock = claim_status(key, root=root)
+    assert lock["pid"] == os.getpid()
+    assert lock["pid_provenance"] == "holder-process"
+    flight.release()
+    assert not claim_path(key, root=root).exists(), "release must drop the lock"
+
+
+@requires_rust
+def test_a_sigkilled_holder_is_reclaimed(iso):
+    key = "post-merge-sync"
+    root = iso / "canonical"
+    root.mkdir(parents=True, exist_ok=True)
+    child = subprocess.Popen(
+        [sys.executable, "-c", _SIGKILL_CHILD_HOLDER, key, str(root)],
+        env=_child_env(iso, {}),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_for_claim(key, root, child)
+        child.send_signal(signal.SIGKILL)
+        child.wait(timeout=5)
+        flight = acquire_flight(key, scope="post-merge canonical sync",
+                                name="sync-canonical:7", root=root, ttl_ms=60_000)
+        assert flight is not None and flight.held is False, "the dead holder must be reclaimed"
+        flight.release()
+    finally:
+        if child.poll() is None:
+            child.kill()
 
 
 # ---------------------------------------------------------------------------

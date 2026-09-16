@@ -116,7 +116,13 @@ pub fn run_flight_acquire(args: &[String]) -> i32 {
     let opts = claims::AcquireOpts {
         pid,
         ttl_ms: Some(ttl_ms),
-        reason: Some(format!("backlog single-flight: {scope}")),
+        reason: Some(format!("single-flight: {scope}")),
+        // An explicit --pid names the calling process, which holds the lease
+        // for its whole run: stamp holder-process so the classifier reads the
+        // pid's verdict and a live writing session never heals an expired
+        // lease. Without --pid the pid is this short-lived binary and the
+        // stamp would lie.
+        pid_provenance: pid.map(|_| claims::HOLDER_PROCESS.to_string()),
         root: root.clone(),
         events_dir,
         ..Default::default()
@@ -159,6 +165,11 @@ pub fn run_flight_acquire(args: &[String]) -> i32 {
 }
 
 fn held_receipt(key: &str, root: Option<&Path>) -> i32 {
+    print_receipt(&held_receipt_value(key, root));
+    0
+}
+
+fn held_receipt_value(key: &str, root: Option<&Path>) -> Value {
     let (state, rec) = claims::status(key, root);
     let holder = rec
         .as_ref()
@@ -168,18 +179,23 @@ fn held_receipt(key: &str, root: Option<&Path>) -> i32 {
         .as_ref()
         .map(|r| ((claims::now_ms() - r.acquired_at).max(0) / 1000) as u64)
         .unwrap_or(0);
+    let expires = rec.as_ref().and_then(|r| {
+        r.expires_at
+            .and_then(chrono::DateTime::from_timestamp_millis)
+            .map(|t| t.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    });
     let requests = if state == claims::ClaimState::Free {
         0
     } else {
         count_held_request(key, root)
     };
-    print_receipt(&json!({
+    json!({
         "acquired": false,
         "holder": holder,
         "held_for_s": held_for_s,
+        "expires": expires,
         "requests": requests,
-    }));
-    0
+    })
 }
 
 /// `flight-release <key> --holder <h> [--claims-root <dir>]`
@@ -265,5 +281,37 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         let rc = run_flight_acquire(&verb_args(key, "B", &td));
         assert_eq!(rc, 0, "acquired: true despite the lost reset");
+    }
+
+    #[test]
+    fn an_explicit_pid_stamps_holder_process_on_the_lease() {
+        let td = TempDir::new().unwrap();
+        let key = "flight:test-stamp";
+        let mut args = verb_args(key, "W", &td);
+        args.extend([
+            "--pid".into(),
+            std::process::id().to_string(),
+            "--scope".into(),
+            "test stamping".into(),
+        ]);
+        assert_eq!(run_flight_acquire(&args), 0);
+        let (_state, rec) = claims::status(key, Some(td.path()));
+        let rec = rec.expect("the acquire must have written a lockfile");
+        assert_eq!(rec.pid, Some(std::process::id() as i32));
+        assert_eq!(rec.pid_provenance.as_deref(), Some(claims::HOLDER_PROCESS));
+        assert_eq!(rec.reason.as_deref(), Some("single-flight: test stamping"));
+    }
+
+    #[test]
+    fn the_held_receipt_names_the_expiry() {
+        let td = TempDir::new().unwrap();
+        let key = "flight:test-expires";
+        assert_eq!(run_flight_acquire(&verb_args(key, "A", &td)), 0);
+        let receipt = held_receipt_value(key, Some(td.path()));
+        assert_eq!(receipt["acquired"], false);
+        let expires = receipt["expires"]
+            .as_str()
+            .expect("expires must be an ISO string when the lease has a TTL");
+        assert!(expires.ends_with('Z'));
     }
 }

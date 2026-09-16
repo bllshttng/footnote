@@ -1122,12 +1122,11 @@ pub fn run_update(args: &[String]) -> i32 {
     match apply(&graph, &req) {
         Ok(receipt) => {
             if json_out {
-                println!(
-                    "{}",
-                    serde_json::to_string(&receipt).unwrap_or_else(|_| "{}".into())
+                crate::backlog::receipt::emit_line(
+                    &serde_json::to_string(&receipt).unwrap_or_else(|_| "{}".into()),
                 );
             } else {
-                println!("{}", render_text(&receipt));
+                crate::backlog::receipt::emit_line(&render_text(&receipt));
             }
             0
         }

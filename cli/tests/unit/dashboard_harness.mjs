@@ -192,17 +192,23 @@ const groups = board.children;
 const rows = board.descendants.filter((n) => n.classList.contains("row"));
 const visible = rows.filter((r) => !r.classList.contains("is-hidden"));
 
+const groupsApi = (sections) =>
+  sections.map((g) => ({
+    open: g.dataset.open,
+    expanded: (g.children[0] || {}).attrs
+      ? g.children[0].getAttribute("aria-expanded")
+      : null,
+    hidden: g.classList.contains("is-hidden"),
+    count: (g.querySelector(".gc") || {}).textContent,
+    bar: (g.querySelector(".tw") || {}).innerHTML || "",
+  }));
+
 const api = {
   shown: byId.get("shown").textContent,
   totalRows: rows.length,
   visibleRows: visible.length,
   visibleIds: visible.map((r) => r.id).filter(Boolean),
-  groups: groups.map((g) => ({
-    open: g.dataset.open,
-    hidden: g.classList.contains("is-hidden"),
-    count: (g.querySelector(".gc") || {}).textContent,
-    bar: (g.querySelector(".tw") || {}).innerHTML || "",
-  })),
+  groups: groupsApi(groups),
   projectChips: byId.get("projectChips").children.map((b) => ({
     project: b.dataset.project,
     pressed: b.getAttribute("aria-pressed"),
@@ -273,11 +279,22 @@ if (act) {
     q.value = arg || "";
     q.fire("input");
   }
+  // The reload script restores collapsed groups through aria-expanded, so the
+  // harness must be able to click a group head and read the state back.
+  if (kind === "toggleGroup") {
+    byId.get("board").children.forEach((g) => {
+      const head = g.children[0];
+      if (!head) return;
+      const title = head.children.find((c) => c.tagName === "H2");
+      if (title && title.textContent === arg) head.click();
+    });
+  }
   const after = board.descendants.filter((n) => n.classList.contains("row"));
   api.after = {
     totalRows: after.length,
     visibleRows: after.filter((r) => !r.classList.contains("is-hidden")).length,
     shown: byId.get("shown").textContent,
+    groups: groupsApi(byId.get("board").children),
     projectChips: byId.get("projectChips").children.map((b) => ({
       project: b.dataset.project,
       pressed: b.getAttribute("aria-pressed"),

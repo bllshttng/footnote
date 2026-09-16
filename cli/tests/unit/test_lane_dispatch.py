@@ -398,8 +398,13 @@ def test_spawn_worker_forwards_vendor_in_spawn_argv(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     captured = {}
+    original_run = advance.subprocess.run
 
     def fake_run(cmd, **kwargs):
+        # The patch lands on the shared subprocess module, so the naming
+        # bridge's verbs run here too; they delegate, the launch is faked.
+        if len(cmd) > 1 and cmd[1] in ("name-mint", "name-codes"):
+            return original_run(cmd, **kwargs)
         captured["cmd"] = cmd
         return SimpleNamespace(
             returncode=0,

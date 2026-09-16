@@ -86,11 +86,9 @@ def test_relay_hands_the_native_renderer_court_graph_and_out(
         stdout = ""
         stderr = ""
 
-    def fake_run(argv, **_kwargs):
+    def fake_run(argv, **kwargs):
         seen["argv"] = argv
-        seen["court_on_disk"] = json.loads(
-            Path(argv[argv.index("--court-json") + 1]).read_text(encoding="utf-8")
-        )
+        seen["court"] = json.loads(kwargs["input"])
         Path(argv[argv.index("--out") + 1]).write_text("<html></html>", encoding="utf-8")
         return Proc()
 
@@ -106,9 +104,35 @@ def test_relay_hands_the_native_renderer_court_graph_and_out(
     assert write_ledger(court, out) == out
     argv = seen["argv"]
     assert argv[1] == "reign-ledger"
-    assert seen["court_on_disk"] == court
+    assert argv[argv.index("--court-json") + 1] == "-"
+    assert seen["court"] == court
     assert "--graph" in argv
     assert out.exists()
+
+
+def test_relay_writes_no_court_file(tmp_path, monkeypatch):
+    """The court rides stdin, so a killed render leaves no temp file behind."""
+    import tempfile
+
+    from fno.king import ledger as ledger_module
+    from fno.king.ledger import write_ledger
+
+    class Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def no_mkstemp(*_args, **_kwargs):
+        raise AssertionError("mkstemp must never be called")
+
+    monkeypatch.setattr(tempfile, "mkstemp", no_mkstemp)
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_binary", lambda: str(tmp_path / "stub-fno-agents")
+    )
+    monkeypatch.setattr(ledger_module.subprocess, "run", lambda argv, **k: Proc())
+
+    out = tmp_path / "page.html"
+    assert write_ledger({"crowns": []}, out) == out
 
 
 def test_relay_refuses_when_the_binary_is_missing(monkeypatch, tmp_path):

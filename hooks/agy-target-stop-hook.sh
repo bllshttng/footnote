@@ -110,17 +110,9 @@ OTHER_WORKTREE_PRESENT=0
 SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
 [[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="${REPO_ROOT}/.fno"
 
-resolve_agents_bin() {
-    if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
-        printf '%s' "$FNO_AGENTS_BIN"
-    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
-        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
-    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
-        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
-    elif command -v fno-agents >/dev/null 2>&1; then
-        command -v fno-agents
-    fi
-}
+# shellcheck source=lib/agents-bin.sh
+source "$PLUGIN_ROOT/hooks/lib/agents-bin.sh"
+resolve_agents_bin() { fno_agents_bin "$REPO_ROOT"; }
 
 BIN=""
 TARGET_RESOLVE_BROKEN=0
@@ -221,7 +213,6 @@ else
     done
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
-DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
 
 # jq-free event writer (string interpolation, so it also runs on the jq-missing
 # give-up path). Fields are hook-internal and safe to interpolate.
@@ -389,6 +380,16 @@ synthesize_transcript() {
 
 SYNTH="${STATE_FILE%/*}/.agy-loopcheck-${CONVERSATION_ID:-session}.jsonl"
 mkdir -p "$SPACE_DIR" 2>/dev/null || true
+# Snapshot the manifest content BEFORE loop-check runs: the session's own
+# machinery may delete or replace the file while loop-check is deciding, and
+# the DoneDelivery staging below must still stage what the hook saw at entry.
+# A variable, not a candidate file: nothing lands in the checkout before the
+# stop is decided.
+STATE_SNAPSHOT=""
+if [[ -n "$STATE_FILE" && "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+    && [[ -f "$STATE_FILE" ]]; then
+    STATE_SNAPSHOT=$(cat "$STATE_FILE" 2>/dev/null || true)
+fi
 if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
     synthesize_transcript "$TRANSCRIPT_PATH" > "$SYNTH" 2>/dev/null || : > "$SYNTH"
 else
@@ -397,7 +398,7 @@ else
     : > "$SYNTH"
 fi
 # Clean up the synth file on every exit path (loop-check has read it by then).
-trap 'rm -f "$SYNTH" "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
+trap 'rm -f "$SYNTH" 2>/dev/null || true' EXIT
 
 # ── 5. Resolve the fno-agents binary (most-local wins; same order as the shim) ─
 [[ -n "$BIN" ]] || BIN=$(resolve_agents_bin)
@@ -412,12 +413,6 @@ if [[ -z "$BIN" ]]; then
     echo "agy stop-hook: WARNING: fno-agents binary not found for an active session" >&2
     echo "agy stop-hook: install with: cargo install --path crates/fno-agents --bins" >&2
     unavailable_continue_or_allow
-fi
-
-CANDIDATE_READY=0
-if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-    && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
-    CANDIDATE_READY=1
 fi
 
 # ── 7. Invoke loop-check (transcript scan only; agy stdin has no last message) ─
@@ -485,10 +480,21 @@ fi
 if [[ -n "$TERMINATION_REASON" ]]; then
     FINALIZE_STATE="$STATE_FILE"
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
-        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-            && { [[ $CANDIDATE_READY -ne 1 ]] \
-                || ! mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE"; }; then
-            emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
+        # Staged here only, as in target-stop-hook.sh: a stop that is not a
+        # delivery writes nothing, and no candidate file exists for loop-check
+        # to see. The staging source is the entry snapshot; the manifest
+        # itself may already be gone by the time finalize runs.
+        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]]; then
+            [[ -n "$DELIVERY_PENDING_STATE" ]] \
+                || emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
+            PENDING_TMP="${DELIVERY_PENDING_STATE}.tmp.$$"
+            if ! { cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
+                || { [[ -n "$STATE_SNAPSHOT" ]] \
+                    && printf '%s\n' "$STATE_SNAPSHOT" > "$PENDING_TMP"; }; } \
+                || ! mv "$PENDING_TMP" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+                rm -f "$PENDING_TMP" 2>/dev/null || true
+                emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
+            fi
         fi
         FINALIZE_STATE="$DELIVERY_PENDING_STATE"
     fi

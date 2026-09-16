@@ -7,9 +7,7 @@ the Python-tree ratchet holds. Contract: docs/architecture/reign.md.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -45,28 +43,21 @@ def write_ledger(court: dict, path: Optional[Path] = None) -> Path:
             "rendered by the native reign-ledger verb"
         )
     out = Path(path) if path is not None else default_ledger_path()
-    fd, court_file = tempfile.mkstemp(suffix=".json")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(court, handle)
-        argv = [
-            str(binary),
-            "reign-ledger",
-            "--court-json",
-            court_file,
-            "--graph",
-            str(graph_json()),
-            "--generated",
-            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "--out",
-            str(out),
-        ]
-        proc = subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60)
-    finally:
-        try:
-            os.unlink(court_file)
-        except OSError:
-            pass
+    argv = [
+        str(binary),
+        "reign-ledger",
+        "--court-json",
+        "-",
+        "--graph",
+        str(graph_json()),
+        "--generated",
+        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "--out",
+        str(out),
+    ]
+    proc = subprocess.run(
+        argv, input=json.dumps(court), capture_output=True, text=True, check=False, timeout=60
+    )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"reign-ledger exited {proc.returncode}")
     return out

@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths:
+    paths: &cli_ci_paths
       - cli/**
       # The python suite reads claim verdicts through the native batch door,
       # so a crates-only change reaches these tests. Without this a rust-only
@@ -24,6 +24,13 @@ on:
       - agents/**
       - skills/**
       - hooks/**
+      # The cargo tests include fixtures from this tree at compile time.
+      # A schema-only change must schedule the cargo test + schema parity job.
+      - schemas/**
+      # The cargo job diffs this generated document against its source.
+      - docs/harnesses/capability-matrix.md
+      # The cargo job runs the gate that reads this boundary inventory.
+      - docs/architecture/product-boundaries.md
       - scripts/**
       - scripts/lib/events-validate.sh
       - scripts/lib/set-gate.sh
@@ -39,27 +46,7 @@ on:
       - .github/workflows/guards.yml
       - .github/workflows/rust-ci.yml
   pull_request:
-    paths:
-      - cli/**
-      - crates/**
-      - .claude-plugin/**
-      - agents/**
-      - skills/**
-      - hooks/**
-      - scripts/**
-      - scripts/lib/events-validate.sh
-      - scripts/lib/set-gate.sh
-      - scripts/lib/paths.sh
-      - scripts/ci/check-no-hardcoded-paths.sh
-      - scripts/ci/check-placement-rule.sh
-      - scripts/generate-skill-bundles.sh
-      - scripts/lib/parse-bundle-manifest.py
-      - scripts/lint/**
-      - skill-bundles.yaml
-      - tests/**
-      - .github/workflows/cli-ci.yml
-      - .github/workflows/guards.yml
-      - .github/workflows/rust-ci.yml
+    paths: *cli_ci_paths
 
 jobs:
   real-codex-0145:
@@ -644,6 +631,7 @@ jobs:
             cli/src/fno/agents/harness_capabilities.toml \
             crates/fno/src/harness_capabilities.toml \
             cli/src/fno/agents/merge_posture.toml \
+            cli/src/fno/graph/page_reload.js \
             cli/src/fno/agents/spawn_phase.toml \
             crates/fno-agents/src/events_limits.toml \
             cli/src/fno/agents/registry_schema.toml \
@@ -664,10 +652,8 @@ jobs:
 
       - name: Preflight receipt-scope parity
         # Runs HERE, not only in the smoke registry. The guard's own subject is
-        # a Rust file (verify_evidence.rs), and cli-ci's paths filter carries no
-        # crates/**, so a crates-only PR that renamed a scope name would ship
-        # with both checks green and every receipt it produced untrusted. This
-        # workflow is the one that triggers on crates/**.
+        # a Rust file (verify_evidence.rs), so this leg rides the cargo job that
+        # already triggers for Rust source changes.
         run: bash scripts/tests/test_preflight_parity.sh
 
       - name: Reviewer descriptor parity check

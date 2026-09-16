@@ -2,6 +2,7 @@
 //! families. Shared helpers (`tmp_home`, `ask_row`, `rentry`, `civil`, ...)
 //! stay in the parent tests module and resolve through the glob.
 use super::*;
+use crate::daemon::codex_thread_resume::codex_thread_recovery_candidate;
 
 use crate::gc_sweep::{self, GcSummary, GraphRead};
 

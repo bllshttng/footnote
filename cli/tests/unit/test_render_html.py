@@ -1388,3 +1388,48 @@ def test_public_backlog_flow_is_aggregate_and_leak_clean():
         assert not pattern.search(flow_json), f"flow leaks {name}"
 
 
+def test_local_board_carries_the_page_reload_script(tmp_path: Path, monkeypatch):
+    """AC6-HP: a local board reloads itself on the configured interval, and
+    the script it carries is the build-generated copy the crate owns."""
+    import fno.config_io
+
+    script_src = (
+        Path(__file__).parents[2] / "src" / "fno" / "graph" / "page_reload.js"
+    ).read_text(encoding="utf-8")
+    real = fno.config_io.read_global_block
+    monkeypatch.setattr(
+        fno.config_io,
+        "read_global_block",
+        lambda block, *a, **k: {"page_reload_s": 120} if block == "backlog" else real(block),
+    )
+    out = tmp_path / "graph.html"
+    render_graph_html([_entry("x-1")], out)
+    text = out.read_text()
+    tag = '<script data-fno-reload="120">'
+    assert text.count(tag) == 1
+    # The reload script rides AFTER the board script, and nothing follows it
+    # but the page close.
+    assert text.endswith(f"{tag}{script_src}</script></body></html>\n")
+    board_script_at = text.index("<script>") + len("<script>")
+    assert text.index(tag) > board_script_at, "the reload tag follows the board script"
+
+    monkeypatch.setattr(
+        fno.config_io,
+        "read_global_block",
+        lambda block, *a, **k: None if block == "backlog" else real(block),
+    )
+    out2 = tmp_path / "graph-default.html"
+    render_graph_html([_entry("x-1")], out2)
+    assert 'data-fno-reload="60"' in out2.read_text()
+
+
+def test_public_board_carries_no_reload_script():
+    """AC6-ERR: a public projection never reloads; strangers read a snapshot."""
+    from fno.graph.render_html import render_public_sections_html
+
+    content = render_public_sections_html(
+        [("uncategorized", [_entry("pub-00003")])], title="t", projection="backlog"
+    )
+    assert "data-fno-reload" not in content
+
+

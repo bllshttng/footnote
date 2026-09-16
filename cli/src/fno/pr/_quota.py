@@ -321,16 +321,40 @@ def _gh_budget(payload: dict) -> dict:
     return verb_call("fleet-incident", payload, timeout=5)
 
 
+def _reader_signalled(exc: VerbUnavailable) -> bool:
+    """Whether the budget reader died from a signal (OOM killer, kernel).
+
+    verb_call attaches the child's exit code on a clean non-zero failure; a
+    signalled reader comes back negative from subprocess, or 137 through a
+    shell. A signalled reader means the machine is killing processes - exactly
+    when a flood of gh calls hurts. A clean exit (missing ledger, bad install)
+    is a config state and keeps admitting.
+    """
+    rc = getattr(exc, "returncode", None)
+    return rc is not None and (rc < 0 or rc == 137)
+
+
 def admit(argv: Sequence[str]) -> Optional[str]:
     """Ask the machine-wide budget before one real gh call leaves.
 
     Returns None when admitted; a str is the refusal line the caller prints
     (and exits 75 on). A budget that cannot answer admits: it protects the
     fleet, it is not a stop - the operator's breaker is `fno agents incident`.
+    The one exception is a reader the kernel signalled (exit -9, 137): the
+    machine is in distress, so refuse instead of admitting a gh-call flood,
+    and name the exit code - "ledger unavailable" alone reads as a missing
+    ledger when the real story is the OOM killer.
     """
     try:
         answer = _gh_budget({"op": "admit", "argv": [str(a) for a in argv]})
     except VerbUnavailable as exc:
+        if _reader_signalled(exc):
+            rc = exc.returncode
+            return (
+                f"gh budget: budget reader exited {rc} (signalled); refusing while "
+                "the machine kills processes - retry when it recovers, "
+                "breaker is `fno agents incident`"
+            )
         print(f"gh budget: ledger unavailable, admitting: {exc}", file=sys.stderr)
         return None
     if answer.get("verdict") == "refused":

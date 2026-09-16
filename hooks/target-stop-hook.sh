@@ -285,8 +285,6 @@ else
     done
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
-DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
-trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 
 # Second candidate: a king session. Its manifest is a separate file because a
 # king runs in the canonical checkout where a target manifest may also exist,
@@ -557,10 +555,15 @@ fi
 # and the captured exit code is the binary's own. (Trailing newline added by
 # <<< is harmless: serde_json tolerates trailing whitespace.)
 mkdir -p "$SPACE_DIR" 2>/dev/null || true
-CANDIDATE_READY=0
-if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-    && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
-    CANDIDATE_READY=1
+# Snapshot the manifest content BEFORE loop-check runs: the session's own
+# machinery may delete or replace the file while loop-check is deciding, and
+# the DoneDelivery staging below must still stage what the hook saw at entry.
+# A variable, not a candidate file: nothing lands in the checkout before the
+# stop is decided.
+STATE_SNAPSHOT=""
+if [[ -n "$STATE_FILE" && "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+    && [[ -f "$STATE_FILE" ]]; then
+    STATE_SNAPSHOT=$(cat "$STATE_FILE" 2>/dev/null || true)
 fi
 LOOP_CHECK_LOG="${SPACE_DIR}/loop-check.stderr.log"
 DECISION_JSON=""
@@ -705,10 +708,21 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
     esac
     FINALIZE_STATE="$STATE_FILE"
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
-        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
-            && { [[ $CANDIDATE_READY -ne 1 ]] \
-                || ! mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE"; }; then
-            emit_block_for_harness "generic delivery state could not be preserved; will retry"
+        # The retry state is staged here and nowhere earlier: a stop that is
+        # not a delivery writes nothing, and no candidate file exists for
+        # loop-check to see. The staging source is the entry snapshot; the
+        # manifest itself may already be gone by the time finalize runs.
+        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]]; then
+            [[ -n "$DELIVERY_PENDING_STATE" ]] \
+                || emit_block_for_harness "generic delivery state could not be preserved; will retry"
+            PENDING_TMP="${DELIVERY_PENDING_STATE}.tmp.$$"
+            if ! { cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
+                || { [[ -n "$STATE_SNAPSHOT" ]] \
+                    && printf '%s\n' "$STATE_SNAPSHOT" > "$PENDING_TMP"; }; } \
+                || ! mv "$PENDING_TMP" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+                rm -f "$PENDING_TMP" 2>/dev/null || true
+                emit_block_for_harness "generic delivery state could not be preserved; will retry"
+            fi
         fi
         FINALIZE_STATE="$DELIVERY_PENDING_STATE"
     fi

@@ -14,11 +14,30 @@ import pytest
 
 from fno.pr._proc import Result
 from fno.pr._sync_canonical import run_sync_canonical, sync_staleness
+from fno.rust_binary import find_dev_binary
 
 
 @pytest.fixture(autouse=True)
 def _isolate_claims(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
+
+
+@pytest.fixture(autouse=True)
+def _fake_flight(monkeypatch, request):
+    """Stub the native flight gate; @pytest.mark.real_flight opts out so the
+    real fno-agents binary writes the lock. The stub records every acquire."""
+    if "real_flight" in request.keywords:
+        return
+    import fno.backlog.single_flight as sf
+
+    seen: list[dict] = []
+
+    def fake_acquire(key, *, scope, name="single-flight", root=None, ttl_ms=sf.FLIGHT_TTL_MS):
+        seen.append({"key": key, "scope": scope, "name": name, "root": root, "ttl_ms": ttl_ms})
+        return sf.Flight(key=key, holder=f"{name}:fake", held=False)
+
+    monkeypatch.setattr(sf, "acquire_flight", fake_acquire)
+    return seen
 
 
 def _settings(command: Optional[str] = None, paths=None):
@@ -93,12 +112,15 @@ def test_already_synced_skips(tmp_path, capsys):
 
 
 def test_lock_held_skips(tmp_path, capsys, monkeypatch):
-    from fno import claims
+    import fno.backlog.single_flight as sf
 
-    def _raise(*a, **k):
-        raise claims.ClaimHeldByOther("other", 1, "host", "post-merge-sync:x")
+    def held(*a, **k):
+        return sf.Flight(
+            key="post-merge-sync", holder="sync-canonical:99:1:abcd", held=True,
+            expires="2026-09-15T19:00:00Z",
+        )
 
-    monkeypatch.setattr(claims, "acquire_claim", _raise)
+    monkeypatch.setattr(sf, "acquire_flight", held)
     shell = _Shell()
     rc = _run(tmp_path, shell_runner=shell)
     assert rc == 0
@@ -106,7 +128,15 @@ def test_lock_held_skips(tmp_path, capsys, monkeypatch):
     assert shell.calls == []
 
 
-def test_sync_lease_is_stamped_holder_process(tmp_path):
+requires_rust = pytest.mark.skipif(
+    find_dev_binary() is None,
+    reason="compiled fno-agents binary not present (build with `cargo build -p fno-agents`)",
+)
+
+
+@pytest.mark.real_flight
+@requires_rust
+def test_sync_lease_is_stamped_holder_process(tmp_path, monkeypatch):
     # The writer is the only party that knows its pid is the whole hold: the
     # lock must carry the holder-process stamp so a dead sync process never
     # outlives its lease through the writer session's witness.
@@ -116,6 +146,7 @@ def test_sync_lease_is_stamped_holder_process(tmp_path):
 
     from fno.claims.io import claim_path
 
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     seen: list[str] = []
 
     def reading_shell(command: str, cwd: str) -> Result:
@@ -130,12 +161,17 @@ def test_sync_lease_is_stamped_holder_process(tmp_path):
     assert rec["pid"] == os.getpid()
 
 
-def test_lock_held_skip_names_holder_and_expiry(tmp_path, capsys):
+@pytest.mark.real_flight
+@requires_rust
+def test_lock_held_skip_names_holder_and_expiry(tmp_path, capsys, monkeypatch):
+    import os
+
     from fno import claims
 
+    monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     claims.acquire_claim(
-        "post-merge-sync", "sync-canonical:99", ttl_ms=60_000, root=tmp_path,
-        pid_provenance=claims.HOLDER_PROCESS,
+        "post-merge-sync", "sync-canonical:99", ttl_ms=60_000,
+        pid=os.getpid(), root=tmp_path,
     )
     shell = _Shell()
     rc = _run(tmp_path, shell_runner=shell)
@@ -287,7 +323,7 @@ def test_e2e_merge_syncs_canonical_not_worktree_and_dedups(tmp_path, capsys):
     assert "already synced" in capsys.readouterr().out
 
 
-def test_claim_key_is_canonical_wide_not_per_sha(tmp_path, monkeypatch):
+def test_claim_key_is_canonical_wide_not_per_sha(tmp_path, _fake_flight):
     """Two different merges must contend for ONE lock.
 
     The claim's job is that two `fno agents restart`s never overlap in a checkout. A
@@ -295,14 +331,6 @@ def test_claim_key_is_canonical_wide_not_per_sha(tmp_path, monkeypatch):
     sync for another would take different locks and pull, update, and restart
     concurrently. Exactly-once-per-SHA is the marker's job, not the claim's.
     """
-    from fno import claims
-
-    keys: list[str] = []
-    monkeypatch.setattr(
-        claims, "acquire_claim", lambda key, holder, **_kw: keys.append(key)
-    )
-    monkeypatch.setattr(claims, "release_claim", lambda *a, **k: None)
-
     _run(tmp_path, shell_runner=_Shell())
     _run(
         tmp_path,
@@ -310,9 +338,9 @@ def test_claim_key_is_canonical_wide_not_per_sha(tmp_path, monkeypatch):
         shell_runner=_Shell(),
     )
 
+    keys = [rec["key"] for rec in _fake_flight]
     assert len(keys) == 2
-    assert keys[0] == keys[1], "different SHAs must contend for the same lock"
-    assert "a" * 40 not in keys[0] and "b" * 40 not in keys[1]
+    assert keys[0] == keys[1] == "post-merge-sync", "different SHAs must contend for the same lock"
 
 
 # --- x-adf9: _default_shell_runner detaches daemons + is bounded ---------

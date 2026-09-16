@@ -18,11 +18,12 @@ use serde_json::Map;
 use serde_json::Value;
 
 const EXIT_USAGE: i32 = 2;
-const USAGE: &str = "usage: fno-agents evals-trend --history <jsonl> (--mode report [--since K] [--graduate N] [--json] [--compare V] | --mode trend | --mode summary) [--stale-days N] [--now <rfc3339>]";
+const USAGE: &str = "usage: fno-agents evals-trend --history <jsonl> (--mode report [--since K] [--graduate N] [--json] [--compare V] [--planned <json>] | --mode trend | --mode summary) [--stale-days N] [--now <rfc3339>]";
 
 /// One history row: the fields the folds read. Absent keys read as the
 /// Python fold read them (missing `variant` is baseline, missing `ts` is
-/// unparseable, missing `tier` is "unknown").
+/// unparseable, missing `tier` is "unknown"). `raw` is kept so the attempt
+/// verdict comes from the ONE native classifier, never a second fold.
 #[derive(Clone)]
 struct Row {
     task_id: String,
@@ -31,6 +32,7 @@ struct Row {
     ts: Option<DateTime<Utc>>,
     variant: Option<String>,
     bank_rev: Option<String>,
+    raw: Value,
 }
 
 fn read_rows(history: &str, variant: Option<&str>, since: Option<usize>) -> Vec<Row> {
@@ -76,6 +78,7 @@ fn read_rows(history: &str, variant: Option<&str>, since: Option<usize>) -> Vec<
                 .get("bank_rev")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            raw: v,
         });
     }
     if let Some(k) = since {
@@ -85,28 +88,53 @@ fn read_rows(history: &str, variant: Option<&str>, since: Option<usize>) -> Vec<
     rows
 }
 
-/// Per-task stats over one row list: runs/passes since the task's latest
+/// Per-task stats over one row list: attempts/passes since the task's latest
 /// tier change (the anti-false-alarm segment rule).
+///
+/// Two denominators: a task with ANY natively classified row reports
+/// `grades` (valid task grades) and correctness over those grades only -
+/// infrastructure/unavailable/ungraded attempts never drag the pass rate. A
+/// task whose rows are ALL legacy (pre-attempt history) keeps the old
+/// boolean fold: legacy evidence is never reinterpreted, and existing
+/// history keeps its alarm semantics. `runs` is the attempt count either way.
 struct TaskStat {
     task_id: String,
     tier: String,
     runs: usize,
     passes: usize,
+    grades: usize,
+    infrastructure: usize,
+    unavailable: usize,
+    ungraded: usize,
+    legacy: usize,
+    legacy_fold: bool,
 }
 
 impl TaskStat {
+    /// Correctness denominator: valid grades for a modern task, attempts for
+    /// an all-legacy task.
+    fn grade_denominator(&self) -> usize {
+        if self.legacy_fold {
+            self.runs
+        } else {
+            self.grades
+        }
+    }
     fn pass_at_1(&self) -> f64 {
-        if self.runs == 0 {
+        let den = self.grade_denominator();
+        if den == 0 {
             0.0
         } else {
-            self.passes as f64 / self.runs as f64
+            self.passes as f64 / den as f64
         }
     }
     fn pass_k(&self) -> bool {
-        self.runs > 0 && self.passes == self.runs
+        let den = self.grade_denominator();
+        den > 0 && self.passes == den
     }
     fn flake(&self) -> bool {
-        self.passes > 0 && self.passes < self.runs
+        let den = self.grade_denominator();
+        self.passes > 0 && self.passes < den
     }
 }
 
@@ -128,12 +156,39 @@ fn stats(rows: &[Row]) -> Vec<TaskStat> {
             }
             segment_rows.push(r);
         }
-        out.push(TaskStat {
+        let mut stat = TaskStat {
             task_id: tid,
             tier: current_tier,
             runs: segment_rows.len(),
-            passes: segment_rows.iter().filter(|r| r.pass).count(),
-        });
+            passes: 0,
+            grades: 0,
+            infrastructure: 0,
+            unavailable: 0,
+            ungraded: 0,
+            legacy: 0,
+            legacy_fold: false,
+        };
+        for r in &segment_rows {
+            match crate::eval_attempt::classify(&r.raw, None).status {
+                "graded" => {
+                    stat.grades += 1;
+                    if r.pass {
+                        stat.passes += 1;
+                    }
+                }
+                "infrastructure" => stat.infrastructure += 1,
+                "unavailable" => stat.unavailable += 1,
+                "ungraded" => stat.ungraded += 1,
+                _ => stat.legacy += 1,
+            }
+        }
+        // All-legacy segment: keep the pre-attempt boolean fold verbatim.
+        stat.legacy_fold =
+            stat.grades + stat.infrastructure + stat.unavailable + stat.ungraded == 0;
+        if stat.legacy_fold {
+            stat.passes = segment_rows.iter().filter(|r| r.pass).count();
+        }
+        out.push(stat);
     }
     out
 }
@@ -261,11 +316,14 @@ fn group_by_task<'a>(rows: Vec<&'a Row>) -> BTreeMap<String, Vec<&'a Row>> {
 }
 
 /// The report fold: tiers, tasks, flakes, the windowed alarm, graduation.
+/// *planned* (task_id -> expected attempts) projects the planned denominator:
+/// missing attempts stay visible and completion is reported beside correctness.
 fn report_fold(
     rows: &[Row],
     window_days: i64,
     now: DateTime<Utc>,
     graduate_n: Option<usize>,
+    planned: Option<&BTreeMap<String, usize>>,
 ) -> Value {
     let all = stats(rows);
     let mut tiers: BTreeMap<String, (usize, usize)> = BTreeMap::new();
@@ -273,12 +331,20 @@ fn report_fold(
         let e = tiers.entry(s.tier.clone()).or_insert((0, 0));
         e.0 += s.runs;
         e.1 += s.passes;
+        // The tier rate sums each task's OWN denominator (grades for a modern
+        // task, attempts for an all-legacy task) so the aggregate never mixes
+        // infrastructure evidence into correctness.
     }
     let tier_json = Map::from_iter(tiers.iter().map(|(tier, (runs, passes))| {
-        let rate = if *runs == 0 {
+        let den: usize = all
+            .iter()
+            .filter(|s| s.tier == *tier)
+            .map(|s| s.grade_denominator())
+            .sum();
+        let rate = if den == 0 {
             0.0
         } else {
-            *passes as f64 / *runs as f64
+            *passes as f64 / den as f64
         };
         (
             tier.clone(),
@@ -288,11 +354,33 @@ fn report_fold(
     let tasks: Vec<Value> = all
         .iter()
         .map(|s| {
-            json!({
+            let mut task = json!({
                 "task_id": s.task_id, "tier": s.tier, "runs": s.runs,
                 "passes": s.passes, "pass_at_1": round4(s.pass_at_1()),
                 "pass_k": s.pass_k(), "flake": s.flake(),
-            })
+                "grades": s.grades,
+                "grade_den": s.grade_denominator(),
+                "attempts": {
+                    "infrastructure": s.infrastructure,
+                    "unavailable": s.unavailable,
+                    "ungraded": s.ungraded,
+                    "legacy": s.legacy,
+                },
+                "legacy_fold": s.legacy_fold,
+            });
+            if let Some(plan) = planned {
+                let expected = plan.get(&s.task_id).copied().unwrap_or(0);
+                let missing = expected.saturating_sub(s.runs);
+                let completion = if expected == 0 {
+                    0.0
+                } else {
+                    s.runs as f64 / expected as f64
+                };
+                task["expected_attempts"] = json!(expected);
+                task["missing_attempts"] = json!(missing);
+                task["completion"] = json!(round4(completion));
+            }
+            task
         })
         .collect();
     let flakes: Vec<&str> = all
@@ -411,7 +499,81 @@ fn compare_variants(rows: &[Row], variant: &str) -> Value {
     })
 }
 
+/// The summary document `evals_health_summary` reads: alarm, regressed set,
+/// tier pass rate, flake count, and the staleness fold (newest
+/// regression-tier timestamp vs the window). Staleness lives here so Python
+/// carries the fields instead of re-folding them (d-b6cc1a2a).
+fn summary_payload(history: &str, stale_days: i64, now: DateTime<Utc>) -> Value {
+    let rows = read_rows(history, Some("baseline"), None);
+    let (_, regressed) = trend_fold(&rows, stale_days, now);
+    let w = chrono::Duration::days(stale_days);
+    let recent_alarm: Vec<String> = stats_window(&rows, now - w, now)
+        .into_iter()
+        .filter(|s| s.tier == "regression" && s.pass_at_1() < 1.0)
+        .map(|s| s.task_id)
+        .collect();
+    let fold = report_fold(&rows, stale_days, now, None, None);
+    let reg = fold.get("tiers").and_then(|t| t.get("regression"));
+    let pass_rate = reg
+        .and_then(|t| t.get("pass_rate"))
+        .cloned()
+        .unwrap_or(json!(null));
+    let flake_count = fold
+        .get("flakes")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let reg_rows: Vec<&Row> = rows.iter().filter(|r| r.tier == "regression").collect();
+    let never_ran = reg_rows.is_empty();
+    let age_days =
+        reg_rows.iter().filter_map(|r| r.ts).max().map(|newest| {
+            ((now - newest).num_seconds() as f64 / 86_400.0 * 1000.0).round() / 1000.0
+        });
+    let stale = age_days.map_or(false, |age| age > stale_days as f64);
+    json!({
+        "regression_alarm": recent_alarm,
+        "regressed": regressed,
+        "regression_pass_rate": pass_rate,
+        "flake_count": flake_count,
+        "row_count": rows.len(),
+        "never_ran": never_ran,
+        "age_days": age_days,
+        "stale": stale,
+    })
+}
+
+fn print_summary(history: &str, stale_days: i64, now: DateTime<Utc>) -> i32 {
+    println!(
+        "{}",
+        serde_json::to_string(&summary_payload(history, stale_days, now)).unwrap_or_default()
+    );
+    0
+}
+
 pub fn run_evals_trend(args: &[String]) -> i32 {
+    if args.is_empty() {
+        // stdin summary: a JSON payload on stdin (the verb_call shape),
+        // `{"op": "summary", "history": "...", "stale_days": N}`; the flags
+        // below remain the human surface.
+        use std::io::Read;
+
+        let mut buf = String::new();
+        if std::io::stdin().read_to_string(&mut buf).is_ok() {
+            if let Ok(v) = serde_json::from_str::<Value>(&buf) {
+                if v.get("op").and_then(Value::as_str) == Some("summary") {
+                    let history = v
+                        .get("history")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let stale_days = v.get("stale_days").and_then(Value::as_i64).unwrap_or(7);
+                    return print_summary(&history, stale_days, Utc::now());
+                }
+            }
+        }
+        eprintln!("{USAGE}");
+        return EXIT_USAGE;
+    }
     let mut history = String::new();
     let mut mode = String::from("report");
     let mut stale_days: i64 = 7;
@@ -420,6 +582,7 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
     let mut consecutive_n: usize = 3;
     let mut json_out = false;
     let mut compare: Option<String> = None;
+    let mut planned: Option<BTreeMap<String, usize>> = None;
     let mut now: Option<DateTime<Utc>> = None;
     let mut i = 0usize;
     while i < args.len() {
@@ -498,6 +661,15 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                 Ok(v) => compare = Some(v),
                 Err(()) => return EXIT_USAGE,
             },
+            "--planned" => match value("--planned")
+                .and_then(|v| serde_json::from_str::<BTreeMap<String, usize>>(&v).map_err(|_| ()))
+            {
+                Ok(v) => planned = Some(v),
+                Err(()) => {
+                    eprintln!("evals-trend: --planned must be a JSON object of task_id -> expected attempts");
+                    return EXIT_USAGE;
+                }
+            },
             "--now" => match value("--now").map(|v| DateTime::parse_from_rfc3339(&v)) {
                 Ok(Ok(dt)) => now = Some(dt.with_timezone(&Utc)),
                 _ => {
@@ -520,23 +692,7 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
     let now = now.unwrap_or_else(Utc::now);
 
     if mode == "summary" {
-        let rows = read_rows(&history, Some("baseline"), None);
-        let (_, regressed) = trend_fold(&rows, stale_days, now);
-        let w = chrono::Duration::days(stale_days);
-        let recent_alarm: Vec<String> = stats_window(&rows, now - w, now)
-            .into_iter()
-            .filter(|s| s.tier == "regression" && s.pass_at_1() < 1.0)
-            .map(|s| s.task_id)
-            .collect();
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "regression_alarm": recent_alarm,
-                "regressed": regressed,
-            }))
-            .unwrap_or_default()
-        );
-        return 0;
+        return print_summary(&history, stale_days, now);
     }
 
     if mode == "trend" {
@@ -647,7 +803,13 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
         return 0;
     }
     let rows = read_rows(&history, Some("baseline"), since);
-    let report = report_fold(&rows, stale_days, now, graduate.then_some(consecutive_n));
+    let report = report_fold(
+        &rows,
+        stale_days,
+        now,
+        graduate.then_some(consecutive_n),
+        planned.as_ref(),
+    );
     if json_out {
         println!(
             "{}",
@@ -691,7 +853,7 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
                 t["tier"].as_str().unwrap_or_default(),
                 t["task_id"].as_str().unwrap_or_default(),
                 t["pass_at_1"].as_f64().unwrap_or(0.0) * 100.0,
-                t["runs"],
+                t["grade_den"],
                 t["pass_k"],
                 mark,
             );

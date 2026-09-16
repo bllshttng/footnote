@@ -184,10 +184,10 @@ pass "a non-repo cwd is skipped, leaving the day retryable"
 # claude runs its SessionStart scripts individually. A fallback reachable only
 # from the wrapper would ship and never run on the primary platform - which is
 # the exact failure this whole node exists to end.
-HOOKS_JSON="${REPO_ROOT_REAL}/hooks/hooks.json"
-grep -q 'hooks/groom-self-heal-session-start\.sh' "$HOOKS_JSON" \
-    || fail "the fallback is not registered in hooks.json; it would never run under claude"
-python3 -c "import json,sys; json.load(open('$HOOKS_JSON'))" 2>/dev/null \
-    || fail "hooks.json is not valid JSON"
-pass "the fallback is registered in hooks.json and the file still parses"
+CONTEXT_HOOKS_JSON="${REPO_ROOT_REAL}/hooks/context-hooks.json"
+grep -q 'hooks/groom-self-heal-session-start\.sh' "$CONTEXT_HOOKS_JSON" \
+    || fail "the fallback is not registered in context-hooks.json; it would never run under claude"
+python3 -c "import json,sys; json.load(open('$CONTEXT_HOOKS_JSON'))" 2>/dev/null \
+    || fail "context-hooks.json is not valid JSON"
+pass "the fallback is registered in context-hooks.json and the file still parses"
 log "all groom self-heal tests passed"

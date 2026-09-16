@@ -153,6 +153,29 @@ pub(crate) fn drain_reserve_body(
     })
 }
 
+/// The stop hook's one JSON verdict line: decision, reason, and the counts
+/// a wrapper reads.
+pub(crate) fn king_output(
+    decision: &str,
+    reason: Option<TerminationReason>,
+    message: &str,
+    actionable: i64,
+    fires: u64,
+) -> String {
+    serde_json::json!({
+        "driver": "king",
+        "decision": decision,
+        "termination_reason": reason,
+        // `reason` carries the human-readable why, distinct from the enum
+        // above: a stop hook reader wants the top actionable row, not a tag.
+        "reason": message,
+        "message": message,
+        "actionable": actionable,
+        "fires": fires,
+    })
+    .to_string()
+}
+
 pub(crate) fn read_king_board(
     fno_bin: &str,
     cwd: &Path,

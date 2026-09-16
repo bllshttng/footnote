@@ -77,6 +77,11 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/inject-announce.sh prompt"
+          },
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/law-stage-inject.sh",
+            "timeout": 5
           }
         ]
       }
@@ -171,11 +176,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id target-postcompact-reinject --expected target-postcompact-reinject,king-postcompact-reinject --entry post_compact -- ${PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
-          },
-          {
-            "type": "command",
-            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id king-postcompact-reinject --expected target-postcompact-reinject,king-postcompact-reinject --entry post_compact -- ${PLUGIN_ROOT}/hooks/king-postcompact-reinject.sh"
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-post-compact"
           },
           {
             "type": "command",
@@ -190,7 +191,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/session-start.sh"
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-session-start"
           },
           {
             "type": "command",
@@ -207,7 +208,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id inject-fno-agent-whoami --expected inject-fno-agent-whoami -- ${PLUGIN_ROOT}/hooks/inject-fno-agent-whoami.sh"
+            "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-whoami"
           }
         ]
       }

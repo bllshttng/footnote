@@ -56,22 +56,16 @@ def _make_exe(path: Path) -> Path:
 
 
 # --------------------------------------------------------------------------- #
-# rust_runtime_enabled
+# runtime_mode
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.parametrize(
     "value,expected",
-    [("rust", True), ("RUST", True), (" rust ", True), ("rs", False),
-     ("python", False), ("", False), ("1", False)],
+    [("rust", "rust"), ("python", "python"), ("auto", "auto"), ("rs", "auto")],
 )
-def test_runtime_enabled_gating(monkeypatch, value, expected) -> None:
+def test_runtime_mode_gating(monkeypatch, value, expected) -> None:
     monkeypatch.setenv(rr.RUNTIME_ENV, value)
-    assert rr.rust_runtime_enabled() is expected
-
-
-def test_runtime_disabled_when_unset(monkeypatch) -> None:
-    monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    assert rr.rust_runtime_enabled() is False
+    assert rr.runtime_mode() == expected
 
 
 def test_rm_target_name_skips_internal_audit_values() -> None:

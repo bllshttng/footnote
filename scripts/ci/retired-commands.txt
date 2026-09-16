@@ -26,8 +26,7 @@ fno project|fno config project|d-344fe242
 fno yard|fno agents yard|the root-verb fold
 fno runtime|fno agents workspace (retired outright, tombstoned)|d-cf2d6fe1
 --model-tier|fno backlog update --difficulty <band> - the work-difficulty axis (low, medium, high)|the difficulty-axis rename
-# The launch-on-write hook retired with the ordered advance nudge: blueprint
-# completion nudges fno backlog advance; the hook must stay unrunnable.
+# The launch-on-write hook stays unrunnable. Blueprint completion dispatches nothing; a king or the drain runs fno backlog advance.
 autolaunch-on-ready.sh|fno backlog advance (the ordered drain start)|the one-drain-start ruling
 # d-e1eec854 collapses /fno:law to one user-invoked step. The staged-proposal
 # ceremony is gone: one `fno inbox law set` call records and returns a d- id.

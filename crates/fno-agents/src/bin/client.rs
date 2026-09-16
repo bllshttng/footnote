@@ -155,6 +155,14 @@ fn main() {
     if args.first().map(String::as_str) == Some("surface-check") {
         std::process::exit(fno_agents::surface_check::run_surface_check(&args[1..]));
     }
+    // `context-run`: one runner for every fno SessionStart/PostCompact context
+    // producer (see context_run.rs doc). Transport-only, dispatched BEFORE
+    // `run` like surface-check: hooks/context-run.sh is the only caller and
+    // the action list is shrink-only (d-fe66560a), so this verb is never
+    // registered and never routed.
+    if args.first().map(String::as_str) == Some("context-run") {
+        std::process::exit(fno_agents::context_run::run_context_run(&args[1..]));
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -175,6 +183,13 @@ fn main() {
     // --stale-days and forward the rest.
     if args.first().map(String::as_str) == Some("evals-trend") {
         std::process::exit(fno_agents::evals_trend::run_evals_trend(&args[1..]));
+    }
+    // `evals-attempt`: the native attempt-eligibility verdict for eval history
+    // rows. Transport-only, dispatched here like evals-trend: the
+    // Python runner asks it per attempt at write time; the report re-asks it
+    // over whole-history batches at read time.
+    if args.first().map(String::as_str) == Some("evals-attempt") {
+        std::process::exit(fno_agents::eval_attempt::run_evals_attempt(&args[1..]));
     }
     let code = rt.block_on(run(args));
     std::process::exit(code);

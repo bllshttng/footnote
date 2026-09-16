@@ -623,15 +623,17 @@ def dispatch_post_merge_ritual(
         # Crashed attended ritual: retry under a new attempt_id once the TTL clears.
         return PostMergeDispatchResult("already-dispatched", pr_number, detail="lock-contention")
 
-    lock_key = f"post-merge-ritual:{dispatch_id}"
-    holder = f"post-merge-dispatch:{pr_number}"
-    try:
-        claims.acquire_claim(
-            lock_key, holder, ttl_ms=_POST_MERGE_DISPATCH_TTL_MS,
-            reason="post-merge ritual dispatch", root=canonical,
-            pid_provenance=claims.HOLDER_PROCESS,
-        )
-    except claims.CLAIM_UNAVAILABLE:
+    from fno.backlog.single_flight import acquire_flight
+
+    # This process holds the dispatch lease for its whole run: the flight gate
+    # stamps holder-process, so a dead dispatcher's lease is reclaimed on the
+    # pid probe and never healed through this session's witness.
+    flight = acquire_flight(
+        f"post-merge-ritual:{dispatch_id}", scope="post-merge ritual dispatch",
+        name=f"post-merge-dispatch:{pr_number}", root=canonical,
+        ttl_ms=_POST_MERGE_DISPATCH_TTL_MS,
+    )
+    if flight is None or flight.held:
         # In-flight, not done, not a reason to crash the merge-dispatch tick
         # loop with a traceback.
         return PostMergeDispatchResult("already-dispatched", pr_number, detail="lock-contention")
@@ -735,7 +737,4 @@ def dispatch_post_merge_ritual(
             pr_number, short_id="verb", detail=f"cold: {cold_reason}",
         )
     finally:
-        try:
-            claims.release_claim(lock_key, holder, root=canonical)
-        except Exception:  # noqa: BLE001 - TTL-bounded; a failed release self-heals
-            pass
+        flight.release()

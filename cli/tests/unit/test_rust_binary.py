@@ -233,3 +233,51 @@ def test_path_binary_uses_which(monkeypatch, tmp_path) -> None:
     target = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     monkeypatch.setattr(rust_binary.shutil, "which", lambda name: str(target) if name == rust_binary.BINARY_NAME else None)
     assert rust_binary._path_binary() == target
+
+
+def test_verb_call_attaches_returncode(monkeypatch) -> None:
+    """A clean non-zero exit carries its code as a structured field.
+
+    The gh budget's admit gate refuses on a signalled reader (negative code or
+    137) and admits on a clean failure, so the code must be readable as data,
+    not only as prose in the message.
+    """
+    import subprocess
+
+    import pytest
+
+    from fno.rust_binary import VerbUnavailable
+
+    proc = subprocess.CompletedProcess(
+        ["fno-agents", "fleet-incident"], returncode=1, stdout="", stderr="no ledger"
+    )
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: "/dev/null/fno-agents")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: proc)
+    with pytest.raises(VerbUnavailable) as excinfo:
+        rust_binary.verb_call("fleet-incident", {})
+    assert excinfo.value.returncode == 1
+    assert "exited 1" in str(excinfo.value)
+
+
+def test_verb_call_attaches_returncode_with_passthrough_stderr(monkeypatch) -> None:
+    """The passthrough_stderr failure path carries the code too.
+
+    The stream-it-live callers (spawn gates) raise on the same non-zero exit;
+    a consumer discriminating a signal kill must read None only when there
+    truly was no exit, never because the stderr went to the terminal.
+    """
+    import subprocess
+
+    import pytest
+
+    from fno.rust_binary import VerbUnavailable
+
+    proc = subprocess.CompletedProcess(
+        ["fno-agents", "spawn-axes"], returncode=-9, stdout="", stderr=""
+    )
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: "/dev/null/fno-agents")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: proc)
+    with pytest.raises(VerbUnavailable) as excinfo:
+        rust_binary.verb_call("spawn-axes", {}, passthrough_stderr=True)
+    assert excinfo.value.returncode == -9
+    assert "exited -9" in str(excinfo.value)
