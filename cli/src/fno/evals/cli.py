@@ -152,7 +152,7 @@ def run_command(
         if gate.get("error"):
             typer.echo(f"Error: cohort split refused: {gate['error']}", err=True)
             raise typer.Exit(code=2)
-        if rc != 0 or gate.get("ok") is False:
+        if rc != 0 or gate.get("ok") is not True:
             for err in gate.get("errors") or [f"native cohort door failed ({rc})"]:
                 typer.echo(f"Error: cohort split refused: {err}", err=True)
             raise typer.Exit(code=2)
