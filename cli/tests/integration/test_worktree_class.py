@@ -19,7 +19,6 @@ from fno.worktree import (
     WorktreeError,
     WorktreeManager,
     WorktreeDiskPressureError,
-    WorktreeStaleError,
 )
 
 

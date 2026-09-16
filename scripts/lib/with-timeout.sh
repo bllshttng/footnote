@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # with-timeout.sh - the one wall-clock bound for shelling out to a binary from
-# shell. (The Python side has its own in cli/src/fno/context_observation.py,
-# which agrees on the contract: 124, TERM then KILL, by process group.)
+# shell. (The Rust runner bounds its children the same way: TERM then KILL, by
+# process group.)
 #
 # Replaces six hand-rolled "portable timeout" helpers that all preferred GNU
 # coreutils `timeout` and then disagreed on the fallback. Measured against a hung

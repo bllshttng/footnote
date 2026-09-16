@@ -276,7 +276,7 @@ def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
             "--fno-bin", _resolve_fno_binary(),
             "--schedule-days", str(days),
             "--stale-days", str(int(getattr(evals_cfg, "stale_days", 7) or 7)),
-            "--summary-json", json.dumps(evals_health_summary(evals_history(), native_reads=False)),
+            "--summary-json", json.dumps(evals_health_summary(evals_history())),
         ]
         proc = subprocess.run(argv, capture_output=True, text=True, check=False,
                               timeout=max(1.0, seconds_left_fn() or 30.0))
@@ -1503,7 +1503,6 @@ def heal() -> None:
     an unloaded agent and the wedged-job state a plain ``launchctl load``
     cannot fix.
     """
-    from fno import claims
     from fno.claims.io import global_claims_root
     from fno.pr_watch import _install as m
 
@@ -1526,15 +1525,14 @@ def heal() -> None:
         )
         return
 
-    holder = f"pr-watch-heal:{os.getpid()}"
+    from fno.backlog.single_flight import acquire_flight
+
     heal_root = global_claims_root()
-    try:
-        claims.acquire_claim(
-            "pr-watch:heal", holder, ttl_ms=_HEAL_TTL_MS,
-            reason="pr-watch SessionStart self-heal", root=heal_root,
-            pid_provenance=claims.HOLDER_PROCESS,
-        )
-    except claims.CLAIM_UNAVAILABLE:
+    flight = acquire_flight(
+        "pr-watch:heal", scope="pr-watch SessionStart self-heal",
+        name="pr-watch-heal", root=heal_root, ttl_ms=_HEAL_TTL_MS,
+    )
+    if flight is None or flight.held:
         # Someone else is on it, not a reason to abort this SessionStart
         # hook with a traceback.
         typer.echo("pr-watch heal: another session is healing; skipped")
@@ -1552,10 +1550,7 @@ def heal() -> None:
         if rc != 0:
             raise typer.Exit(1)
     finally:
-        try:
-            claims.release_claim("pr-watch:heal", holder, root=heal_root)
-        except Exception:  # noqa: BLE001 - TTL-bounded; a failed release self-recovers
-            pass
+        flight.release()
 
 
 # ---------------------------------------------------------------------------

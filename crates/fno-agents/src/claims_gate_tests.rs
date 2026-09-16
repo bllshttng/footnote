@@ -174,3 +174,55 @@ fn an_unexpired_holder_process_lease_with_a_dead_pid_stays_suspect() {
     );
     assert_eq!(state, ClaimState::Suspect);
 }
+
+fn prov_opts(td: &tempfile::TempDir) -> AcquireOpts {
+    AcquireOpts {
+        root: Some(td.path().to_path_buf()),
+        events_dir: Some(td.path().to_path_buf()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn make_claim_stamps_pid_provenance_by_pid_origin() {
+    let td = tempfile::TempDir::new().unwrap();
+    // A defaulted pid is the claimant itself: the strongest provenance -
+    // but only under a harness that forks per session. The suite's own
+    // ambient harness decides which, so the expectation is derived rather
+    // than hardcoded; hardcoding it makes this test pass under claude and
+    // fail under codex, which is a flake keyed to who ran it.
+    let own = match acquire("session:prov", "pty:me", prov_opts(&td)) {
+        AcquireOutcome::Acquired(r) => r,
+        other => panic!("{other:?}"),
+    };
+    let expected = if pid_dies_with_session(own.harness.as_deref()) {
+        "session-prover"
+    } else {
+        "ambient"
+    };
+    assert_eq!(own.pid_provenance.as_deref(), Some(expected));
+    // An explicitly passed pid is caller-supplied and unverifiable here:
+    // ambient, so the hybrid arm will not extend an expired lease for it.
+    let mut o = prov_opts(&td);
+    o.pid = Some(4242);
+    let foreign = match acquire("session:prov2", "pty:me", o) {
+        AcquireOutcome::Acquired(r) => r,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(foreign.pid_provenance.as_deref(), Some("ambient"));
+}
+
+#[test]
+fn an_explicit_provenance_stamps_the_lease_verbatim() {
+    // A writer that knows its pid holds the whole lease (the flight gate)
+    // passes the stamp through: make_claim must not recompute it.
+    let td = tempfile::TempDir::new().unwrap();
+    let mut o = prov_opts(&td);
+    o.pid = Some(4242);
+    o.pid_provenance = Some(HOLDER_PROCESS.into());
+    let rec = match acquire("session:prov3", "pty:me", o) {
+        AcquireOutcome::Acquired(r) => r,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(rec.pid_provenance.as_deref(), Some(HOLDER_PROCESS));
+}

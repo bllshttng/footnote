@@ -526,37 +526,6 @@ def _host_sources(
     return sources
 
 
-def runtime_native_context_manifest(
-    repo_root: Path,
-    *,
-    harness: str,
-    entry_state: str,
-) -> list[dict]:
-    """Measure Footnote-owned harness-native directives on the runtime path."""
-    manifest = []
-    for source in _host_sources(repo_root, harness, entry_state, 0):
-        measurement = cast(MeasurementKind, source.measurement)
-        if not source.packet_eligible or measurement is not MeasurementKind.DIRECTIVE_BYTES:
-            continue
-        record = _source_record(source)
-        record["status"] = "observed" if source.status == "reachable" else source.status
-        manifest.append(
-            {
-                key: record.get(key)
-                for key in (
-                    "source_id",
-                    "carrier",
-                    "status",
-                    "error",
-                    "bytes",
-                    "estimated_tokens",
-                    "content_hash",
-                )
-            }
-        )
-    return manifest
-
-
 def _load_hook_commands(
     repo_root: Path,
     manifest: Path,
@@ -604,10 +573,48 @@ def _load_hook_commands(
 def _command_path(command: str, repo_root: Path) -> Path | None:
     matches = list(_PLUGIN_PATH_RE.finditer(command))
     for match in reversed(matches):
-        path = repo_root / match.group("path")
-        if path.name != "context-observe-hook.sh":
-            return path
+        return repo_root / match.group("path")
     return None
+
+
+_CONTEXT_RUN_RE = re.compile(r"context-run\.sh\s+(\S+)")
+
+
+def _expand_runner_commands(
+    commands: list[tuple[str, str]],
+    plugin_root: Path,
+    census_source: str,
+) -> list[tuple[str, str]]:
+    """Expand each ``context-run.sh <group>`` command into its declared
+    producer argv from hooks/context-hooks.json. A producer whose
+    ``sources`` list excludes the census's payload source is skipped, the
+    same way matcher sets gate compact-only recorders today."""
+    declaration: dict | None = None
+    declaration_path = plugin_root / "hooks" / "context-hooks.json"
+    expanded: list[tuple[str, str]] = []
+    for command, lifecycle in commands:
+        match = _CONTEXT_RUN_RE.search(command)
+        if not match:
+            expanded.append((command, lifecycle))
+            continue
+        if declaration is None:
+            try:
+                data = json.loads(declaration_path.read_text(encoding="utf-8"))
+                declaration = data["groups"]
+            except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError):
+                declaration = {}
+        group = declaration.get(match.group(1))
+        if not isinstance(group, dict):
+            expanded.append((command, lifecycle))
+            continue
+        for producer in group.get("producers") or []:
+            sources = producer.get("sources") or []
+            if sources and census_source not in sources:
+                continue
+            argv = [str(item) for item in producer.get("argv") or []]
+            if argv:
+                expanded.append((" ".join(argv), lifecycle))
+    return expanded
 
 
 def _logical_id(path: Path) -> str:
@@ -738,12 +745,16 @@ def _discover_cell_sources(
     # group; a set restricts to SessionStart groups whose "matcher" is in it.
     # Post-compaction context rides different events per harness - PostCompact on
     # Codex, SessionStart(source=compact) on Claude - so the post_compact census
-    # enumerates both carriers. Startup enumerates only matcher="" recorders so a
-    # compact-only recorder is not miscounted as a startup one.
+    # enumerates both carriers. Claude's matcher="" group fires on every source
+    # (its runner filters by producer `sources`), so the claude post_compact
+    # census must enumerate it too and let the expansion pick the producers a
+    # compact payload actually runs. Startup enumerates only matcher="" and
+    # "<entry>" recorders so a compact-only recorder is not miscounted.
     if entry_state == "post_compact":
+        claude_matchers = {"", "compact"} if harness == "claude" else {"compact"}
         specs = [
             ("PostCompact", None, "post_compact"),
-            ("SessionStart", {"compact"}, "session_start"),
+            ("SessionStart", claude_matchers, "session_start"),
         ]
     else:
         specs = [("SessionStart", {"", entry_state}, "session_start")]
@@ -811,6 +822,11 @@ def _discover_cell_sources(
                         )
                     )
                     ordinal += 1
+
+    commands = _expand_runner_commands(
+        commands, plugin_root,
+        "compact" if entry_state == "post_compact" else entry_state,
+    )
 
     if manifest_error:
         sources.append(

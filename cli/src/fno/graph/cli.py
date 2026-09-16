@@ -290,12 +290,6 @@ def _archive_path() -> Path:
     return GRAPH_ARCHIVE_JSON
 
 
-def _briefs_dir() -> Path:
-    from fno.graph._constants import BRIEFS_DIR
-
-    return BRIEFS_DIR
-
-
 # -- relatedness sidecar (`fno backlog relatedness build|get`) --
 # A node-to-node relatedness map read by 's offer path and /triage.
 # Sidecar, not a graph mutation, so `build` writes unconditionally.
@@ -5090,14 +5084,14 @@ def cmd_get(
 
     # Read-through fallback: a node the sweep archived still resolves here
     # (read-only). Mutating verbs stay working-graph-only and error instead.
-    from fno.graph.store import read_archive_entries, resolve_node_with_archive
+    from fno.graph.store import read_archive_entries, resolve_node_with_archive, served_store_path
 
     matched_entry = resolve_node_with_archive(id, read_archive_entries())
     if matched_entry is not None:
         _echo_node_entry(matched_entry, field, grouped)
         return
 
-    typer.echo(f"No node matching '{id}' (id/slug/bare-hex) in {_graph_path()}", err=True)
+    typer.echo(f"No node matching '{id}' (id/slug/bare-hex) in {served_store_path(_graph_path())}", err=True)
     raise typer.Exit(code=1)
 
 
@@ -5328,7 +5322,8 @@ def cmd_provenance(
     entries = _resolve_entries_or_exit(id)
     match = resolve_node(id, entries)
     if match.kind != "exact":
-        typer.echo(f"No node matching '{id}' in {_graph_path()}", err=True)
+        from fno.graph.store import served_store_path
+        typer.echo(f"No node matching '{id}' in {served_store_path(_graph_path())}", err=True)
         raise typer.Exit(code=1)
 
     e = match.candidates[0]

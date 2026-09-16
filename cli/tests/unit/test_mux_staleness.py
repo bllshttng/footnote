@@ -61,35 +61,8 @@ def test_stale_empty_on_error_or_bad_json(monkeypatch, tmp_path):
 
 
 def test_live_mux_sessions_parses_live_only(monkeypatch, tmp_path):
-    binary = tmp_path / "fno"
-    binary.write_text("x")
-    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: binary)
-
-    def fake_run(cmd, **kw):
-        return SimpleNamespace(
-            returncode=0,
-            stdout='[{"session":"a","state":"live"},'
-            '{"session":"b","state":"stale"},'
-            '{"session":"c","state":"live"}]',
-        )
-
-    assert update._live_mux_sessions(runner=fake_run) == ["a", "c"]
-
-
-def test_live_mux_sessions_empty_on_error_or_bad_json(monkeypatch, tmp_path):
-    binary = tmp_path / "fno"
-    binary.write_text("x")
-    monkeypatch.setattr(update, "_cargo_installed_mux", lambda: binary)
-
-    assert (
-        update._live_mux_sessions(
-            runner=lambda cmd, **kw: SimpleNamespace(returncode=1, stdout="")
-        )
-        == []
-    )
-    assert (
-        update._live_mux_sessions(
-            runner=lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="not json")
-        )
-        == []
-    )
+    """Retired with the dead helper it pinned; the stale_mux_servers tests
+    above keep covering the shared ls --json error shapes."""
+    assert update.stale_mux_servers(
+        runner=lambda cmd, **kw: SimpleNamespace(returncode=0, stdout="not json")
+    ) == []
