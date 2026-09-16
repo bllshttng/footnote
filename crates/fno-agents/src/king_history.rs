@@ -756,6 +756,21 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     let (compactions, compactions_source, compactions_error) =
         compaction_reading(&manifest, &harness, readings.compactions);
     readings.compactions = compactions;
+    let term_transcript = if harness == "claude"
+        && !harness_session_id.is_empty()
+        && manifest
+            .term
+            .as_deref()
+            .is_some_and(|s| s.trim().starts_with("compactions:"))
+    {
+        crate::claude_drive::find_transcript_in(
+            &crate::claude_drive::claude_projects_dir(),
+            &harness_session_id,
+        )
+    } else {
+        None
+    };
+    let term_reading = crate::king_term::reading(&manifest, now, term_transcript.as_deref());
     readings.compactions_measurable = !harness_session_id.is_empty();
     readings.inherited_undelivered = inputs.inherited_undelivered;
     readings.inherited_closed_in_window = inputs.inherited_closed_in_window;
@@ -787,6 +802,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
             "value": b.value,
             "source": b.source,
         })),
+        "term": term_reading_payload(&term_reading),
         "manifest": {
             "path": manifest_path.display().to_string(),
             "fno_id": manifest.fno_id,
@@ -880,7 +896,50 @@ fn render_verdict(payload: &Value) -> String {
     if let Some(error) = payload["compactions_error"].as_str() {
         lines.push(format!("compactions read: {error}"));
     }
+    lines.push(render_term_line(&payload["term"]));
     lines.join("\n")
+}
+
+/// JSON shape of the verdict's `term` field: the crown's declared or default
+/// spec, whether a king declared it, and the reading's state, evidence only -
+/// a `Reached` term does not change the `Verdict` enum, the Stop hook gate
+/// does the forcing.
+fn term_reading_payload(reading: &crate::king_term::TermReading) -> Value {
+    let (used, of, unreadable_reason) = match &reading.state {
+        crate::king_term::TermState::Within { used, of }
+        | crate::king_term::TermState::Reached { used, of } => {
+            (Some(used.clone()), Some(of.clone()), None)
+        }
+        crate::king_term::TermState::Unreadable(why) => (None, None, Some(why.clone())),
+    };
+    json!({
+        "spec": reading.spec,
+        "declared": reading.declared,
+        "state": crate::king_term::state_word(&reading.state),
+        "used": used,
+        "of": of,
+        "unreadable_reason": unreadable_reason,
+    })
+}
+
+fn render_term_line(term: &Value) -> String {
+    let spec = term["spec"].as_str().unwrap_or("");
+    let default_note = if term["declared"].as_bool().unwrap_or(true) {
+        ""
+    } else {
+        " (default)"
+    };
+    match term["state"].as_str().unwrap_or("") {
+        "unreadable" => format!(
+            "term: {spec}{default_note} unreadable: {}",
+            term["unreadable_reason"].as_str().unwrap_or("unknown")
+        ),
+        state => format!(
+            "term: {spec}{default_note} {} of {}, {state}",
+            term["used"].as_str().unwrap_or("?"),
+            term["of"].as_str().unwrap_or("?"),
+        ),
+    }
 }
 
 fn checkins_stale(
