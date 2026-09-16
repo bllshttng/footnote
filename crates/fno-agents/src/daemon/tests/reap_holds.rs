@@ -1168,6 +1168,65 @@ fn an_adopted_corpse_absent_from_a_known_roster_retires() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+/// The roster sweep's second tick (x-6b61 AC2-HP): once the roster sweep has
+/// removed the session, the adopted row is absent from a known roster that
+/// still lists OTHER sessions - positive absence, not an empty read - and
+/// the registry sweep retires it through `origin_corpse`. `kept_not_spawn`
+/// does not name it.
+#[test]
+fn an_adopted_row_retires_once_the_roster_sweep_removed_its_session() {
+    let home = tmp_home("gc-corpse-second-tick");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = claude_worker_row("x42-row", "x42row00");
+        row.origin = Some("adopted".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+
+    let mut graph = graph_read(
+        &[("x42row00-1111-2222-3333-444444444444", "NM", "done")],
+        &[],
+    )
+    .unwrap();
+    graph
+        .pr_state
+        .insert("NM".into(), (Some("merged".into()), 0, 0));
+    // The roster the sweep would have left behind: one unrelated live
+    // session, the adopted row's session gone - the roster sweep's removal.
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("otherw", Some("idle")),
+    ]);
+
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        Some(graph),
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| true,
+    );
+
+    assert_eq!(
+        summary.retired.len(),
+        1,
+        "retired: {:?}, kept_not_spawn: {:?}",
+        summary.retired,
+        summary.kept_not_spawn
+    );
+    assert_eq!(summary.retired[0].0, "x42row00");
+    assert!(
+        summary.kept_not_spawn.is_empty(),
+        "{:?}",
+        summary.kept_not_spawn
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 /// The failed read: the same corpse row with a snapshot that reads unknown
 /// keeps under `not a spawn row` - an unread instrument is never absence.
 #[test]

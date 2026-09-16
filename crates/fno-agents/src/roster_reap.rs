@@ -9,9 +9,11 @@
 //! are positive reasons to remove, never an absence.
 //!
 //! The gates, in order. The enumeration must be trusted: a snapshot that
-//! failed outright keeps everything. No fno registry row may name the row,
-//! by session id, short id, or name: an owned row is the registry sweep's
-//! business, and this sweep keeps it with that reason. The shared
+//! failed outright keeps everything. No fno registry row that owns its
+//! session may name the row, by session id, short id, or name: an owned
+//! row is the registry sweep's business, and this sweep keeps it with that
+//! reason (an adopted, uncrowned row owns nothing: see the scope rule
+//! below). The shared
 //! provenance verdict must resolve a provenance and read the node done,
 //! with the PR confirm passing - the same function the registry sweep runs,
 //! so the two sweeps cannot disagree about which rows are dead. The
@@ -27,13 +29,23 @@
 //! The scope (`agents.reap.roster_scope`) names the population that may
 //! retire, as an operator setting: `off` retires nothing, `provenanced`
 //! (the default) is the chain above, `all` widens to rows fno itself
-//! spawned (sessions or registry provenance) whose work is open. One rule
-//! sits under every value: a row that resolves to no fno node is never
-//! retirable at any scope. An operator session names no fno node, so a
-//! hand-started session is unreachable by construction, not by default
-//! value, and a wrong config cannot reach it.
+//! spawned (sessions or registry provenance) whose work is open. The rule
+//! under every value is positive: an unowned session retires only on an
+//! fno-ownership marker - provenance through the sessions join or the
+//! registry's stored node field, or a reap receipt an earlier retirement
+//! staged for the same session (the leaked-retirement class: the sweep
+//! that leaked a session is the sweep that staged its receipt). A name
+//! pattern or a transcript mention is exactly how a hand-started session
+//! acquires a phantom node, so weak provenance keeps. An adopted registry
+//! row is a healer's or `fno agents adopt`'s note about a session, not
+//! work fno itself spawned, so it does not shield its listed session; when
+//! this sweep removes that session, the registry sweep's `origin_corpse`
+//! exit retires the row on the next pass. A session with no marker at all
+//! is unreachable by construction, not by default value, and a wrong
+//! config cannot reach it.
 
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::claude_roster::{ClaudeAgentRow, ClaudeAgentsSnapshot};
@@ -155,7 +167,7 @@ pub(crate) fn run(
     registry: &[RegistryEntry],
     read_graph: &dyn Fn() -> Option<GraphRead>,
     transcripts: &dyn Fn(&RegistryEntry) -> Option<Vec<PathBuf>>,
-    age: &dyn Fn(&RegistryEntry) -> Option<i64>,
+    age_many: &dyn Fn(&[&RegistryEntry]) -> HashMap<String, Option<i64>>,
     _now: i64,
     remove: &dyn Fn(&RegistryEntry) -> CascadeOutcome,
 ) -> RosterReapSummary {
@@ -196,8 +208,16 @@ pub(crate) fn run(
     }
     let rows: Vec<ClaudeAgentRow> = unique;
     let graph = read_graph();
+    // An adopted row is a fact a healer or `fno agents adopt` wrote ABOUT a
+    // session, not work fno itself spawned: the registry sweep keeps the row
+    // while the session is listed, so here it stops shielding and this
+    // sweep's own gates judge the session. Removing the session is the
+    // first tick; the registry sweep's `origin_corpse` exit retires the row
+    // on the next pass. Every other entry still shields, including an
+    // entry with no origin.
     let owned: BTreeSet<String> = registry
         .iter()
+        .filter(|e| !(e.origin.as_deref() == Some("adopted") && e.crown_level.is_none()))
         .flat_map(|e| {
             e.aliases
                 .iter()
@@ -209,6 +229,17 @@ pub(crate) fn run(
                 .collect::<Vec<String>>()
         })
         .collect();
+    // Pass one: every gate up to the quiet gate, judged per row; the rows
+    // that survive it become the batch's age candidates.
+    struct Candidate {
+        entry: RegistryEntry,
+        ident: String,
+        node: Option<String>,
+        basis: String,
+        terminal: Option<String>,
+        pid: Option<u32>,
+    }
+    let mut candidates: Vec<Candidate> = Vec::new();
     for row in &rows {
         let ident = row
             .session_id
@@ -291,6 +322,22 @@ pub(crate) fn run(
             .source
             .map(|s| s.as_str())
             .unwrap_or("sessions");
+        // The fno-ownership marker: provenance through the sessions join or
+        // the registry's stored node field - the two joins fno writes - or
+        // a reap receipt an earlier retirement staged for this session (the
+        // same build_reap_receipt plus path-exists pair `write_receipt`
+        // uses). A name pattern or a transcript mention is exactly how a
+        // hand-started session acquires a phantom node, so weak provenance
+        // is not a marker. Checked only where a retirement is possible.
+        let strong_source = matches!(
+            verdict.route.source,
+            Some(crate::node_route::NodeSource::Sessions)
+                | Some(crate::node_route::NodeSource::Registry)
+        );
+        let receipt_marker = || {
+            crate::receipt::build_reap_receipt(&entry, None)
+                .is_ok_and(|r| crate::receipt::reap_receipt_path(home, &r).exists())
+        };
         // the terminal read hoisted out of the Open arm. Every row
         // here is claude by construction, so `row.state` is in hand, and
         // recency must be able to yield to it exactly as the registry
@@ -322,15 +369,21 @@ pub(crate) fn run(
         };
         let basis: String = match &verdict.work {
             WorkState::AllDone { nodes } => {
-                format!("every named node done: {} (via {via})", nodes.join(", "),)
+                if strong_source || receipt_marker() {
+                    format!("every named node done: {} (via {via})", nodes.join(", "),)
+                } else {
+                    summary.kept.push(judgement(
+                        &ident,
+                        node,
+                        format!("no fno ownership marker (via {via})"),
+                        false,
+                    ));
+                    continue;
+                }
             }
             WorkState::Open { node: n, status } => {
                 let scope_all_strong = scope == crate::agents_config::RosterScope::All
-                    && matches!(
-                        verdict.route.source,
-                        Some(crate::node_route::NodeSource::Sessions)
-                            | Some(crate::node_route::NodeSource::Registry)
-                    );
+                    && (strong_source || receipt_marker());
                 // The open-PR keep at scope all, asked through the one
                 // predicate the registry sweep runs: the graph record names
                 // the candidate and both sweeps read the same answer. No
@@ -382,10 +435,11 @@ pub(crate) fn run(
             WorkState::NoProvenance => {
                 // The registry sweep's decision with the roster's own
                 // witness: a harness state of `done` is the row's own
-                // finished report, so it falls to the quiet gate every
-                // other state takes below. `stopped` and `failed` are not
-                // that report, and a row still working keeps.
-                if terminal == Some("done") {
+                // finished report, so with a receipt marker it falls to the
+                // quiet gate every other state takes below. Without the
+                // marker - and for `stopped` and `failed`, which are not
+                // that report - the row keeps.
+                if terminal == Some("done") && receipt_marker() {
                     format!(
                         "no provenance; harness state {state} is the row's own finished report",
                         state = terminal.unwrap_or_default()
@@ -401,16 +455,31 @@ pub(crate) fn run(
                 }
             }
         };
-        // The quiet gate: an unresolved transcript is never quiet, and the
-        // age rides the reason so a keep is auditable. change 8: a
-        // provably dead pid (ESRCH) overrides recency here too, the same
-        // override the registry sweep makes in grace_gate - recency without
-        // a living writer is not liveness.: a terminal harness state
-        // overrides it the same way. The age rides the injected seam
-        // (; production wires the shared probe): the newest timestamped
-        // entry, not a file stat.
-        let age = age(&entry);
-        let pid_gone = row.pid.is_some_and(crate::daemon::pid_is_gone);
+        candidates.push(Candidate {
+            entry,
+            ident,
+            node,
+            basis,
+            terminal: terminal.map(str::to_string),
+            pid: row.pid,
+        });
+    }
+
+    // Pass two: ONE batched age call answers every candidate, keyed by
+    // `row_handle` - the exact seam `gc_sweep::run` takes, whose production
+    // default pages 24 handles per truth probe instead of paying one
+    // subprocess per row. Judgements push in roster order.
+    let refs: Vec<&RegistryEntry> = candidates.iter().map(|c| &c.entry).collect();
+    let ages = age_many(&refs);
+    for c in &candidates {
+        let ident = c.ident.clone();
+        let node = c.node.clone();
+        let basis = c.basis.clone();
+        let age = ages
+            .get(&crate::gc::row_handle(&c.entry))
+            .copied()
+            .flatten();
+        let pid_gone = c.pid.is_some_and(crate::daemon::pid_is_gone);
         match age {
             None => summary.kept.push(judgement(
                 &ident,
@@ -418,7 +487,7 @@ pub(crate) fn run(
                 "transcript unresolved".into(),
                 false,
             )),
-            Some(age) if age <= grace_secs && !pid_gone && terminal.is_none() => {
+            Some(age) if age <= grace_secs && !pid_gone && c.terminal.is_none() => {
                 summary.kept.push(judgement(
                     &ident,
                     node,
@@ -429,26 +498,27 @@ pub(crate) fn run(
             Some(age) => {
                 // Name the early fire: a retirement INSIDE the grace window
                 // went because the harness says the session finished, not
-                // because the transcript aged out.
-                let basis = if terminal.is_some() && age <= grace_secs {
+                // because the transcript aged out. A dead pid and a terminal
+                // harness state are the two early-fire witnesses.
+                let basis = if c.terminal.is_some() && age <= grace_secs {
                     format!(
                         "{basis}; session terminal: harness state {}",
-                        terminal.unwrap_or_default()
+                        c.terminal.as_deref().unwrap_or_default()
                     )
                 } else {
                     basis
                 };
                 let basis = if pid_gone {
-                    format!("{basis}; pid {} is gone", row.pid.unwrap_or(0))
+                    format!("{basis}; pid {} is gone", c.pid.unwrap_or(0))
                 } else {
                     basis
                 };
                 if dry_run {
                     summary.retired.push(judgement(&ident, node, basis, true));
                 } else {
-                    let outcome = remove(&entry);
+                    let outcome = remove(&c.entry);
                     if outcome.satisfies_applied() {
-                        write_receipt(home, &entry, &outcome, node.as_deref(), &basis);
+                        write_receipt(home, &c.entry, &outcome, node.as_deref(), &basis);
                         summary.retired.push(judgement(&ident, node, basis, true));
                     } else {
                         // Name WHY the removal did not confirm, not just the
@@ -539,7 +609,7 @@ pub fn roster_reap(
         &registry.entries,
         &|| crate::gc_sweep::read_graph_entries(home),
         &|e| store.borrow_mut().matches(e),
-        &crate::gc::probe_row_age,
+        &crate::gc::probe_entry_ages,
         crate::daemon::now_epoch_secs(),
         &crate::gc_native::apply_active_surface_removal,
     )
@@ -577,6 +647,21 @@ mod tests {
             pr_state: HashMap::from([(node.to_string(), (Some("merged".into()), 0, 0))]),
             ..Default::default()
         }
+    }
+
+    /// `graph_done` with the sessions join naming the node: the session's
+    /// provenance resolves through NodeSource::Sessions, an ownership
+    /// marker.
+    fn graph_done_via_sessions(node: &str, sids: &[&str]) -> GraphRead {
+        let mut g = graph_done(node);
+        for sid in sids {
+            g.index.insert(
+                sid.to_string(),
+                vec![(node.to_string(), "done".to_string())],
+            );
+        }
+        g.work_index = g.index.clone();
+        g
     }
 
     fn quiet_transcript(dir: &std::path::Path, sid: &str) -> PathBuf {
@@ -624,11 +709,14 @@ mod tests {
         crate::paths::AgentsHome::at(std::path::Path::new("/nonexistent-roster-reap"))
     }
 
-    // The whole positive chain: unmatched, resolved by name, done, merged,
-    // quiet -> would retire with the basis naming the route.
+    // AC4-HP: an unowned session whose provenance resolves only through the
+    // row NAME (done, merged, quiet) keeps: a name pattern is exactly how a
+    // hand-started session acquires a phantom node, so without an ownership
+    // marker - no sessions join, no receipt - the keep names the missing
+    // marker.
     #[test]
-    fn unmatched_done_quiet_row_would_retire_via_name() {
-        let dir = tmpdir("retire");
+    fn an_unowned_session_with_weak_or_no_provenance_keeps_without_a_marker() {
+        let dir = tmpdir("marker-weak");
         let transcript = quiet_transcript(&dir, "sid-1");
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
         let summary = run(
@@ -640,14 +728,78 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
-        assert_eq!(summary.retired.len(), 1, "{:?}", summary.kept);
-        assert_eq!(summary.retired[0].node.as_deref(), Some("x-aaaa"));
+        assert!(summary.retired.is_empty(), "{summary:?}");
         assert!(
-            summary.retired[0].reason.contains("via name"),
+            summary.kept[0]
+                .reason
+                .contains("no fno ownership marker (via name)"),
+            "{summary:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // AC5-HP, the leaked-retirement class: a session with NO provenance in
+    // harness state done, quiet past the grace, retires on the receipt an
+    // earlier retirement staged for it.
+    #[test]
+    fn a_done_session_with_a_receipt_on_disk_retires() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tmpdir("marker-receipt");
+        let home = crate::paths::AgentsHome::at(dir.join("home"));
+        home.ensure_root().unwrap();
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("hand-typed-name"))];
+        // Stage the receipt under a hermetic HOME: the receipt builder reads
+        // the harness store index for the resume locator.
+        let store_home = tempfile::tempdir().unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", store_home.path());
+        let mut entry = RegistryEntry::new(
+            Some("sid-1".into()),
+            crate::state::Lineage::unproven("test receipt staging"),
+        );
+        entry.harness = Some("claude".into());
+        entry.short_id = "ab12cd34".into();
+        let receipt = crate::receipt::build_reap_receipt(&entry, None).expect("receipt builds");
+        crate::receipt::write_reap_receipt(&home, &receipt).unwrap();
+        let summary = run(
+            &home,
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(GraphRead::default()),
+            &|_e| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        match &old_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        assert!(
+            summary.retired[0]
+                .reason
+                .contains("no provenance; harness state done"),
             "{summary:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -669,12 +821,139 @@ mod tests {
             &[entry],
             &|| Some(graph_done("x-aaaa")),
             &|_| None,
-            &|_| None,
+            &|_| HashMap::new(),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
         assert_eq!(summary.kept_owned, 1);
         assert!(summary.retired.is_empty());
+    }
+
+    // AC1-HP: an adopted, uncrowned registry row does NOT shield its listed
+    // session. The session still needs its own gates - marker, quiet - but
+    // the adopted keep is no longer one of them.
+    #[test]
+    fn an_adopted_row_does_not_shield_its_listed_session() {
+        let dir = tmpdir("adopted-unshield");
+        let transcript = quiet_transcript(&dir, "sid-1");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let mut entry = RegistryEntry::default();
+        entry.name = "adopted-worker".into();
+        entry.short_id = "adopted-worker".into();
+        entry.origin = Some("adopted".into());
+        entry.harness = Some("claude".into());
+        entry.harness_session_id = Some("sid-1".into());
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[entry],
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
+            &|_e| Some(vec![transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.kept_owned, 0, "{summary:?}");
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // AC3-ERR: spawn, operator, crowned, and unstamped entries all still
+    // shield their listed session; only the adopted-uncrowned carve-out
+    // stops shielding.
+    #[test]
+    fn a_spawn_operator_crowned_or_unstamped_row_still_shields() {
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let mut spawn = RegistryEntry::default();
+        spawn.name = "w-spawn".into();
+        spawn.origin = Some("spawn".into());
+        spawn.harness_session_id = Some("sid-1".into());
+        let mut operator = RegistryEntry::default();
+        operator.name = "w-operator".into();
+        operator.origin = Some("operator".into());
+        operator.harness_session_id = Some("sid-1".into());
+        let mut crowned = RegistryEntry::default();
+        crowned.name = "w-crowned".into();
+        crowned.origin = Some("adopted".into());
+        crowned.crown_level = Some(1);
+        crowned.harness_session_id = Some("sid-1".into());
+        let mut unstamped = RegistryEntry::default();
+        unstamped.name = "w-unstamped".into();
+        unstamped.harness_session_id = Some("sid-1".into());
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::All,
+            true,
+            &roster(rows),
+            &[spawn, operator, crowned, unstamped],
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
+            &|_| None,
+            &|_| HashMap::new(),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert_eq!(summary.kept_owned, 1, "{summary:?}");
+        assert!(summary.retired.is_empty(), "{summary:?}");
+    }
+
+    // AC6-HP: the age seam is called ONCE with every candidate, and a
+    // candidate the batch does not answer keeps as `transcript unresolved`.
+    #[test]
+    fn the_age_seam_is_called_once_for_every_candidate() {
+        let dir = tmpdir("age-batch");
+        let transcript = quiet_transcript(&dir, "sid-a");
+        let rows = vec![
+            row("aaaa1111", Some("sid-a"), Some("target-x-aaaa-worker-a")),
+            row("bbbb2222", Some("sid-b"), Some("target-x-aaaa-worker-b")),
+        ];
+        let calls = std::cell::RefCell::new(0u32);
+        let summary = {
+            let calls_ref = &calls;
+            run(
+                &no_home(),
+                900,
+                RosterScope::Provenanced,
+                true,
+                &roster(rows),
+                &[],
+                &|| Some(graph_done_via_sessions("x-aaaa", &["sid-a", "sid-b"])),
+                &|_e| Some(vec![transcript.clone()]),
+                &move |entries: &[&RegistryEntry]| {
+                    *calls_ref.borrow_mut() += 1;
+                    entries
+                        .iter()
+                        .map(|e| {
+                            let age = if crate::gc::row_handle(e) == "aaaa1111" {
+                                Some(10_000i64)
+                            } else {
+                                None
+                            };
+                            (crate::gc::row_handle(e), age)
+                        })
+                        .collect::<HashMap<_, _>>()
+                },
+                crate::daemon::now_epoch_secs(),
+                &|_| CascadeOutcome::NotApplicable,
+            )
+        };
+        assert_eq!(*calls.borrow(), 1, "one batched call, not one per row");
+        assert_eq!(summary.retired.len(), 1, "{summary:?}");
+        let unresolved = summary
+            .kept
+            .iter()
+            .find(|j| j.reason == "transcript unresolved")
+            .expect("the unanswered candidate keeps");
+        assert_eq!(unresolved.short_id, "sid-b", "{summary:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // a terminal harness state releases the open-work keep inside
@@ -703,7 +982,12 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -748,7 +1032,12 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -781,7 +1070,12 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -813,7 +1107,7 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_| None,
-            &|_| None,
+            &|_| HashMap::new(),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -822,9 +1116,8 @@ mod tests {
     }
 
     // No provenance keeps the row: the positive reason is named, never an
-    // absence dressed as a removal. The row's harness state reads done, so
-    // the fall-through lands at the quiet gate, whose unresolved arm names
-    // the real reason the row cannot retire.
+    // absence dressed as a removal. The row's harness state reads done, but
+    // with no receipt marker the done release never reaches the quiet gate.
     #[test]
     fn unresolved_provenance_keeps_the_row() {
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("hand-typed-name"))];
@@ -837,13 +1130,13 @@ mod tests {
             &[],
             &|| Some(GraphRead::default()),
             &|_| None,
-            &|_| None,
+            &|_| HashMap::new(),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
         assert!(summary.retired.is_empty());
         assert!(
-            summary.kept[0].reason.contains("transcript unresolved"),
+            summary.kept[0].reason.contains("no provenance"),
             "{summary:?}"
         );
     }
@@ -866,9 +1159,14 @@ mod tests {
             true,
             &roster(rows),
             &[],
-            &|| Some(graph_done("x-aaaa")),
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -894,7 +1192,7 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_| None,
-            &|_| None,
+            &|_| HashMap::new(),
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -915,9 +1213,14 @@ mod tests {
             false,
             &roster(rows),
             &[],
-            &|| Some(graph_done("x-aaaa")),
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Failed("rm exited 3".into()),
         );
@@ -944,9 +1247,14 @@ mod tests {
             false,
             &roster(rows),
             &[],
-            &|| Some(graph_done("x-aaaa")),
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-event"])),
             &|_| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Removed,
         );
@@ -984,9 +1292,14 @@ mod tests {
             false,
             &roster(rows),
             &[],
-            &|| Some(graph_done("x-aaaa")),
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-refused"])),
             &|_| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Failed("injected refusal".into()),
         );
@@ -1039,9 +1352,22 @@ mod tests {
             false,
             &roster(vec![present, absent]),
             &[],
-            &|| Some(graph_done("x-aaaa")),
+            &|| {
+                Some(graph_done_via_sessions(
+                    "x-aaaa",
+                    &[
+                        "present-1111-2222-3333-444444444444",
+                        "absent-1111-2222-3333-444444444444",
+                    ],
+                ))
+            },
             &|_| Some(vec![staged.clone()]),
-            &|_e| Some(10_000i64),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), Some(10_000i64)))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::Removed,
         );
@@ -1115,9 +1441,14 @@ mod tests {
             true,
             &roster(rows),
             &[],
-            &|| Some(graph_done("x-aaaa")),
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1150,7 +1481,7 @@ mod tests {
                 &[],
                 &|| Some(GraphRead::default()),
                 &|_| None,
-                &|_| None,
+                &|_| HashMap::new(),
                 crate::daemon::now_epoch_secs(),
                 &|_| CascadeOutcome::NotApplicable,
             );
@@ -1181,9 +1512,14 @@ mod tests {
             true,
             &roster(rows),
             &[],
-            &|| Some(graph_done("x-aaaa")),
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1213,16 +1549,24 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
         assert!(at_all.retired.is_empty(), "{at_all:?}");
         assert!(at_all.kept[0].reason.contains("open work"), "{at_all:?}");
-        // The same row retires at the default too - done work needs no
-        // spawn provenance beyond the cascade - so this is `all`-only
-        // slack, not a default change.
+        // The same row retires at the default too: done work retires on the
+        // sessions-join marker, so the only `all`-only slack is the open
+        // work above.
         g.statuses.insert("x-aaaa".into(), "done".into());
+        g.index
+            .insert("sid-1".into(), vec![("x-aaaa".into(), "done".into())]);
+        g.work_index = g.index.clone();
         let at_default = run(
             &no_home(),
             900,
@@ -1232,7 +1576,12 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1270,7 +1619,12 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1293,7 +1647,12 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1320,7 +1679,12 @@ mod tests {
             &[],
             &|| Some(graph_done("x-aaaa")),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1353,7 +1717,12 @@ mod tests {
             &[],
             &|| Some(g.clone()),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1389,9 +1758,14 @@ mod tests {
             true,
             &roster(rows),
             &[],
-            &|| Some(graph_done("x-aaaa")),
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
@@ -1416,9 +1790,14 @@ mod tests {
             true,
             &roster(rows),
             &[],
-            &|| Some(graph_done("x-aaaa")),
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
             &|_e| Some(vec![transcript.clone()]),
-            &|_e| mtime_age(&[transcript.clone()]),
+            &|entries| {
+                entries
+                    .iter()
+                    .map(|e| (crate::gc::row_handle(e), mtime_age(&[transcript.clone()])))
+                    .collect::<HashMap<_, _>>()
+            },
             crate::daemon::now_epoch_secs(),
             &|_| CascadeOutcome::NotApplicable,
         );
