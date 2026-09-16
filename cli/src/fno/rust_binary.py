@@ -225,6 +225,12 @@ def find_dev_binary() -> Optional[Path]:
 class VerbUnavailable(RuntimeError):
     """The fno-agents binary is missing, failed, or answered malformed JSON."""
 
+    # Structured exit code for the non-zero-exit failure; None on the other
+    # paths (binary missing, OSError/timeout, bad JSON). The gh budget's admit
+    # gate reads it: a negative code or 137 is a signalled reader, which is a
+    # machine in distress, not a ledger that cannot answer.
+    returncode: Optional[int] = None
+
 
 def verb_call(
     verb: str,
@@ -278,9 +284,11 @@ def verb_call(
                 f"fno-agents {verb} exited {proc.returncode}"
                 " (its stderr went to your terminal)"
             )
-        raise unavailable(
+        raised = unavailable(
             f"fno-agents {verb} exited {proc.returncode}: {proc.stderr.strip()[:200]}"
         )
+        raised.returncode = proc.returncode
+        raise raised
     try:
         return json.loads(proc.stdout)
     except ValueError as exc:
