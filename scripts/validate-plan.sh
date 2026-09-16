@@ -143,6 +143,35 @@ _plan_created_date() {
     printf '%s' "$created"
 }
 
+# The plan's node id, from the frontmatter's node: then claims: key - the
+# same order _plan_link_id resolves. Empty when neither names an id.
+_plan_node_id() {
+    local file="$1" line=""
+    line=$(awk '
+        /^---/ { c++; if (c==2) exit; next }
+        c==1 && /^(node|claims):/ {
+            sub(/^(node|claims):[[:space:]]*/, "")
+            gsub(/["'"'"']/, "")
+            print
+            exit
+        }
+    ' "$file")
+    printf '%s' "$line"
+}
+
+# The decision ids the plan's frontmatter acknowledges, one per line. The
+# stage-law check reads the same set the node-decision rows check against.
+_acknowledged_ids() {
+    awk '
+        /^---/ { c++; if (c==2) exit; next }
+        c==1 && /decision_id:/ {
+            sub(/.*decision_id:[[:space:]]*/, "")
+            gsub(/["'"'"']/, "")
+            print
+        }
+    ' "$1"
+}
+
 # Echo the fno-agents binary the Rust-backed checks shell out to, resolved
 # with the stop hook's order: an explicit executable $FNO_AGENTS_BIN, a build
 # under the source root, then PATH. Empty means no binary: callers warn NOT
@@ -1212,6 +1241,63 @@ PYEOF
         done
     fi
 
+    # Stage-matched laws: the node's own rulings are the rows above; laws the
+    # blueprint STAGE block lists (node id, epic id, project slug, or stage
+    # keyword) need the same entry. Graduated on this check's ship date:
+    # plans created before it could not have read the block; same-day and
+    # later plans must acknowledge what it lists.
+    local stage_law_gate_date="2026-09-16"
+    local stage_node
+    stage_node=$(_plan_node_id "$file")
+    if [[ "$stage_node" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]]; then
+        local stage_bin
+        stage_bin=$(resolve_agents_bin)
+        if [[ -z "$stage_bin" ]]; then
+            warn "$label: stage-law check NOT CHECKED (no fno-agents binary) - not a pass"
+        else
+            local stage_out
+            stage_out=$(printf '{"mode":"stage","hook":{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"fno:blueprint","args":"%s"}}}' "$stage_node" \
+                | "$stage_bin" law-match 2>/dev/null) || stage_out=""
+            if [[ -z "$stage_out" ]]; then
+                warn "$label: stage-law check NOT CHECKED (fno-agents law-match returned nothing) - not a pass"
+            else
+                # The block rides one JSON string: cut additionalContext,
+                # split its escaped newlines, read `- <id> (<subject>):`.
+                local -a stage_laws=()
+                local s_line
+                while IFS= read -r s_line; do
+                    if [[ "$s_line" =~ ^-[[:space:]](d-[0-9a-f]{8})[[:space:]]\((.+)\): ]]; then
+                        stage_laws+=("${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}")
+                    fi
+                done < <(printf '%s' "$stage_out" \
+                    | sed -n 's/.*"additionalContext":"//p' \
+                    | sed 's/\\n/\n/g')
+                local acked_list="" acked_id
+                while IFS= read -r acked_id; do
+                    [[ -n "$acked_id" ]] && acked_list+="${acked_id}"$'\n'
+                done < <(_acknowledged_ids "$file")
+                local s_created s_did s_subj stage_missing=0
+                s_created=$(_plan_created_date "$file")
+                for s_line in ${stage_laws[@]+"${stage_laws[@]}"}; do
+                    s_did="${s_line%%$'\t'*}"
+                    s_subj="${s_line#*$'\t'}"
+                    if [[ -n "$acked_list" ]] \
+                        && printf '%s' "$acked_list" | grep -qixF "$s_did"; then
+                        continue
+                    fi
+                    stage_missing=$((stage_missing + 1))
+                    if [[ ! "$s_created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+                        c_error "$label: decisions_acknowledged is missing $s_did ($s_subj) - no readable created: date to grandfather against, add both"
+                    elif [[ "$s_created" < "$stage_law_gate_date" ]]; then
+                        warn "$label: decisions_acknowledged is missing $s_did ($s_subj) (created $s_created, before the $stage_law_gate_date stage gate)"
+                    else
+                        c_error "$label: decisions_acknowledged is missing $s_did ($s_subj) - the blueprint-stage block lists it as a live ruling governing this work"
+                    fi
+                done
+            fi
+        fi
+    fi
+
     if [[ $c_errors -eq 0 ]]; then
         # decisions_checked is unset (not "0") when no node resolved or the
         # index read failed (the W branch) - only claim a count when a check
@@ -1350,29 +1436,85 @@ elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
 fi
 
 # -------------------------------------------------------------------
-# Check 6b-quinquies: Python tree allowance (advisory backstop)
+# Check 6b-quinquies: no new Python in cli/src/fno
 # -------------------------------------------------------------------
-# A bug fix under the allowance is legal, so this is a warn, never an error:
-# the CI gate refuses a size violation, this reminder speaks when the
-# /blueprint gate was skipped. A plan that writes cli/src/fno Python and
-# names no size remedy is the shape - a feature planned in the
-# compatibility shell, discovered only at push time.
-check_python_tree_file() {
-    local file="$1"
-    grep -E 'cli/src/fno/[^[:space:]`)"]*\.py' "$file" >/dev/null || return 0
-    if grep -qE 'crates/|PY_TREE_ALLOWANCE|net \+' "$file"; then
-        return 0
-    fi
-    warn "plan writes cli/src/fno Python but names no size remedy; cli/src/fno grows net +100 per change (scripts/ci/check-file-budget.sh). State the expected net delta, or land the feature in crates/."
+# New code lands in crates/. A row that writes cli/src/fno Python is a port
+# (the behavior moves to a crates/ row in the same table), a deletion, or an
+# operator grant. Only rows the plan writes count: Files to Modify, File
+# Ownership Map, and task surfaces. A path cited in prose writes nothing.
+python_row_gate_date="2026-09-16"
+check_python_rows_file() {
+    local file="$1" label="$2"
+    local rows surfaces
+    rows=$(awk -F'|' '
+        /^##+[[:space:]]+(Files to Modify|File Ownership Map)[[:space:]]*$/ { t=1; next }
+        /^##/ { t=0 }
+        t && NF >= 3 && $2 ~ /cli\/src\/fno\/[^[:space:]`]*\.py/ {
+            path=$2; gsub(/[`*[:space:]]/, "", path)
+            act=$3; sub(/^[[:space:]]+/, "", act); sub(/[[:space:]]+$/, "", act)
+            print path "\t" act
+        }' "$file")
+    surfaces=$(awk '
+        /^##+[[:space:]]+Execution Strategy/ { t=1; next }
+        /^## / { t=0 }
+        t && /^[[:space:]]*surface:/' "$file" \
+        | grep -oE "cli/src/fno/[^]'\", ]*\.py" | sort -u || true)
+    [[ -z "$rows" && -z "$surfaces" ]] && return 0
+
+    local created findings=()
+    created=$(_plan_created_date "$file")
+    local has_crates_row=0
+    awk -F'|' '
+        /^##+[[:space:]]+(Files to Modify|File Ownership Map)[[:space:]]*$/ { t=1; next }
+        /^##/ { t=0 }
+        t && $2 ~ /crates\// { found=1 }
+        END { exit(found ? 0 : 1) }' "$file" && has_crates_row=1
+
+    local path act word id
+    while IFS=$'\t' read -r path act; do
+        [[ -z "$path" ]] && continue
+        word=$(printf '%s' "$act" | sed -E 's/^[^A-Za-z]*//; s/[^A-Za-z].*$//' | tr '[:upper:]' '[:lower:]')
+        case "$word" in
+            port)
+                (( has_crates_row )) || findings+=("$path is a Port, but no crates/ row in the table names where it lands") ;;
+            delete) ;;
+            grant)
+                id=$(printf '%s' "$act" | grep -oE 'd-[0-9a-f]{8}' | sed -n 1p || true)
+                if [[ -z "$id" ]] || ! fno backlog decisions "$id" 2>/dev/null | grep -qE "^LIVE[[:space:]].*$id"; then
+                    findings+=("$path is a Grant, but ${id:-no decision id} reads no LIVE line in fno backlog decisions ${id:-<id>}")
+                fi ;;
+            *)
+                findings+=("$path is '$act'. New code lands in crates/, and cli/src/fno Python is only ported or deleted. Mark the row Port (with the crates/ row it lands in), Delete, or Grant d-XXXXXXXX naming a live operator ruling, or move the change to crates/") ;;
+        esac
+    done <<< "$rows"
+    local s
+    while IFS= read -r s; do
+        [[ -z "$s" ]] && continue
+        grep -qF "$s"$'\t' <<< "$rows" \
+            || findings+=("$s is in a task surface, but no Files to Modify row declares its action (Port, Delete, or Grant)")
+    done <<< "$surfaces"
+
+    local f
+    # ${findings[@]+"${findings[@]}"}: bash 3.2 under set -u refuses an
+    # empty array expansion, and a clean plan reaches this loop empty.
+    for f in ${findings[@]+"${findings[@]}"}; do
+        if [[ ! "$created" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            error "$label: $f (and no readable created: date to tell this plan from a pre-gate one)"
+        elif [[ "$created" > "$python_row_gate_date" ]]; then
+            error "$label: $f"
+        else
+            warn "$label: $f (created $created, not after the $python_row_gate_date gate)"
+        fi
+    done
 }
 
 echo ""
-echo "--- Python Tree Allowance ---"
+echo "--- No New Python ---"
 
 if [[ -f "$PLAN_DIR" ]]; then
-    check_python_tree_file "$PLAN_DIR"
+    check_python_rows_file "$PLAN_DIR" "$(basename "$PLAN_DIR")"
 elif [[ -d "$PLAN_DIR" && -f "$PLAN_DIR/00-INDEX.md" ]]; then
-    check_python_tree_file "$PLAN_DIR/00-INDEX.md"
+    check_python_rows_file "$PLAN_DIR/00-INDEX.md" "$(basename "$PLAN_DIR")/00-INDEX.md"
 fi
 
 # -------------------------------------------------------------------

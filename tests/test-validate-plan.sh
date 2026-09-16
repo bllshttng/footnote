@@ -839,46 +839,316 @@ else
     fail "AC10o: Missing binary should warn-only without a receipt (exit $EXIT_CODE): $OUTPUT"
 fi
 
-# --- AC11: Python tree allowance warn ---
+# --- AC11: No New Python row gate ---
 echo ""
-echo "--- AC11: Python Tree Allowance ---"
+echo "--- AC11: No New Python ---"
 
-# Trips: plan writes cli/src/fno Python and names no size remedy. Warn only:
-# a bug fix under the allowance is legal, so the exit stays 0.
-PLAN_PYTREE="$TMPDIR_BASE/pytree_warn.md"
-cat > "$PLAN_PYTREE" <<'EOF'
-execution_mode: sequential
+# The section's lines, not the exit code, prove this check: a dated fixture
+# also trips the consolidation and surface gates, so exit 1 alone proves
+# nothing.
+nnpy() {
+    sed -n '/^--- No New Python ---/,/^--- /p' <<< "$1" | sed '1d' | grep -v '^--- ' || true
+}
 
-### Task 1.1
-Files: cli/src/fno/mail/cli.py
-Acceptance Criteria: AC1
-Steps:
-Step 1: Do something
+# AC11a (AC1-HP): post-gate plan, Modify Python row -> ERROR naming the path,
+# the crates/ rule, and the three legal actions; exit 1.
+PLAN_NNPY_A="$TMPDIR_BASE/nnpy_a.md"
+cat > "$PLAN_NNPY_A" <<'EOF'
+---
+claims: x-nnpya
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Modify |
 EOF
-OUTPUT=$(bash "$VALIDATE" "$PLAN_PYTREE" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 0 ]] && grep -q "names no size remedy" <<< "$OUTPUT" && grep -q "net +100" <<< "$OUTPUT"; then
-    pass "AC11a: cli/src/fno Python with no remedy warns naming net +100"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_NNPY_A" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ $EXIT_CODE -eq 1 ]] \
+    && grep -q "cli/src/fno/mail/cli.py is 'Modify'" <<< "$NNPY_OUT" \
+    && grep -q "New code lands in crates/" <<< "$NNPY_OUT" \
+    && grep -q "Port" <<< "$NNPY_OUT" && grep -q "Delete" <<< "$NNPY_OUT" && grep -q "Grant" <<< "$NNPY_OUT"; then
+    pass "AC11a: Modify Python row on a post-gate plan errors naming the rule and three actions"
 else
-    fail "AC11a: expected exit 0 with the remedy warn (exit $EXIT_CODE): $OUTPUT"
+    fail "AC11a: expected ERROR naming the row (exit $EXIT_CODE): $NNPY_OUT"
 fi
 
-# Clean: the same plan stating its expected delta and the crates/ remedy.
-PLAN_PYTREE_OK="$TMPDIR_BASE/pytree_clean.md"
-cat > "$PLAN_PYTREE_OK" <<'EOF'
-execution_mode: sequential
+# AC11b (AC2-HP): Port row plus the crates/ row it lands in -> clean section.
+PLAN_NNPY_B="$TMPDIR_BASE/nnpy_b.md"
+cat > "$PLAN_NNPY_B" <<'EOF'
+---
+claims: x-nnpyb
+created: 2099-01-01
+---
 
-### Task 1.1
-Files: cli/src/fno/mail/cli.py
-Acceptance Criteria: AC1
-Steps:
-Step 1: Do something
-Size: expected net +40; the verb moves to crates/
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Port: the send verb moves to crates |
+| `crates/fno-agents/src/mail.rs` | Modify |
 EOF
-OUTPUT=$(bash "$VALIDATE" "$PLAN_PYTREE_OK" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
-if [[ $EXIT_CODE -eq 0 ]] && ! grep -q "names no size remedy" <<< "$OUTPUT"; then
-    pass "AC11b: a plan stating its delta and remedy prints no remedy warn"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_NNPY_B" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ -z "$NNPY_OUT" ]]; then
+    pass "AC11b: Port with a crates/ row prints nothing"
 else
-    fail "AC11b: remedy plan should not warn (exit $EXIT_CODE): $OUTPUT"
+    fail "AC11b: expected a clean section (exit $EXIT_CODE): $NNPY_OUT"
+fi
+
+# AC11c (AC3-ERR): Port row with no crates/ row -> ERROR naming the gap.
+PLAN_NNPY_C="$TMPDIR_BASE/nnpy_c.md"
+cat > "$PLAN_NNPY_C" <<'EOF'
+---
+claims: x-nnpyc
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Port |
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_NNPY_C" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "is a Port, but no crates/ row in the table names where it lands" <<< "$NNPY_OUT"; then
+    pass "AC11c: Port with no crates/ row errors"
+else
+    fail "AC11c: expected the Port-gap ERROR: $NNPY_OUT"
+fi
+
+# AC11d (AC4-HP): a bold Delete row -> nothing.
+PLAN_NNPY_D="$TMPDIR_BASE/nnpy_d.md"
+cat > "$PLAN_NNPY_D" <<'EOF'
+---
+claims: x-nnpyd
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | **Delete** |
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_NNPY_D" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ -z "$NNPY_OUT" ]]; then
+    pass "AC11d: bold Delete row prints nothing"
+else
+    fail "AC11d: expected a clean section: $NNPY_OUT"
+fi
+
+# The stub fno for the Grant cases: LIVE line for d-1234abcd, the
+# no-decision line for any other id, real fno for every other argv.
+REAL_FNO="$(command -v fno || true)"
+STUBBIN="$TMPDIR_BASE/stubbin"
+mkdir -p "$STUBBIN"
+{
+    echo '#!/bin/bash'
+    echo 'if [[ "${1:-} ${2:-}" == "backlog decisions" && "${3:-}" == "d-1234abcd" ]]; then'
+    echo '    echo "LIVE  LAW  d-1234abcd  2026-09-12T00:00:00Z  new-code-language  stub"'
+    echo '    exit 0'
+    echo 'fi'
+    echo 'if [[ "${1:-} ${2:-}" == "backlog decisions" ]]; then'
+    echo '    echo "no decision carries it"'
+    echo '    exit 0'
+    echo 'fi'
+    if [[ -n "$REAL_FNO" ]]; then
+        printf 'exec %q "$@"\n' "$REAL_FNO"
+    else
+        echo 'exit 3'
+    fi
+} > "$STUBBIN/fno"
+chmod +x "$STUBBIN/fno"
+
+# AC11e (AC5-HP): Grant naming a live ruling -> nothing.
+PLAN_NNPY_E="$TMPDIR_BASE/nnpy_e.md"
+cat > "$PLAN_NNPY_E" <<'EOF'
+---
+claims: x-nnpye
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-1234abcd |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_E" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ -z "$NNPY_OUT" ]]; then
+    pass "AC11e: Grant with a LIVE ruling prints nothing"
+else
+    fail "AC11e: expected a clean section: $NNPY_OUT"
+fi
+
+# AC11f (AC5-ERR): Grant whose id reads no LIVE line -> ERROR naming the id
+# and the read that failed.
+PLAN_NNPY_F="$TMPDIR_BASE/nnpy_f.md"
+cat > "$PLAN_NNPY_F" <<'EOF'
+---
+claims: x-nnpyf
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `cli/src/fno/mail/cli.py` | Grant d-9999abcd |
+EOF
+OUTPUT=$(PATH="$STUBBIN:$PATH" bash "$VALIDATE" "$PLAN_NNPY_F" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "d-9999abcd" <<< "$NNPY_OUT" && grep -q "fno backlog decisions d-9999abcd" <<< "$NNPY_OUT"; then
+    pass "AC11f: Grant without a LIVE ruling errors naming the id and the read"
+else
+    fail "AC11f: expected the Grant ERROR: $NNPY_OUT"
+fi
+
+# AC11g (AC6-ERR): task surface naming a Python path with no table row.
+PLAN_NNPY_G="$TMPDIR_BASE/nnpy_g.md"
+cat > "$PLAN_NNPY_G" <<'EOF'
+---
+claims: x-nnpyg
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+
+## Execution Strategy
+
+```yaml
+tasks:
+  - id: '1.1'
+    surface: ['cli/src/fno/mail/cli.py']
+```
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_NNPY_G" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "cli/src/fno/mail/cli.py is in a task surface, but no Files to Modify row declares its action" <<< "$NNPY_OUT"; then
+    pass "AC11g: undeclared task surface errors"
+else
+    fail "AC11g: expected the surface ERROR: $NNPY_OUT"
+fi
+
+# AC11h (AC7-EDGE): Python path named only in prose, crates/ rows only.
+PLAN_NNPY_H="$TMPDIR_BASE/nnpy_h.md"
+cat > "$PLAN_NNPY_H" <<'EOF'
+---
+claims: x-nnpyh
+created: 2099-01-01
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+
+Prose may discuss cli/src/fno/update.py history; prose writes nothing.
+EOF
+OUTPUT=$(bash "$VALIDATE" "$PLAN_NNPY_H" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if [[ -z "$NNPY_OUT" ]]; then
+    pass "AC11h: prose-only mention prints nothing"
+else
+    fail "AC11h: expected a clean section: $NNPY_OUT"
+fi
+
+# AC11i (AC8-EDGE): pre-gate plan warns with its created date; an undated
+# plan errors (filename carries no date either).
+PLAN_NNPY_I="$TMPDIR_BASE/nnpy_i.md"
+sed 's/created: 2099-01-01/created: 2026-09-13/' "$PLAN_NNPY_A" > "$PLAN_NNPY_I"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_NNPY_I" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "WARN" <<< "$NNPY_OUT" && grep -q "created 2026-09-13, not after the 2026-09-16 gate" <<< "$NNPY_OUT" \
+    && ! grep -q "ERROR" <<< "$NNPY_OUT"; then
+    pass "AC11i: pre-gate plan warns with its created date"
+else
+    fail "AC11i: expected a WARN with the created date: $NNPY_OUT"
+fi
+PLAN_NNPY_I2="$TMPDIR_BASE/nnpy_undated.md"
+sed '/^created:/d' "$PLAN_NNPY_A" > "$PLAN_NNPY_I2"
+OUTPUT=$(bash "$VALIDATE" "$PLAN_NNPY_I2" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+NNPY_OUT=$(nnpy "$OUTPUT")
+if grep -q "ERROR" <<< "$NNPY_OUT" && grep -q "no readable created: date" <<< "$NNPY_OUT"; then
+    pass "AC11i: undated plan errors"
+else
+    fail "AC11i: expected the undated ERROR: $NNPY_OUT"
+fi
+
+# AC11j: stage-law gate - a law the blueprint-stage block lists with no
+# decisions_acknowledged entry on a post-gate plan errors naming id+subject.
+# The stub fno-agents answers law-match only; the surface gate warns NOT
+# CHECKED against it, which this section does not read.
+STUB_AGENTS="$STUBBIN/fno-agents"
+cat > "$STUB_AGENTS" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "law-match" ]]; then
+    printf '%s' '{"ok":true,"stage":"blueprint","hook_output":{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"## Law governing blueprint\n\nThese live operator rulings govern the blueprint you are starting.\n- d-a11b0002 (stub-epic-ruling): A stub ruling names the epic.\n"}}}'
+    exit 0
+fi
+exit 3
+STUB
+chmod +x "$STUB_AGENTS"
+PLAN_NNPY_J="$TMPDIR_BASE/nnpy_j.md"
+cat > "$PLAN_NNPY_J" <<'EOF'
+---
+claims: x-a11b001
+created: 2099-01-01
+consolidation:
+  outcome: proceed_alone
+  rejected: []
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+EOF
+OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS" bash "$VALIDATE" "$PLAN_NNPY_J" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if grep -q "decisions_acknowledged is missing d-a11b0002 (stub-epic-ruling)" <<< "$OUTPUT"; then
+    pass "AC11j: stage-block law with no entry errors naming id and subject"
+else
+    fail "AC11j: expected the stage-law ERROR: $OUTPUT"
+fi
+
+# AC11k: the same plan carrying the entry is clean.
+PLAN_NNPY_K="$TMPDIR_BASE/nnpy_k.md"
+cat > "$PLAN_NNPY_K" <<'EOF'
+---
+claims: x-a11b002
+created: 2099-01-01
+consolidation:
+  outcome: proceed_alone
+  rejected: []
+  decisions_acknowledged:
+    - decision_id: d-a11b0002
+      reason: "fixture acknowledgment"
+---
+
+## Files to Modify
+
+| File | Action |
+|------|--------|
+| `crates/fno-agents/src/mail.rs` | Modify |
+EOF
+OUTPUT=$(FNO_AGENTS_BIN="$STUB_AGENTS" bash "$VALIDATE" "$PLAN_NNPY_K" 2>&1) && EXIT_CODE=0 || EXIT_CODE=$?
+if ! grep -q "d-a11b0002" <<< "$OUTPUT"; then
+    pass "AC11k: acknowledged stage law prints nothing"
+else
+    fail "AC11k: expected no d-a11b0002 finding: $OUTPUT"
 fi
 
 # --- Summary ---
