@@ -86,17 +86,24 @@ fn run_owned(
     let pending = delivery_pending_for(hook_cwd, fire, Some(&state));
     let state_is_pending = pending.as_ref().is_some_and(|p| *p == state);
 
+    // One read of the manifest feeds the guard below, the diagnostics, and
+    // translate's claim release.
+    let manifest = if state_is_pending {
+        String::new()
+    } else {
+        std::fs::read_to_string(&state).unwrap_or_default()
+    };
+
     // ── The foreign-session guard (PR #388 fix class) ─────────────────────────
     // The manifest's stamped harness id (claude_session_id, then
     // claude_transcript_id, then harness_session_id) must name THIS
     // transcript. Codex rollout suffixes count.
     if !state_is_pending {
-        let content = std::fs::read_to_string(&state).unwrap_or_default();
         let manifest_ctid =
-            first_raw_field(&content, &["claude_session_id", "claude_transcript_id"])
+            first_raw_field(&manifest, &["claude_session_id", "claude_transcript_id"])
                 .filter(|v| v != "null" && !v.is_empty())
                 .or_else(|| {
-                    first_raw_field(&content, &["harness_session_id"])
+                    first_raw_field(&manifest, &["harness_session_id"])
                         .filter(|v| v != "null" && !v.is_empty())
                 })
                 .unwrap_or_default();
@@ -116,7 +123,7 @@ fn run_owned(
     if !transcript_ok {
         return unavailable_block(
             hook_cwd,
-            &state_node_id(&state),
+            &state_node_id_content(&manifest),
             driver,
             "no transcript for an active session",
         );
@@ -138,7 +145,7 @@ fn run_owned(
             "message": "retrying generic delivery finalization"
         })
         .to_string();
-        return translate(hook_cwd, &out, driver, &state, &owner_cwd, fire);
+        return translate(hook_cwd, &out, driver, &state, &owner_cwd, fire, "");
     }
 
     // ── Decide, in process ─────────────────────────────────────────────────
@@ -186,17 +193,26 @@ fn run_owned(
         tail_stderr_log(hook_cwd);
         return unavailable_block(
             hook_cwd,
-            &state_node_id(&state),
+            &state_node_id_content(&manifest),
             driver,
             "checker produced no verdict",
         );
     }
 
-    translate(hook_cwd, &decision_json, driver, &state, &owner_cwd, fire)
+    translate(
+        hook_cwd,
+        &decision_json,
+        driver,
+        &state,
+        &owner_cwd,
+        fire,
+        &manifest,
+    )
 }
 
 /// The decision translation: counters, tick row, harness-shaped block, and
-/// terminal cleanup.
+/// terminal cleanup. `manifest` is the state file's content when an upstream
+/// step already read it (empty on the pending-retry entry, which re-reads).
 fn translate(
     hook_cwd: &Path,
     decision_json: &str,
@@ -204,6 +220,7 @@ fn translate(
     state: &Path,
     owner_cwd: &Path,
     fire: &Fire,
+    manifest: &str,
 ) -> i32 {
     let v: Value = serde_json::from_str(decision_json.trim()).unwrap_or(Value::Null);
     let decision = v.get("decision").and_then(Value::as_str).unwrap_or("allow");
@@ -244,7 +261,11 @@ fn translate(
             // Release BEFORE finalize: both stamp a `do` row for the same
             // session, and sessions[] is append-only, so the release row must
             // land first to carry its ended_at window.
-            let content = std::fs::read_to_string(state).unwrap_or_default();
+            let content = if manifest.is_empty() {
+                std::fs::read_to_string(state).unwrap_or_default()
+            } else {
+                manifest.to_string()
+            };
             let key = first_raw_field(&content, &["target_claim_key"]).unwrap_or_default();
             let holder = first_raw_field(&content, &["target_claim_holder"]).unwrap_or_default();
             if key.starts_with("node:") && !holder.is_empty() {
@@ -400,12 +421,8 @@ fn unavailable_block(cwd: &Path, session_id: &str, driver: &str, why: &str) -> i
 }
 
 /// The manifest's node/session identity for diagnostics (first field wins).
-fn state_node_id(state: &Path) -> String {
-    first_raw_field(
-        &std::fs::read_to_string(state).unwrap_or_default(),
-        &["fno_id", "session_id"],
-    )
-    .unwrap_or_else(|| "unknown".to_string())
+fn state_node_id_content(content: &str) -> String {
+    first_raw_field(content, &["fno_id", "session_id"]).unwrap_or_else(|| "unknown".to_string())
 }
 
 fn tail_stderr_log(cwd: &Path) {

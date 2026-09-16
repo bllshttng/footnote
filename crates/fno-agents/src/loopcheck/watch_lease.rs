@@ -88,7 +88,8 @@ pub(super) enum RenewCause {
 }
 
 impl RenewCause {
-    /// The `watch_refusal` event value for this cause (schema.yaml enum).
+    /// The cause string. schema.yaml keeps the `watch_refusal` enum for old
+    /// journals; nothing emits the event since the inline refusal landed.
     pub(super) fn as_str(&self) -> &'static str {
         match self {
             RenewCause::Gone => "gone",
