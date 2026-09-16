@@ -5,4 +5,4 @@ The change touches a CLI flag, config key, schema, shipped file name, or a skill
 Treat a one-way door as a promise. Put its evidence first: the receipt, the exit code, or the check that proves the door does what the plan says.
 
 Feeds: Context
-Source: strategic-partner cognitive-patterns, One-Way and Two-Way Doors (MIT; see NOTICE)
+Source: strategic-partner cognitive-patterns, One-Way and Two-Way Doors (MIT, see NOTICE)

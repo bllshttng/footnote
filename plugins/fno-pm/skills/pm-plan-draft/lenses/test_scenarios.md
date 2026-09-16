@@ -5,4 +5,4 @@ For each observable behavior change, give the plan a happy path, an error path, 
 Write the error path before the code exists: it names what the caller sees, not what the function returns.
 
 Feeds: Acceptance Criteria (HP, ERR, EDGE)
-Source: pm-skills pm-execution test-scenarios (MIT; see NOTICE)
+Source: pm-skills pm-execution test-scenarios (MIT, see NOTICE)

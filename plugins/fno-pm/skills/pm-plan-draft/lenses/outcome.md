@@ -5,4 +5,4 @@ Name the outcome the change moves, then make Verification observe that outcome. 
 If no observation can reach the outcome, say so in the plan instead of pointing Verification at a proxy.
 
 Feeds: Verification
-Source: pm-skills pm-execution outcome-roadmap (MIT; see NOTICE)
+Source: pm-skills pm-execution outcome-roadmap (MIT, see NOTICE)

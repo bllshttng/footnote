@@ -5,7 +5,7 @@ disable-model-invocation: true
 pack: fno-pm
 ---
 
-Each file under `lenses/` is one drafting lens: a move a planner makes while a plan is written. The blueprint skill links every lens by a named condition in its lens table. Read a lens only when its condition holds for the node in hand; read nothing here up front.
+Each file under `lenses/` is one drafting lens, a move a planner makes while a plan is written. The blueprint skill links every lens by a named condition in its lens table. When a lens condition holds for the node in hand, read that one file. Read nothing here up front.
 
 The grading lenses are the `pm-plan-review` skill of this pack, and a planner never reads them. A grader read during drafting turns into a checklist the author writes to.
 
@@ -15,4 +15,4 @@ The grading lenses are the `pm-plan-review` skill of this pack, and a planner ne
 
 ## Known Limitations and Deferred Work
 
-- The lenses shape a plan and check nothing; the judge still grades. The long form lives in [LIMITATIONS.md](LIMITATIONS.md).
+- The lenses shape a plan and check nothing. The judge still grades. The long form lives in [LIMITATIONS.md](LIMITATIONS.md).

@@ -5,4 +5,4 @@ The plan creates or reorders child nodes. Rank the children by the outcome each 
 The cheapest first child that unlocks nothing is the most expensive order in the plan.
 
 Feeds: Execution Strategy
-Source: pm-skills pm-execution outcome-roadmap (MIT; see NOTICE)
+Source: pm-skills pm-execution outcome-roadmap (MIT, see NOTICE)

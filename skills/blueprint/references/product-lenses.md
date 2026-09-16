@@ -1,6 +1,6 @@
 # Product lenses for blueprint drafting
 
-The lens text lives in the fno-pm pack skill `pm-plan-draft`. Nothing here is read up front: read a lens file only when its row's condition holds for the node in hand.
+The lens text lives in the fno-pm pack skill `pm-plan-draft`. Nothing here is read up front. When a row's condition holds for the node in hand, read that one lens file.
 
 | Read when | Lens |
 |---|---|

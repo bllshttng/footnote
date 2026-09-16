@@ -5,4 +5,4 @@ The plan deletes, replaces, or retires something. Read `git log` for why it exis
 If the reason still holds, the plan shrinks or stops. If it is gone, say why in the plan, in one line.
 
 Feeds: Five questions 4
-Source: strategic-partner cognitive-patterns, Chesterton's Fence (MIT; see NOTICE)
+Source: strategic-partner cognitive-patterns, Chesterton's Fence (MIT, see NOTICE)

@@ -5,4 +5,4 @@ Difficulty reads high, or the plan carries three or more tasks. Stop adding and 
 The failure you write down first is the one the review does not have to find later.
 
 Feeds: Five questions 3
-Source: strategic-partner cognitive-patterns, Inversion (MIT; see NOTICE)
+Source: strategic-partner cognitive-patterns, Inversion (MIT, see NOTICE)
