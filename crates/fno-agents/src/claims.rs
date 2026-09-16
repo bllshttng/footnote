@@ -266,6 +266,10 @@ const GLOBAL_ID_PREFIXES: &[&str] = &[
     "config-optout",
     "flight",
     "gate",
+    // `worker:<name>`, the spawn gate's provider-lane reservation: the gate
+    // mints it under global_claims_root() (gate_claims_root), so a root-less
+    // reader resolves the same file the gate wrote.
+    "worker",
     // `test:suite` (test_run.rs): a caller with no explicit `--claims-root`
     // and no FNO_CLAIMS_ROOT/HOME in its environment must not hard-fail the
     // claim lookup - it degrades to the machine-wide root like every other

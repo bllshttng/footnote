@@ -143,6 +143,10 @@ _GLOBAL_ID_PREFIXES = frozenset(
         "config-optout",
         "flight",
         "gate",
+        # `worker:<name>`, the spawn gate's provider-lane reservation: the gate
+        # mints it under global_claims_root() (gate_claims_root), so a
+        # root-less reader/release resolves the same file the gate wrote.
+        "worker",
         # `test:suite`, the fno-agents test-run admission claim (Rust-only
         # caller): keeps parity with crates/fno-agents/src/claims.rs so the
         # same key never routes to two different roots.
