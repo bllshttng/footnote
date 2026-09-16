@@ -175,6 +175,8 @@ def test_using_fno_reach_is_pinned_to_its_carriers() -> None:
     SessionStart injects it through a two-hop chain. If either hop is cut, the
     label lies and every reach subtotal with it.
     """
+    # The chain is codex-hooks.json -> context-run.sh codex-session-start ->
+    # the context-hooks.json group -> session-start.sh. Pin every hop.
     hooks_json = json.loads(
         (ROOT / "hooks" / "codex-hooks.json").read_text(encoding="utf-8")
     )
@@ -184,8 +186,17 @@ def test_using_fno_reach_is_pinned_to_its_carriers() -> None:
         for hook in block.get("hooks", [])
     ]
     assert any(
-        command.endswith("hooks/session-start.sh") for command in commands
+        command.endswith("hooks/context-run.sh codex-session-start")
+        for command in commands
     ), commands
+    group_manifest = json.loads(
+        (ROOT / "hooks" / "context-hooks.json").read_text(encoding="utf-8")
+    )
+    producers = group_manifest["groups"]["codex-session-start"]["producers"]
+    assert any(
+        producer["argv"][0].endswith("hooks/session-start.sh")
+        for producer in producers
+    ), producers
     wrapper = (ROOT / "hooks" / "session-start.sh").read_text(encoding="utf-8")
     assert "session-start-using-fno.sh" in wrapper
 
