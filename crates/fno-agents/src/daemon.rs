@@ -584,190 +584,38 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
-/// How long between stale-question reconciles. Stale rows are measured in
-/// hundreds of hours, so the interval bounds discovery lag, not freshness:
-/// a row that crosses the wake ceiling waits at most one interval before a
-/// human is told. Identity-keyed dedupe lives in the verb, so an eager run
-/// costs one sweep and changes nothing.
-const STALE_SWEEP_INTERVAL_SECS: i64 = 21_600;
-
-/// One fleet's stale-sweep reading, parsed from the verb's JSON line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StaleSweepReport {
-    pub stale: usize,
-    pub oldest_h: i64,
-    pub outcome: String,
-}
-
-/// Parse the JSON object `fno agents stale-escalate --json` prints on stdout.
+/// Distinct canonical repo roots the registry knows about, deduplicated.
 ///
-/// The scheduled invocation passes `--json`, so stdout is ONE JSON line whose
-/// `summary` field happens to carry a `Summary: ...` string - the line itself
-/// never starts with it. Parse the object's fields, not that embedded text.
-///
-/// Returns `None` rather than a zeroed report when no readable object is
-/// present. A sweep that could not read its own output must not report
-/// "0 stale", which is indistinguishable from a clean machine: an absence has
-/// two explanations and a count must only ever come from a real reading. The
-/// outcome word rides along because on the refused path the count is NOT a
-/// real reading - the event must be able to say so rather than fabricate a
-/// measured zero.
-pub fn parse_stale_sweep(stdout: &str) -> Option<StaleSweepReport> {
-    let line = stdout
-        .lines()
-        .map(str::trim_start)
-        .find(|l| l.starts_with('{'))?;
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    Some(StaleSweepReport {
-        stale: usize::try_from(value.get("stale_count")?.as_u64()?).ok()?,
-        oldest_h: value.get("oldest_h")?.as_i64()?,
-        outcome: value.get("outcome")?.as_str()?.to_string(),
-    })
-}
-
-/// Stale-question reconcile on a 6h floor: report-only, no apply mode.
-///
-/// Rows past the wake ceiling are the watchdog's needs-human bucket - no
-/// action lane may take them - so the durable question channel is the only
-/// surface they reach. This sweep is its trigger; the verb inside reconciles
-/// one question to the measured set, so a re-run is a duplicate no-op unless
-/// the set changed. Removal stays everywhere it already was: this fn takes no
-/// apply flag and shells no action verb, and the run closure is injected so
-/// the policy is testable without shelling out.
-///
-/// Emits one `stale_sweep` event per run, INCLUDING on outcome `none` or
-/// `duplicate`: a tick that stays silent when it finds nothing cannot be told
-/// from a tick that never ran.
-pub fn stale_sweep(
-    home: &AgentsHome,
-    emitter: &EventEmitter,
-    now: i64,
-    run: &dyn Fn() -> Option<String>,
-) -> usize {
-    let stamp = home.root().join("stale-escalate.stamp");
-    let last = std::fs::read_to_string(&stamp)
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
-    if now.saturating_sub(last) < STALE_SWEEP_INTERVAL_SECS {
-        return 0;
-    }
-    // the sweep's only child is `agents stale-escalate --json`, so an
-    // effective dispatch pause suspends the sweep without consuming its
-    // cadence: no closure call, no stamp write, and a positive skip row so
-    // intentional silence cannot read as a dead arm. The row is paced by a
-    // SIDECAR stamp at the sweep's own interval - the real stamp stays
-    // untouched, so a due sweep stays due - because the idle tick reaches
-    // this arm every ~5s and an unpaced row would grow events.jsonl by
-    // ~17k rows/day for the length of the incident. On clear the next due
-    // tick runs normally. Serve-only liveness is NOT behind this gate - its
-    // call site sits before this arm and stays eligible while dispatch polls
-    // are held (AC3-LIVENESS).
-    let pause = crate::loops_pause::dispatch_pause();
-    if pause.is_paused() {
-        let skip_stamp = home.root().join("stale-escalate.skipstamp");
-        let last_skip = std::fs::read_to_string(&skip_stamp)
-            .ok()
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .unwrap_or(0);
-        if now.saturating_sub(last_skip) >= STALE_SWEEP_INTERVAL_SECS {
-            let _ = emitter.emit(
-                "stale_sweep",
-                &json!({
-                    "outcome": "skipped",
-                    "reason": pause.skip_reason(),
-                    "detail": pause.detail(),
-                }),
-            );
-            let _ = std::fs::write(&skip_stamp, now.to_string());
-        }
-        return 0;
-    }
-    let outcome = match run().as_deref().and_then(parse_stale_sweep) {
-        Some(r) => {
-            let _ = emitter.emit(
-                "stale_sweep",
-                &json!({
-                    "stale_count": r.stale,
-                    "oldest_h": r.oldest_h,
-                    "outcome": r.outcome,
-                }),
-            );
-            1
-        }
-        None => {
-            let _ = emitter.emit("stale_sweep", &json!({"error": "unreadable-summary"}));
-            0
-        }
+/// A linked worktree is not its own repo, so its rows fold into the checkout
+/// that owns them and the sweep runs once per repo rather than once per row.
+fn registry_repo_roots(home: &AgentsHome) -> Vec<String> {
+    let Ok(loaded) = state::load_registry(&home.registry_json()) else {
+        return Vec::new();
     };
-    let _ = std::fs::write(&stamp, now.to_string());
-    outcome
-}
-
-/// How long between park sweeps. A parked PR comes back on the next push,
-/// so the sweep's job is to notice the push; 6h bounds discovery lag on a
-/// clock that already ticks.
-const PARK_SWEEP_INTERVAL_SECS: i64 = 21_600;
-
-/// Park sweep on a 6h floor: un-parks open rows whose PR head moved since
-/// the park baseline or whose park passed 24 hours, and marks finished rows
-/// handled, over every repo root the registry knows. The verb inside
-/// (`fno-agents pr-park sweep`) is idempotent on an untouched store, so a
-/// re-run costs one head probe per open row and changes nothing.
-///
-/// Emits one `park_sweep` event per run INCLUDING on a zero-count or skipped
-/// run: a tick that stays silent when it finds nothing cannot be told from a
-/// tick that never ran. The run closure is injected so the policy is
-/// testable without shelling out.
-pub fn park_sweep(
-    home: &AgentsHome,
-    emitter: &EventEmitter,
-    now: i64,
-    run: &dyn Fn() -> Option<(usize, usize, usize)>,
-) -> usize {
-    let stamp = home.root().join("park-sweep.stamp");
-    let last = std::fs::read_to_string(&stamp)
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
-    if now.saturating_sub(last) < PARK_SWEEP_INTERVAL_SECS {
-        return 0;
-    }
-    // The sweep's child probes gh once per open parked row, so a dispatch
-    // pause suspends it on the same sidecar-stamp shape stale_sweep uses.
-    let pause = crate::loops_pause::dispatch_pause();
-    if pause.is_paused() {
-        let skip_stamp = home.root().join("park-sweep.skipstamp");
-        let last_skip = std::fs::read_to_string(&skip_stamp)
-            .ok()
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .unwrap_or(0);
-        if now.saturating_sub(last_skip) >= PARK_SWEEP_INTERVAL_SECS {
-            let _ = emitter.emit(
-                "park_sweep",
-                &json!({
-                    "outcome": "skipped",
-                    "reason": pause.skip_reason(),
-                }),
-            );
-            let _ = std::fs::write(&skip_stamp, now.to_string());
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in &loaded.entries {
+        let root = if e.project_root.is_empty() {
+            e.cwd.clone()
+        } else {
+            e.project_root.clone()
+        };
+        if !root.is_empty() && std::path::Path::new(&root).is_dir() {
+            seen.insert(root);
         }
-        return 0;
     }
-    let (outcome, counts) = match run() {
-        Some((unparked, handled, total)) => ("ok", Some((unparked, handled, total))),
-        None => ("error", None),
-    };
-    let mut row = json!({"outcome": outcome});
-    if let Some((unparked, handled, total)) = counts {
-        row["unparked"] = json!(unparked);
-        row["handled"] = json!(handled);
-        row["total"] = json!(total);
+    // The request read spans the rotated generation too (merge_reap's reader),
+    // so a repo whose only request rotated aside stays in the roots.
+    for repo in crate::merge_reap::merge_cleanup_request_repos(home) {
+        if std::path::Path::new(&repo).is_dir() {
+            seen.insert(repo);
+        }
     }
-    let _ = emitter.emit("park_sweep", &row);
-    let _ = std::fs::write(&stamp, now.to_string());
-    1
+    seen.into_iter().collect()
 }
+
+/// How long between worktree report sweeps. A 24-hour reap order spans at
+/// least three complete windows even when its mint cannot clear the stamp.
+const WORKTREE_SWEEP_INTERVAL_SECS: u64 = 21_600;
 
 /// One repo's worktree-sweep reading, parsed from the verb's `Summary:` line.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2410,28 +2258,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     tokio::task::spawn_blocking(move || {
                         let _gate = SweepGate(flag);
                         park_sweep(&home, &emitter, now_epoch_secs(), &|| {
-                            let paths = crate::pr_park::Paths::from_home();
-                            let mut unparked = 0usize;
-                            let mut handled = 0usize;
-                            let mut total = 0usize;
-                            for root in registry_repo_roots(&home) {
-                                let ctx = crate::pr_park::Ctx::live(
-                                    std::path::Path::new(&root),
-                                    paths.clone(),
-                                );
-                                if ctx.slug.is_empty() {
-                                    continue;
-                                }
-                                match crate::pr_park::sweep(&ctx) {
-                                    Ok(r) => {
-                                        unparked += r.unparked;
-                                        handled += r.handled;
-                                        total += r.total;
-                                    }
-                                    Err(_) => return None,
-                                }
-                            }
-                            Some((unparked, handled, total))
+                            sweeps::sweep_all_roots(&home)
                         });
                     });
                 }
@@ -8502,6 +8329,14 @@ fn fill_random(buf: &mut [u8]) {
         *byte = (x & 0xff) as u8;
     }
 }
+
+/// The interval-gated maintenance sweeps (stale questions, park records),
+/// split out for the file budget; each is stamp-gated and pause-aware.
+pub(crate) mod sweeps;
+pub(crate) use sweeps::{
+    park_sweep, parse_stale_sweep, stale_sweep, StaleSweepReport, PARK_SWEEP_INTERVAL_SECS,
+    STALE_SWEEP_INTERVAL_SECS,
+};
 
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
