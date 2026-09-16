@@ -213,7 +213,7 @@ fn record_from_options(key: &str, holder: &str, options: &AcquireOpts) -> ClaimR
         } else {
             Some(options.pid.unwrap_or_else(std::process::id) as i32)
         },
-        host: std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string()),
+        host: claims::hostname(),
         pid_unavailable: options.pid_unavailable,
         expires_at: options.ttl_ms.map(|ttl| acquired_at.saturating_add(ttl)),
         reason: options.reason.clone(),
