@@ -2250,9 +2250,7 @@ def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
     """Run one native claim operation and decode its JSON reply."""
     import json
     import subprocess
-
     from fno.rust_binary import resolve_binary
-
     binary = resolve_binary()
     if binary is None:
         raise ClaimVerdictUnavailable(
@@ -2286,22 +2284,14 @@ def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ClaimVerdictError("fno-agents claim returned a non-object JSON value")
     return payload
-
-
 def _native_root_flags(root: Optional[Path]) -> list[str]:
     return ["--root", str(root)] if root is not None else []
-
 
 def _native_claim_model(payload: dict[str, Any]) -> Claim:
     body = payload.get("claim", payload)
     if not isinstance(body, dict):
         raise ClaimVerdictError("fno-agents claim returned no claim object")
     return Claim.model_validate(body)
-
-
-# Native client compatibility surface. The legacy implementations above stay
-# available to old imports during the migration, but every public claim verb
-# resolves to this one Rust door below.
 _LEGACY_ACQUIRE_CLAIM = acquire_claim
 _LEGACY_RELEASE_CLAIM = release_claim
 _LEGACY_REFRESH_CLAIM = refresh_claim
@@ -2329,21 +2319,7 @@ def acquire_claim(
     _attempt: int = 0,
 ) -> Claim:
     if root is not None:
-        return _LEGACY_ACQUIRE_CLAIM(
-            key,
-            holder,
-            reason=reason,
-            ttl_ms=ttl_ms,
-            metadata=metadata,
-            pid=pid,
-            pid_unavailable=pid_unavailable,
-            host=host,
-            harness=harness,
-            pid_provenance=pid_provenance,
-            harness_session_id=harness_session_id,
-            root=root,
-            _attempt=_attempt,
-        )
+        return _LEGACY_ACQUIRE_CLAIM(key, holder, reason=reason, ttl_ms=ttl_ms, metadata=metadata, pid=pid, pid_unavailable=pid_unavailable, host=host, harness=harness, pid_provenance=pid_provenance, harness_session_id=harness_session_id, root=root, _attempt=_attempt)  # noqa: E501
     del host, harness, pid_provenance, harness_session_id, _attempt
     _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
     flags = ["--holder", holder]
