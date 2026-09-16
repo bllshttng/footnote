@@ -486,8 +486,8 @@ def test_closure_trailer_warns_on_a_dropped_malformed_extra_id(monkeypatch, tmp_
     assert "Backlog-Closure: x-1111" in result.output
 
 
-def test_closure_trailer_from_branch_resolves_and_renders(monkeypatch, tmp_path):
-    """x-5625: --from-branch resolves the node the branch names and renders."""
+def test_closure_trailer_bare_invocation_resolves_from_branch(monkeypatch, tmp_path):
+    """The bare verb resolves the node the branch names and renders."""
     from fno import paths
     import fno.pr.closure as closure_mod
 
@@ -500,43 +500,29 @@ def test_closure_trailer_from_branch_resolves_and_renders(monkeypatch, tmp_path)
         lambda known_ids, cwd=None, runner=None: "x-1111",
     )
 
-    result = runner.invoke(app, ["do", "pr", "closure-trailer", "--from-branch"])
+    result = runner.invoke(app, ["do", "pr", "closure-trailer"])
 
     assert result.exit_code == 0
     assert "Backlog-Closure: x-1111" in result.output
 
 
-def test_closure_trailer_from_branch_refusal_is_loud(monkeypatch):
-    """x-5625: a --from-branch failure exits NONZERO naming the reason - the
+def test_closure_trailer_bare_invocation_refusal_is_loud(monkeypatch):
+    """A bare-verb resolution failure exits NONZERO naming the reason - the
     legacy silent-empty contract is what shipped trailer-less PR 2080."""
     import fno.pr.closure as closure_mod
 
     def _raise(known_ids, cwd=None, runner=None):
         raise closure_mod.BranchResolutionError(
-            "branch 'main' names 0 real node(s); --from-branch needs exactly one"
+            "branch 'main' names 0 real node(s); pass the node explicitly instead"
         )
 
     monkeypatch.setattr(closure_mod, "resolve_branch_node_id", _raise)
 
-    result = runner.invoke(app, ["do", "pr", "closure-trailer", "--from-branch"])
+    result = runner.invoke(app, ["do", "pr", "closure-trailer"])
 
     assert result.exit_code == 1
     assert "main" in result.output
-    assert "exactly one" in result.output
-
-
-def test_closure_trailer_node_and_from_branch_refuse_together():
-    result = runner.invoke(
-        app, ["do", "pr", "closure-trailer", "x-1111", "--from-branch"],
-    )
-    assert result.exit_code == 2
-    assert "not both" in result.output
-
-
-def test_closure_trailer_without_node_or_flag_refuses():
-    result = runner.invoke(app, ["do", "pr", "closure-trailer"])
-    assert result.exit_code == 2
-    assert "--from-branch" in result.output
+    assert "pass the node explicitly" in result.output
 
 
 def test_global_receipt_path_uses_pinned_accessor(monkeypatch, tmp_path):

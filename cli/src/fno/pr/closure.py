@@ -172,7 +172,7 @@ def known_node_ids() -> frozenset[str]:
 
 
 class BranchResolutionError(Exception):
-    """--from-branch could not resolve exactly one real node; message names why."""
+    """Bare-verb branch resolution could not find exactly one real node; the message names why."""
 
 
 def _read_current_branch(
@@ -182,7 +182,7 @@ def _read_current_branch(
 ) -> str:
     """The checked-out branch name; "" when HEAD is detached.
 
-    The one branch read both consuming producers share (the --from-branch
+    The one branch read both consuming producers share (the bare-verb
     resolver and the created-PR binder), so the two can never drift.
     """
     try:
@@ -209,7 +209,7 @@ def resolve_branch_node_id(
     cwd: Optional[str] = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> str:
-    """The one real graph node the current branch names - the --from-branch producer.
+    """The one real graph node the current branch names - the bare verb's producer.
 
     A branch-derived candidate is a guess verified against the graph, the same
     rule ``bind_created_pr`` applies at bind time: exactly one well-formed
@@ -218,7 +218,7 @@ def resolve_branch_node_id(
     closure claim, and one wrong id voids the whole binding at merge. Unlike
     ``known_node_ids`` the failure here is loud - the caller reads the
     exception, never an empty set - because silent empty is how a trailer-less
-    PR ships (x-5625) and reds CI an hour later.
+    PR ships and reds CI an hour later.
     """
     head_ref = _read_current_branch(cwd=cwd, runner=runner)
     if not head_ref:
@@ -228,7 +228,7 @@ def resolve_branch_node_id(
         named = f" ({', '.join(real)})" if real else ""
         raise BranchResolutionError(
             f"branch '{head_ref}' names {len(real)} real node(s){named}; "
-            "--from-branch needs exactly one - pass the node explicitly instead"
+            "bare resolution needs exactly one - pass the node explicitly instead"
         )
     return real[0]
 
