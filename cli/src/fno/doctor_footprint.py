@@ -202,6 +202,19 @@ def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
     return _pid_alive(pid, pid_start)
 
 
+def _pid_recycled(pid: int, pid_start: int | None) -> bool:
+    """True only when the pid runs under a start time we never recorded.
+
+    Proof the recorded process is gone and this pid belongs to someone else.
+    An unreadable or matching start time answers False and the caller keeps
+    failing closed: recycling must be proven, never guessed.
+    """
+    from fno.agents.spawn_gate import _process_start_time
+
+    current = _process_start_time(pid)
+    return pid_start is not None and current is not None and current != pid_start
+
+
 class AttributionGap:
     """Live worker rows this reading could not attribute to processes.
 
@@ -332,6 +345,7 @@ def _live_root_pids(
 ) -> tuple[set[int], str | AttributionGap | None]:
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
+    recycled_rows: list[Any] = []
     try:
         from fno.agents.registry import load_registry
         from fno.agents.session_procs import bg_socket_pid_map, roster_pid_map
@@ -361,7 +375,9 @@ def _live_root_pids(
                     return roots, "worker root liveness unavailable"
                 root_live = _root_pid_is_live(row.pid, row.pid_start_time)
                 if root_live is not True:
-                    return roots, "worker root liveness unavailable"
+                    if not _pid_recycled(row.pid, row.pid_start_time):
+                        return roots, "worker root liveness unavailable"
+                    continue
                 roots.add(row.pid)
                 continue
             if row.pid is None:
@@ -374,7 +390,9 @@ def _live_root_pids(
             if root_live:
                 roots.add(row.pid)
             elif snapshot_pids is not None and row.pid in snapshot_pids:
-                return roots, "worker root liveness unavailable"
+                if not _pid_recycled(row.pid, row.pid_start_time):
+                    return roots, "worker root liveness unavailable"
+                recycled_rows.append(row)
         pidless_rows = [
             row for row in rows if row.status in LIVE_STATUSES and row.pid is None
         ]
@@ -452,6 +470,13 @@ def _live_root_pids(
             f"({', '.join(sorted({str(row.harness) for row in fleet_unrouted}))}; "
             f"rows: {', '.join(gap_labels)})"
         ] if fleet_unrouted else []
+        if recycled_rows:
+            gap_rows.append(
+                f"{len(recycled_rows)} live row(s) whose pid was reused: "
+                + ", ".join(sorted(
+                    f"{getattr(row, 'name', '?')} (pid={row.pid})" for row in recycled_rows
+                ))
+            )
         if not routed_rows:
             return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
         if deadline is not None and time.monotonic() >= deadline:
@@ -587,7 +612,8 @@ def _live_shared_serve_root_pids(
         if root_live:
             roots.add(pid)
         elif snapshot_pids is not None and pid in snapshot_pids:
-            return roots, "shared serve root liveness unavailable"
+            if not _pid_recycled(pid, pid_start):
+                return roots, "shared serve root liveness unavailable"
     except FileNotFoundError:
         return roots, None
     except Exception:

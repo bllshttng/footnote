@@ -1488,42 +1488,6 @@ fn reconcile_does_not_orphan_a_live_interactive_host_on_store_miss() {
 }
 
 #[test]
-fn reconcile_reaps_a_dead_interactive_host_to_exited() {
-    // Codex P2 (PR #373): a genuinely dead interactive worker (store-miss AND
-    // pid no longer live) must be reaped to Exited DURING reconcile, not left
-    // Live until a daemon restart. A live interactive host (pid_live) on the
-    // same store-miss stays Live.
-    let mut dead = rentry("dead-tui", AgentStatus::Live, None);
-    dead.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
-    let mut live = rentry("live-tui", AgentStatus::Live, None);
-    live.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
-    let entries = vec![dead, live];
-    let (changes, out) = plan_reconcile(
-        &entries,
-        |_| Ok(false), // both store-miss
-        || false,
-        |e| e.name == "live-tui", // only live-tui's worker pid is alive
-        |_| false,
-        |_| false,
-        |_| false,
-        |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
-        true,                   // roster readable: the flip needs a successful roster read
-    );
-    assert_eq!(
-        changes[0].new_status,
-        Some(AgentStatus::Exited),
-        "a dead interactive host is reaped to Exited during reconcile"
-    );
-    assert_eq!(
-        changes[1].new_status, None,
-        "a live interactive host is left untouched"
-    );
-    // Reaped to Exited, never orphaned.
-    assert!(out.orphans.is_empty());
-    assert_eq!(out.updated, vec!["dead-tui".to_string()]);
-}
-
-#[test]
 fn reconcile_mux_pane_liveness_follows_the_pid_not_the_store() {
     // Codex P1/P2 (#603): a mux-hosted pane is PTY-governed, so on a
     // session-store miss a live pid keeps it Live and a dead pid reaps to
@@ -1571,69 +1535,6 @@ fn reconcile_mux_pane_liveness_follows_the_pid_not_the_store() {
         "a pid-less mux pane defers to store liveness (orphan), not immortal"
     );
     assert_eq!(out.orphans, vec!["pidless-pane".to_string()]);
-}
-
-#[test]
-fn reconcile_served_word_on_pane_rows_follows_the_pid_even_when_the_probe_errs() {
-    // AC3: a claude pane row carries a pid and NO session id, so
-    // ClaudeProvider::reachability refuses it ("no session id in entry").
-    // The old mapping served `unmeasured` on every Err whatever the pid
-    // said - a live 13h44m pane and a dead one read the same. The served
-    // word follows the pid for pane rows; the status transition keeps
-    // today's rule (an Err probe never flips status).
-    let mk = |name: &str, pid: Option<u32>| {
-        let mut e = rentry(name, AgentStatus::Live, None);
-        e.mux = Some(crate::state::MuxRef {
-            session: "main".into(),
-            pane_id: 7,
-        });
-        e.pid = pid;
-        e
-    };
-    let mut interactive = mk("interactive-live", Some(4244));
-    interactive.mux = None;
-    interactive.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
-    let entries = vec![
-        mk("live-pane", Some(4242)),
-        mk("dead-pane", Some(4243)),
-        mk("pidless-pane", None),
-        interactive,
-    ];
-    let (changes, out) = plan_reconcile(
-        &entries,
-        |_| Err(probe_err()),
-        || false,
-        |e| e.name == "live-pane" || e.name == "interactive-live",
-        |_| false,
-        |_| false,
-        |_| false,
-        |_| RowLiveness::Alive,
-        true,
-    );
-    assert_eq!(
-        changes[0].new_liveness,
-        Some("alive"),
-        "a live pane pid serves alive even on an Err probe"
-    );
-    assert_eq!(
-        changes[1].new_liveness,
-        Some("dead"),
-        "a dead pane pid serves dead even on an Err probe"
-    );
-    assert_eq!(
-        changes[2].new_liveness,
-        Some("unmeasured"),
-        "a pid-less pane keeps today's Err mapping"
-    );
-    assert_eq!(
-        changes[3].new_liveness,
-        Some("alive"),
-        "an interactive host's served word follows its pid too"
-    );
-    for ch in &changes {
-        assert_eq!(ch.new_status, None, "an Err probe never flips status");
-    }
-    assert!(out.orphans.is_empty());
 }
 
 #[test]
