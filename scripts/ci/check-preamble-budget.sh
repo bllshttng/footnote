@@ -367,13 +367,16 @@ for path in "${FILES[@]}"; do
   bytes=$((bytes))
   content_hash=$(hash_file "$path")
   TOTAL_BYTES=$((TOTAL_BYTES + bytes))
-  case "$(reach_of "$relative")" in
+  # Not called in command substitution on purpose: a reach-less path must exit
+  # the gate, and an exit inside $() only kills the subshell.
+  reach="$(reach_of "$relative")"
+  case "$reach" in
     "every harness") REACH_EVERY=$((REACH_EVERY + bytes)) ;;
     hook:*) REACH_HOOK=$((REACH_HOOK + bytes)) ;;
     "claude only") REACH_CLAUDE=$((REACH_CLAUDE + bytes)) ;;
   esac
   RECORDS+="${bytes}"$'\t'"${relative}"$'\n'
-  MANIFEST_RECORDS+="${bytes}"$'\t'"${content_hash}"$'\t'"${relative}"$'\t'"$(reach_of "$relative")"$'\n'
+  MANIFEST_RECORDS+="${bytes}"$'\t'"${content_hash}"$'\t'"${relative}"$'\t'"${reach}"$'\n'
 done
 
 APPROX_TOKENS=$((TOTAL_BYTES / 4))
