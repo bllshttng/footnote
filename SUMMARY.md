@@ -16,6 +16,8 @@ The king-loop board-budget test pins env under `claims::test_env_lock()` alongsi
 
 The shim-era loop-check payload stubs the native code cannot read are gone. `test_loop_check_shim.sh` keeps the 11 cases that pin real behavior against the real binary. The codex-rollout contract moved to `test_target_stop_hook_codex_uuid.sh` driving the binary.
 
+The boundary reconcile also fixed one watching behavior the lease-only arm had wrong: a refused watch blocked with the refusal alone, never naming the blocker behind the dead watch. The refusal now composes after done() has named the real blocker; permanent refusals cut the contradicting arm hint, transient ones keep the blocker, and the row carries the refusal kind. Fourteen integration tests whose premise 2.1 deleted were adjudicated: eight deleted (the attended no-gh advisory pair, the pre-read-only prefail pin, the four floor stand-down tests, the fingerprint-wedge test) and six rewritten (three gate-open fixtures, two first-call wedges, one extra healthy fire in the outage freeze test). The PR body names each.
+
 ## Deleted
 
 Stop shim body (451). Guard shim body with five CLI calls and four Python fragments (342). The GraphQL floor and stand-down block less the kept lease idle (139). The fingerprint pre-read and second streak recount (128). The verified-watching arm (71). The Python `fno agents nudge-peek` leg: nudge.py, test_nudge.py, the cli and runtime entries. 13 inline emit blocks folded into two row builders. The duplicated delivery retry-id math. The loopcheck test block (8,092 lines) moved beside the file's other children.
