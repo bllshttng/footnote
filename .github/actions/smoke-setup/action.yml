@@ -90,9 +90,16 @@ runs:
       # other smoke step resolves.
       shell: bash
       run: |
-        cargo clean -p fno --manifest-path crates/fno/Cargo.toml
-        cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
-        cargo build --manifest-path crates/fno/Cargo.toml
-        cargo build --manifest-path crates/fno-agents/Cargo.toml
+        # The repo .cargo/config.toml sets build-dir to the cargo-home build
+        # base ({cargo-cache-home}/build/{workspace-path-hash}); a toolchain
+        # that honors it puts the final binaries THERE, and the FRONT exports
+        # below point at a path that was never written. Pin the classic
+        # layout per build so both binaries land where the exports read.
+        CARGO_BUILD_BUILD_DIR="$PWD/crates/fno/target" \
+          cargo build --manifest-path crates/fno/Cargo.toml
+        CARGO_BUILD_BUILD_DIR="$PWD/crates/fno-agents/target" \
+          cargo build --manifest-path crates/fno-agents/Cargo.toml
+        test -x "$PWD/crates/fno-agents/target/debug/fno-agents"
+        test -x "$PWD/crates/fno/target/debug/fno"
         echo "FNO_RUST_FRONT=$PWD/crates/fno/target/debug/fno" >> "$GITHUB_ENV"
         echo "FNO_AGENTS_FRONT=$PWD/crates/fno-agents/target/debug/fno-agents" >> "$GITHUB_ENV"
