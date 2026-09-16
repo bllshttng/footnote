@@ -420,26 +420,6 @@ fi
 
 hydrate_state_provider_context
 
-record_combined_context() {
-    [[ -n "$CONTEXT_HOOK_INPUT" ]] || return 0
-    command -v uv >/dev/null 2>&1 || return 0
-    local output_file
-    output_file="$(mktemp "${TMPDIR:-/tmp}/fno-context-output.XXXXXX" 2>/dev/null || true)"
-    [[ -n "$output_file" ]] || return 0
-    printf '%s' "$combined" >"$output_file"
-    python3 "$PLUGIN_ROOT/cli/src/fno/context_observation.py" run-bounded \
-        --timeout "${FNO_CONTEXT_OBSERVER_TIMEOUT_SECONDS:-2}" -- \
-        uv run --project "$PLUGIN_ROOT/cli" python3 \
-        "$PLUGIN_ROOT/cli/src/fno/context_observation.py" direct \
-        --source-id session-start-combined \
-        --expected session-start-combined \
-        --carrier hooks/session-start.sh \
-        --input-file "$CONTEXT_HOOK_INPUT" \
-        --output-file "$output_file" \
-        --output-is-directive >/dev/null 2>&1 || true
-    rm -f "$output_file" 2>/dev/null || true
-}
-record_combined_context || true
 [[ -n "$CONTEXT_HOOK_INPUT" ]] && rm -f "$CONTEXT_HOOK_INPUT" 2>/dev/null || true
 
 # No context to inject — exit silently

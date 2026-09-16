@@ -3494,6 +3494,17 @@ def _drain_hook_wired(hooks_json: Optional[Path] = None) -> Optional[bool]:
         for c in (h.get("hooks") or []) if isinstance(h, dict) else []:
             if isinstance(c, dict):
                 cmds.append(str(c.get("command", "")))
+    # Producers moved into hooks/context-hooks.json (the context-run groups);
+    # their argv strings name the same scripts, so scan them beside hooks.json.
+    try:
+        declaration = json.loads(
+            (path.parent / "context-hooks.json").read_text(encoding="utf-8")
+        )
+        for group in (declaration.get("groups") or {}).values():
+            for producer in group.get("producers") or []:
+                cmds.append(" ".join(str(a) for a in producer.get("argv") or []))
+    except (OSError, ValueError, UnicodeDecodeError, AttributeError):
+        pass
     return any("mail-drain" in c or "drain-self" in c for c in cmds)
 
 
