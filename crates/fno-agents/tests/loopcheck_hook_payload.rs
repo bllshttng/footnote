@@ -461,8 +461,20 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
     );
     assert!(
         retry.exists(),
-        "missing retry snapshot at {}",
-        retry.display()
+        "missing retry snapshot at {}; git_dir={:?}; dot_fno={:?}",
+        retry.display(),
+        fs::read_dir(git_path(&cwd, ".").join(".git"))
+            .map(|entries| entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>())
+            .unwrap_or_default(),
+        fs::read_dir(cwd.join(".fno"))
+            .map(|entries| entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>())
+            .unwrap_or_default(),
     );
     write_other_pending(&cwd);
     assert_eq!(fire(), Some(0));
