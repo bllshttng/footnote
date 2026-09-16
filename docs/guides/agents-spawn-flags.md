@@ -28,6 +28,8 @@ Every placement flag implies `--substrate pane`.
 
 `--model/-m` is forwarded as-is to the provider's own CLI. There is no fuzzy resolution. On the default pane substrate every provider honors it. On thread or headless it reaches claude, codex, and agy.
 
+`--agent` names an agent definition the launched session runs under. claude takes `fno:<name>` on every lane and also resolves a bare name. opencode takes it on the pane lane only. An unknown name exits 1 before launch. The launched main thread gets the agent body but not its `skills:` list, so a skills list in the body loads nothing. codex, agy and gemini refuse the flag, and the codex refusal names the `.codex/agents/<role>.toml` role and the `spawn_agent` `agent_type` that replaces it.
+
 ## Credentials
 
 `--account` pins ONE worker to a registered claude account. The daemon-wide active `~/.claude` slot stays untouched. An account with its own config_dir sets `CLAUDE_CONFIG_DIR`, which bills right. A managed account that IS the active occupant rides the shared slot. Any other managed account is refused, with a pointer to config-dir registration: the setup-token env lane bills the wrong account. claude only, fail-closed.

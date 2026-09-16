@@ -1239,6 +1239,8 @@ fn blueprinter_tick(cfg: &DrainConfig, journal: &Journal) {
             "thread".to_string(),
             "--name".to_string(),
             status.worker_name_next.clone(),
+            "--agent".to_string(),
+            "fno:architect".to_string(),
             prompt,
         ];
         let provenance = spawn_provenance_env(cfg, "blueprinter");
@@ -4324,6 +4326,7 @@ mod tests {
         assert_eq!(argv.matches("agents spawn").count(), 1);
         assert!(argv.contains("--substrate thread"));
         assert!(argv.contains("--name blueprinter-x-bbbb-abc123"));
+        assert!(argv.contains("--agent fno:architect"));
         assert!(argv.contains("territory blueprinter for scope x-bbbb"));
         assert_eq!(argv.matches("--deliver").count(), 1);
         eprintln!(

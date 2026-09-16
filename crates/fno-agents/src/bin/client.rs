@@ -1904,6 +1904,18 @@ fn exec_python_front(args: &[String]) -> std::io::Error {
     err
 }
 
+// The `--agent` refusal for codex names the native role form, not generic advice.
+fn agent_unsupported_line(provider: &str, agent: &str) -> Option<String> {
+    let role = agent.strip_prefix("fno:").unwrap_or(agent);
+    (provider == "codex").then(|| {
+        format!(
+            "--agent is not supported for harness 'codex': codex has no main-thread agent flag. \
+             Its native form is the agent role .codex/agents/{role}.toml: seed the session to \
+             call spawn_agent with agent_type {role}, or pass -H claude."
+        )
+    })
+}
+
 fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32> {
     use fno_agents::agy_ask::dispatch_agy_once_with_effort;
     use fno_agents::claude_ask::{
@@ -2172,7 +2184,13 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         }
         // --agent / --tools / --deny-tools: claude-only on this lane.
         if agent.is_some() && provider != "claude" {
-            unsupported("--agent");
+            match agent
+                .as_deref()
+                .and_then(|a| agent_unsupported_line(provider, a))
+            {
+                Some(line) => eprintln!("{line}"),
+                None => unsupported("--agent"),
+            }
             return Some(2);
         }
         if tools.is_some() && provider != "claude" {
