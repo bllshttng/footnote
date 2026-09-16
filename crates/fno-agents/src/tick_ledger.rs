@@ -114,6 +114,11 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         default_interval_s: crate::merge_close::MERGE_CLOSE_INTERVAL_S,
         scheduler: SCHED_DAEMON,
     },
+    ArmSpec {
+        arm: "crown_ledger",
+        default_interval_s: crate::king_ledger::CROWN_LEDGER_INTERVAL_S,
+        scheduler: SCHED_DAEMON,
+    },
 ];
 
 /// Build the `data` object of one tick row. `skip_reason` is a single token
@@ -992,7 +997,7 @@ mod tests {
     /// `KNOWN_ARMS` row, daemon scheduler, the 900s beat for merge_close.
     #[test]
     fn arm_watch_is_the_eleventh_known_arm_merge_close_the_thirteenth() {
-        assert_eq!(KNOWN_ARMS.len(), 13);
+        assert_eq!(KNOWN_ARMS.len(), 14);
         let spec = KNOWN_ARMS
             .iter()
             .find(|s| s.arm == "arm_watch")
@@ -1017,6 +1022,15 @@ mod tests {
             crate::merge_close::MERGE_CLOSE_INTERVAL_S
         );
         assert_eq!(mc.scheduler, SCHED_DAEMON);
+        let cl = KNOWN_ARMS
+            .iter()
+            .find(|s| s.arm == "crown_ledger")
+            .expect("crown_ledger row");
+        assert_eq!(
+            cl.default_interval_s,
+            crate::king_ledger::CROWN_LEDGER_INTERVAL_S
+        );
+        assert_eq!(cl.scheduler, SCHED_DAEMON);
     }
 
     fn write_rows(path: &Path, rows: &[Value]) {

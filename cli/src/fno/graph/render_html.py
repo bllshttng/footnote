@@ -914,9 +914,10 @@ _DASHBOARD_JS = """\
       var count = document.createElement('span'); count.className = 'gc';
       head.appendChild(caret); head.appendChild(title); head.appendChild(bar); head.appendChild(count);
       var list = document.createElement('div'); list.className = 'rows';
-      sec.dataset.open = 'true';
+      sec.dataset.open = 'true'; head.setAttribute('aria-expanded', 'true');
       head.addEventListener('click', function () {
-        sec.dataset.open = sec.dataset.open === 'false' ? 'true' : 'false'; });
+        sec.dataset.open = sec.dataset.open === 'false' ? 'true' : 'false';
+        head.setAttribute('aria-expanded', sec.dataset.open); });
       sec.appendChild(head);
       var built = rows.map(function (n) { var row = document.createElement('div'); row.className = 'row';
         if (n.id) row.id = n.id;
@@ -1021,7 +1022,8 @@ _DASHBOARD_JS = """\
     revealed = id;
     render(true);
     var sec = row.closest('.group');
-    if (sec) { sec.classList.remove('is-hidden'); sec.dataset.open = 'true'; }
+    if (sec) { sec.classList.remove('is-hidden'); sec.dataset.open = 'true';
+      var gh = sec.querySelector('.ghead'); if (gh) gh.setAttribute('aria-expanded', 'true'); }
     var main = row.querySelector('.rmain');
     if (main && main.getAttribute('aria-expanded') !== 'true') main.click();
     row.scrollIntoView({ block: 'center' });
@@ -1032,6 +1034,11 @@ _DASHBOARD_JS = """\
   revealHash();
 })();
 """
+
+# The crate owns this script (king_ledger.rs include_str!s the same file);
+# build.rs copies it here, and the cli-ci generated-copies step is the
+# tripwire. Only LOCAL pages embed it: a public board is a snapshot.
+_PAGE_RELOAD_JS = (Path(__file__).parent / "page_reload.js").read_text(encoding="utf-8")
 
 
 def _dashboard_rows(
@@ -1316,6 +1323,7 @@ def _dashboard_html(
     projection: str = "backlog",
     flow: dict | None = None,
     label: str = "fno",
+    reload_s: object = None,
 ) -> str:
     rows = _dashboard_rows(
         entries, local=local, vault=vault, context_entries=context_entries
@@ -1399,6 +1407,9 @@ def _dashboard_html(
         "onload=\"this.media='all';this.onload=null\">"
         f'<noscript><link rel="stylesheet" href="{font_href}"></noscript>'
     )
+    reload_tag = "" if reload_s is None else (
+        f'<script data-fno-reload="{html.escape(str(reload_s))}">{_PAGE_RELOAD_JS}</script>'
+    )
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -1439,7 +1450,7 @@ def _dashboard_html(
         f'<footer><span id="shown"></span><span>rendered {generated}</span>'
         f"<span>statuses: {status_legend}</span></footer>"
         f'</div><script id="data" type="application/json">{payload}</script>'
-        f"<script>{dashboard_js}</script></body></html>\n"
+        f"<script>{dashboard_js}</script>{reload_tag}</body></html>\n"
     )
 
 
@@ -1486,6 +1497,8 @@ def render_graph_html(
 
         path = GRAPH_HTML
     vault = _load_obsidian_vault()
+    from fno.config_io import read_global_block
+
     content = _dashboard_html(
         scoped,
         title=title,
@@ -1493,6 +1506,7 @@ def render_graph_html(
         local=True,
         vault=vault,
         context_entries=all_entries,
+        reload_s=(read_global_block("backlog") or {}).get("page_reload_s", 60),
         flow=_board_flow(
             scoped, None if all_projects or not project else project
         ),

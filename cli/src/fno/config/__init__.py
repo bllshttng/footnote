@@ -417,6 +417,9 @@ class BacklogBlock(BaseModel):
     # faster than an untriaged idea, so it defaults tighter (21).
     staleness_days: int = 21
     render_targets: list[RenderTargetConfig] = Field(default_factory=list)
+    # Seconds an open local board or reign.html tab waits, visible and
+    # untouched, before it reloads itself (0 is off).
+    page_reload_s: int = 60
 
     @field_validator("render_targets", mode="before")
     @classmethod

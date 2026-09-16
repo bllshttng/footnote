@@ -15,7 +15,7 @@
 use crate::court_fold::{compile_forced, esc, ACTIVE_STATUSES, COUNT_ORDER};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn s_str<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(|x| x.as_str())
@@ -604,9 +604,137 @@ footer{font-family:var(--mono);font-size:11px;color:var(--ink-mut);border-top:1p
   display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap}
 "##;
 
+/// The shared page-reload script, inlined into every operator page this
+/// crate renders. `build.rs` copies the same file to the Python package.
+const PAGE_RELOAD_JS: &str = include_str!("page_reload.js");
+
+/// The crown_ledger arm's beat: the age after which the /crown route in
+/// crates/fno/src/web.rs starts its own render, so the file on disk and the
+/// served page age alike.
+pub const CROWN_LEDGER_INTERVAL_S: u64 = 300;
+
+/// The arm as the daemon holds it: cadence stamp plus one-in-flight gate.
+#[derive(Default)]
+pub struct Arm {
+    last_tick: std::sync::Mutex<Option<std::time::Instant>>,
+    in_flight: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// The production runner: the page render, cwd-bound (config, the graph and
+/// the default out path all resolve per cwd).
+fn run_ledger() -> Result<(), String> {
+    let output = std::process::Command::new(crate::scrape::fno_py())
+        .args(["agents", "king", "ledger"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("spawn: {e}"))?;
+    if !output.status.success() {
+        let last = output
+            .stderr
+            .split(|b| *b == b'\n')
+            .filter(|l| !l.is_empty())
+            .next_back()
+            .map(|l| String::from_utf8_lossy(l).into_owned())
+            .unwrap_or_default();
+        return Err(format!(
+            "exit {}: {last}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(())
+}
+
+/// One pass of the arm body: the run, then exactly one tick row - on every
+/// path, so a silent tick cannot be told from one that never ran.
+fn emit_one(
+    home: &crate::paths::AgentsHome,
+    run: impl FnOnce() -> Result<(), String>,
+) -> crate::merge_close::CloseOutcome {
+    let outcome = match run() {
+        Ok(()) => crate::merge_close::CloseOutcome {
+            acted: 1,
+            skip_reason: None,
+            detail: "reign.html rendered".to_string(),
+        },
+        Err(e) => crate::merge_close::CloseOutcome {
+            acted: 0,
+            skip_reason: Some("error".to_string()),
+            detail: e.chars().take(200).collect(),
+        },
+    };
+    let journal = crate::loop_runtime::Journal::new_raw(
+        home.events_jsonl(),
+        crate::daemon::global_events_path(home),
+    );
+    crate::tick_ledger::emit_tick(
+        &journal,
+        "crown_ledger",
+        crate::tick_ledger::SCHED_DAEMON,
+        outcome.acted,
+        outcome.skip_reason.as_deref(),
+        Some(&outcome.detail),
+        CROWN_LEDGER_INTERVAL_S,
+    );
+    outcome
+}
+
+/// The daemon-facing wrapper: due-check plus one-in-flight gate. A page
+/// render is not dispatch, so there is no pause gate: the arm renders even
+/// when no crown is live, so an empty court reads "no live crowns" rather
+/// than a stale crown.
+pub fn maybe_tick(arm: &Arm, home: crate::paths::AgentsHome) {
+    maybe_tick_with(arm, home, run_ledger);
+}
+
+fn maybe_tick_with(
+    arm: &Arm,
+    home: crate::paths::AgentsHome,
+    run: impl FnOnce() -> Result<(), String> + Send + 'static,
+) {
+    let interval = std::time::Duration::from_secs(CROWN_LEDGER_INTERVAL_S);
+    {
+        let mut last = arm.last_tick.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| t.elapsed() < interval)
+            || arm
+                .in_flight
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let flag = std::sync::Arc::clone(&arm.in_flight);
+    tokio::task::spawn_blocking(move || {
+        let _gate = crate::daemon::SweepGate(flag);
+        emit_one(&home, run);
+    });
+}
+
+/// `backlog.page_reload_s`: seconds between self-reloads of an open page.
+/// Unset, negative, or not an integer reads as the 60-second default.
+fn reload_secs(value: Option<toml::Value>) -> i64 {
+    value
+        .and_then(|v| v.as_integer())
+        .filter(|s| *s >= 0)
+        .unwrap_or(60)
+}
+
+/// The court arrives as a path or, with `-`, on stdin, so a relay never
+/// needs a temp file to lose when a render is killed.
+fn read_court(path: &Path, stdin: &mut dyn std::io::Read) -> Result<String, String> {
+    if path.as_os_str() == "-" {
+        let mut text = String::new();
+        stdin
+            .read_to_string(&mut text)
+            .map_err(|e| format!("cannot read stdin: {e}"))?;
+        return Ok(text);
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
 /// The whole page. Four verdict states; an unreadable registry and an empty
 /// court are measurements, never a blank or falsely healthy page.
-pub fn render(court: &Value, entries: &[Value], generated: &str) -> String {
+pub fn render(court: &Value, entries: &[Value], generated: &str, reload_s: i64) -> String {
     let projects: Result<HashMap<String, String>, String> =
         crate::king_board::project_map(&std::env::current_dir().unwrap_or_default());
     let summary = court.get("summary").cloned().unwrap_or(json!({}));
@@ -707,8 +835,11 @@ pub fn render(court: &Value, entries: &[Value], generated: &str) -> String {
         "</div><script>(function(){var el=document.querySelector(\".age\");if(!el)return;\
          var t=Date.parse(el.getAttribute(\"data-generated\"));if(isNaN(t))return;\
          var m=Math.floor((Date.now()-t)/60000);if(m<0)m=0;\
-         el.textContent=m<60?m+\" min ago\":Math.floor(m/60)+\" h ago\";})();</script></body></html>",
+         el.textContent=m<60?m+\" min ago\":Math.floor(m/60)+\" h ago\";})();</script>",
     );
+    out.push_str(&format!(
+        "<script data-fno-reload=\"{reload_s}\">{PAGE_RELOAD_JS}</script></body></html>"
+    ));
     out
 }
 
@@ -765,7 +896,7 @@ pub fn run_reign_ledger(args: &[String]) -> i32 {
             other => {
                 eprintln!("fno-agents reign-ledger: unknown flag {other}");
                 eprintln!(
-                    "fno-agents reign-ledger: --court-json PATH --graph PATH \
+                    "fno-agents reign-ledger: --court-json PATH|- --graph PATH \
                      --generated TS --out PATH"
                 );
                 return 2;
@@ -776,13 +907,10 @@ pub fn run_reign_ledger(args: &[String]) -> i32 {
         eprintln!("fno-agents reign-ledger: --court-json, --graph and --out are required");
         return 2;
     };
-    let court_text = match std::fs::read_to_string(&court_path) {
+    let court_text = match read_court(&court_path, &mut std::io::stdin()) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!(
-                "fno-agents reign-ledger: cannot read {}: {e}",
-                court_path.display()
-            );
+            eprintln!("fno-agents reign-ledger: {e}");
             return 1;
         }
     };
@@ -801,7 +929,11 @@ pub fn run_reign_ledger(args: &[String]) -> i32 {
                 return 1;
             }
         };
-    if let Err(e) = write_atomic(&out_path, &render(&court, &entries, &generated)) {
+    let reload = reload_secs(crate::agents_config::config_lookup(
+        &std::env::current_dir().unwrap_or_default(),
+        &["backlog", "page_reload_s"],
+    ));
+    if let Err(e) = write_atomic(&out_path, &render(&court, &entries, &generated, reload)) {
         eprintln!("fno-agents reign-ledger: {e}");
         return 1;
     }
@@ -815,7 +947,7 @@ mod tests {
     use serde_json::json;
 
     fn page(court: Value, entries: Vec<Value>) -> String {
-        render(&court, &entries, "2026-09-12T00:00:00Z")
+        render(&court, &entries, "2026-09-12T00:00:00Z", 60)
     }
 
     fn base_crown() -> Value {
@@ -1160,5 +1292,93 @@ mod tests {
         ];
         let page = page(base_court(json!([base_crown(), base_crown()])), entries);
         assert!(!page.contains('\u{2014}'));
+    }
+
+    #[test]
+    fn page_carries_one_reload_script_before_body_close() {
+        let page = page(base_court(json!([base_crown()])), vec![]);
+        let tag = "<script data-fno-reload=\"60\">";
+        assert_eq!(page.matches(tag).count(), 1, "exactly one reload tag");
+        let tail = format!("{tag}{PAGE_RELOAD_JS}</script></body></html>");
+        assert!(
+            page.ends_with(&tail),
+            "the reload script is the last thing before the page close"
+        );
+    }
+
+    #[test]
+    fn reload_interval_reads_60_unless_a_whole_non_negative_number() {
+        assert_eq!(reload_secs(None), 60);
+        assert_eq!(reload_secs(Some(toml::Value::Integer(-1))), 60);
+        assert_eq!(reload_secs(Some(toml::Value::Float(90.5))), 60);
+        assert_eq!(reload_secs(Some(toml::Value::String("90".into()))), 60);
+        assert_eq!(reload_secs(Some(toml::Value::Integer(0))), 0);
+        assert_eq!(reload_secs(Some(toml::Value::Integer(120))), 120);
+    }
+
+    #[test]
+    fn court_json_dash_reads_the_court_from_stdin() {
+        let text = read_court(
+            &PathBuf::from("-"),
+            &mut std::io::Cursor::new("{\"crowns\":[]}"),
+        )
+        .unwrap();
+        assert_eq!(text, "{\"crowns\":[]}");
+        let dir = std::env::temp_dir().join(format!("reign-court-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("court.json");
+        std::fs::write(&path, "{\"crowns\":[1]}").unwrap();
+        let from_file = read_court(&path, &mut std::io::empty()).unwrap();
+        assert_eq!(from_file, "{\"crowns\":[1]}");
+        let err = read_court(&dir.join("absent.json"), &mut std::io::empty()).unwrap_err();
+        assert!(err.contains("cannot read"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn home() -> crate::paths::AgentsHome {
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("crown-ledger-test-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::paths::AgentsHome::at(dir.join("home"))
+    }
+
+    #[test]
+    fn crown_ledger_success_writes_one_acted_row() {
+        let h = home();
+        let o = emit_one(&h, || Ok(()));
+        assert_eq!(o.acted, 1);
+        assert_eq!(o.skip_reason, None);
+        let log = std::fs::read_to_string(h.events_jsonl()).unwrap_or_default();
+        assert_eq!(
+            log.matches("\"arm\":\"crown_ledger\"").count(),
+            1,
+            "log: {log}"
+        );
+        assert!(log.contains("\"acted\":1"), "log: {log}");
+        assert!(log.contains("\"interval_s\":300"), "log: {log}");
+    }
+
+    #[test]
+    fn crown_ledger_failure_is_an_error_row() {
+        let h = home();
+        let o = emit_one(&h, || Err("exit 1: graph unreadable".to_string()));
+        assert_eq!(o.acted, 0);
+        assert_eq!(o.skip_reason.as_deref(), Some("error"));
+        let log = std::fs::read_to_string(h.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("\"acted\":0"), "log: {log}");
+        assert!(log.contains("\"skip_reason\":\"error\""), "log: {log}");
+        assert!(log.contains("graph unreadable"), "log: {log}");
+    }
+
+    #[test]
+    fn crown_ledger_young_cadence_stamp_runs_nothing() {
+        let arm = Arm::default();
+        let h = home();
+        *arm.last_tick.lock().unwrap() = Some(std::time::Instant::now());
+        maybe_tick_with(&arm, h.clone(), || panic!("arm must be gated"));
+        assert!(!h.events_jsonl().exists(), "a gated tick wrote no row");
     }
 }
