@@ -837,6 +837,29 @@ def test_decider_slot_table_covers_every_readout_verb(tmp_path):
     assert table["fix"]["lanes_raw"], "the fix row must carry its lanes, not only its key"
 
 
+def test_profile_fields_by_difficulty_is_json_serializable(tmp_path):
+    """A populated by_difficulty rung answers as plain dicts, not pydantic
+    models: the slot payload is handed to json.dumps for the route-slot
+    subprocess, and a DifficultyLaneBlock value there raised TypeError
+    (Object of type DifficultyLaneBlock is not JSON serializable), refusing
+    every dispatch under strict routing."""
+    import json
+
+    from fno.config import settings_from_files
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        "[agents.profiles.target.by_difficulty.high]\n"
+        'lanes = ["claude-opus-5", "codex-sol"]\n',
+        encoding="utf-8",
+    )
+    settings = settings_from_files([cfg])
+    profile = settings.agents.profiles["target"]
+    fields = rr._profile_fields(profile)
+    assert fields["by_difficulty"]["high"]["lanes"] == ["claude-opus-5", "codex-sol"]
+    json.dumps(fields)  # must not raise TypeError
+
+
 @requires_rust
 def test_strict_routing_arms_a_configured_verb_outside_the_tuple(tmp_path):
     """Strict routing arms a configured profile whatever its verb, and still
