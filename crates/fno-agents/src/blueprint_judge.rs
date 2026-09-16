@@ -40,29 +40,51 @@ pub const JUDGE_MODEL: &str = "sonnet";
 /// 3,600-second bound. The full session load timed out at 600.
 const READER_TIMEOUT_SECS: u64 = 240;
 
+/// The lens directory under the repo root or the deployed plugin root: one
+/// file per dimension plus preamble.md, read by the judge, never by the
+/// planner (`disable-model-invocation` keeps it that way).
+const LENS_SUBDIR: &str = "skills/pm-plan-review/lenses";
+
 type Lenses = (String, HashMap<String, String>);
 
-fn lenses_path(cwd: &Path) -> PathBuf {
-    worktree_repo_root(cwd).join("evals/blueprint-judge/lenses.md")
+/// The checkout's own lens directory wins (a footnote worktree is fresher
+/// than the deployed stage); else the deployed plugin root's; else None.
+fn lens_dir(repo_root: &Path, plugin_root: Option<&Path>) -> Option<PathBuf> {
+    let own = repo_root.join(LENS_SUBDIR);
+    if own.is_dir() {
+        return Some(own);
+    }
+    let deployed = plugin_root?.join(LENS_SUBDIR);
+    deployed.is_dir().then_some(deployed)
 }
 
-/// (shared preamble, {dimension: section body}); unreadable file -> ("", {}).
-fn load_lenses(path: &Path) -> Lenses {
-    let Ok(text) = std::fs::read_to_string(path) else {
+/// Drop a lens file's leading `# ` title line and trim; the title is for the
+/// person browsing the directory, never for the prompt.
+fn drop_title(text: &str) -> String {
+    match text.strip_prefix("# ") {
+        Some(rest) => match rest.split_once('\n') {
+            Some((_, body)) => body.trim().to_string(),
+            None => String::new(),
+        },
+        None => text.trim().to_string(),
+    }
+}
+
+/// (shared preamble, {dimension: section body}). A missing directory or an
+/// unreadable file is simply absent, and a missing lens is a gap the row
+/// reports, never a silent default.
+fn load_lenses(dir: Option<&Path>) -> Lenses {
+    let Some(dir) = dir else {
         return (String::new(), HashMap::new());
     };
-    let heading = Regex::new(r"(?m)^## ").unwrap();
-    let Some(m) = heading.find(&text) else {
-        return (String::new(), HashMap::new());
-    };
-    let preamble = text[..m.start()].trim().to_string();
+    let mut preamble = String::new();
+    if let Ok(text) = std::fs::read_to_string(dir.join("preamble.md")) {
+        preamble = drop_title(&text);
+    }
     let mut sections = HashMap::new();
-    for chunk in heading.split(&text[m.end()..]) {
-        let mut parts = chunk.splitn(2, '\n');
-        let name = parts.next().unwrap_or("").trim();
-        let body = parts.next().unwrap_or("").trim();
-        if JUDGE_DIMENSIONS.contains(&name) {
-            sections.insert(name.to_string(), body.to_string());
+    for name in JUDGE_DIMENSIONS {
+        if let Ok(text) = std::fs::read_to_string(dir.join(format!("{name}.md"))) {
+            sections.insert(name.to_string(), drop_title(&text));
         }
     }
     (preamble, sections)
@@ -234,6 +256,11 @@ fn judge_plan(
         return (None, format!("unknown judge dimension {dimension:?}"));
     }
     let (preamble, sections) = lenses;
+    let Some(section) = sections.get(dimension).filter(|s| !s.is_empty()) else {
+        // Grading a question the reader was never given is the silent
+        // failure the lens move exists to end: name the gap, spawn nobody.
+        return (None, format!("no lens file {LENS_SUBDIR}/{dimension}.md"));
+    };
     let node_trimmed = node_text.trim();
     let mut parts = vec![
         if preamble.is_empty() {
@@ -255,9 +282,7 @@ fn judge_plan(
     if !ctx.is_empty() {
         parts.push(format!("## Context from code\n{ctx}"));
     }
-    if let Some(section) = sections.get(dimension).filter(|s| !s.is_empty()) {
-        parts.push(format!("## Your question: {dimension}\n{section}"));
-    }
+    parts.push(format!("## Your question: {dimension}\n{section}"));
     let prompt = format!("{}\n", parts.join("\n\n"));
     match spawn(
         &format!("blueprint-judge-{dimension}"),
@@ -333,7 +358,13 @@ fn judge_rows(
         .collect()
 }
 
-fn run_single_plan(plan_path: &Path, node_id: Option<&str>, cwd: &Path, spawn: Spawn) -> i32 {
+fn run_single_plan(
+    plan_path: &Path,
+    node_id: Option<&str>,
+    cwd: &Path,
+    lenses: &Lenses,
+    spawn: Spawn,
+) -> i32 {
     let plan_text = match std::fs::read_to_string(plan_path) {
         Ok(t) => t,
         Err(e) => {
@@ -344,13 +375,18 @@ fn run_single_plan(plan_path: &Path, node_id: Option<&str>, cwd: &Path, spawn: S
             return 0;
         }
     };
-    let lenses = load_lenses(&lenses_path(cwd));
-    let rows = judge_rows(&plan_text, node_id, cwd, &lenses, spawn);
+    let rows = judge_rows(&plan_text, node_id, cwd, lenses, spawn);
     println!("{}", json!({"rows": rows}));
     0
 }
 
-fn run_calibration(labels_path: &Path, split: &str, cwd: &Path, spawn: Spawn) -> i32 {
+fn run_calibration(
+    labels_path: &Path,
+    split: &str,
+    cwd: &Path,
+    lenses: &Lenses,
+    spawn: Spawn,
+) -> i32 {
     let text = match std::fs::read_to_string(labels_path) {
         Ok(t) => t,
         Err(e) => {
@@ -372,7 +408,6 @@ fn run_calibration(labels_path: &Path, split: &str, cwd: &Path, spawn: Spawn) ->
         }
     };
     let base = labels_path.parent().unwrap_or(Path::new("."));
-    let lenses = load_lenses(&lenses_path(cwd));
 
     // (n, n_fail_labeled, n_pass_labeled, tp, tn) per dimension. tp/tn count
     // correct judge verdicts on the rows actually labeled that class, so the
@@ -504,14 +539,21 @@ pub fn run_judge(args: &[String]) -> i32 {
         i += 1;
     }
 
+    let lenses = load_lenses(
+        lens_dir(
+            &worktree_repo_root(&cwd),
+            crate::provider::plugin_root().as_deref(),
+        )
+        .as_deref(),
+    );
     if let Some(labels_path) = labels {
-        return run_calibration(&labels_path, &split, &cwd, &default_spawn);
+        return run_calibration(&labels_path, &split, &cwd, &lenses, &default_spawn);
     }
     let Some(plan_path) = plan else {
         eprintln!("fno-agents judge: give --plan or --labels");
         return 2;
     };
-    run_single_plan(&plan_path, node.as_deref(), &cwd, &default_spawn)
+    run_single_plan(&plan_path, node.as_deref(), &cwd, &lenses, &default_spawn)
 }
 
 #[cfg(test)]
@@ -539,15 +581,16 @@ mod tests {
     }
 
     #[test]
-    fn load_lenses_splits_preamble_from_named_sections() {
+    fn load_lenses_reads_the_directory_shape() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lenses.md");
+        std::fs::write(dir.path().join("preamble.md"), "shared preamble\n").unwrap();
+        std::fs::write(dir.path().join("persona.md"), "# persona\npersona body\n").unwrap();
         std::fs::write(
-            &path,
-            "shared preamble\n\n## persona\npersona body\n\n## surface_fit\nfit body\n",
+            dir.path().join("surface_fit.md"),
+            "# surface_fit\nfit body\n",
         )
         .unwrap();
-        let (preamble, sections) = load_lenses(&path);
+        let (preamble, sections) = load_lenses(Some(dir.path()));
         assert_eq!(preamble, "shared preamble");
         assert_eq!(
             sections.get("persona").map(String::as_str),
@@ -560,10 +603,52 @@ mod tests {
     }
 
     #[test]
-    fn load_lenses_missing_file_is_empty() {
-        let (preamble, sections) = load_lenses(Path::new("/nonexistent/lenses.md"));
+    fn load_lenses_missing_dir_is_empty() {
+        let (preamble, sections) = load_lenses(None);
         assert_eq!(preamble, "");
         assert!(sections.is_empty());
+        let (preamble, sections) = load_lenses(Some(Path::new("/nonexistent/lenses")));
+        assert_eq!(preamble, "");
+        assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn lens_dir_falls_back_to_the_plugin_root() {
+        let repo = tempfile::tempdir().unwrap();
+        let plugin = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(plugin.path().join(LENS_SUBDIR)).unwrap();
+        assert!(lens_dir(repo.path(), None).is_none());
+        let fallback = lens_dir(repo.path(), Some(plugin.path())).unwrap();
+        assert_eq!(fallback, plugin.path().join(LENS_SUBDIR));
+        // the checkout's own copy wins over the deployed one
+        std::fs::create_dir_all(repo.path().join(LENS_SUBDIR)).unwrap();
+        assert_eq!(
+            lens_dir(repo.path(), Some(plugin.path())).unwrap(),
+            repo.path().join(LENS_SUBDIR)
+        );
+    }
+
+    #[test]
+    fn missing_lens_file_is_a_gap_with_no_spawn() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("preamble.md"), "shared").unwrap();
+        std::fs::write(dir.path().join("persona.md"), "# persona\nbody\n").unwrap();
+        let lenses = load_lenses(Some(dir.path()));
+        let calls = std::cell::Cell::new(0u32);
+        let spawn = |_name: &str, _: &str, _: &Path, _: u64, _: &str| {
+            calls.set(calls.get() + 1);
+            Ok((0, "VERDICT: pass".to_string(), String::new()))
+        };
+        let (verdict, reason) = judge_plan("plan", "", "deletable", dir.path(), &lenses, &spawn);
+        assert_eq!(calls.get(), 0, "no lens, no spawn");
+        assert_eq!(verdict, None);
+        assert_eq!(
+            reason,
+            "no lens file skills/pm-plan-review/lenses/deletable.md"
+        );
+        let (verdict, _) = judge_plan("plan", "", "persona", dir.path(), &lenses, &spawn);
+        assert_eq!(verdict.as_deref(), Some("pass"));
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]
@@ -599,7 +684,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plan = dir.path().join("p.md");
         std::fs::write(&plan, "a plan").unwrap();
-        let rc = run_single_plan(&plan, None, dir.path(), &fake_spawn);
+        let lenses = load_lenses(None);
+        let rc = run_single_plan(&plan, None, dir.path(), &lenses, &fake_spawn);
         assert_eq!(rc, 0);
     }
 
@@ -642,7 +728,13 @@ mod tests {
                 Ok((0, "VERDICT: pass".to_string(), String::new()))
             }
         };
-        let lenses = (String::new(), HashMap::new());
+        let lenses = (
+            String::new(),
+            HashMap::from([
+                ("persona".to_string(), "who is hit".to_string()),
+                ("duplication".to_string(), "existing module".to_string()),
+            ]),
+        );
         let rows = judge_rows(&plan_text, None, dir.path(), &lenses, &spawn);
         let persona = rows
             .iter()
@@ -676,8 +768,17 @@ mod tests {
 
         // fake_spawn always answers persona=pass, surface_fit=fail: the
         // persona row agrees with its label, the surface_fit row disagrees
-        // and (being a control) counts against controls_wrong.
-        let rc = run_calibration(&labels_path, "test", dir.path(), &fake_spawn);
+        // and (being a control) counts against controls_wrong. Lenses are
+        // built with sections here: a missing lens is a gap that never
+        // disagrees, so an empty map would score nothing.
+        let lenses = (
+            String::new(),
+            HashMap::from([
+                ("persona".to_string(), "who is hit".to_string()),
+                ("surface_fit".to_string(), "surface".to_string()),
+            ]),
+        );
+        let rc = run_calibration(&labels_path, "test", dir.path(), &lenses, &fake_spawn);
         assert_eq!(rc, 1);
     }
 }

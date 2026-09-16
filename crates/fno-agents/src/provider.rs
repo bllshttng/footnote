@@ -516,7 +516,7 @@ fn read_footnote_verbs() -> std::collections::HashSet<String> {
     verbs
 }
 
-fn plugin_root() -> Option<PathBuf> {
+pub(crate) fn plugin_root() -> Option<PathBuf> {
     for name in ["CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT", "FNO_REPO_ROOT"] {
         if let Ok(root) = std::env::var(name) {
             if !root.is_empty() {
