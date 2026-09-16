@@ -286,6 +286,13 @@ else
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
 
+# A candidate exists only to be promoted into DELIVERY_PENDING_STATE. A king
+# stop has no pending state, and the bare expansion then wrote `.candidate.$$`
+# into the checkout the hook runs in.
+DELIVERY_CANDIDATE=""
+[[ -n "$DELIVERY_PENDING_STATE" ]] && DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
+trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
+
 # Second candidate: a king session. Its manifest is a separate file because a
 # king runs in the canonical checkout where a target manifest may also exist,
 # and the target manifest wins when both are present: a session holding one is
@@ -555,6 +562,11 @@ fi
 # and the captured exit code is the binary's own. (Trailing newline added by
 # <<< is harmless: serde_json tolerates trailing whitespace.)
 mkdir -p "$SPACE_DIR" 2>/dev/null || true
+CANDIDATE_READY=0
+if [[ -n "$DELIVERY_CANDIDATE" && "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+    && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
+    CANDIDATE_READY=1
+fi
 LOOP_CHECK_LOG="${SPACE_DIR}/loop-check.stderr.log"
 DECISION_JSON=""
 verb_rc=0
@@ -704,11 +716,18 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
         if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]]; then
             [[ -n "$DELIVERY_PENDING_STATE" ]] \
                 || emit_block_for_harness "generic delivery state could not be preserved; will retry"
-            PENDING_TMP="${DELIVERY_PENDING_STATE}.tmp.$$"
-            if ! cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
-                || ! mv "$PENDING_TMP" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
-                rm -f "$PENDING_TMP" 2>/dev/null || true
-                emit_block_for_harness "generic delivery state could not be preserved; will retry"
+            if [[ $CANDIDATE_READY -eq 1 ]] \
+                && mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+                :
+            else
+                # The candidate missed (no pending id, or the manifest was
+                # absent even before loop-check); the source is still here.
+                PENDING_TMP="${DELIVERY_PENDING_STATE}.tmp.$$"
+                if ! cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
+                    || ! mv "$PENDING_TMP" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+                    rm -f "$PENDING_TMP" 2>/dev/null || true
+                    emit_block_for_harness "generic delivery state could not be preserved; will retry"
+                fi
             fi
         fi
         FINALIZE_STATE="$DELIVERY_PENDING_STATE"

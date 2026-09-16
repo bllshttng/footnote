@@ -222,6 +222,14 @@ else
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
 
+# A candidate exists only to be promoted into DELIVERY_PENDING_STATE. A king
+# stop has no pending state, and the bare expansion then wrote `.candidate.$$`
+# into the checkout the hook runs in. The trap registers here, not beside the
+# synth trap below: an emit between the two sites must not leak the candidate.
+DELIVERY_CANDIDATE=""
+[[ -n "$DELIVERY_PENDING_STATE" ]] && DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
+trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
+
 # jq-free event writer (string interpolation, so it also runs on the jq-missing
 # give-up path). Fields are hook-internal and safe to interpolate.
 emit_event() {
@@ -388,6 +396,11 @@ synthesize_transcript() {
 
 SYNTH="${STATE_FILE%/*}/.agy-loopcheck-${CONVERSATION_ID:-session}.jsonl"
 mkdir -p "$SPACE_DIR" 2>/dev/null || true
+CANDIDATE_READY=0
+if [[ -n "$DELIVERY_CANDIDATE" && "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+    && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
+    CANDIDATE_READY=1
+fi
 if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
     synthesize_transcript "$TRANSCRIPT_PATH" > "$SYNTH" 2>/dev/null || : > "$SYNTH"
 else
@@ -395,8 +408,10 @@ else
     # working (loop-check still runs its world-gate/backstop reads).
     : > "$SYNTH"
 fi
-# Clean up the synth file on every exit path (loop-check has read it by then).
-trap 'rm -f "$SYNTH" 2>/dev/null || true' EXIT
+# Clean up the synth file on every exit path (loop-check has read it by then);
+# the candidate keeps its own trap from the mint site, and the promote below
+# consumes it on a DoneDelivery stop.
+trap 'rm -f "$SYNTH" "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 
 # ── 5. Resolve the fno-agents binary (most-local wins; same order as the shim) ─
 [[ -n "$BIN" ]] || BIN=$(resolve_agents_bin)
@@ -478,15 +493,22 @@ fi
 if [[ -n "$TERMINATION_REASON" ]]; then
     FINALIZE_STATE="$STATE_FILE"
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
-        # Staged here only, as in target-stop-hook.sh: the manifest is write-once.
+        # Staged before loop-check (the candidate) so a manifest that vanishes
+        # mid-check still lands the retry; the direct copy below covers a
+        # candidate that missed. Same shape as target-stop-hook.sh.
         if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]]; then
             [[ -n "$DELIVERY_PENDING_STATE" ]] \
                 || emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
-            PENDING_TMP="${DELIVERY_PENDING_STATE}.tmp.$$"
-            if ! cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
-                || ! mv "$PENDING_TMP" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
-                rm -f "$PENDING_TMP" 2>/dev/null || true
-                emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
+            if [[ $CANDIDATE_READY -eq 1 ]] \
+                && mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+                :
+            else
+                PENDING_TMP="${DELIVERY_PENDING_STATE}.tmp.$$"
+                if ! cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
+                    || ! mv "$PENDING_TMP" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+                    rm -f "$PENDING_TMP" 2>/dev/null || true
+                    emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
+                fi
             fi
         fi
         FINALIZE_STATE="$DELIVERY_PENDING_STATE"

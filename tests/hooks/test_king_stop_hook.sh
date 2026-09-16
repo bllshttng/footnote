@@ -504,10 +504,12 @@ STUB
     cleanup
 }
 
-# ── K16: a DoneDelivery stop stages its retry state, and nothing earlier ────
+# ── K16: a DoneDelivery stop hands finalize an existing retry state ─────────
 # finalize needs the pending copy so a failed delivery can retry on the next
-# stop. It must exist when finalize runs, and no stop may stage anything before
-# loop-check has decided.
+# stop. It must exist when finalize runs. The staging happens before loop-check
+# (the manifest can vanish while loop-check runs, and the retry must survive
+# that), so the SEEN record now documents rather than forbids it: the guarantees
+# that matter are the pending existing at finalize and NOTHING left behind.
 {
     setup_king
     cat > "${TMP_DIR}/.fno/target-state.md" <<'MANIFEST'
@@ -543,15 +545,13 @@ STUB
     LEFTOVER="$(find "$TMP_DIR" \( -name '*.tmp.*' -o -name '*.candidate.*' -o -name '*delivery-finalize-pending-*' \) -print)"
     if [[ ! -f "$SEEN" ]]; then
         fail "K16: loop-check never ran (rc=$CLAUDE_RC)"
-    elif [[ -s "$SEEN" ]]; then
-        fail "K16: state staged before loop-check decided: $(cat "$SEEN")"
     elif ! grep -q "^state=.*delivery-finalize-pending-" "$SAW" 2>/dev/null \
         || ! grep -qx "exists" "$SAW"; then
         fail "K16: finalize was not handed an existing pending state: $(cat "$SAW" 2>/dev/null)"
     elif [[ "$CLAUDE_RC" -ne 0 || -n "$LEFTOVER" ]]; then
         fail "K16: rc=$CLAUDE_RC, left behind: ${LEFTOVER:-nothing}"
     else
-        pass "K16: a DoneDelivery stop stages its retry state only after loop-check, then cleans it"
+        pass "K16: a DoneDelivery stop hands finalize an existing pending state, then cleans it"
     fi
     cleanup
 }
