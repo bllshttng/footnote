@@ -1,4 +1,4 @@
-"""fno.agents.watchdog - the external fleet watchdog (x-55c3).
+"""fno.agents.watchdog - the external fleet watchdog.
 
 Runs OUTSIDE every session (a manual verb, or a leg on the pr_watch tick) and
 decides, per fleet row: wake it, reroute it, or leave it. The decision reads
@@ -6,18 +6,18 @@ TRANSCRIPT truth keyed by session id; the fno registry and
 ``claude agents --json`` are hints (measured 2026-08-15: 8 roster rows claimed
 ``working`` on silent transcripts, and the claude view inverted live/dead; the
 transcript was right every time). Row retirement is the daemon sweep's
-question (x-c672), not this module's.
+question, not this module's.
 
 The classifier is one pure function over injected inputs, so tests need no
 live fleet. Mechanisms delegate: the wake lane calls ``fno agents resume``
-(x-c136) then confirms the message by CONTENT in the recipient transcript;
+ then confirms the message by CONTENT in the recipient transcript;
 reroute reuses ``fno.recovery._redispatch`` (stop FIRST, then respawn).
 
 Traps a stranger inherits (measured 2026-08-15, pinned by tests): node
 identity joins on the recorded ``node:<id>`` claim holder / worktree
 manifest, NEVER on a name regex (eight auto-named workers nearly
 double-dispatched); a wake is confirmed by transcript content, never by a
-state field. Third (x-cd1e): ``unclaimed`` is ADVISORY - the worker is fine,
+state field. Third : ``unclaimed`` is ADVISORY - the worker is fine,
 the record is wrong - and never wakes or reroutes.
 """
 from __future__ import annotations
@@ -42,7 +42,7 @@ from fno.agents.session_truth import classify_tail
 Verdict = namedtuple(
     "Verdict", "row_id name state verdict basis action agent", defaults=("claude",)
 )
-#: ``agent`` (default "claude") resolves the row's transcript store (x-c624);
+#: ``agent`` (default "claude") resolves the row's transcript store ;
 #: apply lanes re-read the transcript through it, so it rides the verdict too.
 #: ``pid``/``pid_start_time``/``mux`` ride for the reachability falsifiers.
 Row = namedtuple(
@@ -68,7 +68,7 @@ GHOST = "ghost"
 WAKE = "wake"
 STALE = "stale"
 LEAVE = "leave"
-#: Advisory only (x-cd1e): the worker is fine, the RECORD is wrong. Never a
+#: Advisory only : the worker is fine, the RECORD is wrong. Never a
 #: wake, never a reroute - the action lanes below switch on the specific
 #: verdict, so this one cannot reach either of them. It replaces LEAVE so
 #: the row surfaces in the digest, which is the whole point: nothing today
@@ -86,7 +86,7 @@ KEEPER = "keeper"
 #: MERGED or CLOSED). Neither acts at any apply level.
 CONTENDED = "contended"
 POLLING_SETTLED = "polling_settled"
-#: Open node, spawn row, no crown, quiet past the drive threshold (x-c624). Driven like WAKE.
+#: Open node, spawn row, no crown, quiet past the drive threshold. Driven like WAKE.
 SILENCE = "silence"
 #: Report-only: a past-ceiling row whose evidence says FINISHED work (node
 #: shipped, or tail reads done) never enters the needs-human ask it can
@@ -464,7 +464,7 @@ ADVISORY_WARNING_PREFIX = "roster advisory: "
 HEADROOM_WARNING_PREFIX = f"{ADVISORY_WARNING_PREFIX}latency: "
 
 #: Advisory structured line for a live row with no harness session id; the
-#: payload names the node so the overlay skips the one row (x-ae54).
+#: payload names the node so the overlay skips the one row.
 UNMEASURABLE_ROW_PREFIX = "unmeasurable-row: "
 
 #: The roster enumeration budget. ``claude agents --json --all`` is a
@@ -500,7 +500,7 @@ _TAIL_RECORDS = 60
 #: refused because the attach that followed it was chatty.
 _CONFIRM_RECORDS = 120
 
-#: The bare resume word (x-e21e): a bus-only row is woken with this and never
+#: The bare resume word : a bus-only row is woken with this and never
 #: a message payload - a wake is an attach and a neutral resume, not a paste.
 WAKE_MESSAGE = "continue"
 
@@ -890,7 +890,7 @@ def _verdict_one(
             "report",
         )
 
-    # silence (x-c624): open node, quiet past the drive threshold; node_state_for gated on age.
+    # silence: open node, quiet past the drive threshold; node_state_for gated on age.
     if silence_after_s is not None and facts is not None and facts.last_event_epoch is not None:
         silence_age_s = max(0.0, now_s - facts.last_event_epoch)
         if silence_age_s > silence_after_s:
@@ -933,7 +933,7 @@ def _verdict_one(
         and facts.last_event_epoch is not None
     ):
         if in_quorum_breaker:
-            # The cap actor owns every cap move now (x-7e05): the watchdog
+            # The cap actor owns every cap move now: the watchdog
             # reports the strand and leaves the row alone.
             return _verdict(
                 row, LEAVE,
@@ -972,7 +972,7 @@ def _verdict_one(
                             f"tail reads {truth}, session does not owe a move",
                             "none")
         if window == "passed":
-            # x-6412: a clock-only return races the provider-cap canary and
+            # a clock-only return races the provider-cap canary and
             # wakes every capped row at once. The return is the actor's, so a
             # passed window leaves, never wakes.
             return _verdict(row, LEAVE,
@@ -1463,7 +1463,7 @@ def fleet_rows(*, timeout: Optional[float] = None) -> tuple[list[Row], list[str]
 
 
 def silence_rows(roots: "Iterable[Path]") -> tuple[list[Row], list[str]]:
-    """SILENCE's row set (x-c624): the registry, not ``claude agents --json``."""
+    """SILENCE's row set : the registry, not ``claude agents --json``."""
     from fno.agents.registry import load_registry
     from fno.agents.spawn_gate import LIVE_STATUSES
 
@@ -1638,7 +1638,7 @@ def _graph_index() -> dict[str, dict] | _Unreadable:
 
 
 #: A sweep over ZERO rows is an unreadable instrument, never an empty fleet
-#: (king report 2026-08-17, node x-4c87: after a binary update the roster read
+#: (king report 2026-08-17, node : after a binary update the roster read
 #: 0 registered rows against an intact 19-row registry file). A zero-row sweep
 #: would write ``counts={}`` and a fresh sweep-file mtime, which reads as a
 #: healthy quiet fleet - an empty fleet and a broken instrument must never
@@ -2524,7 +2524,7 @@ def apply_verdict(
     """Execute one verdict inside ``lanes`` ("wake" | "all"); only ``SKIPPED`` is
     silent. wake/silence resume with ``cwd`` set; the transcript reads run under
     the row's own harness (``agent or v.agent``). Cap moves are owned by the
-    provider-cap actor (x-7e05), so no reroute arm exists here."""
+    provider-cap actor, so no reroute arm exists here."""
     if v.verdict not in LANES.get(lanes, frozenset()):
         return SKIPPED, f"{v.verdict} outside {lanes} lane"
     try:
@@ -2590,7 +2590,7 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[
         return "refused", f"resume exit {proc.returncode}: {tail[-1] if tail else ''}"
     if agent != "claude":
         # Resume's own exit code is the receipt on every non-claude harness
-        # (x-6ac3): a codex thread row exits 0 only when the daemon accepted
+        # a codex thread row exits 0 only when the daemon accepted
         # the turn - the same receipt mail delivery trusts - and every exec
         # arm cannot exit 0 under a captured stdin at all. The transcript
         # marker is the claude contract; re-checking it here would read a
@@ -2598,7 +2598,7 @@ def _apply_wake(v: Verdict, *, cwd: str, runner: Callable, agent: str) -> tuple[
         return "applied", f"woke {v.name}; resume exit 0 is the delivery receipt ({agent})"
     if not confirm_wake_landed(v.row_id, cwd, WAKE_MESSAGE, before_epoch, agent=agent):
         # Carry resume's own last line into the refusal: exit 0 is exactly
-        # the receipt that lied here (x-6ac3), so its before -> after line
+        # the receipt that lied here, so its before -> after line
         # is what the next operator needs without re-running anything.
         # Empty output keeps today's text with no trailing separator.
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()

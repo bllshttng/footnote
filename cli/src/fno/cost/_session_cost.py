@@ -514,7 +514,7 @@ def render_tasks_md(entries: list[dict]) -> str:
 
     # Provenance: historical costs were corrected once by
     # backfill-cost-recompute.py (transcript dedup + version-aware pricing,
-    # ab-c0f92987). Anything that consumed pre-correction totals (retro
+    #). Anything that consumed pre-correction totals (retro
     # docs, per-feature comparisons) silently shifted meaning; this note
     # lives in the renderer so it survives re-renders.
     if any(e.get("cost_backfill") for e in entries):

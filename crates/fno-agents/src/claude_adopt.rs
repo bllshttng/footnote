@@ -1,6 +1,6 @@
 //! Adopt an externally-spawned `claude --bg` worker into the fno registry.
 //!
-//! G1 held-attach substrate (epic x-07c1, node x-26df). Adoption is what makes an
+//! G1 held-attach substrate (epic, node). Adoption is what makes an
 //! external Claude session reachable by the rest of footnote: it mints an fno
 //! registry row (so grid/relay can `resolve_worker_short_id` it) and takes the
 //! single-writer `pty:<short_id>` claim (so two writers can't drive one session).
@@ -53,7 +53,7 @@ pub fn transcript_activity(session_id: &str) -> Option<(String, u64)> {
 /// The adopted row's `last_message_at` stamp: the truth probe's
 /// `last_event_at`, the NEWEST TIMESTAMPED transcript entry. The file mtime
 /// overstates liveness, never understates it - trailing untimestamped records
-/// keep the file young while the conversation is silent (x-54cf) - so the
+/// keep the file young while the conversation is silent - so the
 /// mtime reading is only the fallback for a session the probe cannot resolve.
 /// The existence question (`crown_from_king_manifests`) stays on
 /// [`transcript_activity`]: a probe that fails to answer must not read as "no
@@ -70,7 +70,7 @@ fn transcript_stamp_from_probe(session_id: &str, probed: Option<String>) -> Opti
     probed.or_else(|| transcript_activity(session_id).map(|(stamp, _)| stamp))
 }
 
-/// The model the session is actually running, read from its transcript (x-98ab).
+/// The model the session is actually running, read from its transcript.
 /// The LAST `message.model` on the file wins: a session can be switched
 /// mid-run, and the most recent value is the only one that answers "what is
 /// this worker running now". `None` for a missing/unreadable transcript or a
@@ -100,7 +100,7 @@ pub fn transcript_model(session_id: &str) -> Option<String> {
 }
 
 /// The model-provider this session's observed model is recorded to run on,
-/// matched against `~/.fno/route-settings/*.json` (x-98ab). The file's
+/// matched against `~/.fno/route-settings/*.json`. The file's
 /// `FNO_ROUTE_PROVIDER` stamp is the source - the observed model only SELECTS
 /// which recorded routes to consult, so this is a lookup, never the barred
 /// derive-provider-from-model-string inference. `None` when no file matches or
@@ -168,7 +168,7 @@ pub(crate) fn manifest_field(content: &str, key: &str) -> Option<String> {
 }
 
 /// The crown a live king manifest records for exactly this session, or `None`
-/// (x-f0d2). The manifest is the durable crown record and a registry row its
+///. The manifest is the durable crown record and a registry row its
 /// cache, so when a row vanishes and the healer mints its replacement, the
 /// crown comes back from the file, keyed by harness session id, never by
 /// name. Scans `<space>/kings/*.md` for the project the row belongs to (the
@@ -230,11 +230,11 @@ pub fn crown_from_king_manifests(
 /// storage move does not affect claim/control.sock routing.
 pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
     let short = w.short_id().to_string();
-    // The adopting session's ambient identity (x-132c): adoption runs in the
+    // The adopting session's ambient identity: adoption runs in the
     // session that found the worker, and that session is the best answer the
     // registry can hold for "who is responsible for this row".
     let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
-    // x-f0d2: the crown restored from a live manifest naming this session,
+    // the crown restored from a live manifest naming this session,
     // or none. Computed once, before the literal, so the row and the file can
     // never disagree about what was restored.
     let (crown_level, crown_scope, crown_grantor) =
@@ -253,20 +253,20 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         // retire acts only on "spawn", and reap protects "adopted" the same
         // way it protects a row nothing ever stamped.
         origin: Some("adopted".into()),
-        // x-98ab: adoption observed nothing about the session's node, so the
+        // x-aaaa: adoption observed nothing about the session's node, so the
         // axis stays unknown - never parsed out of the name.
         node: None,
         // The adopter was not at the spawn, so the substrate axis stays
         // unknown rather than guessed.
         substrate: None,
-        // x-d285: adopted, not launched here - HOW this session got its
+        // adopted, not launched here - HOW this session got its
         // account is unobserved, so the account axis stays unknown (never
         // "default").
         launch_account: None,
         related_session_id: None,
         short_id: short,
         legacy_provider: String::new(),
-        // x-98ab: provider is stamped by `adopt` from a REAL source (the
+        // x-aaaa: provider is stamped by `adopt` from a REAL source (the
         // route-settings match) or stays None. The old unconditional
         // "anthropic" here was a guess - an adopted claude worker may be
         // running on any routed provider, and a wrong stamp is exactly how a
@@ -275,7 +275,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         model: None,
         model_basis: None,
         effort: None,
-        // v23 (x-2019): adoption observed no spawn request, so the requested
+        // v23: adoption observed no spawn request, so the requested
         // axis stays unknown - never a guess from the transcript model, which
         // is the OBSERVED side and lands in `model` at `adopt`.
         requested_model: None,
@@ -346,12 +346,12 @@ pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<
         });
         match idx {
             Some(i) => {
-                // x-e21e: `delivery_policy` is a stamp the SESSION declared
+                // `delivery_policy` is a stamp the SESSION declared
                 // about itself; the adopt path does not own it, so a refresh
                 // carries it forward instead of reverting the row to the
                 // injectable default (a re-adopted leader must stay bus-only).
                 let policy = reg.entries[i].delivery_policy.clone();
-                // x-98ab: same for `node` - adoption observed nothing about
+                // x-aaaa: same for `node` - adoption observed nothing about
                 // the node, so replacing the row must not erase one a spawn
                 // or register path stamped.
                 let node = reg.entries[i].node.clone();
@@ -434,7 +434,7 @@ pub fn adopt(
 
     let mut entry = mint_adopted_entry(worker, &crate::daemon::now_rfc3339_like());
     entry.last_message_at = transcript_stamp(&worker.session_id);
-    // x-98ab: close the missing-model class at adopt - the transcript states
+    // x-aaaa: close the missing-model class at adopt - the transcript states
     // the model outright, so an adopted row stops attesting nothing and the
     // attest-model guard gets its premise. Provider comes only from the
     // route-settings match; with no match it records None rather than a guess.
@@ -504,7 +504,7 @@ mod tests {
         let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
         let base = seed_transcript("stamp-probe", uuid, &[transcript_line("glm-5.3")]);
         // The probe answered: its stamp wins no matter how fresh the file stat
-        // is, because the stat rides untimestamped trailing records (x-54cf).
+        // is, because the stat rides untimestamped trailing records.
         assert_eq!(
             transcript_stamp_from_probe(uuid, Some("2030-01-01T00:00:00Z".into())),
             Some("2030-01-01T00:00:00Z".into())
@@ -532,12 +532,12 @@ mod tests {
         let e = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
         assert_eq!(e.name, "cc-a1b2c3d4");
         assert_eq!(e.harness_name(), "claude");
-        // x-98ab: mint stamps NO provider - the old unconditional "anthropic"
+        // x-aaaa: mint stamps NO provider - the old unconditional "anthropic"
         // was a guess about how the session is routed, and a wrong stamp is
         // how a session bills the wrong account unobserved. `adopt` fills it
         // from the route-settings match or leaves it None.
         assert_eq!(e.provider, None);
-        // x-98ab: adoption observed nothing about the node; the field reads
+        // x-aaaa: adoption observed nothing about the node; the field reads
         // unknown, never a value parsed out of the name.
         assert_eq!(e.node, None);
         assert_eq!(e.host_mode.as_deref(), Some("attached"));
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(e.status, AgentStatus::Live);
     }
 
-    // -- x-98ab: row identity + a sweep that names what it kept --------------
+    // -- x-aaaa: row identity + a sweep that names what it kept --------------
 
     /// Write a minimal transcript for `uuid` under a fresh temp projects dir
     /// and point `FNO_CLAUDE_PROJECTS_DIR` at it. The transcript lives one
@@ -743,17 +743,17 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let reg = dir.join("registry.json");
         let mut stamped = mint_adopted_entry(&worker(), "2026-06-27T17:00:00Z");
-        stamped.node = Some("x-98ab".into());
+        stamped.node = Some("x-aaaa".into());
         upsert_adopted_row(&reg, stamped).unwrap();
         upsert_adopted_row(&reg, mint_adopted_entry(&worker(), "2026-06-27T18:00:00Z")).unwrap();
         let loaded = crate::state::load_registry(&reg).unwrap();
-        assert_eq!(loaded.entries[0].node.as_deref(), Some("x-98ab"));
+        assert_eq!(loaded.entries[0].node.as_deref(), Some("x-aaaa"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn adopted_row_restores_crown() {
-        // x-f0d2: the manifest is the durable crown record, the row its cache.
+        // the manifest is the durable crown record, the row its cache.
         // A manifest naming the adopted session holder restores the crown
         // triple onto the minted row, keyed by session id, never by name.
         let _guard = crate::claims::test_env_lock()
@@ -772,9 +772,9 @@ mod tests {
         let kings = spaces.join("-Users-x-code-proj").join("kings");
         std::fs::create_dir_all(&kings).unwrap();
         std::fs::write(
-            kings.join("x-dede.md"),
+            kings.join("x-bbbb.md"),
             format!(
-                "---\nscope: x-dede\nharness_session_id: {uuid}\ncrown_level: 2\ncrown_scope: x-dede\ncrown_grantor: operator\n---\n"
+                "---\nscope: x-bbbb\nharness_session_id: {uuid}\ncrown_level: 2\ncrown_scope: x-bbbb\ncrown_grantor: operator\n---\n"
             ),
         )
         .unwrap();
@@ -782,7 +782,7 @@ mod tests {
 
         let e = mint_adopted_entry(&worker(), "2026-09-05T00:00:00Z");
         assert_eq!(e.crown_level, Some(2));
-        assert_eq!(e.crown_scope.as_deref(), Some("x-dede"));
+        assert_eq!(e.crown_scope.as_deref(), Some("x-bbbb"));
         assert_eq!(e.crown_grantor.as_deref(), Some("operator"));
 
         std::env::remove_var("FNO_SPACES_DIR");
@@ -856,9 +856,9 @@ mod tests {
         let kings = spaces.join("-Users-x-code-proj").join("kings");
         std::fs::create_dir_all(&kings).unwrap();
         std::fs::write(
-            kings.join("x-dede.md"),
+            kings.join("x-bbbb.md"),
             format!(
-                "---\nscope: x-dede\nharness_session_id: {uuid}\ncrown_level: 2\ncrown_scope: x-dede\n---\n"
+                "---\nscope: x-bbbb\nharness_session_id: {uuid}\ncrown_level: 2\ncrown_scope: x-bbbb\n---\n"
             ),
         )
         .unwrap();
@@ -922,7 +922,7 @@ mod tests {
     #[test]
     fn upsert_refresh_carries_a_declared_delivery_policy_forward() {
         let _root = crate::paths::DeclaredRoot::declare("upsert_refresh_carries_a_dec");
-        // x-e21e: the replace path swaps the WHOLE row for a fresh mint, which
+        // the replace path swaps the WHOLE row for a fresh mint, which
         // would silently revert a session's self-declared bus-only stamp to
         // injectable on re-adopt -- the delivery defect again, one adopt later.
         let dir = std::env::temp_dir().join(format!(

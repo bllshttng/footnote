@@ -1,4 +1,4 @@
-"""Which codex session does THIS process's rollout prove? (x-a409)"""
+"""Which codex session does THIS process's rollout prove? """
 from __future__ import annotations
 
 import os
@@ -64,10 +64,10 @@ def _codex_session_id_for_pid(pid: int, *, psutil_mod=None) -> Optional[str]:
 def codex_rollout_witness(
     harness: str, env: Optional[Mapping[str, str]] = None
 ) -> frozenset:
-    """Session ids a live codex rollout witnesses for THIS process (x-a409).
+    """Session ids a live codex rollout witnesses for THIS process.
 
     Injected into claims.resolve_self_identity: an fd is process ground a
-    leaked env marker cannot forge. Tree scan first; when empty (post-x-a095,
+    leaked env marker cannot forge. Tree scan first; when empty (post-change,
     the daemon holds the fd), the daemon oracle requires the present
     CODEX_THREAD_ID to match a row at this cwd, uniquely. Else empty; never
     raises.

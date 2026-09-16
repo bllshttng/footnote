@@ -1,4 +1,4 @@
-//! The one native owner of every non-journal input to `king-verdict` (x-5952):
+//! The one native owner of every non-journal input to `king-verdict` :
 //! caller crown, canonical scope, manifest, config values, graph rows, the
 //! check-in window, and the inherited/filed delivery split. `king_history.rs`
 //! keeps the journal scan, verdict, payload, and rendering it already owns.
@@ -173,7 +173,7 @@ fn resolve_scope(explicit_scope: Option<&str>, registry_path: &Path) -> Result<S
 /// `<space>/kings/<scope>.md` for the named scope (a deliberate change from
 /// Python, which resolved the CALLER's manifest even under an explicit scope
 /// - reading one crown's reign through another crown's manifest is the bug
-/// x-5952 closes).
+/// closes).
 fn resolve_manifest(
     cwd: &Path,
     scope: &str,

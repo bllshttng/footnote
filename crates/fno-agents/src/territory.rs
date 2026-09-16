@@ -1,4 +1,4 @@
-//! The territory fact set (x-e221): one module owns territory identity,
+//! The territory fact set : one module owns territory identity,
 //! membership, the drain-target facts, and the standing blueprinter's record.
 //!
 //! Ownership follows the seam rule (rust-python-seam.md): the active-backlog
@@ -37,7 +37,7 @@ pub(crate) fn compile_scope_ids(
     compile_territory(scope, entries, projects).map(|(_, ids)| ids)
 }
 
-/// The territory-key + membership read (x-e221 AC1): the canonical scope key
+/// The territory-key + membership read (AC1): the canonical scope key
 /// alongside the ids it contains. `Err` is the explicit unknown - a scope
 /// that is neither a configured project nor a graph epic - never an empty
 /// territory, so a capacity/board reader that gets `Err` stops instead of
@@ -771,7 +771,7 @@ fn is_terminal(row: &Value) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The blueprinter feed (x-e221 AC5/AC6)
+// The blueprinter feed (AC5/AC6)
 // ---------------------------------------------------------------------------
 
 /// A failed delivery re-attempts after this long; a delivered idea still
@@ -1158,7 +1158,7 @@ pub fn run_territory_rows(args: &[String]) -> i32 {
 }
 
 /// `fno-agents active-backlog-receipt`: the drain reading as JSON on stdout,
-/// the x-338c object shape (`targets`/`missions`/`skip_reason`). Exit 1 with
+/// the object shape (`targets`/`missions`/`skip_reason`). Exit 1 with
 /// the reason on stderr when a source is unreadable - `unknown` must never
 /// print as an empty list. Invoked by the `fno config active-backlog`
 /// passthrough and rank's dispatcher note.
@@ -1221,7 +1221,7 @@ pub fn run_blueprint_feed(args: &[String]) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// The readout projection (x-e221 AC7)
+// The readout projection (AC7)
 // ---------------------------------------------------------------------------
 
 /// The per-territory cap: `agents.max_live_per_territory`, default 4, coerced
@@ -1257,7 +1257,7 @@ pub fn territory_rows(config_cwd: &Path, registry_path: &Path) -> Vec<Value> {
     let live_names: HashSet<&str> = live.iter().map(|r| r.name.as_str()).collect();
     let live_nodes: Vec<Option<&str>> = live.iter().map(|r| r.node.as_deref()).collect();
 
-    // Exclusive membership (x-e221): a crowned node counts for its crown
+    // Exclusive membership: a crowned node counts for its crown
     // scope only, so a worker can never cost two territories at once - the
     // same rule the spawn gate enforces.
     let mut memberships: Vec<(&Territory, Result<(String, HashSet<String>), String>)> = Vec::new();
@@ -1664,7 +1664,7 @@ path = "/repo/alpha"
     #[test]
     fn py_quote_matches_urllib_parse_quote_safe_empty() {
         let _env = env_guard();
-        assert_eq!(py_quote("x-a792"), "x-a792");
+        assert_eq!(py_quote("x-cccc"), "x-cccc");
         assert_eq!(py_quote("x-a,x-b"), "x-a%2Cx-b");
         assert_eq!(py_quote("a:b/c d"), "a%3Ab%2Fc%20d");
         assert_eq!(py_quote("t~i.l-d_x"), "t~i.l-d_x");
@@ -1825,8 +1825,8 @@ path = "/repo/alpha"
 
     #[test]
     fn worker_name_is_registry_safe_and_stable_per_scope() {
-        let a1 = worker_name_for_scope("x-a792");
-        let a2 = worker_name_for_scope("x-a792");
+        let a1 = worker_name_for_scope("x-cccc");
+        let a2 = worker_name_for_scope("x-cccc");
         let b = worker_name_for_scope("x-b, x-c");
         assert_eq!(a1, a2);
         assert_ne!(a1, b);

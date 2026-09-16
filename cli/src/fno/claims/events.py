@@ -107,7 +107,7 @@ def emit_claim_rebound(
     harness: Optional[str] = None,
     harness_session_id: Optional[str] = None,
 ) -> None:
-    """A native target resume rebound a same-holder local claim (x-2ccd).
+    """A native target resume rebound a same-holder local claim.
 
     ``mode`` is ``rebind`` (a dead prior PID rebound to the resumed durable
     PID) or ``idempotent`` (a live same-PID lease refresh). The claim file is

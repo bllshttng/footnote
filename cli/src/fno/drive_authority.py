@@ -1,4 +1,4 @@
-"""Drive-authority detection (Phase 6 Wave 4, ab-8d258ddb).
+"""Drive-authority detection (Phase 6 Wave 4).
 
 ``is_drive_authority_active()`` is the primitive every gate-hardening consumer
 reads. While an operator holds an interactive / step / paranoid drive window on

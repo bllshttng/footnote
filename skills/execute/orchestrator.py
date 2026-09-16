@@ -60,7 +60,7 @@ _PRODUCT_MD_SEARCH_PATHS = (
 
 
 # ---------------------------------------------------------------------------
-# Company topology projection (x-7741)
+# Company topology projection
 # ---------------------------------------------------------------------------
 # The router projects a resolved company topology onto a work order through
 # fno.company.execution.project_execution, which carries the shape alongside the
@@ -68,7 +68,7 @@ _PRODUCT_MD_SEARCH_PATHS = (
 # required evidence. There is no second router: topology changes execution
 # shape only, so the same WorkOrderRef and delivery requirements pass through
 # direct, loop, squad, and pipeline unchanged. Company work is not yet flowing
-# through this router (x-edf5 is the first consumer); this is the seam.
+# through this router (is the first consumer); this is the seam.
 
 
 def apply_company_topology(resolution, work_order, authority_ceiling, approval_floor, required_evidence_ids):
@@ -916,7 +916,7 @@ class TaskResult:
 # The execution-agent return-contract status enum (AGENTS.md "Return Contract").
 # A status outside this set is REJECTED, never coerced: the parse layer fails
 # CLOSED so a model that appends prose or invents a status yields no false
-# success (ab-1394e797: "text output-format conventions fail open; schema
+# success (: "text output-format conventions fail open; schema
 # validation happens at the tool-call layer").
 VALID_STATUSES = ("SUCCESS", "DONE_WITH_CONCERNS", "FAILED", "BLOCKED")
 
@@ -1021,7 +1021,7 @@ def parse_structured_result(output: str) -> Optional[TaskResult]:
 def parse_task_result(output: str) -> Optional[TaskResult]:
     """Parse an execution agent's structured return, schema-first and fail-closed.
 
-    Resolution order (ab-1394e797 - schema over the RESULT: stdout grammar):
+    Resolution order (- schema over the RESULT: stdout grammar):
 
     1. A schema-enforced structured block (```json or ``<result>``) is preferred,
        the claude dispatch path. It is validated against the contract; a
@@ -1089,7 +1089,7 @@ ClassifiedKind = Literal[
     "no_output",
 ]
 
-# Runtime-observed worker terminal vocabulary (x-1862): the process-level half
+# Runtime-observed worker terminal vocabulary: the process-level half
 # of a worker return, independent of anything the worker wrote about itself.
 # The dispatcher encodes process death as an exit code (a signal death arrives
 # as 128+N); ``runtime_terminal_from_exit_code`` is the producer-side mapping
@@ -1126,7 +1126,7 @@ def classify_worker_return(
 ) -> tuple[Optional[str], Optional[ClassifiedKind]]:
     """Validate a worker return against the canonical contract and classify it.
 
-    Two independent inputs, kept separate on purpose (x-1862): ``output`` is
+    Two independent inputs, kept separate on purpose : ``output`` is
     the worker's self-report (the CLAIM); ``runtime_terminal`` is what the
     runtime OBSERVED about the process (``"completed"``, ``"error"``,
     ``"signal"`` for a 128+N death, ``"context_limit"``, ``"refusal"``). A
@@ -1166,7 +1166,7 @@ def emit_status_event(
     outcome: str = "",
     data: Optional[Dict] = None,
 ) -> bool:
-    """Emit an x-dbaf status-breakpoint event by shelling ``fno doctor event emit``.
+    """Emit an status-breakpoint event by shelling ``fno doctor event emit``.
 
     Non-fatal by contract: any failure logs one stderr note and returns False;
     it never raises, so a boundary emit can never fail the task or the run.
@@ -1296,7 +1296,7 @@ _GIVEBACK_OUTCOMES = ("FAILED", "BLOCKED")
 
 
 def release_task_claim_at_boundary(node: str, task: str, outcome: str) -> bool:
-    """Settle the task claim at a task boundary (x-09d7 group 3).
+    """Settle the task claim at a task boundary (group 3).
 
     ``done`` after a terminal outcome, ``pending`` (the holder-only give-back)
     after ``blocked``/``FAILED``, so the next ready worker can pick the task
@@ -1810,7 +1810,7 @@ if __name__ == "__main__":
             data=b_data,
         )
         # The boundary every outcome already passes through is also the one
-        # place the task claim taken at dispatch gets settled (x-09d7 g3):
+        # place the task claim taken at dispatch gets settled (g3):
         # done releases it, blocked/FAILED gives it back to pending. The event
         # TYPE is gated, not just trusted: a typo'd type carrying --task must
         # not reach the give-back and release a live worker's claim. The node

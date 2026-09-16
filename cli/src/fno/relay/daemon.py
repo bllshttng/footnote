@@ -1,4 +1,4 @@
-"""Group 3 of the cross-session agent relay (x-908b / x-a2c9): the ALWAYS-ON
+"""Group 3 of the cross-session agent relay (/): the ALWAYS-ON
 relay DAEMON. Tails the durable bus, routes each peer-to-peer relay message to
 its recipient's inject handle, and re-injects replies -- with NO human in the
 routing path (US3 / AC3). The human-out-of-loop guarantee is the whole point.
@@ -310,7 +310,7 @@ def daemon_deliver(
 
     - **interactive** (E4.3): a footnote-spawned PTY worker -> the daemon
       ``worker.submit`` RPC (:func:`fno.relay.roundtrip.deliver_session`).
-    - **attached** (G3, node x-e027): an adopted ``claude --bg`` session with no
+    - **attached** (G3, node): an adopted ``claude --bg`` session with no
       worker socket -> the ``control.sock`` op:'reply' inject
       (:func:`fno.relay.roundtrip.deliver_attached`, the ``mail-inject`` verb).
 
@@ -340,7 +340,7 @@ def daemon_deliver(
     holder = holder or f"relay-daemon:{_pid()}"
 
     def _deliver(res: Resolution, framed: str) -> Optional[str]:
-        # Cross-harness lane (G4 / x-3f34): a non-claude owned-PTY worker carries a
+        # Cross-harness lane (G4 /): a non-claude owned-PTY worker carries a
         # ``worker:<short_id>`` inject handle (the registry bridge). Route it through
         # the SAME ``worker.submit`` and capture via the per-harness seam (pty-tail by
         # default). No ``session:`` claim probe -- that single-writer interlock is

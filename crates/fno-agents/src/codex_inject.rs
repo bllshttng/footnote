@@ -1,5 +1,5 @@
 //! `mail-inject --harness codex`: LIVE delivery into a running codex session
-//! over the codex app-server daemon socket (US8, node x-d899). The codex sibling
+//! over the codex app-server daemon socket (US8, node). The codex sibling
 //! of [`crate::mail_inject`]'s claude `control.sock` path. Python's send path
 //! (`_mail_inject_codex`) runs this as a subprocess and falls back to the durable
 //! bus ONLY when it reports not-delivered (live-inject-first).
@@ -407,7 +407,7 @@ pub fn thread_resume_probe_json(id: u64, thread_id: &str) -> String {
 
 /// `review/start` target: what the codex reviewer diffs against. Mirrors the
 /// app-server protocol's `ReviewTarget` enum (verified live against the daemon,
-/// node x-c24d): a structured target beats a typed `/review <prose>`, which only
+/// node): a structured target beats a typed `/review <prose>`, which only
 /// yields `{type:custom, instructions}` with no computed merge base.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReviewTarget {
@@ -438,7 +438,7 @@ impl ReviewTarget {
 
 /// `review/start` delivery: `inline` runs the review on the worker's own thread
 /// (its current cwd), `detached` forks a new thread that inherits the session's
-/// ORIGINAL cwd - the cwd trap (node x-c24d). Default inline.
+/// ORIGINAL cwd - the cwd trap (node). Default inline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewDelivery {
     Inline,
@@ -1298,7 +1298,7 @@ pub fn loaded_threads_block(result: Result<Vec<LoadedThread>, &'static str>) -> 
 }
 
 // ---------------------------------------------------------------------------
-// Project assignment (x-dc97). Codex never derives a thread's project from its
+// Project assignment. Codex never derives a thread's project from its
 // cwd: a thread carries an explicit projectId and a project carries an ARRAY
 // of root paths, and Desktop writes the assignment only for worktrees it
 // created itself under CODEX_HOME/worktrees. Every other spawn falls back to
@@ -1635,7 +1635,7 @@ pub async fn assign_thread_to_project(thread_id: &str, project_id: &str) -> Opti
     accepted.then_some(())
 }
 
-/// The hidden `fno-agents codex-assign-project` verb (x-dc97): resolve or
+/// The hidden `fno-agents codex-assign-project` verb: resolve or
 /// create the repo's project for `--cwd`, and when `--thread-id` is given,
 /// assign that bound thread to it. This is how the HEADLESS lane reaches the
 /// resolver - the Python codex create path captures the thread id from
@@ -1712,7 +1712,7 @@ async fn round_trip(
 /// The connect + initialize handshake + the posture read + `turn/start`.
 /// Split out so [`deliver_via_codex_daemon`] can wrap it in a total timeout.
 ///
-/// The writable-roots grant rides the TURN, never a client `-c` flag (x-4a68):
+/// The writable-roots grant rides the TURN, never a client `-c` flag:
 /// `thread/read` names the thread's cwd, `thread/resume` reads the posture the
 /// server resolved, and only a `workspaceWrite` posture widens the roots -
 /// this lane never narrows a thread. A failed read is NOT a delivery failure:
@@ -2390,7 +2390,7 @@ mod tests {
         assert_eq!(classify_turn_start_response(raw), Ok(()));
     }
 
-    /// AC8 (x-296f defect 2): a daemon that REFUSES `initialize` must not read
+    /// AC8 (defect 2): a daemon that REFUSES `initialize` must not read
     /// healthy. The id-matched frame is not automatically a successful
     /// handshake: protocol or version skew answers with an `error` on the same
     /// id, and the discarded response let `probe_codex_app_server` report
@@ -2631,7 +2631,7 @@ mod tests {
         assert!(!probe_codex_app_server(&missing));
     }
 
-    // --- project assignment (x-dc97) -------------------------------------
+    // --- project assignment -------------------------------------
 
     /// Positive-control the matcher on the exact shape a real page carries.
     #[test]

@@ -102,7 +102,7 @@ const FLOCK_SLEEP: Duration = Duration::from_millis(20);
 /// plus lifecycle markers for a dead or intentionally detached worker.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredMember {
-    /// (x-5f7f) `#[serde(default)]` so a worker member can omit it: a
+    /// `#[serde(default)]` so a worker member can omit it: a
     /// non-claude worker pane has no claude jobId, and its identity is the
     /// `worker` registry name instead. Empty for those members; the load
     /// gate accepts either shape.
@@ -123,22 +123,22 @@ pub struct StoredMember {
     /// attaches/resumes the row. Omitted false keeps older stores compact.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detached: bool,
-    /// (x-0f9d US4) The name of the tab hosting this member's pane at store
+    /// (US4) The name of the tab hosting this member's pane at store
     /// time, so a chosen tab name survives a mux restart: restore names the
     /// re-derived tab from it. Re-derived fresh on every persist so a rename is
-    /// captured. `#[serde(default)]` keeps a pre-x-0f9d store readable (absent
+    /// captured. `#[serde(default)]` keeps a pre-change store readable (absent
     /// -> `None` -> the tab restores unnamed, exactly as before) and holds
     /// STORE_VERSION at 1 (an additive field never quarantines existing squads).
     #[serde(default)]
     pub tab_name: Option<String>,
-    /// (x-caef) The pane's spawn cwd at store time, re-derived fresh on every
+    /// The pane's spawn cwd at store time, re-derived fresh on every
     /// persist like `tab_name`. Restore spawns `claude attach` here instead of
     /// the squad's `origins[0]` when the directory still exists (a worktree
     /// worker's true home), falling back to `origins[0]` with a notice when it
     /// does not. `#[serde(default)]`, same no-quarantine rule as `tab_name`.
     #[serde(default)]
     pub cwd: Option<String>,
-    /// (x-5f7f) The registry name of a non-claude worker pane - the JOIN key.
+    /// The registry name of a non-claude worker pane - the JOIN key.
     /// Harness, harness session id, cwd and account live on the registry row,
     /// which is the file that already owns them; restore never respawns this
     /// member, it renders idle and resumes through the harness's own form.
@@ -214,7 +214,7 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// A durable identity for an UNNAMED squad derived from what it represents: its
 /// sorted, deduped origin set (the home squad for a repo has one origin, so it
 /// derives one key forever and every later persist upserts onto a single row
-/// across unbounded restarts - x-e447). Order-independent and set-stable, so a
+/// across unbounded restarts -). Order-independent and set-stable, so a
 /// multi-origin lane derives consistently. The unit separator (`\x1f`, which
 /// cannot occur in a path) keeps `["a","bc"]` and `["ab","c"]` distinct. Returns
 /// 16 hex chars, the shape `mint_key` produces, so it is a drop-in for `key`.
@@ -236,7 +236,7 @@ pub fn origin_key(origins: &[String]) -> String {
 
 /// One persisted squad. Named workspaces key by `name`; an unnamed squad (empty
 /// `name` - a home squad or a project lane) keys by its durable `key`.
-/// Deliberately NOT `Eq`: `tab_trees` carries f32 split weights (x-caef).
+/// Deliberately NOT `Eq`: `tab_trees` carries f32 split weights.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredSquad {
     pub name: String,
@@ -252,27 +252,27 @@ pub struct StoredSquad {
     /// A cosmetic `YYYY-MM-DDThh:mm:ssZ` stamp, preserved across upserts.
     #[serde(default)]
     pub created_at: String,
-    /// (x-c4d4) The layout spec of each template-managed, named tab in this
+    /// The layout spec of each template-managed, named tab in this
     /// squad. Restore re-applies these to rebuild the template topology (US8),
     /// instead of the one-tab-per-member fallback. `#[serde(default)]` keeps a
-    /// pre-x-c4d4 store readable without a `STORE_VERSION` bump (an absent field
+    /// pre-change store readable without a `STORE_VERSION` bump (an absent field
     /// loads to `[]`, so no squad is quarantined).
     #[serde(default)]
     pub tab_specs: Vec<StoredTabSpec>,
-    /// (x-caef) Every tab's full topology, in squad tab order. The successor
+    /// Every tab's full topology, in squad tab order. The successor
     /// lane to `tab_specs` for shape; restore rebuilds from these when present
-    /// and falls back to the template/member lanes when absent (a pre-x-caef
+    /// and falls back to the template/member lanes when absent (a pre-change
     /// store loads them as `[]`). `#[serde(default)]`, same no-bump rule.
     #[serde(default)]
     pub tab_trees: Vec<StoredTabTree>,
-    /// (x-caef) The squad's active tab INDEX at capture, clamped at restore.
+    /// The squad's active tab INDEX at capture, clamped at restore.
     /// `#[serde(default)]`, same no-bump rule as `tab_trees`.
     #[serde(default)]
     pub active_tab: Option<usize>,
 }
 
-/// One template-managed tab's persisted layout (x-c4d4). Keyed by `tab_name`,
-/// the durable tab identity (x-0f9d) - an unnamed tab has no stable key and is
+/// One template-managed tab's persisted layout. Keyed by `tab_name`,
+/// the durable tab identity - an unnamed tab has no stable key and is
 /// never persisted. `spec` is the SAME struct `LayoutApply` consumes, so restore
 /// is a plain re-apply.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -281,7 +281,7 @@ pub struct StoredTabSpec {
     pub spec: crate::proto::LayoutSpec,
 }
 
-/// One persisted tab's FULL topology (x-caef): an arbitrary weighted tree
+/// One persisted tab's FULL topology: an arbitrary weighted tree
 /// (`layout get`'s shape, the struct `LayoutTreeSpec` graft already uses),
 /// not one of `LayoutSpec`'s five named templates. Capture is uniform across
 /// every tab of a persisted squad, so a hand split survives a restart exactly
@@ -302,7 +302,7 @@ pub struct StoredTabTree {
     pub focus: Option<String>,
 }
 
-/// The lifecycle state of a tracked EXTERNAL (claude-daemon) row (x-7561). A
+/// The lifecycle state of a tracked EXTERNAL (claude-daemon) row. A
 /// LIVE external row is never persisted (the daemon roster owns it); a record
 /// is born when we act on one. `stopping`/`removing` are in-flight (a spawn is
 /// or was outstanding); `stopped` is the terminal tombstone `x` can rm;
@@ -351,14 +351,14 @@ struct StoreFile {
     next_pane_id: u64,
     #[serde(default)]
     squads: Vec<StoredSquad>,
-    /// (x-7561) Machine-global external-row lifecycle tombstones. A defaulted
+    /// Machine-global external-row lifecycle tombstones. A defaulted
     /// field on the version-1 object: a v1 reader without it stays wire-tolerant
     /// and STORE_VERSION does not bump (which would quarantine existing squads).
     #[serde(default)]
     external_lifecycle: Vec<ExternalLifecycle>,
 }
 
-/// The outcome of a durable compare-and-set gate (x-7561). `Committed` carries
+/// The outcome of a durable compare-and-set gate. `Committed` carries
 /// the new action generation the caller correlates the subprocess result
 /// against; `Refused` is a fail-closed reason (no spawn) that is NOT a
 /// persistence error. An `io::Err` from the CAS helper is a persistence failure
@@ -377,7 +377,7 @@ pub struct Loaded {
     pub generations: std::collections::HashMap<String, u64>,
     /// The persisted pane-id floor; zero means no pane has been reserved yet.
     pub next_pane_id: u64,
-    /// (x-7561) The tracked external-row lifecycle tombstones, `attach_id`
+    /// The tracked external-row lifecycle tombstones, `attach_id`
     /// validated exactly like squad members (a malformed id never reaches an
     /// argv). Empty when the store has none.
     pub external_lifecycle: Vec<ExternalLifecycle>,
@@ -421,7 +421,7 @@ pub fn valid_attach_id(id: &str) -> bool {
     id.len() == 8 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// A worker name is a registry name, not a path or a shell token (x-5f7f).
+/// A worker name is a registry name, not a path or a shell token.
 /// Same argv-safety posture as [`valid_attach_id`]: file content is untrusted
 /// and a worker name reaches a resume spawn keyed by name, so anything outside
 /// the slug charset (`fno agents spawn` itself refuses other shapes) is
@@ -580,7 +580,7 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
         .into_iter()
         .map(|mut sq| {
             let before = sq.members.len();
-            // (x-5f7f) A member is valid in either shape: a claude attach id,
+            // A member is valid in either shape: a claude attach id,
             // or a worker registry name. Anything else (including a worker
             // name carrying a path separator or metacharacter) is dropped at
             // load before a resume can key on it.
@@ -591,7 +591,7 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
             sq
         })
         .collect::<Vec<_>>();
-    // (x-6b0b) Repair rows carrying both a name and a key - a rename of an
+    // Repair rows carrying both a name and a key - a rename of an
     // unnamed squad used to mint exactly that and leave the old key row alive
     // beside it. Clearing the key is reversible without loss (clearing a name
     // re-derives it from origins). Two passes: strip every both-fields key
@@ -763,7 +763,7 @@ pub fn upsert_with_generations(
             conflicts: Vec::new(),
         });
     }
-    // (x-6b0b) A named squad keys by name and leaves the key empty (the
+    // A named squad keys by name and leaves the key empty (the
     // struct's own contract at `StoredSquad::key`). Enforced here, where every
     // write funnels through, for the same reason the identity-less skip above
     // lives here: a caller passing both minted a row that matched by name
@@ -778,7 +778,7 @@ pub fn upsert_with_generations(
         // Preserve template tab specs and tab trees (owned by set_tab_specs /
         // set_tab_trees, not this path) across a membership upsert - the struct
         // is rebuilt fresh, so an un-carried field would be silently wiped
-        // (x-c4d4, x-caef).
+        //.
         let tab_specs = existing.map(|s| s.tab_specs.clone()).unwrap_or_default();
         let (tab_trees, active_tab) = existing
             .map(|s| (s.tab_trees.clone(), s.active_tab))
@@ -797,7 +797,7 @@ pub fn upsert_with_generations(
     })
 }
 
-/// Set the template tab specs for `name` (x-c4d4), preserving its other fields.
+/// Set the template tab specs for `name`, preserving its other fields.
 /// Inserts a minimal entry if the squad is not yet persisted (a template applied
 /// before any membership write). A store-write failure is the caller's to treat
 /// as degraded persistence (the live layout stands).
@@ -1002,7 +1002,7 @@ pub struct MemberEvidence {
     dead: std::collections::HashSet<String>,
     live_pairs: std::collections::HashSet<(String, String)>,
     dead_pairs: std::collections::HashSet<(String, String)>,
-    /// (x-6b0b, x-688b) Worker names positively recorded dead: a never-bound
+    /// Worker names positively recorded dead: a never-bound
     /// journal marker, a DEAD registry row, or a spawned worker whose row a
     /// successful registry read no longer carries. Kept separate from `dead`
     /// because the name is the identity of LAST resort: in `verdict` it only
@@ -1010,22 +1010,22 @@ pub struct MemberEvidence {
     /// where the name is all the member has). A session-keyed member keeps
     /// its exact pair (AC7-EDGE).
     dead_names: std::collections::HashSet<String>,
-    /// (x-688b) Every registry row name one fold observed. With
+    /// Every registry row name one fold observed. With
     /// `complete_registry_names`, a spawned name ABSENT here is dead evidence
     /// (its row was reaped), not missing evidence.
     registry_row_names: std::collections::HashSet<String>,
-    /// (x-688b) Worker names the spawn journal records, held or not.
+    /// Worker names the spawn journal records, held or not.
     spawned_names: std::collections::HashSet<String>,
-    /// (x-688b) Names with a still-held spawn receipt: the worker is
+    /// Names with a still-held spawn receipt: the worker is
     /// resumable, so registry absence must stay `Unknown`.
     held_names: std::collections::HashSet<String>,
-    /// (x-0d08) Names the provenance cascade POSITIVELY resolved to a done,
+    /// Names the provenance cascade POSITIVELY resolved to a done,
     /// PR-confirmed node. The caller asks the cascade once per Unknown
     /// name-only member and inserts only the positive answers; a live name
     /// never reaches here, so the verdict arm below retires nothing on an
     /// absence.
     retire_eligible_names: std::collections::HashSet<String>,
-    /// (x-0d08) The Unmeasured expiry: an Unmeasured registry row whose last
+    /// The Unmeasured expiry: an Unmeasured registry row whose last
     /// activity is older than this many seconds contributes its NAME to the
     /// dead-row candidates, where the reuse guard (an alive same-name row, a
     /// held spawn receipt) still protects it. Zero (the default) disables
@@ -1083,7 +1083,7 @@ impl MemberEvidence {
         self.dead.insert(identity.into());
     }
 
-    /// (x-6b0b) A name-keyed never-bound removal marker. Only ever reached by
+    /// A name-keyed never-bound removal marker. Only ever reached by
     /// a member with no harness and no session id (`verdict` scopes it), so a
     /// reused name cannot kill a member that carries a stronger identity.
     pub fn add_dead_name(&mut self, name: impl Into<String>) {
@@ -1098,7 +1098,7 @@ impl MemberEvidence {
         self.complete_attach_set = true;
     }
 
-    /// (x-0d08) Arm the Unmeasured expiry: `now_secs` is the fold's clock,
+    /// Arm the Unmeasured expiry: `now_secs` is the fold's clock,
     /// `expiry_s` the inactivity bound past which an Unmeasured row's name
     /// may join the dead-row candidates. Zero keeps the historical
     /// fail-safe.
@@ -1107,7 +1107,7 @@ impl MemberEvidence {
         self.unmeasured_expiry_s = expiry_s;
     }
 
-    /// (x-0d08) A cascade answer: this name positively resolved to a done,
+    /// A cascade answer: this name positively resolved to a done,
     /// PR-confirmed node.
     pub fn add_retire_eligible_name(&mut self, name: impl Into<String>) {
         self.retire_eligible_names.insert(name.into());
@@ -1121,13 +1121,13 @@ impl MemberEvidence {
         self.dead_pairs.insert((harness.into(), session_id.into()));
     }
 
-    /// (x-688b) True when `name` carries positive dead evidence (dead row,
+    /// True when `name` carries positive dead evidence (dead row,
     /// never-bound marker, or reaped spawned worker - reuse-guarded).
     pub fn is_dead_name(&self, name: &str) -> bool {
         self.dead_names.contains(name)
     }
 
-    /// (x-688b) THE shared registry-row fold. Both evidence builders (the CLI
+    /// THE shared registry-row fold. Both evidence builders (the CLI
     /// prune's file read and the daemon's cached rows) call this one function,
     /// so the two can never drift on what a row proves. Beyond today's
     /// pair/identity folding it records every row's name and derives two new
@@ -1174,7 +1174,7 @@ impl MemberEvidence {
                     dead_row_names.insert(row.name.clone());
                 }
                 crate::agents_view::Liveness::Unmeasured => {
-                    // (x-0d08) The expiry: a row the probe never measured
+                    // The expiry: a row the probe never measured
                     // and whose last activity is older than the bound is
                     // not live in any positive sense its evidence can
                     // name. Its name joins the DEAD-ROW candidates, where
@@ -1765,7 +1765,7 @@ pub fn prune_with_evidence_with_generations(
 }
 
 /// Heal duplicate rows that accumulated under the old random-mint identity
-/// (x-e447, unnamed; legacy shared mint keys, named). Migrate every unnamed
+/// (unnamed; legacy shared mint keys, named). Migrate every unnamed
 /// squad with origins onto its derived
 /// [`origin_key`] (Locked Decision 1: the durable key IS a function of the
 /// origin set), then collapse rows that now share an identity: among same-key
@@ -1882,7 +1882,7 @@ fn collapse_groups(
         squads[surv]
             .tab_specs
             .dedup_by(|a, b| a.tab_name == b.tab_name);
-        // Trees have no durable per-tab key (identity is position, x-caef), so
+        // Trees have no durable per-tab key (identity is position), so
         // a merge dedups only exact duplicates - a would-be reshape by the heal
         // is wrong, and any real divergence survives until the next topology
         // mutation rewrites the survivor's whole vec.
@@ -1934,7 +1934,7 @@ pub fn rename_with_generations(
     })
 }
 
-/// Begin an external STOP (x-7561, AC2-FR gate): under the store lock, move the
+/// Begin an external STOP (AC2-FR gate): under the store lock, move the
 /// record for `id` to `stopping` with a FRESH generation, snapshotting
 /// `name`/`cwd` (cosmetic). A LIVE row carries no record yet, so an absent id
 /// inserts one at generation 1. Refused (no state change) when the current state
@@ -1990,7 +1990,7 @@ pub fn begin_external_stop(id: &str, name: &str, cwd: &str) -> io::Result<Lifecy
     Ok(outcome)
 }
 
-/// Begin an external RM (x-7561, stop-then-rm ordering): refuse unless the
+/// Begin an external RM (stop-then-rm ordering): refuse unless the
 /// record is `stopped`. On commit, bump generation and set `removing` before the
 /// caller spawns `claude rm`. A live/`stopping`/`failed` target refuses with
 /// `stop it first`; `unknown` refuses with `state unknown; retry stop`; an
@@ -2018,7 +2018,7 @@ pub fn begin_external_rm(id: &str) -> io::Result<LifecycleCas> {
     Ok(outcome)
 }
 
-/// Record a subprocess completion (x-7561). Applied ONLY when the record exists,
+/// Record a subprocess completion. Applied ONLY when the record exists,
 /// its `generation` matches, AND its current state is the in-flight `action` -
 /// so a stale retry's late completion (older generation, or a state a newer
 /// action already moved on from) is ignored and can never overwrite a newer
@@ -2054,7 +2054,7 @@ pub fn complete_external(
     })
 }
 
-/// Apply the startup reconcile ATOMICALLY under the store lock (x-7561): the
+/// Apply the startup reconcile ATOMICALLY under the store lock: the
 /// `claude agents` liveness query runs off-lock (it must - a subprocess cannot
 /// be awaited while holding the flock), but the load -> compute -> write is
 /// serialized here so a concurrent operator action is never clobbered
@@ -2141,7 +2141,7 @@ fn mutate_generations(
 }
 
 /// Retire every member whose (harness, session id) matches, by the store's
-/// own tombstone convention (x-70e1 task 3): a tombstoned member reads Dead,
+/// own tombstone convention (task 3): a tombstoned member reads Dead,
 /// never renders, and restart/restore cannot resurrect it, while the squad's
 /// other members and the last operator shell stay untouched. Returns the
 /// number of members newly retired; a second call retires none (idempotent).
@@ -2174,7 +2174,7 @@ pub fn retire_session_members_with_generations(
     Ok((retired, batch))
 }
 
-/// The lifecycle-collection twin of [`mutate`] (x-7561): the SAME locked atomic
+/// The lifecycle-collection twin of [`mutate`]: the SAME locked atomic
 /// read-modify-write, applying `f` to `external_lifecycle` while preserving
 /// `squads` byte-for-byte. Both collections ride one version-1 object, so a
 /// squad write can never drop a lifecycle record and vice-versa.
@@ -2543,7 +2543,7 @@ mod tests {
 
     #[test]
     fn pre_xc4d4_store_loads_without_tab_specs_field() {
-        // AC9: a store written before x-c4d4 has no `tab_specs` key. It must load
+        // AC9: a store written before has no `tab_specs` key. It must load
         // unquarantined (STORE_VERSION unchanged), defaulting tab_specs to empty.
         let s = Scratch::new("no-tab-specs");
         // Hand-write a v1 squad object WITHOUT the tab_specs key.
@@ -2586,7 +2586,7 @@ mod tests {
 
     #[test]
     fn tab_trees_persist_by_key_for_an_unnamed_squad_and_survive_upsert() {
-        // x-caef gate 2: topology keys by squad IDENTITY (name or key), so an
+        // gate 2: topology keys by squad IDENTITY (name or key), so an
         // unnamed squad - the operator's `commanders` case, a named tab in an
         // unnamed squad - holds a layout. A membership upsert must not wipe it.
         use crate::proto::{LayoutBinding, LayoutSlot, LayoutTreeChild, LayoutTreeSpec};
@@ -2675,7 +2675,7 @@ mod tests {
 
     #[test]
     fn pre_xcaef_store_loads_without_tab_trees_field() {
-        // Wire tolerance: a store written before x-caef has neither key. It
+        // Wire tolerance: a store written before has neither key. It
         // must load unquarantined (STORE_VERSION unchanged), trees empty, and
         // restore takes the legacy member/template lanes.
         let s = Scratch::new("no-tab-trees");
@@ -2691,7 +2691,7 @@ mod tests {
     #[test]
     fn pre_xcaef_member_loads_without_cwd_field() {
         // Wire tolerance for StoredMember.cwd, same rule as tab_trees above: a
-        // member row written before x-caef has no "cwd" key and must load
+        // member row written before has no "cwd" key and must load
         // unquarantined with cwd defaulting to None.
         let s = Scratch::new("no-member-cwd");
         let raw = r#"{"version":1,"squads":[{"name":"w","origins":[],"members":[{"attach_id":"c19cd2c3","tombstone":false}],"created_at":"2026-08-11T00:00:00Z","tab_specs":[]}]}"#;
@@ -2703,7 +2703,7 @@ mod tests {
 
     #[test]
     fn pre_v68_slot_loads_without_cwd_field_and_serializes_byte_identically() {
-        // AC1-HP / AC2-EDGE (x-5baf): a tab_trees slot written before v68 has
+        // AC1-HP / AC2-EDGE: a tab_trees slot written before v68 has
         // no "cwd" key. It must load unquarantined with cwd defaulting to
         // None, and a None-cwd `LayoutSlot` must never emit a "cwd" key
         // (`skip_serializing_if`) - so a pre-v68 store round-trips byte for
@@ -2746,7 +2746,7 @@ mod tests {
 
     #[test]
     fn portal_slot_field_loads_and_stays_absent_when_none() {
-        // AC2-HP (x-a9b4): a slot carrying "portal" (written by an a9b4
+        // AC2-HP: a slot carrying "portal" (written by an a9b4
         // build) loads unquarantined, and a build WITHOUT the field reading
         // this store decodes the slot as the plain Shell slot it names -
         // pinned here by the serde contract: an unknown-field-tolerant
@@ -2816,7 +2816,7 @@ mod tests {
 
     #[test]
     fn valid_worker_name_gate() {
-        // x-5f7f: the worker field is a registry name that keys a resume, so
+        // the worker field is a registry name that keys a resume, so
         // the same argv-safety posture as valid_attach_id - a hostile value
         // must never survive load. Registry names are slugs; anything else
         // (separator, whitespace, metachar, overlong, non-ascii) is refused.
@@ -2834,7 +2834,7 @@ mod tests {
 
     #[test]
     fn worker_member_roundtrips_without_a_jobid() {
-        // x-5f7f: a worker member carries a registry NAME and an EMPTY
+        // a worker member carries a registry NAME and an EMPTY
         // attach_id (a codex/agy pane has no claude jobId). It must round-trip
         // through the store and survive the load gate, which previously
         // dropped every member whose attach_id was not 8 hex digits - the
@@ -2890,7 +2890,7 @@ mod tests {
 
     #[test]
     fn retire_session_members_tombstones_only_the_matching_identity() {
-        // x-70e1 task 3: the exact-session retirement retires ONLY the
+        // task 3: the exact-session retirement retires ONLY the
         // member whose (harness, session id) matches; a live sibling, an
         // already-tombstoned member and a shared-workspace plain pane all
         // survive, and a second call retires nothing (idempotent).
@@ -2994,7 +2994,7 @@ mod tests {
 
     #[test]
     fn four_squad_store_on_disk_loads_whole() {
-        // x-5f7f: the exact store shape measured on the operator's disk -
+        // the exact store shape measured on the operator's disk -
         // four squads, three holding ZERO members (the empty-squads defect:
         // worker panes never entered the membership funnel) and one holding
         // six claude attach members. The widened member must not quarantine or
@@ -3022,7 +3022,7 @@ mod tests {
                  "members": [], "created_at": "2026-08-21T00:00:00Z"},
                 {"name": "", "key": "3333333333333333", "origins": ["/gone2"],
                  "members": [], "created_at": "2026-08-21T00:00:00Z"},
-                {"name": "x-f3d0", "key": "", "origins": ["/repo"],
+                {"name": "x-bbbb", "key": "", "origins": ["/repo"],
                  "members": [], "created_at": "2026-08-21T00:00:00Z"}
             ]
         });
@@ -3035,12 +3035,12 @@ mod tests {
             6,
             "the six claude members survive"
         );
-        assert!(loaded.squads.iter().any(|sq| sq.name == "x-f3d0"));
+        assert!(loaded.squads.iter().any(|sq| sq.name == "x-bbbb"));
     }
 
     #[test]
     fn tab_name_roundtrips_and_absent_field_loads_none() {
-        // x-0f9d US4: a member's tab_name persists and reloads; a pre-x-0f9d
+        // US4: a member's tab_name persists and reloads; a pre-change
         // store written without the field is wire-tolerant (loads as None ->
         // the tab restores unnamed), so STORE_VERSION stays 1.
         let s = Scratch::new("tabname");
@@ -3171,7 +3171,7 @@ mod tests {
 
     #[test]
     fn upsert_never_persists_a_key_on_a_named_row() {
-        // (x-6b0b) The invariant, enforced at the one write path every caller
+        // The invariant, enforced at the one write path every caller
         // funnels through: a named squad keys by name and leaves the key empty.
         let _s = Scratch::new("x6b0b-upsert-invariant");
         upsert("w", "stalekey", &["/repo".into()], &[m("c19cd2c3")]).unwrap();
@@ -3200,7 +3200,7 @@ mod tests {
 
     #[test]
     fn load_repairs_a_name_and_key_row_by_folding_its_unnamed_twin() {
-        // AC14-EDGE + the live-store shape (x-6b0b): a rename of an unnamed
+        // AC14-EDGE + the live-store shape: a rename of an unnamed
         // squad minted a named row that KEPT the key, leaving the old key row
         // alive beside it. Load clears the key, folds the twin into the named
         // row (the one the operator chose), keeps the EARLIER created_at, and
@@ -3381,12 +3381,12 @@ mod tests {
         assert_eq!(
             evidence.verdict(&harness_only),
             MemberLiveness::Dead,
-            "(x-688b) the keys branch guarantees no session id, so the name \
+            " the keys branch guarantees no session id, so the name \
              is all the member has even with a harness recorded"
         );
     }
 
-    /// (x-688b) The reaped-row rule: a journal-spawned name that a SUCCESSFUL
+    /// The reaped-row rule: a journal-spawned name that a SUCCESSFUL
     /// registry read does not carry is dead evidence. The inversion this
     /// fixes: row reaping destroyed the evidence, so the member was kept
     /// Unknown forever - one stranded squads.json row per reaped worker.
@@ -3431,7 +3431,7 @@ mod tests {
         );
     }
 
-    /// (x-688b) A still-held spawn receipt means the worker is resumable:
+    /// A still-held spawn receipt means the worker is resumable:
     /// registry absence must not read as its death.
     #[test]
     fn a_held_receipt_keeps_a_spawned_name_unknown() {
@@ -3462,7 +3462,7 @@ mod tests {
         );
     }
 
-    /// (x-91eb) The keeper guard: a keeper-held worker's child is alive while
+    /// The keeper guard: a keeper-held worker's child is alive while
     /// its registry row reads Dead, so a held spawn receipt must outrank the
     /// dead row or an automatic sweep dead-names a live worker.
     #[test]
@@ -3494,7 +3494,7 @@ mod tests {
         );
     }
 
-    /// (x-0d08) A cascade POSITIVE answer retires the name-only member; a
+    /// A cascade POSITIVE answer retires the name-only member; a
     /// name the cascade left unresolved, open, or held stays Unknown. The
     /// reuse guard is upstream (the caller folds live identities first),
     /// so this arm retires on positive evidence only.
@@ -3530,7 +3530,7 @@ mod tests {
         );
     }
 
-    /// (x-0d08) The Unmeasured expiry: a row the probe never measured whose
+    /// The Unmeasured expiry: a row the probe never measured whose
     /// last activity is older than the bound contributes its name to the
     /// dead-row candidates under the reuse guard; a fresh or never-active
     /// row, or expiry disabled (0), stays fail-safe Unknown.
@@ -3631,7 +3631,7 @@ mod tests {
         );
     }
 
-    /// (x-688b) A paired ALIVE row still owes its name to the live set: a
+    /// A paired ALIVE row still owes its name to the live set: a
     /// session-less member sharing the name must read Live even when the row
     /// carries no harness session id (the pair path would otherwise strand
     /// it Unknown).
@@ -3666,7 +3666,7 @@ mod tests {
         );
     }
 
-    /// (x-688b) An EXITED row proves its NAME dead (the t-f90d case: the row
+    /// An EXITED row proves its NAME dead (the t-f90d case: the row
     /// carries a session id, so its evidence only ever landed as a pair the
     /// session-less member could not match), and a name both exited and alive
     /// in one read is a reuse, not a death.
@@ -3776,7 +3776,7 @@ mod tests {
 
     #[test]
     fn origin_key_is_stable_order_independent_and_distinct_per_set() {
-        // x-e447: an unnamed squad's durable key is a pure function of its origin
+        // an unnamed squad's durable key is a pure function of its origin
         // SET, so one repo's home squad derives one key across restarts. Order-
         // independent and duplicate-insensitive (sorted + deduped), distinct per
         // distinct set, and the separator keeps adjacent-path sets apart.
@@ -3809,7 +3809,7 @@ mod tests {
 
     #[test]
     fn collapse_duplicate_squads_merges_same_origin_into_one() {
-        // x-e447 AC-HP2: the backlog rows carry distinct random keys (the old
+        // AC-HP2: the backlog rows carry distinct random keys (the old
         // mint), so a key-based upsert cannot heal them. collapse groups by
         // origin, rekeys onto origin_key, keeps the membered row, merges every
         // dropped row's members, and leaves exactly one row per origin. A named
@@ -3856,7 +3856,7 @@ mod tests {
 
     #[test]
     fn collapse_duplicate_squads_is_idempotent() {
-        // x-e447: collapse runs every restore; a second pass must be a no-op
+        // collapse runs every restore; a second pass must be a no-op
         // (drops nothing) once the store has converged.
         let _s = Scratch::new("collapse-idempotent");
         upsert("", "k1", &["/r".into()], &[m("aaaaaaaa")]).unwrap();
@@ -3870,7 +3870,7 @@ mod tests {
 
     #[test]
     fn collapse_duplicate_squads_surfaces_a_write_error() {
-        // x-e447 AC-ERR1: a collapse write error is not swallowed. A corrupt
+        // AC-ERR1: a collapse write error is not swallowed. A corrupt
         // store makes the locked read fail loud, and collapse returns Err so the
         // caller degrades restore instead of healing silently on one machine.
         let s = Scratch::new("collapse-err");

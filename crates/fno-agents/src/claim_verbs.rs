@@ -48,7 +48,7 @@ pub fn run_claim(args: &[String]) -> i32 {
     if op == "long-holds" {
         return crate::claims::run_claim_long_holds(&args[1..]);
     }
-    // The backlog one-in-flight gate's lock operations (x-ef2c): arguments of
+    // The backlog one-in-flight gate's lock operations: arguments of
     // this verb, never new leaves. The lock is held in the name of the
     // CALLING process (--pid), never this short-lived binary, and a dead
     // holder is reclaimed on the pid probe - for a one-shot subprocess the
@@ -397,7 +397,7 @@ fn claim_status_value_with_witness(
 }
 
 /// The verdict `fno agents claim status` prints for one record, computed with
-/// the production session witness (x-a613). `renew` (x-b445) and the
+/// the production session witness. `renew` and the
 /// watch-lease cause mapping read this same verdict, so a refused renewal
 /// names the answer the operator would see from `claim status`, never a
 /// second liveness opinion.
@@ -540,7 +540,7 @@ const HANDOVER_HOLDER_PREFIX: &str = "spawn-handover:";
 /// shrink-only (4996 lines).
 const REGISTRY_SERVED_LIVE: &str = "registry-served-live";
 
-/// The production session witness (x-a613). Resolution order for the record's
+/// The production session witness. Resolution order for the record's
 /// resolved subject session (the worker a handover holder names, else the
 /// record's own session id): (a) the fleet registry row keyed by `harness_session_id`, whose
 /// pid + start time is probed - the row's session binding is the identity
@@ -671,7 +671,7 @@ pub(crate) fn session_witness_primed_for<'a>(
 /// not the session that wrote it. A dispatcher-minted `spawn-handover:<worker>`
 /// record carries the MINTER's session_id, so answering from that field asks
 /// the dispatcher whether the worker is alive - a long-lived king then keeps
-/// every claim it ever launched reading live after the worker died (x-41f7).
+/// every claim it ever launched reading live after the worker died.
 /// Join the worker name to its registry row's session; no row means None (the
 /// caller answers Unresolved, bounded grace), never a fallback to the
 /// minter's session. The primed witness asks the SAME question when it picks
@@ -751,7 +751,7 @@ fn session_liveness_answer(
 /// The registry-backed resolution inputs, built once per invocation and shared
 /// across every record the sweep classifies. `by_session` carries (pid, start)
 /// for the registry-row liveness proof, so it requires session id, pid and
-/// start time. `by_name` is the spawn-handover join (x-41f7) and requires only
+/// start time. `by_name` is the spawn-handover join and requires only
 /// name + session id: a thread worker has no pid (39 of 39 rows measured
 /// 2026-09-07), so a pid requirement here would make every handover claim
 /// unresolvable and hand its verdict back to the dispatcher.
@@ -1017,7 +1017,7 @@ mod tests {
         ));
     }
 
-    // ---- claim sweep (x-54fa) --------------------------------------------
+    // ---- claim sweep --------------------------------------------
 
     fn sweep_acquire(root: &std::path::Path, key: &str) {
         let opts = crate::claims::AcquireOpts {
@@ -1051,15 +1051,15 @@ mod tests {
         // paths guard refuses an undeclared $HOME read under test).
         with_registry(serde_json::json!([]), || {
             let td = tempfile::TempDir::new().unwrap();
-            sweep_acquire(td.path(), "node:x-ef41");
-            sweep_acquire(td.path(), "dispatch:x-ef41");
+            sweep_acquire(td.path(), "node:x-aaaa");
+            sweep_acquire(td.path(), "dispatch:x-aaaa");
             sweep_acquire(td.path(), "session:not-swept"); // out-of-scope prefix
             let payload = claim_sweep_payload(&sweep_dir(td.path()));
             let claims = payload["claims"].as_array().unwrap();
             assert_eq!(claims.len(), 2, "session: claim must be excluded");
             // Sorted by key: dispatch: before node:.
-            assert_eq!(claims[0]["key"], "dispatch:x-ef41");
-            assert_eq!(claims[1]["key"], "node:x-ef41");
+            assert_eq!(claims[0]["key"], "dispatch:x-aaaa");
+            assert_eq!(claims[1]["key"], "node:x-aaaa");
             for c in claims {
                 // Acquired by THIS live process => live.
                 assert_eq!(c["state"], "live");
@@ -1184,7 +1184,7 @@ mod tests {
         });
     }
 
-    // ---- the handover witness subject (x-41f7) ---------------------------
+    // ---- the handover witness subject ---------------------------
 
     fn own_pid_start() -> u64 {
         // Registry units: daemon::process_start_time's native value, the same
@@ -1237,7 +1237,7 @@ mod tests {
         // registry row names this very test process. The handover names a
         // worker with no row. The witness must answer Unresolved anyway -
         // answering from the minter kept every claim a dead worker left
-        // behind reading live for the rest of the king's reign (x-41f7).
+        // behind reading live for the rest of the king's reign.
         let me = std::process::id();
         with_registry(
             serde_json::json!([{

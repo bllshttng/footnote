@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 GH_QUERY_TIMEOUT_S = 30.0
 
 # reverse_map_unstamped fires one gh call per distinct repo in its scope
-# (x-59a6 round-9 review fix). A --pr-number call now includes every open
+# (round-9 review fix). A --pr-number call now includes every open
 # ref-less node graph-wide (needed so a stale ref-less node in another
 # project still self-heals), so a multi-repo graph can fan out to several
 # repos' worth of gh calls on a single merge. Same reasoning as cli.py's
@@ -314,7 +314,7 @@ class PrMergeState:
     url: Optional[str]
     merged_at: Optional[str]
     # mergeCommit.oid - the dedup key for post-merge-ritual auto-dispatch
-    # (x-47be). Optional: absent on a non-merged PR or when gh omits it.
+    #. Optional: absent on a non-merged PR or when gh omits it.
     merge_sha: Optional[str] = None
     changed_files: list[str] = field(default_factory=list)
     files_truncated: bool = False
@@ -338,12 +338,12 @@ class MergeDriftRecord:
     error: Optional[str] = None
     # The owning target session + its working directory, carried from the graph
     # node so the CLI can emit a session_satisfied event for that session after
-    # closing the node (Group 1 / ab-f7f8bc53). Both optional: a node may have
+    # closing the node (Group 1 /). Both optional: a node may have
     # been intaken without a session (session_id null) or without a cwd.
     session_id: Optional[str] = None
     cwd: Optional[str] = None
     # mergeCommit.oid for the closed PR - the exactly-once dedup key for the
-    # post-merge-ritual auto-dispatch (x-47be). None on a reverse-mapped record
+    # post-merge-ritual auto-dispatch. None on a reverse-mapped record
     # (branch-name match has no SHA); the dispatcher falls back to a pr-number
     # key there.
     merge_sha: Optional[str] = None
@@ -949,7 +949,7 @@ def resolve_promise_evidence(
     # `deferred` carve-out is declared scope that did not ship, and it blocks
     # the close until it becomes a node (harvest) or is force-overridden. Only
     # the closing node's OWN rows (``node`` field, stamped at capture time):
-    # a repo-wide read held every close open on any unrelated row (x-40be).
+    # a repo-wide read held every close open on any unrelated row.
     # See the docstring for why unattributed rows block nothing.
     node_id = str(node.get("id") or "")
     deferred = [
@@ -1012,7 +1012,7 @@ def resolve_promise_evidence(
     node_id = node.get("id", "(unknown)")
     plan_display = node.get("plan_path", plan_path_clean)
 
-    # Condition E (x-6d64): an open prove-it FAIL on this node's own plan
+    # Condition E: an open prove-it FAIL on this node's own plan
     # artifacts is claimed work whose outcome did not hold; it needs no
     # declaration. A done node is never reopened; a failed reader is a warning.
     if node_id:
@@ -1513,9 +1513,9 @@ def _branch_matches_node(head_ref: str, node_id: str) -> bool:
     """True when ``node_id`` is a full delimiter-bounded segment of ``head_ref``.
 
     ``branch_name()`` puts the whole node id in every dispatch branch as a
-    ``/``- or ``-``-bounded segment (``feature/x-5b66``,
-    ``target/some-slug-x-5b66``). A bare substring must NOT match: fixed-width
-    hex ids make ``x-5b66`` a prefix of ``x-5b667``, so an unbounded match
+    ``/``- or ``-``-bounded segment (``feature/``,
+    ``target/some-slug-x-aaaa``). A bare substring must NOT match: fixed-width
+    hex ids make ```` a prefix of ``x-5b667``, so an unbounded match
     would close the wrong node.
     """
     if not head_ref or not node_id:
@@ -1678,7 +1678,7 @@ def cascade_close_should_stop(parent: dict, kids: list[dict], child: object) -> 
 
 @dataclass
 class OpenPrBinding:
-    """One open PR row's verdict against the graph (x-d3c6).
+    """One open PR row's verdict against the graph.
 
     ``node_id`` is set only when exactly one real node resolves - an
     ``untracked`` or ``ambiguous`` row carries no candidate, because a guess
@@ -1708,7 +1708,7 @@ def classify_open_pr_bindings(
     graph's own ``(pr_number, pr_url)`` back-pointer read through
     ``node_pr_refs``, scoped by URL because a ``pr_number`` is only unique
     within one repository; when both miss, the row body's exact
-    ``Backlog-Closure:`` trailer (x-9588). The branch key wins whenever it
+    ``Backlog-Closure:`` trailer. The branch key wins whenever it
     hits, so existing verdicts are unchanged. A row produced without a
     ``body`` field never reads the trailer; the ``untracked`` detail names
     that absence instead of reading it as an empty body.
@@ -1861,7 +1861,7 @@ def list_open_pr_branches(
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     timeout_s: float = GH_QUERY_TIMEOUT_S,
 ) -> list[dict]:
-    """Open PRs (number/url/headRefName) for the open-binding heal (x-d3c6).
+    """Open PRs (number/url/headRefName) for the open-binding heal.
 
     Same shape and contract as :func:`list_merged_pr_branches`: one bounded
     call in ``cwd`` so gh resolves the repo from that dir's origin remote,
@@ -1899,7 +1899,7 @@ def list_open_pr_branches(
 
 
 def _repo_group_key(cwd: str, memo: dict[str, str]) -> str:
-    """The git common dir of ``cwd``, or ``cwd`` when git can't say (x-6283)."""
+    """The git common dir of ``cwd``, or ``cwd`` when git can't say."""
     hit = memo.get(cwd)
     if hit is None:
         try:
@@ -1920,7 +1920,7 @@ def _repo_group_key(cwd: str, memo: dict[str, str]) -> str:
 
 
 class _ListingCache:
-    """One gh listing per repo per run, shared by the scans (x-6283).
+    """One gh listing per repo per run, shared by the scans.
 
     A failed fetch caches the error so later asks re-raise, not re-hit gh.
     """
@@ -1993,7 +1993,7 @@ def collect_open_binding_heals(
     list_open: Optional[Callable[..., list[dict]]] = None,
     listings: Optional[_ListingCache] = None,
 ) -> "tuple[list[OpenPrBinding], list[str]]":
-    """Discover open PRs that uniquely name an open, ref-less node (x-d3c6).
+    """Discover open PRs that uniquely name an open, ref-less node.
 
     One ``gh pr list --state open`` per repo (same-repo worktrees share the
     call), under the same ``REVERSE_MAP_BUDGET_S`` wall clock as the merged
@@ -2063,7 +2063,7 @@ def _effective_reconcile_cwd(cwd: str, project: Optional[str]) -> str:
 def _node_id_scope(node_id: Optional[Union[str, Iterable[str]]]) -> Optional[set[str]]:
     """Normalize a scan's ``node_id`` filter to a set, or None for unscoped.
 
-    Accepts a single id (the common case) or an iterable of ids (x-59a6: a
+    Accepts a single id (the common case) or an iterable of ids (: a
     ``--pr-number`` call scopes the scan to every node this one PR actually
     touches - its own stamped ref plus every exact trailer claim - rather
     than either a single node or the whole graph.
@@ -2091,7 +2091,7 @@ def reverse_map_unstamped(
     cache = listings if listings is not None else _ListingCache()
 
     # Open, ref-less, cwd-resolvable candidates grouped by repo so we make
-    # ONE gh call per repo, not per node or per worktree cwd (x-6283).
+    # ONE gh call per repo, not per node or per worktree cwd.
     by_repo, cwd_by_nid, skipped_dead_cwd = _group_refless_by_repo(
         entries, node_id=node_id, memo=cache._repo_keys
     )
@@ -2311,7 +2311,7 @@ def scan_merge_drift(
             # risk closing a node off a same-numbered PR elsewhere.
             repo = repo_slug_from_url(url)
             # A merged listing row closes this ref; only a number in NEITHER
-            # listing owes the query below (x-6283).
+            # listing owes the query below.
             hit = _listing_answer(merged_rows, number, repo)
             if hit is not None:
                 # No mergeCommit oid/files on a listing row - like a reverse-mapped record.
@@ -2573,12 +2573,12 @@ def emit_human_touch_for_record(record: MergeDriftRecord) -> Optional[Path]:
         return None
 
 
-# Tier-1 gate_escape (x-f894). A required review bot that never reviewed a PR
+# Tier-1 gate_escape. A required review bot that never reviewed a PR
 # which merged out-of-band is autonomy debt: the loop should have waited for /
 # resolved that review, and the human merge past it is the escape. Kept as a
 # module constant so the emit site and its tests name the same string.
 _GATE_ESCAPE_REASON_DEADBOT = "dead-bot"
-# x-0eaf: an out-of-band merge of a PR nothing reviewed. Distinct from dead-bot
+# an out-of-band merge of a PR nothing reviewed. Distinct from dead-bot
 # (a required bot never reviewed) - this fires whether or not any bot was
 # required, closing the gap where the dead-bot escape's early return on empty
 # github_apps emitted nothing for the exact zero-coverage merges this node
@@ -2638,7 +2638,7 @@ def _fetch_pr_review_logins(
     return logins
 
 
-# Tier-1 reuses the shared gate_escape emit machinery (x-91b5): the canonical
+# Tier-1 reuses the shared gate_escape emit machinery: the canonical
 # events path, the durable failure-log, and the final dedup+append all live in
 # ONE place (fno.events.gate_escape) so Tier-1 (dead-bot) and Tier-2 (spawn-cap
 # + the manual verb) never drift into parallel telemetry paths (Locked Decision
@@ -2657,12 +2657,12 @@ def _latest_review_coverage(pr_number: int, events_path: Path) -> Optional[dict]
     """The latest ``review_coverage`` event data for ``pr_number``, or None.
 
     Fail-open: a missing/unreadable log or a parse error returns None (the
-    caller under-reports rather than crashes). (x-0eaf)
+    caller under-reports rather than crashes).
 
     Reads the global log alongside ``events_path`` for the same reason the merge
     gate does: reconcile runs from canonical while the review that produced the
     event ran wherever the session stood, usually a worktree. Scanning one log
-    left this detector reasoning about coverage it could not see (x-f43c).
+    left this detector reasoning about coverage it could not see.
     """
     try:
         from fno.pr._reviews import latest_review_coverage
@@ -2682,7 +2682,7 @@ def _emit_zero_coverage_escape(record: "MergeDriftRecord", events_path: Path) ->
     event shows 0/unknown coverage. Returns True if emitted.
 
     Fires whether or not any bot was required, so a no-required-bots config that
-    merged a PR nothing reviewed is still recorded as autonomy debt (x-0eaf). A
+    merged a PR nothing reviewed is still recorded as autonomy debt. A
     genuinely-reviewed PR (covered, count > 0) does not escape; no event at all
     (loop-check never ran) under-reports (fail-open). Returns True/False so the
     caller can short-circuit the dead-bot path when the headline gap is coverage.
@@ -2718,7 +2718,7 @@ def emit_gate_escape_for_record(
     reviews_fetcher: Callable[..., set[str]] = _fetch_pr_review_logins,
     events_path: Optional[Path] = None,
 ) -> Optional[Path]:
-    """Tier-1 auto-emit (x-f894): a ``gate_escape{reason:dead-bot}`` when
+    """Tier-1 auto-emit : a ``gate_escape{reason:dead-bot}`` when
 
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
@@ -2735,7 +2735,7 @@ def emit_gate_escape_for_record(
         if resolved_events is None:
             resolved_events = _canonical_events_path(record.cwd)
 
-        # x-0eaf: zero-coverage escape fires whether or not any bot was required.
+        # zero-coverage escape fires whether or not any bot was required.
         # The dead-bot-only path below returned early when github_apps was empty,
         # so on a no-required-bots config it emitted nothing for the exact
         # zero-coverage merges this node exists to catch. Reads the

@@ -6,21 +6,21 @@
 use super::*;
 
 /// `fno mux thread <name> [--portal N|new] [--tab SEL] [--split DIR]
-/// [--workspace NAME] [--at PANE]` (x-07c2, hidden): the outside-the-TUI
+/// [--workspace NAME] [--at PANE]` (hidden): the outside-the-TUI
 /// reach behind `fno agents attach <name>`. Sends the ThreadPane control verb,
 /// which runs the exact command a TUI reach runs, and prints where it landed.
 /// A missing server is its own exit code so the CLI caller can fall through to
 /// the inline attach instead of reading a generic failure as one.
 ///
-/// (x-8f9d) `--portal N` names which portal to reach through; omitted is
+/// `--portal N` names which portal to reach through; omitted is
 /// portal 0. This is the addressing door: two calls naming 0 and 1 put two
 /// threads in two panes, which the tab menu's Join actions then tile.
 ///
-/// (x-3ea6) `--portal new` asks the server for a portal of its own in a new
+/// `--portal new` asks the server for a portal of its own in a new
 /// tab: a MACHINE reach (retask, mail force) must never repoint a seat a
 /// person is using, and portal 0 is usually the operator's own.
 ///
-/// (x-9b60) The placement flags reuse the pane path's spellings and ride the
+/// The placement flags reuse the pane path's spellings and ride the
 /// verb's `placement` field. They steer a FRESH open; a portal that already
 /// has a live seat keeps its geometry (the server says so) - same contract
 /// the server holds for the TUI.
@@ -105,7 +105,7 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
     // A paneless row owns no session routing: the operator's ambient server
     // (the flag, FNO_SERVER / FNO_SESSION, or the default) is the one whose
     // portal this drives. Flag and env stay separate so resolve_session can
-    // tell an env-decided server from a flag-decided one (x-f209).
+    // tell an env-decided server from a flag-decided one.
     let session = resolve_session(
         session_flag.as_deref().filter(|s| !s.is_empty()),
         env_session,

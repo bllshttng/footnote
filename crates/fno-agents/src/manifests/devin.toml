@@ -1,4 +1,4 @@
-# devin readiness manifest (x-83e7) - full-roster parity port from
+# devin readiness manifest - full-roster parity port from
 # the reference manifest for devin per ADAPTING.md.
 #
 # UNVALIDATED + INERT: devin has no fno provider host (no build_pane_argv arm /

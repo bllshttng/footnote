@@ -41,7 +41,7 @@ READ_ALLOWLIST = (
     "cli/src/fno/tracker/sidecar.py",
     "cli/src/fno/tracker/metadata.py",
     "crates/fno/src/backlog_view.rs",  # consumes the neutral snapshot + graph-mode mtime path (task 1.2)
-    "crates/fno-agents/src/graph_get.rs",  # refuses the default store under an external backend (x-997a)
+    "crates/fno-agents/src/graph_get.rs",  # refuses the default store under an external backend
     "crates/fno-agents/src/prove_it_verdicts.rs",  # the verdict reader's read-only walk, same external-backend refusal as graph_get
     "crates/fno-agents/src/gc_sweep.rs",  # the retirement sweep's read-only reverse join (sessions_index + work_state)
     "crates/fno-agents/src/feed.rs",  # the activity feed's read-only lifecycle derivation

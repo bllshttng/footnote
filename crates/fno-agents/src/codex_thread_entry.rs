@@ -52,14 +52,14 @@ pub(crate) fn build_codex_thread_entry(
         // the field no longer reads unpopulated on this mint.
         model_basis: model.map(|_| "requested".to_string()),
         effort: effort.map(str::to_string),
-        // v23 (x-2019): the request beside the effect; verbatim as typed.
+        // v23: the request beside the effect; verbatim as typed.
         requested_model: model.filter(|m| !m.is_empty()).map(str::to_string),
         requested_provider: None,
         requested_effort: effort.filter(|v| !v.is_empty()).map(str::to_string),
         harness: Some("codex".into()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
-        // x-d285: non-claude harness; the account axis does not apply.
+        // non-claude harness; the account axis does not apply.
         launch_account: None,
         related_session_id: None,
         cwd: cwd_s.clone(),

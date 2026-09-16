@@ -19,7 +19,7 @@
 //! cfg-gated `windows-sys` (FFI, compiles to nothing off Windows) - no
 //! winit, no GUI stack. The richer cell model (`Flags`, `NamedColor`/`Rgb`,
 //! `Dimensions`) is exactly what the mux/agent surfaces
-//! needs, so the whole crate standardized on it (ab-3c063856 review).
+//! needs, so the whole crate standardized on it (review).
 //!
 //! The [`crate::readiness::ReadinessDetector`] trait is unchanged: it still
 //! operates over [`ScreenView`], so the emulator crate is an implementation

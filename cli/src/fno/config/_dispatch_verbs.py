@@ -24,7 +24,7 @@ class DispatchVerbDescriptor:
     # The sessions-row phase stamped for a worker dispatched on this verb.
     # Shipped verbs infer theirs from the spawn_phase table; an outside verb
     # is unknown to that table, so it declares its phase here. Absent, a
-    # --node spawn is refused rather than launched unbound (x-007c).
+    # --node spawn is refused rather than launched unbound.
     session_phase: Optional[str] = None
 
 

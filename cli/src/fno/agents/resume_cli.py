@@ -80,14 +80,14 @@ def _session_id_for(entry: Any) -> Optional[str]:
     Reads the harness -> field mapping from the shared
     :data:`fno.agents.registry.HARNESS_SESSION_ID_FIELDS` so this
     duck-typed resolver and ``AgentEntry.session_id`` stay in sync. Keyed on
-    ``harness`` (x-8dfc) with ``provider`` fallback. Uses ``getattr`` (not the
+    ``harness`` with ``provider`` fallback. Uses ``getattr`` (not the
     property) so it still works on the test fakes, which carry the underlying
     id fields but not the property.
 
     A claude pane row carries no transport ``short_id`` (empty by design), so
     it falls back to the canonical ``harness_session_id`` - mirroring
     ``AgentEntry.session_id`` - rather than reporting "no session id" for a row
-    that has one (x-b84f).
+    that has one.
     """
     from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
 
@@ -372,7 +372,7 @@ def _default_wake_fn(
     scrub_incoherent_model_env_and_notify(
         env, routed=overlay_restores_model_env(route_env)
     )
-    # x-d285: the account binding (CLAUDE_CONFIG_DIR) applies before the
+    # the account binding (CLAUDE_CONFIG_DIR) applies before the
     # route overlay, same precedence as every spawn seam - account selects
     # the namespace, route wins endpoint/auth/model. Cleared FIRST so an
     # ambient dir from the caller's shell (an alt-account alias) cannot
@@ -457,7 +457,7 @@ def _resume_claude_wake(
     the TUI, hand the terminal to the operator); this is the headless
     counterpart -- allocate a pty, restore the row's own route, inject the
     message, and confirm the message reached the transcript. Exit 0
-    requires that transcript marker (x-6ac3): a status word that reads
+    requires that transcript marker : a status word that reads
     Working proves a session moved, never that THIS wake landed, so the
     content read alone decides success.
 
@@ -508,7 +508,7 @@ def _resume_claude_wake(
     # The transcript confirm id: the row's full uuid, never the transport
     # short_id. The claude transcript FILE is named by the uuid, so a
     # short-id confirm could never resolve a transcript and only the status
-    # word was left to decide success - the x-6ac3 false receipt. Falls back
+    # word was left to decide success - the false receipt. Falls back
     # to the resolved session_id (the exact lane's matched uuid) for a row
     # that records no canonical uuid.
     confirm_id = confirm_session_id or session_id
@@ -545,7 +545,7 @@ def _resume_claude_wake(
             return ResumeResult(exit_code=claim_exit, stderr=claim_msg + "\n")
 
     route_env: Optional[dict[str, str]] = None
-    # x-d285: the account axis resolves under the same `not skipped` gate as
+    # the account axis resolves under the same `not skipped` gate as
     # the route - a skip-eligible row launches nothing, so there is nothing
     # to mis-bill. A routed or non-Anthropic row with UNKNOWN account
     # refuses (exit 3, the re-entry refusal code): a woken attach inherits
@@ -680,7 +680,7 @@ def _resume_claude_wake(
     # attempted, so "did it reach Working" is the wrong question to ask.
     #
     # Landed means the transcript shows the message, never that a status
-    # word said Working (x-6ac3): a short turn starts and finishes inside
+    # word said Working: a short turn starts and finishes inside
     # one ~19s attempt, so a DELIVERED wake can read Idle again, and a row
     # recovering from an API error flips to Working on its own with nothing
     # injected. Content is the marker the watchdog's own wake lane already
@@ -901,7 +901,7 @@ def resume_logic(
             stderr=f"fno agents resume: registry read failed: {exc}\n",
         )
 
-    # Resolve by any of the three address forms (x-1b1e): name, full session id,
+    # Resolve by any of the three address forms: name, full session id,
     # or 8-hex short. The shared core keeps Rust `find_agent_entry` in parity.
     from fno.agents.registry import (
         AgentResolutionError,
@@ -926,13 +926,13 @@ def resume_logic(
             ),
         )
 
-    # Identity is one axis (x-8dfc): resume keys on harness (provider fallback
+    # Identity is one axis: resume keys on harness (provider fallback
     # for a not-yet-backfilled row); harness == provider on every current row.
     harness = getattr(entry, "harness", None)
     cwd = cwd_override or getattr(entry, "cwd", None)
     current_session_id = _session_id_for(entry)
     # An explicit full predecessor uuid selects the EXACT historical session,
-    # not the row's current one (x-dfe7): delivery follows the successor, but
+    # not the row's current one: delivery follows the successor, but
     # resume was handed A and A is what it must reopen. Only a full-id match
     # carries matched_session_id, so a name or short address always keeps the
     # current session.

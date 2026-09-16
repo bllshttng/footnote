@@ -11,7 +11,7 @@ use crate::proto::Command;
 /// stores hold dead rows and each has its own verb: a member TOMBSTONE lives in
 /// the squad's member list (`RemoveAgent` resolves only against the agent
 /// registry, so it would answer "no such agent" and leave the row on screen), an
-/// EXTERNAL row routes by its stable attach_id (x-7561), and a registry row goes
+/// EXTERNAL row routes by its stable attach_id, and a registry row goes
 /// by name. One mapping so the row menu and the bulk clear cannot disagree.
 pub(crate) fn remove_dead(a: &super::AgentRow) -> Command {
     match (a.tombstone, a.squad, a.external, a.attach_id.clone()) {
@@ -27,7 +27,7 @@ pub(crate) fn remove_dead(a: &super::AgentRow) -> Command {
             // nothing to answer, so resolution stays registry-only here.
             // The live-row gesture path carries pane_id itself.
             pane_id: None,
-            // (x-b5d1) Every door that removes an Unmeasured row measures:
+            // Every door that removes an Unmeasured row measures:
             // the dead-row sweep and the row menu ride the same flag the x
             // gesture sets, so no path pays a stop leg a `?` row cannot
             // answer. The server's gate still refuses a row that reads Alive.
@@ -45,7 +45,7 @@ pub(crate) const CLEAR_DEAD_MAX: usize = 25;
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
 /// confirm. `label` is the entity name shown in the prompt; `action` is what
-/// Enter commits (x-a496 dispatch, extended by x-96e8 with squad removal).
+/// Enter commits (dispatch, extended by with squad removal).
 pub(crate) struct ConfirmAction {
     pub(crate) action: ConfirmKind,
     pub(crate) label: String,
@@ -53,21 +53,21 @@ pub(crate) struct ConfirmAction {
 
 /// What a confirmed [`ConfirmAction`] sends on Enter.
 pub(crate) enum ConfirmKind {
-    /// Start a targeted session on a work-queue card's node (x-a496).
+    /// Start a targeted session on a work-queue card's node.
     Dispatch { node: String },
-    /// Close a whole workspace (x-96e8). `panes` is the blast radius named in
+    /// Close a whole workspace. `panes` is the blast radius named in
     /// the prompt; `last` warns that removing the session's only squad ends it.
     RemoveSquad {
         squad: u64,
         panes: usize,
         last: bool,
     },
-    /// Stop a live agent row (x-76ea). The captured `name`, not the row index,
+    /// Stop a live agent row. The captured `name`, not the row index,
     /// commits - a row that raced out between confirm and Enter resolves to the
     /// server's stale-name refusal. (v67) The row's harness session id rides
     /// beside the label: `sid` is captured with the name at
     /// gesture time so the server resolves identity-first; `None` for an old
-    /// capture or a bare-identity row. (x-e763) The pane the row was drawn
+    /// capture or a bare-identity row. The pane the row was drawn
     /// from rides too, so a bare-pane row acts through its pane even with no
     /// registry row.
     StopAgent {
@@ -75,8 +75,8 @@ pub(crate) enum ConfirmKind {
         sid: Option<String>,
         pane_id: Option<u64>,
     },
-    /// Remove an agent row in one gesture (x-76ea, x-e763). Same captured
-    /// name + session id + pane id. (x-b5d1) `measure` arms the
+    /// Remove an agent row in one gesture. Same captured
+    /// name + session id + pane id. `measure` arms the
     /// measure-and-remove prompt and wire flag for an Unmeasured row: rm's
     /// daemon-side gate does the measuring the stop leg cannot.
     RemoveAgent {
@@ -85,19 +85,19 @@ pub(crate) enum ConfirmKind {
         pane_id: Option<u64>,
         measure: bool,
     },
-    /// Bulk-reap every exited fno-agent registry row (x-7561, uppercase `X`).
+    /// Bulk-reap every exited fno-agent registry row (uppercase `X`).
     /// No payload - the server's reap verb owns the candidate set.
     ReapAgents,
-    /// Stop a live external claude-daemon row by stable `attach_id` (x-7561).
+    /// Stop a live external claude-daemon row by stable `attach_id`.
     /// The captured attach id, not the row index, commits; `name` is cosmetic.
     StopExternal { attach_id: String, name: String },
-    /// Remove a stopped external tombstone by `attach_id` (x-7561). Same
+    /// Remove a stopped external tombstone by `attach_id`. Same
     /// captured-id commit; the server gates rm on a persisted `stopped` state.
     RemoveExternal { attach_id: String, name: String },
-    /// Dismiss a member TOMBSTONE from its squad's member list (x-8f11). A
+    /// Dismiss a member TOMBSTONE from its squad's member list. A
     /// tombstone is not a registry agent, so RemoveAgent cannot reach it.
     DismissMember { squad: u64, attach_id: String },
-    /// Remove every exited row in one section (x-f300). The SECTION commits, not
+    /// Remove every exited row in one section. The SECTION commits, not
     /// the row list: the set is re-folded on Enter, so rows that died or were
     /// reaped while the prompt sat open are handled honestly. `dead` is the count
     /// the prompt showed, kept only to name it.

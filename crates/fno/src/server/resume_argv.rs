@@ -1,9 +1,9 @@
-//! How a resume argv is built and delivered (x-7b5e, x-eb79): the declared
+//! How a resume argv is built and delivered : the declared
 //! `interactive_resume` form reader, the fail-open render the mux gesture
 //! falls back to, the OFF-LOOP resolution that carries the codex
 //! writable-roots grant, and the replay vocabulary the gesture re-enters
 //! through. Extracted from server.rs (over the file budget, shrink-only):
-//! the code this module owns moved here with the x-eb79 change that touched
+//! the code this module owns moved here with the change that touched
 //! it, answering one question - what argv resumes a session, and how does it
 //! reach the pane spawn without blocking the core loop.
 
@@ -23,14 +23,14 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// (x-7b5e) One harness's declared `interactive_resume` form: the tokens the
+/// One harness's declared `interactive_resume` form: the tokens the
 /// capability table carries, with the `{session_id}` placeholder intact.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct DeclaredResumeForm {
     tokens: Vec<String>,
 }
 
-/// (x-7b5e) The `interactive_resume` form `harness` declares, or `None` when
+/// The `interactive_resume` form `harness` declares, or `None` when
 /// it declares none. A thin view over [`crate::agents_view::resume_form`] -
 /// the ONE reader of the declared capability table, shared with the attach
 /// lane by a form-kind parameter as its doc comment promised - so a seventh
@@ -47,7 +47,7 @@ pub(super) fn declared_resume_form(harness: &str) -> Option<DeclaredResumeForm> 
     })
 }
 
-/// (x-7b5e) Test override pinning one harness's declared resume availability
+/// Test override pinning one harness's declared resume availability
 /// directly, so the negative arms (a harness the table gives no form) stay
 /// assertable after the table itself declares a form for every harness.
 #[cfg(test)]
@@ -95,7 +95,7 @@ impl Drop for ResumeProgramGuard {
     }
 }
 
-/// (x-d401) The session id a pane-run argv resumes: the token after
+/// The session id a pane-run argv resumes: the token after
 /// The session id a pane argv is resuming, derived from the SAME declared
 /// resume form the resume spawn builds: the argv's command names a harness
 /// the capability table gives a form, the argv carries that form's literal
@@ -152,7 +152,7 @@ pub(super) fn resume_target_from_argv(argv: &[String]) -> Option<String> {
         .cloned()
 }
 
-/// The argv resuming `session_id` through its harness's own form (x-5f7f).
+/// The argv resuming `session_id` through its harness's own form.
 /// The session id is always a positional arg (never a shell string), and it
 /// arrives from a registry row the catalog gate matched, so it can only name
 /// a session. Tests override the program via [`set_resume_program`],
@@ -172,7 +172,7 @@ pub(super) fn resume_target_from_argv(argv: &[String]) -> Option<String> {
 ///
 /// For codex this renders the BARE declared form, no grant and no `--cd`.
 /// The gesture does not run it for codex except as the fail-open fallback:
-/// x-eb79 routes the gesture's argv through `fno-agents resume-argv` (the
+/// routes the gesture's argv through `fno-agents resume-argv` (the
 /// builder the CLI verb lane uses) via [`Core::resolve_resume_argv`], and
 /// this render is what survives when that shell-out fails - flagged so a
 /// pane notice names the grant loss. `--cd` itself is refused on this lane
@@ -207,7 +207,7 @@ pub(super) fn resume_target_from_argv(argv: &[String]) -> Option<String> {
 /// claim lockfile. Copying it is a fourth divergent implementation of subtle
 /// logic. Depending on fno-agents inverts a boundary its own Cargo.toml
 /// records: fno never links it, it shells the binary at runtime. The open
-/// candidate is TAKEN as of x-7b5e/x-eb79: the tokens come from the declared
+/// candidate is TAKEN as of / the tokens come from the declared
 /// `interactive_resume` form via `fno-agents resume-argv` (see
 /// [`declared_resume_form`]), and this fn only fills the session id.
 pub(super) fn resume_argv_for(harness: &str, session_id: &str) -> Result<Vec<String>, String> {
@@ -239,7 +239,7 @@ pub(super) fn resume_argv_for(harness: &str, session_id: &str) -> Result<Vec<Str
     Ok(argv)
 }
 
-/// (x-eb79) What the core loop re-enters once a non-claude row's resume argv
+/// What the core loop re-enters once a non-claude row's resume argv
 /// lands. Same idempotent-gates contract as `ReentrySpawnRequest`: the
 /// replay re-runs the gesture and the staged argv is consumed at argv
 /// construction, so the second pass spawns exactly the pane the first pass
@@ -252,7 +252,7 @@ pub(crate) enum ResumeReplay {
 }
 
 impl super::Core {
-    /// (x-eb79) Resolve one non-claude row's resume argv OFF the core loop
+    /// Resolve one non-claude row's resume argv OFF the core loop
     /// (`fno-agents resume-argv`), mirroring `resolve_reentry`: the codex
     /// grant decision needs a Python-booting shell-out, so the gesture yields
     /// `PlanPending` and replays through [`super::CoreMsg::ResumeArgvReady`].
@@ -283,7 +283,7 @@ impl super::Core {
             .await
             {
                 Ok(argv) => Ok((argv, false)),
-                // x-3954: fail-open ONLY on Unavailable - the fallback IS
+                // fail-open ONLY on Unavailable - the fallback IS
                 // today's declared-form render, never a second divergent
                 // builder, and the degradation is named to the operator. A
                 // `Refused` (a routed codex row) goes back as the gesture's
@@ -317,7 +317,7 @@ mod tests {
         // against this crate's own literals (Rust checked against Rust proves
         // nothing). EVERY harness the table declares must render, because a
         // bulk restore built on a partial match silently skips the rest
-        // (x-7b5e: the old two-arm match left gemini/agy/opencode/pi with no
+        // (: the old two-arm match left gemini/agy/opencode/pi with no
         // Resume at all). The headless form is reserved for one-shot and
         // stream-json workers, while `claude attach` is the live-row gesture.
         // No override is installed, so the REAL argv is asserted.
@@ -354,7 +354,7 @@ mod tests {
             "the table declares every harness under test: {declared:?}"
         );
         for harness in &declared {
-            // x-eb79: codex now resumes through the off-loop `resume-argv`
+            // codex now resumes through the off-loop `resume-argv`
             // resolution (grant + --cd, asserted on the staging tests in
             // server.rs); its declared form is the FAILOPEN render, not the
             // gesture's.
@@ -383,7 +383,7 @@ mod tests {
         // it, never an argv (AC5-ERR).
         let err = resume_argv_for("iambad", "sid").unwrap_err();
         assert!(err.contains("iambad"), "{err}");
-        // Codex's declared form IS the fail-open render (x-eb79): what a
+        // Codex's declared form IS the fail-open render: what a
         // gesture runs when `fno-agents resume-argv` is unavailable. The
         // grant-bearing gesture argv is asserted on the staging tests.
         assert_eq!(

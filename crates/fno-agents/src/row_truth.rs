@@ -23,7 +23,7 @@ pub(crate) fn fold_positive_death(
 /// ladder never launches a serial per-row `fno agents truth` subprocess
 /// inside the sweep - N rows would otherwise hold the GC worker for roughly
 /// N probe timeouts. Every row qualifies, not only stamped ones: the
-/// ladder's `is_live` vote (x-91f3) reads the truth rung for unstamped rows
+/// ladder's `is_live` vote reads the truth rung for unstamped rows
 /// too, and a stamped-only batch leaves the transcript - the one marker a
 /// pid-less, unstamped claude row can carry - permanently silent for that
 /// vote. An empty candidate set spends nothing.

@@ -1,7 +1,7 @@
-//! The king board's budget-aware collector, in Rust (x-25b8).
+//! The king board's budget-aware collector, in Rust.
 //!
 //! Ports `cli/src/fno/king/board.py`'s `build_board` + `collect_inputs` with
-//! the budget branch built in (the x-f8e3 reference, `feature/x-f8e3`
+//! the budget branch built in (the reference, `feature/`
 //! bfd1a5e8e, which could not land because the file-budget gate refuses grown
 //! Python): the caller hands in ONE whole-board budget, every per-source slice
 //! derives from it, and as the budget runs out the board stops starting reads,
@@ -94,7 +94,7 @@ pub(crate) const DEFAULT_MAX_PR_READS: usize = 50;
 pub(crate) const SRC_PRS: &str =
     "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url";
 pub(crate) const SRC_PR_NODES: &str = "gh pr list --state open --json number,title,mergeable,statusCheckRollup,headRefName,url + fno backlog get <id>";
-/// x-b9e1: the mergeable_pr queue asks the gate, not just the listing.
+/// the mergeable_pr queue asks the gate, not just the listing.
 pub(crate) const SRC_PR_GATE: &str =
     "fno do pr status <n> (ready + ready_blockers per mergeable candidate)";
 pub(crate) const SRC_QUESTIONS: &str = "fno inbox outstanding --json";
@@ -504,7 +504,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 let (prs, pr_nodes, mut w) = read_prs(&cwd, slice, opts.max_pr_reads, entries_ref);
                 // The gate read rides the same thread: its input is the
                 // listing's own narrowed candidates, so there is nothing to
-                // overlap until the listing lands (x-b9e1).
+                // overlap until the listing lands.
                 let candidates: Vec<i64> = prs
                     .rows()
                     .iter()
@@ -700,7 +700,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 Ok(Ok(map)) => (map, None),
                 // A timed-out batch is UNREADABLE, not empty: an empty map
                 // read as "every holder answered nothing" is how live workers
-                // rendered stalled (x-db9c).
+                // rendered stalled.
                 Ok(Err(e)) => (HashMap::new(), Some(e)),
                 Err(_) => (
                     HashMap::new(),
@@ -836,7 +836,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // Blocked child: read the global distress journal and resolve every
     // candidate's answered/unanswered state HERE, where claims, the graph,
     // and the verdict subprocess already live - build_board only
-    // scope-filters and renders what this collects (x-3ecf). Gated on
+    // scope-filters and renders what this collects. Gated on
     // `s_blocked_child` like every other source, so an exhausted board
     // budget skips it rather than running an unbounded read anyway - the
     // ONE bound this module's own contract promises. Wrapped in
@@ -1300,10 +1300,10 @@ mod tests {
 
     #[test]
     fn unplanned_note_names_the_batch_and_undispatched_names_the_target() {
-        // x-c1c7: a rule without a number is advice nobody applies; the
+        // a rule without a number is advice nobody applies; the
         // queue a king dispatches from names the verb, never the blueprint.
         let inputs = inputs_with(
-            json!([{"id": "x-1234", "priority": "p0"}]),
+            json!([{"id": "x-aaaa", "priority": "p0"}]),
             json!([]),
             json!([]),
         );
@@ -1324,7 +1324,7 @@ mod tests {
 
     #[test]
     fn a_blind_actionable_queue_makes_the_count_a_named_floor() {
-        // x-c911: the aggregate is a FLOOR (readable rows only); the blind
+        // the aggregate is a FLOOR (readable rows only); the blind
         // queues are named in a warning, never counted as rows.
         let mut inputs = inputs_with(json!([]), json!([]), json!([]));
         inputs.entries = Some(Vec::new());
@@ -1442,7 +1442,7 @@ mod tests {
 
     #[test]
     fn x_dead_contained_nodes_reach_neither_queue() {
-        // Task 1.4b (the x-58a5 shape): a node with `contained_in` set has an
+        // Task 1.4b (the x-bbbb shape): a node with `contained_in` set has an
         // owner by definition and never dispatches alone, so `none` - the
         // word that fills unheld_progress and undriven_pr - is not an
         // available verdict for it. One check inside node_driver drops it
@@ -1450,8 +1450,8 @@ mod tests {
         let mut inputs = inputs_with(json!([]), json!([]), json!([]));
         inputs.entries = Some(vec![
             json!({
-                "id": "x-58a5", "priority": "p1", "status": "in_progress",
-                "title": "contained work", "contained_in": "x-b7f8",
+                "id": "x-bbbb", "priority": "p1", "status": "in_progress",
+                "title": "contained work", "contained_in": "x-cccc",
             }),
             json!({
                 "id": "x-contained-pr", "priority": "p1", "status": "in_progress",
@@ -1475,12 +1475,12 @@ mod tests {
 
     #[test]
     fn unheld_progress_names_a_claim_free_in_progress_row() {
-        // x-add3 sat in_progress 25 minutes with a free claim and a dead
+        // x-dddd sat in_progress 25 minutes with a free claim and a dead
         // worker while every queue read clean; the status stamp is never
         // revoked, so this queue is the only one that can carry it.
         let mut inputs = inputs_with(json!([]), json!([]), json!([]));
         inputs.entries = Some(vec![json!({
-            "id": "x-add3",
+            "id": "x-dddd",
             "priority": "p1",
             "status": "in_progress",
             "title": "dead handoff",
@@ -1493,7 +1493,7 @@ mod tests {
             .unwrap();
         let rows = unheld["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "{unheld}");
-        assert_eq!(rows[0]["id"], "x-add3");
+        assert_eq!(rows[0]["id"], "x-dddd");
         assert!(rows[0].get("claim_state").is_none(), "{:?}", rows[0]);
     }
 
@@ -1520,7 +1520,7 @@ mod tests {
 
     #[test]
     fn unheld_progress_omits_a_crowned_epic_but_keeps_a_dead_leaf() {
-        // x-26e5: a king holds a crown, never a claim, so the epic it reigns
+        // a king holds a crown, never a claim, so the epic it reigns
         // over read claim-free and held the stop hook open on a row no verb
         // could clear. The crown is that epic's driver. An in-scope leaf with
         // no claim is still a dead handoff the king must redispatch.
@@ -1605,7 +1605,7 @@ mod tests {
         inputs.entries = Some(vec![
             json!({"id": "x-epic", "priority": "p1", "status": "in_progress", "type": "epic"}),
             json!({"id": "x-done", "priority": "p1", "status": "done", "parent": "x-epic"}),
-            json!({"id": "x-dead", "priority": "p1", "status": "in_progress", "parent": "x-epic"}),
+            json!({"id": "x-eeee", "priority": "p1", "status": "in_progress", "parent": "x-epic"}),
         ]);
         let board = build_board(&inputs);
         let queues = board.get("queues").and_then(Value::as_array).unwrap();
@@ -1693,7 +1693,7 @@ mod tests {
         // positive control: it proves the row was read and classified, not
         // dropped by an unrelated guard.
         let node = json!({
-            "id": "x-7471",
+            "id": "x-ffff",
             "priority": "p1",
             "status": "in_progress",
             "title": "the board probes the holder before it honors the clock",
@@ -1701,7 +1701,7 @@ mod tests {
         let mut inputs = inputs_with(
             json!([]),
             json!([{
-                "key": "node:x-7471", "state": "stale",
+                "key": "node:x-ffff", "state": "stale",
                 "holder": "spawn-handover:target-7471-worker",
             }]),
             json!([]),
@@ -1745,9 +1745,9 @@ mod tests {
         assert_eq!(stale_keys, Vec::<&str>::new(), "{stale}");
         // Positive control on the same inputs: the node classifies active.
         let claim_by_node: HashMap<String, Value> = [(
-            "x-7471".to_string(),
+            "x-ffff".to_string(),
             json!({
-                "key": "node:x-7471", "state": "stale",
+                "key": "node:x-ffff", "state": "stale",
                 "holder": "spawn-handover:target-7471-worker",
             }),
         )]
@@ -1793,7 +1793,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_claims_source_reads_the_claims_queues_unreadable() {
-        // AC5-ERR (x-636f): the claims source's Err must arrive as unreadable
+        // AC5-ERR: the claims source's Err must arrive as unreadable
         // queues, never as an empty-fleet success that would re-dispatch held
         // work. This pins the existing `!inputs.claims.is_ok()` gates, which
         // had no test on the claims leg.
@@ -2067,13 +2067,13 @@ mod tests {
         // reason, and age when the board runs from the crowned session.
         let mut inputs = inputs_with(json!([]), json!([]), json!([]));
         inputs.blocked_child = ok_read(json!([{
-            "id": "x-eb79",
+            "id": "x-0000",
             "session": "cx-run-1",
             "reason": "worktree-init-blocked",
             "evidence": "Operation not permitted",
             "age_minutes": 45,
         }]));
-        inputs.scope_ids = Some(["x-eb79"].into_iter().map(str::to_string).collect());
+        inputs.scope_ids = Some(["x-0000"].into_iter().map(str::to_string).collect());
         let board = build_board(&inputs);
         let queues = board.get("queues").and_then(Value::as_array).unwrap();
         let blocked = queues
@@ -2082,7 +2082,7 @@ mod tests {
             .unwrap();
         let rows = blocked["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1, "{blocked}");
-        assert_eq!(rows[0]["id"], "x-eb79");
+        assert_eq!(rows[0]["id"], "x-0000");
         assert_eq!(rows[0]["session"], "cx-run-1");
         assert_eq!(rows[0]["reason"], "worktree-init-blocked");
         assert_eq!(rows[0]["age_minutes"], 45);

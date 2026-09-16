@@ -1,4 +1,4 @@
-"""Per-provider usage/rate-limit probe (quota-aware dispatch, x-5d3e).
+"""Per-provider usage/rate-limit probe (quota-aware dispatch).
 
 Predictive layer on top of the reactive failover substrate: read remaining
 quota + reset time per provider BEFORE a dispatch decision, instead of burning
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 PROBE_TIMEOUT_SECONDS = 10  # matches Claude Code's own 10s usage-fetch budget
 
 # The claude OAuth usage endpoint Claude Code's `/usage` reads. Verified live
-# against a real account (x-6bcf): the response is top-level
+# against a real account: the response is top-level
 # window objects (five_hour / seven_day), each `{utilization: 0-100 float,
 # resets_at: ISO-8601 string}` - NOT a `windows[]` array of epoch floats.
 _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -52,7 +52,7 @@ _CLAUDE_USER_AGENT = "claude-code/2.1.0"  # a custom UA risks being rejected
 # carries model-specific weekly windows (seven_day_opus, seven_day_sonnet, ...);
 # those are captured generically by _parse_claude_windows (any five_hour /
 # seven_day* object) so a maxed Opus weekly binds headroom instead of being
-# dropped, letting Opus work dispatch until the reactive 429 (x-6bcf review).
+# dropped, letting Opus work dispatch until the reactive 429 (review).
 _CLAUDE_KNOWN_LABELS = {"five_hour": "5h", "seven_day": "weekly"}
 
 # Unit codes to minutes. There is no sibling suffix table: a label is derived
@@ -82,7 +82,7 @@ class UsageWindow:
     ``rate_limited_until``; a value already in the past means the window has
     reset and never binds a headroom verdict.
 
-    ``resets_at`` is OPTIONAL (x-763a). A window with no reset is still
+    ``resets_at`` is OPTIONAL. A window with no reset is still
     evidence: the endpoint reported the limit and reported its utilization,
     and only the reset is missing. Dropping such a row is what let a live
     z.ai response lose its binding five-hour cap and answer with a surviving
@@ -352,12 +352,12 @@ def _claude_window_label(api_key: str) -> str:
 def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
     """Parse the claude ``/api/oauth/usage`` payload into windows.
 
-    Verified live (x-6bcf): the payload has top-level window OBJECTS keyed by
+    Verified live : the payload has top-level window OBJECTS keyed by
     name, each ``{utilization: float already on a 0-100 scale, resets_at:
     ISO-8601 string, ...dollar fields}``. Includes the general ``five_hour`` /
     ``seven_day`` AND every model-specific weekly (``seven_day_opus``,
     ``seven_day_sonnet``, ...) so a maxed model window binds headroom rather than
-    being silently dropped (x-6bcf review). The obfuscated promo/experimental
+    being silently dropped (review). The obfuscated promo/experimental
     buckets (``tangelo``, ``nimbus_quill``, ...) do not match the
     ``five_hour``/``seven_day*`` prefix and are excluded. A window whose object
     is absent/null or missing either field is skipped (never a raise).
@@ -403,7 +403,7 @@ def _credential_still_current(record: ProviderRecord, bearer: str) -> bool:
 def _probe_claude(
     record: ProviderRecord, now: float
 ) -> tuple[UsageSnapshot | None, str | None]:
-    """Probe the claude ``/api/oauth/usage`` endpoint (verified x-6bcf).
+    """Probe the claude ``/api/oauth/usage`` endpoint (verified).
 
     Tries every candidate bearer token until one returns 200: a stale scoped
     Keychain item 401s while the live unscoped item succeeds, so a single-token
@@ -502,7 +502,7 @@ def _latest_codex_session(record: ProviderRecord) -> Path | None:
 def _find_rate_limits(obj: Any) -> dict | None:
     """Recursively locate the first ``rate_limits`` dict in a codex event.
 
-    Verified live (x-6bcf): the shape is an ``event_msg`` line
+    Verified live : the shape is an ``event_msg`` line
     ``{timestamp, type, payload}`` with ``rate_limits`` at ``payload.rate_limits``.
     Searching recursively keeps the probe robust if a codex version re-nests it.
     """
@@ -547,7 +547,7 @@ def _label_for_minutes(minutes: int | None) -> str:
 def _parse_codex_rate_limits(payload: Any) -> tuple[UsageWindow, ...]:
     """Parse a codex ``rate_limits`` payload into windows.
 
-    Verified live (x-6bcf): ``rate_limits`` has ``primary`` and ``secondary``
+    Verified live : ``rate_limits`` has ``primary`` and ``secondary``
     sub-objects, each ``{used_percent: 0-100 float, resets_at: ABSOLUTE unix
     epoch seconds, window_minutes: int}``. ``resets_at`` is absolute (NOT an
     offset), so it is used directly. A sub-object missing ``used_percent`` or

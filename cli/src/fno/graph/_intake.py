@@ -141,7 +141,7 @@ def _would_exceed_epic_depth(
     entries: list[dict], node: dict, parent_node: dict
 ) -> bool:
     """True iff parenting ``node`` under ``parent_node`` breaks the epic-nesting
-    cap (x-6c2b wave 3: mission -> epic -> leaf, two epic levels).
+    cap (wave 3: mission -> epic -> leaf, two epic levels).
 
     Fires only when BOTH are epics and either direction would make a third epic
     level: (a) the parent already has an epic ancestor (it is a nested epic, not
@@ -187,7 +187,7 @@ def descendants_of(entries: list[dict], parent_id: str) -> set[str]:
     reachable below ``parent_id``. The parent itself is never included.
 
     Powers the ``--parent <epic-id>`` epic-scope filter on ``fno backlog
-    next``/``ready`` (C2, ab-facfaade): candidates are restricted to this
+    next``/``ready`` (C2): candidates are restricted to this
     set so a walk drains one epic's subtree feature-by-feature.
 
     Cycle-safe: a ``seen`` set bounds the BFS so a malformed graph with a
@@ -420,7 +420,7 @@ def make_selection_sort_key(
     # Once per sort, not once per comparison: the key below runs O(n log n)
     # times and this answer does not change while it does.
     child_progress_epics = _epics_with_child_progress(id_to_entry)
-    # Fan-out: how many OPEN nodes wait on each id (x-e451). Within a band the
+    # Fan-out: how many OPEN nodes wait on each id. Within a band the
     # node more work hangs on goes first, AFTER the priority terms: a decision
     # outranks a measurement (a p2 blocking three must not jump a p1 blocking none).
     dependents: dict[str, int] = {}
@@ -523,7 +523,7 @@ def _git_repo_root() -> str | None:
     # `git worktree list` record that is a real working tree, robust across
     # normal / bare / separate-git-dir layouts (skips a bare repo and a
     # separate-git-dir gitdir mis-report rather than recording either as the
-    # backlog cwd). See paths.resolve_canonical_worktree (ab-91a004af).
+    # backlog cwd). See paths.resolve_canonical_worktree.
     canonical = _paths.resolve_canonical_worktree()
     if canonical is not None:
         return os.path.normpath(str(canonical))
@@ -565,7 +565,7 @@ def _settings_candidate_paths() -> list[Path]:
     essential: the ``work.workspaces`` project->path map lives only there, and
     inside a repo ``config_file()`` resolves to the project-local settings, so
     without the global entry the map is never consulted and project detection
-    returns None for every node filed from inside a project (ab-95e8efec).
+    returns None for every node filed from inside a project.
 
     De-duplicated by normalized path so an outside-a-repo run (where
     ``config_file()`` is already the global file) does not read + warn on the
@@ -585,7 +585,7 @@ def _settings_candidate_paths() -> list[Path]:
     out: list[Path] = []
     seen: set[str] = set()
     # config.toml-first: each settings.yaml location also yields its config.toml
-    # sibling as a higher-priority candidate (flat hard cut, x-8526).
+    # sibling as a higher-priority candidate (flat hard cut).
     for path in config_read_candidates([
         Path(".fno/settings.yaml"),
         _paths.config_file(),
@@ -1155,7 +1155,7 @@ def _prepare_intake(
 
     existing = _match_plan_in_graph(entries, plan_path, roadmap_id)
     if existing is None:
-        # plan == PR == node (x-04b9): a plan file is one delivery unit regardless
+        # plan == PR == node: a plan file is one delivery unit regardless
         # of which roadmap tracks it. _match_plan_in_graph only catches the
         # same-roadmap "already intaked" case; a plan owned under a different
         # roadmap still arms two concurrent dispatches, so refuse it here on the
@@ -1512,7 +1512,7 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
 
     raw_difficulty = fm.get("difficulty")
     if raw_difficulty is None and fm.get("model_tier") is not None:
-        # The compat read died with the field (x-baef); a plan still spelling
+        # The compat read died with the field; a plan still spelling
         # the band as model_tier must hear it lost, not lose it silently.
         sys.stderr.write(
             f"warning: {spec['plan_path']}: frontmatter model_tier is retired "
@@ -1601,7 +1601,7 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     # to the plan projector, which then deletes a band the doc authored later.
     if difficulty is not None:
         node["difficulty"] = difficulty
-        # The one append shape every difficulty writer uses (x-baef): a
+        # The one append shape every difficulty writer uses: a
         # hand-rolled birth entry here would drift from the helper the
         # claim, update, and migration lanes all share.
         append_difficulty_history(

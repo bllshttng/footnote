@@ -1,7 +1,7 @@
 """Detective attribution check for replay-run isolation.
 
 Resurrected verbatim from ``cli/src/fno/evals/isolation.py`` (cut in
-``675b24e``); the observer harness (x-57a5, Locked Decision 5) reuses its
+``675b24e``); the observer harness (Locked Decision 5) reuses its
 proven preventive+detective isolation mechanics, not the golden-fixture eval
 concept it was part of. "eval run" below reads as "replay run".
 

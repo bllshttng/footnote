@@ -1,6 +1,6 @@
 """Error taxonomy normalizer for provider failover.
 
-Phase 01 of the provider rotation failover spec (ab-9728b70b). Single
+Phase 01 of the provider rotation failover spec. Single
 classifier: maps a provider call's outcome (HTTP status + body, or CLI
 subprocess exit code + stderr) to a structured ``NormalizedError`` so the
 failover controller can decide swap vs surface vs retry.
@@ -114,7 +114,7 @@ class NormalizedError:
     the taxonomy so a hand-constructed instance (e.g., a test fixture)
     can't lie to the failover controller.
 
-    ``model`` (Plan A1, ab-7fe3cdaf) is the optional model identifier
+    ``model`` (Plan A1) is the optional model identifier
     that errored - lets downstream code (``update_provider_health``,
     ``is_in_cooldown``) lock only that model rather than the whole
     provider record. None when the caller doesn't know which model the
@@ -329,7 +329,7 @@ def _classify(
     return ErrorClass.UNKNOWN
 
 
-# Plan A (ab-6534a78a): priority-ordered ErrorRule list. These rules are
+# Plan A: priority-ordered ErrorRule list. These rules are
 # SUPPLEMENTARY to the closed ErrorClass taxonomy: they
 # produce the COOLDOWN-shaping rule (fixed cooldown_ms vs exponential
 # backoff), not a new ErrorClass. The classifier walks ERROR_RULES
@@ -451,7 +451,7 @@ def normalize(
             is the authoritative PARSER_ERROR signal; the body-shape
             heuristic is a fallback for direct callers that didn't attempt
             a parse.
-        model: Optional model identifier (Plan A1, ab-7fe3cdaf). When
+        model: Optional model identifier (Plan A1). When
             provided, plumbed through ``NormalizedError.model`` so the
             failover controller can write a model-specific lock instead
             of a provider-level one. Clamped to 256 bytes before

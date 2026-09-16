@@ -22,7 +22,7 @@ BLUEPRINT_WRITE_ALLOWLIST: frozenset[str] = frozenset(
         "kill_criteria",
         "execution_mode",
         "waves",
-        # The compiled-v1 acceptance-contract stamp (x-f905): set at finalize
+        # The compiled-v1 acceptance-contract stamp: set at finalize
         # when a design promotes to ready, marking the plan as carrying strict
         # reference-resolved acceptance criteria.
         "acceptance_contract",
@@ -30,7 +30,7 @@ BLUEPRINT_WRITE_ALLOWLIST: frozenset[str] = frozenset(
         # kill_criteria: the validator requires the block, so the ownership
         # model has to permit the write that satisfies it.
         "consolidation",
-        # The difficulty band. Same rule (x-e3d1): the date-keyed gate
+        # The difficulty band. Same rule: the date-keyed gate
         # requires it on plans created after 2026-08-26, and the mint is what
         # stamps that date, so the ownership model has to permit the floor
         # band the mint writes to satisfy its own validator.

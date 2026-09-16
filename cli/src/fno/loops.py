@@ -1,4 +1,4 @@
-"""Loop levels + global pause-all kill switch (x-ce71).
+"""Loop levels + global pause-all kill switch.
 
 Substrate only: no standing loop ships in this module. Every later loop is
 born with a pause button by reading ``loops_paused()`` at tick start (paused

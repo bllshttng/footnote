@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-deploy probe: a finished blueprint retires on the daemon tick (x-d8bc).
+"""Post-deploy probe: a finished blueprint retires on the daemon tick.
 
 Read-only. Scans the agents event journal inside the --since window and exits 0
 only when all three conditions hold:
@@ -119,7 +119,7 @@ def run_probe(events_path: pathlib.Path, since: dt.datetime) -> tuple[bool, str,
         return (
             False,
             "no daemon retire_holds event in the window: the deployed daemon "
-            "is not running the x-d8bc build, or no tick held rows yet",
+            "is not running the build, or no tick held rows yet",
             [],
         )
 

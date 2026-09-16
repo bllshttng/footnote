@@ -1,4 +1,4 @@
-"""Hidden deprecated flag aliases (short-flags Phase 3, ab-a04f3f1a).
+"""Hidden deprecated flag aliases (short-flags Phase 3).
 
 The two-spelling unification in the short-flag design
 (``internal/fno/design/2026-06-03-fno-cli-short-flags.md``)
@@ -76,7 +76,7 @@ def merge_deprecated_alias(
     return legacy
 
 
-#: The axis-split tombstone (x-bab1). The harness axis (the CLI binary) was
+#: The axis-split tombstone. The harness axis (the CLI binary) was
 #: ``--provider/-p`` on every verb except spawn; it is ``--harness/-H`` everywhere
 #: now. A model vendor routes ONLY at spawn, so the retired spelling is a hidden
 #: long-only option whose sole behavior is to exit 2 with this map - a tombstone,
@@ -105,7 +105,7 @@ def refuse_retired_provider(value: object) -> None:
     _refuse_retired(value, PROVIDER_AXIS_TOMBSTONE)
 
 
-#: The difficulty-axis tombstone (x-baef). ``model_tier`` was the retired
+#: The difficulty-axis tombstone. ``model_tier`` was the retired
 #: spelling of the work-difficulty axis; ``difficulty`` is the one spelling
 #: (``fno backlog update <id> --difficulty low|medium|high``). A refusing
 #: tombstone, not an alias: a silent alias is how a retired spelling survives

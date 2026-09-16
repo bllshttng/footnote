@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Archive a DEFUNCT .fno/target-state.md at session start (x-4af4: a dead
+# Archive a DEFUNCT .fno/target-state.md at session start (: a dead
 # manifest once auto-locked attended /think for ~10 days). Shell the ONE
 # claim-first predicate (`fno do target status`); never re-implement it in bash.
 # Advisory: never blocks a session, degrades silently on any failure.

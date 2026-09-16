@@ -16,7 +16,7 @@ import sys
 
 
 def _build_unified_envelope_schema() -> dict:
-    """Build the unified events.jsonl envelope schema (x-2901).
+    """Build the unified events.jsonl envelope schema.
 
     Describes {ts, type, source, data} with source as an anyOf of the enum
     and the worker patterns. Structurally equal to schemas/events-v3.json
@@ -37,7 +37,7 @@ def _build_unified_envelope_schema() -> dict:
     source_anyof += [{"pattern": p.pattern} for p in ALLOWED_SOURCE_PATTERNS]
 
     return {
-        "$comment": "Unified envelope (x-2901). Emitted by cli/src/fno/events/__init__.py.",
+        "$comment": "Unified envelope. Emitted by cli/src/fno/events/__init__.py.",
         "type": "object",
         "required": ["ts", "type", "source", "data"],
         "properties": {

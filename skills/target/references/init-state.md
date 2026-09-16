@@ -56,7 +56,7 @@ The size profile sets the base values for all toggles. Individual flags then ove
 
 **FORBIDDEN:** Setting skip flags to `true` based on your own judgment (e.g., "this project doesn't need docs" or "no external review needed"). If no CLI flag, config, or size profile sets it, the phase MUST run.
 
-## Step 1c-blast: Blast-Radius Modulation (AUTO, opt-in, x-518f)
+## Step 1c-blast: Blast-Radius Modulation (AUTO, opt-in)
 
 When `config.target.blast.enabled: true` **and** the input is a plan or node (a File Ownership Map exists), `fno do target init` performs a deterministic blast read on the plan's touched surface BEFORE it writes the immutable manifest, and modulates the size resolved in Step 1c. This is fully internal to the verb — there is no separate LLM step — but the agent should understand the resulting `target_size` may differ from the operator/default size, and an announce line is printed to stderr:
 
@@ -88,7 +88,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/hooks/helpers/init-target-state.sh"
 
 Then read or overwrite `.fno/target-state.md` with the session-specific fields below. If a prior `status: COMPLETE` or `status: BLOCKED` file exists and you are starting a new run (not resuming), delete it before writing the fresh state so the helper does not short-circuit. See [state-schema.md](state-schema.md) for full schema.
 
-> **Note (ab-d0337fbc):** The example below shows a PRE-WEDGE manifest. The current manifest has no `status`, `current_phase`, `iteration`, or `completion_gates`. See `references/state-schema.md` for the current field list.
+> **Note :** The example below shows a PRE-WEDGE manifest. The current manifest has no `status`, `current_phase`, `iteration`, or `completion_gates`. See `references/state-schema.md` for the current field list.
 
 ```yaml
 ---
@@ -96,9 +96,9 @@ Then read or overwrite `.fno/target-state.md` with the session-specific fields b
 input: "Add AI chat feature"
 input_type: idea | plan
 execution_mode: main | agent | fork  # How to dispatch tasks
-status: IN_PROGRESS           # removed in ab-d0337fbc
-current_phase: think          # removed in ab-d0337fbc
-iteration: 1                  # removed in ab-d0337fbc
+status: IN_PROGRESS           # removed in
+current_phase: think          # removed in
+iteration: 1                  # removed in
 mode: interactive              # interactive | autonomous
 ---
 ```
@@ -214,7 +214,7 @@ See [domain-profiles.md](domain-profiles.md) for full schema and examples.
 
 ## Step 3d2: Discovery Gate (idea input only)
 
-When `input_type == idea`, run the discovery protocol before plan to surface unknowns before planning. This is the most important touch point - it prevents target from silently assuming its way through ambiguity. `/think` is NOT a step here (x-42c5, operator ruling): it is a research verb outside the delivery path, never an automatic prerequisite. When no prior `/think` doc exists, the discovery protocol (and `/blueprint` after it) self-grounds via `fno do think inspect`.
+When `input_type == idea`, run the discovery protocol before plan to surface unknowns before planning. This is the most important touch point - it prevents target from silently assuming its way through ambiguity. `/think` is NOT a step here (operator ruling): it is a research verb outside the delivery path, never an automatic prerequisite. When no prior `/think` doc exists, the discovery protocol (and `/blueprint` after it) self-grounds via `fno do think inspect`.
 
 ```
 DISCOVERY GATE -> plan -> execute -> review -> ship

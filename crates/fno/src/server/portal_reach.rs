@@ -5,7 +5,7 @@
 
 use super::*;
 
-/// (x-8f9d) Does `portal_key` name the same ROW the reach resolved?
+/// Does `portal_key` name the same ROW the reach resolved?
 ///
 /// Not the same KEY: the TUI door keys a portal by the attach id while
 /// `fno agents attach` keys it by the registry name, and both doors advertise
@@ -29,7 +29,7 @@ pub(super) fn row_answers_key(a: &RegistryAgent, key: &str) -> bool {
     a.mux.is_none() && !a.exited && (a.attach_id.as_deref() == Some(key) || a.name == key)
 }
 
-/// (x-a9b4) Remember every restored portal slot's seat (index, row, pane,
+/// Remember every restored portal slot's seat (index, row, pane,
 /// tab id) until the tab ids are final.
 pub(super) fn collect_portal_slot_seats(
     kept_slots: &[&crate::proto::LayoutSlot],
@@ -44,7 +44,7 @@ pub(super) fn collect_portal_slot_seats(
     }
 }
 
-/// (x-a9b4) One restore receipt for both held kinds. A zero count is not
+/// One restore receipt for both held kinds. A zero count is not
 /// silent when the other is non-zero, so "no portal came back" and "the
 /// counter never ran" stay distinguishable.
 pub(super) fn notify_held_receipt(core: &mut Core, workers_total: usize, portals_total: usize) {
@@ -58,7 +58,7 @@ pub(super) fn notify_held_receipt(core: &mut Core, workers_total: usize, portals
     ));
 }
 
-/// (x-a9b4) Re-arm every held portal seat after restore: the entry goes back
+/// Re-arm every held portal seat after restore: the entry goes back
 /// in the map, the seat pane gets its name and its held message, and the
 /// reach or a focus fills it on first demand. A held portal is NOT a squad
 /// member - the slot in its tab is the whole record. Returns the count of
@@ -107,7 +107,7 @@ pub(super) fn rearm_held_portal_seats(
     held
 }
 
-/// (x-a9b4) A focused portal seat that is still the held shell fills in
+/// A focused portal seat that is still the held shell fills in
 /// place: the reach's repoint respawns the row's viewer in THIS seat.
 /// `None` falls through to a plain focus, so a seat whose row resolves to
 /// zero or several live paneless rows stays a readable placeholder.
@@ -122,7 +122,7 @@ pub(super) fn fill_held_portal_seat(
     fill_held_portal_at(core, client_id, view, vp, idx)
 }
 
-/// (x-a6b9) The fill by portal INDEX: the one body behind the focus door
+/// The fill by portal INDEX: the one body behind the focus door
 /// ([`fill_held_portal_seat`]) and the restore verb, so the two doors cannot
 /// disagree about what fills a held seat. The seat's own leaf wins
 /// (`portal_explicit = false`); the reach repoints the stand-in in place.
@@ -157,7 +157,7 @@ pub(super) fn fill_held_portal_at(
     None
 }
 
-/// (x-a6b9) What the restore verb would do with portal `idx` right now. One
+/// What the restore verb would do with portal `idx` right now. One
 /// classifier behind both callers - `workspace_restore_start` collects the
 /// claude plans to resolve off-loop, `workspace_restore_apply` turns each
 /// verdict into the report row - so the two halves cannot disagree about
@@ -214,7 +214,7 @@ pub(super) fn classify_portal_restore(core: &Core, idx: u8) -> Option<PortalRest
     }
 }
 
-/// (x-a6b9) The notice a filled Locate-tier portal carries: the seat shows
+/// The notice a filled Locate-tier portal carries: the seat shows
 /// where the thread lives, not the thread, and the row says so instead of
 /// reading as a Drive fill that shows nothing.
 pub(super) fn locate_tier_notice(row: &RegistryAgent) -> Option<String> {
@@ -230,11 +230,11 @@ pub(super) fn locate_tier_notice(row: &RegistryAgent) -> Option<String> {
     })
 }
 
-/// (x-a6b9) The passive client id a restore-verb fill rides: the verb has no
+/// The passive client id a restore-verb fill rides: the verb has no
 /// focused client, so the seat's own tab rect and this id stand in.
 pub(super) const RESTORE_CLIENT: u64 = u64::MAX;
 
-/// (x-a6b9) The row names of held portals whose fill needs the off-loop
+/// The row names of held portals whose fill needs the off-loop
 /// claude re-entry plan: one Drive row answering the key, seat still held.
 pub(super) fn portals_needing_claude_plan(core: &Core) -> Vec<String> {
     core.portals
@@ -247,7 +247,7 @@ pub(super) fn portals_needing_claude_plan(core: &Core) -> Vec<String> {
         .collect()
 }
 
-/// (x-a6b9) One report row per stored portal, classified by the same door
+/// One report row per stored portal, classified by the same door
 /// the focus fill uses, appended after the member rows. A held claude Drive
 /// seat fills from its staged attach verdict; a fill that did not land
 /// reports refused, never silent. The one-row / ambiguous / no-row texts
@@ -418,7 +418,7 @@ fn portal_reply(landed: bool, landing: Option<String>, name: &str, portal: u8) -
             code: err_code::BAD_REQUEST,
             msg: text,
         },
-        // (x-7955) The fallback arm: the reach itself never reported. The
+        // The fallback arm: the reach itself never reported. The
         // old "no such agent: NAME" here read as a resolver-style refusal
         // and cost a measurement pass; this text can only mean the harvest
         // came back empty.
@@ -430,13 +430,13 @@ fn portal_reply(landed: bool, landing: Option<String>, name: &str, portal: u8) -
 }
 
 impl Core {
-    /// (x-07c2) Reach `key` (an attach id for a claude row, a registry name
+    /// Reach `key` (an attach id for a claude row, a registry name
     /// for every other harness) through portal `portal`. The tier is
     /// capability-computed (`agents_view::thread_reach`): Drive runs the
     /// account-wrapped attach argv, Follow tails the transcript with
     /// `fno agents peek --follow`, Locate renders the self-teaching screen.
     ///
-    /// (x-8f9d) Resolution order is per INDEX, and every arm touches only its
+    /// Resolution order is per INDEX, and every arm touches only its
     /// own portal: no portal at `portal` opens one through the ordinary
     /// placement path; a portal at `portal` on another row repoints it in
     /// place (the open-here mechanic: spawn-first, `tree::replace_leaf`,
@@ -446,16 +446,16 @@ impl Core {
     /// tab's slot and restored held: a pane
     /// binds a session to geometry, a thread binds a session to a row.
     ///
-    /// (x-9b60) The geometry decision lives HERE, after the slot lookup that
+    /// The geometry decision lives HERE, after the slot lookup that
     /// knows whether index N is occupied - not at the decode edge, which
     /// cannot see occupancy. `here` is refused in both cases (a portal mints
     /// its own seat pane; open-here repoints the sender's focused pane).
     /// Everything else the caller named is IGNORED, visibly, when the portal
-    /// already has a live seat (a portal owns its geometry; x-d545's
+    /// already has a live seat (a portal owns its geometry;
     /// remembered tab steers the replacement), and HONORED on a fresh open,
     /// where there is no geometry to own yet.
     ///
-    /// (x-a9b4) A portal is persisted as its tab's slot and restored held: a
+    /// A portal is persisted as its tab's slot and restored held: a
     /// stand-in seat is a HELD portal until a reach or a focus fills it, so
     /// the one-row-one-viewer check treats a live viewer as the row's home
     /// and a default (no explicit index) reach retargets to a held seat that
@@ -470,7 +470,7 @@ impl Core {
         placement: &PanePlacement,
         portal_explicit: bool,
     ) -> Flow {
-        // (x-9b60) open-here is never a portal, in either case below. Refused
+        // open-here is never a portal, in either case below. Refused
         // before any lookup, exactly as the decode edge refused it before
         // this decision moved in here.
         if placement.here {
@@ -497,7 +497,7 @@ impl Core {
                 return Flow::Continue;
             }
             _ => {
-                // (x-7955) The bare "no such agent" this arm used to emit
+                // The bare "no such agent" this arm used to emit
                 // sent a reader hunting a lifecycle resolver that is not in
                 // this chain. Name the door and the row it looked for.
                 self.notice(
@@ -507,7 +507,7 @@ impl Core {
                 return Flow::Continue;
             }
         };
-        // (x-a9b4) A DEFAULT reach goes home to the held seat that remembers
+        // A DEFAULT reach goes home to the held seat that remembers
         // the row. Restore put a shell in the seat and the entry back in the
         // map; without this retarget the reach would open a fresh viewer at
         // the requested index and strand the held seat. Only a stand-in
@@ -536,7 +536,7 @@ impl Core {
                 portal_idx = held_idx;
             }
         }
-        // (x-8f9d) ONE ROW, ONE VIEWER. A reach for a row that ANOTHER portal
+        // ONE ROW, ONE VIEWER. A reach for a row that ANOTHER portal
         // already shows focuses that portal rather than minting a second
         // viewer for it. The single slot enforced this by construction: there
         // was nowhere else for the row to be, so the same-row arm below caught
@@ -554,7 +554,7 @@ impl Core {
             };
             match self.session.find_pane(other_seat) {
                 Some((sid, _)) => {
-                    // (x-9b60) This focus ignores caller geometry; saying so
+                    // This focus ignores caller geometry; saying so
                     // beats a silent drop.
                     if caller_geometry {
                         self.notice(client_id, "a portal takes no split, target, or anchor");
@@ -598,10 +598,10 @@ impl Core {
         let argv = match tier {
             Reach::Drive => {
                 let id = row.attach_id.clone().expect("Drive implies attach_id");
-                // (x-d285) The Drive argv is the canonical re-entry plan for a
+                // The Drive argv is the canonical re-entry plan for a
                 // claude row. `None` means the plan is resolving off-loop; the
                 // replay carries a portal placement, which re-lands in this
-                // reach with the verdict staged. (x-8f9d) It names THIS
+                // reach with the verdict staged. It names THIS
                 // portal, so an off-loop replay returns to the index the
                 // operator reached, not to portal 0.
                 let placement = crate::proto::PanePlacement {
@@ -631,7 +631,7 @@ impl Core {
         // reads as closed and never wedges the portal). Only this index is
         // removed; every other portal is untouched by this reach.
         let slot = self.portals.remove(&portal_idx);
-        // (x-d545) The seat's tab id, kept out of the stale-seat paths: a
+        // The seat's tab id, kept out of the stale-seat paths: a
         // fresh-open (below) prefers it when the tab still exists.
         let mut remembered_tab_id: Option<TabId> = None;
         if let Some(Portal {
@@ -649,7 +649,7 @@ impl Core {
                     // one-row-one-viewer check above, so the two readings of
                     // "is this the same row" cannot drift apart.
                     let same_row = row_matches_portal_key(&row, key, &slot_row);
-                    // (x-d545) A same-row reach is a focus only when the seat
+                    // A same-row reach is a focus only when the seat
                     // holds a LIVE viewer. After the viewer's child died, the
                     // seat holds the idle-shell stand-in (no argv provenance):
                     // "already showing" would lie, so fall through to the
@@ -660,7 +660,7 @@ impl Core {
                         // the pane is the ordinary close gesture. The slot
                         // was taken above; put it back - a focus is not a
                         // close. Caller geometry is ignored here too (the
-                        // seat keeps its place), visibly (x-9b60).
+                        // seat keeps its place), visibly.
                         if caller_geometry {
                             self.notice(client_id, "a portal takes no split, target, or anchor");
                         }
@@ -690,7 +690,7 @@ impl Core {
                     // open-here path needs does not apply here: the slot pane
                     // is the dedicated pane, displaceable by construction.
                     //
-                    // (x-9b60) The repoint keeps the portal's geometry - the
+                    // The repoint keeps the portal's geometry - the
                     // seat is replaced IN PLACE, the tab never moves - so
                     // caller geometry is ignored. The notice is what makes
                     // that a decision rather than a silent drop (AC2-REG).
@@ -798,16 +798,16 @@ impl Core {
         // placement succeeds, and NO squad member is persisted - the one
         // deliberate difference from the ordinary attach tail.
         //
-        // (x-d545) A remembered seat tab (from the stale slot above) still
+        // A remembered seat tab (from the stale slot above) still
         // means something: when it survives, land the fresh viewer THERE, so
         // replacing a dead or displaced viewer never strands the viewport in
         // whatever tab the client happens to be viewing. Any miss - no
         // remembered tab, squad or tab gone - falls back to today's routing.
         //
-        // (x-9b60) With no surviving remembered tab, a fresh open has no
+        // With no surviving remembered tab, a fresh open has no
         // geometry to own yet, so the CALLER's placement is honored instead
         // of a server guess (AC1-HP). The remembered tab still wins over a
-        // caller tab: x-d545's precedence must not regress (AC3-REG).
+        // caller tab: precedence must not regress (AC3-REG).
         let remembered_tab = remembered_tab_id.and_then(|tid| {
             self.session
                 .squads
@@ -920,7 +920,7 @@ impl Core {
         }
     }
 
-    /// (x-07c2) The outside-the-TUI reach (`fno agents attach` with a live
+    /// The outside-the-TUI reach (`fno agents attach` with a live
     /// mux), run as the exact command a TUI reach runs: a synthetic OBSERVER
     /// client (0,0 - read-only, no squad or PTY of its own) whose reliable
     /// channel collects the notices, then the real AttachAgent portal
@@ -928,7 +928,7 @@ impl Core {
     /// removed through the same Gone path a Detach takes, and the reply is
     /// the landing notice on success or the refusal's Err.
     ///
-    /// (x-8f9d) `portal` is the index the caller named (`--portal N`, default
+    /// `portal` is the index the caller named (`--portal N`, default
     /// 0). This door is the addressing surface an operator uses to put two
     /// threads side by side without touching the TUI.
     pub(super) fn portal_ctl(
@@ -991,7 +991,7 @@ impl Core {
                 return;
             }
         }
-        // (x-7955) A claude Drive row's argv is the canonical re-entry plan,
+        // A claude Drive row's argv is the canonical re-entry plan,
         // resolved OFF this loop. The TUI gesture hands that wait to a live
         // client whose replay re-enters in place; this door's observer is
         // disposable and its reply is one-shot, so parking is the only honest
@@ -1015,7 +1015,7 @@ impl Core {
             });
             return;
         }
-        // (x-3ea6) `--portal new` resolves to the next free index HERE, before
+        // `--portal new` resolves to the next free index HERE, before
         // any park, so the parked replay lands where the reply says. Same
         // allocator the TUI's new-portal gesture uses. The one-park guard
         // above keeps two concurrent claude reaches from taking one index.
@@ -1055,10 +1055,10 @@ impl Core {
         // the reach's notice is the payload, and an empty buffer guarantees it
         // is never the message a full channel drops.
         while rx.try_recv().is_ok() {}
-        // (x-9b60) The verb's index is the authoritative portal; the decoded
+        // The verb's index is the authoritative portal; the decoded
         // placement carries only geometry. Overwriting the portal trio keeps
         // the reach's addressing in exactly one field, the way every pre-v66
-        // caller already sent it. (x-3ea6) `portal` is the resolved index by
+        // caller already sent it. `portal` is the resolved index by
         // here, so a `new` reach names the index the server picked.
         let mut placement = placement;
         placement.portal = Some(portal);
@@ -1094,7 +1094,7 @@ impl Core {
         );
         // Harvest the notice(s) the reach emitted and tear the observer out
         // through Gone. Every path ends in at least one; a reach that refuses
-        // caller geometry AND lands (x-9b60) ends in two, joined here so the
+        // caller geometry AND lands ends in two, joined here so the
         // reply still carries the landing.
         let landing = Self::harvest_portal_landing(&mut rx);
         let _ = self.self_tx.try_send(CoreMsg::Gone(CONTROL_CLIENT));

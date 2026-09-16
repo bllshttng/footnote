@@ -186,7 +186,7 @@ class TargetState(BaseModel):
     graph_id: Optional[RoadmapId] = None
 
     # Provenance: strict 16-lowercase-hex nonce injected by the verify-child-promise
-    # handshake (ab-c4acc10a). Pattern verified safe per Locked Decision #7: pre-
+    # handshake. Pattern verified safe per Locked Decision #7: pre-
     # implementation grep across production state files confirmed zero non-conforming
     # values. Previously accepted via extra="allow"; now a modeled field.
     provenance_nonce: Optional[str] = Field(default=None, pattern=r"^[a-f0-9]{16}$")
@@ -266,7 +266,7 @@ class TargetState(BaseModel):
     # Auto-merge
     auto_merge_enabled: bool = False
     auto_merge_approved: bool = False
-    # Which input set the posture (x-9d11). Closed enum, written by the init
+    # Which input set the posture. Closed enum, written by the init
     # fold: config | flag-no-merge | env-target-auto-merge | default-off.
     # None on pre-provenance manifests; render that as `unknown`, never a guess.
     auto_merge_source: Optional[str] = None

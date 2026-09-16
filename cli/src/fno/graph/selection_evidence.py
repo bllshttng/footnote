@@ -115,7 +115,7 @@ def _starvation_receipts(
         ) and not (
             e.get("contained_in") or _has_unmerged_open_pr(e) or _is_batched_member(e)
         ):
-            # Terminal-ancestor arm (x-a31a): the structural cause outranks
+            # Terminal-ancestor arm: the structural cause outranks
             # incidental attributes - a plan-less node under a dead parent
             # reads here, not plan-less. Superseded/deferred are a subset of
             # terminal, so this arm owns the old selection-guards

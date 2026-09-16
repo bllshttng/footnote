@@ -378,7 +378,7 @@ else
   echo "setup-worktree: could not resolve git-common-dir; salvage-ref hook not installed" >&2
 fi
 
-# Salvage remote mirror: ON by default for every fno worktree (x-28ff). The
+# Salvage remote mirror: ON by default for every fno worktree. The
 # founding case loses work only while commits live on one disk; pushing HEAD
 # to refs/fno/salvage/<worktree> at commit time closes that window. With
 # extensions.worktreeConfig on this lands in THIS worktree's own config;

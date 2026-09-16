@@ -1,10 +1,10 @@
-//! The `<help>` distress side channel (x-77a0): parse the tag from the
+//! The `<help>` distress side channel : parse the tag from the
 //! stopping message, append the deduped `blocked` event row, and push it to
 //! the parent spawn lineage. Deliberately separate from the stop DECISION -
 //! a help tag never changes the verdict; it tells the parent the session is
 //! stuck without stopping it - and named by the one question it answers, so
 //! the transcript readers it needs live beside it instead of growing
-//! loopcheck further (x-6aca).
+//! loopcheck further.
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -59,7 +59,7 @@ pub(crate) fn extract_help_distress(text: &str) -> Option<HelpDistress> {
 /// resolved the speaker via /message/role and a top-level role alone, so a
 /// codex rollout (payload.role, content[].output_text) read as
 /// assistant-free on every line and no codex distress ever reached a parent
-/// (x-6aca); routing through the reader deletes that second parser instead
+///; routing through the reader deletes that second parser instead
 /// of teaching it the codex shape. Newest-entry-only mirrors the intent
 /// read's newest-entry rule for `watching`: an older entry's distress was
 /// handled at its own stop. Fail-quiet None on a missing fno, a timeout, or
@@ -160,7 +160,7 @@ pub(crate) fn scan_and_emit(
     )
 }
 
-/// Emit the `blocked` x-dbaf event natively (x-77a0) and push it to the
+/// Emit the `blocked` event natively and push it to the
 /// parent handle. The push leg and the emit-CLI auto-push shipped with zero
 /// emitters (the advisory `--emit-boundary blocked` instruction demonstrably
 /// never fires, so a king got swept on a timeout instead of being told). The
@@ -477,7 +477,7 @@ mod tests {
             &project,
             &global,
             "run-a",
-            Some("x-77a0"),
+            Some("x-aaaa"),
             Some("codex"),
             &d,
         );
@@ -488,11 +488,11 @@ mod tests {
             .collect();
         assert_eq!(rows.len(), 1, "exactly one row on first distress");
         let row = &rows[0];
-        // x-dbaf extended envelope, same family finalize's run_summary writes.
+        // extended envelope, same family finalize's run_summary writes.
         assert_eq!(row["type"], "blocked");
         assert_eq!(row["source"], "target");
         assert_eq!(row["run"], "run-a");
-        assert_eq!(row["node"], "x-77a0");
+        assert_eq!(row["node"], "x-aaaa");
         assert_eq!(row["harness"], "codex");
         assert_eq!(row["data"]["reason"], "missing dependency");
         assert_eq!(row["data"]["evidence"], "plan 4.2");
@@ -506,7 +506,7 @@ mod tests {
             &project,
             &global,
             "run-a",
-            Some("x-77a0"),
+            Some("x-aaaa"),
             Some("codex"),
             &d
         ));
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn distress_flows_from_reader_output_to_a_blocked_row() {
-        // x-6aca regression, Rust half: the transcript fallback must feed
+        // x-bbbb regression, Rust half: the transcript fallback must feed
         // extract_help_distress and land a blocked row. The stub pins the
         // seam contract: `agents newest-assistant-text --transcript <path>`
         // with the newest assistant text on stdout. The codex record SHAPE
@@ -604,7 +604,7 @@ mod tests {
             &project,
             &global,
             "cx-run",
-            Some("x-6aca"),
+            Some("x-bbbb"),
             None,
             &distress.unwrap()
         ));
@@ -615,7 +615,7 @@ mod tests {
             row["data"]["reason"],
             serde_json::json!("worktree-init-blocked")
         );
-        assert_eq!(row["node"], serde_json::json!("x-6aca"));
+        assert_eq!(row["node"], serde_json::json!("x-bbbb"));
         // No reader answer (missing binary, empty stdout): fail-quiet None,
         // the same degrade an unreadable transcript always had.
         let text = newest_assistant_text_via_reader(
@@ -675,7 +675,7 @@ mod tests {
             &global,
             tmp.path(),
             "cx-run",
-            Some("x-6aca"),
+            Some("x-bbbb"),
             Some("codex"),
             &transcript,
             None,
@@ -691,7 +691,7 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
         assert_eq!(row["data"]["reason"], "worktree-init-blocked");
         assert_eq!(row["data"]["evidence"], "Operation not permitted");
-        assert_eq!(row["node"], "x-6aca");
+        assert_eq!(row["node"], "x-bbbb");
         assert_eq!(row["harness"], "codex");
     }
 

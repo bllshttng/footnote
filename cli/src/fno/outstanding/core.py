@@ -127,7 +127,7 @@ class Capture:
 
 
 class VerdictRow(NamedTuple):
-    """One open prove-it FAIL verdict (x-6d64): claimed outcome did not hold."""
+    """One open prove-it FAIL verdict : claimed outcome did not hold."""
 
     node: str
     report: str

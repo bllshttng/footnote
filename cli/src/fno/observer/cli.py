@@ -1,4 +1,4 @@
-"""``fno doctor observer`` - skill eval over a recorded corpus (x-57a5).
+"""``fno doctor observer`` - skill eval over a recorded corpus.
 
 Two verbs over the pure fold in :mod:`fno.observer.fold`:
 
@@ -230,7 +230,7 @@ def _score_item(item: dict, skill: str, by_id: dict, gh_runner) -> dict[str, Opt
 
 
 def _events_paths() -> list[Path]:
-    """Project events.jsonl (x-0ca7's trigger source) + the global log."""
+    """Project events.jsonl (trigger source) + the global log."""
     from fno import paths as _paths
 
     project = _paths.project_log("events.jsonl")
@@ -571,7 +571,7 @@ def judge_cmd(ctx: typer.Context) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# target sweep: PR-anchored walk-back (x-6ff0)
+# target sweep: PR-anchored walk-back
 # --------------------------------------------------------------------------- #
 
 # gh pr list defaults to 30 (Domain Pitfall); one call per repo covers the
@@ -1139,7 +1139,7 @@ def _replay(
 
         # DETECTIVE scan FIRST, before any emit (codex P1): an isolation violation
         # is the ONE hard failure and must VOID the whole replay. Emitting findings
-        # or a terminal skill_eval_run_complete before the scan would leave x-0ca7
+        # or a terminal skill_eval_run_complete before the scan would leave
         # a "successful" event for a run whose results are tainted by a real-state
         # leak. A violation here emits nothing and exits 3.
         if _run_worktree:

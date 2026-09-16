@@ -4,7 +4,7 @@
 //! `loop_king.rs`: its lines must count toward the `crates/fno-agents/src/loop*`
 //! control-plane glob.
 //!
-//! Ported from the Python reader (`cli/src/fno/king/state.py`, x-7b36): the
+//! Ported from the Python reader (`cli/src/fno/king/state.py`): the
 //! Python tree is shrink-only as a whole, so the compute landed here and the
 //! Python side kept a thin JSON client plus the CLI shell. The port is
 //! behavior-identical, refusal strings included, because the escalate closing
@@ -63,7 +63,7 @@ pub struct ReignState {
     /// sessions. `None` when either side is unknown - a vacated crown and an
     /// unreadable manifest are not disagreements, and must never render as one.
     pub split: Option<bool>,
-    /// The manifest file's path, when it exists (x-f0d2): the manifest is the
+    /// The manifest file's path, when it exists: the manifest is the
     /// durable crown record, and court names where the record lives.
     pub manifest_path: Option<String>,
     /// The manifest carries `crown_scope` equal to the scope: a durable crown
@@ -569,7 +569,7 @@ fn territory_key(scope: &str) -> String {
 }
 
 /// Crowns whose registry row is gone but whose manifest still holds them
-/// (x-f0d2): scan every project space's `kings/` under `root`, keep manifests
+/// scan every project space's `kings/` under `root`, keep manifests
 /// carrying `crown_scope` not among `held`. The sweep walks the spaces ROOT,
 /// not the rows' own projects - a vanished row names no cwd, and the
 /// vanished-row scope is exactly the case this read exists to surface.

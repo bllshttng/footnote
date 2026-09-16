@@ -1,4 +1,4 @@
-//! `fno agents reap --release <row>` (x-e3cc): apply an operator ruling to
+//! `fno agents reap --release <row>` : apply an operator ruling to
 //! one escalated hold. The verb classifies with the dry run the report came
 //! from, refuses a fresh hold or open work by name, and applies through the
 //! sweep's own door: `run_with_release` runs the full real sweep with the
@@ -85,7 +85,7 @@ pub fn run(home: &AgentsHome, cwd: &Path, handle: &str) -> i32 {
     0
 }
 
-/// The fresh-hold refusal line (x-e3cc): the age, the threshold, and what
+/// The fresh-hold refusal line: the age, the threshold, and what
 /// a release needs before it applies.
 pub(crate) fn fresh_hold_refusal(hold: &gc_sweep::Hold, threshold_s: u64) -> String {
     format!(
@@ -101,7 +101,7 @@ pub(crate) fn fresh_hold_refusal(hold: &gc_sweep::Hold, threshold_s: u64) -> Str
 /// node still carries ACTIVE work names itself and refuses. Done and the
 /// inactive NODE statuses (deferred, idea, gc.rs INACTIVE_NODE_STATUSES)
 /// are not open work - a node parked at deferred is exactly the shape the
-/// x-2774 session-shaped releases already retire onto - so they release.
+/// session-shaped releases already retire onto - so they release.
 /// The witnesses ride the hold detail as `sessions <node> vs registry
 /// <node>`.
 pub(crate) fn witness_refusal(home: &AgentsHome, hold: &gc_sweep::Hold) -> Option<String> {

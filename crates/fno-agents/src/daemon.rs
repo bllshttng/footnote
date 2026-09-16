@@ -12,7 +12,7 @@
 //! a working supervisor end-to-end.
 
 use crate::events::EventEmitter;
-// The receipt builders moved to `receipt.rs` (x-a879) so the write choke
+// The receipt builders moved to `receipt.rs` so the write choke
 // point (`state::update_registry`) can stage the same recovery record for a
 // row removed through ANY door; re-exported so the reap path's references
 // are unchanged.
@@ -86,7 +86,7 @@ pub struct DaemonOptions {
     /// (tests point this at the cargo-built binary).
     pub worker_bin: PathBuf,
     /// Run one bounded reconcile sweep on daemon startup, CONCURRENTLY with the
-    /// accept loop (Architecture B, plan ab-70faa65b; concurrency per x-ef7f).
+    /// accept loop (Architecture B, plan; concurrency per).
     /// It used to complete before the daemon served anything, which on a large
     /// roster left a cold daemon silent for tens of seconds and had every client
     /// that timed out against that silence lazy-start another one. Default
@@ -99,7 +99,7 @@ pub struct DaemonOptions {
     /// way `idle_exit` is: config candidates are per-cwd, so the lookup
     /// happens at sweep time, not once at startup.
     pub agents_config_cwd: PathBuf,
-    /// Fire an OS notification when a badge ENTERS `blocked` (x-dd84). Default
+    /// Fire an OS notification when a badge ENTERS `blocked`. Default
     /// ON; overridden from `config.mux.notify_on_blocked` at startup.
     pub notify_on_blocked: bool,
     /// Also notify on a terminal `done` hook transition. Default OFF; overridden
@@ -147,7 +147,7 @@ pub enum DaemonError {
 
 /// Why a registry entry could not be reconciled against its `state.json` during
 /// recovery. Typed so the report distinguishes the two cases a bare short_id
-/// string elided (ab-3aea7437), mirroring `ReconcileOutcome`'s `(name, reason)`
+/// string elided, mirroring `ReconcileOutcome`'s `(name, reason)`
 /// inconsistency record. `as_str()` is the wire/event `reason` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InconsistencyReason {
@@ -172,7 +172,7 @@ impl InconsistencyReason {
 pub struct RecoveryReport {
     /// `(short_id, reason)` per entry whose `state.json` could not be
     /// reconciled. The typed reason preserves *why* (missing vs unreadable),
-    /// which a bare `Vec<String>` of short_ids discarded (ab-3aea7437).
+    /// which a bare `Vec<String>` of short_ids discarded.
     pub inconsistent: Vec<(String, InconsistencyReason)>,
     pub archived_orphans: Vec<String>,
     pub reaped_pids: Vec<u32>,
@@ -225,7 +225,7 @@ fn codex_thread_resume_identity(
     Ok(Some((session_id.to_string(), PathBuf::from(cwd))))
 }
 
-/// Whether the row was launched with the danger-full-access posture (x-de10
+/// Whether the row was launched with the danger-full-access posture (
 /// v19): the resume lane applies it so a daemon restart cannot silently demote
 /// a yolo worker to workspace-write. `None` (pre-v19 rows) reads safe.
 fn entry_posture_is_full_access(entry: &RegistryEntry) -> bool {
@@ -249,7 +249,7 @@ pub(crate) fn is_codex_thread_entry(entry: &RegistryEntry) -> bool {
 /// invariant (READ `drive_active` BEFORE clearing it, finding #12 Critical) is
 /// enforced by [`crate::state::PtyState::take_active_drive`], which this calls.
 ///
-/// Since x-4c87 an unreadable registry is a startup failure, not an empty
+/// Since an unreadable registry is a startup failure, not an empty
 /// roster: `unwrap_or_default()` reads once made the daemon come up believing
 /// zero agents and answer every caller from that false zero.
 pub fn recover(
@@ -306,7 +306,7 @@ fn recover_with_policy(
         // `state_json` for one would emit a spurious `agent_inconsistent`
         // (Gemini medium, PR #364). Two shapes qualify:
         //   1. empty short_id: a codex/gemini shellout row (no worker key).
-        //   2. a claude shellout (`ask`/`--bg`) or adopted row. Since v9 (x-1b1e)
+        //   2. a claude shellout (`ask`/`--bg`) or adopted row. Since v9
         //      these carry the claude jobId in `short_id` (was `claude_short_id`),
         //      so the empty-short_id proxy no longer catches them; the only claude
         //      lane the daemon PTY-manages (and writes a state.json for) is the
@@ -405,7 +405,7 @@ fn recover_with_policy(
     // Step 6: orphan-PID sweep. An entry whose pid is set but is no longer OUR
     // worker is reaped; a live worker socket means the worker (Outcome B) is
     // still up. "No longer ours" = dead (ESRCH) OR a recycled pid whose start
-    // time no longer matches (ab-d19e6458), else a reused pid keeps a dead
+    // time no longer matches, else a reused pid keeps a dead
     // worker looking alive.
     let live_workers = home.scan_worker_sockets();
     let mut to_reap: Vec<(String, u32)> = Vec::new();
@@ -423,7 +423,7 @@ fn recover_with_policy(
         }
     }
     if !to_reap.is_empty() {
-        // Keyed on (short_id, pid), not short_id alone (x-9de7 task 1). Every
+        // Keyed on (short_id, pid), not short_id alone (task 1). Every
         // A codex/gemini shellout row shares the same empty short_id, so a
         // short_id-only set condemns every row wearing that empty id the moment
         // ONE fails pid_is_ours. pid is what pid_is_ours verified, so it gates
@@ -529,7 +529,7 @@ fn quarantine_interrupted_write_temps(home: &AgentsHome, emitter: &EventEmitter)
 }
 
 /// A live process's start time, used to distinguish "our worker" from a recycled
-/// PID (ab-d19e6458). `None` if the process is gone or the lookup is
+/// PID. `None` if the process is gone or the lookup is
 /// unsupported/failed. The value is a per-host, per-boot quantity compared only
 /// for equality against a value captured for the SAME pid, so the differing
 /// units across platforms (Linux ticks vs macOS microseconds) do not matter.
@@ -684,7 +684,7 @@ pub fn stale_sweep(
     if now.saturating_sub(last) < STALE_SWEEP_INTERVAL_SECS {
         return 0;
     }
-    // x-39f4: the sweep's only child is `agents stale-escalate --json`, so an
+    // the sweep's only child is `agents stale-escalate --json`, so an
     // effective dispatch pause suspends the sweep without consuming its
     // cadence: no closure call, no stamp write, and a positive skip row so
     // intentional silence cannot read as a dead arm. The row is paced by a
@@ -885,7 +885,7 @@ pub fn worktree_sweep(
 }
 
 pub(crate) use crate::gc_inventory::index_tree;
-// x-1b90: the pane kill and its absence vocabulary moved to pane_stop.rs
+// the pane kill and its absence vocabulary moved to pane_stop.rs
 // with the stop helper that now shares them.
 pub(crate) use crate::pane_stop::{mux_pane_is_absent, run_mux_pane_kill};
 
@@ -1078,7 +1078,7 @@ pub(crate) fn worktree_clean_probe(cwd: &str) -> Option<bool> {
     None
 }
 
-/// (x-d545) The reapable gate's answer for a removed row's worktree: the
+/// The reapable gate's answer for a removed row's worktree: the
 /// verdict, plus the reason a kept tree names in its receipt.
 enum WorktreeGate {
     Reapable,
@@ -1468,7 +1468,7 @@ pub(crate) fn restore_unaccounted_row(
     }
 }
 
-/// The shared liveness ladder as production runs it (x-5d96): the reader
+/// The shared liveness ladder as production runs it: the reader
 /// extracted from `claude_resume_argv_with_truth`, now called by the reaper
 /// instead of a per-caller derivation. The sessions-dir index and the truth
 /// answers are both computed ONCE per closure (one sweep), however many rows
@@ -1493,7 +1493,7 @@ pub(crate) fn live_liveness_prober(
     }
 }
 
-/// Terminal-stop sweep (x-fcbf): `claude stop` any fire-and-forget `claude --bg`
+/// Terminal-stop sweep: `claude stop` any fire-and-forget `claude --bg`
 /// worker that `finalize` marked terminal. finalize (running as the worker's own
 /// child) cannot self-exit it, so this daemon sweep — external to every worker —
 /// runs the shipped stop on its behalf. A clean stop settles the session `(done)`
@@ -1604,7 +1604,7 @@ async fn terminal_stop_sweep(home: &AgentsHome, emitter: &EventEmitter) {
 
 /// Is `pid` still OUR worker, not a recycled PID? True iff the process exists,
 /// we may signal it, AND its current start time matches `recorded`
-/// (ab-d19e6458). If a start time is unavailable on either side (`None` — lookup
+///. If a start time is unavailable on either side (`None` — lookup
 /// unsupported/failed, or no start time was recorded for a legacy entry), fall
 /// back to a bare existence check so behavior degrades to the pre-create_time
 /// semantics rather than mis-deciding.
@@ -1646,7 +1646,7 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
 /// not a reason to stay resident -- rows outlive their workers by design (the
 /// GC reaps them a grace window later), so the registry-emptiness test this
 /// replaced made idle-exit unsatisfiable on any machine that had ever spawned
-/// a worker (x-cd31: 78 daemons at once, all idle, all orphaned). The question
+/// a worker (: 78 daemons at once, all idle, all orphaned). The question
 /// is whether a worker is LIVE, answered by the same pair `gc_sweep_impl`
 /// uses: a live worker socket, or a pid that is still ours.
 ///
@@ -1709,7 +1709,7 @@ const PREVIOUS_BUILD_PROBE: Duration = Duration::from_millis(250);
 ///   socket at all. `try_lock()` is a positive marker (held or not), unlike a
 ///   connect probe that reads "absent" for a daemon merely too busy to accept
 ///   in time -- the failure mode that let every failed probe add a new
-///   supervisor instead of replacing the incumbent (x-ef7f). On contention it
+///   supervisor instead of replacing the incumbent. On contention it
 ///   retries briefly (see [`LOCK_ACQUIRE_ATTEMPTS`]), because a client's
 ///   liveness probe takes the same lock for microseconds and conceding to that
 ///   would let a read-only question kill a cold start. Only a holder that
@@ -1777,7 +1777,7 @@ pub async fn bind_supervisor_socket(
         return Err(DaemonError::AlreadyRunning(home.supervisor_sock()));
     }
 
-    // Record the holder in the lockfile CONTENT (x-3498): pid plus start time,
+    // Record the holder in the lockfile CONTENT: pid plus start time,
     // so `restart --force` has a SIGKILL target that survives "which daemon
     // owns this". The start time is written alongside because a bare pid is a
     // reuse hazard -- `pid_is_ours` guards the eventual signal with it. A write
@@ -1864,7 +1864,7 @@ pub async fn bind_supervisor_socket(
 /// True when `sock` still resolves to the inode we originally bound. A
 /// mismatch means something else unlinked and rebound the path out from under
 /// us (an operator `rm`, or a bug elsewhere) -- we no longer own the
-/// reachable path (x-ef7f / x-e98b).
+/// reachable path (/).
 ///
 /// Sound only because the caller is still LISTENING on that inode. An inode
 /// number is free to be recycled once nothing references it, and Linux
@@ -1890,7 +1890,7 @@ fn flock_self_test(home: &AgentsHome) -> Result<(), DaemonError> {
         .open(&probe)
         .map_err(|e| DaemonError::FlockUnsupported(probe.clone(), e.to_string()))?;
     // Always clean up the probe file, even when the lock fails: an early `?`
-    // here would otherwise leave a stray `.flock-probe` behind (ab-b396250f).
+    // here would otherwise leave a stray `.flock-probe` behind.
     let lock_res = file.lock();
     if lock_res.is_ok() {
         let _ = file.unlock();
@@ -1911,7 +1911,7 @@ fn flock_self_test(home: &AgentsHome) -> Result<(), DaemonError> {
 pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonError> {
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
 
-    // Startup row-count assertion (x-4c87 AC5), BEFORE the socket is bound: a
+    // Startup row-count assertion (AC5), BEFORE the socket is bound: a
     // registry with rows on disk that the typed reader cannot fully decode must
     // refuse startup here -- exit nonzero, stderr naming the path and both
     // counts -- rather than bind, serve, and answer every caller from a
@@ -1942,8 +1942,8 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     );
     let report = recover_with_policy(&home, &emitter, destructive)?;
 
-    // Architecture B (plan ab-70faa65b): ONE bounded reconcile sweep on startup,
-    // as part of recovery, CONCURRENTLY with the accept loop (x-ef7f), so a
+    // Architecture B (plan): ONE bounded reconcile sweep on startup,
+    // as part of recovery, CONCURRENTLY with the accept loop, so a
     // large roster no longer keeps a cold daemon silent while it probes. Reuses
     // the same bounded machinery as the `reconcile` RPC (fairness order +
     // 250ms/probe + 5s budget). Strictly non-fatal: a sweep that returns an
@@ -1955,7 +1955,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // FIRST `list` is post-sweep. Opt out via FNO_AGENTS_NO_STARTUP_RECONCILE
     // for the fastest cold start (discretion #5).
     if opts.reconcile_on_start {
-        // Off the startup path and onto the blocking pool (x-ef7f). The sweep
+        // Off the startup path and onto the blocking pool. The sweep
         // probes reachability PER REGISTRY ROW, each probe bounded but not
         // free, so on a large roster it costs tens of seconds. Awaiting it here
         // -- on the async runtime, before the accept loop starts -- meant a
@@ -1973,7 +1973,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         let home_sweep = home.clone();
         let emitter_sweep = EventEmitter::new(home.events_jsonl(), "daemon");
         tokio::task::spawn_blocking(move || {
-            // Test seam (x-ef7f): hold the sweep open so a test can prove the
+            // Test seam: hold the sweep open so a test can prove the
             // daemon answers DURING it, not merely after it. Without a seam that
             // assertion is a race against however fast the machine probes, and a
             // flaky proof of the one property this fix exists to give. Never set
@@ -1996,7 +1996,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     )
                 } else {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        // Registry-side keeper sweep FIRST (x-ac6b): re-bind
+                        // Registry-side keeper sweep FIRST: re-bind
                         // surviving lane-B thread rows BEFORE the settle pass
                         // below reads them - the daemon-side twin of the pane
                         // sweep's re-adopt-before-restore ordering. Non-fatal
@@ -2059,7 +2059,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // State: serving. daemon_started is emitted AFTER recovery (step 7 ordering:
     // events.jsonl reflects reality from the first served request).
     let started_at = Instant::now();
-    // Drift signal (ab-1891cdff): fingerprint the executable we are running so a
+    // Drift signal: fingerprint the executable we are running so a
     // later client can tell whether the on-disk binary has been replaced since.
     // Also record our own pid start time so `restart` can pid-reuse-guard the
     // SIGTERM, reusing the same check the daemon already applies to workers.
@@ -2095,7 +2095,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     });
     schedule_codex_thread_recovery(Arc::clone(&ctx));
 
-    // Active-backlog drain supervisor (node x-c070). Opt-in via
+    // Active-backlog drain supervisor (node). Opt-in via
     // config.active_backlog; the supervisor resolves its own enabled targets and
     // stays dormant (live=false) when none, so this is byte-for-byte today's
     // behavior unless an operator turns it on. Started AFTER the Serving
@@ -2122,7 +2122,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // Screen-manifest scrape gate: at most one sweep in flight (a slow mux
     // stalls its own sweep, never the loop or a pile-up of sweeps).
     let scrape_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    // Terminal-stop sweep gate (x-fcbf): same one-in-flight discipline; a large
+    // Terminal-stop sweep gate: same one-in-flight discipline; a large
     // marker set must never serialize inline and starve accept()/SIGTERM.
     let terminal_stop_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worktree_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2132,19 +2132,19 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut last_orphan_sweep = Instant::now();
     let liveness_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_liveness_sweep = Instant::now();
-    // Machine watch (x-d6ad): the arm owns its cadence, gate and memory.
+    // Machine watch: the arm owns its cadence, gate and memory.
     let machine_watch = crate::machine_watch::Arm::default();
     // Merge close: the arm owns its cadence and gate; the sweep runs the
     // bare reconcile that closes a merged PR's node with no session alive.
     let merge_close = crate::merge_close::Arm::default();
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
-    // Retirement-sweep cadence (x-d354): the throttle stamp beside the gate,
+    // Retirement-sweep cadence: the throttle stamp beside the gate,
     // plus the next interval cell the sweep body hands back (the idle-probe
     // verdict pattern), so the tick reads a mutex instead of config files.
     let mut last_gc_sweep = Instant::now();
     let retire_interval_next = crate::gc::seed_retire_interval_cell(&ctx.opts.agents_config_cwd);
-    // Dead-row GC gate (x-ef7f): its dormant check shells out to the truth
+    // Dead-row GC gate: its dormant check shells out to the truth
     // probe, so it gets the same one-in-flight discipline as its neighbors.
     let gc_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Idle-exit liveness probe gate + verdict handoff: the probe is blocking
@@ -2164,7 +2164,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
 
-    // THE RULE FOR THIS LOOP (x-ef7f): nothing that shells out, walks the
+    // THE RULE FOR THIS LOOP: nothing that shells out, walks the
     // registry row by row, or otherwise blocks may run INLINE in a select arm.
     // Every arm shares one thread with `accept()` and with the SIGTERM arm, so
     // an inline sweep makes the daemon both unreachable and unstoppable at the
@@ -2173,7 +2173,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // `spawn_blocking` plus a one-in-flight `AtomicBool`, like the four below.
     // The reason the serve loop ended, threaded to the shared exit tail so
     // `daemon_exited` can tell an abnormal ending from a graceful one
-    // (x-3498): every break carries its reason string.
+    // every break carries its reason string.
     let exit_reason: &str = loop {
         tokio::select! {
             accepted = listener.accept() => {
@@ -2195,7 +2195,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 break "sigterm";
             }
             _ = idle_check.tick() => {
-                // Bound-inode self-check (x-ef7f): if the socket path no
+                // Bound-inode self-check: if the socket path no
                 // longer resolves to the inode we bound, something else now
                 // owns it (an operator `rm`, or a bug elsewhere) -- retire
                 // rather than keep serving unreachable forever.
@@ -2229,11 +2229,11 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         crate::scrape::scrape_sweep(&home, &emitter, notify_on_blocked);
                     });
                 }
-                // Retirement sweep (x-c672): a row leaves when its work is done
+                // Retirement sweep: a row leaves when its work is done
                 // (reverse join) and its transcript is quiet past
                 // `agents.retire_grace_s`; held process stopped first, receipt
                 // written before the drop, clean worktree pruned. Throttled to
-                // `agents.retire_interval_s` (x-d354); off-loop (x-ef7f).
+                // `agents.retire_interval_s`; off-loop.
                 let retire_interval = crate::gc::retire_interval_snapshot(&retire_interval_next);
                 crate::gc::maybe_retirement_sweep(
                     &mut last_gc_sweep,
@@ -2248,7 +2248,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     // opt-in via the manual verb (Locked Decision 6).
                     || crate::gc::mux_tab_sweep(false, false),
                 );
-                // Worktree sweep + merge reaper (x-07dc): the sweep backstops
+                // Worktree sweep + merge reaper: the sweep backstops
                 // what the reaper cannot reach; the reaper is the merge-triggered
                 // consumer of `merge_cleanup_requested` (60s floor). Both
                 // off-loop; grace and stop order live in merge_reap.rs.
@@ -2307,7 +2307,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     &orphan_sweep_in_flight,
                     ctx.home.events_jsonl(),
                 );
-                // The machine gets an arm (x-d6ad): bands the box, escalates, gates nothing.
+                // The machine gets an arm: bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
                 // Merged nodes close even when no session is alive.
                 crate::merge_close::maybe_tick(&merge_close, ctx.home.clone());
@@ -2330,7 +2330,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         }
                     }),
                 );
-                // Terminal-stop sweep (x-fcbf): exit fire-and-forget `claude --bg`
+                // Terminal-stop sweep: exit fire-and-forget `claude --bg`
                 // workers finalize marked terminal, so a shipped bg /target frees
                 // its slot instead of parking at an idle prompt forever. Spawned
                 // off the select arm behind a one-in-flight gate (mirrors the
@@ -2425,7 +2425,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     ab_handle.abort();
 
     // Only reap the socket if it's still ours -- never unlink a live
-    // successor's socket (x-e98b), the same discipline stop_worker_confirmed
+    // successor's socket, the same discipline stop_worker_confirmed
     // already applies to worker sockets ("never unlink a live worker's
     // socket"). No captured inode (bind-time metadata read failed) falls back
     // to today's unconditional behavior.
@@ -2448,7 +2448,7 @@ struct Ctx {
     emitter: EventEmitter,
     opts: DaemonOptions,
     started_at: Instant,
-    /// Fingerprint of the executable this daemon is running (ab-1891cdff),
+    /// Fingerprint of the executable this daemon is running,
     /// captured once at startup. `None` if `current_exe()`/stat failed; the
     /// status payload then reports null and clients fail safe to `Unknown`.
     exe_fingerprint: Option<crate::drift::ExeFingerprint>,
@@ -2479,7 +2479,7 @@ struct Ctx {
 /// panes registering at once while staying a hard ceiling.
 const PENDING_INSIDE_LEG_CAP: usize = 64;
 
-/// One actor task per thread owns its daemon connection exclusively (x-de10).
+/// One actor task per thread owns its daemon connection exclusively.
 /// This used to be `Arc<tokio::sync::Mutex<CodexThread>>`, which baked
 /// whole-turn exclusion into the HANDLE TYPE: `drive_turn` held the guard for
 /// up to `TURN_TIMEOUT` (600s), so every follow-up ask blocked behind the
@@ -2504,7 +2504,7 @@ use thread_row_status::{
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
 }
-/// The final `daemon_exited` payload (x-3498). Every exit path flows through
+/// The final `daemon_exited` payload. Every exit path flows through
 /// one tail, and before this it emitted `clean: true` unconditionally, so the
 /// socket-lost retirement - where something unlinked and rebound our socket
 /// path - logged identically to a graceful SIGTERM shutdown. A watchdog
@@ -2586,7 +2586,7 @@ where
     }
 }
 
-/// The daemon-face x-4c87 read: the typed decode plus the raw-count
+/// The daemon-face read: the typed decode plus the raw-count
 /// assertion, on EVERY roster read the daemon serves (startup, recovery, and
 /// every RPC handler). The tolerant state reader still returns a PARTIAL
 /// registry for a future-schema store with announced row drops, which the
@@ -2607,8 +2607,8 @@ pub(crate) fn load_registry_asserted(
 
 /// Offload the blocking flock + file read of `load_registry_asserted` to the
 /// blocking pool so it never stalls an async handler's runtime thread
-/// (ab-e86e326b). Mirrors the `update_registry_offloaded` wrapper and the
-/// `run_blocking` helper. Since x-4c87 a join failure maps to a `StateError`
+///. Mirrors the `update_registry_offloaded` wrapper and the
+/// `run_blocking` helper. Since a join failure maps to a `StateError`
 /// (like `update_registry_offloaded`) and a read error propagates: both used
 /// to collapse to the empty registry, which turned an unreadable registry into
 /// the valid-looking answer "zero agents" for every caller below.
@@ -2645,7 +2645,7 @@ fn state_error_code(e: &state::StateError) -> ErrorCode {
     }
 }
 
-/// The x-4c87 RPC face of a registry-read failure: every handler that consults
+/// The RPC face of a registry-read failure: every handler that consults
 /// the registered roster reports `registry read failed` carrying the state
 /// error (which names the registry path, both row counts, and the comparison
 /// to run) instead of answering from a silently emptied roster. `AgentNotFound`
@@ -2656,7 +2656,7 @@ fn registry_read_failed(id: u64, e: state::StateError) -> Response {
 }
 
 /// Offload the blocking read-modify-write of `state::update_registry` to the
-/// blocking pool (ab-e86e326b). The closure runs on the blocking thread, so it
+/// blocking pool. The closure runs on the blocking thread, so it
 /// must be `Send + 'static` (callers move owned clones in). A join panic maps to
 /// a `StateError::Io` so callers' existing error handling fires.
 async fn update_registry_offloaded<F, T>(path: PathBuf, f: F) -> Result<T, state::StateError>
@@ -2796,7 +2796,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
             fallback
         }
     };
-    // Post-G4 (x-f54c): the daemon hosts no agent PTYs, so the only spawns it
+    // Post-G4: the daemon hosts no agent PTYs, so the only spawns it
     // still serves are the claude stream-json ADOPTION lane -- host_mode=interactive
     // + mode=stream_json resumes an idle session as a held stream thread
     // (`claude -p --resume <uuid>`) for chat/switchboard/ask to drive -- and
@@ -2851,7 +2851,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
     Response::err(
         req.id,
         ErrorCode::InvalidParams,
-        "daemon PTY hosting was retired at G4 (x-f54c): spawn a mux-hosted agent pane with \
+        "daemon PTY hosting was retired at G4 : spawn a mux-hosted agent pane with \
          `fno agents spawn --substrate pane`, or use `--substrate bg|headless`. The daemon \
          serves only claude stream-json adoption (host_mode=interactive, mode=stream_json).",
     )
@@ -2862,7 +2862,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
 /// `attach_needs_server` splits harness-owned-server attaches (the app-server
 /// lane below) from harness-owned-client ones, which this daemon cannot serve.
 /// An unreadable table or unknown harness refuses rather than routing. Every
-/// arm but attach-with-server refuses, so the x-f54c invariant holds.
+/// arm but attach-with-server refuses, so the invariant holds.
 async fn route_thread_spawn(
     ctx: &Ctx,
     req: &Request,
@@ -2955,7 +2955,7 @@ fn thread_spawn_refusal(
 }
 
 // ---------------------------------------------------------------------------
-// Claude stream-json host lane front door (Group 3, ab-734fcd6c).
+// Claude stream-json host lane front door (Group 3).
 // ---------------------------------------------------------------------------
 
 /// The single-writer claim holder for an adopted claude stream thread, derived
@@ -3022,7 +3022,7 @@ fn claude_stream_worker_args(
 /// settling it `exited` like a one-shot) + the FULL `claude_session_uuid` (the
 /// resume key, finally populated here -- the field G1 added is set by the front
 /// door). Pure so the row shape is asserted without a live spawn.
-/// The agent-list row's substitution marker (x-2019): the object naming BOTH
+/// The agent-list row's substitution marker: the object naming BOTH
 /// values on a substituted verdict, null on match-or-unknown. Null is the
 /// unknown shape too - a row whose probe has not answered must never read as
 /// clean. Mirrors `format._model_substitution_marker` in the Python emitter.
@@ -3051,7 +3051,7 @@ fn build_claude_stream_entry(
     node: Option<&str>,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
-    // Ambient parent edge (x-132c), captured for shape parity with the other
+    // Ambient parent edge, captured for shape parity with the other
     // mint sites. This fn runs IN THE DAEMON, and lazy-start scrubs the
     // harness session markers from the daemon's env (client.rs), so this
     // stamps None by construction: the daemon itself started this PTY worker
@@ -3078,7 +3078,7 @@ fn build_claude_stream_entry(
         model: None,
         model_basis: None,
         effort: None,
-        // v23 (x-2019): adoption - the daemon observed no spawn request, so
+        // v23: adoption - the daemon observed no spawn request, so
         // the requested axis stays unknown rather than a guess.
         requested_model: None,
         requested_provider: None,
@@ -3086,7 +3086,7 @@ fn build_claude_stream_entry(
         harness: Some("claude".into()),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
-        // x-d285: the daemon env is what this claude child inherits, so the
+        // the daemon env is what this claude child inherits, so the
         // three-valued env read is honest (ambient config dir = unknown).
         launch_account: launch_account.clone(),
         launch_account_source,
@@ -3277,7 +3277,7 @@ async fn spawn_claude_stream_lane(
 
     // 2. Lock-free pre-checks for clean messages (the authoritative re-checks run
     //    atomically under the registry lock at registration). A read failure is
-    //    fatal to the spawn (x-4c87): an empty-roster default here would read
+    //    fatal to the spawn: an empty-roster default here would read
     //    every existing name as free.
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(r) => r,
@@ -3521,7 +3521,7 @@ async fn spawn_claude_stream_lane(
     )
 }
 
-/// (x-296f) The turn a seedless codex thread spawn takes so a rollout exists
+/// The turn a seedless codex thread spawn takes so a rollout exists
 /// and the worker is attachable immediately. Deliberately trivial: it must
 /// cost one small turn and leave a transcript line an operator reads as
 /// startup rather than as work someone asked for.
@@ -4484,7 +4484,7 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         );
     }
 
-    // x-4c87: a blind read must not claim a live recipient is absent. The
+    // a blind read must not claim a live recipient is absent. The
     // `unwrap_or_default()` this replaces made every mail send to a
     // demonstrably live worker print `agent '<name>' not found` first.
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
@@ -4508,7 +4508,7 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         );
     }
 
-    // A codex hosted thread is driven through its actor (x-de10): submit the
+    // A codex hosted thread is driven through its actor: submit the
     // body and answer delivered on ACCEPTANCE - the protocol's own receipt
     // (turn/start ack when idle, steer ack when driving) - never a whole-turn
     // wait. The claude stream lane below waits out the turn because it mirrors
@@ -4783,7 +4783,7 @@ where
     };
     let filter_cwd_norm = filter_cwd.as_deref().map(&norm_path);
 
-    // x-4c87: an unreadable registry is an RPC error, never a valid empty
+    // an unreadable registry is an RPC error, never a valid empty
     // roster with discovered-only rows beside it. `unwrap_or_default()` here is
     // what let a broken registered lane publish `count: 0` next to a healthy
     // `discovered_count` and read as "no agents". This handler is sync, so it
@@ -4837,7 +4837,7 @@ where
             .collect()
     };
     let (truths, batch_outcome) = truth_fn(&handles);
-    // The instrument's own receipt (x-e3cc): a page where the probe answered
+    // The instrument's own receipt: a page where the probe answered
     // nothing must be readable AS that, not as 43 rows confidently `unknown`.
     // The rendered status word cannot carry the distinction (the vocabulary is
     // frozen by the --status filter), so the envelope does.
@@ -5017,7 +5017,7 @@ where
                     // never the model vendor. `provider` beside it is the v15+
                     // model-vendor axis stamped at spawn; the pre-split alias that
                     // carried the harness value under this name stayed omitted
-                    // until x-f273, which hid the real vendor axis from every
+                    // until, which hid the real vendor axis from every
                     // RPC consumer. `observed_model` below remains the honest
                     // answer to what actually answered.
                     "harness": e.harness_name(),
@@ -5026,7 +5026,7 @@ where
                     // through unchanged; observed_model remains transcript truth.
                     "effort": e.effort,
                     "harness_session_id": e.harness_session_id,
-                    // The two identity axes plus classified lineage (x-dfe7),
+                    // The two identity axes plus classified lineage,
                     // mirroring Python's serialize_entry: `thread_id` is the
                     // stable fno identity, `current_session_id` the address
                     // delivery follows now, and the predecessor chain / fork
@@ -5105,7 +5105,7 @@ where
                     // never grows a second transcript reader that could disagree
                     // with the truth verb about the same session.
                     "observed_model": observed_model,
-                    // v23 (x-2019): the stored REQUEST beside the observation,
+                    // v23: the stored REQUEST beside the observation,
                     // plus the substitution marker derived from the payload
                     // above - the same two keys, computed the same way, as
                     // Python's serialize_entry. Null marker is match-or-
@@ -5115,7 +5115,7 @@ where
                         e.requested_model.as_deref(),
                         &observed_model,
                     ),
-                    // Architecture C (plan ab-70faa65b): additive keys, never removing
+                    // Architecture C (plan): additive keys, never removing
                     // live_status (Locked #4 back-compat). `pid` is the worker pid for
                     // a PTY agent, null for a one-shot ask (no managed process). The
                     // pid is cleared when a PTY row reconciles to exited (Locked #7),
@@ -5130,7 +5130,7 @@ where
                     // key that says where such a worker actually lives; without it a
                     // caller reads a bound pane worker as unhosted.
                     "mux": e.mux,
-                    // (x-7955) The lane the row was spawned on, read from the
+                    // The lane the row was spawned on, read from the
                     // registry record. Never inferred from `mux` or
                     // `thread_id`: a paneless pane row and a thread row would
                     // then read identically, which is the confusion a reader
@@ -5150,9 +5150,9 @@ where
                     // for a row nothing stamped. Emitted on BOTH serializers because
                     // `fno agents list` auto-routes to this projection whenever an
                     // installed binary is present, so a Python-only key would be
-                    // missing from the path nearly every reader takes (x-944f).
+                    // missing from the path nearly every reader takes.
                     "origin": e.origin,
-                    // x-481e: the row's mail delivery policy ("bus-only" holds
+                    // the row's mail delivery policy ("bus-only" holds
                     // mail on the durable bus, null is the injectable default).
                     // Stored since v14, read by every injector gate, and until
                     // now never rendered anywhere a human or a king could see
@@ -5246,7 +5246,7 @@ where
 async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     // load_registry does blocking flock I/O; offload it from the async worker
     // thread (Gemini review). The drive-table read below stays async. A read
-    // failure is an RPC error (x-4c87): `unwrap_or_default()` here published
+    // failure is an RPC error: `unwrap_or_default()` here published
     // zero-agent status counts over a broken registry.
     let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
         Ok(reg) => reg,
@@ -5275,7 +5275,7 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
                 "pid": std::process::id(),
                 "uptime_secs": ctx.started_at.elapsed().as_secs(),
                 "version": env!("CARGO_PKG_VERSION"),
-                // Drift signal (ab-1891cdff), additive. Null when the daemon
+                // Drift signal, additive. Null when the daemon
                 // could not fingerprint itself; a client then reads Unknown.
                 "exe_path": ctx
                     .exe_fingerprint
@@ -5463,7 +5463,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
             }),
         );
     }
-    // A lane-B keeper thread (x-889a): fno's own keeper hosts the child and
+    // A lane-B keeper thread: fno's own keeper hosts the child and
     // the row's short_id is empty, so without this arm the no-op arm below
     // reports a stop that stopped nothing (PR 1332 review finding). Kill is
     // delivered over the row's own socket and CONFIRMED before the row goes
@@ -5558,7 +5558,7 @@ async fn stop_body(ctx: &Ctx, req: &Request) -> Response {
     Response::ok(req.id, json!({"stopped": true, "short_id": entry.short_id}))
 }
 
-/// One release per confirmed stop/rm verb (x-9c91 change 5). Resolves the
+/// One release per confirmed stop/rm verb (change 5). Resolves the
 /// stopped row's identity, scans the global claims dir and the row's own
 /// space claims dir, releases the provably-dead claims the stopped holder
 /// keeps, emits ONE audit event, and rides the receipt on the response under
@@ -5665,14 +5665,14 @@ fn release_stopped_claims_into(
     );
 }
 
-/// Bound on a worker's shutdown ACK (x-3498 review): a wedged worker must not
+/// Bound on a worker's shutdown ACK (review): a wedged worker must not
 /// hang the daemon's stop handler - the client above it would then report the
 /// DAEMON as unresponsive and prescribe killing it, orphaning the very worker
 /// being stopped. No ack inside this window reads as no ack; the caller's
 /// SIGTERM -> SIGKILL escalation is the recovery.
 const WORKER_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Bound on the WRITE half of a `worker.shutdown` round trip (x-76d1 self-review
+/// Bound on the WRITE half of a `worker.shutdown` round trip (self-review
 /// finding, mirrors [`crate::client::WRITE_TIMEOUT`]). A small JSON request to an
 /// already-connected local socket clears the kernel send buffer near instantly
 /// unless the worker has stopped reading its socket entirely; kept short and
@@ -5749,7 +5749,7 @@ async fn stop_worker_confirmed(ctx: &Ctx, entry: &RegistryEntry) -> bool {
 }
 
 /// The home-keyed body of [`stop_worker_confirmed`], shared with the
-/// retirement sweep (x-c672), which holds an `AgentsHome` and no `Ctx`.
+/// retirement sweep, which holds an `AgentsHome` and no `Ctx`.
 pub(crate) async fn stop_worker_confirmed_for_home(
     home: &AgentsHome,
     entry: &RegistryEntry,
@@ -5788,7 +5788,7 @@ pub(crate) async fn stop_worker_confirmed_for_home(
     //    are done and never signal a pid - this avoids SIGKILLing a stale or
     //    recycled pid when the real worker has already exited (Codex P1).
     //    Additionally, validate pid+create_time ownership before signaling
-    //    (ab-d19e6458): if the recorded pid is alive but its start time no longer
+    // if the recorded pid is alive but its start time no longer
     //    matches, the pid was recycled by an unrelated process and we must NOT
     //    SIGTERM/SIGKILL it. The socket-reachable worker (a restarted instance
     //    under a new pid) is left for the caller to report as not-confirmed.
@@ -6030,7 +6030,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
             // `entry.short_id`: a row with only a generic session_id and an empty
             // short_id would otherwise print `stopped: <name> ()` and break the
             // stop output
-            // contract for exactly the rows ab-e5a57efa makes readable (Codex P2).
+            // contract for exactly the rows makes readable (Codex P2).
             Response::ok(
                 req.id,
                 json!({"stopped": true, "backend": "claude", "short_id": short}),
@@ -6337,7 +6337,7 @@ async fn handle_rm_with(
     let mut pane_stop_detail: Option<String> = None;
     let pane_arm_ran = entry.substrate.as_deref() == Some("pane");
     if pane_arm_ran {
-        // x-1b90: a pane row's ONE live ref is the pane process, and a
+        // a pane row's ONE live ref is the pane process, and a
         // successful or absent pane kill is not a death - the stored pane id
         // is not an address for a process a keeper re-adopt. rm proves the
         // stop the same way the reap does: verified pid, pane found by child
@@ -6485,12 +6485,12 @@ async fn handle_rm_with(
         );
     }
     cleanup_king_manifest(&entry);
-    // (x-d545) The row is gone from the registry: take its worktree, but only
+    // The row is gone from the registry: take its worktree, but only
     // as far as the reapable gate allows. The receipt rides the RESULT (the
     // operator's notice), deliberately NOT the event: agent_removed sits
     // near the 500-byte event cap already, so the receipt would push every
     // rm event over it and the writer would replace the whole record. The
-    // auditable event field is x-90ee's to land with a shape that fits.
+    // auditable event field is to land with a shape that fits.
     let worktree_path = std::path::Path::new(&entry.cwd);
     let detected_worktree = is_linked_worktree(&entry.cwd);
     let worktree_touched = audit.worktree_touched.unwrap_or(detected_worktree);
@@ -6558,7 +6558,7 @@ async fn handle_rm_with(
         "pane_session": pane_session,
         "pane_id": pane_id,
         "pane_removed": pane_outcome.removed_json(),
-        // x-1b90: a confirmed pane stop's detail (pane killed, pid gone)
+        // a confirmed pane stop's detail (pane killed, pid gone)
         // rides here because `Removed` carries no reason of its own.
         "pane_reason": pane_stop_detail.as_deref().or(pane_outcome.reason()),
         "worktree_receipt": worktree_receipt,
@@ -6649,7 +6649,7 @@ fn to_agent_entry(e: &RegistryEntry) -> crate::provider::AgentEntry {
 
 /// Everything the `reconcile` RPC needs to render its response, returned by
 /// [`run_reconcile_sweep`] so the bounded sweep core is shared with the daemon's
-/// startup pass (Architecture B, plan ab-70faa65b).
+/// startup pass (Architecture B, plan).
 pub(crate) struct ReconcileSweepResult {
     /// Registry snapshot read at sweep start (per-name provider lookup).
     registry: crate::state::Registry,
@@ -6667,7 +6667,7 @@ pub(crate) struct ReconcileSweepResult {
 /// the registry write fails (the registry is then unchanged, so callers degrade
 /// to serving last-recorded status rather than reporting a sweep that did not
 /// apply -- Codex P1). Shared by the `reconcile` RPC and the startup sweep.
-/// Late bind (x-9de7 task 2): resolve a pane-hosted codex row's session id on
+/// Late bind (task 2): resolve a pane-hosted codex row's session id on
 /// the reconcile tick, keyed on the PANE, not on cwd. `(harness, cwd)` is not
 /// a join key -- 43 of 49 registry rows share a `(harness, cwd)` bucket with
 /// a sibling on this machine, so joining on it would light every sibling
@@ -6950,7 +6950,7 @@ fn codex_session_for_pid_shellout(pid: u32) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Registry-side keeper sweep (x-ac6b).
+// Registry-side keeper sweep.
 // ---------------------------------------------------------------------------
 
 /// How long one keeper probe waits for the Identify reply. A wedged keeper
@@ -7206,7 +7206,7 @@ fn apply_keeper_sweep_changes(
 }
 
 /// Re-bind surviving lane-B keeper threads to their registry rows at daemon
-/// start (x-ac6b): the registry-side consumer of the keeper discovery, keyed
+/// start: the registry-side consumer of the keeper discovery, keyed
 /// on the row rather than on a mux member (a lane-B thread has no tab, so
 /// the mux server's re-adopt sweep never sees its socket).
 ///
@@ -7436,7 +7436,7 @@ pub(crate) fn run_reconcile_sweep(
 ) -> Result<ReconcileSweepResult, String> {
     use crate::provider::ReachabilityProbeError;
 
-    // Late bind (x-9de7 task 2), before the registry snapshot below is taken,
+    // Late bind (task 2), before the registry snapshot below is taken,
     // so a row bound this tick is already visible to the probe/reconcile pass
     // that follows. Serve-only skips it: the tick re-measures, it does not
     // re-bind identities.
@@ -7444,7 +7444,7 @@ pub(crate) fn run_reconcile_sweep(
         late_bind_codex_sessions(home, emitter, &codex_session_for_pid_shellout)?;
     }
 
-    // x-4c87: a broken registry is a failed sweep, never a successful zero-row
+    // a broken registry is a failed sweep, never a successful zero-row
     // scan. `unwrap_or_default()` here answered the client-facing reconcile
     // RPC with `scanned: 0` over a store full of rows (code-review on PR 924).
     let registry = match load_registry_asserted(&home.registry_json()) {
@@ -7489,7 +7489,7 @@ pub(crate) fn run_reconcile_sweep(
     // on a working teammate costs a duplicate spawn, a stale `live` costs a
     // waiter its timeout.
     let roster = crate::claude_roster::ClaudeRoster::load_default();
-    // The x-5d96 zombie flip fires only when the roster read SUCCEEDED: an
+    // The zombie flip fires only when the roster read SUCCEEDED: an
     // unreadable roster is unknown liveness (the fail-closed branch below),
     // and orphaning a live worker on a transient instrumentation failure is
     // the exact false positive the flip must not produce (codex P1, PR 1329).
@@ -7615,7 +7615,7 @@ pub(crate) fn run_reconcile_sweep(
         );
     }
 
-    // Roster-progress refresh (x-cdc7 SECOND HALF): the same per-tick set the
+    // Roster-progress refresh (SECOND HALF): the same per-tick set the
     // reconcile sweep just probed - but this loop's own git/gh subprocess
     // calls are NOT covered by the probe loop's budget check above (that one
     // stops feeding `plan_reconcile` new entries; it does not bound what runs
@@ -7934,7 +7934,7 @@ fn flush_buffered_inside_leg(ctx: &Ctx, session_uuid: &str, name: &str) {
 }
 
 /// Which null-uuid row (if any) should adopt a full session uuid seen on an
-/// inside-leg report (x-c393).
+/// inside-leg report.
 enum UuidBackfill {
     None,
     One(usize),
@@ -7945,7 +7945,7 @@ enum UuidBackfill {
 /// the row with the 8-hex jobId in `short_id` (v9) but `claude_session_uuid:
 /// null` -- the full uuid only arrives on the first inside-leg report, so until
 /// it is backfilled `entry_holds_session` never matches and every report is
-/// buffered-then-lost (x-c393). Match a null-uuid claude row whose short-id is
+/// buffered-then-lost. Match a null-uuid claude row whose short-id is
 /// the leading hex group of `full_uuid` (`3228ccad` -> `3228ccad-c078-...`).
 /// Two rows sharing that short-id is ambiguous -> refuse rather than backfill
 /// the wrong row (AC1-ERR).
@@ -8062,7 +8062,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         Unknown,
     }
     let mut outcome = Outcome::Unknown;
-    // Badge-transition notify intent (x-dd84): (title, body, is_done). Captured
+    // Badge-transition notify intent: (title, body, is_done). Captured
     // UNDER the flock from prev-vs-new state; fired AFTER the write so a slow
     // notifier can never stall ingestion.
     let mut notify: Option<(String, String, bool)> = None;
@@ -8077,7 +8077,7 @@ fn handle_report(ctx: &Ctx, req: &Request) -> Response {
         // Match by the pinned session id (fast path). If nothing holds it, a
         // `claude --bg` row may still be waiting for its uuid: backfill it by
         // short-id prefix so the report can store on it AND ask/mail/push route
-        // to it (x-c393). Ambiguous prefix -> no backfill (AC1-ERR).
+        // to it. Ambiguous prefix -> no backfill (AC1-ERR).
         let idx = match r
             .entries
             .iter()
@@ -8344,7 +8344,7 @@ fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
             )
         }
     };
-    // x-4c87: a channel lookup over an unreadable registry reports the failed
+    // a channel lookup over an unreadable registry reports the failed
     // read, never a false `ChannelUnknown` for a channel its rows carry. The
     // asserted read also refuses a partial roster (this handler is sync, so it
     // takes the blocking read inline as before).

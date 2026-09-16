@@ -1,6 +1,6 @@
 """Status-sink fanout: the dumb dispatcher.
 
-Layer 2 of the status-breakpoints protocol. Workers emit x-dbaf protocol-family
+Layer 2 of the status-breakpoints protocol. Workers emit protocol-family
 events (``task_started`` / ``task_done`` / ``blocked`` / ``run_summary``) once to
 ``.fno/events.jsonl`` and never know sinks exist. This module sweeps that log on
 a tick and routes each event to configured external sinks per a per-sink filter.
@@ -609,7 +609,7 @@ def _resolve_url(sink: StatusSinkConfig) -> "tuple[Optional[str], Optional[str]]
     ``url_env`` resolves from the process env first, then ``~/.fno/.env`` - the
     daemon shells the tick with its own env, which never saw the operator's
     ``export``, so a file fallback is what makes an unattended ``url_env`` sink
-    deliver (x-0128). Process env wins so an exported value is unchanged."""
+    deliver. Process env wins so an exported value is unchanged."""
     if sink.url:
         return sink.url, None
     if sink.url_env:
@@ -785,7 +785,7 @@ def _dispatch_backlog_progress(
     sink: StatusSinkConfig, event: dict[str, Any], project_root: Path
 ) -> "tuple[str, str]":
     """On ``task_done`` / ``run_summary`` carrying a ``node``: record the row in
-    permanent history (x-920a: never the human current state) AND append to the
+    permanent history (: never the human current state) AND append to the
     plan doc's ``## Progress`` section. Other kinds / node-less events are a
     no-op (advance the cursor)."""
     if event.get("type") not in ("task_done", "run_summary"):

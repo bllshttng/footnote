@@ -79,7 +79,7 @@ gh pr comment <pr-number> --body "⚠️ Reconciliation refused: <validate detai
 
 Then end the session WITHOUT a completion promise - the work is genuinely
 blocked on human judgment. The stranded draft PR is surfaced by
-`fno backlog triage health` (x-a10e stranded-dependent reuse).
+`fno backlog triage health` (stranded-dependent reuse).
 
 ## Invariants
 

@@ -59,7 +59,7 @@ Cutting requires proving no shell call site **and** no internal dispatch **and**
 The three channel wrappers were cut on the first two, with the forward intent judged already served by the sidecar path.
 The `channel.*` daemon RPCs (`protocol.rs`, `daemon.rs`) are untouched, so rewiring a CLI front is a re-add, not a rebuild.
 
-## The a2a reply contract (x-605c)
+## The a2a reply contract
 
 Agent-to-agent mail is a protocol, not a transport the caller reasons about. It has exactly two halves:
 
@@ -68,7 +68,7 @@ Agent-to-agent mail is a protocol, not a transport the caller reasons about. It 
 
 **Resolution ladder** (`discover.resolve_or_suggest`, one scan serving match + suggestions):
 
-1. **fno-agents registry** - a named worker (`x-d899-us8-build`) also answers to its bare `<short8>` handle.
+1. **fno-agents registry** - a named worker (`-us8-build`) also answers to its bare `<short8>` handle.
 2. **claude daemon roster** (`~/.claude/daemon/roster.json`) - a `claude --bg` worker leaves no pid-sidecar, so the roster is the only source that surfaces it. Presence is enough; the `mail-inject` connect is the authoritative liveness gate.
 3. **disk sessions** - live `~/.claude/sessions/<pid>.json` sidecars, else the transcript store.
 4. **codex rollouts** - hand-started codex sessions from `~/.codex/sessions`.

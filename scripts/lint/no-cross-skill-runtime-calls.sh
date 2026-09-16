@@ -92,7 +92,7 @@ fi
 # so tests can fixture only the skills they care about.
 #
 #   DRIVER_SKILLS   - the pipeline drivers (target, megawalk).
-#   CLUSTER_ROUTERS - the router+mode skills (epic ab-0d05a9b7). A router
+#   CLUSTER_ROUTERS - the router+mode skills (epic). A router
 #                     folds sibling skills in as modes via bundled references,
 #                     so it must obey the same self-containment invariants:
 #                     no Skill() runtime calls, no ../../ path escapes, and an
@@ -150,7 +150,7 @@ for skill in "${SELF_CONTAINED_SKILLS[@]}"; do
   # so it can be tested in isolation and reused. The helper splits failure
   # modes: rc=2 for PyYAML-missing / file-missing / malformed-frontmatter
   # (substrate problems) and rc=1 for "binary not declared" (authoring
-  # problem). The `if ...; then : ; else rc=$?; fi` pattern is tested
+  # problem). The `if ...; then:; else rc=$?; fi` pattern is tested
   # context, so `set -e` does NOT abort when the helper exits non-zero.
   rc=0
   if "${PY[@]}" "$FRONTMATTER_CHECKER" "$SKILL_FILE" --require fno; then

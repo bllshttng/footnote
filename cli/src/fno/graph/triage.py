@@ -300,7 +300,7 @@ def _read_canonical_events(path: Optional[Path] = None) -> list[dict]:
 
 
 def fold_routing_health(events: list[dict]) -> Optional[dict]:
-    """Fold ``executor_resolved`` events into routing-tier metrics (x-64cb US3).
+    """Fold ``executor_resolved`` events into routing-tier metrics (US3).
 
     Returns None when no such events exist so the health render can gate the
     section (AC6-EDGE: no fabricated zeros). The override-after-inference count
@@ -349,7 +349,7 @@ def fold_routing_health(events: list[dict]) -> Optional[dict]:
 
 def fold_triage_health(events: list[dict]) -> Optional[dict]:
     """Fold ``triage_applied`` events into apply-count + validation-drop metrics
-    (x-64cb US3). Returns None when absent (event-gated render). The drop rate
+    (US3). Returns None when absent (event-gated render). The drop rate
     ships both numerator and denominator so it is never a bare percentage."""
     ta = [e for e in events if e.get("type") == "triage_applied"]
     if not ta:
@@ -379,7 +379,7 @@ def fold_triage_health(events: list[dict]) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Consistency measurement (x-64cb US4): run the propose step K times over one
+# Consistency measurement (US4): run the propose step K times over one
 # frozen context and measure per-category agreement. Read-only toward the live
 # graph - propose runs never apply.
 # ---------------------------------------------------------------------------
@@ -387,7 +387,7 @@ def fold_triage_health(events: list[dict]) -> Optional[dict]:
 # The reasoning instruction handed to each headless run. MUST mirror the
 # /triage skill's reasoning prompt (skills/triage/SKILL.md, "LLM reasoning"
 # step) so the consistency measurement reflects what production /triage does;
-# when one changes, change both (x-64cb US5 hardens the pair together).
+# when one changes, change both (US5 hardens the pair together).
 _CONSISTENCY_PROMPT = (
     "You are a backlog triage classifier. First REASON, then LABEL - never emit "
     "the JSON first. In a short reasoning pass, name each spec's PRIMARY concern "
@@ -502,7 +502,7 @@ def _category_agreement(per_run_maps: list[dict]) -> dict:
 
 
 def fold_consistency(proposals: list[dict]) -> dict:
-    """Per-category agreement over the COMPLETED-run proposals (x-64cb US4).
+    """Per-category agreement over the COMPLETED-run proposals (US4).
     Priority is keyed by node id + `to` value; the rest are presence-based."""
     return {
         "priority": _category_agreement([_priority_map(p) for p in proposals]),
@@ -521,7 +521,7 @@ def fold_consistency(proposals: list[dict]) -> dict:
 def _emit_triage_applied(
     applied: dict, priority_moves: list[dict], proposed: int, dropped: int
 ) -> None:
-    """Best-effort ``triage_applied`` telemetry (x-64cb US2). The graph mutation
+    """Best-effort ``triage_applied`` telemetry (US2). The graph mutation
     has already committed by the time this runs; an emit failure logs one stderr
     line and never changes apply semantics or the exit code."""
     import sys
@@ -1328,7 +1328,7 @@ def cmd_apply(
 
     commit_rows_via_store(_graph_path(), mutator)
 
-    # Telemetry (x-64cb US2): the mutation has committed; emit is best-effort and
+    # Telemetry (US2): the mutation has committed; emit is best-effort and
     # must precede the Exit(3) below so a partial apply still records what landed.
     # proposed is the raw entry count across every category (the drop-rate
     # denominator); dropped is what _validate_proposal rejected.
@@ -1395,7 +1395,7 @@ def cmd_projects(
 
 
 # ---------------------------------------------------------------------------
-# pile: the triage pile - deferred nodes with their reason (G2, x-3236)
+# pile: the triage pile - deferred nodes with their reason (G2)
 # ---------------------------------------------------------------------------
 
 
@@ -1595,7 +1595,7 @@ def cmd_health(
             }
         )
 
-    # 7b. Ownership defects (x-f8b1 change 5): every node carrying an
+    # 7b. Ownership defects (change 5): every node carrying an
     # ownership_defect stamped by the Rust recompute - a stale graph lock, or
     # an open do row past the do TTL. Surfacing only: the section names the
     # verification pair a human or king runs, because the graph cannot decide
@@ -1661,7 +1661,7 @@ def cmd_health(
     except Exception:  # noqa: BLE001 - advisory only; health must not break
         pass
 
-    # 10. Routing + triage decision metrics (x-64cb): folded from the canonical
+    # 10. Routing + triage decision metrics: folded from the canonical
     # events log, event-gated (absent when no decisions recorded - AC6-EDGE).
     # Advisory only; a read failure leaves the sections off, never breaks health.
     routing_metrics: Optional[dict] = None
@@ -1720,7 +1720,7 @@ def cmd_health(
     except Exception:  # noqa: BLE001
         dnm = {"violations": [], "unknown": [], "checked": 0, "window_days": 0}
 
-    # Supersessions nothing can ever settle (x-e451): the successor merged but
+    # Supersessions nothing can ever settle: the successor merged but
     # the declared surfaces were not all in its PR; the only moves are
     # unsupersede or done. A done predecessor reads as accepted: `fno backlog
     # done` never stamps the record, so the completed_at skip keeps it settled.
@@ -1750,7 +1750,7 @@ def cmd_health(
             ],
         })
 
-    # Edges the sweep holds open (x-e451): a deferred blocker is a human
+    # Edges the sweep holds open: a deferred blocker is a human
     # decision, a missing one is data loss - both named, neither erased. The
     # readiness kind comes from the read overlay, the one Rust answers.
     blocked_by_held: list[dict] = []

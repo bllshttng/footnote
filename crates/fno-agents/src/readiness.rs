@@ -204,7 +204,7 @@ fn codex_prompt_ready(screen: &ScreenView) -> bool {
 }
 
 /// Provider-agnostic readiness check for the grid attention scanner
-/// (fu-grid-pagination / ab-82dddd5f). codex + gemini share [`PROMPT_GLYPHS`]
+/// (fu-grid-pagination /). codex + gemini share [`PROMPT_GLYPHS`]
 /// and the same [`prompt_ready`] logic, and the grid only ever hosts those
 /// two (claude is excluded, grid Locked Decision 6), so a single shared check
 /// is correct here. Run client-side on a pane's `Term` snapshot to flag an
@@ -281,7 +281,7 @@ impl ReadinessDetector for ClaudeReadinessDetector {
     }
 }
 
-/// opencode TUI readiness (x-51f6 US3). Markers pinned from a LIVE capture
+/// opencode TUI readiness (US3). Markers pinned from a LIVE capture
 /// (opencode 1.14.50, mux-pane hosted), not guessed:
 ///
 /// - **idle**: the composer box draws a `┃` (U+2503) left edge; the footer
@@ -389,7 +389,7 @@ mod tests {
         assert_eq!(d.is_ready(&view("Waiting for auth \u{276f}")), Ok(false));
     }
 
-    // ---- opencode (x-51f6 US3): fixtures condensed from a live 1.14.50
+    // ---- opencode (US3): fixtures condensed from a live 1.14.50
     // mux-pane capture (capture method: `fno mux pane run -- opencode` +
     // `pane read`), per the markers-from-capture locked decision. ----
 
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn no_signal_detector_errors_never_guesses() {
         // "goose" is the canonical genuinely-unhosted CLI (opencode graduated
-        // to a real detector at x-51f6).
+        // to a real detector at).
         let d = NoSignalDetector {
             provider: "goose".to_string(),
         };

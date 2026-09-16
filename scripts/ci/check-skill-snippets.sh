@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Block known-hazardous constructs in fenced bash blocks under skills/ (x-f47f).
+# Block known-hazardous constructs in fenced bash blocks under skills/.
 #
 # Skill snippets are executed by the harness under the OPERATOR's shell against
 # whatever grep is on PATH, and they are unrunnable by construction - no CI can

@@ -1,4 +1,4 @@
-//! The shared anchored/centered popup overlay widget (x-8ccf US1): the single
+//! The shared anchored/centered popup overlay widget (US1): the single
 //! component behind the row context menu, the which-key keybinds modal, and the
 //! NEW|MENU / settings popups. It owns positioning (clamp + edge-flip), the row
 //! anatomy (glyph · label · right-aligned hint, headers, rules, a full-width
@@ -537,7 +537,7 @@ pub fn origin(anchor: Anchor, w: usize, h: usize, term: (usize, usize)) -> (usiz
 /// Truncate to `w` display columns (ellipsizing) and pad with spaces to `w`, so
 /// a line is a fixed-width block that fully overwrites the content beneath it.
 /// Measured in terminal columns, not chars: a fullwidth glyph is one char and
-/// two cells (x-1b68). Mirrors `client::pad_to` (kept local so the widget is
+/// two cells. Mirrors `client::pad_to` (kept local so the widget is
 /// self-contained).
 fn pad(s: &str, w: usize) -> String {
     let cols = chrome::str_cols(s);

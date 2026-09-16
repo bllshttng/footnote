@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Post-deploy probe over reap receipts (x-9485).
+"""Post-deploy probe over reap receipts.
 
 Passive only: reads ~/.fno/agents/reap-receipts/*.json and verifies, for every
 native-stop effect written since --since, that the pid the effect names is
@@ -9,7 +9,7 @@ UNPROBEABLE-no-pid and named, never silently passed. A failed effect's pid is
 informational: the refusal never claimed the pid died.
 
 The active rm-with-re-minted-pane-id check stays a manual recipe (plan
-20260910-reap-live-checks-post-deploy-x-9485.md); a probe that spawns and
+the 2026-09-10 reap live-checks post-deploy brief); a probe that spawns and
 kills on its own is a liability, not a probe.
 """
 

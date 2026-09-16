@@ -23,7 +23,7 @@ pins that they agree. When the verb cannot be reached, every caller keeps its
 own fail-closed default, which is today's behaviour exactly.
 
 The same argument reaches one class of untracked content: the symlinks
-`setup-worktree.sh` writes. On `.claude/worktrees/x-ba96` (2026-09-06) they were
+`setup-worktree.sh` writes. On `.claude/worktrees/` (2026-09-06) they were
 the tree's ENTIRE difference, so footnote dirtied it at creation and the DIRTY
 rule protected that dirt forever. Such a link holds no human work, so it is
 discounted and named; everything else untracked still blocks.

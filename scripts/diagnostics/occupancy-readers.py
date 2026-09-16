@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Census the node-claim occupancy readers under cli/src/fno (x-74aa).
+"""Census the node-claim occupancy readers under cli/src/fno.
 
 Every site that reads a ``node:`` claim answers "is someone working this
 node?". The wrong-tree default answered ``free`` from the repo space while

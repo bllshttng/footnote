@@ -1,4 +1,4 @@
-//! Terminal-stop markers for fire-and-forget `claude --bg` workers (x-fcbf).
+//! Terminal-stop markers for fire-and-forget `claude --bg` workers.
 //!
 //! A fire-and-forget bg `/target`/`/think` worker reaches a terminal loop
 //! decision, and the stop hook returns exit-0 = allow: that ends the agent's

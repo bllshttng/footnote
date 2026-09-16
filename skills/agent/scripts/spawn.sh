@@ -30,7 +30,7 @@
 # reservation means nobody is building it and nobody will until an operator
 # intervenes: failed, exit 1, and the message carries the clearing command. Both
 # used to exit 0 while launching nothing, so a caller reading the exit code was
-# told the launch worked (x-05be).
+# told the launch worked.
 
 set -uo pipefail
 
@@ -42,27 +42,27 @@ CWD=""
 SELF=""                # caller's own claim holder (target_claim_holder). Lets
                        # the collision pre-check tell a self-held claim (route to
                        # the sanctioned handoff) from a foreign one (refuse).
-# Routing inputs (codex/gemini first-class dispatch, ab-417ab20f). Defaults keep
+# Routing inputs (codex/gemini first-class dispatch). Defaults keep
 # the legacy claude path equivalent: exec + build -> claude resolves to `spawn`
-# (Group 1 ab-8b3e4fe0: ask never creates), so an old caller that passes none
+# (Group 1: ask never creates), so an old caller that passes none
 # of these still launches a persistent claude thread peer.
 MODE="exec"            # exec | interactive  (-i routes codex/gemini -> host)
 MODEL=""               # exact model name, forwarded as `spawn --model` (each
                        # provider's own --model). Empty = provider default.
 EFFORT=""              # reasoning effort forwarded as `spawn --effort`.
 PAYLOAD_MODE="build"   # build (node-id /target) | seed | handoff | passthrough
-SUBSTRATE=""           # x-61df: ""|pane|thread|headless. bg is a deprecated
+SUBSTRATE=""           # ""|pane|thread|headless. bg is a deprecated
                        # alias for thread; headless -> one-shot (reply receipt).
 YOLO=0                 # 1 appends --yolo to the spawn/host argv
-PERMISSION_MODE=""     # x-dfa4: forwarded as --permission-mode to the spawn verb
-ROLE=""                # x-d2fe: forwarded as --role to the spawn verb (model routing)
+PERMISSION_MODE=""     # forwarded as --permission-mode to the spawn verb
+ROLE=""                # forwarded as --role to the spawn verb (model routing)
 TIMEOUT=""             # forwarded as --timeout to the spawn verb (per-spawn seconds)
 FRESH=0                # 1 appends --fresh (canonical-root cwd) to the spawn argv
 HERE=0                 # 1 appends --here (opt out of --fresh) to the spawn argv
-ADD_DIR=""             # x-b6e2: forwarded as --add-dir to the spawn verb
-AGENT=""               # x-b6e2: forwarded as --agent to the spawn verb
-TOOLS=""               # x-b6e2: forwarded as --tools to the spawn verb
-DENY_TOOLS=""          # x-b6e2: forwarded as --deny-tools to the spawn verb
+ADD_DIR=""             # forwarded as --add-dir to the spawn verb
+AGENT=""               # forwarded as --agent to the spawn verb
+TOOLS=""               # forwarded as --tools to the spawn verb
+DENY_TOOLS=""          # forwarded as --deny-tools to the spawn verb
 
 fail() { printf 'result=failed reason="%s"\n' "$1"; exit 1; }
 
@@ -112,7 +112,7 @@ while [[ $# -gt 0 ]]; do
     --agent)        AGENT="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --tools)        TOOLS="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
     --deny-tools)   DENY_TOOLS="${2:-}"; [[ $# -ge 2 ]] && shift 2 || shift ;;
-    # Pass-through cwd flags: forwarded verbatim to `fno agents spawn`. x-85fe
+    # Pass-through cwd flags: forwarded verbatim to `fno agents spawn`.
     # inverted the runtime default -- a spawn with NO cwd source now lands on
     # canonical, so this script defaults NOTHING and behavior follows the runtime:
     # --here keeps the caller cwd, --fresh is an accepted no-op alias. A code
@@ -127,7 +127,7 @@ done
 command -v fno >/dev/null 2>&1 || fail "fno not on PATH"
 command -v jq  >/dev/null 2>&1 || fail "jq not on PATH"
 [[ -n "$NAME" ]]     || fail "missing --name"
-# x-de9d US8: --provider may be omitted when config.agents.defaults.provider is
+# US8: --provider may be omitted when config.agents.defaults.provider is
 # set; adopt the config default here so verb selection and the receipt check
 # both have a concrete provider (the seam then sees it as an explicit flag with
 # the same value). With neither flag nor config default, fail early with today's
@@ -140,12 +140,12 @@ if [[ -z "$PROVIDER" ]]; then
   printf 'spawn.sh: provider from config.agents.defaults.provider=%s\n' "$PROVIDER" >&2
 fi
 
-# ---- Verb selection (Locked Decisions 1 + 2; Group 1 ab-8b3e4fe0) -------
+# ---- Verb selection (Locked Decisions 1 + 2; Group 1) -------
 # Creation is always spawn/host. claude routes to `spawn` (client-side `claude
 # --bg --name`, subscription lane, JSON receipt); a codex/gemini build/seed
 # routes to `spawn` (exec, autonomous) by default and `host` (interactive,
 # human-driven) under `-i`. A one-shot exchange is the `headless` substrate
-# (x-cbb0: subsumes the retired `ask` verb) -> `spawn --substrate headless`
+# (: subsumes the retired `ask` verb) -> `spawn --substrate headless`
 # (reply on stdout). A codex/gemini passthrough never reaches here (normalize.sh
 # refuses it); a claude passthrough runs the slash command via `spawn`.
 if [[ "$PROVIDER" == "claude" ]]; then
@@ -156,7 +156,7 @@ else
   VERB="spawn"
 fi
 
-# x-61df: an explicit --substrate (thread|headless; bg alias) always selects
+# an explicit --substrate (thread|headless; bg alias) always selects
 # the spawn verb (never host). `headless` yields a one-shot reply receipt; `thread`
 # (and pane/default) yields the JSON short-id receipt. `bg` (and pane/
 # default) yield the JSON short-id receipt. REPLY drives the receipt-family
@@ -192,7 +192,7 @@ is_code_payload() {
   esac
 }
 
-# ---- Read-only early receipt; cmd_spawn owns the real guard (x-5c08) ------
+# ---- Read-only early receipt; cmd_spawn owns the real guard ------
 # Preserve /agent's self-handoff and contested-worker receipts without taking a
 # reservation here. The actual `fno agents spawn --node` below reruns the same
 # family-2 decision with side effects and reserves dispatch:<node> at the one
@@ -234,7 +234,7 @@ if [[ -n "$NODE" ]]; then
         # release the claim here. A node claim can be released ONLY by the two
         # sanctioned sites (handoff.sh / `fno backlog unclaim`, holder-verified);
         # a helper subprocess release is a locked-down authority violation
-        # (ab-588326a7). And a thread spawn cannot emit the `delegated` event a clean
+        #. And a thread spawn cannot emit the `delegated` event a clean
         # takeover needs (it does not control the successor's session id), so
         # merely proceeding would spawn a worker that is born contested while the
         # caller still holds a live claim. The honest move is to route the caller
@@ -322,7 +322,7 @@ case "$existing_status" in
     exit 0 ;;
 esac
 
-# ---- Auto-worktree for code-implementing payloads (x-9c4c) --------------
+# ---- Auto-worktree for code-implementing payloads --------------
 # A thread /target|/execute|/fix launched into a repo's MAIN checkout lands on the
 # canonical (often protected) branch and relies on the soft skill instruction
 # "a thread /target self-creates its worktree before building." Do it
@@ -399,7 +399,7 @@ maybe_auto_worktree() {
   fi
   # The git/worktree mechanism (main-checkout-only gate, idempotent reuse,
   # stray-dir non-clobber, origin/main base, best-effort setup-worktree.sh)
-  # lives in the `fno agents workspace worktree ensure` verb (x-73ca) so all three code-dispatch
+  # lives in the `fno agents workspace worktree ensure` verb so all three code-dispatch
   # paths share ONE implementation. On any failure it prints nothing on stdout,
   # so $wt is empty and we launch in the original CWD -- isolation is best-effort
   # and never blocks the spawn. (NOTE: ensure bases the branch on origin/main,
@@ -440,10 +440,10 @@ maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout
 
 # ---- Spawn (subscription lane only) -------------------------------------
 # Run the GENUINE verb. claude `spawn` builds `claude --bg --name <name> <msg>`
-# client-side (Group 1 ab-8b3e4fe0 moved the create off `ask`); codex/gemini
+# client-side (Group 1 moved the create off `ask`); codex/gemini
 # `spawn`/`host` are daemon-managed PTY workers (Locked Decision 1) and
 # `spawn --once` is the ephemeral one-shot. Name is POSITIONAL (Locked
-# Decision 8). Never default to claude `-p`/`--bare` (x-2c27, amended from
+# Decision 8). Never default to claude `-p`/`--bare` (amended from
 # "never -p"): `pane`/`thread` use owned-PTY / `claude --bg`, never `-p`; `-p` is
 # reachable only via the explicit `--substrate headless` verb (which the Rust
 # client, not this script, translates to `claude -p`). --yolo is appended only
@@ -470,10 +470,10 @@ cmd=(agents "$VERB" --harness "$PROVIDER")
 [[ -n "$AGENT" ]] && cmd+=(--agent "$AGENT")
 [[ -n "$TOOLS" ]] && cmd+=(--tools "$TOOLS")
 [[ -n "$DENY_TOOLS" ]] && cmd+=(--deny-tools "$DENY_TOOLS")
-# x-2c27: an explicit substrate emits --substrate (the canonical selector); the
+# an explicit substrate emits --substrate (the canonical selector); the
 # `headless` value carries the one-shot lane the retired `ask` verb used to.
 [[ -n "$SUBSTRATE" ]] && cmd+=(--substrate "$SUBSTRATE")
-# x-84a8: forward the node so a node-driven pane spawn exports FNO_NODE/SLUG/PLAN
+# forward the node so a node-driven pane spawn exports FNO_NODE/SLUG/PLAN
 # provenance (the verb resolves slug/plan from the graph). Ad-hoc spawns have no
 # --node and export nothing new. Harmless on thread/headless (the verb ignores it).
 [[ -n "$NODE" ]] && cmd+=(--node "$NODE")
@@ -493,7 +493,7 @@ case "$SUBSTRATE" in
     ;;
 esac
 
-# x-8151: the x-9d11 refusal-carrier case block that lived here is deleted.
+# the refusal-carrier case block that lived here is deleted.
 # This wrapper's `fno agents spawn` call re-derives the identical verdict one
 # process later (cmd_spawn in-process, or the fno-agents binary's own spawn
 # handler once the front door execs it) from the one carrier table - one
@@ -535,7 +535,7 @@ if [[ "$spawn_rc" -ne 0 ]]; then
         # inside the real spawn, and could not prove the holder dead, so nobody
         # is building this node and nobody will until an operator intervenes.
         # `already-running` plus exit 0 told a caller reading the exit code that
-        # the launch worked, which is the x-05be defect on the one path that
+        # the launch worked, which is the defect on the one path that
         # actually reaches it. The remedy goes to stderr; this file's contract
         # is ONE line on stdout.
         printf '%s' "$spawn_err" | grep -E '^  (Clear it|Override): ' >&2 || true
@@ -555,7 +555,7 @@ fi
 # Receipt family is keyed by the VERB/mode the skill ran (never by sniffing
 # the output - Locked Decision 3):
 #   --substrate headless -> a CLIENT-SIDE one-shot (`codex exec` / `gemini -p`,
-#                          the lane the retired `ask` verb used, x-cbb0):
+#                          the lane the retired `ask` verb used):
 #                          stdout is the model REPLY verbatim, NOT a short-id
 #                          (the teardown receipt rides stderr). Success = rc==0
 #                          (checked above) AND a non-empty reply; the reply IS

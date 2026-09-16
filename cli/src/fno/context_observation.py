@@ -64,7 +64,7 @@ def _identity(hook_input: bytes, explicit_entry: str | None) -> tuple[str, str, 
 
     # Same family rule as the resolver: two DIFFERENT ids of one family are a
     # disagreement, so the row records no id rather than the table-first one
-    # it would be guessing (x-0992).
+    # it would be guessing.
     family_value_keys: dict[str, str] = {}
     picked_by: str = ""
     conflicted = False

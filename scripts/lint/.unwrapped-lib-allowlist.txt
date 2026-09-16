@@ -136,7 +136,7 @@ cancel-signal-writer.sh
 # point.
 blocked-handler.sh
 
-# Verified-merge ground truth (ab-f7f8bc53). Sourced by hooks/target-stop-hook.sh;
+# Verified-merge ground truth. Sourced by hooks/target-stop-hook.sh;
 # exposes is_verified_merge (the shared rc0/1/2 check, also called from
 # gate-audit.sh) and maybe_softexit_on_verified_merge (the defensive completion).
 # Pure sourcing library; tests source it directly for behavioral + structural
@@ -158,19 +158,19 @@ budget-display.sh
 check-artifact-body.sh
 
 # Per-PR artifact consolidator. Invoked best-effort by fno/pr/_merge.py
-# (the internalized `fno do pr merge`, ab-d4c98550) after a successful merge to
+# (the internalized `fno do pr merge`) after a successful merge to
 # collect every phase artifact for the session into one
 # {YYYYMMDD}{SS}-{pr#}-artifact.md file. Internal helper, not a user-facing
 # entry point; degrades to a silent no-op when absent (bare pip install).
 consolidate-artifacts.sh
 
-# Shared throttled-reconcile helper (retro-auto-triage, ab-79165ba1). Sourced
+# Shared throttled-reconcile helper (retro-auto-triage). Sourced
 # by hooks/reconcile-session-start.sh and hooks/megawalk-stop-hook.sh to fire a
 # backgrounded, throttled `fno backlog reconcile` (which IS the wrapped entry
 # point). Pure sourcing library: exposes reconcile_maybe_fire; no standalone CLI.
 reconcile-throttle.sh
 
-# Shared daily-throttled eval-loop ignition helper (x-42f6). Sourced by
+# Shared daily-throttled eval-loop ignition helper. Sourced by
 # hooks/eval-sweep-session-start.sh to fire a backgrounded, throttled
 # `fno doctor observer sweep` + `fno doctor skill-diff tick` (which ARE the wrapped entry
 # points); itself sources reconcile-throttle.sh for helper reuse. Pure sourcing
@@ -183,7 +183,7 @@ eval-sweep-throttle.sh
 # point). Pure sourcing library; no standalone CLI of its own.
 drive-authority.sh
 
-# Human-gated operator-override close (ab-ae3cc4a8). Sourced by
+# Human-gated operator-override close. Sourced by
 # hooks/target-stop-hook.sh; exposes _detect_operator_override_reason and
 # handle_operator_override_if_authorized. The authorization is a genuine
 # user-authored `/target override <reason>` message detected from the
@@ -202,7 +202,7 @@ infer-has-ui.sh
 resolve-plan-executor.sh
 
 # Megawalk lineage-aware pre-advance verification (target self-handoff,
-# ab-534bcc55). resolve_terminal_session implements the terminal-session
+#). resolve_terminal_session implements the terminal-session
 # resolution rule (docs/architecture/target-self-handoff.md). Sourced by
 # hooks/megawalk-stop-hook.sh; tests source the lib directly. Pure sourcing
 # library; no standalone CLI of its own.
@@ -254,14 +254,14 @@ worktree-occupancy.sh
 # Its caller is the bridge; no fno verb wraps it directly.
 worktree_occupancy.py
 
-# Bounded append-log rotation (.fno/ dir-hygiene, ab-d5a984f6). A thin
+# Bounded append-log rotation (.fno/ dir-hygiene). A thin
 # `bash <path> <file> <max_bytes>` helper invoked by hooks/convo-signal-capture.sh
 # to cap convo-signals.jsonl; tests run it directly. Pure utility, not a
 # user-facing fno verb.
 rotate-append-log.sh
 
 # Cross-references a worktree path against ~/.fno/agents/registry.json for
-# its real session name + live/exited status (x-ad51). Invoked by
+# its real session name + live/exited status. Invoked by
 # scripts/lib/worktree-lifecycle.sh's `status` case, which IS the wrapped
 # entry point (`fno workspace worktree status` -> cli/src/fno/worktree_cli/cli.py);
 # a second wrapper here would be a third opinion on one question.
@@ -283,7 +283,7 @@ postcompact-carrier.sh
 canon-doc-marker.sh
 cargo-rustc-wrapper.sh
 
-# The foreign-rooted-writers predicate for the flush nudge (x-299b). Sourced by
+# The foreign-rooted-writers predicate for the flush nudge. Sourced by
 # hooks/context-nudge.sh's flush branch; exposes foreign_rooted_writers, which
 # reuses _wt_pids from scripts/lib/worktree-lifecycle.sh and joins the agents
 # registry - the wrapped entry point for that population is

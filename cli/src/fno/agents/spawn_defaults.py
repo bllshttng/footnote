@@ -47,7 +47,7 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
     The scanned flag is ``-H/--harness``: this pass reads the HARNESS axis and
     never touches ``-P/--provider``, which the caller reads separately.
     Handles both `--flag value` and `--flag=value`; stops at the `--argv`
-    payload boundary and at a bare `--` passthrough fence (x-1caa: fenced
+    payload boundary and at a bare `--` passthrough fence (: fenced
     tokens are the harness's own flags, never fno's); skips a value flag's value.
     """
     harness_present = model_present = effort_present = False
@@ -74,7 +74,7 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
 
 
 # --------------------------------------------------------------------------- #
-# Spawn argv normalization (x-f76e): three ergonomic cuts, one argv->argv pass.
+# Spawn argv normalization: three ergonomic cuts, one argv->argv pass.
 #
 # Runs at the front door (inside inject_spawn_defaults, BEFORE config injection
 # and BEFORE the runtime route/fork), so by the time either runtime parser sees
@@ -96,16 +96,16 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         "--deny-tools", "--workspace", "--squad", "-s", "--split", "-x", "--tab",
         "--pane",
         "--node", "--slug", "--plan", "--name", "--recorded-provider",
-        # x-6de8: --route/--account/--crown were absent, so their VALUES read as
+        # --route/--account/--crown were absent, so their VALUES read as
         # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
         # named "zai,glm-5.2". Kept in lockstep with cmd_spawn's value options
         # (test_spawn_value_flags_cover_every_value_option pins the two together).
         "--route", "--account", "--crown", "-k", "--dispatch-account",
-        # x-6928: --at's value (current|<pane>) must not read as a positional.
+        # --at's value (current|<pane>) must not read as a positional.
         "--at",
-        # x-9b60: --portal's index is a value, never a prompt word.
+        # --portal's index is a value, never a prompt word.
         "--portal",
-        # x-4342: the sessions-row phase names a phase, not a prompt word.
+        # the sessions-row phase names a phase, not a prompt word.
         "--session-phase",
         # The join call site's per-worker policy file: its PATH is a value,
         # never a prompt word.
@@ -211,7 +211,7 @@ def placement_refusal(
     tab: Optional[str],
     bounded_placement: bool,
 ) -> Optional[str]:
-    """The pane placement contract (x-3e38) as one named refusal, or None when
+    """The pane placement contract as one named refusal, or None when
     the combination is legal. Portal placement is Rust-owned (the runtime that
     runs the spawn validates its own flags); this seam no longer reads a
     --portal value."""
@@ -276,7 +276,7 @@ def _positional_indices(toks: Sequence[str]) -> List[int]:
     """Indices of positional tokens (NAME, MESSAGE), skipping flags + their values.
 
     Stops at a bare ``--`` fence: the first fenced token still lands in the
-    MESSAGE (click fills positionals in order), and the rest are the x-1caa
+    MESSAGE (click fills positionals in order), and the rest are the
     provider passthrough - provider tokens, never prompt positionals to refuse.
     """
     idxs: List[int] = []
@@ -393,11 +393,11 @@ def _mint_node_name(
     model: Optional[str],
     existing: Optional[Set[str]] = None,
 ) -> Optional[str]:
-    """The ``t-<hex>-<slug>-<model>`` mint for a node-driven spawn (x-b80d).
+    """The ``t-<hex>-<slug>-<model>`` mint for a node-driven spawn.
 
     Routes through :func:`fno.agents.naming.dispatch_agent_name` - the single
     owner of the 64-char budget - with no source (a manual launch) and the
-    model tag as the name's final segment (x-57fe). The mint is
+    model tag as the name's final segment. The mint is
     deterministic, so a name already taken by a live worker gets a ``-2``,
     ``-3``... suffix (the same collision-avoidance the adjective-noun mint
     retries for): a re-spawn on one node must not turn into a refusal. Any
@@ -499,7 +499,7 @@ def normalize_spawn_args(
             toks += ["--substrate", tok]
 
     # Pass 2: -r / --resume id widening + implied bg. The scan sees only the
-    # pre-fence head (x-1caa): a fenced `--resume`/`-r` is the provider's flag,
+    # pre-fence head: a fenced `--resume`/`-r` is the provider's flag,
     # and reading it here would append an implied `--substrate bg` under a
     # passthrough fence - or exit 2 on the provider's short-flag value.
     _fence = next((i for i, t in enumerate(toks) if t == "--"), None)
@@ -557,7 +557,7 @@ def normalize_spawn_args(
         # `--resume` is bg-only: default the substrate when none was pinned.
         # Print the implied choice so the routing decision is never silent
         # (blueprint Silent-Failure-Hunter / Locked Decision 4). The flag pair
-        # splices BEFORE any bare `--` fence (x-1caa): appended past it, click
+        # splices BEFORE any bare `--` fence: appended past it, click
         # reads it as passthrough positionals and the implied lane is lost.
         if _has_explicit_substrate(toks) is None:
             cut = _fence if _fence is not None else len(toks)
@@ -578,7 +578,7 @@ def normalize_spawn_args(
     # guessed at: under the old `<name> <message>` grammar it would silently
     # register an agent named after the prompt. The mint probe scans only the
     # pre-fence head: a passthrough `--name` is the PROVIDER's flag (claude's
-    # session display name) and must not suppress fno's own name mint (x-1caa).
+    # session display name) and must not suppress fno's own name mint.
     head = toks if fence is None else toks[:fence]
     if not any(t == "--name" or t.startswith("--name=") for t in head):
         names = (
@@ -586,7 +586,7 @@ def normalize_spawn_args(
             if existing_names is not None
             else {str(getattr(e, "name", "")) for e in _read_registry_rows()}
         )
-        # x-b80d: a node-driven spawn carries what an operator remembers. The
+        # a node-driven spawn carries what an operator remembers. The
         # name is the registry row's ONLY node carrier, so a nodeless mint makes
         # the row unfindable by node or slug. Mint ``t-<node>-<slug>-<model>``
         # through the canonical owner when --node is present; any lookup
@@ -649,7 +649,7 @@ _CROWN_VERBS = frozenset({"reign", "king-for-a-day", "fno-me"})
 # The one built-in answer to "what permission mode does an unattended worker
 # get". Formerly config.agents.spawn_permission_mode's default; a constant now,
 # because a second config key answering the same question is what let a bare
-# mesh spawn land in auto while three other paths were pinned (x-7198).
+# mesh spawn land in auto while three other paths were pinned.
 SPAWN_PERMISSION_BUILTIN = "bypassPermissions"
 
 
@@ -778,7 +778,7 @@ def _carries_fno_namespace(seed: Optional[str], tok: str) -> bool:
 
 
 def _profile_key(seed: Optional[str], known: Optional[Set[str]] = None) -> Optional[str]:
-    """Classify a seed into its profile key. THREE outcomes (x-413d): a
+    """Classify a seed into its profile key. THREE outcomes : a
     verb-shaped token that resolves (either sigil, anywhere, via
     ``_VERB_ALIASES``) returns the canonical key, except a king verb
     (``reign``, ``king-for-a-day``, ``fno-me``), which returns ``crown``
@@ -808,7 +808,7 @@ def _profile_key(seed: Optional[str], known: Optional[Set[str]] = None) -> Optio
 
 def _has_permission_mode(toks: Sequence[str]) -> bool:
     """Whether the permission control is pinned, up to the ``--argv`` boundary
-    and a bare ``--`` fence (x-1caa: a fenced ``--permission-mode`` is the
+    and a bare ``--`` fence (: a fenced ``--permission-mode`` is the
     provider's flag, not fno's, and must not suppress a config default).
     ``--yolo``/``-Y`` count: they are the same knob as ``--permission-mode`` and
     are mutually exclusive with it downstream, so a config value injected
@@ -933,7 +933,7 @@ def _lane_value(lane: object, name: str) -> str:
 def _overlays_present(defaults: object, profile: object, lane: object = None) -> bool:
     """A harness overlay table (or lane args) can carry the ONLY value this
     spawn injects, so an empty harness-blind scalar read must not end
-    composition before the post-resolution reads run (x-8975)."""
+    composition before the post-resolution reads run."""
     for obj in (defaults, profile):
         table = getattr(obj, "harness", None)
         if isinstance(table, Mapping) and table:
@@ -1102,7 +1102,7 @@ def inject_spawn_defaults(
     terminal. Config-sourced effort/substrate/permission_mode degrade open on
     an incompatible resolved provider (warn, skip); an explicit flag stays
     fail-closed downstream. ``apply_permission_builtin`` (default True) gates
-    the ``SPAWN_PERMISSION_BUILTIN`` rung (x-7198); off for a probe that
+    the ``SPAWN_PERMISSION_BUILTIN`` rung ; off for a probe that
     never launches (see ``retask.py``).
     """
     out = list(args)
@@ -1117,7 +1117,7 @@ def inject_spawn_defaults(
         if a in ("-h", "--help"):
             return out
 
-    # Ergonomic normalization runs FIRST (x-f76e): the substrate-token / -r /
+    # Ergonomic normalization runs FIRST: the substrate-token / -r /
     # autogen-name rewrites consider only operator-supplied argv, so config
     # defaults injected below never fight the token form.
     out = normalize_spawn_args(out, stderr=stderr)
@@ -1149,7 +1149,7 @@ def inject_spawn_defaults(
         profile_seed = f"/{node_verb}"
     verb = _profile_key(profile_seed, known if roster_ok else None)
     if verb is None:
-        # x-413d: an unknown namespaced verb used to resolve crown silently.
+        # an unknown namespaced verb used to resolve crown silently.
         print(
             f"fno agents spawn: seed {seed!r} names verb-shaped token "
             f"{_verb_token(seed)!r} but no shipped footnote verb or configured "
@@ -1166,7 +1166,7 @@ def inject_spawn_defaults(
             profile = profiles.get(legacy_verb)
             if profile is not None:
                 profile_verb = legacy_verb
-    # Overlay table guards (x-8975): the spawn-overlay verb owns them now -
+    # Overlay table guards: the spawn-overlay verb owns them now -
     # an unknown harness name, or a ranking field inside an overlay, refuses
     # the composition from the same call that resolves the rungs. Scoped to
     # the rungs THIS spawn reads; an unrelated verb's typo must not block it.
@@ -1243,7 +1243,7 @@ def inject_spawn_defaults(
             except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
                 capacity = {}
         if capacity is not None:
-            # x-ebd2: the resolved leading verb is the phase authority.
+            # the resolved leading verb is the phase authority.
             # blueprint/think bill planning; target never acquires frontier
             # eligibility merely because its low-difficulty node has no plan -
             # that model-only plan-presence inference is gone (the derived
@@ -1604,7 +1604,7 @@ def inject_spawn_defaults(
         suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
         route_injected = bool(_axes.get("route_injected"))
 
-    # The spawn-overlay verb owns the harness-keyed rungs (x-8975): one
+    # The spawn-overlay verb owns the harness-keyed rungs: one
     # round-trip answers effort/substrate/permission plus the ONE bundle and
     # refuses a bad overlay. Gated on an overlay table (or lane args) being
     # present, so an overlay-free spawn pays zero subprocesses and the
@@ -1660,7 +1660,7 @@ def inject_spawn_defaults(
     if not has_effort:
         # Effort surface depends on the RESOLVED HARNESS, not the vendor, so
         # the value is re-read through the harness rungs HERE, after the grid
-        # or slot has settled the harness (x-8975) - a codex-keyed overlay
+        # or slot has settled the harness - a codex-keyed overlay
         # effort must win on codex while the scalar still answers claude.
         cfg_effort, effort_rung = _seamed("effort")
 
@@ -1681,9 +1681,9 @@ def inject_spawn_defaults(
         cfg_substrate, substrate_rung = "", None
     _has_permission = _has_permission_mode(out[1:])
     if not _has_permission:
-        # Re-read through the harness rungs (x-8975): an empty re-read keeps
+        # Re-read through the harness rungs: an empty re-read keeps
         # the harness-blind read alive: that is the builtin.autonomous rung
-        # (x-7198), which field() cannot see.
+        #, which field() cannot see.
         h_permission, h_rung = _seamed("permission_mode")
         if h_permission:
             cfg_permission, permission_rung = h_permission, h_rung
@@ -1723,7 +1723,7 @@ def inject_spawn_defaults(
     suppressed.extend([tuple(e) for e in _axes.get("suppressed") or []])
     injected_substrate = _axes.get("injected_substrate") or None
 
-    # Harness bundle (x-8975): the verb's ONE bundle answer (lane args >
+    # Harness bundle: the verb's ONE bundle answer (lane args >
     # profile harness overlay > defaults harness overlay, never concatenated)
     # lands behind the -- passthrough fence at the argv TAIL, so the caller's
     # own pre-fence tokens stay pre-fence; a boundary the caller already typed
@@ -1805,7 +1805,7 @@ def inject_spawn_defaults(
     if _bundle_inject:
         out = [*out, *_bundle_inject]
     if inject or _bundle_inject:
-        # x-1caa: injection can pin the substrate the operator left open, and
+        # injection can pin the substrate the operator left open, and
         # the Rust-routed lane never reaches the Python CLI's own refusal, so
         # the gate re-runs on the final argv. The helper rewrites `--substrate`
         # in place and ignores toks[0], so `out` itself is the safe view.

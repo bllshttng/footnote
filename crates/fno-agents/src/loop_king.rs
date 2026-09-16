@@ -208,7 +208,7 @@ impl KingQueue {
                 )));
             }
         }
-        // x-84b2: the walk identity is minted through the canonical bridge; a
+        // the walk identity is minted through the canonical bridge; a
         // failed mint refuses the walk before anything dispatches.
         let walk_key = mint_walk_key(&fno_bin, repo_root, &scope)?;
         Ok(Self {
@@ -440,7 +440,7 @@ fn mint_walk_discriminator() -> String {
 }
 
 /// `kl-th-<scope>-<walk-discriminator>`, minted through the canonical
-/// `fno agents name` bridge (x-84b2): the kl source names the king loop as the
+/// `fno agents name` bridge: the kl source names the king loop as the
 /// spawner, th the think-class walk verb, and the scope the crown it belongs
 /// to so a journal read by a human says which reign spawned the unit. A failed
 /// mint REFUSES the walk (Err) rather than falling back to an uncoded key.
@@ -672,7 +672,7 @@ fn live_crown_holder_in_with_projects(
 /// read. Returns the one-line outcome to record, never an error: a
 /// failed escalation is named and moves on, since blocking the terminal on it
 /// leaves the king stopped with nobody told either way. Stdout carries
-/// `king:<holder>` or `operator:<qid>` (x-3ecf, AC4-HP) - the CLI resolves
+/// `king:<holder>` or `operator:<qid>` (AC4-HP) - the CLI resolves
 /// which target the receipt names, this fn only renders it.
 pub(crate) fn escalate_stalled(
     fno_bin: &str,
@@ -890,9 +890,9 @@ mod tests {
         let out = escalate_stalled(
             fno.to_str().unwrap(),
             dir.path(),
-            &["undispatched:x-1234".to_string()],
+            &["undispatched:x-aaaa".to_string()],
             "NoProgress",
-            "x-a792",
+            "x-bbbb",
         );
         assert_eq!(out, "escalated to the presiding king l1-king");
     }
@@ -904,7 +904,7 @@ mod tests {
         let out = escalate_stalled(
             fno.to_str().unwrap(),
             dir.path(),
-            &["undispatched:x-1234".to_string()],
+            &["undispatched:x-aaaa".to_string()],
             "NoProgress",
             "",
         );
@@ -920,7 +920,7 @@ mod tests {
         let out = escalate_stalled(
             fno.to_str().unwrap(),
             dir.path(),
-            &["undispatched:x-1234".to_string()],
+            &["undispatched:x-aaaa".to_string()],
             "NoProgress",
             "",
         );
@@ -942,13 +942,13 @@ mod tests {
         let out = escalate_stalled(
             stub_path.to_str().unwrap(),
             dir.path(),
-            &[crate::king_escalation::reading_undelivered("x-a792")],
+            &[crate::king_escalation::reading_undelivered("x-bbbb")],
             "Budget",
-            "x-a792",
+            "x-bbbb",
         );
         assert!(out.contains("escalated to the operator"), "{out}");
         let recorded = std::fs::read_to_string(dir.path().join("args.txt")).unwrap();
-        assert!(recorded.contains("x-a792"), "args: {recorded}");
+        assert!(recorded.contains("x-bbbb"), "args: {recorded}");
         assert!(!recorded.contains("--scope"), "args: {recorded}");
     }
 
@@ -1216,7 +1216,7 @@ mod tests {
         fs::create_dir_all(&kings).unwrap();
         fs::write(kings.join("k.md"), "---\nfno_id: k-1\nscope: epic-x\n---\n").unwrap();
         let registry = write_registry(&dir, "busy", Some("epic-x"));
-        // x-84b2: the mint runs `fno agents name` at construction; the stub
+        // the mint runs `fno agents name` at construction; the stub
         // answers it so the guard assertions stay the test's subject.
         let fno_bin = write_fno_stub(&dir, "kl-th-epic-x-w00ff")
             .to_string_lossy()

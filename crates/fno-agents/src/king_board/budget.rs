@@ -182,7 +182,7 @@ pub(crate) fn run_json(cmd: Vec<String>, cwd: &Path, timeout: Duration) -> Sourc
 }
 
 /// The argv prefix for a Python `fno` self-shellout, resolved without a PATH
-/// dependency (`scrape::fno_py`, x-cf15): `FNO_PY`, then the `fno-py`
+/// dependency (`scrape::fno_py`): `FNO_PY`, then the `fno-py`
 /// console script beside this binary, then the uv tools bin; the bare name
 /// last so a genuinely-missing CLI surfaces a real subprocess error rather
 /// than a silent no-op. Was PATH-scan-then-bare, which died on an install

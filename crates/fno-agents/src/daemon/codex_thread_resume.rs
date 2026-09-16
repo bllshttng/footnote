@@ -85,7 +85,7 @@ pub(super) async fn ensure_codex_thread_handle(
     if let Some(handle) = threads.get(&entry.name).cloned() {
         return Ok(handle);
     }
-    // x-fd66: the resumed actor's report seq starts ABOVE the row's current
+    // The resumed actor's report seq starts ABOVE the row's current
     // seq, so its first write clears the gate instead of dying under the
     // previous incarnation's seq. The counter itself lives on the callback,
     // one per thread start/resume, never on the row.

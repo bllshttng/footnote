@@ -1,6 +1,6 @@
 """Typed, immutable, versioned resume receipts + live-authority revalidation.
 
-The two invariants this module exists to enforce (x-c3a2):
+The two invariants this module exists to enforce :
 
 1. A receipt is EVIDENCE, not AUTHORITY. ``write_receipt`` records a snapshot;
    it never grants the right to act. ``revalidate`` is the gate: it compares a
@@ -635,7 +635,7 @@ def read_node_events(paths: Sequence[Path]) -> list[dict[str, Any]]:
     event view is identical to the scoreboard's (same dedup, same paths). The
     caller filters to the node before passing to revalidate. Each journal's
     ``.ephemeral`` sibling is read too: the claim lifecycle kinds below are
-    ephemeral-class and have lived there since retention routing (x-add3),
+    ephemeral-class and have lived there since retention routing,
     and the coverage reader dedups and tolerates the missing file.
     """
     kinds = {

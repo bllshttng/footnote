@@ -1,4 +1,4 @@
-"""Ship-gate verifier advisory (W6, x-f063): run the plan-AC check against the
+"""Ship-gate verifier advisory (W6): run the plan-AC check against the
 ship diff, record the verdict, NEVER block.
 
 Invoked by ``fno-agents finalize``'s ship branch as::

@@ -2,7 +2,7 @@
 //! `claude stop`, and the all-source heal-token helper shellout. One module
 //! answers one question - how every such child runs (cwd pinning, bounds,
 //! output contract) - so a dead daemon cwd cannot take them all down at once
-//! (x-8f73: a daemon lazy-started from a worktree the reaper later deleted
+//! (: a daemon lazy-started from a worktree the reaper later deleted
 //! kept that deleted cwd forever, and every child that inherited it died at
 //! getcwd, leaving finished workers unstopable and holding fleet slots).
 
@@ -99,7 +99,7 @@ fn token_helper_output(
         // No scope dir named: pin an existing cwd anyway, because a daemon
         // lazy-started from a worktree the reaper later deleted would hand the
         // child its own dead cwd, and the Python helper dies at getcwd with a
-        // traceback (x-8f73). The registry's parent (~/.fno/agents) is the
+        // traceback. The registry's parent (~/.fno/agents) is the
         // nearest always-there directory.
         None => command.current_dir(lifecycle_child_cwd(
             registry_path.parent().unwrap_or_else(|| Path::new(".")),
@@ -172,7 +172,7 @@ fn parse_heal_token_output(
         // helper's LAST stderr line, not its first. A Python traceback opens
         // with the useless "Traceback" header and names the real failure in
         // its tail ("OSError: ...deleted"); quoting the first line shipped
-        // "(exit 1): Traceback", a refusal that names nothing (x-8f73).
+        // "(exit 1): Traceback", a refusal that names nothing.
         let stderr = String::from_utf8_lossy(&out.stderr);
         let cause = stderr
             .lines()
@@ -236,7 +236,7 @@ mod tests {
     use crate::claims::test_env_lock;
     use crate::{path_with, PATH_TEST_MUTEX};
 
-    /// x-8f73: a live cwd passes through untouched (the dominant case).
+    /// a live cwd passes through untouched (the dominant case).
     #[test]
     fn lifecycle_child_cwd_passes_a_live_cwd_through() {
         let live = std::env::temp_dir().join("x8f73-live-cwd");
@@ -246,7 +246,7 @@ mod tests {
         std::fs::remove_dir_all(&live).ok();
     }
 
-    /// x-8f73: a dead cwd (getcwd errored) falls back to an existing fallback;
+    /// a dead cwd (getcwd errored) falls back to an existing fallback;
     /// a missing fallback degrades to the temp dir instead of handing the child
     /// another missing directory.
     #[test]
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn heal_failure_relays_the_cause_line_not_the_traceback_header() {
-        // The x-8f73 failure shape: a Python traceback whose first line is the
+        // The failure shape: a Python traceback whose first line is the
         // useless header and whose tail names the real cause. The refusal
         // relays ONE labelled line - the tail - and never the raw buffer.
         let out = std::process::Command::new("sh")
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn token_helper_without_scope_cwd_pins_an_existing_directory() {
-        // x-8f73: with no scope dir named, the child inherits the caller's cwd
+        // with no scope dir named, the child inherits the caller's cwd
         // - fatal when a daemon lazy-started from a worktree the reaper later
         // deleted keeps that dead cwd forever. The helper child must land in an
         // existing directory (the registry's parent) instead.

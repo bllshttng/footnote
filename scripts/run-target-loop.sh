@@ -1,12 +1,12 @@
 #!/bin/bash
-# Exec shim over `fno-agents loop run --driver target` (step 5, ab-781b6d17).
+# Exec shim over `fno-agents loop run --driver target` (step 5, x-aaaa).
 # The legacy 466-line bash loop moved into the Rust loop runtime
 # (crates/fno-agents/src/loop_target.rs). This shim maps the documented
 # legacy flags onto the new verb and execs the binary - no loop logic here.
 # Resume after a crash is world-state driven: the Rust verb re-reads the
 # events journal and refuses to double-dispatch a terminated session.
 #
-# THE DOCUMENTED SUPERVISED-LOOP EXCEPTION (x-0ad6). Since the active_backlog
+# THE DOCUMENTED SUPERVISED-LOOP EXCEPTION. Since the active_backlog
 # daemon retargeted to fire-and-forget `fno agents spawn`, this supervised loop
 # is the ONE sanctioned non-spawn dispatch path. It is required for harnesses
 # with no native resume, which carry the conversation across iterations via
@@ -62,7 +62,7 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     *)
       echo "run-target-loop.sh: unknown flag '$1'" >&2
-      echo "The bash loop moved to 'fno-agents loop run' (step 5, ab-781b6d17);" >&2
+      echo "The bash loop moved to 'fno-agents loop run' (step 5, x-aaaa);" >&2
       echo "this shim maps only the documented legacy flags. See --help." >&2
       exit 2 ;;
   esac

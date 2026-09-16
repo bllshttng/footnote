@@ -65,7 +65,7 @@ set -uo pipefail
 
 # The report RPC and the OSC marker write both reach a daemon socket / a pane
 # PTY that can stall; both are bounded with the shared wall-clock helper rather
-# than the harness's 30s hook timeout (x-989d). Sourcing fails closed: a missing
+# than the harness's 30s hook timeout. Sourcing fails closed: a missing
 # helper makes this fire-and-forget hook exit 0 instead of blocking unbounded.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/with-timeout.sh

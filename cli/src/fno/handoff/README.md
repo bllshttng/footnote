@@ -7,7 +7,7 @@ Two responsibilities live here:
 
 ## History: the exit-42 dispatch protocol (removed)
 
-This package used to host `DispatchPayload` / `build_dispatch_payload` / `emit_and_exit` - the exit-42 handoff the pre-wedge `fno loop` used when a reasoning phase needed the host LLM, with `fno loop --continue --session <id>` as the resume command. The control-plane collapse removed the consumers in stages: the wedge (ab-d0337fbc) deleted the gate/phase machinery, and step-5 group 3 (ab-9fd662c6) deleted the exit-12 `fno loop` stub itself, so the dispatch payload builder went with it. The unified loop (`fno-agents loop run`) resumes from world state (graph + journal + claims), not from dispatch payloads.
+This package used to host `DispatchPayload` / `build_dispatch_payload` / `emit_and_exit` - the exit-42 handoff the pre-wedge `fno loop` used when a reasoning phase needed the host LLM, with `fno loop --continue --session <id>` as the resume command. The control-plane collapse removed the consumers in stages: the wedge deleted the gate/phase machinery, and step-5 group 3 deleted the exit-12 `fno loop` stub itself, so the dispatch payload builder went with it. The unified loop (`fno-agents loop run`) resumes from world state (graph + journal + claims), not from dispatch payloads.
 
 `ExitCode.DISPATCH_REQUIRED` (42) remains declared: the exit-42 convention is still used by skill-side shims (see `references/ship-phase.md` in the target skill), just no longer minted by this package.
 

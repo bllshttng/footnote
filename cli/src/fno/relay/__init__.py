@@ -1,4 +1,4 @@
-"""Cross-session agent relay (epic x-908b -> inside-out E4).
+"""Cross-session agent relay (epic -> inside-out E4).
 
 After the E4.3 relay-unification capstone, the relay is a transcript-reader + RPC
 client: the Rust daemon owns the interactive-claude PTY, and the relay injects via

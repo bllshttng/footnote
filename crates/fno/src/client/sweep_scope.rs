@@ -1,4 +1,4 @@
-//! One sweep choice, from modal row to prune flags (x-cf97, x-688b): the
+//! One sweep choice, from modal row to prune flags : the
 //! counts the modal offers, and the exact flag expansion each choice
 //! promises - pure, so the promised expansion is unit-testable without
 //! spawning the verb.
@@ -116,7 +116,7 @@ fn read_counts(n: &impl Fn(&str) -> Option<usize>) -> Option<SweepCounts> {
 /// zero there is nothing to choose, and the header says so. Each row carries
 /// its OWN count, and the tap IS the confirmation - a widening is a separate
 /// row, never a rider on an existing choice, so the sweep's posture is
-/// visible before it acts (x-cf97).
+/// visible before it acts.
 pub(super) fn build_sweep_modal(c: &SweepCounts) -> AuxPopup {
     let (tabs, used, dead) = (c.tabs, c.used, c.dead);
     let any = tabs > 0 || dead > 0 || used > 0;
@@ -198,13 +198,13 @@ pub(super) fn build_sweep_modal(c: &SweepCounts) -> AuxPopup {
 
 /// The prune flags one sweep scope maps to, pure so the expansion each
 /// choice promises is unit-testable without spawning the verb. `both` means
-/// all three populations (x-688b): tabs, spent shells, and dead agents -
+/// all three populations: tabs, spent shells, and dead agents -
 /// with tabs 0 and used shells 21, a both that skipped the shells half
 /// closed nothing while the operator watched.
 pub(super) fn sweep_apply_args(scope: SweepScope, args: &mut Vec<String>) {
     match scope {
         SweepScope::Tabs => args.push("--tabs-only".to_string()),
-        // (x-cf97) The opt-in half: tabs-only PLUS the flag that
+        // The opt-in half: tabs-only PLUS the flag that
         // widens the tab fold to spent shells. Never the default.
         SweepScope::UsedShells => {
             args.push("--tabs-only".to_string());

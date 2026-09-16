@@ -112,7 +112,7 @@ TERMINAL_STATUSES = frozenset({"exited", "orphaned", "failed", "permanent_dead"}
 # "exec" in load_registry; any other concrete value is rejected like an alien
 # status, so a typo ("intractive") cannot silently fall back to exec behavior.
 # "attached" is an ADOPTED claude --bg session footnote drives over the daemon
-# control.sock (G1 held-attach substrate, x-26df) -- its process is Claude's, not
+# control.sock (G1 held-attach substrate) -- its process is Claude's, not
 # footnote's, so it is neither "exec" (one-shot) nor "interactive" (a
 # footnote-spawned PTY worker); listed here so a row the Rust adopt path writes
 # stays load_registry-readable from Python instead of bricking the registry.
@@ -122,11 +122,11 @@ KNOWN_HOST_MODES = frozenset({"exec", "interactive", "attached"})
 # target". Consumed by both AgentEntry.session_id (real entries) and
 # resume_cli._session_id_for (duck-typed against test fakes), so the
 # harness -> field mapping lives in exactly one place and cannot drift
-# between the two. Keyed on the row's harness (x-8dfc): identity is one axis.
-# At v10 (x-880e) the legacy per-provider id fields are gone, so codex/gemini
+# between the two. Keyed on the row's harness: identity is one axis.
+# At v10 the legacy per-provider id fields are gone, so codex/gemini
 # resume off the canonical harness_session_id; claude still attaches by the
 # 8-hex jobId in short_id (a distinct transport key, not removed).
-# pi joined at x-efd7. Two consumers reach this map WITHOUT the
+# pi joined at. Two consumers reach this map WITHOUT the
 # harness_session_id fallback that AgentEntry.session_id and
 # _session_id_for apply: `register_session` below raises on an unmapped
 # harness, and `discover._discover_from_registry` skips the row. So a
@@ -146,7 +146,7 @@ HARNESS_SESSION_ID_FIELDS = {
     "grok": "harness_session_id",
 }
 
-# The registry's legacy per-harness session-id keys (x-ec59). Distinct from the
+# The registry's legacy per-harness session-id keys. Distinct from the
 # manifest's map (which uses claude_session_id): the registry's claude identity
 # lives in claude_session_uuid. Passed to the shared sync_harness_aliases rule so
 # canonical harness_session_id and these legacy fields stay in lockstep on load.
@@ -156,7 +156,7 @@ REGISTRY_LEGACY_SESSION_KEYS = {
     "gemini": "gemini_session_id",
 }
 
-# v4 (ab-a171ceb2) is the host_mode forward-compat bump. v5 (inside-out E3.1) is
+# v4 is the host_mode forward-compat bump. v5 (inside-out E3.1) is
 # the same kind of bump for the additive `inside_leg` field: structurally
 # identical to v4 (inside_leg is additive-optional, an absent key reads as None),
 # but stamping v5 makes a pre-inside-leg reader (which accepts only {1,2,3,4})
@@ -164,7 +164,7 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # write-back. Reads stay backward-compatible: load_registry accepts
 # 1..=SCHEMA_VERSION. v6 (4a-G2) is the mux-ref bump; v7 (screen-manifest
 # fallback authority) the same bump for the additive `screen_state` verdict.
-# v8 (x-ec59) is the canonical-identity bump for `harness` / `harness_session_id`:
+# v8 is the canonical-identity bump for `harness` / `harness_session_id`:
 # every Python-authored row emits these keys, so a pre-v8 reader must REJECT the
 # store (clean "upgrade fno") rather than accept the version and then TypeError on
 # the unknown AgentEntry kwargs (the PR #364 brick) or silently drop the fields on
@@ -173,7 +173,7 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # UUID) now lives in `short_id`, unifying the transport-key field across
 # providers. Legacy rows backfill on load (see load_registry); a pre-v9 reader
 # must reject a v9 store rather than drop the jobId on write-back.
-# v10 (x-880e) removes the on-disk `provider` field and the legacy per-provider
+# v10 removes the on-disk `provider` field and the legacy per-provider
 # session-id trio (`codex_session_id`, `gemini_session_id`, `claude_session_uuid`):
 # `harness` is the sole identity axis and `harness_session_id` the sole session
 # id. A legacy row's `provider` back-fills `harness`, and each per-provider key
@@ -183,17 +183,17 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # v11 (US9): additive crown fields (crown_level/crown_scope/crown_grantor).
 # asdict emits them as null on every written row, so a pre-v11 reader must
 # reject the store rather than TypeError on the unknown keys.
-# v12 (x-ae2d): additive `route_settings_path` - the route-settings file a
+# v12: additive `route_settings_path` - the route-settings file a
 # routed worker was LAUNCHED with, so a relaunch can re-apply it instead of
 # silently coming back on the default account. Same additive-optional shape and
 # same forward-compat rationale as v11: asdict emits the key on every written
 # row, so a pre-v12 reader must reject the store rather than TypeError on it.
-# v13 (x-0358): additive `fno_id` - a durable fno identity independent of the
+# v13: additive `fno_id` - a durable fno identity independent of the
 # harness session id. Adopted target orphans carry the target run id; pane rows
 # carry the bound harness id or their unique registry name when the harness has
 # no session id. Same additive-optional shape and
 # forward-compat rationale as v12.
-# v14 (x-e21e): additive `delivery_policy` - a recipient's mail delivery
+# v14: additive `delivery_policy` - a recipient's mail delivery
 # policy ("bus-only": never prompt-line inject, always durable bus). Same
 # additive-optional shape and same forward-compat rationale as v12/v13: asdict
 # emits the key on every written row, so a pre-v14 reader must reject the
@@ -203,13 +203,13 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # harness="claude" and provider="zai", while "opencode" is valid on either
 # axis. Rows from v1..v14 retain the legacy meaning where `provider` was a
 # harness alias and are migrated only while reading those schema versions.
-# v16 (x-944f): `origin` and `spawn_trigger` gain their Rust counterparts in
+# v16: `origin` and `spawn_trigger` gain their Rust counterparts in
 # `RegistryEntry`. Python has written both for releases; Rust never modelled
 # them, so every Rust write re-serialized the row from its typed struct and
 # dropped the keys. Measured 2026-08-20: 0 of 37 live rows carried either. The
 # bump is not for a new Python field - it is what turns a pre-v16 binary's
 # SILENT erasure into a loud refusal, the same reason v11-v14 bumped.
-# v17 (x-d401): additive `model_basis` - whether `model` was REQUESTED at spawn
+# v17: additive `model_basis` - whether `model` was REQUESTED at spawn
 # or VERIFIED off a pane status. Same additive-optional shape and same
 # forward-compat rationale as v11-v14: asdict emits the key on every written
 # row, so without the bump a pre-v17 reader sees an unknown key AT its own
@@ -217,7 +217,7 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # TypeErrors - the PR #364 brick. The bump makes it a version gap instead.
 # v18 adds classified session lineage. Older readers must refuse rather than
 # silently erase predecessor or fork provenance on a read-modify-write.
-# v19 (x-de10): additive `sandbox_posture` - the sandbox a codex thread was
+# v19: additive `sandbox_posture` - the sandbox a codex thread was
 # LAUNCHED with, mirrored here so a Python write-back cannot erase the Rust
 # stamp (the same X3 erasure v16 closed for origin/spawn_trigger). The daemon
 # applies it on thread/resume; None on every other row.
@@ -230,28 +230,28 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # same forward-compat rationale as v11-v18: asdict emits every key on each
 # written row, so a reader older than the bump must reject the store on
 # version rather than TypeError on the unknown kwargs.
-# v21 (x-98ab): additive `node` - the backlog node this row works, stamped at
+# v21: additive `node` - the backlog node this row works, stamped at
 # the Python spawn seams from the spawn's resolved provenance and at the
 # register path from the session's own exported FNO_NODE. Before it, a reap
 # decision resolved the node by parsing it out of a name and the ledger check
 # a reap needs had no node to read off the row. None on rows whose writer
 # cannot know (adopt, daemon-hosted mints). Same additive-optional shape and
 # forward-compat rationale as v19/v20.
-# v22 (x-ac6b): additive `keeper_child_pid` - the process a lane-B keeper
+# v22: additive `keeper_child_pid` - the process a lane-B keeper
 # hosts, the daemon's restart-sweep assertion (a changed pid means something
 # respawned under the row's name). The bump is for the WRITER, the same reason
 # v16 bumped for origin: a pre-v22 Rust daemon accepts the unknown key and its
 # next read-modify-write silently erases it, after which the respawn check has
 # no recorded pid and backfills whichever child answers. The bump makes that
 # erasure a loud version refusal instead.
-# v23 (x-3837): additive `substrate` - the lane a row was spawned on ("pane",
+# v23: additive `substrate` - the lane a row was spawned on ("pane",
 # "thread", "headless"), stamped once at birth by the writer that resolved the
 # lane so a later restore reads the lane instead of guessing it off a mux ref
 # or a pid. None on rows whose writer cannot know (adopt, manifest synthesis);
 # ABSENCE MEANS UNKNOWN, never "pane". Same writer-refusal rationale as v22:
 # the stamp is written once and read much later, so an erasure on
 # read-modify-write is unrecoverable rather than self-healing.
-# v24 (x-2019): additive `requested_model`/`requested_provider`/`requested_effort`
+# v24: additive `requested_model`/`requested_provider`/`requested_effort`
 # - the spawn REQUEST verbatim as typed (any [1m] suffix included), stamped at
 # birth beside the observed `model`/`provider`/`effort` axes so a silent
 # substitution is a one-line diff instead of an operator's memory. The bump is
@@ -268,7 +268,7 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # forward-compat rationale as v11-v24.
 # v26: additive served facts (liveness + its stamp, harness_title): a pre-v26
 # reader degrades (drops the keys, refuses writes) instead of TypeError at v25.
-# v27 (x-04ce): additive `launch_account_source` - WHO chose the row's
+# v27: additive `launch_account_source` - WHO chose the row's
 # `launch_account`: "caller" or "config", vocabulary defined once in
 # `fno.agents.spawn_flag_owners`. None on every other row: "default" already
 # says nobody chose, a revive inherits the source row's stamp, legacy rows
@@ -282,7 +282,7 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # rationale as v27/v28: asdict emits the keys on every written row, so a
 # pre-v29 reader must reject the store on version rather than TypeError on the
 # unknown kwarg.
-# v28 (x-5283): additive `adopted_by_session` - the session that VOUCHED for
+# v28: additive `adopted_by_session` - the session that VOUCHED for
 # an adopted row; `spawned_by_session` keeps one meaning, so crowning cannot
 # re-attribute a row's cost. Same writer-protection rationale as v27.
 # v30 adds the effective git common-dir grant for Codex threads. The path is a
@@ -368,7 +368,7 @@ class AgentEntry:
     name: str
     cwd: str
     log_path: str
-    # Canonical harness identity (x-880e, v10). `provider` below is a separate
+    # Canonical harness identity (v10). `provider` below is a separate
     # model-provider axis from v15 onward; neither value may be inferred from the
     # other because names such as "opencode" are valid on both axes.
     # ``harness_session_id`` (below) is the worker's own session id in its harness's
@@ -378,9 +378,9 @@ class AgentEntry:
     aliases: list[str] = field(default_factory=list)
     provider: Optional[str] = None
     model: Optional[str] = None
-    # (x-d401) The basis for `model`: "requested" (stamped at spawn from the
+    # The basis for `model`: "requested" (stamped at spawn from the
     # flag or route the caller named) or "verified" (read back from a verified
-    # pane status). A bare model is two facts in one field - the x-aa8e
+    # pane status). A bare model is two facts in one field - the
     # shape - so the pair travels together. None on rows that predate the
     # field or carry no model. Additive-optional; stays OUT of the list-row
     # projection (model is a projection omission by standing ruling: intended
@@ -402,7 +402,7 @@ class AgentEntry:
     host_mode: Optional[str] = None
     # The worker's own session id in its harness's store (claude full UUID, codex
     # thread id, gemini session id) -- the canonical successor to the removed
-    # per-provider session-id fields (x-880e). load_registry back-fills it from a
+    # per-provider session-id fields. load_registry back-fills it from a
     # legacy row's per-provider key on read; the Rust RegistryEntry mirrors it.
     harness_session_id: Optional[str] = None
     # Classified session lineage. The current harness_session_id is the address
@@ -415,7 +415,7 @@ class AgentEntry:
     route_provider_id: Optional[str] = None
     model_name: Optional[str] = None
     account_record_id: Optional[str] = None
-    # Spawn-time parent edge (Task 2.2, x-30f6). Ambient-captured from the
+    # Spawn-time parent edge (Task 2.2). Ambient-captured from the
     # SPAWNING session's environment; never required of a caller. All three
     # default to None so pre-existing rows and callers that pass none of them
     # round-trip safely (additive-optional: the Rust crate has no
@@ -429,7 +429,7 @@ class AgentEntry:
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
-    # x-5283 LD3: adoption is VOUCHING, not spawning; the grantor lives here
+    # LD3: adoption is VOUCHING, not spawning; the grantor lives here
     # so ``spawned_by_*`` keeps one meaning. Additive-optional (schema v28).
     adopted_by_session: Optional[str] = None
     # v29: what the codex app-server RESOLVED for a thread row, in its own
@@ -444,7 +444,7 @@ class AgentEntry:
     # carries onto every turn; the posture alone does not say what it reached.
     resolved_sandbox: Optional[str] = None
     granted_writable_roots: list[str] = field(default_factory=list)
-    # x-42c5: the CAUSE of the spawn, distinct from spawned_by_* above (which
+    # the CAUSE of the spawn, distinct from spawned_by_* above (which
     # identify WHO called `fno agents spawn`, not WHY). An automated dispatcher
     # sets FNO_SPAWN_TRIGGER before shelling out so the subprocess's own
     # environment carries the reason (ambient-captured here the same way
@@ -452,11 +452,11 @@ class AgentEntry:
     # None/absent means "an operator asked for this directly." Format is
     # "<dispatcher>:<reason>", e.g. "think_spawn:work-start" or
     # "think_spawn:conversational" - the only producer today is
-    # fno.provenance.spawn_think._spawn_think_worker. Before x-42c5 the only
+    # fno.provenance.spawn_think._spawn_think_worker. Before the only
     # evidence for "did a birth trigger spawn this?" was a timestamp gap
     # between a node's created_at and a worker's registry row.
     spawn_trigger: Optional[str] = None
-    # Sandbox posture the worker was launched with (v19, x-de10):
+    # Sandbox posture the worker was launched with (v19):
     # "danger-full-access" or "workspace-write"; stamped by the daemon's codex
     # thread lane at spawn and applied on thread/resume, so a daemon restart
     # cannot silently demote a yolo worker. None on every other row. Mirrors
@@ -488,7 +488,7 @@ class AgentEntry:
     origin: Optional[str] = None
 
     # ----------------------------------------------------------------------
-    # Rust-daemon-only PTY fields (ab-b946b59c). A genuine daemon PTY row
+    # Rust-daemon-only PTY fields. A genuine daemon PTY row
     # (spawn/host/promote) carries a non-empty short_id/project_root + pid +
     # worker socket, etc. PR #364 made a *round-tripped Python* row omit these
     # (Rust's skip_serializing_if drops them when empty/None), but a real PTY
@@ -503,7 +503,7 @@ class AgentEntry:
     # "" -- emitting "short_id": null would fail Rust's deserialize (null is not
     # a String). The Option fields below emit null, which Rust reads as None.
     #
-    # short_id is the provider's transport key (v9, x-1b1e): claude rows carry
+    # short_id is the provider's transport key (v9): claude rows carry
     # the 8-hex jobId (`claude attach/logs <jobId>`, by construction the first 8
     # hex of the session UUID); daemon PTY rows carry the name-derived worker
     # socket key. The legacy `claude_short_id` field was removed at v9 --
@@ -514,14 +514,14 @@ class AgentEntry:
     cc_session_id: Optional[str] = None
     pid: Optional[int] = None
     pid_start_time: Optional[int] = None
-    # The KEEPER's child pid for a lane-B thread row (x-ac6b): the process the
+    # The KEEPER's child pid for a lane-B thread row: the process the
     # keeper hosts. Stamped by the lane-B spawn from the Identify reply and
     # re-asserted unchanged by the Rust daemon's registry-side keeper sweep on
     # every start - a changed pid means something respawned under the row's
     # name. Mirrors Rust ``RegistryEntry.keeper_child_pid``; gated by the v22
     # schema bump so an older writer refuses rather than silently erases it.
     keeper_child_pid: Optional[int] = None
-    # The substrate this row was spawned on (v23, x-3837): "pane", "thread" or
+    # The substrate this row was spawned on (v23): "pane", "thread" or
     # "headless", stored under the public names the capability table keys on
     # (never "bg", the deprecated alias for thread). Stamped once at birth by
     # the writer that resolved the lane. None on rows whose writer cannot know
@@ -537,12 +537,12 @@ class AgentEntry:
     # `InsideLegReport`). A lossless PASSTHROUGH: the daemon (Rust) is the sole
     # writer and owns all inside-leg behaviour (seq-drop, TTL aging, authority);
     # Python only custodies the blob so a row round-trips across the mixed-language
-    # registry (X3 / ab-b946b59c). Kept as an opaque dict (not a typed dataclass)
+    # registry (X3 /). Kept as an opaque dict (not a typed dataclass)
     # because no Python consumer reads its fields yet; type it when one does.
     # None for every non-inside-leg row; asdict re-emits it (None -> null, which
     # Rust reads back as None). Additive-optional, gated by the v5 schema bump.
     inside_leg: Optional[dict] = None
-    # Reconcile's Exited-transition stamp (x-b1aa): ISO 8601 UTC, written the
+    # Reconcile's Exited-transition stamp: ISO 8601 UTC, written the
     # moment reconcile proves the row's child gone and cleared again when
     # current evidence contradicts it. Retirement no longer reads it (the
     # reverse join + transcript quiet decide); the liveness ladder's heartbeat
@@ -586,7 +586,7 @@ class AgentEntry:
     crown_scope: Optional[str] = None
     crown_grantor: Optional[str] = None
     # The PATH of the route-settings/<sha16>.json this CLAUDE worker was launched
-    # with (x-ae2d, v12), or None for a worker that was never routed. Written by
+    # with (v12), or None for a worker that was never routed. Written by
     # the spawn seams only; read only by the relaunch paths, which re-apply it or
     # refuse. A path, never the contents: that file is 0600 and carries a live
     # ANTHROPIC_AUTH_TOKEN, while the registry has no such guarantee.
@@ -598,17 +598,17 @@ class AgentEntry:
     #
     # NOT an answer to "what is this worker running now" - a recorded value
     # reports the INTENDED route in exactly the case where a fallback happened,
-    # so that question is read from the transcript (x-cf40) and never from here.
+    # so that question is read from the transcript and never from here.
     # Rust's RegistryEntry mirrors it as additive-optional passthrough, or the
     # daemon would drop a Python-stamped path on its next read-modify-write.
     route_settings_path: Optional[str] = None
-    # v13 (x-0358): durable fno identity. Adopted target orphans carry their
+    # v13: durable fno identity. Adopted target orphans carry their
     # target run id; pane rows carry the bound harness id, or the unique registry
     # name when the harness exposes none. Identity-adjacent only; never a
     # liveness or ownership claim. Rust mirrors it as additive-optional
     # passthrough so the daemon's read-modify-write keeps it.
     fno_id: Optional[str] = None
-    # v14 (x-e21e): this recipient's MAIL DELIVERY POLICY. ``"bus-only"`` means
+    # v14: this recipient's MAIL DELIVERY POLICY. ``"bus-only"`` means
     # mail to this session never prompt-line injects and always takes the
     # durable bus (the recipient surfaces it at its turn boundary via
     # ``fno agents mail notify-self``); ``None`` is the default injectable policy every
@@ -620,7 +620,7 @@ class AgentEntry:
     # mirrors it as additive-optional passthrough so the daemon's
     # read-modify-write keeps it.
     delivery_policy: Optional[str] = None
-    # v20 (x-d285): the ACCOUNT axis this worker was launched under. Three
+    # v20: the ACCOUNT axis this worker was launched under. Three
     # values, never two: "default" (the spawn positively pinned no account),
     # a registered account id (explicit or headroom-picked), or None (a legacy
     # row or a mint that cannot know - never readable as "default", because a
@@ -629,7 +629,7 @@ class AgentEntry:
     # CLAUDE_CONFIG_DIR or refuse. Rust's RegistryEntry mirrors it as
     # additive-optional passthrough so the daemon's read-modify-write keeps it.
     launch_account: Optional[str] = None
-    # v20 (x-d285): the SECOND valid session id an additive fork/background
+    # v20: the SECOND valid session id an additive fork/background
     # minted on this row. A fork is additive: both ids stay valid forever,
     # resolve to this same row and its launch binding, and neither replaces
     # the other. At most ONE optional id - no list, edge, generation, or
@@ -638,7 +638,7 @@ class AgentEntry:
     # refuses the write rather than evicting either. Rust mirrors it as
     # additive-optional passthrough.
     related_session_id: Optional[str] = None
-    # v21 (x-98ab): the backlog node this row WORKS, stamped once at birth from
+    # v21: the backlog node this row WORKS, stamped once at birth from
     # the spawn's resolved provenance (the FNO_NODE the spawner exported for
     # this child, never the spawner's own ambient value) or, at the register
     # path, from the session's own exported FNO_NODE - there the row describes
@@ -649,7 +649,7 @@ class AgentEntry:
     # the same discipline as `origin`. Rust's RegistryEntry mirrors it as
     # additive-optional passthrough so a daemon write-back preserves the stamp.
     node: Optional[str] = None
-    # v23 (x-2019): the spawn REQUEST, verbatim as the flags spelled it (any
+    # v23: the spawn REQUEST, verbatim as the flags spelled it (any
     # [1m] suffix included), stamped once at birth beside the observed axes.
     # `model`/`model_basis` flip to a verified observation; these three never
     # do, so requested-vs-observed stays a one-line diff instead of an
@@ -666,7 +666,7 @@ class AgentEntry:
     liveness_measured_at: Optional[str] = None
     harness_title: Optional[str] = None
 
-    # v27 (x-04ce): WHO chose `launch_account`, vocabulary from
+    # v27: WHO chose `launch_account`, vocabulary from
     # spawn_flag_owners. None on "default", inherited, and unattributable
     # rows. ABSENCE MEANS UNKNOWN, the `origin` discipline; Rust mirrors it
     # as additive-optional passthrough.
@@ -687,11 +687,11 @@ class AgentEntry:
         pane/mux row carries a ``harness_session_id`` but no ``short_id`` by
         design (``_validate_single_live_ref`` enforces mux XOR worker XOR bg).
         Falling back to ``harness_session_id`` keeps such a row resumable
-        instead of reporting "no session id" for a row that has one (x-b84f).
+        instead of reporting "no session id" for a row that has one.
 
         The harness -> field mapping comes from the module-level
         :data:`HARNESS_SESSION_ID_FIELDS`, which ``resume_cli._session_id_for``
-        also reads, so the two cannot drift. Keyed on ``harness`` (x-880e, the
+        also reads, so the two cannot drift. Keyed on ``harness`` (the
         sole identity axis). As a ``@property`` this is excluded from ``asdict``
         serialization and never becomes an on-disk storage field.
         """
@@ -743,7 +743,7 @@ def mint_agent_entry(
 
 
 # ---------------------------------------------------------------------------
-# Shared identifier resolver (x-1b1e): every session-connecting `fno agents`
+# Shared identifier resolver: every session-connecting `fno agents`
 # verb accepts the registry name, full harness session id, explicit transport
 # short id, canonical handle, or legacy prefix. This function is the single
 # lookup choke point so no verb re-implements a name-only `.find`.
@@ -928,7 +928,7 @@ def resolve_agent(
     Every session-shaped short token is checked against the harness stores too:
     the registry is a cache of reality, so a store-only session must participate
     in the same ambiguity decision. A registry miss may then adopt one unique
-    store hit (x-9cc5).
+    store hit.
     """
     try:
         entries = load_registry(path=path)
@@ -1071,7 +1071,7 @@ def resolve_from_harness_store(
     token: str, *, registry_path: Optional[Path] = None,
     scope_cwd: Optional[str] = None, cross_project: bool = False,
 ) -> Optional[AgentEntry]:
-    """The registry-miss healer (x-9cc5), isolated so every resolution surface
+    """The registry-miss healer, isolated so every resolution surface
     reaches it identically -- including ``resume``, which loads its own entries
     and so calls :func:`resolve_agent_in` rather than :func:`resolve_agent`.
 
@@ -1278,7 +1278,7 @@ def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
 def _existing_row_names(raw: Optional[dict]) -> set[str]:
     """Names already on disk, from the same read ``_refuse_write_over_newer_schema``
     uses -- so the new-vs-existing split for the resolvable-handle invariant
-    (x-7bcd) costs no extra I/O."""
+ costs no extra I/O."""
     if raw is None:
         return set()
     agents = raw.get("agents")
@@ -1295,7 +1295,7 @@ def _has_resolvable_handle(
     harness: Optional[str] = None,
     harness_session_id: Optional[str] = None,
 ) -> bool:
-    """The three-leg resolvable-handle predicate (x-7bcd), factored out of
+    """The three-leg resolvable-handle predicate, factored out of
     ``_validate_resolvable_handle`` so a mint site that must decide WHETHER a
     fallback handle is needed (``mux_spawn.py``) can call the same source of
     truth instead of re-deriving the leg logic inline, where a future change
@@ -1308,7 +1308,7 @@ def _has_resolvable_handle(
 
 
 def _validate_resolvable_handle(entry: AgentEntry) -> None:
-    """The resolvable-handle invariant (x-7bcd, mirrors Rust
+    """The resolvable-handle invariant (mirrors Rust
     ``validate_resolvable_handle``): at creation, every registry row carries
     at least one handle an outside observer can resolve without asking the
     worker anything. Any one of three legs satisfies it: (1) ``pid`` +
@@ -1523,9 +1523,9 @@ def _is_identity_token(value: object) -> bool:
     """A well-shaped registry identity token (provider or harness): a
     non-empty, all-lowercase, whitespace-free string.
 
-    The relaxed load-gate corruption guard (x-8dfc) that replaced the
+    The relaxed load-gate corruption guard that replaced the
     KNOWN/READABLE_PROVIDERS enumeration: the read no longer bricks on an
-    alien harness (it degrades to durable routing, x-ec59 posture), and
+    alien harness (it degrades to durable routing, posture), and
     dispatch capability is gated separately at the spawn/ask seam. This still
     rejects genuine corruption -- empty, non-string, or whitespace-bearing
     identity. Mirrors Rust ``client_verbs::is_identity_token``.
@@ -1688,7 +1688,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     # last_message_at + mcp_channel_id), v2 (lacks mcp_channel_id),
     # v3 (adds mcp_channel_id), and v4 (host_mode forward-compat bump;
     # structurally identical to v3). The accepted set spans 1..=SCHEMA_VERSION
-    # so a bump never drops back-compat reads (ab-a171ceb2); the synthesis
+    # so a bump never drops back-compat reads; the synthesis
     # flags below key off ABSOLUTE version numbers, not SCHEMA_VERSION-relative
     # offsets, so future bumps don't silently mis-trigger v1/v2 synthesis.
     # Anything outside the range raises RegistryVersionError.
@@ -1813,7 +1813,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                     f"{sorted(KNOWN_STATUSES)}. "
                     "Upgrade or downgrade fno to match."
                 )
-            # Accept-on-read backfill (x-880e, v10): the removed identity keys
+            # Accept-on-read backfill (v10): the removed identity keys
             # (provider + the per-provider session-id trio) populate the canonical
             # harness / harness_session_id and then die, so a legacy row round-trips
             # losslessly and asdict never re-emits them. harness adopts provider when
@@ -1838,7 +1838,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
                 dead_keys.append("provider")
             for _dead in dead_keys:
                 row.pop(_dead, None)
-            # v9 backfill (x-1b1e): the removed `claude_short_id` is accepted on
+            # v9 backfill: the removed `claude_short_id` is accepted on
             # READ only -- a legacy row's jobId moves into `short_id` (the unified
             # transport key) and the key dies here, so asdict never re-emits it.
             # A conflicting pair keeps `short_id` (the drift this removal kills)
@@ -1870,7 +1870,7 @@ def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
             # fires for a row that recorded one); passing it to AgentEntry(**row)
             # would TypeError. Drop it -- Python recomputes it from harness +
             # harness_session_id (the identical projection Rust uses), so nothing
-            # recoverable is lost, and asdict re-omits it on write-back. (ab-b946b59c)
+            # recoverable is lost, and asdict re-omits it on write-back.
             if "session_id" in row:
                 row = {k: v for k, v in row.items() if k != "session_id"}
             # An unknown key is a writer bug AT or BELOW our schema, and stays fatal
@@ -1967,7 +1967,7 @@ def register_existing_session(
     if not session_id:
         raise ValueError("session_id must be non-empty")
 
-    # x-0345: refusal IS the docs; see the raise message below.
+    # refusal IS the docs; see the raise message below.
     self_name = os.environ.get("FNO_AGENT_SELF", "")
     if self_name and (
         os.environ.get("FNO_AGENT_ROW_PENDING") == self_name
@@ -1993,7 +1993,7 @@ def register_existing_session(
     # (cv-d54ddd45).
     #
     # ``status`` overrides that default for a caller with better information:
-    # the harness-store fallback (x-9cc5) adopts a row it only knows EXISTS, so
+    # the harness-store fallback adopts a row it only knows EXISTS, so
     # it registers "orphaned". Neither value is live, so neither reaches live
     # anycast or a lane cap.
     _REGISTERED_STATUS: AgentStatus = status or "idle"
@@ -2087,7 +2087,7 @@ def register_existing_session(
                 )
                 if origin is not None and upgradeable:
                     entry.origin = origin
-                # x-98ab: same fill-empty discipline as origin. `node` is a
+                # same fill-empty discipline as origin. `node` is a
                 # birth fact, but the session's own exported FNO_NODE is
                 # evidence the birth path could have read too, so a refresh
                 # may FILL an empty node and may never change one - otherwise
@@ -2147,10 +2147,10 @@ def register_existing_session(
         while _address_is_taken(chosen):
             chosen = f"{base}-{suffix}"
             suffix += 1
-        # Parent edge (x-132c), captured for every NON-operator birth: a row
+        # Parent edge, captured for every NON-operator birth: a row
         # an operator's SessionStart registered has no spawner, and stamping
         # the operator's own session env would record a self-edge. ADOPTED
-        # rows are different (x-5283 LD3): adoption is vouching, not
+        # rows are different (LD3): adoption is vouching, not
         # spawning, so the captured session lands on adopted_by_session and
         # the spawned_by_* edge stays empty. The identity guard covers every
         # OTHER self-registration caller: a row never stamps itself as its
@@ -2182,7 +2182,7 @@ def register_existing_session(
             status=_REGISTERED_STATUS,
             origin=origin,
             last_message_at=last_message_at,
-            # x-98ab: the SessionStart caller passes the session's own exported
+            # the SessionStart caller passes the session's own exported
             # FNO_NODE; a caller that cannot know leaves None.
             node=node,
             # Registration observes a session that already exists; the lane it
@@ -2232,7 +2232,7 @@ def _mint_branch_row(
     while any(candidate.name == branch_name for candidate in entries):
         branch_name = f"{branch_base}-{suffix}"
         suffix += 1
-    # A claude branch is born bg-routable (x-a457): hex-guarded like its siblings.
+    # A claude branch is born bg-routable: hex-guarded like its siblings.
     lead = claude_transport_short_id(session_id)
     branch = replace(
         entry,
@@ -2470,7 +2470,7 @@ def heal_own_cwd(
     cwd: str,
     registry_path: Optional[Path] = None,
 ) -> Optional[tuple[Optional[str], str]]:
-    """Stamp the directory the worker WORKS in (x-dead task 0.1).
+    """Stamp the directory the worker WORKS in (task 0.1).
 
 The spawner mints the row with the spawn directory; the worker's own
 SessionStart heal makes the registry's cwd field answer "where does this
@@ -2512,7 +2512,7 @@ def registry_rows_by_cwd(
     """Raw registry rows indexed by each row's own ``cwd``, plus an ok flag.
 
     The ONE occupancy join for every reader that asks "which worker holds
-    this tree" (x-dead task 0.2, folding x-73df); three copies used to live
+    this tree" (task 0.2, folding); three copies used to live
     in unfinished_work and the worktree status legs. A missing registry is a
     legitimate empty fleet (ok); one that exists and fails to parse reads
     every candidate unmeasurable.
@@ -2563,7 +2563,7 @@ def record_session_observation(
 ) -> tuple[Optional[AgentEntry], str]:
     """Record ONE SessionStart id observation, classified when evidence exists.
 
-    Without predecessor evidence this is the x-d285 additive recorder: an
+    Without predecessor evidence this is the additive recorder: an
     empty primary accepts its first id (and promotes a ``spawning`` row to
     ``live``), an id already recorded is a no-op, a second different id fills
     the ONE optional ``related_session_id`` slot, and a third distinct id
@@ -2748,7 +2748,7 @@ def record_session_observation(
 def _stage_removal_receipt(
     entry: AgentEntry, *, home: Path, removed_by: str
 ) -> tuple[bool, str]:
-    """Build and durably write the removal receipt from the in-hand row (x-a879).
+    """Build and durably write the removal receipt from the in-hand row.
 
     Same keys, same ``<agents home>/reap-receipts/`` directory, same filename
     alphabet as the watchdog reap receipt and the Rust writer, so one
@@ -2779,7 +2779,7 @@ def _stage_removal_receipt(
     # A receipt already on disk for this session was staged moments ago by
     # the reap sweep (or the watchdog) BEFORE it dropped the rows - rewriting
     # it would stamp removed_by onto a pure reap receipt and change the
-    # x-b150 shape. The record on disk is already the recovery path.
+    # shape. The record on disk is already the recovery path.
     if path.exists():
         return True, f"receipt already staged for this session at {path}"
     receipt: dict = {
@@ -2808,7 +2808,7 @@ def _account_for_removed_rows(
     current: list[AgentEntry],
     new_entries: list[AgentEntry],
 ) -> None:
-    """Removal accounting at the write choke point (x-a879).
+    """Removal accounting at the write choke point.
 
     Every row the updater dropped is announced before the write lands: one
     ``registry_row_removed`` event per row on the agent-lifecycle log the

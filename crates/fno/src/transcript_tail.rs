@@ -324,7 +324,7 @@ const TRANSCRIPT_RESCAN_EVERY: std::time::Duration = std::time::Duration::from_s
 /// A session-tails reader that remembers where each uuid's transcript lives.
 ///
 /// The mux's 1s sideline tick calls [`TailReader::tails`] repeatedly with the
-/// same rows. Content freshness is per call (x-b186: a transcript grows
+/// same rows. Content freshness is per call (: a transcript grows
 /// independently of the registry, so cached paths are re-read every tick);
 /// only DISCOVERY is paced - the filename walk runs when a uuid has no cached
 /// path and the rescan clock is due. Entries for uuids no longer in `keys`
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn tail_reader_rereads_cached_paths_every_call() {
-        // x-b186 freshness under the cache: a transcript GROWS between ticks
+        // freshness under the cache: a transcript GROWS between ticks
         // and the next call picks up the newer prose with no new walk.
         let uuid = "346f5d0d-9840-473c-af21-eaf100ca9ec3";
         let dir = scratch(uuid, "older");

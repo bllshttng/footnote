@@ -1,4 +1,4 @@
-"""Task-grain claims: one claim per plan task under a node (epic x-09d7, group 3).
+"""Task-grain claims: one claim per plan task under a node (epic, group 3).
 
 Key shape ``task:<node-id>:<task-id>``. No primitive change: the claims core
 validates a key only for non-emptiness and encoded filename length, and this

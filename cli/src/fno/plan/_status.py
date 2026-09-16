@@ -21,7 +21,7 @@ fully dispatchable. `idea` is the rung `stub` was always naming.
 as status VALUES and accepted on read via STATUS_ALIASES; `shipped_at` is a
 timestamp field and is untouched.
 
-`reviewing`/`shipping` were pruned (x-f34f): they had zero consumers and the
+`reviewing`/`shipping` were pruned : they had zero consumers and the
 graph has no derived state that distinguishes them, so they never got written.
 The reconcile sweep folds them into `in_review` as Tier-1 synonyms.
 
@@ -62,9 +62,9 @@ KNOWN_STATUSES: frozenset[str] = (
     frozenset(STATUS_PROGRESSION) | frozenset(TERMINAL_STATUSES) | frozenset(STATUS_ALIASES)
 )
 
-# Graph derived `_status` -> plan `status` projection (x-f34f). Total over the
+# Graph derived `_status` -> plan `status` projection. Total over the
 # graph vocabulary; None means "no plan write" (a graph-side gate that must not
-# touch plan state). Identity on every rung: x-3ad5 unified the spellings and
+# touch plan state). Identity on every rung: unified the spellings and
 # `idea`'s last non-identity row retired once `idea` became a plan-side rung. It
 # survives for the two None gates, which are real behavior with no naming
 # component.
@@ -73,7 +73,7 @@ GRAPH_TO_PLAN_STATUS: dict[str, str | None] = {
     "design": "design",  # doc exists but is still a design doc
     "ready": "ready",
     "in_progress": "in_progress",
-    "claimed": "in_progress",  # legacy graph vocabulary, pre-x-5d91 rows
+    "claimed": "in_progress",  # legacy graph vocabulary, pre-change rows
     "blocked": None,  # graph-side gate; plan keeps its current state
     "in_review": "in_review",  # PR open = implementation complete
     "done": "done",  # merged

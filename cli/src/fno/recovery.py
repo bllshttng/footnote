@@ -1,6 +1,6 @@
 """fno.recovery — Layer-2 provider-failover and close-surfacing for bg sessions.
 
-ORIGIN (x-f47c): a background ``/target`` session whose turn ended on an
+ORIGIN : a background ``/target`` session whose turn ended on an
 *abnormal* termination (``API Error: Connection closed mid-response``, a dropped
 stream, an empty response) was resumed by nothing. The stream closed cleanly, so
 Claude Code's stuck-stream watchdog treated it as not-stuck, and the footnote
@@ -10,7 +10,7 @@ stopped until the ~1h reaper killed the process, leaving the backlog node stuck
 (hosted on the ``pr_watch`` launchd tick, independent of any session) that
 re-injected a resume nudge over Claude Code's messaging socket.
 
-THE SOCKET NUDGE NO LONGER DELIVERS (x-d93d, observed live 2026-08-09). Current
+THE SOCKET NUDGE NO LONGER DELIVERS (observed live 2026-08-09). Current
 Claude Code (verified on 2.1.226) holds every cross-session message sent to a
 ``bypassPermissions`` session for manual review (the ``crossSessionInbound``
 guard). footnote's bg ``/target`` sessions ARE bypassPermissions (unattended
@@ -26,13 +26,13 @@ So this module is NOT an auto-resume watchdog anymore: it cannot inject a resume
 into a stuck bypass session, and pretending otherwise would ship a daemon that
 silently no-ops while every held nudge raised an operator dialog. What survives:
 
-- **Provider failover (x-7abe).** A swap-class death (rate-limit / quota / auth
+- **Provider failover.** A swap-class death (rate-limit / quota / auth
   / 5xx) rotates the active provider and respawns a fresh ``claude --bg``
   worker (``--resume`` or ``/target``) on the new account. A fresh process's
   seed is a CLI arg, NOT a socket inject, so it is not held. This is the one
   live autonomous recovery path.
 
-- **Close-surfacing (x-a76d).** A session whose MISSION finished (node ``done``
+- **Close-surfacing.** A session whose MISSION finished (node ``done``
   or PR shipped) but whose process still lingers is surfaced ONCE for the
   operator to close (retro, then /stop), not told to "keep going" over a held
   socket. The operator wants finished sessions off the view, not re-opened.
@@ -72,7 +72,7 @@ from fno.adapters.providers.error_taxonomy import ErrorClass
 
 # The error the real send seam raises; aliased so callers/tests have one name.
 
-# Decision constants returned by :func:`classify`.
+# Decision constants returned by:func:`classify`.
 NUDGE = "nudge"
 NUDGE_CLOSE = "nudge-close"
 SKIP_NEEDS_INPUT = "skip-needs-input"
@@ -83,13 +83,13 @@ NOT_STALE = "not-stale"
 # motivating repro (b78039cc, a human typed it); the agent re-enters its turn
 # loop on any user message. This is now ONLY the CLI-arg seed passed to a fresh
 # ``claude --bg --resume <uuid>`` (the failover/revive path); it is NOT a socket
-# inject. The held socket nudge was removed in x-d93d: a bypassPermissions
+# inject. The held socket nudge was removed in: a bypassPermissions
 # recipient (which every autonomous /target worker is, via the built-in
 # unattended default) holds every cross-session message by design.
 CONTINUE_MESSAGE = "keep going"
 # A finished-but-lingering session is surfaced to the operator to CLOSE (run its
 # retro, then /stop), not to resume. Routed over an OS notification, not the
-# held socket (x-a76d): the operator wants these off the view, not re-opened.
+# held socket: the operator wants these off the view, not re-opened.
 CLOSE_MESSAGE = "mission complete but still open - run retro then /stop to close"
 FROM_NAME = "fno-recovery"
 REDISPATCH_PARTIAL = "partial"
@@ -158,13 +158,13 @@ def classify(
 ) -> str:
     """Classify from family-1 transcript truth; state.json is phase metadata.
 
-    ``mission_complete`` is the family-2 half (x-5583): family 1 calls any
+    ``mission_complete`` is the family-2 half : family 1 calls any
     terminal ``<promise>`` done, so on its own it lets a worker that promised
     and then died abnormally suppress recovery AND failover forever. Only an
     explicit ``False`` - positive evidence of an unfinished mission - relaxes
     that to the staleness gate (resume). An explicit ``True`` (the mission
     actually shipped, but the process still lingers) flips to :data:`NUDGE_CLOSE`
-    once idle (x-a76d): the operator wants finished sessions off the view, not
+    once idle : the operator wants finished sessions off the view, not
     re-opened. ``None`` (unverifiable) keeps the terminal skip (fail closed).
     """
     del updated_at, now
@@ -205,7 +205,7 @@ class Candidate:
     sock_path: str
     jobs_dir: object  # pathlib.Path; opaque here so tests can pass a tmp_path
     # cwd + name come from the registry row. They are unused on the nudge path
-    # and only carried for the failover re-dispatch (x-7abe): the worktree cwd
+    # and only carried for the failover re-dispatch: the worktree cwd
     # holds the node's target-state.md, and the name is the handle for
     # ``fno agents stop``. Both default None so nudge-path callers/tests need not
     # supply them.
@@ -230,7 +230,7 @@ class _SnapshotView:
     updated_at: Optional[str]
     # The dead session's last ``output.result`` text. For an out-of-usage death
     # it carries the provider error ("API Error: ... rate limit ...") that the
-    # failover branch classifies (x-7abe). None on the nudge path / older tests.
+    # failover branch classifies. None on the nudge path / older tests.
     output_result: Optional[str] = None
 
 
@@ -285,7 +285,7 @@ def _capped_key(short_id: str) -> str:
 
 
 def _close_key(short_id: str) -> str:
-    """Sentinel: a close-surface has fired once for this id (x-a76d)."""
+    """Sentinel: a close-surface has fired once for this id."""
     return f"close:{short_id}"
 
 
@@ -322,15 +322,15 @@ def recovery_sweep(
 
     Every decision that *matters* emits at most one event:
       - ``recovery_close_notify`` once when a finished-but-lingering /target
-        worker is surfaced to the operator to close (x-a76d),
+        worker is surfaced to the operator to close,
       - ``recovery_skipped{reason}`` when a session is deliberately spared
         (``needs-input``) or, for a node-bound stuck worker, surfaced once as
-        ``held-by-design`` (x-d93d: the socket nudge cannot reach a bypass
+        ``held-by-design`` (: the socket nudge cannot reach a bypass
         recipient, so the worker is stuck-but-not-auto-resumable).
     A not-yet-stale / done-and-not-lingering session is silent so healthy ticks
     do not spam the log. All I/O is injected so this is unit-testable offline.
 
-    Provider failover lives in the provider-cap actor (x-7e05); this sweep
+    Provider failover lives in the provider-cap actor ; this sweep
     records quota locks and surfaces the strand but moves nothing.
     """
     for c in candidates:
@@ -372,7 +372,7 @@ def recovery_sweep(
                     # True when the epoch is the NAMED window plus the
                     # observation time rather than a stamp the body resolved.
                     # A derived epoch is a bound, so a consumer knows a later
-                    # probe supersedes it (x-763a).
+                    # probe supersedes it.
                     "reset_is_derived": _err.reset_is_derived,
                     "reset_stamp_unparsed": _err.reset_stamp_unparsed,
                     "excerpt": _err.body_excerpt,
@@ -445,14 +445,14 @@ def recovery_sweep(
                 # honest action is to surface the stuck session once for the
                 # operator.
 
-        # x-d93d: the recipient is a bypass bg /target worker (the built-in
+        # the recipient is a bypass bg /target worker (the built-in
         # unattended default), so a socket nudge is held by
         # Claude Code's ``crossSessionInbound`` guard and would stack an operator
         # dialog without recovering anything. Do NOT send. A node-bound worker
         # that is genuinely stuck is surfaced (bounded by ``max_nudges``, then
         # ``recovery_capped``); a node-less bg thread (an ask/relay worker, or a
         # ``--bg`` session a human has attached to and drives interactively) is
-        # none of recovery's mission and stays silent (x-a76d scope fix).
+        # none of recovery's mission and stays silent (x-aaaa scope fix).
         if not c.cwd or _worktree_is_node_less(c.cwd):
             continue
         n = counts.get(c.short_id, 0)
@@ -528,7 +528,7 @@ def _safe_read_state(jobs_dir):
 
 
 # ---------------------------------------------------------------------------
-# Out-of-usage provider failover (x-7abe)
+# Out-of-usage provider failover
 #
 # This wires the already-built+tested failover engine
 # (``adapters/providers/error_taxonomy`` + ``failover.FailoverController``) into
@@ -713,7 +713,7 @@ def _worktree_is_node_less(cwd: str) -> bool:
 def _node_is_done(node: str) -> bool:
     """True iff ``node`` resolves in the graph and is already ``done``.
 
-    Guards the respawn against a node that raced to completion (x-370f AC1-EDGE):
+    Guards the respawn against a node that raced to completion (AC1-EDGE):
     re-dispatching a finished node would spawn a worker with nothing to do. Any
     load miss (absent / corrupt graph, unknown id) degrades to False so the
     respawn proceeds — the claim + spawn path is the real backstop, not this read.
@@ -752,7 +752,7 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
 
         parsed = parse_worker_mission(candidate.name)
         # Manifest first: the runtime wrote it, so unlike a worker name (a mere
-        # convention - `tgt-x-4175-liveness` ships) it cannot drift. The one
+        # convention - `tgt-x-aaaa-liveness` ships) it cannot drift. The one
         # exception is a positively think-named worker: it writes no manifest of
         # its own but spawns with --cwd on the node's canonical root, where an
         # unrelated /target session's manifest can sit. Reading that would
@@ -787,7 +787,7 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
             if name_str.startswith(f"think-{node_id}-"):
                 tail = name_str[len(f"think-{node_id}-"):]
             else:
-                # x-84b2 canonical shape: the reason opens the parsed tail.
+                # canonical shape: the reason opens the parsed tail.
                 from fno.agents.naming import parse_dispatch_agent_name
 
                 dname = parse_dispatch_agent_name(name_str)
@@ -807,7 +807,7 @@ def mission_complete(candidate: "Candidate") -> Optional[bool]:
 
 
 def _release_lane_slot(node: str, cwd: str) -> None:
-    """Free a dead lane's parallel-lane slot (parallel mode x-42d5, G4).
+    """Free a dead lane's parallel-lane slot (parallel mode, G4).
 
     Called only when the respawn did NOT start: a successful respawn keeps the
     slot for the new worker's target-init reconcile, and a post-init slot is
@@ -891,7 +891,7 @@ def _redispatch(
 ) -> "bool | str | _Failed":
     """Legacy non-outage stop and respawn on an already selected route.
 
-    Quorum-backed provider outages belong to the provider-cap actor (x-7e05);
+    Quorum-backed provider outages belong to the provider-cap actor ;
     this helper has neither exact source-death proof nor a durable attempt
     journal and is not an outage migration seam.
 
@@ -915,7 +915,7 @@ def _redispatch(
     ``--substrate bg`` for a non-claude harness - a real difference in the spawn
     call, not a naming change.
 
-    Ordered reuse-first sequence (x-370f residual 1): stop the worker, then
+    Ordered reuse-first sequence (residual 1): stop the worker, then
     ``fno agents claim force-release`` the node claim (the verified reliability gap —
     ``stop`` alone does NOT free the claim, per the auto-continue-wedge finding,
     so without this the respawn's ``target init`` refuses on the held claim and
@@ -1010,7 +1010,7 @@ def _redispatch(
         # active in settings.yaml, so the kind is what spawn needs. no-merge: an
         # autonomous worker lands a PR for review, never auto-merges.
         axis = list(flags) if flags else ["--harness", "claude", "--substrate", "bg"]
-        # x-8151: the spelling comes from harness_map.AUTONOMOUS_COMMAND, never
+        # the spelling comes from harness_map.AUTONOMOUS_COMMAND, never
         # a second hardcoded string that drifts.
         from fno.agents.harness_map import AUTONOMOUS_COMMAND
 
@@ -1018,7 +1018,7 @@ def _redispatch(
             [*_subprocess_util.fno_py_cmd(), "agents", "spawn", *axis,
              "--cwd", cwd, "--name", agent,
              AUTONOMOUS_COMMAND.format(id=node)],
-            # x-9d11: the env carrier backs the flag - a replacement worker
+            # the env carrier backs the flag - a replacement worker
             # that drops the flag post-compaction still folds the refusal at
             # init (this respawn lane does not route through resolve_dispatch).
             cwd=cwd, capture_output=True, timeout=60, check=False,
@@ -1114,7 +1114,7 @@ def _materialize_managed_switch(record_id: str, repo_root: Optional[str] = None)
 # A failover swap rotates the active account, but a node-LESS bg thread (a
 # footnote-launched ``claude --bg`` session whose cwd has no target-state.md - an
 # ask/relay worker, a bare bg thread) has no node for ``_redispatch`` to /target.
-# Revival maps the session kind to an action (epic x-e4a7 revival table):
+# Revival maps the session kind to an action (epic revival table):
 #   - transcript visible to the new account -> respawn ``claude --bg --resume
 #     <uuid> "keep going"`` under the new env (US4).
 #   - transcript NOT visible (unshared two-dir) -> notify the human with the exact

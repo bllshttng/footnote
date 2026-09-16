@@ -1,4 +1,4 @@
-"""Which mux server does this call address? (x-f209)
+"""Which mux server does this call address?
 
 The server-axis resolver: flag > FNO_SERVER > FNO_SESSION > main, with the
 one deprecation note only when the legacy variable decided. Lives apart
@@ -21,7 +21,7 @@ def mux_server_env(env=None) -> str:
 
     Silent: the deprecation note fires in :func:`resolve_mux_session`, and
     only when the legacy variable is the one that decided the server
-    (x-f209). Callers that must never print (session-start hooks) use this.
+. Callers that must never print (session-start hooks) use this.
     """
     source = env if env is not None else os.environ
     server = source.get("FNO_SERVER") or ""

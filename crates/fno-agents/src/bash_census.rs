@@ -1,6 +1,6 @@
 //! `fno-agents bash-census [--days N] [--allow] [--json] [--cwd PATH]` --
 //! fold Bash tool_use calls out of this project's Claude transcripts into the
-//! shape a permission allowlist can act on (x-997a).
+//! shape a permission allowlist can act on.
 //!
 //! Read-only fold over transcripts, like [`crate::digest`]: no daemon RPC,
 //! nothing written. Reuses [`crate::claude_drive::claude_projects_dir`] and

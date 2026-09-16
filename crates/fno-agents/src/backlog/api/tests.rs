@@ -822,7 +822,7 @@ fn readers_follow_store_rows_reflect_mutations() {
         assert_eq!(all.len(), 4);
         assert_eq!(all[0]["id"], "ab-one");
         assert_eq!(all[3]["id"], "ab-four"); // archived rows ride along
-                                             // x-665f: status no longer moves through this seam (it is derived;
+                                             // status no longer moves through this seam (it is derived;
                                              // the patch door owns it), so the mutation here is a plain field.
         node_update(
             store,

@@ -1,4 +1,4 @@
-# Homebrew formula for the `fno` CLI - the brew install channel (ab-d59d219a).
+# Homebrew formula for the `fno` CLI - the brew install channel.
 #
 # This is the canonical source of the formula. It is copied verbatim into the
 # own tap repo (github.com/<owner>/homebrew-fno) so `brew install <owner>/fno/fno`
@@ -16,7 +16,7 @@
 #
 # NOTE: this is the SEED snapshot. The live tap (bllshttng/homebrew-fno, what
 # `brew install` reads) is auto-bumped on every release by
-# scripts/release/update-homebrew-formula.py (x-0afe); these values are just the
+# scripts/release/update-homebrew-formula.py ; these values are just the
 # last-release snapshot, not the source of truth.
 #
 # LAUNCH GATE: satisfied for 0.2.1 on both macOS arches. `fno` 0.2.1 is
@@ -87,7 +87,7 @@ class Fno < Formula
     # venv bin; pip links none of them into the keg bin, so symlink them
     # explicitly. The fno-agents* symlink is the load-bearing step (Locked
     # Decision 4): the CLI invokes the binaries by name on PATH. The `fno`
-    # symlink is the advertised front door (x-538e): the Rust mux that owns
+    # symlink is the advertised front door : the Rust mux that owns
     # `fno` on PATH and forwards non-mux verbs to the `fno-py` beside it.
     # Arch-agnostic via libexec.
     bin.install_symlink libexec/"bin/fno"

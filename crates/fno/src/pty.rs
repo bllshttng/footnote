@@ -1856,7 +1856,7 @@ fn spawn_reader(
     std::thread::Builder::new()
         .name("fno-mux-pty-reader".into())
         .spawn(move || {
-            // x-0296 diagnostics: the first chunk logged from THIS std thread
+            // diagnostics: the first chunk logged from THIS std thread
             // proves the child spoke even when the tokio runtime is wedged.
             let e2e = std::env::var_os("FNO_E2E").is_some();
             let drop_exit = e2e && std::env::var_os("FNO_E2E_DROP_PTY_EXIT").is_some();
@@ -2279,7 +2279,7 @@ mod tests {
         let _ = fs::remove_dir_all(&hop);
         let _ = fs::remove_dir_all(&home);
 
-        // AC1-HP: the alias loaded (the :- default fired) and ZDOTDIR ended at the user default.
+        // AC1-HP: the alias loaded (the:- default fired) and ZDOTDIR ended at the user default.
         assert!(
             stdout.contains("fno_marker=ok"),
             "alias missing (ZDOTDIR clobbered): {stdout}"

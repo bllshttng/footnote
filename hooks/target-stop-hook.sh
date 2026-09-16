@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hooks/target-stop-hook.sh -- control-plane collapse wedge (ab-d0337fbc), Task 2.1
+# hooks/target-stop-hook.sh -- control-plane collapse wedge, Task 2.1
 #
 # READ-ONLY SHIM: this file writes nothing to target-state.md.
 # All stop/allow decision logic lives in crates/fno-agents/src/loopcheck.rs
@@ -11,7 +11,7 @@
 #   3. <repo>/crates/fno-agents/target/debug/fno-agents    (debug build)
 #   4. $(command -v fno-agents)   (PATH fallback)
 #
-# ACTIVE-SESSION-AWARE error handling (x-81d9): the state file
+# ACTIVE-SESSION-AWARE error handling: the state file
 # The session manifest (the worktree slice of the repo's space; legacy
 # `<repo>/.fno/target-state.md`) is the active-session discriminator. With NO state file
 # there is nothing to gate, so every failure path exits 0 (allow) as before.
@@ -444,7 +444,7 @@ emit_event_both() {
     _append_bounded_event target_stop_hook "$line" "$global_events" || true
 }
 
-# One control-plane arm row for this fire (x-1b88). interval_s 0: the stop hook
+# One control-plane arm row for this fire. interval_s 0: the stop hook
 # is event-driven, so the arms readout never reads it stale from quiet.
 emit_tick_row() {
     local acted="$1" skip="$2" detail="$3" skip_json
@@ -495,7 +495,7 @@ fi
 
 # ── 4. Foreign-session guard (PR #388 fix class) ──────────────────────────────
 # Extract the claude session id from state frontmatter. Read the current key
-# (claude_session_id) first, falling back to the pre-x-2de3 key
+# (claude_session_id) first, falling back to the pre-change key
 # (the pre-rename claude_transcript_id) so an in-flight manifest written by an older binary
 # still parses for one release.
 MANIFEST_CTID=$(grep -E '^(claude_session_id|claude_transcript_id):' "$STATE_FILE" 2>/dev/null \
@@ -546,7 +546,7 @@ fi
 # ── 7. Invoke the verb ────────────────────────────────────────────────────────
 # The full hook payload rides the verb's stdin (--hook-input-stdin) so
 # loop-check can read last_assistant_message - the stopping turn's final text,
-# recomputed per fire - instead of racing the transcript flush (ab-223d2dae).
+# recomputed per fire - instead of racing the transcript flush.
 # stdin (not argv/env) because the message is unbounded and an oversized exec
 # would fail into the shim's allow-exit path. A herestring (NOT a pipe!)
 # because an OLD binary never reads stdin: with a pipe and a payload larger
@@ -568,7 +568,7 @@ verb_rc=0
 if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
     DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
 else
-    # x-3227: done_probes inherit the session cargo build-dir env, TARGET loops
+    # done_probes inherit the session cargo build-dir env, TARGET loops
     # only (probes run for target plans, and the settle sweep below must stay
     # the hook's last `fno` call for a king driver). The hook env is replayed
     # from the session snapshot and fno declares none, so a probe running cargo
@@ -655,7 +655,7 @@ if [[ "$DECISION" == "block" ]]; then
     emit_block_for_harness "$MESSAGE"
 fi
 
-# ── 10. Terminal-allow: invoke the finalize WRITER (step 6, ab-f8e5f214) ───────
+# ── 10. Terminal-allow: invoke the finalize WRITER (step 6) ───────
 # On a terminal allow, the shim runs the separate `finalize` writer for the
 # ledger record and ship-only stamp, graduation, and handoff in every mode.
 #
@@ -737,7 +737,7 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
 fi
 
 # ── 11. Live-tick: refresh this session's node claim so a long-running loop ──
-# never silently expires its TTL and frees the node for a twin (x-a7ab 1.4).
+# never silently expires its TTL and frees the node for a twin (1.4).
 # Best-effort, non-blocking: any failure (no claim, holder mismatch after a
 # supervisor respawn, stale manifest snapshot, fno absent) is logged and ignored
 # - it can never change the completion decision. Skipped on a TERMINAL allow: a

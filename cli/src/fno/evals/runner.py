@@ -6,7 +6,7 @@ executes in the user's working copy).
 
 The worker step is injectable (``spawn``) so tests never spawn a real model and
 never spend money. The default spawn routes through ``fno agents spawn
---substrate headless`` (the x-2c27 rule: never bare ``claude -p``; the substrate
+--substrate headless`` (the rule: never bare ``claude -p``; the substrate
 path keeps provider rotation and the spawn cap in play).
 """
 from __future__ import annotations
@@ -106,7 +106,7 @@ def _now_iso() -> str:
 
 
 def evals_enabled() -> bool:
-    """Resolve whether the headless grading-worker spawn is armed (x-aaaf wave 2).
+    """Resolve whether the headless grading-worker spawn is armed (wave 2).
 
     ``config.evals.enabled`` defaults True (matches the spawner's prior,
     ungated behavior). A malformed value degrades to True (never opt-in), but
@@ -146,7 +146,7 @@ def _default_spawn(
     """Run the worker via ``fno agents spawn --substrate headless`` in *workdir*.
     A non-zero exit, missing binary, or timeout is a graded failure, never a
     sweep crash. A *lane* is a complete coordinate: its harness wins over *provider*.
-    The worker name is the x-84b2 ``ev-th-evals-<run>``: typed non-node identity,
+    The worker name is the ``ev-th-evals-<run>``: typed non-node identity,
     per-invocation run token as the never-shaved discriminator."""
     try:
         name = dispatch_agent_name(
@@ -301,7 +301,7 @@ def run_task(
 
         if workdir is not None:
             if task.prompt and spawn is None and not evals_enabled():
-                # x-aaaf wave 2: the gate only bites the REAL default spawn -
+                # wave 2: the gate only bites the REAL default spawn -
                 # an injected spawn_fn (tests, or a caller with its own
                 # worker) is an explicit invocation, not autonomous.
                 reason = "config.evals.enabled is false"

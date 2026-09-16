@@ -1064,7 +1064,7 @@ mod tests {
             head_ref: "feature/x".to_string(),
             base_ref: "main".to_string(),
             url: "https://github.com/o/r/pull/7".to_string(),
-            body: Some("Backlog-Closure: x-0001\n".to_string()),
+            body: Some("Backlog-Closure: x-aaaa\n".to_string()),
             state: "OPEN".to_string(),
             armed: false,
         }
@@ -1207,7 +1207,7 @@ mod tests {
     fn a_repo_with_no_node_under_it_is_never_refused() {
         // AC4-HP: the scope. A graph whose nodes all live in other repos has
         // nothing this PR could bind to, so the gate is silent there.
-        let entries = vec![json!({"id": "x-1a2b", "cwd": "/other/repo", "project": "other"})];
+        let entries = vec![json!({"id": "x-bbbb", "cwd": "/other/repo", "project": "other"})];
         let outcome = node_binding_from_entries(Path::new("/this/repo"), &entries, &open_facts());
         assert_eq!(outcome, ProbeOutcome::Clear);
     }
@@ -1216,7 +1216,7 @@ mod tests {
     fn an_unreadable_body_or_graph_refuses_to_assume_bound() {
         // AC4-ERR: a missing body key is an out-of-date deployed fno, never a
         // bound PR; the remedy names the update.
-        let entries = vec![json!({"id": "x-1a2b", "cwd": "/this/repo", "project": "fno"})];
+        let entries = vec![json!({"id": "x-bbbb", "cwd": "/this/repo", "project": "fno"})];
         let facts = PrFacts {
             body: None,
             ..open_facts()

@@ -1,5 +1,5 @@
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->
-> **SUPERSEDED (2026-06-05, ab-d0337fbc):** the gate boolean transition matrix in this file (Completion Gates section) was deleted by the control-plane collapse wedge. The acceptance criteria gate before /execute waves remains active. Kept for historical context; see docs/architecture/control-plane-loop.md.
+> **SUPERSEDED (2026-06-05):** the gate boolean transition matrix in this file (Completion Gates section) was deleted by the control-plane collapse wedge. The acceptance criteria gate before /execute waves remains active. Kept for historical context; see docs/architecture/control-plane-loop.md.
 
 # Phase Transition Guards
 

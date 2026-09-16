@@ -1,6 +1,6 @@
 """Credential staging for provider rotation substrate.
 
-Phase 03 of the provider rotation substrate (ab-256f6b6e).
+Phase 03 of the provider rotation substrate.
 
 Each provider gets a directory at <root>/<id>/. The shape inside depends on
 the CLI kind:

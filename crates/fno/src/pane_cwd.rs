@@ -1,4 +1,4 @@
-//! What directory was a pane in? (x-5baf)
+//! What directory was a pane in?
 //!
 //! A shell's own cwd, not the pane's spawn cwd: every tab is born at the
 //! squad root (`create_tab_in`), so the spawn cwd tells two tabs apart in no
@@ -61,7 +61,7 @@ pub fn live_or_spawn(child_pid: Option<u32>, spawn_cwd: &str) -> String {
 }
 
 impl crate::proto::LayoutSlot {
-    /// A slot with no recorded cwd (every site but capture itself, x-5baf).
+    /// A slot with no recorded cwd (every site but capture itself).
     pub fn new(name: String, binding: crate::proto::LayoutBinding) -> Self {
         Self {
             name,
@@ -111,7 +111,7 @@ fn shell_restore_cwd(
 }
 
 impl crate::server::Core {
-    /// (x-5baf) A slot pane that could not be resolved: mint a shell,
+    /// A slot pane that could not be resolved: mint a shell,
     /// steered by the slot's own captured cwd for a genuine Shell slot
     /// whose directory still exists.
     pub(crate) fn restore_shell_slot(

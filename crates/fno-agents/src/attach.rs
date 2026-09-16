@@ -145,7 +145,7 @@ fn attach_refusal_for_state(state: &str, harness: &str, name: &str) -> (String, 
     )
 }
 
-/// (x-296f) Attach through the harness's OWN declared `interactive_attach`
+/// Attach through the harness's OWN declared `interactive_attach`
 /// form, or `None` when it declares none (the caller then keeps its refusal).
 ///
 /// EXEC, never proxy: this replaces the process, so the terminal's child is
@@ -271,7 +271,7 @@ fn attach_via_declared_form(
     Some(1)
 }
 
-/// (x-c198) Attach to a pi session by EXEC'ing pi's own TUI on the same
+/// Attach to a pi session by EXEC'ing pi's own TUI on the same
 /// session id, in the row's own cwd.
 ///
 /// `None` means this is not a pi thread row and the caller should fall through
@@ -516,7 +516,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         return code;
     }
 
-    // (x-296f) A harness whose contract row DECLARES an interactive_attach
+    // A harness whose contract row DECLARES an interactive_attach
     // form execs it - codex today, whatever a harness declares tomorrow -
     // still gated on the thread-row shape. One mechanism replaces the old
     // two: the declared `pre_exec` starts the harness's own service (codex's
@@ -530,7 +530,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         }
     }
 
-    // (x-c198) A pi row execs pi's own TUI on the same session id, which JOINS
+    // A pi row execs pi's own TUI on the same session id, which JOINS
     // the session its rpc lane is driving. pi declares no form (its argv
     // carries env-dependent provider/model), so it keeps its own builder.
     if harness == "pi" {
@@ -543,7 +543,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     // answers reachability, never the verb inventory and never a gap in this
     // file. `!= "claude"` instead of an allowlist so a provider added to the
     // roster inherits the read rather than falling through to a
-    // claude-shaped attach (x-51f6 US1).
+    // claude-shaped attach (US1).
     if harness != "claude" {
         let (reason, code, message) = attach_table_refusal(harness, &name);
         eprintln!("{message}");
@@ -594,7 +594,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         return 14;
     }
 
-    // x-d285: the inline attach consumes the canonical re-entry plan. A fresh
+    // the inline attach consumes the canonical re-entry plan. A fresh
     // claude process re-resolves its account namespace from ambient env, so a
     // bare `claude attach` from the wrong shell lands in the wrong config
     // namespace (the falsified "attach has nothing to do" premise). The plan
@@ -673,7 +673,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
 mod tests {
     use super::*;
 
-    // The attach-refusal family (x-296f), a file of its own beside this verb.
+    // The attach-refusal family, a file of its own beside this verb.
     #[path = "x296f_attach_refusals.rs"]
     mod x296f_attach_refusals;
 

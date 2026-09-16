@@ -1,4 +1,4 @@
-//! The merge reaper (x-07dc): a PR merged, its node done, the machine reaps.
+//! The merge reaper : a PR merged, its node done, the machine reaps.
 //!
 //! `fno do pr merge` mints one `merge_cleanup_requested` envelope the moment
 //! the merge confirms (the post-merge ritual is the second mint site and
@@ -54,7 +54,7 @@ pub(crate) struct MergeCleanupRequest {
     branch: Option<String>,
     worktree: Option<String>,
     node_ids: Vec<String>,
-    /// The exact registered row names the merge producer proposed (x-84b2).
+    /// The exact registered row names the merge producer proposed.
     /// Non-empty: rows are selected by exact membership (plus worktree
     /// equality) and the reaper never re-derives names. Empty: an event older
     /// than the field, and the ONLY case where the narrow legacy
@@ -228,7 +228,7 @@ pub(crate) fn merge_cleanup_requested(home: &AgentsHome, repo: &str) -> bool {
 
 /// The rows this request may remove: registry rows whose cwd IS the merged
 /// worktree, whose name is an exact candidate the merge producer proposed
-/// (x-84b2 `candidate_row_names` - the reaper never re-derives a name the
+/// (`candidate_row_names` - the reaper never re-derives a name the
 /// producer did not propose, so a prefix can never widen the removal), or
 /// whose name resolves to one of the closed nodes through the shared
 /// `name_route` vocabulary, so the operator's `t-`/`bp-`/`king-`/`target-`
@@ -1676,23 +1676,23 @@ mod tests {
         write_registry(
             &home,
             &[
-                claude_row("t-1a2b-idle-glm", false),
-                claude_row("bp-1a2b-arm-timeout", false),
-                claude_row("king-1a2b", false),
-                claude_row("target-x-1a2b-worker", false),
+                claude_row("t-aaaa-idle-glm", false),
+                claude_row("bp-aaaa-arm-timeout", false),
+                claude_row("king-aaaa", false),
+                claude_row("target-x-aaaa-worker", false),
                 // Another node's worker: never a candidate.
                 claude_row("t-docs-3prs-glm", false),
             ],
         );
         let mut request = settled_request("/elsewhere");
-        request.node_ids = vec!["x-1a2b".to_string()];
+        request.node_ids = vec!["x-aaaa".to_string()];
         let rows = merge_cleanup_rows(&home, &request);
         let names: Vec<String> = rows.iter().map(|e| e.name.clone()).collect();
         for expected in [
-            "t-1a2b-idle-glm",
-            "bp-1a2b-arm-timeout",
-            "king-1a2b",
-            "target-x-1a2b-worker",
+            "t-aaaa-idle-glm",
+            "bp-aaaa-arm-timeout",
+            "king-aaaa",
+            "target-x-aaaa-worker",
         ] {
             assert!(
                 names.iter().any(|n| n == expected),
@@ -1714,15 +1714,15 @@ mod tests {
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let mut busy = claude_row("t-ffff-busy-glm", false);
         busy["short_id"] = json!("fff001");
-        write_registry(&home, &[claude_row("t-1a2b-idle-glm", false), busy]);
+        write_registry(&home, &[claude_row("t-aaaa-idle-glm", false), busy]);
         let mut states = HashMap::new();
         states.insert(
-            "x-1a2b".to_string(),
+            "x-aaaa".to_string(),
             ("done".to_string(), Some("merged".to_string()), 0),
         );
         states.insert("x-ffff".to_string(), ("in_progress".to_string(), None, 0));
         let mut request = settled_request("/no-such-worktree");
-        request.node_ids = vec!["x-1a2b".to_string()];
+        request.node_ids = vec!["x-aaaa".to_string()];
         let seams = RequestSeams {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
@@ -1754,7 +1754,7 @@ mod tests {
             "the count dropped by exactly one"
         );
         assert!(
-            !after.entries.iter().any(|e| e.name == "t-1a2b-idle-glm"),
+            !after.entries.iter().any(|e| e.name == "t-aaaa-idle-glm"),
             "the finished row is gone BY NAME"
         );
         assert!(
@@ -1772,17 +1772,17 @@ mod tests {
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         let mut open_row = claude_row("t-cccc-open-glm", false);
         open_row["short_id"] = json!("cccc01");
-        write_registry(&home, &[open_row, claude_row("t-1a2b-idle-glm", false)]);
+        write_registry(&home, &[open_row, claude_row("t-aaaa-idle-glm", false)]);
         let mut states = HashMap::new();
         states.insert(
-            "x-1a2b".to_string(),
+            "x-aaaa".to_string(),
             ("done".to_string(), Some("merged".to_string()), 0),
         );
         states.insert("x-cccc".to_string(), ("in_progress".to_string(), None, 0));
         let mut holding = settled_request("/no-such-worktree");
         holding.node_ids = vec!["x-cccc".to_string()];
         let mut clean = settled_request("/no-such-worktree");
-        clean.node_ids = vec!["x-1a2b".to_string()];
+        clean.node_ids = vec!["x-aaaa".to_string()];
         let seams = RequestSeams {
             finished: &|_entry| true,
             stop: &|_entry| Ok("abc123".to_string()),
@@ -1824,7 +1824,7 @@ mod tests {
             "the holding request's row is untouched"
         );
         assert!(
-            !after.entries.iter().any(|e| e.name == "t-1a2b-idle-glm"),
+            !after.entries.iter().any(|e| e.name == "t-aaaa-idle-glm"),
             "the clean request's row is gone"
         );
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
@@ -1924,7 +1924,7 @@ mod tests {
 
     #[test]
     fn exact_candidates_select_the_registered_row() {
-        // x-84b2 AC4-HP: a request carrying candidate_row_names retires the
+        // AC4-HP: a request carrying candidate_row_names retires the
         // EXACT registered row - ab-bp- spelling included - via membership,
         // never prefix reconstruction.
         let home = temp_home("exact-candidates");
@@ -1956,7 +1956,7 @@ mod tests {
 
     #[test]
     fn a_row_absent_from_candidates_is_never_removed() {
-        // x-84b2 AC4-EDGE: the producer's candidate list is exact. A second
+        // AC4-EDGE: the producer's candidate list is exact. A second
         // row of the same node, unproposed, stays; the name leg does not
         // fire either, because x-2 is not one of the closed nodes.
         let home = temp_home("absent-candidate");
@@ -2020,7 +2020,7 @@ mod tests {
 
     #[test]
     fn wrapped_row_joins_the_merge_cleanup_by_name() {
-        // x-a634: the widened name vocabulary joins wrapper-prefixed rows
+        // the widened name vocabulary joins wrapper-prefixed rows
         // too - a king-spawned row for a closed node is reaped, not left.
         let home = temp_home("wrapped-cleanup");
         write_registry(&home, &[claude_row("k-bp-x-1-cargo", false)]);

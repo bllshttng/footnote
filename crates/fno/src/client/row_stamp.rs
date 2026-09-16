@@ -1,6 +1,6 @@
-//! Row-scoped outcome stamps for the sideline (x-f191), plus the tab-bar
+//! Row-scoped outcome stamps for the sideline, plus the tab-bar
 //! notice channel they ride (the notice text builders and the overlay
-//! paint). The notice stays the full-text channel (x-0175: every error
+//! paint). The notice stays the full-text channel (: every error
 //! surface renders in the UI); the stamp is the placement fix: a row-scoped
 //! action's outcome renders AT the row the operator acted on, not only the
 //! tab bar's opposite corner. Extracted from client.rs under the file
@@ -15,7 +15,7 @@ use super::{
 /// Transient notice lifetime on the tab bar.
 pub(super) const NOTICE_TTL: Duration = Duration::from_secs(3);
 
-/// (x-f191) How long a row-scoped outcome stamp stays on its sideline row.
+/// How long a row-scoped outcome stamp stays on its sideline row.
 /// Outlives NOTICE_TTL on purpose: the tab-bar notice expires first, and the
 /// stamp at the row is what the operator falls back to finding.
 const ROW_STAMP_TTL: Duration = Duration::from_secs(8);
@@ -38,8 +38,8 @@ const ROW_FAILURE_MARKS: [&str; 8] = [
     "no longer a live external row",
 ];
 
-/// (x-f191) A row-scoped action outcome, stamped ON the sideline row it
-/// names. The tab-bar notice stays the full-text channel (x-0175); the stamp
+/// A row-scoped action outcome, stamped ON the sideline row it
+/// names. The tab-bar notice stays the full-text channel; the stamp
 /// is the placement fix: the outcome renders at the row the operator acted
 /// on, not the far corner of the screen.
 pub(super) struct RowStamp {
@@ -57,7 +57,7 @@ pub(super) struct RowArm {
     expires: Instant,
 }
 
-/// (x-f191) Whether a notice names `row_name` tightly enough to be its
+/// Whether a notice names `row_name` tightly enough to be its
 /// verdict: the name must sit at a token boundary, and the notice must not
 /// be an in-flight progress line (those end in `…` and never resolve the
 /// arm - the external verbs emit "stopping X…" long before the verdict).
@@ -78,7 +78,7 @@ impl View {
         self.notice = Some((text, Instant::now() + NOTICE_TTL));
     }
 
-    /// (x-f191) Arm the row stamp for a row-scoped confirm commit: the next
+    /// Arm the row stamp for a row-scoped confirm commit: the next
     /// notice naming this row renders beside the row, not only in the tab
     /// bar. No-op for bulk and non-row confirms (reap, squad, close-tab).
     pub(super) fn arm_row_stamp(&mut self, action: &ConfirmKind) {
@@ -97,7 +97,7 @@ impl View {
         }
     }
 
-    /// (x-f191) Resolve an armed row stamp against an incoming notice: a
+    /// Resolve an armed row stamp against an incoming notice: a
     /// notice naming the armed row stamps that row (success or failure) and
     /// disarms. An unrelated or late notice leaves the arm alone.
     pub(super) fn resolve_row_stamp(&mut self, text: &str) {
@@ -138,7 +138,7 @@ impl View {
         }
     }
 
-    /// (x-f191 scope a+c) A row-scoped commit keeps the sideline open and
+    /// (scope a+c) A row-scoped commit keeps the sideline open and
     /// the selection on the acted row: the operator opened the sideline to
     /// act, and nothing about the action says they are done. Resolve by row
     /// identity so the cursor follows the row through its state flip; a row
@@ -198,7 +198,7 @@ pub(super) fn no_pane_notice(a: &AgentRow) -> String {
         Some(AgentNoPaneReason::LivenessUnmeasured) => format!(
             "worker {} has no pane here: liveness reading is absent (neither confirmed dead nor confirmed live{}); run fno agents peek {} to see before resuming",
             a.name,
-            // (x-b5d1) The reading is absent, but a measurement may still
+            // The reading is absent, but a measurement may still
             // exist and be old - say how old, so "unmeasured" cannot be
             // read as "just checked, nothing there". The row carries the
             // measurement instant; the age is this client's now minus it.
@@ -266,7 +266,7 @@ pub(super) fn paint_row_stamp(
         return;
     };
     let mark = if failure { "✗ " } else { "✓ " };
-    // (x-f191 review) Ellipsize to leave the row's leading identity cells: a
+    // (review) Ellipsize to leave the row's leading identity cells: a
     // stamp that swallows the name is a placement fix that eats its own target.
     let cap = text_w.saturating_sub(4);
     let full = format!("{mark}{stamp_text}");
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn row_stamp_skips_progress_lines_and_resolves_on_the_verdict() {
-        // (x-f191 review) The external verbs emit "stopping X…" long before
+        // (review) The external verbs emit "stopping X…" long before
         // the verdict; the arm must survive it and resolve on the outcome.
         let mut view = two_pane_view();
         view.arm_row_stamp(&ConfirmKind::StopExternal {
@@ -439,7 +439,7 @@ mod tests {
 
     #[test]
     fn sideline_stamp_ellipsizes_and_keeps_the_row_identity() {
-        // (x-f191 review) A stamp longer than the row must not swallow the
+        // (review) A stamp longer than the row must not swallow the
         // name: it ellipsizes and leaves the row's leading cells alone.
         let mut view = two_pane_view();
         view.layout.agents.push(corpse_row());
@@ -476,7 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn selector_x_commit_reanchors_the_selector_on_the_row() {
-        // (x-f191 scope a+c) The sideline comes back after the commit: the
+        // (scope a+c) The sideline comes back after the commit: the
         // selection resolves onto the acted row by identity, so the operator
         // is never thrown out to re-find a greyed row.
         let mut v = view_with_agents(vec![lifecycle_row("worker-a", false, false)]);

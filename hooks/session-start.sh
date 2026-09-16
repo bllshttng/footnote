@@ -257,7 +257,7 @@ if [[ -f "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" ]]; then
     mail_content=$(bash "${SCRIPT_DIR}/inject-mail-drain-session-start.sh" 2>/dev/null || echo "")
 fi
 
-# 6a. fleet announcements (x-8cfb) - one bus line every session reads by its
+# 6a. fleet announcements - one bus line every session reads by its
 #     own cursor. The sub-hook maps the SessionStart input's source:compact to
 #     the compact boundary itself, so a compacted session re-sees standing
 #     announcements. Fails open; silent when there is nothing standing.
@@ -276,7 +276,7 @@ if [[ -f "${SCRIPT_DIR}/outstanding-session-start.sh" ]]; then
     outstanding_content=$(bash "${SCRIPT_DIR}/outstanding-session-start.sh" 2>/dev/null || true)
 fi
 
-# 7b. spawn seed provenance (x-3a64) — the <fno_mail> envelope for the seed that
+# 7b. spawn seed provenance — the <fno_mail> envelope for the seed that
 #     started this worker. The seed itself must stay byte-identical (normalize.sh
 #     and the harness REPL both key off its leading slash), so the attribution
 #     rides beside it here. The sub-hook owns the startup-only gate: it re-reads
@@ -384,12 +384,12 @@ append_section "$outstanding_content"
 append_section "$seed_prov_content"
 append_section "$orphan_content"
 
-# Self-heal a defunct target manifest (x-4af4) before anything reads it, so a
+# Self-heal a defunct target manifest before anything reads it, so a
 # dead target-state.md can no longer auto-lock an attended /think. Advisory.
 gc_helper="${SCRIPT_DIR}/helpers/gc-dead-target-manifest.sh"
 [[ -f "$gc_helper" ]] && bash "$gc_helper" "$STATE_FILE" || true
 
-# Plan status reconcile sweep (x-f34f US5) — project canonical-but-stale plan
+# Plan status reconcile sweep (US5) — project canonical-but-stale plan
 # frontmatter from graph truth. Daily-watermark gated and fully async so the
 # 452-file parse never lands on the session-start critical path more than once a
 # day; bg output is discarded so it can never corrupt this hook's JSON stdout.

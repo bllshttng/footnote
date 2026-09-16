@@ -65,7 +65,7 @@ fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
     }
     // A daemon lazy-started from a worktree the reaper later deleted keeps
     // that dead directory captured as its config anchor; every lookup under
-    // it then fails and every getter silently takes its default (x-8f73
+    // it then fails and every getter silently takes its default (
     // review). Re-anchor to the agents home, the nearest always-there
     // directory, so the daemon keeps reading the operator's global config.
     let home = crate::paths::AgentsHome::from_env_opt();
@@ -394,11 +394,11 @@ pub fn effective_yolo(yolo: bool, headless_default: bool) -> bool {
 }
 
 /// Default reap-receipt retention: 7 days. A reaped row's resume handle
-/// survives a week by default before the GC sweep expires it (x-6db9).
+/// survives a week by default before the GC sweep expires it.
 pub const DEFAULT_REAP_RECEIPT_RETAIN_DAYS: u64 = 7;
 
 /// Default retire grace: 15 minutes of transcript quiet past done work before
-/// a row retires (x-c672; the retired `recovery.retire_grace_s` default).
+/// a row retires (; the retired `recovery.retire_grace_s` default).
 pub const DEFAULT_RETIRE_GRACE_SECS: u64 = 900;
 
 /// Resolve `agents.retire_grace_s` for the retirement sweep. The legacy key
@@ -426,7 +426,7 @@ pub fn retire_grace_secs(cwd: &Path) -> u64 {
 
 /// Default retirement-sweep cadence: a third of the 900s retire grace, so a
 /// done-and-quiet row waits at most one interval past eligibility while the
-/// sweep samples far slower than the state it detects (x-d354). The rule the
+/// sweep samples far slower than the state it detects. The rule the
 /// clamp enforces: the interval is a FRACTION of grace, never a multiple.
 pub const DEFAULT_RETIRE_INTERVAL_SECS: u64 = 300;
 /// Floor: the daemon tick itself is 5s, so anything smaller re-creates the
@@ -600,24 +600,24 @@ pub fn state_reap_config(cwd: &Path) -> StateReapConfig {
     }
 }
 
-// --- Spawn-gate knobs (x-c5cc). Same precedence + fail-open degrade as
+// --- Spawn-gate knobs. Same precedence + fail-open degrade as
 // `retire_grace_secs`; all coerce invalid values to their defaults so a config
 // typo can never brick the spawn primitive.
 
 /// Default global cap on concurrent live worker processes (union of the fno
 /// registry and claude's daemon roster). Matches the Pydantic default.
 pub const DEFAULT_MAX_LIVE: u32 = 3;
-/// The per-territory team cap default (x-e221): max live node-working workers
+/// The per-territory team cap default: max live node-working workers
 /// under ONE crown scope. The machine ceiling stays [`DEFAULT_MAX_LIVE`].
 pub const DEFAULT_MAX_LIVE_PER_TERRITORY: u32 = 4;
 /// Default available-RAM floor (GB) for spawn preflight. `<= 0` disables.
 pub const DEFAULT_MIN_FREE_GB: f64 = 4.0;
 /// Default swap-pressure ceiling (percent used) for spawn preflight: available
 /// RAM can read six times its floor while the kernel is paging to a nearly
-/// full swap device (x-8c8c). `<= 0` disables.
+/// full swap device. `<= 0` disables.
 pub const DEFAULT_MAX_SWAP_PCT: f64 = 90.0;
 /// Default share of CPU capacity the fleet may hold, checked on EVERY spawn
-/// (x-7783): an attribution gap widens the share to an interval bounded above
+/// an attribution gap widens the share to an interval bounded above
 /// by the machine's measured CPU. Matches the Pydantic default.
 pub const DEFAULT_MAX_FLEET_CPU_SHARE: f64 = 0.5;
 /// Default absolute machine backstop: refuse above this times the CPU count no
@@ -635,7 +635,7 @@ pub const DEFAULT_SINGLE_FLIGHT_JOIN_BUDGET_S: u64 = 30;
 /// running. Matches the Pydantic default.
 pub const DEFAULT_ORPHAN_REAP_AFTER_S: u64 = 5400;
 /// Default age at which a reaper hold escalates into a question a king or
-/// the operator can rule on (x-e3cc): the same derivation as the orphan
+/// the operator can rule on: the same derivation as the orphan
 /// clock, three times the longest detached wait.
 pub const DEFAULT_HOLD_ESCALATE_AFTER_S: u64 = 5400;
 
@@ -648,7 +648,7 @@ pub fn max_live(cwd: &Path) -> u32 {
     }
 }
 
-/// Resolve `agents.max_live_per_territory` (x-e221), default
+/// Resolve `agents.max_live_per_territory`, default
 /// [`DEFAULT_MAX_LIVE_PER_TERRITORY`] — never 0, which would wall off a scope.
 pub fn territory_max_live(cwd: &Path) -> u32 {
     match resolve_agents_value(cwd, "max_live_per_territory")
@@ -766,7 +766,7 @@ pub fn orphan_reap_after(cwd: &Path) -> Duration {
 }
 
 /// Resolve `agents.hold_escalate_after_s`: the age at which a reaper hold
-/// escalates into a question a king or the operator can rule on (x-e3cc).
+/// escalates into a question a king or the operator can rule on.
 pub fn hold_escalate_after(cwd: &Path) -> Duration {
     positive_seconds(cwd, "hold_escalate_after_s", DEFAULT_HOLD_ESCALATE_AFTER_S)
 }
@@ -1064,7 +1064,7 @@ pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
 }
 
 /// `mux.notify_on_blocked` (default ON): the daemon fires an OS notification when
-/// a badge ENTERS `blocked` (x-dd84).
+/// a badge ENTERS `blocked`.
 pub fn notify_on_blocked_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "notify_on_blocked", true)
 }
@@ -1076,7 +1076,7 @@ pub fn notify_on_done_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "notify_on_done", false)
 }
 
-// --- [provider_cap] (x-7e05). The cap actor's own arm, independent of
+// --- [provider_cap]. The cap actor's own arm, independent of
 // recovery.watchdog: the watchdog stays in report mode; this table alone
 // decides whether a provider usage cap may move sessions. Same precedence and
 // fail-open degrade as every reader above: an absent table means OFF, a
@@ -1239,7 +1239,7 @@ mod tests {
         clear_config_env();
     }
 
-    /// x-8f73 review: a dead config anchor (the launch worktree reaped under a
+    /// review: a dead config anchor (the launch worktree reaped under a
     /// long-lived daemon) must not silently default every getter; the reader
     /// re-anchors to the agents home.
     #[test]
@@ -1686,7 +1686,7 @@ mod tests {
         f
     }
 
-    // --- retirement sweep cadence (x-d354) -------------------------------
+    // --- retirement sweep cadence -------------------------------
 
     #[test]
     fn retirement_sweep_interval_defaults_to_a_third_of_grace() {

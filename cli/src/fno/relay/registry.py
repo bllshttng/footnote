@@ -1,4 +1,4 @@
-"""Group 2 of the cross-session agent relay (x-908b / x-e4ac): a PERSISTENT
+"""Group 2 of the cross-session agent relay (/): a PERSISTENT
 session registry. Maps ``session_id -> {provider, pid, cwd, inject_handle,
 status}`` so a peer is addressable by its session id and discovery survives a
 restart (earlier designs kept this map in memory and lost it on restart;
@@ -69,7 +69,7 @@ def transcript_path_for(
     claude encodes the ``projects/`` subdir by replacing BOTH ``/`` and ``.`` in
     the cwd with ``-``, so glob by the ``<session_id>.jsonl`` filename rather than
     deriving the path from cwd (the naive ``/``->``-`` derivation misses the dot,
-    proven in the x-e4ac probe). Returns None when no transcript exists yet --
+    proven in the probe). Returns None when no transcript exists yet --
     which on this host means the peer was spawned without scrubbing the parent's
     ``CLAUDE_CODE_*`` env (the daemon spawn recipe, E4.1, applies that scrub)."""
     base = projects_dir or (Path.home() / ".claude" / "projects")
@@ -178,7 +178,7 @@ _AGENT_SHORT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 def _live_agents_workers() -> dict[str, RegistryEntry]:
     """Live interactive NON-claude owned-PTY workers from the canonical agents
-    registry -- the cross-harness bridge (G4 / x-3f34). claude peers are surfaced by
+    registry -- the cross-harness bridge (G4 /). claude peers are surfaced by
     :func:`discover_live_sessions` and routed on the session-uuid lane; this makes a
     codex / gemini / ... interactive worker an addressable relay peer keyed by its
     ``short_id``, with a ``worker:<short_id>`` inject handle the daemon routes through

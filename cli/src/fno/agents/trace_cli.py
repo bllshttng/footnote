@@ -109,9 +109,9 @@ def _ev_kind(ev: dict[str, Any]) -> str:
     """Event type name: unified ``type``, else the retired flat ``kind``.
 
     ~/.fno/events.jsonl carries two shapes: the daemon EventEmitter's unified
-    ``{type, source, data}`` envelope (x-2901) and the flat agents-audit
+    ``{type, source, data}`` envelope and the flat agents-audit
     envelope (append_agents_event, unchanged). Drop the ``kind`` fallback once
-    the daemon fleet has restarted on the post-x-2901 binary.
+    the daemon fleet has restarted on the post-change binary.
     """
     return ev.get("type") or ev.get("kind") or ""
 
@@ -144,7 +144,7 @@ class _RegistryResolutionError(RuntimeError):
 
 
 def _resolve_registry_name(token: str) -> "str | None":
-    """Resolve a trace ``token`` (name | 8-hex short | full session id, x-1b1e)
+    """Resolve a trace ``token`` (name | 8-hex short | full session id)
     to its canonical registry name, or ``None`` when it matches nothing.
 
     Events key on the name, so the caller filters by the RESOLVED name — trace
@@ -249,7 +249,7 @@ def trace_logic(
             )
 
     # AC1-ERR: gate on registry membership unless --all, resolving the token to
-    # its canonical name (x-1b1e) so the event filter below matches regardless of
+    # its canonical name so the event filter below matches regardless of
     # the address form. Surface registry read failures distinctly (exit 12) so
     # the operator sees the real cause instead of a misleading "agent not found".
     resolved_name = name

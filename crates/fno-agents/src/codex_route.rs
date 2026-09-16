@@ -1,5 +1,5 @@
 //! The one codex route owner: identity predicate, config read, key, tokens,
-//! splice (x-3954).
+//! splice.
 //!
 //! A routed codex spawn selects its endpoint through three inline `-c` config
 //! tokens (`model_providers.<p>={...}`, `model_provider=<p>`, `model=<m>`);
@@ -225,7 +225,7 @@ pub fn splice_route(argv: &mut Vec<String>, route: &CodexRoute) {
     argv.splice(1..1, route.config_args.clone());
 }
 
-/// x-3954: the `fno agents resume` door. For a codex row, resolve the route
+/// the `fno agents resume` door. For a codex row, resolve the route
 /// from TODAY's config and splice its tokens into `argv` after the binary;
 /// `None` for a non-codex row, `Ok(None)` for an unrouted one.
 pub fn resume_route(

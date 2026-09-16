@@ -23,7 +23,7 @@
 //      in-context via client.session.prompt (preserves history; beats the
 //      loop-wrapper's fresh-process relaunch).
 //
-// This SUPERSEDES x-6007/#47's `message.part.updated` promise-text handler,
+// This SUPERSEDES /#47's `message.part.updated` promise-text handler,
 // which emitted an UNGATED DonePRGreen termination on the promise text alone.
 // loop-check is the SOLE completion authority (shared with claude, no drift):
 // the plugin never decides "done" itself, and never fabricates a termination

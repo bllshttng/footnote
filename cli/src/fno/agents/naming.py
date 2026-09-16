@@ -172,7 +172,7 @@ def _graph_hex_map(graph_path: str):
 
 
 def _enrich_hex_nodes(rows):
-    """Re-attach full node ids to bare-hex parse results (x-57fe).
+    """Re-attach full node ids to bare-hex parse results.
 
     The mint emits the node hex without its prefix; the graph is the only
     place that knows the prefix. A hex with no unique `<prefix>-<hex>` id

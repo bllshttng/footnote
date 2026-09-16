@@ -455,7 +455,7 @@ def newest_assistant_text(path: Path) -> Optional[str]:
     """Newest assistant turn's text from one claude- or codex-shaped JSONL.
 
     The one transcript read for callers that hold a PATH but no agent
-    (loopcheck's distress leg routes here, x-6aca: its former in-process
+    (loopcheck's distress leg routes here, : its former in-process
     parser read claude shape only, so every codex rollout read as
     assistant-free and no codex distress reached a parent). The two record
     parsers are shape-disjoint per line, so trying both loses nothing. The
@@ -491,7 +491,7 @@ def newest_assistant_text(path: Path) -> Optional[str]:
 def _status_event_line(rec: dict) -> Optional[tuple[str, str]]:
     """Parse one events.jsonl record into ``(kind, id)`` if it is a status event.
 
-    Accepts BOTH envelope shapes (x-2901 split-brain, a permanent superset):
+    Accepts BOTH envelope shapes (split-brain, a permanent superset):
     Python ``{type, data:{...}}`` and Rust ``{kind, ...flat}``. Returns None for
     a record that is neither — the caller skips it and falls through.
     """
@@ -703,7 +703,7 @@ def _lookup_mux_pane(
     ``session_id`` stays null until reconcile backfills it. A pane worker is
     still a fully-registered row, so the registry resolves it directly. This
     closes the asymmetry that made the default substrate unobservable through
-    the documented observe verb (x-680d).
+    the documented observe verb.
 
     Returns ``(mux_session, pane_id, name)`` for a row carrying a ``mux`` ref,
     else None. A read/parse failure or a non-mux row is None, never raised.
@@ -741,7 +741,7 @@ def _lookup_registry_row_exact(handle: str):
     The session id is matched alongside the name through the same handle tiers
     every other reader uses (full uuid, canonical first-eight, legacy
     last-eight): a row addressable by one spelling and not the other is the
-    same dead end by a shorter route, and x-f715 is exactly that dead end - a
+    same dead end by a shorter route, and is exactly that dead end - a
     short-id handle against a row that stores the full uuid. Two rows matching
     one short handle is a guess this refuses to make, so it returns None and
     the not-found path below speaks.
@@ -943,7 +943,7 @@ def _try_mux_pane(
     ``mux`` row for ``handle``, read the pane scrollback and render it; on any
     read failure emit a refusal that names the working surface (``fno mux pane
     read <id>``) rather than listing unrelated peers - the misdirecting refusal
-    that manufactured false-liveness verdicts on 2026-08-04 (x-680d).
+    that manufactured false-liveness verdicts on 2026-08-04.
 
     Returns an exit code when it handled the handle (read or named refusal),
     None to let the caller fall through to ``peer not found``.
@@ -1096,7 +1096,7 @@ def peek(
     if session is None:
         # The default substrate (a mux pane) is invisible to the live-session
         # resolver: its content is a PTY, not a transcript. Try the registry's
-        # mux ref before declaring the peer missing (x-680d).
+        # mux ref before declaring the peer missing.
         mux_rc = _try_mux_pane(
             handle, lines, out, err,
             json_out=json_out, mux_lookup=mux_lookup, mux_reader=mux_reader,

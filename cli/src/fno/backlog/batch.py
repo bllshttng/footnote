@@ -373,7 +373,7 @@ def _clear_member_batch_marks(member_ids: list[str], *, root: Path) -> None:
     `fno backlog next` until that TTL expires - delaying the individual-PR
     requeue by up to 2h on the rare abandon-after-success path. Force-releasing
     it here is the obvious fix, but it violates the node-claim-release-authority
-    invariant (ab-588326a7: only the walker/handoff may release a node claim,
+    invariant (: only the walker/handoff may release a node claim,
     never a helper subprocess). The invariant outranks the P2; the requeue is
     correct (eventual), only latency-bound. Aligning the batch-claim lifecycle is
     deferred to cv-30d898f0 (the same 2h-TTL follow-up).
@@ -504,8 +504,8 @@ def ship_batch(
             )
 
     if pr_url is None:
-        # Stale-base guard parity (x-9b87): the batch lane is the third
-        # gh-pr-create site (x-712b), so it runs the same check_stale_base the
+        # Stale-base guard parity: the batch lane is the third
+        # gh-pr-create site, so it runs the same check_stale_base the
         # /pr create + worker/ship.py paths run. The batch worktree is born off
         # origin/main by `fno agents workspace worktree ensure`, so this is defense-in-depth for a
         # future refactor - refuse via the EXISTING abandon path (never a wedged
@@ -1040,7 +1040,7 @@ def _root_opt(root: Optional[str]) -> Path:
     `.fno/batches/`, so a raw `Path.cwd()` default would fragment state across
     worktrees. resolve_canonical_repo_root() returns the main checkout from any
     linked worktree (the same category claims_dir() resolves to), so every
-    participant converges on `<canonical>/.fno/batches/` (x-6cdf prerequisite).
+    participant converges on `<canonical>/.fno/batches/` (prerequisite).
     """
     if root:
         return Path(root)

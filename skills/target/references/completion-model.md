@@ -23,7 +23,7 @@ The shim delegates all stop/allow logic to `fno-agents loop-check`. Output is on
 **`done()` reads** (what must be true when a promise is seen):
 
 - PR exists for HEAD commit and CI is green. When `no_ship: true`, this is skipped.
-- Every bot in `config.review.required_bots` has at least one completed review pass. The loop-check **code default is empty `[]`** (`DEFAULT_REQUIRED_BOTS` in `loopcheck.rs`) - a fresh install carries no review gate and never hangs on an unconfigured bot; a maintainer sets the list explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. When `no_external: true` in the manifest, the review reads are skipped (step 2, ab-f1c5a9ed). (Note: the Python config layer reports a different absent-key default - see carveout for that layer split.)
+- Every bot in `config.review.required_bots` has at least one completed review pass. The loop-check **code default is empty `[]`** (`DEFAULT_REQUIRED_BOTS` in `loopcheck.rs`) - a fresh install carries no review gate and never hangs on an unconfigured bot; a maintainer sets the list explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. When `no_external: true` in the manifest, the review reads are skipped (step 2). (Note: the Python config layer reports a different absent-key default - see carveout for that layer split.)
 - No unaddressed blocking inline finding (codex P1 / gemini critical|high on `/pulls/N/comments`). A finding is addressed when its thread has a non-bot reply AND (a fix commit landed after it OR the reply carries `wontfix:`). `/pr check` Step 8a is the matching writer.
 - CI is green on the PR. When `ci.declared_none: true` in settings, the CI read is skipped (the project declared CI is not applicable).
 - A promise with an unsatisfied read blocks with the failing read named (missing bot or finding path:line); the loop continues until the world catches up.
@@ -49,7 +49,7 @@ The loop continues until `<promise>MISSION COMPLETE: ...</promise>` AND the worl
 
 To cancel: `touch .fno/.target-cancelled` (or invoke `/target cancel`). The shim detects the sentinel and terminates with `Interrupted`.
 
-## bg terminal state, promise timing, and the review gate (x-8b64)
+## bg terminal state, promise timing, and the review gate
 
 - **Merge authority is CONFIG-driven, not attendance-driven.** Read the manifest's resolved `auto_merge_approved` (`sed -n 's/^auto_merge_approved:[[:space:]]*//p' .fno/target-state.md`), NOT `fno config get auto_merge`. Init folds `auto_merge.enabled` together with this run's modifiers, and a per-run `no-merge` - which `/target bg` injects by default - sets the resolved field false even when the config is enabled, so the raw config would tell you to merge against an explicit per-run prohibition. `fno do pr merge` reads the same field and refuses too (it used to gate on `enabled` alone, which made the sanctioned verb a weaker gate than the raw `gh pr merge` the git-protection hook guards); treat that as a backstop and decide from the manifest.
   - **When approved, MERGE BEFORE PROMISING.** `fno do pr merge <n>`, then `fno backlog reconcile` to close the node (a merge from inside a worktree skips the local post-merge step), and only then `<promise>`. This is the one exception to promise-early: a promise emitted first terminates the loop as `DonePRGreen` the moment CI is green, the session is never re-invoked, and the merge silently never happens. Config set once IS the standing authorization; re-asking each time re-imposes the step it was configured to delete.
@@ -58,11 +58,11 @@ To cancel: `touch .fno/.target-cancelled` (or invoke `/target cancel`). The shim
 - **Promise early; the external reads hold it.** You do not need to wait for the external review to pass before emitting `<promise>`. Emit it when the work is shipped (PR up, CI green); if the required bot has not reviewed yet, the `done()` reads simply block-and-retry (naming the missing bot) until the world catches up. A premature promise is safe - it never short-circuits the gate.
 - **The gate reads `config.review.required_bots`, NOT `external_reviewers`.** Internal sigma-review is advisory; the external required bot is the gate. Read the current value with `fno config get review.required_bots` (the bare key works; the `config.` prefix is optional). An empty list declares the no-review-gate path (PR + CI carry the gate).
 
-## Running tests / reading CI here (x-8b64)
+## Running tests / reading CI here
 
 - **Run the Python suite with `fno doctor test [paths...]`**, not bare `pytest`. It pins `PYTHONPATH` to the worktree source. A bare `pytest` in a worktree imports the canonical `fno`. It bypasses rtk, which can stall a bare `pytest` or `cargo` for minutes. It returns pytest's **real exit code**. A pipe into `tail` can mask failure as green. For `cargo`, set `RTK_DISABLED=1` for the same scoped bypass.
 - **Read a PR's CI verdict with `fno do pr status <n>`**, not hand-rolled `jq` over `statusCheckRollup` or `gh pr checks` (which disagrees with the rollup). It prints one JSON verdict (`green|red|pending|unknown`) and exits 0/1/2/3 accordingly; an in-progress check reads as pending, a PR with no checks reads as unknown - neither is a false red.
 
-## What changed (ab-d0337fbc)
+## What changed
 
 The pre-wedge control plane had three layers removed in Tasks 1.1-3.2: (1) the 1101-line bash stop hook with thrash/budget/phase-stall/help-escalation/orphan detectors and three-factor gate provenance machinery (~7575 LOC of `scripts/lib/` helpers deleted); (2) the `fno gate` CLI surface and `gates/` package (~1460 LOC + both `gate_reality_map.yaml` copies deleted); (3) the phase verifier scripts in `skills/target/scripts/verifiers/` (~900 LOC deleted). The replacement is `fno-agents loop-check` (a single Rust verb) + the 118-line shim.
