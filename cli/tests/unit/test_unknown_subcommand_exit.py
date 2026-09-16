@@ -1,4 +1,4 @@
-"""An unknown subcommand must exit nonzero (x-9b35).
+"""An unknown subcommand must exit nonzero.
 
 A missing verb that exits 0 is byte-identical, to a caller gating on the
 exit code, to a genuinely empty result: four no-match readings were once
