@@ -2681,6 +2681,25 @@ event_types:
         scope:
           type: string
 
+  - name: king_term
+    description: "A crown's term was declared or extended via `fno agents king term <spec> [--reason]`, or the Stop-hook gate observed it reached. The receipt a reign's tenure bound leaves."
+    sources: [loop, hook]
+    data:
+      required: [scope, term]
+      properties:
+        scope:
+          type: string
+        session_id:
+          type: string
+        term:
+          type: string
+        reason:
+          type: string
+        prior_term:
+          type: string
+        prior_state:
+          type: string
+
   - name: event_payload_too_large
     description: "A Rust-emitted event payload exceeded limits.max_data_bytes (65536). The oversized event is replaced by this meta-event so the intended_kind is still visible to auditors."
     sources: [daemon, subagent]
