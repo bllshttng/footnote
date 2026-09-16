@@ -232,7 +232,7 @@ A driver-hosted thread closes this by construction. It appears in `thread/loaded
 
 ## What the fno side holds now
 
-`crates/fno-agents/src/daemon.rs` is the supervisor, and `ctx.codex_threads` holds one entry per codex thread worker. Read those entries as SOCKETS, not children. The supervisor owns no app-server process, so losing one loses a connection while the thread keeps running. `recover_codex_threads` reopens them at startup from the registry's durable `harness_session_id`.
+`crates/fno-agents/src/daemon.rs` is the supervisor, and `ctx.codex_threads` holds one entry per codex thread worker. Read those entries as SOCKETS, not children. The supervisor owns no app-server process, so losing one loses a connection while the thread keeps running. `recover_codex_threads` reopens them at startup from the registry's durable `harness_session_id`. Recovery refuses a row whose cwd no longer exists and stamps it Orphaned. A resumed thread with no cwd reads alive and can never run a turn.
 
 One actor task per thread owns its connection exclusively. That reasoning is about handle types, so it survived the transport change untouched. `drive_turn` used to hold a mutex guard for a whole turn, so every follow-up ask queued behind it and the steer RPC was unreachable. Consumers now send commands and never touch the driver.
 
