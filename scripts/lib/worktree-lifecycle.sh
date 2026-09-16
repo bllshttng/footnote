@@ -1146,11 +1146,17 @@ case "${1:-status}" in
 
             N_TOTAL=0; N_REAP=0; N_FAIL=0
             N_DIRTY=0; N_UNPUSHED=0; N_UNMERGED=0; N_LIVE=0; N_PROC=0; N_SALVAGE=0; N_NEEDCONF=0; N_APP_OWNED=0; N_PERM=0; N_UNBORN=0
+            # Every tree git reports minus the canonical checkout, counted
+            # before the --prefix filter: a truncated read must never be
+            # indistinguishable from a partial sweep.
+            N_ENUM=0
 
             _wt_refresh_cwd_snapshot || true
             printf '%-18s %-34s %s\n' "STATUS" "BRANCH" "PATH"
             while IFS= read -r wt; do
                 [[ "$wt" == "$MAIN_DIR" ]] && continue
+
+                N_ENUM=$((N_ENUM + 1))
 
                 branch="$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
                 head="$(git -C "$wt" rev-parse HEAD 2>/dev/null || echo '')"
@@ -1302,8 +1308,8 @@ case "${1:-status}" in
                 EXECUTED=""; [[ -n "$APPLY" && -z "$DRY_RUN" ]] && EXECUTED="1"
                 VERB="would archive"; [[ -n "$EXECUTED" ]] && VERB="archived"
                 SUFFIX=""; [[ -z "$EXECUTED" ]] && SUFFIX="  [dry-run: no changes made; pass --apply to execute]"
-                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d unborn, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed%s\n' \
-                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_UNBORN" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$SUFFIX"
+                printf 'Summary: %d %s, %d kept (%d unmerged, %d unpushed, %d unborn, %d dirty, %d live-session, %d processes, %d salvage-failed, %d needs-confirmation, %d app-owned, %d permanent), %d failed, enumerated %d judged %d%s\n' \
+                    "$N_REAP" "$VERB" "$KEPT" "$N_UNMERGED" "$N_UNPUSHED" "$N_UNBORN" "$N_DIRTY" "$N_LIVE" "$N_PROC" "$N_SALVAGE" "$N_NEEDCONF" "$N_APP_OWNED" "$N_PERM" "$N_FAIL" "$N_ENUM" "$N_TOTAL" "$SUFFIX"
             fi
             exit 0
         fi

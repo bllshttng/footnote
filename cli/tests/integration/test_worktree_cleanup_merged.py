@@ -1277,3 +1277,30 @@ def test_unborn_worktree_survives_the_sweep_and_is_named(repo: Path):
     assert "kept (unborn)" in r.stdout, diag
     assert wt.exists(), "the sweep ate a worker's tree during its setup window" + diag
     assert "1 unborn" in r.stdout, f"the Summary must name the new bucket: {diag}"
+
+
+def test_summary_names_enumerated_and_judged_counts(repo: Path):
+    """AC13: the summary says what the sweep enumerated, before judging.
+
+    The daemon read "20 judged" on a 54-tree machine and concluded a partial
+    sweep; the summary could not say otherwise. `enumerated` counts every
+    non-canonical tree git reports (before any filter); `judged` counts what
+    the sweep actually judged (after --prefix scoping). A truncated read is no
+    longer indistinguishable from a partial sweep.
+    """
+    _wire_real_reapable(repo)
+    wt_a = repo / "wt-enum-a"
+    wt_b = repo / "wt-enum-b"
+    _git(repo, "worktree", "add", str(wt_a), "-b", "feature/enum-a", "main")
+    _git(repo, "worktree", "add", str(wt_b), "-b", "feature/enum-b", "main")
+
+    r = _sweep(repo)
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "enumerated 2 judged 2" in r.stdout, diag
+
+    # A --prefix-scoped sweep judges fewer than it enumerated.
+    r = _sweep(repo, "--prefix", "feature/enum-a")
+    assert r.returncode == 0, diag
+    assert "enumerated 2 judged 1" in r.stdout, diag
