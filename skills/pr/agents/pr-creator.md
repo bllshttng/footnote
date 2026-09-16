@@ -216,7 +216,7 @@ else
 fi
 ```
 
-When `$NODE_ID` is empty or unresolvable, `--from-branch` resolves the node from the current branch instead. It demands exactly one real node, the same carrier the CI gate reads. A nonzero exit prints a `warn:` and continues; the trailer is unproducible there, and the red check's annotation names the remedy. `$CLOSURE_TRAILER` stays safe to append unconditionally. The verb is a moved spelling: expect one `is now` deprecation notice on stderr and treat it as expected output, never as a failure signal. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno do pr closure-trailer "$NODE_ID" --extra <other-id>`.
+When `$NODE_ID` is empty or unresolvable, `--from-branch` resolves the node from the current branch instead. It demands exactly one real node, the same carrier the CI gate reads. A nonzero exit prints a `warn:` and continues. The trailer is unproducible there, and the red check's annotation names the remedy. `$CLOSURE_TRAILER` stays safe to append unconditionally. The verb is a moved spelling: expect one `is now` deprecation notice on stderr and treat it as expected output, never as a failure signal. Most genuine extra deliveries ARE `contained_in` already. On the rare case where the commits or plan show a real extra one, add it explicitly: `fno do pr closure-trailer "$NODE_ID" --extra <other-id>`.
 
 Append the non-empty `$CLOSURE_TRAILER` as its own paragraph at the end of the body composed in step 5, before calling `gh pr create`. Never hand-write a `Backlog-Closure:` line. Never add an id this command did not produce: a wrong id silently binds the wrong node at merge.
 
