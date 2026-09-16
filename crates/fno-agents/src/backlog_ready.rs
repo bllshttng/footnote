@@ -369,6 +369,9 @@ fn has_intake_difficulty(e: &Value) -> bool {
 /// (the one fail-closed policy in this selector).
 pub(crate) struct HoldVerdict {
     pub(crate) guard_reason: String,
+    /// True for a validated `HoldState::Held` block; false for `Invalid`
+    /// (a broken ruling still parks the node, but is not held proof).
+    pub(crate) held: bool,
 }
 
 /// One plan's hold state (`ladder.dispatch_hold`).
@@ -456,12 +459,15 @@ pub(crate) fn dispatch_hold_verdict(
         seen.insert(node_id.clone());
         let state = dispatch_hold(&current);
         if !matches!(state, HoldState::Absent) {
-            let prefix = match state {
-                HoldState::Held => "dispatch-hold",
-                _ => "dispatch-hold-invalid",
+            let held = matches!(state, HoldState::Held);
+            let prefix = if held {
+                "dispatch-hold"
+            } else {
+                "dispatch-hold-invalid"
             };
             return Some(HoldVerdict {
                 guard_reason: format!("{prefix}:{node_id}"),
+                held,
             });
         }
         for relation in ["contained_in", "parent"] {
