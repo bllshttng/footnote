@@ -202,7 +202,14 @@ def _enrich_hex_nodes(rows):
 def parse_dispatch_agent_name(name):
     return parse_many([name])[0] if name else None
 
-def legacy_verb_code(name):
-    if not name:
-        return None
-    return "t" if name.startswith("target-") else ("th" if name.startswith("think-") else None)
+def parse_node_ids(names):
+    """Batch node extraction: one name-parse subprocess for the whole list,
+    never one per row (the ``agents list`` join reads every row)."""
+    keys = list(names)
+    try:
+        rows = parse_many([name or "" for name in keys]) if keys else []
+    except AgentNameError:
+        # Stale/missing binary: every name reads as no node, no exception.
+        return {name: None for name in keys}
+    return {name: (row.node if row is not None and row.node else None)
+            for name, row in zip(keys, rows)}

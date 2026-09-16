@@ -875,11 +875,11 @@ def _recovery_agent_name(
     predecessor: Optional[str], node_or_session: str, short: str
 ) -> str:
     """The ``rec-<verb>-<node-or-session>-<short>`` recovery name; the verb
-    parses from the predecessor (legacy spellings still resolve, else t)."""
-    from fno.agents.naming import dispatch_agent_name, legacy_verb_code, parse_dispatch_agent_name
+    parses from the predecessor (legacy spellings resolve in the binary, else t)."""
+    from fno.agents.naming import dispatch_agent_name, parse_dispatch_agent_name
 
     parsed = parse_dispatch_agent_name(predecessor or "")
-    verb = parsed.verb if parsed else (legacy_verb_code(predecessor) or "t")
+    verb = parsed.verb if parsed else "t"
     return dispatch_agent_name("rec", verb, node_or_session, slug=short)
 
 

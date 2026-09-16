@@ -223,9 +223,14 @@ def test_parse_typed_identities_are_not_nodes():
         assert parsed.node is None, name
 
 
-def test_parse_legacy_and_junk_names_return_none():
-    assert parse_dispatch_agent_name("target-x-3218-spawn") is None
-    assert parse_dispatch_agent_name("think-x-3218-retro") is None
+def test_parse_legacy_names_resolve_through_the_window():
+    legacy = parse_dispatch_agent_name("target-x-3218-spawn")
+    assert (legacy.source, legacy.verb, legacy.node, legacy.tail) == (None, "t", "x-3218", "spawn")
+    think = parse_dispatch_agent_name("think-x-3218-retro")
+    assert (think.verb, think.node) == ("th", "x-3218")
+
+
+def test_parse_junk_names_return_none():
     assert parse_dispatch_agent_name("reconcile-ab-4040eee8-cargo") is None
     assert parse_dispatch_agent_name("j-x-3218-2") is None
     assert parse_dispatch_agent_name("fno agents pane") is None
