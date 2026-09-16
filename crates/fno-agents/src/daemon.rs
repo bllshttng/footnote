@@ -5310,6 +5310,9 @@ where
                     // The parent edge the orphan check keys on (same key as
                     // Python's serialize_entry); null is a real answer.
                     "spawned_by_session": e.spawned_by_session,
+                    // The served CHILD/PEER word for that edge, stamped by the
+                    // liveness sweep; null before the first stamp.
+                    "lineage_kind": e.lineage_kind,
                     // How this session came to exist: "operator" for one a human
                     // started by hand, "spawn" for a footnote-created worker, null
                     // for a row nothing stamped. Emitted on BOTH serializers because
