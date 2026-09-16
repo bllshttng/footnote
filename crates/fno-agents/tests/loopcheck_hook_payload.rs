@@ -464,12 +464,22 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
     };
 
     // Fire 1: loop-check answers DoneDelivery but its fixture deletes the live
-    // manifest mid-flight. Staging recovers from the entry snapshot, so the
-    // first finalize attempt still runs and fails; the block names it and the
-    // emit exits before cleanup, so the staged snapshot survives.
+    // manifest first, so staging has no source and the block names it. No
+    // delivery write may run from a state that could not be staged.
     write_same_harness_pending(&cwd);
     let fire1 = fire();
-    assert!(blocked(&fire1, "generic delivery finalization failed"));
+    assert!(blocked(
+        &fire1,
+        "generic delivery state could not be preserved"
+    ));
+    assert!(!cwd.join(".fno/finalize-count").exists());
+
+    // Fire 2: the manifest is gone, so the pending scan picks up the
+    // same-harness snapshot and the finalize retry engages. The first attempt
+    // fails and blocks; the emit exits before cleanup, so the snapshot
+    // survives for the next stop.
+    let fire2 = fire();
+    assert!(blocked(&fire2, "generic delivery finalization failed"));
     assert_eq!(
         fs::read_to_string(cwd.join(".fno/finalize-count"))
             .unwrap()
@@ -478,7 +488,7 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
     );
     let retry = git_path(
         &cwd,
-        "fno-delivery-finalize-pending-sess-delivery-retry.sess-delivery-retry.md",
+        "fno-delivery-finalize-pending-sess-delivery-retry.session-old.md",
     );
     assert!(
         retry.exists(),
@@ -486,12 +496,11 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
         retry.display()
     );
 
-    // Fire 2: the manifest is gone and the pending scan picks up the staged
-    // snapshot over the stale session-old and foreign candidates, so the
-    // retry engages and the second finalize attempt succeeds.
+    // Fire 3: the retry succeeds and the stop is allowed. The prefix scan must
+    // keep the same-harness snapshot over the other-session candidate.
     write_other_pending(&cwd);
-    let fire2 = fire();
-    assert_eq!(fire2.0, Some(0));
+    let fire3 = fire();
+    assert_eq!(fire3.0, Some(0));
     assert!(cwd.join(".fno/finalize-complete").exists());
     assert_eq!(
         fs::read_to_string(cwd.join(".fno/finalize-count"))
@@ -499,27 +508,11 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
             .trim(),
         "2"
     );
-
-    // Fire 3: the stale session-old candidate retries next and succeeds.
-    let fire3 = fire();
-    assert_eq!(fire3.0, Some(0));
     assert_eq!(
-        fs::read_to_string(cwd.join(".fno/finalize-count"))
+        fs::read_to_string(cwd.join(".fno/loop-count"))
             .unwrap()
             .trim(),
-        "3"
-    );
-
-    // Fire 4: with every same-owner candidate consumed, the foreign pending
-    // file is never picked and the stop stays a silent allow.
-    let fire4 = fire();
-    assert_eq!(fire4.0, Some(0));
-    assert!(git_path(&cwd, "fno-delivery-finalize-pending-000-other.md").exists());
-    assert_eq!(
-        fs::read_to_string(cwd.join(".fno/finalize-count"))
-            .unwrap()
-            .trim(),
-        "3"
+        "1"
     );
 }
 
@@ -554,26 +547,25 @@ fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
     };
 
     // Fire 1: loop-check answers DoneDelivery but its fixture deletes the live
-    // manifest mid-flight. Staging recovers from the entry snapshot, so the
-    // first finalize attempt still runs and fails; the emit exits before
-    // cleanup, so the staged snapshot survives.
+    // manifest first, so staging has no source and nothing is preserved. No
+    // delivery write may run from a state that could not be staged.
     write_same_harness_pending(&cwd);
+    assert!(fire().contains("generic delivery state could not be preserved"));
+    assert!(!cwd.join(".fno/finalize-count").exists());
+
+    // Fire 2: the manifest is gone, so the pending scan picks up the
+    // same-harness snapshot and the finalize retry engages. The first attempt
+    // fails and blocks the stop; the emit exits before cleanup, so the
+    // snapshot survives for the next stop.
     assert!(fire().contains("generic delivery finalization failed"));
-    assert_eq!(
-        fs::read_to_string(cwd.join(".fno/finalize-count"))
-            .unwrap()
-            .trim(),
-        "1"
-    );
     assert!(git_path(
         &cwd,
-        "fno-delivery-finalize-pending-sess-delivery-retry.sess-delivery-retry.md",
+        "fno-delivery-finalize-pending-sess-delivery-retry.session-old.md",
     )
     .exists());
 
-    // Fire 2: the manifest is gone and the pending scan picks up the staged
-    // snapshot over the stale session-old and foreign candidates, so the
-    // retry engages and the second finalize attempt succeeds.
+    // Fire 3: the retry succeeds and the stop is allowed. The prefix scan must
+    // keep the same-harness snapshot over the other-session candidate.
     write_other_pending(&cwd);
     assert_eq!(fire().trim(), "{}");
     assert!(cwd.join(".fno/finalize-complete").exists());
@@ -583,25 +575,11 @@ fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
             .trim(),
         "2"
     );
-
-    // Fire 3: the stale session-old candidate retries next and succeeds.
-    assert_eq!(fire().trim(), "{}");
     assert_eq!(
-        fs::read_to_string(cwd.join(".fno/finalize-count"))
+        fs::read_to_string(cwd.join(".fno/loop-count"))
             .unwrap()
             .trim(),
-        "3"
-    );
-
-    // Fire 4: with every same-owner candidate consumed, the foreign pending
-    // file is never picked and the stop stays a silent allow.
-    assert_eq!(fire().trim(), "{}");
-    assert!(git_path(&cwd, "fno-delivery-finalize-pending-000-other.md").exists());
-    assert_eq!(
-        fs::read_to_string(cwd.join(".fno/finalize-count"))
-            .unwrap()
-            .trim(),
-        "3"
+        "1"
     );
 }
 
