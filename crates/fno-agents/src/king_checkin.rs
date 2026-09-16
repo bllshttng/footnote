@@ -47,6 +47,7 @@ const READING_NAMES: [&str; 13] = [
     "drain",
     "main_ci",
     "control_plane",
+    "parked",
 ];
 
 /// The numeric keys this verb owns and diffs versus the previous beat.
@@ -650,6 +651,29 @@ fn r_drain(ctx: &Ctx) -> Result<Value, String> {
     Ok(payload.get("undelivered").cloned().unwrap_or(Value::Null))
 }
 
+/// The parked-PR board fact (x-6bf4): open parks with the remedy verb, read
+/// in-process from the one owner so a second reader of the store shape can
+/// never drift. A failed store read is a failed reading, never a silent
+/// "parked: none".
+fn r_parked() -> Result<Value, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd unreadable: {e}"))?;
+    let ctx = crate::pr_park::Ctx::live(&cwd, crate::pr_park::Paths::from_home());
+    let rows = crate::pr_park::list_rows(&ctx);
+    let open: Vec<Value> = rows
+        .iter()
+        .filter(|r| r.bucket == "open")
+        .map(|r| {
+            json!({
+                "key": r.key,
+                "node": r.node,
+                "reason_detail": r.reason_detail,
+                "age_hours": r.age_hours,
+            })
+        })
+        .collect();
+    Ok(json!({"open": open.len(), "rows": open}))
+}
+
 fn owner_repo(url: &str) -> Result<String, String> {
     let url = url.trim().trim_end_matches('/');
     let tail = url.rsplit_once(':').map(|(_, t)| t).unwrap_or(url);
@@ -810,6 +834,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("drain", r_drain(ctx));
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
+    take("parked", r_parked());
     readings
 }
 
@@ -1328,6 +1353,38 @@ fn render_lines(
                 lines.push("control plane:".into());
                 for entry in attention {
                     lines.push(format!("  {entry}"));
+                }
+            }
+        }
+    }
+    match failed("parked") {
+        Some(r) => lines.push(format!("READER FAILED parked: {}", r.error)),
+        None => {
+            let rows = by_name("parked")
+                .and_then(|r| r.value.get("rows"))
+                .and_then(|o| o.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                lines.push("parked: none".into());
+            } else {
+                lines.push("parked:".into());
+                for row in rows {
+                    let key = row.get("key").and_then(Value::as_str).unwrap_or("?");
+                    let node = row.get("node").and_then(Value::as_str).unwrap_or("-");
+                    let detail = row
+                        .get("reason_detail")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    let age = row.get("age_hours").and_then(Value::as_i64).unwrap_or(-1);
+                    let age_s = if age < 0 {
+                        "?".to_string()
+                    } else {
+                        format!("{age}h")
+                    };
+                    lines.push(format!(
+                        "  {key} {detail} ({age_s}, node {node}); remedy: fno-agents pr-park unpark {key}"
+                    ));
                 }
             }
         }
@@ -2002,6 +2059,7 @@ mod tests {
             Reading::took("drain", json!(9)),
             Reading::took("main_ci", json!("green")),
             Reading::took("control_plane", json!({"attention": []})),
+            Reading::took("parked", json!({"open": 0, "rows": []})),
         ]
     }
 
@@ -2154,6 +2212,51 @@ mod tests {
         readings[10] = Reading::failed("drain", "drain unreadable".into());
         let data = build_data(&readings, "x-bbbb");
         assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
+    }
+
+    #[test]
+    fn the_king_sees_open_parks_every_beat_with_the_unpark_verb() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
+        );
+        readings[12] = Reading::took(
+            "parked",
+            json!({"open": 2, "rows": [
+                {"key": "owner/repo#101", "node": "x-aa",
+                 "reason_detail": "failed; checks are red", "age_hours": 2},
+                {"key": "owner/repo#2078", "node": "x-bb",
+                 "reason_detail": "failed; checks are red", "age_hours": 5},
+            ]}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let unpark_rows: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("pr-park unpark"))
+            .collect();
+        assert_eq!(unpark_rows.len(), 2, "lines: {lines:?}");
+        assert!(unpark_rows[0].contains("owner/repo#101"));
+        assert!(unpark_rows[0].contains("checks are red"));
+    }
+
+    #[test]
+    fn a_parked_reading_of_zero_rows_reads_parked_none() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 2, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 1, "total_nodes": 2, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
+        );
+        readings[12] = Reading::took("parked", json!({"open": 0, "rows": []}));
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(
+            lines.iter().any(|l| l == "parked: none"),
+            "lines: {lines:?}"
+        );
     }
 
     fn journal(dir: &Path, rows: &[Value]) -> PathBuf {
