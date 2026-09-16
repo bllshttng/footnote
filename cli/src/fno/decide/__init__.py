@@ -506,6 +506,7 @@ def record_decision(
     second id for one ruling, and `fno backlog decide-reindex` is the recovery.
     """
     from fno.events import append_event, operator_decision
+    from fno import paths
     from fno.graph import api as graph_api
     from fno.outstanding.core import events_path
     from fno.decide.graduation import normalize_graduation
@@ -621,7 +622,7 @@ def record_decision(
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:
-        graph_api.decision_record(event)
+        graph_api.decision_record(event, path=paths.graph_json())
     except Exception as exc:  # noqa: BLE001 - re-raised with what the caller must know
         raise IndexWriteError(decision_id, exc) from exc
     try:
@@ -680,6 +681,7 @@ def retract_decision(
         raise RefusedAuthorityError(provenance.decided_by, origin)
 
     from fno.events import append_event, decision_retracted
+    from fno import paths
     from fno.graph import api as graph_api
     from fno.outstanding.core import events_path
 
@@ -698,7 +700,7 @@ def retract_decision(
     events_root = resolve_carveout_root()
     append_event(event, events_path=events_path(events_root))
     try:
-        graph_api.decision_retract(event)
+        graph_api.decision_retract(event, path=paths.graph_json())
     except Exception as exc:  # noqa: BLE001 - durable event must not be retried blindly
         raise IndexWriteError(str(target["decision_id"]), exc) from exc
     return {"decision_id": str(target["decision_id"]), "event": event}

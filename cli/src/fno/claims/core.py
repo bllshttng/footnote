@@ -2302,6 +2302,16 @@ def _native_claim_model(payload: dict[str, Any]) -> Claim:
 # Native client compatibility surface. The legacy implementations above stay
 # available to old imports during the migration, but every public claim verb
 # resolves to this one Rust door below.
+_LEGACY_ACQUIRE_CLAIM = acquire_claim
+_LEGACY_RELEASE_CLAIM = release_claim
+_LEGACY_REFRESH_CLAIM = refresh_claim
+_LEGACY_CLAIM_STATUS = claim_status
+_LEGACY_LIST_CLAIMS = list_claims
+_LEGACY_LIST_CLAIMS_WITH_COUNTS = list_claims_with_counts
+_LEGACY_FORCE_RELEASE_CLAIM = force_release_claim
+_LEGACY_REAP_DEAD_CLAIMS = reap_dead_claims
+
+
 def acquire_claim(
     key: str,
     holder: str,
@@ -2318,6 +2328,22 @@ def acquire_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Claim:
+    if root is not None:
+        return _LEGACY_ACQUIRE_CLAIM(
+            key,
+            holder,
+            reason=reason,
+            ttl_ms=ttl_ms,
+            metadata=metadata,
+            pid=pid,
+            pid_unavailable=pid_unavailable,
+            host=host,
+            harness=harness,
+            pid_provenance=pid_provenance,
+            harness_session_id=harness_session_id,
+            root=root,
+            _attempt=_attempt,
+        )
     del host, harness, pid_provenance, harness_session_id, _attempt
     _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
     flags = ["--holder", holder]
@@ -2345,6 +2371,14 @@ def release_claim(
     root: Optional[Path] = None,
     sync_graph_mirror: bool = True,
 ) -> Optional[Claim]:
+    if root is not None:
+        return _LEGACY_RELEASE_CLAIM(
+            key,
+            holder,
+            strict=strict,
+            root=root,
+            sync_graph_mirror=sync_graph_mirror,
+        )
     del sync_graph_mirror
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
@@ -2366,6 +2400,10 @@ def refresh_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Optional[Claim]:
+    if root is not None:
+        return _LEGACY_REFRESH_CLAIM(
+            key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt
+        )
     del _attempt
     if ttl_ms <= 0:
         raise ClaimValidationError("ttl_ms must be positive")
@@ -2380,6 +2418,8 @@ def refresh_claim(
 
 
 def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
+    if root is not None:
+        return _LEGACY_CLAIM_STATUS(key, root=root)
     if not key:
         raise ClaimValidationError("key must be non-empty")
     return _native_claim("status", key, _native_root_flags(root))
@@ -2391,6 +2431,10 @@ def list_claims(
     include_stale: bool = False,
     root: Optional[Path] = None,
 ) -> list[dict[str, Any]]:
+    if root is not None:
+        return _LEGACY_LIST_CLAIMS(
+            prefix=prefix, include_stale=include_stale, root=root
+        )
     flags = _native_root_flags(root)
     if prefix is not None:
         flags.extend(("--prefix", prefix))
@@ -2406,6 +2450,10 @@ def list_claims_with_counts(
     include_stale: bool = False,
     root: Optional[Path] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
+    if root is not None:
+        return _LEGACY_LIST_CLAIMS_WITH_COUNTS(
+            prefix=prefix, include_stale=include_stale, root=root
+        )
     rows = list_claims(prefix=prefix, include_stale=True, root=root)
     counts = {state: 0 for state in ("live", "suspect", "stale", "corrupted", "free")}
     states: dict[str, str] = {}
@@ -2427,6 +2475,13 @@ def force_release_claim(
     root: Optional[Path] = None,
     holding_recovery_lock: bool = False,
 ) -> ForceReleaseOutcome:
+    if root is not None:
+        return _LEGACY_FORCE_RELEASE_CLAIM(
+            key,
+            reason,
+            root=root,
+            holding_recovery_lock=holding_recovery_lock,
+        )
     del holding_recovery_lock
     if not key:
         raise ClaimValidationError("key must be non-empty")
@@ -2450,6 +2505,14 @@ def reap_dead_claims(
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     optout_sink: Optional[list[Claim]] = None,
 ) -> dict[str, Any]:
+    if roots is not None:
+        return _LEGACY_REAP_DEAD_CLAIMS(
+            roots=roots,
+            apply=apply,
+            abandonment_probe=abandonment_probe,
+            node_settlement=node_settlement,
+            optout_sink=optout_sink,
+        )
     del abandonment_probe, node_settlement, optout_sink
     flags: list[str] = ["--apply"] if apply else []
     for root in roots or [None]:

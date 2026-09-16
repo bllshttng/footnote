@@ -269,6 +269,13 @@ pub fn acquire_db(key: &str, holder: &str, options: &AcquireOpts) -> Result<Valu
     if key.is_empty() || holder.is_empty() {
         return Err("key and holder must be non-empty".to_string());
     }
+    if let Ok(path) = claims::claim_path(key, options.root.as_deref()) {
+        if path.exists() {
+            if let Err(claims::ReadError::Corrupted(error)) = claims::read_claim_file(&path) {
+                return Err(format!("claim is corrupted: {error}"));
+            }
+        }
+    }
     let mut connection = open(options.root.as_deref())?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -316,6 +323,18 @@ pub fn release_db(key: &str, holder: &str, root: Option<&Path>) -> Result<Value,
 }
 
 pub fn status_db(key: &str, root: Option<&Path>) -> Result<Value, String> {
+    if let Ok(path) = claims::claim_path(key, root) {
+        if path.exists() {
+            if let Err(claims::ReadError::Corrupted(error)) = claims::read_claim_file(&path) {
+                return Ok(json!({
+                    "key": key,
+                    "state": "corrupted",
+                    "error": error,
+                    "path": path,
+                }));
+            }
+        }
+    }
     let connection = open(root)?;
     Ok(record_for(&connection, key)?
         .map(|record| status_json(&record))

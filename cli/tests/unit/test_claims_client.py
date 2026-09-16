@@ -33,7 +33,6 @@ def test_acquire_claim_uses_native_json_door(monkeypatch, tmp_path: Path) -> Non
         "holder-1",
         ttl_ms=60_000,
         reason="test",
-        root=tmp_path,
     )
 
     assert claim.key == "node:x-test"
@@ -50,8 +49,6 @@ def test_acquire_claim_uses_native_json_door(monkeypatch, tmp_path: Path) -> Non
                 "test",
                 "--pid",
                 str(os.getpid()),
-                "--root",
-                str(tmp_path),
             ],
         )
     ]
@@ -66,7 +63,7 @@ def test_claim_status_uses_native_json_door(monkeypatch, tmp_path: Path) -> None
 
     monkeypatch.setattr(core, "_native_claim", fake_native)
 
-    status = core.claim_status("node:x-test", root=tmp_path)
+    status = core.claim_status("node:x-test")
 
     assert status == {"key": "node:x-test", "state": "free"}
-    assert calls == [("status", "node:x-test", ["--root", str(tmp_path)])]
+    assert calls == [("status", "node:x-test", [])]
