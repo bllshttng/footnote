@@ -60,66 +60,6 @@ def test_python_surface_captures_hidden_opts_on_every_leaf_kind():
     assert review == ["review"]
 
 
-# --------------------------------------------------------------------------- #
-# Usage-string parser
-# --------------------------------------------------------------------------- #
-KNOWN_USAGE = (
-    "usage: fno [--session <name>] | fno version [--json] | fno mux server "
-    "[--session <name>] | fno mux ls [--json] | fno mux attach <name> | "
-    "fno mux kill-server [<name>] [--json] | fno mux shell-init <zsh|bash> "
-    "[--json] | fno mux doctor [--json] | fno mux serve --web [--session <name>] "
-    "[--bind <addr>] [--port <n>] | fno mux pane ls|read|run|send|wait|kill|"
-    "claim|release ... | fno mux block pipe --from <pane> --to <pane> [--block "
-    "last|<seq>] [--json] [--force] | fno mux workspace prune [--dry-run] "
-    "[--include-named] [--json]"
-)
-
-
-# The usage string is no longer PARSED into the verb set - parsing it was half
-# the tautology, since it and the Python constant were written together and
-# omitted the same verbs. It survives here only as the `mux pane` reachability
-# anchor, which is all `enumerate_rust_leaves` still reads it for. The verb set
-# comes from `scan_rust_source` (real dispatchers) cross-checked against
-# `probe_rust_families` (the live binary's own refusal), and the behavioural
-# proof that the scan reads source lives in test_verb_ratchet_source_scan.py.
-
-
-# --------------------------------------------------------------------------- #
-# Fail-closed Rust-front reach (AC4)
-# --------------------------------------------------------------------------- #
-def _fake_run(responses):
-    """Build a subprocess.run replacement keyed by the first positional token."""
-    class _R:
-        def __init__(self, returncode, stdout, stderr):
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
-    def _run(argv, *a, **k):
-        # argv[0] is the binary; argv[1] is the verb ("version" / "mux")
-        verb = argv[1] if len(argv) > 1 else ""
-        return _R(*responses[verb])
-    return _run
-
-
-def test_fail_closed_when_rust_front_missing(monkeypatch):
-    monkeypatch.setattr(vr, "_locate_rust_front", lambda: None)
-    with pytest.raises(vr.VerbRatchetError, match="not on PATH"):
-        vr.enumerate_rust_leaves()
-
-
-def test_rust_front_override_beats_path(monkeypatch):
-    monkeypatch.setenv("FNO_RUST_FRONT", "/explicit/fno")
-    monkeypatch.setattr(vr.shutil, "which", lambda _: "/on/path/fno")
-    assert vr._locate_rust_front() == Path("/explicit/fno")
-
-
-def test_rust_front_override_unset_falls_back_to_path(monkeypatch):
-    monkeypatch.delenv("FNO_RUST_FRONT", raising=False)
-    monkeypatch.setattr(vr.shutil, "which", lambda _: "/on/path/fno")
-    assert vr._locate_rust_front() == Path("/on/path/fno")
-
-
 def test_fno_agents_front_prefers_worktree_build_before_path(monkeypatch, tmp_path):
     built = tmp_path / "crates" / "fno-agents" / "target" / "debug" / "fno-agents"
     built.parent.mkdir(parents=True)
@@ -132,108 +72,29 @@ def test_fno_agents_front_prefers_worktree_build_before_path(monkeypatch, tmp_pa
     assert vr._locate_fno_agents_front() == built
 
 
-def test_fail_closed_when_version_not_rust_front(monkeypatch):
-    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
-    # version exits nonzero -> unreachable
-    monkeypatch.setattr(
-        vr.subprocess, "run",
-        _fake_run({"version": (1, "", "No such command"), "mux": (2, "", KNOWN_USAGE)}),
-    )
-    with pytest.raises(vr.VerbRatchetError, match="unreachable"):
-        vr.enumerate_rust_leaves()
-
-
-def test_fail_closed_when_version_has_no_rev(monkeypatch):
-    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
-    # a python shim that answers version with non-Rust output -> no git_rev
-    monkeypatch.setattr(
-        vr.subprocess, "run",
-        _fake_run({"version": (0, "fno 0.3.1\n", ""), "mux": (2, "", KNOWN_USAGE)}),
-    )
-    with pytest.raises(vr.VerbRatchetError, match="no git_rev"):
-        vr.enumerate_rust_leaves()
-
-
-def test_fail_closed_when_stale_front_lacks_mux(monkeypatch):
-    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
-    # a stale front: version answers, but it predates mux (no "mux pane")
-    monkeypatch.setattr(
-        vr.subprocess, "run",
-        _fake_run({
-            "version": (0, '{"git_rev":"abc","package":"0.1.0"}', ""),
-            "mux": (2, "", "usage: fno [args]"),  # no mux pane anchor
-        }),
-    )
-    with pytest.raises(vr.VerbRatchetError, match="does not own mux"):
-        vr.enumerate_rust_leaves()
-
-
-def _reachable_front(monkeypatch):
-    """A Rust front that answers `version` and `mux --help` truthfully."""
-    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
-    monkeypatch.setattr(
-        vr.subprocess, "run",
-        _fake_run({
-            "version": (0, '{"git_rev":"abc","package":"0.3.1"}', ""),
-            "mux": (2, "", KNOWN_USAGE),
-        }),
-    )
-
-
-def test_fail_closed_when_source_dispatches_an_unadvertised_verb(monkeypatch):
-    # The dispatcher grew an arm and its own refusal message was not updated.
-    # This is the shape that let five live verbs sit unbaselined behind green.
-    _reachable_front(monkeypatch)
-    monkeypatch.setattr(vr, "scan_rust_source", lambda *a: (set(), {"pane": {"ls", "brandnew"}}))
-    monkeypatch.setattr(vr, "probe_rust_families", lambda *a: {"pane": {"ls"}})
-    with pytest.raises(vr.VerbRatchetError, match="does not name: brandnew"):
-        vr.enumerate_rust_leaves()
-
-
-def test_fail_closed_when_binary_advertises_a_verb_the_scan_missed(monkeypatch):
-    # The other direction: the front says it takes a verb the source scan could
-    # not see. That means the scan is blind to some dispatch shape, and a blind
-    # scan silently under-reports the surface - so it must refuse, not shrug.
-    _reachable_front(monkeypatch)
-    monkeypatch.setattr(vr, "scan_rust_source", lambda *a: (set(), {"pane": {"ls"}}))
-    monkeypatch.setattr(vr, "probe_rust_families", lambda *a: {"pane": {"ls", "unseen"}})
-    with pytest.raises(vr.VerbRatchetError, match="scan did not find: unseen"):
-        vr.enumerate_rust_leaves()
-
-
-def test_fail_closed_when_the_probe_negative_control_does_not_fire(monkeypatch):
-    # If the front does not refuse the bogus probe verb by name, its advertised
-    # set cannot be read. An empty set here would read as "this family has no
-    # verbs" and pass against a baseline that omits them all.
-    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
-    monkeypatch.setattr(
-        vr.subprocess, "run",
-        _fake_run({"mux": (0, "", "")}),  # accepts the probe, says nothing
-    )
-    with pytest.raises(vr.VerbRatchetError, match="negative control did not fire"):
-        vr.probe_rust_families(Path("/fake/fno"), {"pane"})
-
-
 def test_fail_closed_on_subprocess_timeout(monkeypatch):
-    # A hung Rust front raises TimeoutExpired; it must surface as a NAMED
-    # fail-closed error, not an uncaught traceback (AC4: named error).
-    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
+    # A hung fno-agents front raises TimeoutExpired; it must surface as a
+    # NAMED fail-closed error, not an uncaught traceback (AC4: named error).
+    monkeypatch.setattr(vr, "_locate_fno_agents_front", lambda: Path("/fake/agents"))
 
     def raise_timeout(argv, *a, **k):
         raise vr.subprocess.TimeoutExpired(cmd=argv, timeout=20)
 
     monkeypatch.setattr(vr.subprocess, "run", raise_timeout)
     with pytest.raises(vr.VerbRatchetError, match="unreachable"):
-        vr.enumerate_rust_leaves()
+        vr.probe_fno_agents_actions(Path("/fake/agents"))
 
 
 def test_fail_closed_on_missing_executable(monkeypatch):
     # The binary vanished between `which` and exec -> FileNotFoundError ->
     # named fail-closed, not a traceback.
-    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
-    monkeypatch.setattr(vr.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "gone")))
+    monkeypatch.setattr(vr, "_locate_fno_agents_front", lambda: Path("/fake/agents"))
+    monkeypatch.setattr(
+        vr.subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "gone")),
+    )
     with pytest.raises(vr.VerbRatchetError, match="unreachable"):
-        vr.enumerate_rust_leaves()
+        vr.probe_fno_agents_actions(Path("/fake/agents"))
 
 
 # --------------------------------------------------------------------------- #

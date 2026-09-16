@@ -25,7 +25,6 @@ ratchet necessary.
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -93,41 +92,6 @@ COLLAPSE_FLAGS_ROW_HELP = (
 # arm the scan cannot see fails as "advertises a verb the scan missed". The only
 # way to green is to change the code and the baseline together, which is the
 # property the ratchet was supposed to have all along.
-RUST_SOURCES = (
-    Path("crates") / "fno" / "src" / "main.rs",
-    Path("crates") / "fno" / "src" / "mux_cli.rs",
-    Path("crates") / "fno" / "src" / "mux_cli" / "pane_args.rs",
-    Path("crates") / "fno" / "src" / "cli_args.rs",
-)
-FNO_AGENTS_SOURCE = Path("crates") / "fno-agents" / "src" / "bin" / "client.rs"
-
-# A match arm (``"ls" =>``, ``Some("pipe") =>``, ``Some("get") | None =>``).
-_ARM_RE = re.compile(r'(?:Some\(\s*)?"([a-z][a-z0-9-]*)"\s*(?:\)\s*)?(?:\||=>)')
-
-# An early equality guard, which is how ``pane run`` and ``layout apply`` are
-# dispatched. Anchored to the DISPATCH variable rather than any ``==``: an
-# unanchored version also matched ``if v == "current"`` inside the ``pane run``
-# flag parser and proposed a verb that does not exist.
-_EQ_RE = re.compile(
-    r'\b(?:verb|sub|rest\.first\(\)[^=\n]*?)\s*==\s*(?:Some\(\s*)?"([a-z][a-z0-9-]*)"'
-)
-
-# The catch-all arm that ends a verb dispatch, and the family it belongs to.
-_UNKNOWN_VERB_RE = re.compile(r"unknown (?:(\w+) )?verb")
-
-# The `match <expr> {` that a verb dispatch opens, used to find the owning match
-# from inside one of its arms without counting brace depth.
-_MATCH_OPEN_RE = re.compile(r"\bmatch\b[^{}]*\{\s*$")
-_FAMILY_RE = re.compile(r"fno mux (\w+):")
-
-# The alternation the front prints alongside that refusal. Two shapes in the
-# wild: the usual ``(ls|create|rename|join)``, and ``(expected prune)`` where a
-# family has exactly one verb and the pipe form would read oddly. Both are read
-# rather than normalised, because normalising means editing Rust and rebuilding
-# the front, and a probe run against a stale binary is its own silent lie.
-_ALTERNATION_RE = re.compile(r"\((?:expected\s+)?([a-z][a-z0-9-]*(?:\s*\|\s*[a-z][a-z0-9-]*)*)\)")
-
-
 def _repo_root() -> Path:
     # Reuse the canonical cached, FNO_REPO_ROOT-aware resolver rather than a
     # third divergent git rev-parse (lint_cli.py already has one duplicate;
@@ -508,36 +472,6 @@ def _enclosing_block_start(lines: list[str], idx: int) -> int:
     return 0
 
 
-def _enclosing_match_start(lines: list[str], idx: int) -> int:
-    """Index of the ``match ... {`` owning the arm that contains ``idx``.
-
-    Walks OUTWARD block by block instead of assuming a fixed nesting depth.
-    Rust spells a catch-all arm two ways, and rustfmt keeps whichever it is
-    given::
-
-        other => { return Err(format!("unknown pane verb: ...")); }   # 2 deep
-        other => return Err(format!("unknown pane verb: ...")),       # 1 deep
-
-    Counting levels therefore makes the scan depend on whether the message
-    happened to fit on one line. It did not, until a verb list was hoisted into
-    a const and rustfmt collapsed the arm; the scan then walked past the match
-    into the enclosing fn, found no arms at that level, and reported ZERO verbs
-    for a family with eleven. It fails closed, but it blames the verbs it cannot
-    see rather than the shape it cannot parse, which is a long way from the
-    cause. Searching for the match itself has no depth assumption to break.
-    """
-    i = idx
-    while True:
-        start = _enclosing_block_start(lines, i)
-        if _MATCH_OPEN_RE.search(lines[start]):
-            return start
-        if start <= 0:
-            return 0
-        # Strictly decreasing (the next search starts above this block's opener),
-        # so this terminates at 0 even on a file with no match at all.
-        i = start - 1
-
-
 def _arms_at_top_level(lines: list[str], lo: int, hi: int) -> set[str]:
     """Verb literals dispatched directly by the match opening at ``lo``.
 
@@ -557,137 +491,45 @@ def _arms_at_top_level(lines: list[str], lo: int, hi: int) -> set[str]:
     return verbs
 
 
-def _enclosing_fn_start(lines: list[str], idx: int) -> int:
-    for i in range(idx, -1, -1):
-        if re.match(r"^(?:pub )?fn \w+", lines[i]):
-            return i
-    return 0
+NATIVE_TREE_REL = "scripts/ci/native-command-tree.txt"
+INVENTORY_REGENERATE = (
+    "cargo run --quiet --manifest-path crates/fno/Cargo.toml "
+    "--example native_command_tree > scripts/ci/native-command-tree.txt"
+)
 
 
-def scan_rust_source(repo_root: Optional[Path] = None) -> tuple[set[str], dict[str, set[str]]]:
-    """``(top-level mux verbs, {family: verbs})``, read from the dispatchers.
+FNO_AGENTS_SOURCE = Path("crates") / "fno-agents" / "src" / "bin" / "client.rs"
+_ARM_RE = re.compile(r'(?:Some\(\s*)?"([a-z][a-z0-9-]*)"\s*(?:\)\s*)?(?:\||=>)')
 
-    Top-level verbs come from two dispatchers: ``mux_carry_role``'s match in
-    ``main.rs`` for the carry families, and the typed ``Some(("ls", _))`` arms in
-    ``cli_args::map_matches`` for the clap-claimed verbs; ``version`` stays the
-    outer top. Families come from every catch-all arm in ``mux_cli.rs`` and
-    ``mux_cli/pane_args.rs`` that refuses an unknown verb, scanned back to the
-    match that owns it. A family with more than one refusal site (``block`` has
-    two) unions them.
+
+def read_native_inventory(repo_root: Optional[Path] = None) -> list[list[str]]:
+    """The generated native command tree's data rows (path, kind, ...).
+
+    ``scripts/ci/native-command-tree.txt`` is generated from the one clap
+    declaration in ``crates/fno`` (the file's header names the regenerate
+    command), and a freshness test in ``cli_args.rs`` fails ``cargo test``
+    when the artifact lags the tree - so the ratchet reads one generated
+    owner instead of re-deriving the tree from Rust source text.
     """
-    root = repo_root or _repo_root()
-    main_lines = _strip_line_comments((root / RUST_SOURCES[0]).read_text(encoding="utf-8"))
-    mux_lines = _strip_line_comments((root / RUST_SOURCES[1]).read_text(encoding="utf-8"))
-
-    main_text = "\n".join(main_lines)
-    carry_start = main_text.find("fn mux_carry_role")
-    if carry_start < 0:
+    path = (repo_root or _repo_root()) / NATIVE_TREE_REL
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
         raise VerbRatchetError(
-            "verb-ratchet: could not find the `mux` dispatch in "
-            f"{RUST_SOURCES[0]}. The scan reads real source, so a refactor of "
-            "decide_role must be reflected here rather than worked around: a "
-            "scan that silently finds nothing is the tautology this replaced."
-        )
-    carry_end = main_text.find("\nfn ", carry_start + 1)
-    carry_text = main_text[carry_start : carry_end if carry_end > carry_start else len(main_text)]
-    tops: set[str] = set()
-    for m in re.finditer(
-        r'Some\("([a-z][a-z0-9-]*)"((?:\s*\|\s*"[a-z][a-z0-9-]*")*)\)',
-        carry_text,
-    ):
-        tops.add(m.group(1))
-        tops.update(re.findall(r'"([a-z][a-z0-9-]*)"', m.group(2) or ""))
-    tops.discard("mux")
-
-    # The typed simple verbs: the clap-backed arms in cli_args::map_matches
-    # (`Some(("ls", s)) =>`), one arm per verb the front door claims. The
-    # `version` arm is the non-mux top and keeps the outer level.
-    args_text = "\n".join(_strip_line_comments((root / RUST_SOURCES[3]).read_text(encoding="utf-8")))
-    typed = {m.group(1) for m in re.finditer(r'Some\(\("([a-z][a-z0-9-]*)"', args_text)}
-    typed.discard("mux")
-    outer = typed & {"version"}
-    tops |= typed - outer
-
-    pane_lines = _strip_line_comments((root / RUST_SOURCES[2]).read_text(encoding="utf-8"))
-    families: dict[str, set[str]] = {}
-    for src_lines in (mux_lines, pane_lines):
-        for i, line in enumerate(src_lines):
-            # Not `m`: that name is already bound to a Match by the top-level loop
-            # above, and rebinding it to an Optional is a type error rather than a
-            # style nit.
-            unknown = _UNKNOWN_VERB_RE.search(line)
-            if not unknown:
-                continue
-            fam = unknown.group(1) or ""
-            fm = _FAMILY_RE.search(line)
-            if fm:
-                fam = fm.group(1)
-            if not fam:
-                continue
-            match_block = _enclosing_match_start(src_lines, i)
-            verbs = _arms_at_top_level(src_lines, match_block, i)
-            fn_start = _enclosing_fn_start(src_lines, i)
-            verbs |= set(_EQ_RE.findall("\n".join(src_lines[fn_start:i])))
-            families.setdefault(fam, set()).update(verbs)
-
-    # Emit FULL leaf paths rather than bare names fused from two levels: a mux
-    # top is `mux ls`, an outer top is `version`. Returning bare names forced the
-    # caller to re-derive which level each came from, and it got that wrong.
-    tops = {f"mux {t}" for t in tops} | outer
-
-    if not families:
+            f"verb-ratchet: cannot read the native command inventory {path}: {exc}. "
+            f"Regenerate it from the typed tree: {INVENTORY_REGENERATE}"
+        ) from exc
+    rows = [
+        line.split("\t")
+        for line in raw.splitlines()
+        if line and not line.startswith("#")
+    ]
+    if not rows:
         raise VerbRatchetError(
-            "verb-ratchet: the source scan found no verb families in "
-            f"{RUST_SOURCES[1]}. An empty scan reads as 'no Rust verbs' and "
-            "would pass a baseline that omits all of them; refusing instead."
+            f"verb-ratchet: the native command inventory {path} is empty. "
+            f"Regenerate it from the typed tree: {INVENTORY_REGENERATE}"
         )
-    return tops, families
-
-
-def probe_rust_families(binary: Path, families) -> dict[str, set[str]]:
-    """What the live front says each family accepts, from its own refusal.
-
-    ``fno mux tab __fno_verb_probe__`` prints ``unknown verb __fno_verb_probe__
-    (ls|create|rename|join)``. Parsing that alternation is a reading of the
-    BINARY, independent of the source scan, and the probe verb is guaranteed
-    bogus so nothing executes.
-
-    A family whose refusal does not fire is a hard failure, not an empty set: an
-    absence has two explanations here (the family accepted the probe, or the
-    probe never ran) and a silent empty set turns the second into a pass.
-    """
-    probed: dict[str, set[str]] = {}
-    for fam in sorted(families):
-        res = _run_front(binary, ["mux", fam, "__fno_verb_probe__"])
-        out = (res.stdout or "") + (res.stderr or "")
-        if "__fno_verb_probe__" not in out:
-            raise VerbRatchetError(
-                f"verb-ratchet: `fno mux {fam} __fno_verb_probe__` did not refuse "
-                f"the probe verb by name, so the negative control did not fire and "
-                f"this family's advertised set cannot be read. Output: {out.strip()[:200]}"
-            )
-        # Search only AFTER the probe token: the alternation belongs to the
-        # refusal, and a parenthesised word elsewhere in the output is not it.
-        tail = out[out.index("__fno_verb_probe__") :]
-        alts = _ALTERNATION_RE.search(tail)
-        probed[fam] = {a.strip() for a in alts.group(1).split("|") if a.strip()} if alts else set()
-    return probed
-
-
-def _locate_rust_front() -> Optional[Path]:
-    """The Rust front binary, by explicit path first and then PATH.
-
-    ``FNO_RUST_FRONT`` exists for environments that HAVE the front but must not
-    put it on PATH: the CI smoke job builds it for this gate alone, and a bare
-    ``fno`` there would shadow the Python entry point every other smoke step
-    resolves. An unset variable keeps the ordinary PATH lookup; a set-but-wrong
-    one still reaches the reachability probe below and fails closed.
-    """
-    override = os.environ.get("FNO_RUST_FRONT", "").strip()
-    if override:
-        return Path(override)
-    found = shutil.which("fno")
-    return Path(found) if found else None
+    return rows
 
 
 def _run_front(binary: Path, args: list[str]):
@@ -711,102 +553,25 @@ def _run_front(binary: Path, args: list[str]):
         ) from exc
 
 
-def enumerate_rust_leaves() -> list[str]:
-    """The Rust front's leaf verbs, from two readings that must agree.
+def enumerate_rust_leaves(repo_root: Optional[Path] = None) -> list[str]:
+    """The Rust front's leaves, read from the generated native inventory.
 
-    Verifies reachability (``fno version --json`` parseable), scans the
-    dispatchers in ``crates/`` for their verb arms, probes the live front for
-    what each family says it accepts, and refuses on any disagreement. Neither
-    side is a list maintained by hand, which is the whole point: the previous
-    version compared two hand-typed sources that omitted the same five verbs.
+    Every declared root other than ``mux`` is a leaf of its own (``version``);
+    ``mux`` registers as one leaf, its families being argument dispatch. The
+    fno-agents half keeps the independent source/binary cross-check.
     """
-    binary = _locate_rust_front()
-    if binary is None:
+    rows = read_native_inventory(repo_root)
+    roots = {
+        row[0].split()[0] for row in rows if row and row[0] and row[0] != "(root)"
+    }
+    if "mux" not in roots or "version" not in roots:
         raise VerbRatchetError(
-            "verb-ratchet: Rust front not reachable - `fno` is not on PATH. "
-            "The ratchet covers BOTH binaries and refuses to emit a Python-only "
-            "baseline: that would repeat the defect it exists to fix (the help "
-            "surface omitting mux). Install the Rust front, or run where it is."
+            "verb-ratchet: the native command inventory is missing the mux/version "
+            f"roots (found {sorted(roots)}); the artifact may predate the typed "
+            f"tree. Regenerate: {INVENTORY_REGENERATE}"
         )
-    version = _run_front(binary, ["version", "--json"])
-    if version.returncode != 0:
-        raise VerbRatchetError(
-            f"verb-ratchet: Rust front unreachable - `fno version --json` "
-            f"exited {version.returncode}: {version.stderr.strip()[:200]}"
-        )
-    try:
-        parsed = json.loads(version.stdout)
-        rev = parsed.get("git_rev") if isinstance(parsed, dict) else None
-    except (ValueError, TypeError):
-        rev = None
-    if not rev:
-        # `fno version` is Rust-owned; fno-py has no `version` command. A shim
-        # that errors or forwards to Python fails here -> fail closed.
-        raise VerbRatchetError(
-            "verb-ratchet: `fno version --json` returned no git_rev; the `fno` "
-            f"on PATH is not the Rust front. Output: {version.stdout.strip()[:200]}"
-        )
-    mux = _run_front(binary, ["mux", "--help"])
-    # MuxUsage prints the usage to stderr and exits 2; that is the happy path.
-    usage = (mux.stdout + mux.stderr).strip()
-    if "mux pane" not in usage:
-        raise VerbRatchetError(
-            f"verb-ratchet: Rust front does not own mux - `fno mux --help` "
-            f"lacks the `mux pane` anchor (rc={mux.returncode})."
-        )
-
-    tops, families = scan_rust_source()
-    probed = probe_rust_families(binary, families)
-
-    # Both directions, both hard. This is the whole guard: the source and the
-    # binary are read separately and must agree, so neither a new arm nor a
-    # stale usage string can pass unnoticed.
-    for fam in sorted(families):
-        src, live = families[fam], probed[fam]
-        if src - live:
-            raise VerbRatchetError(
-                f"verb-ratchet: `mux {fam}` dispatches verb(s) its own refusal "
-                f"message does not name: {', '.join(sorted(src - live))}. "
-                f"Probed {binary} at git_rev {rev}: if that predates the source "
-                f"being scanned, this is a STALE BINARY rather than a real "
-                f"disagreement - the verbs above exist only in the tree, so "
-                f"rebuild and re-run with FNO_RUST_FRONT pointed at it. "
-                f"Otherwise the dispatcher and its usage string disagree, so one "
-                f"of them is wrong - fix the message in crates/fno/src/mux_cli.rs (or "
-                f"remove the arm), then regenerate the baseline."
-            )
-        if live - src:
-            raise VerbRatchetError(
-                f"verb-ratchet: `mux {fam}` advertises verb(s) the source scan "
-                f"did not find: {', '.join(sorted(live - src))}. The scan reads "
-                f"the match arms and equality guards in mux_cli.rs; a verb "
-                f"dispatched some other way is invisible to it, which is the "
-                f"defect this gate replaced. Teach scan_rust_source that shape "
-                f"rather than adding the verb to a list."
-            )
-
-    agents_binary = _locate_fno_agents_front()
-    if agents_binary is None:
-        raise VerbRatchetError(
-            "verb-ratchet: fno-agents is not reachable; the client dispatcher "
-            "cannot be independently checked"
-        )
-    agents_source = scan_fno_agents_source()
-    agents_live = probe_fno_agents_actions(agents_binary)
-    if agents_source != agents_live:
-        raise VerbRatchetError(
-            "verb-ratchet: fno-agents source and binary action surfaces disagree; "
-            f"source-only={sorted(agents_source - agents_live)}, "
-            f"binary-only={sorted(agents_live - agents_source)}. Rebuild and set "
-            "FNO_AGENTS_FRONT if the installed binary is stale."
-        )
-
-    # Mux already dispatches its action tokens as arguments in decide_role and
-    # the family parsers. Keep the independent source/binary cross-check above
-    # over every action, but register that whole argument-dispatch surface as
-    # one leaf. Non-mux Rust commands such as `version` remain separate leaves.
     leaves = {"mux", "fno-agents"}
-    leaves |= {top for top in tops if not top.startswith("mux ")}
+    leaves |= roots - {"mux"}
     return sorted(leaves)
 
 
