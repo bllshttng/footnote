@@ -35,6 +35,11 @@ pub const JUDGE_DIMENSIONS: [&str; 5] = [
 ];
 pub const JUDGE_MODEL: &str = "sonnet";
 
+/// Lean readers answered in 7 to 80 seconds (measured 2026-09-15); 240
+/// covers a slow one and nine readers stay under the Python wrapper's
+/// 3,600-second bound. The full session load timed out at 600.
+const READER_TIMEOUT_SECS: u64 = 240;
+
 type Lenses = (String, HashMap<String, String>);
 
 fn lenses_path(cwd: &Path) -> PathBuf {
@@ -163,23 +168,7 @@ fn default_spawn(
     model: &str,
 ) -> Result<(i32, String, String), String> {
     let out = Command::new("fno")
-        .args([
-            "agents",
-            "spawn",
-            "--name",
-            name,
-            prompt,
-            "--harness",
-            "claude",
-            "--substrate",
-            "headless",
-            "--model",
-            model,
-            "--cwd",
-            &cwd.display().to_string(),
-            "--timeout",
-            &timeout_secs.to_string(),
-        ])
+        .args(reader_argv(name, prompt, cwd, timeout_secs, model))
         .output()
         .map_err(|e| e.to_string())?;
     Ok((
@@ -187,6 +176,48 @@ fn default_spawn(
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+/// The reader's argv, split from `default_spawn` so a test can read it. The
+/// flags after the `--` fence arrive as harness_args (not prompt words), so
+/// the reader loads no settings, MCP servers, tools or chrome and answers
+/// inside the bound instead of running out the full session load.
+fn reader_argv(
+    name: &str,
+    prompt: &str,
+    cwd: &Path,
+    timeout_secs: u64,
+    model: &str,
+) -> Vec<String> {
+    [
+        "agents",
+        "spawn",
+        "--name",
+        name,
+        prompt,
+        "--harness",
+        "claude",
+        "--substrate",
+        "headless",
+        "--model",
+        model,
+        "--cwd",
+        &cwd.display().to_string(),
+        "--timeout",
+        &timeout_secs.to_string(),
+        "--",
+        "--setting-sources",
+        "",
+        "--strict-mcp-config",
+        "--tools",
+        "",
+        "--disable-slash-commands",
+        "--no-chrome",
+        "--no-session-persistence",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 type Spawn<'a> = &'a dyn Fn(&str, &str, &Path, u64, &str) -> Result<(i32, String, String), String>;
@@ -232,7 +263,7 @@ fn judge_plan(
         &format!("blueprint-judge-{dimension}"),
         &prompt,
         cwd,
-        600,
+        READER_TIMEOUT_SECS,
         JUDGE_MODEL,
     ) {
         Err(e) => (
@@ -277,6 +308,31 @@ fn node_text_of(node_id: Option<&str>) -> String {
         .join("\n")
 }
 
+/// One row per judge dimension, each carrying the reader's wall clock.
+fn judge_rows(
+    plan_text: &str,
+    node_id: Option<&str>,
+    cwd: &Path,
+    lenses: &Lenses,
+    spawn: Spawn,
+) -> Vec<Value> {
+    let node_text = node_text_of(node_id);
+    JUDGE_DIMENSIONS
+        .iter()
+        .map(|dimension| {
+            let started = std::time::Instant::now();
+            let (verdict, reason) =
+                judge_plan(plan_text, &node_text, dimension, cwd, lenses, spawn);
+            json!({
+                "dimension": dimension,
+                "verdict": verdict,
+                "reason": reason,
+                "secs": started.elapsed().as_secs(),
+            })
+        })
+        .collect()
+}
+
 fn run_single_plan(plan_path: &Path, node_id: Option<&str>, cwd: &Path, spawn: Spawn) -> i32 {
     let plan_text = match std::fs::read_to_string(plan_path) {
         Ok(t) => t,
@@ -288,16 +344,8 @@ fn run_single_plan(plan_path: &Path, node_id: Option<&str>, cwd: &Path, spawn: S
             return 0;
         }
     };
-    let node_text = node_text_of(node_id);
     let lenses = load_lenses(&lenses_path(cwd));
-    let rows: Vec<Value> = JUDGE_DIMENSIONS
-        .iter()
-        .map(|dimension| {
-            let (verdict, reason) =
-                judge_plan(&plan_text, &node_text, dimension, cwd, &lenses, spawn);
-            json!({"dimension": dimension, "verdict": verdict, "reason": reason})
-        })
-        .collect();
+    let rows = judge_rows(&plan_text, node_id, cwd, &lenses, spawn);
     println!("{}", json!({"rows": rows}));
     0
 }
@@ -553,6 +601,66 @@ mod tests {
         std::fs::write(&plan, "a plan").unwrap();
         let rc = run_single_plan(&plan, None, dir.path(), &fake_spawn);
         assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn reader_argv_carries_the_substrate_bound_and_lean_flags() {
+        let argv = reader_argv("bp-persona", "grade this", Path::new("/w"), 240, "sonnet");
+        let s: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let sub = s.iter().position(|a| *a == "--substrate").unwrap();
+        assert_eq!(s[sub + 1], "headless");
+        let t = s.iter().position(|a| *a == "--timeout").unwrap();
+        assert_eq!(s[t + 1], "240");
+        // the prompt rides before the fence, as the message
+        let fence = s.iter().position(|a| *a == "--").unwrap();
+        assert!(s.contains(&"grade this"));
+        assert!(s.iter().position(|a| *a == "grade this").unwrap() < fence);
+        // after the fence: the lean flags, keeping the empty values
+        assert_eq!(
+            &s[fence + 1..],
+            &[
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+                "--tools",
+                "",
+                "--disable-slash-commands",
+                "--no-chrome",
+                "--no-session-persistence",
+            ]
+        );
+    }
+
+    #[test]
+    fn one_faulting_dimension_is_a_gap_and_the_rest_still_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_text = "a plan".to_string();
+        let spawn = |name: &str, _: &str, _: &Path, _: u64, _: &str| {
+            if name.ends_with("persona") {
+                Err("spawn went sideways".to_string())
+            } else {
+                Ok((0, "VERDICT: pass".to_string(), String::new()))
+            }
+        };
+        let lenses = (String::new(), HashMap::new());
+        let rows = judge_rows(&plan_text, None, dir.path(), &lenses, &spawn);
+        let persona = rows
+            .iter()
+            .find(|r| r["dimension"] == "persona")
+            .expect("persona row");
+        assert!(persona["verdict"].is_null());
+        assert!(persona["reason"]
+            .as_str()
+            .unwrap()
+            .contains("spawn went sideways"));
+        let duplication = rows
+            .iter()
+            .find(|r| r["dimension"] == "duplication")
+            .expect("duplication row");
+        assert_eq!(duplication["verdict"], "pass");
+        for r in &rows {
+            assert!(r["secs"].is_u64(), "every row carries secs: {r}");
+        }
     }
 
     #[test]
