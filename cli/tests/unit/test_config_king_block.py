@@ -13,7 +13,7 @@ from fno.config import KING_CHECKIN_TEXT, KING_GOAL_TEXT, KingBlock
 
 def test_ac19_defaults_with_no_config() -> None:
     block = KingBlock()
-    assert block.checkin_interval == "30m"
+    assert block.checkin_interval == "4h"
     assert block.checkin_text == KING_CHECKIN_TEXT
     assert block.goal_text == KING_GOAL_TEXT
     # The defaults are the skill's own texts: they name the check-in body,
@@ -25,22 +25,22 @@ def test_ac19_defaults_with_no_config() -> None:
 
 
 def test_ac19_registry_answers_config_get(tmp_path: Path, monkeypatch) -> None:
-    """`fno config get king.checkin_interval` answers 30m from bare defaults."""
+    """`fno config get king.checkin_interval` answers 4h from bare defaults."""
     from fno.config import load_settings
     from fno.paths_testing import use_tmpdir
 
     use_tmpdir(monkeypatch, tmp_path)
     settings = load_settings()
-    assert settings.king.checkin_interval == "30m"
+    assert settings.king.checkin_interval == "4h"
 
 
 def test_ac20_bad_interval_degrades_to_default() -> None:
     block = KingBlock(checkin_interval="not a duration")
-    assert block.checkin_interval == "30m"
+    assert block.checkin_interval == "4h"
     # Valid shapes pass through verbatim.
     assert KingBlock(checkin_interval="15m").checkin_interval == "15m"
     assert KingBlock(checkin_interval="2h").checkin_interval == "2h"
-    assert KingBlock(checkin_interval=45).checkin_interval == "30m"  # type: ignore[arg-type]
+    assert KingBlock(checkin_interval=45).checkin_interval == "4h"  # type: ignore[arg-type]
 
 
 def test_ac20_blank_texts_degrade_and_do_not_raise() -> None:

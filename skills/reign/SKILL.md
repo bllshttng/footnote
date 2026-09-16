@@ -63,12 +63,14 @@ fno agents mail send "/goal ${king.goal_text}" --to-self --raw
 Read both texts with `fno config get`. The defaults, verbatim, so a fresh install runs with no config:
 
 ```
-king.checkin_interval = 30m
-king.checkin_text = reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop.
+king.checkin_interval = 4h
+king.checkin_text = reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. If it does not, confirm the settled-PR monitor still runs, and re-arm it.
 king.goal_text = reign goal. When every node in the crown scope reads done or superseded, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress.
 ```
 
 These defaults pass `fno doctor lint style`, and that is load-bearing rather than cosmetic. The mail bus lints the body it sends, so a default carrying a semicolon or a 26-word sentence refuses its own injection. A fresh install running this skill hit that on its first command and had to pass `--style-exception` to arm at all.
+
+The monitor and stop hook are the beat. The cron is a 4-hour heartbeat whose job is to prove the reign and its monitor are alive.
 
 Confirm the goal with `/hooks`. The loop was already confirmed by `CronList` above. Journal `reign_armed` (`fno doctor event emit`) with every receipt.
 

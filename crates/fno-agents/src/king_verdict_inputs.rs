@@ -14,8 +14,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// The default check-in interval (`config.king.checkin_interval`, "30m").
-const DEFAULT_CHECKIN_SECS: i64 = 1800;
+/// The default check-in interval (`config.king.checkin_interval`, "4h").
+const DEFAULT_CHECKIN_SECS: i64 = 14400;
 /// The window is three check-in intervals (Python `verdict_counts`).
 const WINDOW_INTERVALS: i64 = 3;
 /// The default compaction ceiling (`config.king.compaction_ceiling`).
@@ -456,6 +456,14 @@ mod tests {
     }
 
     // --- the window spelling ---
+
+    #[test]
+    fn checkin_interval_defaults_to_four_hours_and_window_to_twelve() {
+        let dir = tmp("default-interval");
+        // Keep the Python KingBlock default in _king.py aligned with this leg.
+        assert_eq!(checkin_interval_secs(&dir), 14400);
+        assert_eq!(window_display(WINDOW_INTERVALS * 14400), "12h");
+    }
 
     #[test]
     fn window_display_matches_the_python_formatting() {

@@ -2278,24 +2278,24 @@ mod tests {
             .parse::<chrono::DateTime<chrono::Utc>>()
             .unwrap();
         let at = |mins: i64| base + chrono::Duration::minutes(mins);
-        // 59 minutes old: under two intervals, nothing writes.
+        // 479 minutes old: under two intervals, nothing writes.
         assert!(!hook_beat(
             &path,
             dir.path(),
             "x-bbbb",
             "sess",
             &history,
-            at(59)
+            at(479)
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
-        // 61 minutes old: the beat is due, one hook row.
+        // 481 minutes old: the beat is due, one hook row.
         assert!(hook_beat(
             &path,
             dir.path(),
             "x-bbbb",
             "sess",
             &history,
-            at(61)
+            at(481)
         ));
         let rows = std::fs::read_to_string(&path).unwrap();
         assert_eq!(rows.lines().count(), 2, "rows: {rows}");
@@ -2310,7 +2310,7 @@ mod tests {
             "x-bbbb",
             "sess",
             &history,
-            at(62)
+            at(482)
         ));
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
     }
