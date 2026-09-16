@@ -337,7 +337,8 @@ def test_route_slot_policy_leaves_and_worktree_auto_install_are_modeled(tmp_path
     f = _write(
         tmp_path / "config.toml",
         'schema_version = 1\nstate_dir = "%s"\n'
-        "[worktree]\nauto_install = true\n"
+        "[worktree]\nauto_install = true\nsetup_command = \"uv sync\"\n"
+        "skip_verification = false\ntest_command = \"pytest -q\"\n"
         '[agents.profiles.target]\nlanes = ["zai-flash"]\n'
         'on_exhausted = "queue"\non_low = "prefer_healthy"\non_unknown = "skip"\n'
         "[agents.profiles.target.by_difficulty.high]\n"

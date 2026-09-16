@@ -3740,8 +3740,13 @@ class WorktreeBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     policy: Optional[str] = None
-    # Read by setup-worktree.sh (wt_config "auto_install"); true skips nothing.
+    # The worktree.* leaves below are read ad-hoc by
+    # skills/speculate/scripts/worktree-setup.sh (wt_config), so the model
+    # carries them but never enforces their values.
     auto_install: bool = True
+    setup_command: str = ""
+    skip_verification: bool = False
+    test_command: str = ""
 
 
 class ArtifactConfig(BaseModel):
