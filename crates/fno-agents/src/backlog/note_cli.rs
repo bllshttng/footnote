@@ -234,17 +234,17 @@ fn run_machine(
         }
     }
     if parsed.json_out {
-        println!(
-            "{}",
-            json!({
+        crate::backlog::receipt::emit_line(
+            &json!({
                 "status": "ok",
                 "routed": "history",
                 "node_id": node_id,
                 "revision": rev,
             })
+            .to_string(),
         );
     } else {
-        println!("recorded {node_id}: history");
+        crate::backlog::receipt::emit_line(&format!("recorded {node_id}: history"));
     }
     0
 }
@@ -315,17 +315,19 @@ fn write_human(
             return 1;
         }
         if parsed.json_out {
-            println!(
-                "{}",
-                json!({
+            crate::backlog::receipt::emit_line(
+                &json!({
                     "status": "ok",
                     "routed": "history",
                     "node_id": node_id,
                     "revision": rev,
                 })
+                .to_string(),
             );
         } else {
-            println!("recorded {node_id}: history (node is done or superseded)");
+            crate::backlog::receipt::emit_line(&format!(
+                "recorded {node_id}: history (node is done or superseded)"
+            ));
         }
         return 0;
     }
@@ -347,12 +349,14 @@ fn write_human(
             return map_state_err(&e);
         }
         if parsed.json_out {
-            println!(
-                "{}",
-                json!({"status": "ok", "routed": "clear", "node_id": node_id, "revision": rev})
+            crate::backlog::receipt::emit_line(
+                &json!({"status": "ok", "routed": "clear", "node_id": node_id, "revision": rev})
+                    .to_string(),
             );
         } else {
-            println!("cleared {node_id}: current state cleared");
+            crate::backlog::receipt::emit_line(&format!(
+                "cleared {node_id}: current state cleared"
+            ));
         }
         return 0;
     }
@@ -380,9 +384,8 @@ fn write_human(
         }
     };
     if parsed.json_out {
-        println!(
-            "{}",
-            json!({
+        crate::backlog::receipt::emit_line(
+            &json!({
                 "status": "ok",
                 "routed": "state",
                 "node_id": receipt.node_id,
@@ -390,9 +393,13 @@ fn write_human(
                 "journaled": receipt.journaled,
                 "total_prose": receipt.total_prose,
             })
+            .to_string(),
         );
     } else {
-        println!("noted {}: revision {}", receipt.node_id, receipt.revision);
+        crate::backlog::receipt::emit_line(&format!(
+            "noted {}: revision {}",
+            receipt.node_id, receipt.revision
+        ));
     }
     0
 }
