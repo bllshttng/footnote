@@ -1874,7 +1874,7 @@ mod tests {
         let _env_lock = crate::claims::test_env_lock().lock().unwrap();
         let spaces = tempfile::TempDir::new().unwrap();
         declare_test_roots(spaces.path());
-        let (dir, graph) = seeded_sqlite_fixture();
+        let (_dir, graph) = seeded_sqlite_fixture();
         let before = export_rows(&open(&graph).unwrap()).unwrap();
         let ok = mutate_single_row(&graph, "comment_create", |rows| {
             for row in rows.iter_mut() {
@@ -1914,7 +1914,7 @@ mod tests {
         let _env_lock = crate::claims::test_env_lock().lock().unwrap();
         let spaces = tempfile::TempDir::new().unwrap();
         declare_test_roots(spaces.path());
-        let (dir, graph) = seeded_sqlite_fixture();
+        let (_dir, graph) = seeded_sqlite_fixture();
         let graph_for_thread = graph.clone();
         let slow = std::thread::spawn(move || {
             mutate_single_row(&graph_for_thread, "comment_create", |rows| {
@@ -1968,7 +1968,7 @@ mod tests {
         let _env_lock = crate::claims::test_env_lock().lock().unwrap();
         let spaces = tempfile::TempDir::new().unwrap();
         declare_test_roots(spaces.path());
-        let (dir, graph) = seeded_sqlite_fixture();
+        let (_dir, graph) = seeded_sqlite_fixture();
         // A post-flip node lands in the db only; the stale JSON never learns
         // of it. The single-row path must still see and mutate it.
         mutate_single_row(&graph, "node_create", |rows| {
