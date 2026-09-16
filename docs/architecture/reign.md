@@ -30,6 +30,14 @@ A reign that spawns workers is not a pure pass. Until the shape field existed, s
 - `hooks/context-nudge.sh` resolves the manifest in its orphan branch. When the shape is `court` and the spawned workers are live, it goes silent. It stays loud for an unshaped reign walking away from live workers.
 - `hooks/king-postcompact-reinject.sh` appends the reign operating rules after a compaction. The manifest must name the compacting session.
 
+## Term
+
+A reign that never ends is not a bound. It is a reign nobody bothered to bound. One crown ran 11 days, 37 context windows and 36 compactions with every bound looking correctly configured. The open-question branch returned `block` unconditionally. It never called the ceiling function the other branches share. The fix: the manifest carries `term`, a spec of `span:<N>[smhd]` or `compactions:<N>`. Undeclared reads a Rust constant default, `span:96h` (the eval's measured ideal handoff, about 100 hours in). `fno agents king term <spec> [--reason TEXT]` declares or extends it. A declared or reached term refuses a bare re-declaration without `--reason` - the extension is the receipt.
+
+The Stop-hook gate (`loopcheck::king_decide`) reads the term before the board read. It sits ahead of every early return, including the open-question branch that used to wire completion shut. Reached or unreadable, it blocks through the same bounded spine every other block uses (`blind_block`). A king that ignores the message still ends on `Budget` and escalates. The message names the handoff: `fno agents spawn --crown <scope> --succeed`, or an extension with a reason. A `compactions:` term only measures a claude transcript. Declaring one on another harness is refused at declaration time, not discovered later as an always-`Unreadable` gate.
+
+A same-session re-crown (`fno agents king init --scope --force`) starts a fresh term: the re-crown is itself a grantor's receipt. `fno agents king verdict` prints the term as evidence (`term: span:96h (default) 101h of 96h, reached`). A reached term does not change the verdict word itself. Only the Stop-hook gate forces the handoff.
+
 ## Stop semantics
 
 Exit is blocked while actionable rows exist. The stop hook reads board truth. A clean board exits `NoWork`, and the loop re-enters on the next beat. `NoProgress` after three unshrinking fires escalates automatically and the session parks. The operator's answer wakes it through the wake arm. A reign never fights the hook. A reign never `/goal clear` on NoProgress.
