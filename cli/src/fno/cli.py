@@ -307,8 +307,6 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "carveout": set(),
     "claim": {"release"},
     "config": {"accounts", "get", "set"},
-    # Deprecated decision shim retains its non-primary leaves until the
-    # one-release compatibility clock expires; the primary spelling collapses.
     "decide": {"list", "reindex", "retract"},
     "do": set(),
     "doctor": set(),

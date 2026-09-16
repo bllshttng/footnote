@@ -11,9 +11,7 @@ Seven operations on top of io + staleness:
     force_release_claim - administrative override, always succeeds.
     reap_dead_claims  - archive every provably-dead claim (GC).
 
-Every state-changing verb appends an audit event to ``.fno/events.jsonl``
-through the typed builders in :mod:`fno.claims.events`. Audit-trail
-writes are best-effort: the YAML lock file write is authoritative.
+Every state-changing verb appends typed audit events; lockfile writes are authoritative.
 """
 
 from __future__ import annotations
@@ -1731,85 +1729,7 @@ def _legacy_reap_dead_claims(
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     optout_sink: Optional[list[Claim]] = None,
 ) -> dict[str, Any]:
-    """Archive every provably-dead claim across one or more claims roots.
-
-    The only mutation missing from the claim lifecycle. Acquire,
-    release, refresh, and force-release all exist; nothing prunes a claim
-    whose holder died without releasing, so a dead session leaks its
-    lockfile forever. This walks every ``.lock`` file in the swept roots,
-    classifies it with the native ``classify_for_sweep`` decision (the
-    single liveness authority), and archives the provably-dead ones to
-    ``.expired/``.
-
-    ``roots``, when given, is a list of repo-root arguments passed through
-    to :func:`fno.claims.io.claims_dir` exactly as ``--root`` does for
-    every other claim verb (``None`` means the canonical repo root). When
-    omitted, both default roots are swept in one run (AC2) - sweeping only
-    one is the guard-on-one-of-N-paths trap: 574 of the claims measured on
-    2026-08-14 lived in the root a single-root sweep would have missed.
-
-    With ``apply=False`` (the default), nothing is written; reapable files
-    are counted under ``would_reap`` from the same lock-free classification
-    ``apply=True`` uses before it ever takes the per-key recovery mutex - a
-    dry run never probes that mutex (deliberately: it is cheap, lock-free
-    triage by design), so a claim it counts under ``would_reap`` can still
-    land under ``contended`` in a LATER real apply run if something else
-    holds that key's mutex at that later instant. That gap is no different
-    from any other race between a preview and a separate later action; it is
-    not a promise this call predicts contention outcomes, only that the
-    classification itself (dead vs. live vs. suspect) matches.
-
-    With ``apply=True``, each reapable file is archived and then the store
-    is RE-READ to confirm the move: the source path must be gone and the
-    ``.expired/`` destination must exist. Only that re-read increments
-    ``reaped`` - never the absence of an exception, because ``fno agents
-    rm`` was observed tonight to exit 0 having moved nothing. A file whose
-    source path is still present after the archive call is counted under
-    ``reap_failed`` with its path, and the caller (the ``reap`` CLI verb)
-    exits non-zero when that list is non-empty.
-
-    ``abandonment_probe`` is the SECOND instrument, and it is optional so that
-    omitting it is byte-for-byte today's behavior. A ``node:`` claim reading
-    SUSPECT (dead pid, unexpired TTL) is the one case a pid cannot settle: the
-    holder is a session, and a session can be respawned under a new pid. The
-    probe answers "is a live worker actually on this node" from the roster, and
-    is called ONLY for a ``node:`` key that classified SUSPECT - never to
-    override a live claim, and never for a key family with no roster to consult.
-
-    SUSPECT is also where an expired claim whose prover-proven pid is shared
-    across distinct holders lands : the sweep derives
-    PID-exclusivity from the records it scans, and a pid answering for more
-    than one holder corroborates neither the lease nor the holder's death, so
-    the probe - not the daemon both holders point at - decides reap vs keep.
-
-    Its three answers are deliberately not a bool:
-
-      ``True``  proven abandoned; reap it.
-      ``False`` a live worker is on the node; keep it (``kept_suspect_alive``).
-      ``None``  the probe could not run; keep it (``kept_suspect_unprobed``).
-
-    ``None`` KEEPS. Reaping because a probe returned nothing is the exact
-    inversion of this fix: an instrument that did not run must never be read as
-    a finding, and archiving a live worker's claim is disaster from the
-    other side.
-
-    Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
-    ``kept_live``, ``kept_suspect``, ``kept_suspect_alive``,
-    ``kept_suspect_unprobed``, ``kept_unclassified``, ``unclassified_dirs``,
-    ``kept_suspect_unprobed_by``, ``kept_offhost``, ``corrupted``,
-    ``vanished``, ``contended``, ``reap_failed`` (list of ``(path,
-    reason)``), ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every
-    ``apply=True`` call, including a zero-reap run - a leg that never ran
-    must not look the same as one that ran and found nothing. A dry run
-    fires no event: the "nothing is written" promise above covers the
-    event log too, so `fno backlog reconcile --dry-run`'s own preview
-    contract is not silently broken by the reap it previews.
-
-    ``optout_sink``, when given, collects every archived ``config-optout:``
-    claim so the caller can restore the human-facing config file; the reaper
-    itself stays config-free. A caller that passes no sink skips the restore,
-    which read-time revocation still covers.
-    """
+    """Archive claims proven dead; unknown or degraded evidence remains protected."""
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
     native_verdicts: dict[str, dict[str, Any]] = {}
     for cdir in use_dirs:
@@ -2192,12 +2112,8 @@ def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
     command.extend(flags)
     command.append("--json")
     try:
-        result = _SubprocessPopen(
-            command,
-            stdout=_SUBPROCESS_PIPE,
-            stderr=_SUBPROCESS_PIPE,
-            text=True,
-        )
+        result = _SubprocessPopen(command, stdout=_SUBPROCESS_PIPE,
+                                  stderr=_SUBPROCESS_PIPE, text=True)
         stdout, stderr = result.communicate()
     except OSError as exc:
         raise ClaimVerdictUnavailable(f"fno-agents claim could not run: {exc}") from exc
@@ -2471,10 +2387,6 @@ def reap_dead_claims(
     legacy_roots = _legacy_sweep_roots_if_present()
     if legacy_roots is not None:
         return _LEGACY_REAP_DEAD_CLAIMS(
-            # A rootless call owns the default graph mirror. The helper only
-            # detects lockfiles; passing its expanded probe list as explicit
-            # roots would silently turn this into an external-root sweep and
-            # suppress the mirror clear.
             roots=None,
             apply=apply,
             abandonment_probe=abandonment_probe,

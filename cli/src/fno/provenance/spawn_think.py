@@ -779,9 +779,6 @@ def _spawn_think_worker(
         else None
     )
 
-    # The conversational door is already an explicit operator opt-in. Keep
-    # `/think` reachable even when an ambient lifecycle allowlist was written
-    # for another set of automatic verbs; lifecycle calls still honor it.
     dispatch_cfg = None
     if reason == REASON_CONVERSATIONAL:
         from fno.agents.harness_map import _load_dispatch_cfg

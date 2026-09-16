@@ -1601,7 +1601,6 @@ def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
 
 
 def _compact_index(path: Path) -> int:
-    """Move damaged index rows aside, preserving a reversible recovery path."""
     raw = _read_lines(path)
     if not any(not _is_index_line(line) for line in raw):
         return 0
