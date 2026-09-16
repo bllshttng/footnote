@@ -131,15 +131,21 @@ Do NOT auto-insert a citation to silence the gate: as with Failure Mode
 Ingestion, the point is to force schema thinking into the plan, not to paper
 over its absence.
 
-## Python tree allowance (plans that write cli/src/fno Python)
+## No new Python (plans that write cli/src/fno Python)
 
-Trigger: a Files-to-Modify row, or a task `surface`, names a path under `cli/src/fno` ending `.py`.
+Trigger: a Files to Modify row, a File Ownership Map row, or a task `surface` names a path under `cli/src/fno` ending `.py`.
 
-`cli/src/fno` is the compatibility shell and `crates/` is the product. The tree is shrink-only as a TREE, net: `scripts/ci/check-file-budget.sh` refuses a change whose net Python growth exceeds `PY_TREE_ALLOWANCE` (default 100). The allowance is sized so a bug fix never has to port a verb to land, while a feature does. Standing law: the refusal is answered by refactoring in the same PR, never by raising the allowance and never by splitting the PR.
+All new code lands in Rust under `crates/`. No new Python goes into `cli/src/fno`. A Python edit is a port or a deletion.
 
-State the expected net Python delta in the plan body, in one line. Over the allowance, the plan is planning a feature in the shell. Pick a remedy HERE rather than at push time. Land it in `crates/`, port the verb the change touches, or name the offsetting Python deletion the same PR makes. A plan that names none of these is the shape, where roughly 600 lines were written, reviewed and only then refused.
+Start the row's Action cell with one of three words:
 
-The gate is a statement, not a refusal: a plan under the allowance passes by saying so. When the trigger fires and the plan names no remedy, `scripts/validate-plan.sh` warns.
+- `Port` - the behavior moves to `crates/`. The same table names the `crates/` row it lands in.
+- `Delete` - the row removes Python and adds none.
+- `Grant d-XXXXXXXX` - the operator ruled that this change may extend Python. The id must read `LIVE` in `fno backlog decisions <id>`.
+
+Any other action, such as `Modify` or `Create`, plans new Python. Move that change to `crates/` before you write the plan. A path cited only in prose writes nothing, so it does not trigger the gate.
+
+`scripts/validate-plan.sh` refuses a plan that breaks this rule. A plan created before the gate shipped gets a warning. `scripts/ci/check-file-budget.sh` stays as the push-time backstop: it refuses net Python growth past `PY_TREE_ALLOWANCE` (default 100), whatever the plan said. The allowance is a backstop, not a budget to plan against. Never state a net delta under it as the reason a Python row is fine.
 
 ## Answerer Enumeration Gate (graduated, every plan that changes a read, write, or feed)
 
