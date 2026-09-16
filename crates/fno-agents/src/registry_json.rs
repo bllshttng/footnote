@@ -140,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn the_projection_keeps_the_eight_stored_keys_and_the_claude_session_rule() {
+    fn the_projection_keeps_the_stored_keys_and_the_claude_session_rule() {
         let out = registry_json_logic(&[
             row(
                 json!({ "harness": "claude", "short_id": "abc12345", "harness_session_id": "uuid-1" }),

@@ -2179,7 +2179,11 @@ def register_existing_session(
             if origin == "adopted":
                 _adopted_by = _sb_session
                 _sb_session = _sb_harness = _sb_cwd = None
-            _sb_reason = _lineage_reason(_sb_session)
+            else:
+                # An adopted row's parent edge is empty by the vouch split
+                # (adopted_by_session carries the grantor), not because
+                # identity could not be read - no reason text for those.
+                _sb_reason = _lineage_reason(_sb_session)
         fresh = mint_agent_entry(
             harness_session_id=session_id,
             spawned_by_session=_sb_session,
