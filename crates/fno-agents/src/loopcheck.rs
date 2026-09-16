@@ -1540,11 +1540,11 @@ mod coverage_receipt;
 mod review_count;
 mod review_state;
 mod watch_lease;
-pub(crate) use awaiting_merge::main_head_failing_checks;
 use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason};
 use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
+pub(crate) use awaiting_merge::main_head_failing_checks;
 pub use coverage_receipt::coverage_receipt_line;
 use watch_lease::{harness_can_idle, watch_window_ms};
 
