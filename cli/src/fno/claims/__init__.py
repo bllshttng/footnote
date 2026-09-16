@@ -60,7 +60,7 @@ from .lanes import (
     find_lane_slot,
     release_lane_slot,
 )
-from .types import HOLDER_PROCESS, Claim, ClaimState
+from .types import Claim, ClaimState
 
 __all__ = [
     "CLAIM_UNAVAILABLE",
@@ -75,7 +75,6 @@ __all__ = [
     "ClaimVerdictError",
     "ClaimVerdictUnavailable",
     "DEFAULT_LANE_TTL_MS",
-    "HOLDER_PROCESS",
     "HolderMismatch",
     "LANE_HOLDER_PREFIX",
     "LANE_SLOT_PREFIX",

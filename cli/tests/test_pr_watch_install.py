@@ -799,9 +799,9 @@ def test_refresh_verb_bounces_when_no_tick_runs(monkeypatch, tmp_path):
 
 
 def _patch_heal_claims(monkeypatch, *, held=False, probe=None, probe_raises=False):
-    """Stub the claim single-flight and the liveness probe so tests never
+    """Stub the flight-gate single-flight and the liveness probe so tests never
     touch the real claims root, event log or launchctl."""
-    import fno.claims as claims
+    import fno.backlog.single_flight as sf
 
     acquired: list = []
 
@@ -815,13 +815,11 @@ def _patch_heal_claims(monkeypatch, *, held=False, probe=None, probe_raises=Fals
             probe = {"bounce_pending": False}
         monkeypatch.setattr(m, "liveness_report_live", lambda: probe)
 
-    def _acquire(key, holder, **kw):
-        if held:
-            raise claims.ClaimHeldByOther("other-holder", pid=999, host="h", key=key)
+    def _acquire(key, **kw):
         acquired.append(key)
+        return sf.Flight(key=key, holder="pr-watch-heal:other", held=held)
 
-    monkeypatch.setattr(claims, "acquire_claim", _acquire)
-    monkeypatch.setattr(claims, "release_claim", lambda *a, **kw: None)
+    monkeypatch.setattr(sf, "acquire_flight", _acquire)
     return acquired
 
 
