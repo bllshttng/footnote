@@ -123,7 +123,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_OBSERVER_PR_LIST_LIMIT` | py | unclear: cli/src/fno/observer/cli.py:456 |
 | `FNO_OPENCODE_LIVE_TOKEN` | rs | unclear: crates/fno-agents/src/opencode_archive_tests.rs:340 |
 | `FNO_OPENCODE_LIVE_URL` | rs | unclear: crates/fno-agents/src/opencode_archive_tests.rs:338 |
-| `FNO_OPERATOR_CAPTURE_DIR` | py | unclear: cli/src/fno/inbox/operator_turns.py:87 |
+| `FNO_OPERATOR_CAPTURE_DIR` | py+rs | unclear: cli/src/fno/inbox/operator_turns.py:87 |
 | `FNO_OPERATOR_HARNESS` | py | unclear: cli/src/fno/inbox/operator_turns.py:103 |
 | `FNO_OPERATOR_SESSION_ID` | py | unclear: cli/src/fno/inbox/operator_turns.py:102 |
 | `FNO_OPERATOR_TRANSCRIPT` | py | unclear: cli/src/fno/inbox/operator_turns.py:105 |

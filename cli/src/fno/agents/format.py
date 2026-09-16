@@ -299,6 +299,7 @@ def serialize_entry(
         # ambiguous identity resolve records no lineage rather than a wrong
         # one): this worker is invisible to its spawner's orphan check.
         "spawned_by_session": getattr(entry, "spawned_by_session", None),
+        "lineage_kind": getattr(entry, "lineage_kind", None),
         # How this session came to exist: "operator" for one a human started by
         # hand, "spawn" for a footnote-created worker, null for a row nothing
         # stamped. The reap lane REFUSES on "operator", so a human auditing that

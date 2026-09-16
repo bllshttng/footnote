@@ -50,6 +50,7 @@ struct PayloadTurn {
     ts_epoch: Option<f64>,
     text: String,
     excerpt: String,
+    stand_down: bool,
 }
 
 struct QueueOutcome {
@@ -102,6 +103,16 @@ fn system_reminder_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
         regex::Regex::new(r"(?s)<system-reminder>.*?</system-reminder>").expect("valid pattern")
+    })
+}
+
+fn stand_down_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(
+            r"(?i)overstay|stand(ing)?[ -]down|step(ping)?[ -]down|abdicat|(end|stop) (the|your|this) reign|compact\w* (\w+ ){0,3}(degraded|diminish)",
+        )
+        .expect("valid pattern")
     })
 }
 
@@ -431,6 +442,7 @@ fn build_payload(state: ScanState, now_epoch: f64, cursor_error: Option<String>)
             ts_epoch: t.ts_epoch,
             text: t.text.clone(),
             excerpt: excerpt(&t.text),
+            stand_down: stand_down_re().is_match(&t.text),
         })
         .collect();
     let oldest = state.turns.first();
@@ -521,6 +533,22 @@ fn read_queue(
         payload: build_payload(state, now_epoch, cursor_error),
         warnings,
     })
+}
+
+pub(crate) fn pending_stand_down(
+    session: &str,
+    transcript: &Path,
+    capture_dir: &Path,
+    now_epoch: f64,
+) -> Result<Vec<(String, String)>, String> {
+    let outcome = read_queue(session, transcript, capture_dir, now_epoch)?;
+    Ok(outcome
+        .payload
+        .turns
+        .into_iter()
+        .filter(|turn| turn.stand_down)
+        .map(|turn| (turn.turn_id, turn.excerpt))
+        .collect())
 }
 
 /// CLI entry: `fno-agents compaction operator-turns --session <id>
@@ -966,6 +994,43 @@ mod tests {
         );
         assert_eq!(out.payload.depth, 1);
         assert_eq!(out.payload.turns[0].text, "from codex");
+    }
+
+    #[test]
+    fn stand_down_turn_is_marked_in_the_payload() {
+        let out = read_raw(
+            "stand-down-payload",
+            &[user_row(
+                json!("Perhaps our reign has overstayed its welcome"),
+                "u-stand-down",
+            )],
+        );
+        let payload = serde_json::to_value(&out.payload).unwrap();
+        assert_eq!(payload["turns"][0]["stand_down"], true);
+    }
+
+    #[test]
+    fn ordinary_handoff_and_standup_turns_are_not_marked() {
+        let out = read_raw(
+            "not-stand-down",
+            &[
+                user_row(json!("hand off this doc to codex"), "u-handoff"),
+                user_row(json!("fix the stand-up notes"), "u-standup"),
+            ],
+        );
+        assert!(out.payload.turns.iter().all(|turn| !turn.stand_down));
+    }
+
+    #[test]
+    fn acked_stand_down_turn_is_not_pending() {
+        let dir = tmp_dir("stand-down-acked");
+        let tp = dir.join("transcript.jsonl");
+        write_jsonl(
+            &tp,
+            &[user_row(json!("the reign has overstayed"), "u-acked")],
+        );
+        std::fs::write(ledger_path(&dir, "s"), "{\"turn_id\":\"u-acked\"}\n").unwrap();
+        assert!(pending_stand_down("s", &tp, &dir, NOW).unwrap().is_empty());
     }
 
     #[test]
