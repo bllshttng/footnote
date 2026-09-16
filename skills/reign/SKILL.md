@@ -64,7 +64,7 @@ Read both texts with `fno config get`. The defaults, verbatim, so a fresh instal
 
 ```
 king.checkin_interval = 4h
-king.checkin_text = reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. If it does not, confirm the settled-PR monitor still runs, and re-arm it.
+king.checkin_text = reign check-in. Run fno agents king checkin: it gathers the check-in readings, prints them, diffs the last beat, and journals reign_checkin. Then act on the printout per the reign skill. When nothing changed and coverage is full, print 'no change' and stop. This beat is a heartbeat. The heartbeat confirms that the settled-PR monitor still runs. If it does not, the heartbeat re-arms it.
 king.goal_text = reign goal. When every node in the crown scope reads done or superseded, the goal is met. An open operator question blocks completion. An empty actionable queue is a quiet beat, never a finish line. A stand-down order from the operator ends the reign. Until then keep reigning. Never /goal clear on NoProgress.
 ```
 

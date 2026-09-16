@@ -14,7 +14,8 @@ KING_CHECKIN_TEXT = (
     "readings, prints them, diffs the last beat, and journals reign_checkin. "
     "Then act on the printout per the reign skill. When nothing changed and "
     "coverage is full, print 'no change' and stop. This beat is a heartbeat. "
-    "If it does not, confirm the settled-PR monitor still runs, and re-arm it."
+    "The heartbeat confirms that the settled-PR monitor still runs. If it does "
+    "not, the heartbeat re-arms it."
 )
 KING_GOAL_TEXT = (
     "reign goal. When every node in the crown scope reads done or "
