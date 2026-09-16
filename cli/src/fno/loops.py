@@ -16,7 +16,7 @@ from typing import Optional
 import typer
 
 from fno import paths
-from fno.config import load_settings
+from fno.config import LoopEntry, load_settings
 
 _LOG = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def loop_level(name: str) -> str:
     graduated yet.
     """
     entry = load_settings().loops.get(name)
-    return entry.level if entry is not None else "report"
+    return entry.level if entry is not None else LoopEntry().level
 
 
 def _rust_loops_call(action: str, args: list[str] | None = None) -> dict:

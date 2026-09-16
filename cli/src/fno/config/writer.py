@@ -236,6 +236,10 @@ def _target_path(scope: str, repo_root: Optional[Path]) -> Path:
     """The config.toml this scope writes to, migrating a legacy settings.yaml
     sibling to config.toml first so an unmigrated install is converted (not
     lost) before the write lands."""
+    if scope not in ("project", "global"):
+        # A typo'd scope used to fall through to the global file: a call that
+        # asked for one file would write the operator's other one.
+        raise ConfigSetError(f"unknown scope {scope!r}: use project or global", 2)
     if scope == "project":
         if repo_root is None:
             from fno.paths import resolve_repo_root
@@ -769,6 +773,39 @@ def _deep_unset(
     return out, was, True
 
 
+def resolve_dotted(root: BaseModel, parts: list[str]) -> tuple[bool, Any]:
+    """Walk ``parts`` off ``root`` the way a config reader does: model field,
+    then dict key. One resolver for get, unset's default and the
+    overridden-write check, so the three copied walks cannot drift again.
+
+    A ``dict[str, Model]`` hop with an ABSENT key still descends into a
+    default-constructed Model, so an unset ``loops.<name>.level`` reads as the
+    LoopEntry default instead of "unknown". Any other miss is (False, None).
+    """
+    node: Any = root
+    map_model: Optional[type[BaseModel]] = None
+    for part in parts:
+        if isinstance(node, BaseModel) and part in type(node).model_fields:
+            ann = _unwrap_optional(type(node).model_fields[part].annotation)
+            map_model = (
+                _as_model(get_args(ann)[1])
+                if get_origin(ann) is dict and len(get_args(ann)) == 2
+                else None
+            )
+            node = getattr(node, part)
+        elif isinstance(node, dict):
+            if part in node:
+                node = node[part]
+            elif map_model is not None:
+                node = map_model()
+                map_model = None
+            else:
+                return (False, None)
+        else:
+            return (False, None)
+    return (True, node)
+
+
 def _model_default(parts: list[str]) -> Any:
     """The value ``parts`` reverts to once unset: read off a default-constructed
     ``SettingsModel`` by walking the dotted path. Returns None if not resolvable.
@@ -779,15 +816,8 @@ def _model_default(parts: list[str]) -> Any:
     if parts and parts[0] == "providers":
         # Pre-rename spelling: the default lives under `accounts`.
         parts = ["accounts"] + parts[1:]
-    node: Any = SettingsModel()
-    for part in parts:
-        if isinstance(node, BaseModel) and part in type(node).model_fields:
-            node = getattr(node, part)
-        elif isinstance(node, dict) and part in node:
-            node = node[part]
-        else:
-            return None
-    return node
+    ok, node = resolve_dotted(SettingsModel(), parts)
+    return node if ok else None
 
 
 def unset_config_value(

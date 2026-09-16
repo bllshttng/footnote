@@ -1127,15 +1127,9 @@ def get_cmd(
     searched_candidates = describe_settings_for_repo(provenance_root)
 
     def _traverse(dotted: str) -> tuple[bool, object]:
-        node: object = root
-        for part in dotted.split("."):
-            if isinstance(node, BaseModel) and part in type(node).model_fields:
-                node = getattr(node, part)
-            elif isinstance(node, dict) and part in node:
-                node = node[part]
-            else:
-                return (False, None)
-        return (True, node)
+        from fno.config.writer import resolve_dotted
+
+        return resolve_dotted(root, dotted.split("."))
 
     ok, node = _traverse(key)
     if not ok and key.startswith("config."):
@@ -1385,15 +1379,9 @@ def _check_overridden_writes(results: list) -> None:
     root = load_settings()
 
     def _traverse(dotted: str) -> tuple[bool, object]:
-        node: object = root
-        for part in dotted.split("."):
-            if isinstance(node, BaseModel) and part in type(node).model_fields:
-                node = getattr(node, part)
-            elif isinstance(node, dict) and part in node:
-                node = node[part]
-            else:
-                return (False, None)
-        return (True, node)
+        from fno.config.writer import resolve_dotted
+
+        return resolve_dotted(root, dotted.split("."))
 
     for r in results:
         source = resolve_source(r.key)

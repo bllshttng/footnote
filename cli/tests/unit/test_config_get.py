@@ -69,6 +69,30 @@ def test_get_scalar_top_level(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# A dict[str, Model] hop with an absent key resolves to the model default
+# (x-043f task 1.3): an unset loop name reads as its LoopEntry default.
+# ---------------------------------------------------------------------------
+
+
+def test_get_unset_loop_level_names_the_model_default(tmp_path, monkeypatch):
+    r = _run(
+        ["config", "get", "loops.blueprint_judge.level"],
+        tmp_path, monkeypatch, "schema_version: 1\n",
+    )
+    assert r.exit_code == 0, r.output
+    assert r.stdout.strip() == "report"
+
+
+def test_get_unknown_field_inside_known_loop_name(tmp_path, monkeypatch):
+    r = _run(
+        ["config", "get", "loops.blueprint_judge.nosuchfield"],
+        tmp_path, monkeypatch, "schema_version: 1\n",
+    )
+    assert r.exit_code == 1
+    assert "unknown config key" in r.output
+
+
+# ---------------------------------------------------------------------------
 # config.agents.confirm posture knob (ab-27541df5, US4; namespace moved from
 # config.dispatch.confirm to config.agents.confirm in ab-f1b0ccd1)
 # ---------------------------------------------------------------------------
