@@ -1,6 +1,6 @@
 # Reaping FAQ: why is this row still here?
 
-A reaping sweep judged a session row and kept it. This page names the keep reason and tells you what to do. It covers the three sweep programs, every keep reason, and the checks that tell them apart.
+A reaping sweep judged a session row and kept it. This page names the keep reason and tells you what to do. It covers the four sweep programs, every keep reason, and the checks that tell them apart.
 
 Run `fno agents reap --dry-run` and find your row handle in the report. The dry run classifies every row, names one reason per row, and writes nothing. It stops no process, prunes no tree, and writes no receipt.
 
@@ -8,7 +8,7 @@ Measured on this machine on 2026-09-10 with the dry run: 1 `would retire` line, 
 
 ## Is this page for you?
 
-A reaping sweep kept a session row and you want to know why, or you want a row gone and reap refuses. This page owns the keep reasons, the three sweep programs, and the checks that tell them apart. Misreading it makes you force a delete the machine will re-judge on the next sweep, or kill a worker whose row was telling the truth.
+A reaping sweep kept a session row and you want to know why, or you want a row gone and reap refuses. This page owns the keep reasons, the four sweep programs, and the checks that tell them apart. Misreading it makes you force a delete the machine will re-judge on the next sweep, or kill a worker whose row was telling the truth.
 
 Not for: the worktree removal contract (which trees prune on merge and which never do). That is answered at [The row retired and its tree stayed](#the-row-retired-and-its-tree-stayed) and owned by [../.claude/rules/worktrees.md](../.claude/rules/worktrees.md).
 
