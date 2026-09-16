@@ -512,7 +512,6 @@ impl Core {
             AgentNoPaneReason::MissingHarness => "harness is missing",
             AgentNoPaneReason::MissingSessionId => "session id is missing",
             AgentNoPaneReason::UnsupportedHarness => "harness cannot resume sessions",
-            AgentNoPaneReason::BackendNotLive => "backend liveness is unconfirmed",
             AgentNoPaneReason::LivenessUnmeasured => "liveness was never measured",
         }
     }
@@ -528,7 +527,12 @@ impl Core {
                         row.tombstone
                             .then(|| "tombstoned member; dismissable".into())
                     })
-                    .or_else(|| row.exited.then(|| "exited; renders dim".into()));
+                    // A resumable row is actionable, so it carries no note:
+                    // "exited; renders dim" on a resumable row reads as a
+                    // refusal the receipt does not make.
+                    .or_else(|| {
+                        (row.exited && !row.resumable).then(|| "exited; renders dim".into())
+                    });
                 AgentRowReceipt {
                     name: row.name.clone(),
                     harness: row.harness.clone(),
