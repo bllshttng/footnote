@@ -473,6 +473,8 @@ merge_strategy = "merge"
 delete_branch_on_merge = true
 # Require CI green before auto-merge.
 require_checks_pass = true
+# Require green pull_request checks to have run against the current base tip.
+require_fresh_ci = true
 # Conflict-resolution agent for auto-merge rebases.
 conflict_resolution = "opus"
 # Post-failure remediation policy for auto-merge.
