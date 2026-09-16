@@ -256,18 +256,19 @@ def test_format_table_renders_source_verb_columns() -> None:
 
 def test_provenance_inventory_is_complete() -> None:
     rows = dispatch_provenance()
-    assert len(rows) == 18
+    assert len(rows) == 17
     sites = [row[0] for row in rows]
     assert len(set(sites)) == len(sites)
     sources = {row[1] for row in rows}
-    assert {"sob", "ac"} <= sources, "sob and ac must be distinct rows"
+    assert "ac" in sources
+    assert "sob" not in sources, "spawn-on-blueprint is retired"
     assert sum(1 for row in rows if row[1] == "ab") == 2
 
 
 def test_provenance_audit_prints_marker_and_exits_zero(tmp_path: Path) -> None:
     result = runner.invoke(_cli(), ["provenance"])
     assert result.exit_code == 0
-    assert "dispatch provenance: 18/18 coded" in result.stdout
+    assert "dispatch provenance: 17/17 coded" in result.stdout
 
 
 def test_provenance_audit_fails_on_a_broken_inventory(
@@ -275,8 +276,8 @@ def test_provenance_audit_fails_on_a_broken_inventory(
 ) -> None:
     import fno.autonomy_cli as autonomy_cli
 
-    broken = autonomy_cli.dispatch_provenance()[:-1]  # 17 rows: short one path
+    broken = autonomy_cli.dispatch_provenance()[:-1]  # 16 rows: short one path
     monkeypatch.setattr(autonomy_cli, "dispatch_provenance", lambda: broken)
     result = runner.invoke(_cli(), ["provenance"])
     assert result.exit_code == 1
-    assert "dispatch provenance: 18/18 coded" not in result.stdout
+    assert "dispatch provenance: 17/17 coded" not in result.stdout

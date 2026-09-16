@@ -8,7 +8,7 @@ argument-hint: "[quick] [group N | no-group] [no-adopt] [no-collision-check] <de
 # Abilities Plan
 
 When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly once:
-`codex posture: blueprint plans natively in this thread; the completion nudge is fno backlog advance (the dispatch resolver picks the harness); a held advance parks the node visibly.`
+`codex posture: blueprint plans natively in this thread; it writes the plan, closes the blueprint session row, and dispatches nothing.`
 
 <HARD-GATE>
 NEVER edit ~/.fno/graph.json directly via Edit/Write tools or `jq -i`/`sed -i`.
@@ -561,20 +561,6 @@ Explicit AC identifiers (`AC1-HP`, `AC7`) are preserved verbatim. Unlabeled crit
 - a task with no acceptance reference.
 
 Finalize validates the proposed ready + `compiled-v1` contract and atomically stamps `status: ready` and `acceptance_contract: compiled-v1` together, so a half-promoted plan never lands. Plans finalized before this feature carry no marker and keep their existing permissive brief behavior; strict reference resolution begins at `compiled-v1`.
-
-## Ordered auto-launch nudge (advance, never a direct spawn)
-
-After a plan is written AND its claimed backlog node is intaked (the final step of both the single-doc creation and mutation paths), nudge the ordered drain as the LAST action. Resolve the adopted node's parent first (`fno backlog get <node>` prints `parent`). `--source sob` stamps spawn-on-blueprint into the dispatched worker's name, so an operator can tell it apart from a merge-triggered `ac-` dispatch:
-
-- **live epic parent** → `fno backlog advance --epic <parent> --source sob`
-- **no parent** → `fno backlog advance --source sob`
-- **plan stamped `source: claude-plan-mode`** → skip the nudge entirely
-
-When the plan is stamped `source: claude-plan-mode`, the front door owns the dispatch decision: its "Execute autonomously?" confirm may still be pending, and nudging then can start a worker the human is about to decline. The stamp is read from the plan frontmatter only, never the body.
-
-`fno backlog advance` is the sole launcher. It applies the graph's order (epic rank, parent-scoped child rank, `blocked_by`, join width) and the fleet's limits (spawn-gate headroom, live claims, the auto-continue and autonomy gates), so the node it starts is the top-ranked unblocked child - which may be a different sibling than the plan just written, and that is correct. A disabled gate, no ready child, or zero spawn headroom holds, never spawns, and the receipt names the measured reason (`skipped reason=disabled`, `lane-cap`, `already-claimed`, ...).
-
-Relay the receipt line it prints (`epic <id>: dispatched N, skipped M` / `dispatched <node>` / `skipped reason=...`; `--json` for the full dispatched id list) to the user. A refused or held advance is non-fatal: the plan stays intact and the node stays `ready` for a manual `/target bg <node>`. Never spawn the worker yourself and never add a blueprint-specific scheduler or spawn fallback.
 
 ## A missing supplied path fails loudly
 

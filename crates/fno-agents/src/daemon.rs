@@ -2132,11 +2132,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     let mut last_orphan_sweep = Instant::now();
     let liveness_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut last_liveness_sweep = Instant::now();
-    // Machine watch: the arm owns its cadence, gate and memory.
+    // The periodic arms: each module owns its cadence, gate and memory.
     let machine_watch = crate::machine_watch::Arm::default();
-    // Merge close: the arm owns its cadence and gate; the sweep runs the
-    // bare reconcile that closes a merged PR's node with no session alive.
     let merge_close = crate::merge_close::Arm::default();
+    let crown_ledger = crate::king_ledger::Arm::default();
     let arm_watch = crate::arm_watch::Arm::new(ctx.opts.agents_config_cwd.clone());
     let provider_cap = crate::provider_cap_verbs::Arm::new(ctx.opts.agents_config_cwd.clone());
     // Retirement-sweep cadence: the throttle stamp beside the gate,
@@ -2309,8 +2308,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                 );
                 // The machine gets an arm: bands the box, escalates, gates nothing.
                 crate::machine_watch::maybe_tick(&machine_watch, ctx.home.clone());
-                // Merged nodes close even when no session is alive.
                 crate::merge_close::maybe_tick(&merge_close, ctx.home.clone());
+                // reign.html renders on a beat even with no crown live.
+                crate::king_ledger::maybe_tick(&crown_ledger, ctx.home.clone());
                 crate::arm_watch::maybe_tick(&arm_watch, ctx.home.clone());
                 crate::provider_cap_verbs::maybe_tick(&provider_cap, ctx.home.clone());
                 // Serve-only liveness tick: the served pair is the sweep's measurement,
@@ -2492,8 +2492,10 @@ type CodexThreadHandle = Arc<crate::codex_thread::CodexThreadActor>;
 use crate::codex_thread::InterruptOutcome;
 
 mod codex_thread_lane;
+mod codex_thread_resume;
 mod thread_row_status;
 use codex_thread_lane::spawn_codex_thread_lane;
+use codex_thread_resume::{ensure_codex_thread_handle, schedule_codex_thread_recovery};
 pub(crate) use thread_row_status::notify_transition;
 use thread_row_status::{
     codex_thread_on_done, codex_thread_on_status, gate_inside_leg_onto_row, notify_badge,
@@ -3524,173 +3526,6 @@ async fn spawn_claude_stream_lane(
 /// cost one small turn and leave a transcript line an operator reads as
 /// startup rather than as work someone asked for.
 const WARMUP_SEED: &str = "Reply with the single word: ready.";
-
-/// A Codex thread row startup recovery may auto-resume: it needs a full
-/// durable identity AND a status that was non-terminal when the daemon died.
-/// `handle_stop` marks a stopped thread `Exited`; resurrecting that row on the
-/// next daemon start would silently undo `fno agents stop`.
-fn codex_thread_recovery_candidate(entry: &RegistryEntry) -> bool {
-    codex_thread_resume_identity(entry).ok().flatten().is_some() && is_non_terminal(entry.status)
-}
-
-async fn ensure_codex_thread_handle(
-    ctx: &Ctx,
-    entry: &RegistryEntry,
-) -> Result<CodexThreadHandle, String> {
-    if let Some(handle) = ctx.codex_threads.lock().await.get(&entry.name).cloned() {
-        return Ok(handle);
-    }
-    let Some((session_id, cwd)) = codex_thread_resume_identity(entry)? else {
-        return Err(format!("agent '{}' is not a Codex thread", entry.name));
-    };
-    // Connect OUTSIDE the lock. The resume now ensures the shared daemon
-    // (which can take seconds to boot) and completes a network handshake, and
-    // `codex_threads` is the map every other codex ask, stop and retask goes
-    // through. Holding it across that await let one slow connect stall every
-    // other codex thread on the machine, including the recovery loop.
-    let carry = crate::codex_thread::parse_harness_args(&entry.harness_args).map_err(|reason| {
-        format!(
-            "codex thread '{}' stored harness_args refuse to re-parse: {reason}",
-            entry.name
-        )
-    })?;
-    let bounded = !entry_posture_is_full_access(entry);
-    let driver = crate::codex_thread::CodexThread::resume(
-        cwd,
-        &session_id,
-        entry.model.as_deref(),
-        entry_posture_is_full_access(entry),
-        entry.effort.as_deref(),
-        Some(&carry.config),
-    )
-    .await
-    .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;
-    if bounded {
-        let _ = ctx.emitter.emit(
-            "codex_thread_resumed_without_state_grant",
-            &json!({"name": entry.name, "lane": "thread", "session_id": session_id}),
-        );
-    }
-    // The durable fix promised above: persist what THIS resume actually
-    // resolved, not what the original spawn recorded. `resume()` (unlike
-    // `start_with_state_dirs`) carries no state_dirs, so a bounded thread's
-    // `granted_writable_roots` goes to empty here - an accurate report of the
-    // very loss the event above announces, not a stale echo of the spawn-time
-    // grant. Read from the driver BEFORE `into_actor` consumes it; the actor
-    // exposes neither field.
-    let resolved_sandbox = driver.resolved_sandbox_posture().to_string();
-    let granted_writable_roots = driver.granted_writable_roots().to_vec();
-    let resumed_name = entry.name.clone();
-    let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
-        if let Some(row) = registry.find_mut(&resumed_name) {
-            row.resolved_sandbox = Some(resolved_sandbox);
-            row.granted_writable_roots = granted_writable_roots;
-        }
-    })
-    .await;
-    let mut threads = ctx.codex_threads.lock().await;
-    // A concurrent caller may have won the race while we were connecting.
-    // Theirs is already published, so keep it and drop ours: dropping a
-    // driver closes one connection to the shared daemon and ends no thread.
-    if let Some(handle) = threads.get(&entry.name).cloned() {
-        return Ok(handle);
-    }
-    // the resumed actor's report seq starts ABOVE the row's current
-    // seq, so its first write clears the gate instead of dying under the
-    // previous incarnation's seq. The counter itself lives on the callback,
-    // one per thread start/resume, never on the row.
-    let first_seq = entry
-        .inside_leg
-        .as_ref()
-        .map(|report| report.seq + 1)
-        .unwrap_or(1);
-    let handle = Arc::new(driver.into_actor(
-        codex_thread_on_done(&ctx.emitter, ctx.home.registry_json(), &entry.name),
-        codex_thread_on_status(
-            &ctx.emitter,
-            ctx.home.registry_json(),
-            &entry.name,
-            &session_id,
-            first_seq,
-            ctx.opts.notify_on_blocked,
-            ctx.opts.notify_on_done,
-        ),
-    ));
-    threads.insert(entry.name.clone(), Arc::clone(&handle));
-    Ok(handle)
-}
-
-/// Reconnect to Codex threads after daemon startup. Recovery first selects
-/// rows by durable identity; this asynchronous pass reopens the shared-daemon
-/// connections without delaying the supervisor's accept loop. The threads
-/// themselves never stopped: the shared app-server daemon kept them.
-fn schedule_codex_thread_recovery(ctx: Arc<Ctx>) {
-    tokio::spawn(async move {
-        recover_codex_threads(&ctx).await;
-    });
-}
-
-/// The recovery pass body, split from the scheduler so a test can await it
-/// (the spawned task is fire-and-forget). Resume-or-settle: a candidate that
-/// resumes goes Live; one that fails is stamped Orphaned (AC15), never left
-/// reading Live forever.
-async fn recover_codex_threads(ctx: &Ctx) {
-    {
-        let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
-            Ok(registry) => registry,
-            Err(error) => {
-                let _ = ctx.emitter.emit(
-                    "daemon_recovery_error",
-                    &json!({"op": "resume_codex_thread_registry", "error": error.to_string()}),
-                );
-                return;
-            }
-        };
-        for entry in registry.entries {
-            if !codex_thread_recovery_candidate(&entry) {
-                continue;
-            }
-            match ensure_codex_thread_handle(&ctx, &entry).await {
-                Ok(_handle) => {
-                    let name = entry.name.clone();
-                    let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
-                        if let Some(entry) = registry.find_mut(&name) {
-                            // Same reason as `build_codex_thread_entry`: the
-                            // thread owns no process, so its liveness cannot
-                            // be a pid. Clear any stale one a pre-shared-daemon
-                            // row still carries.
-                            entry.pid = None;
-                            entry.pid_start_time = None;
-                            entry.status = AgentStatus::Live;
-                        }
-                    })
-                    .await;
-                }
-                Err(error) => {
-                    let _ = ctx.emitter.emit(
-                        "daemon_recovery_error",
-                        &json!({"op": "resume_codex_thread", "name": entry.name, "error": error}),
-                    );
-                    // A failed resume leaves the row readable Live forever
-                    // unless it is settled here: Orphaned, because the
-                    // rollout on disk is still the durable object a later
-                    // resume (or a human) can pick up. Only a row that is
-                    // still non-terminal is stamped - never overwrite a
-                    // terminal status a concurrent stop just wrote.
-                    let recover_name = entry.name.clone();
-                    let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
-                        if let Some(entry) = registry.find_mut(&recover_name) {
-                            if is_non_terminal(entry.status) {
-                                entry.status = AgentStatus::Orphaned;
-                            }
-                        }
-                    })
-                    .await;
-                }
-            }
-        }
-    }
-}
 
 /// Map a provider name string to a per-CLI readiness detector.
 ///

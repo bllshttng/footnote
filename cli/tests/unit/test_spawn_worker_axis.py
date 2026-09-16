@@ -202,13 +202,12 @@ def test_reconcile_source_names_rd_in_the_trigger(monkeypatch):
 
 
 def test_human_and_blueprint_sources_keep_the_ambient_edge(monkeypatch):
-    """A blueprint's closing advance and a source-less spawn were asked for by
-    a session: the env keeps the parent edge and carries no trigger."""
+    """A source-less (attended) spawn was asked for by a session: the env
+    keeps the parent edge and carries no trigger."""
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "dispatcher-session-1")
-    for source in ("sob", None):
-        args = _resolve(monkeypatch, source=source)
-        assert args.env.get("CLAUDE_CODE_SESSION_ID") == "dispatcher-session-1"
-        assert "FNO_SPAWN_TRIGGER" not in args.env
+    args = _resolve(monkeypatch, source=None)
+    assert args.env.get("CLAUDE_CODE_SESSION_ID") == "dispatcher-session-1"
+    assert "FNO_SPAWN_TRIGGER" not in args.env
 
 
 # --- the receipt ------------------------------------------------------------

@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from fno.plan._project import project_node_to_plan
-from fno.plan._stamp import read_plan_file
+from fno.plan._stamp import parse_frontmatter, read_plan_file
 
 _PLAN = """\
 ---
@@ -97,6 +99,18 @@ def test_explicit_clear_keys_removes_the_doc_band(tmp_path):
     assert "difficulty" not in fields
 
 
+def test_repaint_keeps_the_doc_band(tmp_path):
+    """AC2-HP: the plan authors the band; a graph repaint never writes the
+    graph's band back over it."""
+    plan = _write_plan(tmp_path, _PLAN.replace("size: M", "size: M\ndifficulty: medium"))
+    node = {"difficulty": "low", "priority": "p1"}
+
+    assert project_node_to_plan(node, plan) is True  # priority mirrors, band does not
+    _, fields, _ = read_plan_file(plan)
+    assert fields["difficulty"] == "medium"
+    assert fields["priority"] == "p1"
+
+
 def test_missing_plan_path_warns_no_raise(tmp_path):
     node = {"priority": "p0"}
     assert project_node_to_plan(node, tmp_path / "does-not-exist.md") is False
@@ -121,13 +135,34 @@ def test_unowned_keys_untouched(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_status_projects_claim_to_in_progress(tmp_path):
-    """AC1-HP: a claimed node moves a ready plan to in_progress, body intact."""
-    plan = _write_plan(tmp_path)
-    assert project_node_to_plan({"status": "claimed"}, plan) is True
+def test_status_claim_leaves_plan_status_alone(tmp_path):
+    """AC1-HP: a claim is reversible graph state (and a stale `in_progress` can
+    outlive a dead session); the plan axis is forward-only, so the doc stands."""
+    for doc_status in ("ready", "design"):
+        for graph_status in ("claimed", "in_progress"):
+            plan = _write_plan(
+                tmp_path, _PLAN.replace("status: ready", f"status: {doc_status}")
+            )
+            assert project_node_to_plan({"status": graph_status}, plan) is False
+            _, fields, _ = read_plan_file(plan)
+            assert fields["status"] == doc_status
+
+
+def test_force_off_terminal_never_writes_in_progress(tmp_path):
+    """AC1-EDGE: a reopen forces a done plan off the terminal, but the forced
+    rung is design, never the graph's in_progress - the lock is graph state."""
+    plan = _write_plan(
+        tmp_path,
+        _PLAN.replace("status: ready", "status: done\ndone_at: 2026-09-01T00:00:00Z"),
+    )
+    assert (
+        project_node_to_plan(
+            {"status": "in_progress"}, plan, force_status_off_terminal=True
+        )
+        is True
+    )
     _, fields, _ = read_plan_file(plan)
-    assert fields["status"] == "in_progress"
-    assert "iteration_ceiling" in plan.read_text(encoding="utf-8")  # body untouched
+    assert fields["status"] == "design"
 
 
 def test_status_projects_done_stamps_done_at(tmp_path):
@@ -287,7 +322,10 @@ def test_mirror_type_writes_an_operator_supplied_type(tmp_path):
     """
     plan = _write_plan(tmp_path, _PLAN.replace("type: feature", "type: bug"))
 
-    assert project_node_to_plan({"type": "epic"}, plan, mirror_type=True) is True
+    assert (
+        project_node_to_plan({"type": "epic"}, plan, mirror_keys=frozenset({"type"}))
+        is True
+    )
     _, fields, _ = read_plan_file(plan)
     assert fields["type"] == "epic"
 
@@ -299,3 +337,38 @@ def test_mirror_type_default_off_keeps_the_doc_authoritative(tmp_path):
     assert project_node_to_plan({"type": "epic"}, plan) is False
     _, fields, _ = read_plan_file(plan)
     assert fields["type"] == "bug"
+
+
+_FINALIZED_PLAN = """\
+---
+node: x-abcd
+status: ready
+created: 2026-07-08
+difficulty: medium
+size: M
+type: feature
+done_probes:
+  - fno x --json | grep -oE 'scope: [a-z]+'
+---
+
+# A plan
+
+body text
+"""
+
+
+def test_graph_write_keeps_a_finalized_plan_valid_and_ready(tmp_path):
+    """AC4-HP: the reported file. A graph write over a finalized plan must not
+    rewrite the status or band, and every string it emits must survive a
+    yaml.safe_load of the doc."""
+    plan = _write_plan(tmp_path, _FINALIZED_PLAN)
+    node = {"status": "in_progress", "difficulty": "low", "priority": "p1"}
+
+    assert project_node_to_plan(node, plan) is True
+
+    _fields, block, _rest = parse_frontmatter(plan.read_text(encoding="utf-8"))
+    loaded = yaml.safe_load(block)
+    assert loaded["status"] == "ready"
+    assert loaded["difficulty"] == "medium"
+    assert loaded["priority"] == "p1"
+    assert loaded["done_probes"] == ["fno x --json | grep -oE 'scope: [a-z]+'"]

@@ -6,6 +6,7 @@
 //! dispatch family. Shared helpers (`tmp_home`, `rentry`, `test_ctx`, ...)
 //! stay in the parent tests module and resolve through the glob.
 use super::*;
+use crate::daemon::codex_thread_resume::recover_codex_threads;
 
 // `thread_entry` stays in the parent tests module (used by the plan_reconcile
 // liveness family too, not only this one) and reaches here through the glob.
@@ -410,6 +411,129 @@ async fn recovery_stamps_a_failed_codex_thread_resume_orphaned() {
         "a failed resume must settle the row Orphaned, not Live-forever"
     );
     std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// Recovery refuses a codex thread row whose cwd is gone before any
+/// `thread/resume` frame leaves, and settles it Orphaned through the same
+/// failed-resume arm: a resumed thread with no cwd reads alive and can
+/// never run a turn. A row whose cwd still exists
+/// resumes and goes Live. Two fake-daemon scopes because the registry
+/// forbids two rows sharing one harness_session_id and the fake answers
+/// one configured id.
+#[tokio::test(flavor = "current_thread")]
+async fn recovery_refuses_a_codex_thread_row_whose_cwd_is_gone() {
+    // AC1-EDGE: an existing cwd reaches the fake as a thread/resume.
+    let live_id = "0198f313-0000-7000-8000-00000000a11e";
+    let behavior = crate::codex_fake_daemon::Behavior::quick().with_thread_id(live_id);
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-recover-live-cwd");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        let worktree = home.root().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        state::update_registry(&home.registry_json(), |registry| {
+            let mut entry = thread_entry("t-here", AgentStatus::Live, None);
+            entry.cwd = worktree.to_string_lossy().into_owned();
+            entry.project_root = entry.cwd.clone();
+            entry.harness_session_id = Some(live_id.to_string());
+            entry.codex_session_id = Some(live_id.to_string());
+            entry.pid = None;
+            registry.entries.push(entry);
+        })
+        .unwrap();
+        recover_codex_threads(&ctx).await;
+
+        let registry = load_registry_offloaded(home.registry_json())
+            .await
+            .expect("registry readable");
+        assert_eq!(
+            registry.find("t-here").map(|entry| entry.status),
+            Some(AgentStatus::Live),
+            "a row whose cwd still exists must resume and go Live"
+        );
+        assert!(
+            ctx.codex_threads.lock().await.contains_key("t-here"),
+            "the existing-cwd row holds a hosted handle"
+        );
+        let resumes: Vec<_> = received
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|f| f["method"] == "thread/resume")
+            .cloned()
+            .collect();
+        assert_eq!(resumes.len(), 1, "the existing-cwd row resumed once");
+        assert_eq!(resumes[0]["params"]["threadId"], live_id);
+        ctx.codex_threads.lock().await.remove("t-here");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
+
+    // AC1-HP + AC1-ERR: a gone cwd refuses before any frame leaves.
+    let gone_id = "0198f313-0000-7000-8000-00000000b0d2";
+    let behavior = crate::codex_fake_daemon::Behavior::quick().with_thread_id(gone_id);
+    let received = std::sync::Arc::clone(&behavior.received);
+    with_fake_codex_daemon(behavior, async {
+        let home = tmp_home("codex-recover-gone-cwd");
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        state::update_registry(&home.registry_json(), |registry| {
+            let mut entry = thread_entry("t-gone", AgentStatus::Live, None);
+            entry.cwd = "/nonexistent-cwd-for-gone-f313".into();
+            entry.project_root = entry.cwd.clone();
+            entry.harness_session_id = Some(gone_id.to_string());
+            entry.codex_session_id = Some(gone_id.to_string());
+            entry.pid = None;
+            registry.entries.push(entry);
+        })
+        .unwrap();
+        recover_codex_threads(&ctx).await;
+
+        let registry = load_registry_offloaded(home.registry_json())
+            .await
+            .expect("registry readable");
+        assert_eq!(
+            registry.find("t-gone").map(|entry| entry.status),
+            Some(AgentStatus::Orphaned),
+            "a gone-cwd row must settle Orphaned, not Live-forever"
+        );
+        assert!(
+            !ctx.codex_threads.lock().await.contains_key("t-gone"),
+            "a gone-cwd row holds no handle"
+        );
+        let events = read_events(&home);
+        assert!(
+            events.iter().any(|event| {
+                event["type"] == "daemon_recovery_error"
+                    && event["data"]["op"] == "resume_codex_thread"
+                    && event["data"]["name"] == "t-gone"
+                    && event["data"]["error"]
+                        .as_str()
+                        .is_some_and(|error| error.contains("no longer exists"))
+            }),
+            "the refusal event must name the row and the missing cwd: {:?}",
+            events
+        );
+
+        // The direct call refuses before any resume frame leaves.
+        let entry = registry.find("t-gone").cloned().unwrap();
+        let error = match ensure_codex_thread_handle(&ctx, &entry).await {
+            Ok(_) => panic!("a gone-cwd row must refuse"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("no longer exists"),
+            "refusal must name the missing cwd: {error}"
+        );
+        let resumes = received
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .filter(|f| f["method"] == "thread/resume")
+            .count();
+        assert_eq!(resumes, 0, "the fake must receive no resume frame");
+        std::fs::remove_dir_all(home.root()).ok();
+    })
+    .await;
 }
 
 /// The attach lane WITHOUT a harness-owned server (claude) must refuse
