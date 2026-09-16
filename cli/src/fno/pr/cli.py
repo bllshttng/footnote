@@ -931,16 +931,25 @@ def ritual(
         "`gh pr create` so every node the PR ships gets bound at merge, not "
         "just the one stamped by --pr-number. Prints nothing (exit 0) when "
         "NODE is unresolvable or nothing well-formed remains, so a caller "
-        "can append the output to a body unconditionally."
+        "can append the output to a body unconditionally. With --from-branch "
+        "the node is resolved from the current branch instead: exactly one "
+        "real graph node must be named, and any failure exits NONZERO with "
+        "the reason - a producer that cannot verify must not read as empty."
     ),
 )
 def closure_trailer(
-    node: str = typer.Argument(..., help="Node id to render the trailer for."),
+    node: Optional[str] = typer.Argument(None, help="Node id to render the trailer for."),
     extra: List[str] = typer.Option(
         [],
         "--extra",
         help="Additional genuinely-shipped node ids beyond NODE and its "
         "contained_in descendants (repeatable).",
+    ),
+    from_branch: bool = typer.Option(
+        False,
+        "--from-branch",
+        help="Resolve NODE from the current branch (exactly one real node "
+        "must be named; failures exit nonzero, never empty-stdout).",
     ),
 ) -> None:
     from fno.graph.api import wire_rows
@@ -950,16 +959,58 @@ def closure_trailer(
 
     from fno.graph._constants import is_wellformed_node_id
 
-    if active_backend_name() != "graph":
-        # graph.json is not the delivery record of truth under an external
-        # tracker backend - nothing to render from, matching this command's
-        # own contract (prints nothing, exit 0, on any unresolvable input).
-        return
+    if node is None and not from_branch:
+        typer.echo("error: provide NODE or --from-branch", err=True)
+        raise typer.Exit(code=2)
+    if node is not None and from_branch:
+        typer.echo("error: pass NODE or --from-branch, not both", err=True)
+        raise typer.Exit(code=2)
 
-    try:
-        entries = wire_rows(path=graph_json())
-    except Exception:
-        return
+    if from_branch:
+        # The --from-branch contract is LOUD on every failure (x-5625): silent
+        # empty is how a trailer-less PR ships. This path never takes the
+        # legacy early returns below.
+        if active_backend_name() != "graph":
+            typer.echo(
+                "closure-trailer: --from-branch needs the graph backend; "
+                "pass the node explicitly instead",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        try:
+            entries = wire_rows(path=graph_json())
+        except Exception as exc:  # noqa: BLE001 - the read failure IS the message
+            typer.echo(
+                f"closure-trailer: --from-branch cannot read the graph ({exc}); "
+                "pass the node explicitly instead",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        from fno.pr.closure import BranchResolutionError, resolve_branch_node_id
+
+        known_ids = frozenset(
+            str(entry["id"])
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        )
+        try:
+            node_id: str = resolve_branch_node_id(known_ids, cwd=os.getcwd())
+        except BranchResolutionError as exc:
+            typer.echo(f"closure-trailer: {exc}", err=True)
+            raise typer.Exit(code=1)
+    else:
+        if active_backend_name() != "graph":
+            # graph.json is not the delivery record of truth under an external
+            # tracker backend - nothing to render from, matching this command's
+            # own contract (prints nothing, exit 0, on any unresolvable input).
+            return
+
+        try:
+            entries = wire_rows(path=graph_json())
+        except Exception:
+            return
+        node_id = node or ""
     # render_pr_closure_trailer silently drops a malformed id with no other
     # signal - a bare-hex or slug typo in --extra would otherwise ship with
     # the trailer one node short and no one the wiser (round-7 review fix).
@@ -970,7 +1021,7 @@ def closure_trailer(
             f"{', '.join(dropped)} (need the full <prefix>-<hex> form)",
             err=True,
         )
-    line = render_pr_closure_trailer(entries, node, extra_ids=list(extra))
+    line = render_pr_closure_trailer(entries, node_id, extra_ids=list(extra))
     if line:
         typer.echo(line)
 

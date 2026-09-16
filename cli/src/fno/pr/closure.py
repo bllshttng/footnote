@@ -171,6 +171,55 @@ def known_node_ids() -> frozenset[str]:
         return frozenset()
 
 
+class BranchResolutionError(Exception):
+    """--from-branch could not resolve exactly one real node; message names why."""
+
+
+def resolve_branch_node_id(
+    known_ids: frozenset[str],
+    *,
+    cwd: Optional[str] = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> str:
+    """The one real graph node the current branch names - the --from-branch producer.
+
+    A branch-derived candidate is a guess verified against the graph, the same
+    rule ``bind_created_pr`` applies at bind time: exactly one well-formed
+    segment must name a node ``known_ids`` carries. Zero (a non-node branch)
+    and more than one (ambiguous) both refuse: the caller is about to MINT a
+    closure claim, and one wrong id voids the whole binding at merge. Unlike
+    ``known_node_ids`` the failure here is loud - the caller reads the
+    exception, never an empty set - because silent empty is how a trailer-less
+    PR ships (x-5625) and reds CI an hour later.
+    """
+    try:
+        proc = runner(
+            ["git", "branch", "--show-current"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BranchResolutionError(f"branch lookup failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise BranchResolutionError(
+            f"branch lookup failed: {(proc.stderr or '').strip()}"
+        )
+    head_ref = (proc.stdout or "").strip()
+    if not head_ref:
+        raise BranchResolutionError("current branch is unknown (detached HEAD?)")
+    real = [nid for nid in branch_node_ids(head_ref) if nid in known_ids]
+    if len(real) != 1:
+        named = f" ({', '.join(real)})" if real else ""
+        raise BranchResolutionError(
+            f"branch '{head_ref}' names {len(real)} real node(s){named}; "
+            "--from-branch needs exactly one - pass the node explicitly instead"
+        )
+    return real[0]
+
+
 def ensure_closure_trailer(
     body: str,
     head_ref: str,
