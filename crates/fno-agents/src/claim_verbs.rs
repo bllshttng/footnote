@@ -653,7 +653,8 @@ pub(crate) fn session_witness_primed_for<'a>(
             .collect()
     };
     let memo = std::cell::RefCell::new(std::collections::HashMap::new());
-    if let Ok(map) = crate::truth_probe::family1_truth_probe_many_checked(&wire) {
+    let (map, _) = crate::truth_probe::family1_truth_probe_many_measured(&wire);
+    {
         let registry_known = index.borrow().as_ref().is_some_and(|r| r.known);
         for (session, probe) in &map {
             let answer = session_liveness_from_observations(
