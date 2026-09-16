@@ -77,6 +77,7 @@ pub(crate) fn refuse_undeclared_home_fallback(declared: bool, pin: &str) {
 /// the global claims root: the test-side complement of
 /// [`refuse_undeclared_home_fallback`]. Set-if-unset, so a test that pins its
 /// own root still wins. Callers mutating env should hold `test_env_lock`.
+/// Claim writers create the claims dir on write, so none is made here.
 #[cfg(test)]
 pub(crate) fn pin_test_claims_root(dir: &std::path::Path) {
     let unset = match std::env::var_os("FNO_CLAIMS_ROOT") {
@@ -84,7 +85,6 @@ pub(crate) fn pin_test_claims_root(dir: &std::path::Path) {
         Some(v) => v.is_empty(),
     };
     if unset {
-        let _ = std::fs::create_dir_all(dir.join(".fno").join("claims"));
         std::env::set_var("FNO_CLAIMS_ROOT", dir);
     }
 }
