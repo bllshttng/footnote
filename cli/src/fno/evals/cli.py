@@ -288,7 +288,7 @@ def macro_command(ctx: typer.Context) -> None:
 
 def _argv_opt(args: list[str], name: str) -> Optional[str]:
     """Read one ``--name value`` / ``--name=value`` token from a raw argv tail
-    (the x-72fc forwarder shape: transport leaves declare no typer.Options)."""
+    (the forwarder shape: transport leaves declare no typer.Options)."""
     for i, a in enumerate(args):
         if a == name and i + 1 < len(args):
             return args[i + 1]

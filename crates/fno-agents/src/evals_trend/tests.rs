@@ -310,7 +310,7 @@ fn usage_error_exits_2() {
     assert_eq!(run_evals_trend(&[]), 2);
 }
 
-// --- attempt-aware denominators + the planned view (x-ecda) ----------------
+// --- attempt-aware denominators + the planned view -------------------------
 
 fn modern_row_json(task_id: &str, tier: &str, passed: bool, ts: &str, attempt: usize) -> String {
     json!({
