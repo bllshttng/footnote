@@ -11515,13 +11515,47 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let bounded = |dry: u64, waiting: &str| {
         bound_breached(history.total, dry, manifest.max_iterations, waiting)
     };
+    // Resolved once per fire: a `compactions:` term needs the transcript, an
+    // undeclared or `span:` term never touches disk. `king_loop_check` carries
+    // this on every fire (below), so a reign's tenure is visible even when
+    // the board is clean and no gate fired.
+    let term_transcript = if manifest
+        .term
+        .as_deref()
+        .is_some_and(|s| s.trim().starts_with("compactions:"))
+    {
+        manifest.harness_session_id.as_deref().and_then(|sid| {
+            crate::claude_drive::find_transcript_in(
+                &crate::claude_drive::claude_projects_dir(),
+                sid,
+            )
+        })
+    } else {
+        None
+    };
+    let term_reading =
+        crate::king_term::reading(&manifest, chrono::Utc::now(), term_transcript.as_deref());
+    let term_json = serde_json::json!({
+        "spec": term_reading.spec,
+        "declared": term_reading.declared,
+        "state": crate::king_term::state_word(&term_reading.state),
+    });
+    let with_term = |mut v: serde_json::Value| -> serde_json::Value {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("term".to_string(), term_json.clone());
+        }
+        v
+    };
     // Shared spine of both blind-board blocks: bounded, quiet emit, block.
     // The reading is what the branch measured, never a guess.
     let blind_block = |reading: &str, message: &str, actionable: i64, dry: u64| -> (i32, String) {
         if let Some(b) = bounded(dry, message) {
             return terminate(b.reason, &b.message, 0, b.fires, &[reading.to_owned()]);
         }
-        emit("king_loop_check", king_quiet_body(&session_id, actionable));
+        emit(
+            "king_loop_check",
+            with_term(king_quiet_body(&session_id, actionable)),
+        );
         (0, king_output("block", None, message, actionable, dry + 1))
     };
 
@@ -11529,6 +11563,51 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         crate::king_termination::stand_down_gate(&manifest, &parsed.transcript_path, &parsed.cwd)
     {
         return blind_block(&gate.reading, &gate.message, 0, dry);
+    }
+
+    // The term gate sits ahead of every early return below, including the
+    // open-question branch: a reached or unreadable term is never wired shut
+    // by an open question (the defect this feature exists to close). Bounded
+    // through the same `blind_block` spine, so a king that ignores it still
+    // ends on Budget and escalates.
+    if !matches!(
+        term_reading.state,
+        crate::king_term::TermState::Within { .. }
+    ) {
+        let scope = if manifest.scope.is_empty() {
+            "<scope>"
+        } else {
+            manifest.scope.as_str()
+        };
+        let handoff = format!(
+            "Hand off: fno agents spawn --crown {scope} --succeed. Or extend with a written \
+             reason: fno agents king term <spec> --reason \"...\"."
+        );
+        let (reading_id, message) = match &term_reading.state {
+            crate::king_term::TermState::Reached { used, .. } => {
+                let default_note = if term_reading.declared {
+                    ""
+                } else {
+                    ", default"
+                };
+                (
+                    crate::king_escalation::reading_term_reached(),
+                    format!(
+                        "reign term reached ({}{default_note}; {used} used). {handoff}",
+                        term_reading.spec
+                    ),
+                )
+            }
+            crate::king_term::TermState::Unreadable(why) => (
+                crate::king_escalation::reading_term_unreadable(),
+                format!(
+                    "reign term unreadable ({}): {why}. {handoff}",
+                    term_reading.spec
+                ),
+            ),
+            crate::king_term::TermState::Within { .. } => unreachable!("gated on non-within state"),
+        };
+        return blind_block(&reading_id, &message, 0, dry);
     }
 
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
@@ -11543,10 +11622,10 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             }
             emit(
                 "king_loop_check",
-                serde_json::json!({
+                with_term(serde_json::json!({
                     "session_id": session_id,
                     "board_error": e,
-                }),
+                })),
             );
             return (
                 2,
@@ -11634,7 +11713,11 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         };
         emit(
             "king_loop_check",
-            crate::king_termination::king_undelivered_body(&session_id, undelivered, shrank),
+            with_term(crate::king_termination::king_undelivered_body(
+                &session_id,
+                undelivered,
+                shrank,
+            )),
         );
         if let Some(b) = bounded(dry, &message) {
             return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
@@ -11684,7 +11767,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             fires,
             journal,
         }) => {
-            emit("king_loop_check", journal);
+            emit("king_loop_check", with_term(journal));
             return (0, king_output("block", None, &message, actionable, fires));
         }
         None => {}
@@ -11692,7 +11775,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
 
     emit(
         "king_loop_check",
-        serde_json::json!({
+        with_term(serde_json::json!({
             "session_id": session_id,
             "actionable": board.actionable,
             "actionable_ids": board.actionable_ids,
@@ -11700,7 +11783,7 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             // journal on every fire. A reset that lived only in the local
             // binding was forgotten the moment this process exited.
             "cleared": cleared,
-        }),
+        })),
     );
     let top = board
         .top_row

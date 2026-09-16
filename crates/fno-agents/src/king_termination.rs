@@ -12,11 +12,21 @@ pub(crate) struct KingManifest {
     /// The crowned session the manifest names; `loop_reign`'s split read keys
     /// on it. Empty on manifests written before identity fields existed.
     pub(crate) harness_session_id: Option<String>,
+    /// The harness that crowned this scope, written at coronation
+    /// (`FNO_HARNESS`, default `claude`); absent on manifests written before
+    /// the field existed.
+    pub(crate) harness: Option<String>,
     /// `pass` | `court`; absent reads as `pass`, never a third shape.
     pub(crate) shape: String,
     pub(crate) max_iterations: u64,
     pub(crate) respawn_count: u64,
     pub(crate) respawn_ceiling: u64,
+    /// `span:<N>[smhd]` | `compactions:<N>`; absent reads
+    /// [`crate::king_term::DEFAULT_TERM`], undeclared.
+    pub(crate) term: Option<String>,
+    /// The written reason for a declared/reached term's replacement; absent
+    /// on the first declaration.
+    pub(crate) term_reason: Option<String>,
 }
 
 pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
@@ -47,7 +57,10 @@ pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
                     out.harness_session_id = Some(value);
                 }
             }
+            "harness" => out.harness = Some(value),
             "shape" => out.shape = value,
+            "term" => out.term = Some(value),
+            "term_reason" => out.term_reason = Some(value),
             "budget_max_iterations" => {
                 if let Ok(n) = value.parse::<u64>() {
                     out.max_iterations = n;

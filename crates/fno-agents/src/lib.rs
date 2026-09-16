@@ -144,6 +144,7 @@ pub mod king_checkin;
 pub mod king_escalation;
 pub mod king_history;
 pub mod king_ledger;
+pub mod king_term;
 pub mod king_termination;
 pub mod king_verdict_inputs;
 pub mod lane_heal;
@@ -627,7 +628,12 @@ mod tests {
     /// the absence-lie in audit form.
     #[test]
     fn event_table_knows_reign() {
-        for kind in ["reign_armed", "reign_checkin", "reign_dispatch_exception"] {
+        for kind in [
+            "reign_armed",
+            "reign_checkin",
+            "reign_dispatch_exception",
+            "king_term",
+        ] {
             assert!(
                 KNOWN_EVENT_KINDS.contains(&kind),
                 "{kind} missing from KNOWN_EVENT_KINDS"
@@ -1094,6 +1100,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "reign_armed",
     "reign_checkin",
     "reign_dispatch_exception",
+    // A crown's term declared or extended (`fno agents king term <spec>
+    // [--reason]`), before or after a Stop-hook gate observed it reached.
+    // The receipt a reign's tenure bound leaves; `fno doctor event audit`
+    // resolves it through this table exactly like the reign kinds above.
+    "king_term",
     // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",
