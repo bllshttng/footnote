@@ -1,0 +1,12 @@
+# Function-pack manifest for the product-manager lens pack.
+#
+# Content, not code: nothing in cli/src/fno/plugins/ branches on the pack
+# id or on any function name below. The pack is discovered by path and
+# validated by schema.
+id: fno-pm
+version: 0.1.0
+footnote_compat:
+  minimum: "0.3.0"
+skills:
+  - id: pm-plan-review
+    source: skills/pm-plan-review

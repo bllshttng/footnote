@@ -23,7 +23,7 @@ use crate::protocol::{
     read_request, write_request, write_response, ErrorCode, Namespace, Request, Response,
 };
 pub use crate::receipt::{build_reap_receipt, write_reap_receipt, ReapReceipt};
-use crate::state::{self, Lineage, RegistryEntry};
+use crate::state::{self, RegistryEntry};
 use crate::AgentStatus;
 use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
@@ -2819,8 +2819,17 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         .get("substrate")
         .and_then(|v| v.as_str())
         .unwrap_or("pane");
+    // The door pair arrives on the request from the client, which
+    // proved the caller at the earliest boundary. A malformed pair refuses
+    // before any worker effect; an absent pair keeps the request-edge mint.
+    let provenance = match crate::spawn_contract::parse_request_provenance(p) {
+        Ok(v) => v,
+        Err(reason) => {
+            return Response::err(req.id, ErrorCode::InvalidParams, reason);
+        }
+    };
     if substrate == "thread" {
-        return route_thread_spawn(ctx, req, &name, &cwd, &provider).await;
+        return route_thread_spawn(ctx, req, &name, &cwd, &provider, provenance.as_ref()).await;
     }
     if host_mode == crate::state::HOST_MODE_INTERACTIVE && provider == "claude" {
         let claude_mode = p
@@ -2840,6 +2849,7 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
                 &cwd,
                 resume_id.as_deref(),
                 explicit_argv,
+                provenance.as_ref(),
             )
             .await;
         }
@@ -2869,6 +2879,7 @@ async fn route_thread_spawn(
     name: &str,
     cwd: &Path,
     provider: &str,
+    provenance: Option<&crate::spawn_contract::SpawnProvenance>,
 ) -> Response {
     let contract = match crate::harness_capabilities::HarnessContract::packaged() {
         Ok(contract) => contract,
@@ -2884,7 +2895,7 @@ async fn route_thread_spawn(
     };
     match contract.thread_lane(provider) {
         Ok("attach") => match contract.attach_needs_server(provider) {
-            Ok(true) => spawn_codex_thread_lane(ctx, req, name, cwd, provider).await,
+            Ok(true) => spawn_codex_thread_lane(ctx, req, name, cwd, provider, provenance).await,
             Ok(false) => thread_spawn_refusal(
                 ctx,
                 req,
@@ -3040,102 +3051,6 @@ fn model_substitution_marker(
     }
 }
 
-fn build_claude_stream_entry(
-    name: &str,
-    short_id: &str,
-    cwd: &std::path::Path,
-    uuid: &str,
-    pid: u32,
-    pid_start_time: Option<u64>,
-    log_path: PathBuf,
-    node: Option<&str>,
-) -> RegistryEntry {
-    let cwd_s = cwd.to_string_lossy().into_owned();
-    // Ambient parent edge, captured for shape parity with the other
-    // mint sites. This fn runs IN THE DAEMON, and lazy-start scrubs the
-    // harness session markers from the daemon's env (client.rs), so this
-    // stamps None by construction: the daemon itself started this PTY worker
-    // and no session parent is claimable from here. A daemon that somehow
-    // still carries a marker attributes nothing rather than laundering it.
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
-    let (launch_account, launch_account_source) = crate::state::launch_provenance_from_env();
-    RegistryEntry {
-        // The node this spawn was FOR, from the spawn request - never the
-        // daemon's ambient env, which names the daemon-starting session.
-        node: node.filter(|v| !v.is_empty()).map(str::to_string),
-        // Stream-json adoption is gated on host_mode plus mode, not on a
-        // substrate, and it is not one of the three names - this row's
-        // lifecycle belongs to chat/switchboard/ask, so the axis stays
-        // unknown rather than forcing a "thread" stamp.
-        substrate: None,
-        name: name.into(),
-        short_id: short_id.into(),
-        // Birth marker: the daemon started this PTY worker itself. An absent origin means UNKNOWN,
-        // and the watchdog's retire lane never acts on unknown.
-        origin: Some("spawn".to_string()),
-        legacy_provider: String::new(),
-        provider: None,
-        model: None,
-        model_basis: None,
-        effort: None,
-        // v23: adoption - the daemon observed no spawn request, so
-        // the requested axis stays unknown rather than a guess.
-        requested_model: None,
-        requested_provider: None,
-        requested_effort: None,
-        harness: Some("claude".into()),
-        predecessor_session_ids: Vec::new(),
-        forked_from_session_id: None,
-        // the daemon env is what this claude child inherits, so the
-        // three-valued env read is honest (ambient config dir = unknown).
-        launch_account: launch_account.clone(),
-        launch_account_source,
-        related_session_id: None,
-        // v25: the vendor route is unobserved on this lane (it may be routed,
-        // and `provider` above stays None for the same reason), so it stays
-        // unknown here rather than guessing "anthropic". The account record
-        // mirrors the launch read - unknown stays unknown.
-        route_provider_id: None,
-        model_name: None,
-        account_record_id: launch_account,
-        cwd: cwd_s.clone(),
-        project_root: cwd_s,
-        session_id: None,
-        spawn_trigger: None,
-        legacy_claude_short_id: None,
-        claude_session_uuid: Some(uuid.into()),
-        messaging_socket_path: None,
-        codex_session_id: None,
-        gemini_session_id: None,
-        mcp_channel_id: None,
-        cc_session_id: None,
-        host_mode: Some(crate::state::HOST_MODE_INTERACTIVE.into()),
-        status: AgentStatus::Live,
-        last_message_at: Some(now_rfc3339_like()),
-        created_at: now_rfc3339_like(),
-        pid: Some(pid),
-        pid_start_time,
-        keeper_child_pid: None,
-        log_path: Some(log_path.to_string_lossy().into_owned()),
-        last_reconciled_at: None,
-        inside_leg: None,
-        exited_at: None,
-        mux: None,
-        screen_state: None,
-        crown_level: None,
-        crown_scope: None,
-        crown_grantor: None,
-        route_settings_path: None,
-        fno_id: None,
-        delivery_policy: None,
-        sandbox_posture: None,
-        ..RegistryEntry::new(
-            Some(uuid.into()),
-            Lineage::captured((parent_session, parent_harness, parent_cwd)),
-        )
-    }
-}
-
 /// Outcome of the pre-spawn single-writer claim acquisition.
 #[derive(Debug)]
 enum ClaimOutcome {
@@ -3257,6 +3172,7 @@ async fn spawn_claude_stream_lane(
     cwd: &std::path::Path,
     resume_id: Option<&str>,
     explicit_argv: Option<Vec<String>>,
+    provenance: Option<&crate::spawn_contract::SpawnProvenance>,
 ) -> Response {
     // 1. Adoption requires a resume target. A fresh `host --provider claude`
     //    (no --from) has nothing to resume; point the user at the adopt verb.
@@ -3449,7 +3365,7 @@ async fn spawn_claude_stream_lane(
     //    one-host UUID guard) means exactly one inserts. The loser shuts its
     //    just-started worker down (which releases the claim via the worker's RAII
     //    guard) so it is never leaked untracked.
-    let entry = build_claude_stream_entry(
+    let entry = crate::claude_stream_entry::build_claude_stream_entry(
         name,
         &short_id,
         cwd,
@@ -3458,6 +3374,8 @@ async fn spawn_claude_stream_lane(
         worker_pid_start_time,
         ctx.home.timeline_jsonl(&short_id),
         req.params.get("node").and_then(Value::as_str),
+        &req.params,
+        provenance,
     );
     let uuid_for_lock = uuid.to_string();
     let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {
@@ -7571,14 +7489,14 @@ pub(crate) fn run_reconcile_sweep(
     // Exited that still carries an inside-leg report, publish its completion
     // BEFORE the write below clears the report. Publishing first is the
     // contract: list/waiters see the final state before the badge goes blank.
-    // Serve-only skips it: the tick writes no lifecycle state, so there is no
-    // exit to tear down.
-    if matches!(mode, SweepMode::Full) {
-        for ch in &changes {
-            if matches!(ch.new_status, Some(AgentStatus::Exited)) {
-                if let Some(e) = registry.entries.iter().find(|e| e.name == ch.name) {
-                    emit_inside_leg_completion(emitter, e);
-                }
+    // Gated on the same predicate the applier uses, so a ServeOnly tick that
+    // writes a pid-proven exit also publishes its completion.
+    for ch in &changes {
+        if liveness_sweep::mode_writes_status(&mode, ch)
+            && matches!(ch.new_status, Some(AgentStatus::Exited))
+        {
+            if let Some(e) = registry.entries.iter().find(|e| e.name == ch.name) {
+                emit_inside_leg_completion(emitter, e);
             }
         }
     }

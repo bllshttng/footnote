@@ -272,10 +272,119 @@ def test_live_root_pids_refuses_registered_root_that_dies_after_snapshot(monkeyp
         "fno.agents.spawn_gate._pid_alive",
         lambda _pid, _start: False,
     )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._process_start_time",
+        lambda _pid: None,
+    )
 
     assert doctor_footprint._live_root_pids(snapshot_pids={902}) == (
         set(),
         "worker root liveness unavailable",
+    )
+
+
+def test_live_root_pids_names_a_recycled_root_as_a_gap(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=902,
+        pid_start_time=123,
+        harness="opencode",
+        short_id="oc",
+        name="bp-recycled-worker",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda _pid, _start: False,
+    )
+    # pid 902 runs, but under a start time the row never recorded: the
+    # recorded worker is proven dead and the pid belongs to someone else.
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._process_start_time",
+        lambda _pid: 999,
+    )
+
+    roots, verdict = doctor_footprint._live_root_pids(snapshot_pids={902})
+
+    assert roots == set()
+    assert isinstance(verdict, doctor_footprint.AttributionGap)
+    assert "bp-recycled-worker" in verdict.text
+    assert "pid=902" in verdict.text
+
+
+def test_live_root_pids_still_refuses_when_recycling_is_unproven(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="live",
+        pid=902,
+        pid_start_time=123,
+        harness="opencode",
+        short_id="oc",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda _pid, _start: False,
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._process_start_time",
+        lambda _pid: None,
+    )
+
+    assert doctor_footprint._live_root_pids(snapshot_pids={902}) == (
+        set(),
+        "worker root liveness unavailable",
+    )
+
+
+def test_live_root_pids_skips_recycled_terminal_root(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    row = SimpleNamespace(
+        status="exited",
+        pid=902,
+        pid_start_time=123,
+        harness="opencode",
+        short_id="oc",
+    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda _pid, _start: False,
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._process_start_time",
+        lambda _pid: 999,
+    )
+
+    assert doctor_footprint._live_root_pids(snapshot_pids={902}) == (set(), None)
+
+
+def test_live_shared_serve_root_pids_absorbs_recycled_pid(monkeypatch, tmp_path) -> None:
+    from fno import doctor_footprint
+
+    (tmp_path / "opencode-serve.json").write_text(
+        json.dumps({"pid": 902, "pid_start": 123}), encoding="utf-8"
+    )
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda _pid, _start: False,
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._process_start_time",
+        lambda _pid: 999,
+    )
+
+    assert doctor_footprint._live_shared_serve_root_pids(snapshot_pids={902}) == (
+        set(),
+        None,
     )
 
 
@@ -294,6 +403,10 @@ def test_live_root_pids_refuses_completed_root_that_matches_snapshot(monkeypatch
     monkeypatch.setattr(
         "fno.agents.spawn_gate._pid_alive",
         lambda _pid, _start: False,
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._process_start_time",
+        lambda _pid: None,
     )
 
     assert doctor_footprint._live_root_pids(snapshot_pids={902}) == (
@@ -1411,6 +1524,69 @@ def test_ac1_edge_all_bad_rows_still_refuse_and_name_the_rows(
     # unreadable, and the refusal names the count and the masked first row.
     assert "all 3 ps row(s) failed to parse" in error
     assert "12345 1 00:01 <tok:1> 4096" in error
+
+
+def test_cause_reading_keeps_the_reading_over_a_recycled_pid(monkeypatch) -> None:
+    from fno import doctor_footprint
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._pid_alive",
+        lambda _pid, _start: False,
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_gate._process_start_time",
+        lambda _pid: 999,
+    )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_live_shared_serve_root_pids",
+        lambda **_kwargs: (set(), None),
+    )
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_codex_app_server_serve",
+        lambda _snapshot: (set(), "absent"),
+    )
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda: SimpleNamespace(agents=SimpleNamespace(max_load_per_cpu=4.0)),
+    )
+    monkeypatch.setattr(
+        "fno.config.load_settings_for_repo",
+        lambda _root: SimpleNamespace(
+            agents=SimpleNamespace(footprint_sustained_cpu_cores=None)
+        ),
+    )
+    ps_output = _ps_with(
+        "PID PPID ELAPSED %CPU RSS COMMAND",
+        "902 1 00:01 0.0 1024 /usr/bin/filevaultd",
+        "501 1 01:00:00 0.5 1024 /usr/bin/tool",
+    )
+    _fake_runner(
+        monkeypatch,
+        ps_output,
+        [
+            {
+                "pid": 902,
+                "pid_start_time": 123,
+                "harness": "opencode",
+                "short_id": "oc",
+                "name": "bp-recycled-worker",
+            }
+        ],
+        [],
+    )
+
+    reading, error = doctor_footprint.cause_reading()
+
+    # The verdict, never exit 4: a proven-recycled pid names its row as a
+    # gap and the reading stands.
+    assert error is None
+    assert reading is not None
+    assert reading.attribution_gap is not None
+    assert "bp-recycled-worker" in reading.attribution_gap
+    assert "worker root liveness unavailable" not in reading.attribution_gap
 
 
 def test_ac2_hp_the_refusal_names_the_masked_row_and_the_failing_field(

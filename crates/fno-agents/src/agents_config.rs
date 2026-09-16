@@ -57,7 +57,7 @@ fn global_config_path() -> Option<PathBuf> {
 /// Deduped when the canonical root IS the cwd, and dropped entirely by
 /// `FNO_NO_CANONICAL_CONFIG=1` (preflight's hermetic runner), exactly as Python
 /// does at `config/__init__.py`'s `_settings_yaml_locations`.
-fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
+pub(crate) fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
         let path = PathBuf::from(explicit);
         warn_once_if_yaml(&path);

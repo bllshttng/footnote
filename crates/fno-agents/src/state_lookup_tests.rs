@@ -74,8 +74,11 @@ fn entry(name: &str, harness: &str, sid: Option<&str>) -> RegistryEntry {
         spawned_by_harness: None,
         spawned_by_cwd: None,
         lineage_kind: None,
+        lineage_reason: None,
         adopted_by_session: None,
         legacy_claude_short_id: None,
+        spawn_id: None,
+        spawn_provenance: None,
     }
 }
 

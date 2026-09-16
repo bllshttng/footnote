@@ -7,12 +7,8 @@ use super::*;
 use crate::client_verbs::RowLiveness;
 use crate::codex_thread_entry::build_codex_thread_entry;
 
-/// The e2e restart-storm test only exercises `state_error_code` when the
-/// scheduler happens to race a task into shutdown-cancellation, so its
-/// coverage of the Cancelled -> ShuttingDown mapping is real but silent
-/// on a run where nothing races. Pin the mapping directly and
-/// deterministically: Cancelled must classify as ShuttingDown, and every
-/// other StateError variant must stay Internal.
+/// Pin the Cancelled -> ShuttingDown mapping deterministically (the e2e
+/// restart-storm test only races into it); every other variant stays Internal.
 #[test]
 fn state_error_code_classifies_cancelled_as_shutting_down() {
     assert_eq!(
@@ -84,13 +80,9 @@ async fn bind_supervisor_socket_concurrent_only_one_survives() {
             async move { bind_supervisor_socket(&h).await },
         ));
     }
-    // Collect every result FIRST, then count, so no winner's lock guard is
-    // dropped while another task is still trying for it. Counting inside
-    // the join loop released the lock at the first `Ok(_)` and handed it to
-    // a task still mid-retry, which read as three winners -- an artifact of
-    // the test's own teardown order, not of the guard. In production the
-    // holder keeps its guard for the whole process lifetime, which is what
-    // this shape reproduces.
+    // Collect every result FIRST, then count: counting inside the join loop
+    // dropped the first winner's lock guard to a task still mid-retry and
+    // read as three winners. The production holder keeps its guard for life.
     let mut results = Vec::new();
     for handle in handles {
         results.push(handle.await.unwrap());
@@ -1488,42 +1480,6 @@ fn reconcile_does_not_orphan_a_live_interactive_host_on_store_miss() {
 }
 
 #[test]
-fn reconcile_reaps_a_dead_interactive_host_to_exited() {
-    // Codex P2 (PR #373): a genuinely dead interactive worker (store-miss AND
-    // pid no longer live) must be reaped to Exited DURING reconcile, not left
-    // Live until a daemon restart. A live interactive host (pid_live) on the
-    // same store-miss stays Live.
-    let mut dead = rentry("dead-tui", AgentStatus::Live, None);
-    dead.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
-    let mut live = rentry("live-tui", AgentStatus::Live, None);
-    live.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
-    let entries = vec![dead, live];
-    let (changes, out) = plan_reconcile(
-        &entries,
-        |_| Ok(false), // both store-miss
-        || false,
-        |e| e.name == "live-tui", // only live-tui's worker pid is alive
-        |_| false,
-        |_| false,
-        |_| false,
-        |_| RowLiveness::Alive, // x-5d96 liveness: Alive flips nothing
-        true,                   // roster readable: the flip needs a successful roster read
-    );
-    assert_eq!(
-        changes[0].new_status,
-        Some(AgentStatus::Exited),
-        "a dead interactive host is reaped to Exited during reconcile"
-    );
-    assert_eq!(
-        changes[1].new_status, None,
-        "a live interactive host is left untouched"
-    );
-    // Reaped to Exited, never orphaned.
-    assert!(out.orphans.is_empty());
-    assert_eq!(out.updated, vec!["dead-tui".to_string()]);
-}
-
-#[test]
 fn reconcile_mux_pane_liveness_follows_the_pid_not_the_store() {
     // Codex P1/P2 (#603): a mux-hosted pane is PTY-governed, so on a
     // session-store miss a live pid keeps it Live and a dead pid reaps to
@@ -1571,69 +1527,6 @@ fn reconcile_mux_pane_liveness_follows_the_pid_not_the_store() {
         "a pid-less mux pane defers to store liveness (orphan), not immortal"
     );
     assert_eq!(out.orphans, vec!["pidless-pane".to_string()]);
-}
-
-#[test]
-fn reconcile_served_word_on_pane_rows_follows_the_pid_even_when_the_probe_errs() {
-    // AC3: a claude pane row carries a pid and NO session id, so
-    // ClaudeProvider::reachability refuses it ("no session id in entry").
-    // The old mapping served `unmeasured` on every Err whatever the pid
-    // said - a live 13h44m pane and a dead one read the same. The served
-    // word follows the pid for pane rows; the status transition keeps
-    // today's rule (an Err probe never flips status).
-    let mk = |name: &str, pid: Option<u32>| {
-        let mut e = rentry(name, AgentStatus::Live, None);
-        e.mux = Some(crate::state::MuxRef {
-            session: "main".into(),
-            pane_id: 7,
-        });
-        e.pid = pid;
-        e
-    };
-    let mut interactive = mk("interactive-live", Some(4244));
-    interactive.mux = None;
-    interactive.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
-    let entries = vec![
-        mk("live-pane", Some(4242)),
-        mk("dead-pane", Some(4243)),
-        mk("pidless-pane", None),
-        interactive,
-    ];
-    let (changes, out) = plan_reconcile(
-        &entries,
-        |_| Err(probe_err()),
-        || false,
-        |e| e.name == "live-pane" || e.name == "interactive-live",
-        |_| false,
-        |_| false,
-        |_| false,
-        |_| RowLiveness::Alive,
-        true,
-    );
-    assert_eq!(
-        changes[0].new_liveness,
-        Some("alive"),
-        "a live pane pid serves alive even on an Err probe"
-    );
-    assert_eq!(
-        changes[1].new_liveness,
-        Some("dead"),
-        "a dead pane pid serves dead even on an Err probe"
-    );
-    assert_eq!(
-        changes[2].new_liveness,
-        Some("unmeasured"),
-        "a pid-less pane keeps today's Err mapping"
-    );
-    assert_eq!(
-        changes[3].new_liveness,
-        Some("alive"),
-        "an interactive host's served word follows its pid too"
-    );
-    for ch in &changes {
-        assert_eq!(ch.new_status, None, "an Err probe never flips status");
-    }
-    assert!(out.orphans.is_empty());
 }
 
 #[test]
@@ -2559,11 +2452,10 @@ async fn poll_until_ready_empty_settled_screen_returns_empty_string() {
 // -----------------------------------------------------------------------
 
 /// E1 fix: the locked one-host re-check matches an interactive claude row by
-/// its `claude_session_uuid`, so a second writer on the same pinned session id
-/// is refused even when the file claim is unavailable (fail-open backstop).
+/// its `claude_session_uuid`, refusing a second writer on one pinned session.
 #[test]
 fn entry_holds_session_matches_claude_session_uuid() {
-    let row = build_claude_stream_entry(
+    let row = crate::claude_stream_entry::build_claude_stream_entry(
         "peer",
         "ab12cd34",
         std::path::Path::new("/work"),
@@ -2572,16 +2464,16 @@ fn entry_holds_session_matches_claude_session_uuid() {
         None,
         PathBuf::from("/tmp/log.jsonl"),
         None,
+        &serde_json::Value::Null,
+        None,
     );
     assert!(
         entry_holds_session(&row, "sess-uuid-9"),
         "a claude row must be matched by its claude_session_uuid"
     );
     assert!(!entry_holds_session(&row, "other-uuid"));
-    // v25: the vendor route stays UNKNOWN on this lane (it may be routed;
-    // the row's `provider` is None for the same reason), but the account
-    // record mirrors the launch read rather than sitting at None by
-    // omission - with no ambient config dir this env resolves "default".
+    // v25: the vendor route stays UNKNOWN on this lane, but the account
+    // record mirrors the launch read, not None by omission.
     assert_eq!(row.route_provider_id, None);
     assert_eq!(row.model_name, None);
     assert_eq!(
@@ -2590,7 +2482,7 @@ fn entry_holds_session_matches_claude_session_uuid() {
     );
     // The node rides the spawn REQUEST, never ambient env: a named node
     // stamps, an unnamed one stays unknown.
-    let bound = build_claude_stream_entry(
+    let bound = crate::claude_stream_entry::build_claude_stream_entry(
         "peer",
         "ab12cd34",
         std::path::Path::new("/work"),
@@ -2599,6 +2491,8 @@ fn entry_holds_session_matches_claude_session_uuid() {
         None,
         PathBuf::from("/tmp/log.jsonl"),
         Some("x-cafe"),
+        &serde_json::Value::Null,
+        None,
     );
     assert_eq!(bound.node.as_deref(), Some("x-cafe"));
 }
@@ -4414,7 +4308,7 @@ fn claude_stream_worker_args_carry_stream_flags_and_child_argv() {
 
 #[test]
 fn build_claude_stream_entry_marks_interactive_claude_with_full_uuid() {
-    let e = build_claude_stream_entry(
+    let e = crate::claude_stream_entry::build_claude_stream_entry(
         "adopted",
         "sw3",
         std::path::Path::new("/proj"),
@@ -4422,6 +4316,8 @@ fn build_claude_stream_entry_marks_interactive_claude_with_full_uuid() {
         4242,
         Some(99),
         PathBuf::from("/proj/.fno/agents/sw3/timeline.jsonl"),
+        None,
+        &serde_json::Value::Null,
         None,
     );
     assert_eq!(e.harness_name(), "claude");

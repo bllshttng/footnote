@@ -212,13 +212,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // terminal-stop sweep), so the harness `stopped` state it leaves behind is
 // never read as finished work by the retirement sweep.
 //
-// v33 adds `lineage_kind` - the served CHILD/PEER word for the row's spawn
+// v33 adds `lineage_reason`, `spawn_id` and `spawn_provenance` - why a mint
+// with no parent session could not name one, the coordinator's spawn-attempt
+// id, and the validated birth record every new row carries; `spawned_by_*`
+// become generated compatibility fields derived from the origin at mint.
+//
+// v34 adds `lineage_kind` - the served CHILD/PEER word for the row's spawn
 // edge, derived by `spawn_edge::lineage_kind` and written only by the
 // liveness sweep, so readers that cannot link fno-agents (the sideline in
 // crate `fno`) render the edge without re-deriving it. Absent on rows with
-// no spawn edge. Additive-optional; a pre-v33 writer accepts the unknown
+// no spawn edge. Additive-optional; a pre-v34 writer accepts the unknown
 // keys and erases them on its next read-modify-write. Accepted set widens
-// to 1..=33.
+// to 1..=34.
 // Rendered by build.rs from src/registry_schema.toml (the version's single
 // owner); see that file for the bump protocol.
 include!(concat!(env!("OUT_DIR"), "/registry_schema.rs"));
@@ -1092,11 +1097,20 @@ pub struct RegistryEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_cwd: Option<String>,
     /// The served CHILD/PEER word for this row's spawn edge, derived by
-    /// `spawn_edge::lineage_kind` (schema v33). The liveness sweep writes
+    /// `spawn_edge::lineage_kind` (schema v34). The liveness sweep writes
     /// it and nothing else does; absent on rows with no spawn edge, so
     /// readers that cannot call fno-agents can still render the edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage_kind: Option<String>,
+    /// Why a mint with no parent session could not name one (schema v33):
+    /// a daemon mint reads the parent edge from the spawn REQUEST, so an
+    /// edge-less request stamps its reason instead of a silent null, and an
+    /// ambient capture with no session stamps the identity disposition it
+    /// read. An origin=spawn row carries `spawned_by_session` or a non-empty
+    /// reason, never neither. Same X3 passthrough as the other spawned_by
+    /// columns, and the same writer-protection bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_reason: Option<String>,
     /// LD3: the session that VOUCHED for an adopted row (X3 passthrough).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopted_by_session: Option<String>,
@@ -1127,25 +1141,47 @@ pub struct RegistryEntry {
     /// raw row. Not part of identity; no consumer reads it directly.
     #[serde(default, rename = "claude_short_id", skip_serializing)]
     pub legacy_claude_short_id: Option<String>,
+    /// v33: the spawn-attempt id the coordinator allocated before
+    /// launch, correlating row, journal and receipt. `None` on rows that
+    /// predate the door or never came through it (adopt, operator register).
+    /// Skip-when-None keeps every other row slim; the v33 bump turns a
+    /// pre-v33 writer's silent erasure into a loud version refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_id: Option<String>,
+    /// v33: the structured birth provenance the spawn door validated
+    /// before launch - required origin plus a separate owner. `None` on
+    /// operator/adopted rows and on every row that predates the door, which
+    /// read as `legacy_missing` provenance (a visible defect), never as valid
+    /// new births. Same X3 passthrough duty as `origin`: a field this struct
+    /// does not know is dropped on write-back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_provenance: Option<crate::spawn_contract::SpawnProvenance>,
 }
 
 /// The spawn-time parent edge as one value. Ambient, never required of a
 /// caller, but never implicit either: the mint constructor takes it
-/// positionally, so a mint site with no parent names [`Lineage::none`] in its
-/// own code instead of inheriting a silent `None`.
+/// positionally, so a mint site with no parent names [`Lineage::unproven`]
+/// (with the reason it cannot name one) in its own code instead of
+/// inheriting a silent `None`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lineage {
     pub session: Option<String>,
     pub harness: Option<String>,
     pub cwd: Option<String>,
+    /// Why `session` is None, when a spawn row asserts a parent exists: the
+    /// identity disposition an ambient capture read, or the daemon-mint miss
+    /// [`Lineage::from_request`] records. A row never says nothing.
+    pub reason: Option<String>,
 }
 
 impl Lineage {
-    pub fn none() -> Self {
+    /// A mint with no parent, named as such by the site itself.
+    pub fn unproven(reason: &str) -> Self {
         Self {
             session: None,
             harness: None,
             cwd: None,
+            reason: Some(reason.to_string()),
         }
     }
 
@@ -1157,6 +1193,34 @@ impl Lineage {
             session,
             harness,
             cwd,
+            reason: None,
+        }
+    }
+
+    /// The parent edge a spawn REQUEST carried, read server-side: the daemon
+    /// mints from what the client sent, never from its own scrubbed
+    /// environment (the same trust the `node` field already gets). A request
+    /// with no parent edge stamps the reason, so the row never says nothing.
+    pub fn from_request(params: &serde_json::Value) -> Self {
+        let get = |key: &str| {
+            params
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let session = get("spawned_by_session");
+        let reason = if session.is_none() {
+            Some("daemon mint: spawn request carried no parent edge".to_string())
+        } else {
+            None
+        };
+        Self {
+            session,
+            harness: get("spawned_by_harness"),
+            cwd: get("spawned_by_cwd"),
+            reason,
         }
     }
 }
@@ -1174,9 +1238,63 @@ impl RegistryEntry {
             spawned_by_session: spawned_by.session,
             spawned_by_harness: spawned_by.harness,
             spawned_by_cwd: spawned_by.cwd,
+            lineage_reason: spawned_by.reason,
             ..Default::default()
         }
     }
+
+    /// The coordinator's birth constructor: the only
+    /// sanctioned way to mint a row whose `origin` is `spawn`. Takes the
+    /// allocated spawn id and the VALIDATED provenance, and derives the
+    /// `spawned_by_*` compatibility triple from the origin so a new birth can
+    /// never disagree with its own provenance record. A caller holding only a
+    /// nullable `Lineage` has no door through this constructor.
+    pub fn new_spawn(spawn_id: &str, provenance: &crate::spawn_contract::SpawnProvenance) -> Self {
+        let mut entry = Self {
+            origin: Some("spawn".to_string()),
+            spawn_id: Some(spawn_id.to_string()),
+            spawn_provenance: Some(provenance.clone()),
+            ..Default::default()
+        };
+        if let crate::spawn_contract::SpawnOrigin::Session { parent, .. } = &provenance.origin {
+            entry.spawned_by_session = Some(parent.session_id.clone());
+            entry.spawned_by_harness = Some(parent.harness.clone());
+            entry.spawned_by_cwd = Some(parent.cwd.clone());
+        }
+        entry
+    }
+
+    /// The read-side provenance classification: `Ok` for a door birth whose
+    /// record is present, `LegacyMissing` for the rows that predate the door
+    /// (a visible defect, never silently blessed), `NotApplicable` for
+    /// non-spawn rows (adopt, operator register). The diagnostic readers
+    /// (tasks 6.1/7.1) surface these; a NEW row cannot read as legacy through
+    /// the door because `new_spawn` requires the record.
+    pub fn provenance_status(&self) -> ProvenanceStatus {
+        match self.origin.as_deref() {
+            Some("spawn") => match (&self.spawn_provenance, &self.spawn_id) {
+                (Some(_), Some(_)) => ProvenanceStatus::Ok,
+                (Some(_), None) => ProvenanceStatus::Malformed,
+                (None, _) => ProvenanceStatus::LegacyMissing,
+            },
+            _ => ProvenanceStatus::NotApplicable,
+        }
+    }
+}
+
+/// The read-side classification of a row's birth provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvenanceStatus {
+    /// A door birth with its record present.
+    Ok,
+    /// A `origin=spawn` row predating the door: defective legacy provenance,
+    /// readable and visible, never silently blessed.
+    LegacyMissing,
+    /// A door birth missing half its record (provenance without spawn_id):
+    /// a producer bug, surfaced by the diagnostic readers.
+    Malformed,
+    /// Adopt/operator rows carry no spawn provenance by design.
+    NotApplicable,
 }
 
 /// The one-live-ref invariant (brief Locked 7), checked at write time by both

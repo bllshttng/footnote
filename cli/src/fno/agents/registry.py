@@ -420,12 +420,20 @@ class AgentEntry:
     # default to None so pre-existing rows and callers that pass none of them
     # round-trip safely (additive-optional: the Rust crate has no
     # deny_unknown_fields, so it ignores these keys on read).
-    #   spawned_by_session — the spawning session's ambient identity; two
-    #                        identity families, or two disagreeing ids,
-    #                        record no edge.
+    #   spawned_by_session — the parent session id (CLAUDE_CODE_SESSION_ID /
+    #                        CODEX_SESSION_ID / GEMINI_SESSION_ID, whichever
+    #                        is set; claude takes precedence if multiple are).
+    #   spawned_by_harness — "claude" | "codex" | "gemini"; None when no
+    #                        session env var is present.
+    #   spawned_by_cwd     — parent $PWD at spawn time.
+    #   lineage_reason     — why no parent session could be proved, when
+    #                        spawned_by_session is None (schema v33). An
+    #                        origin=spawn row carries a session or a reason,
+    #                        never neither; the mint refuses "neither".
     spawned_by_session: Optional[str] = None
     spawned_by_harness: Optional[str] = None
     spawned_by_cwd: Optional[str] = None
+    lineage_reason: Optional[str] = None
     # LD3: adoption is VOUCHING, not spawning; the grantor lives here
     # so ``spawned_by_*`` keeps one meaning. Additive-optional (schema v28).
     adopted_by_session: Optional[str] = None
@@ -483,6 +491,12 @@ class AgentEntry:
     # cli/tests/test_agents_watchdog.py walks the AST of this package to
     # enforce that.
     origin: Optional[str] = None
+
+    spawn_id: Optional[str] = None  # v33: door attempt id; X3.
+    # v33: the door's validated origin+owner record. None on
+    # operator/adopted and pre-door rows: ABSENCE on origin=spawn MEANS
+    # LEGACY DEFECT, the origin discipline.
+    spawn_provenance: Optional[dict] = None
 
     # ----------------------------------------------------------------------
     # Rust-daemon-only PTY fields. A genuine daemon PTY row
@@ -720,22 +734,28 @@ def mint_agent_entry(
     spawned_by_session: Optional[str],
     spawned_by_harness: Optional[str],
     spawned_by_cwd: Optional[str],
+    lineage_reason: Optional[str],
     **kwargs: Any,
 ) -> AgentEntry:
     """The one Python mint constructor: birth writers build rows through this.
 
     The canonical session identity and the parent edge are keyword-only with
     no defaults, so a mint site that omits either gets a TypeError instead of
-    a silently-None row. This is the Python twin of Rust's
+    a silently-None row. An ``origin=spawn`` row must name its parent session
+    OR a non-empty ``lineage_reason``; "neither" raises rather than writing
+    the 13-of-39 defect a second time. This is the Python twin of Rust's
     ``RegistryEntry::new`` and the replacement for the retired session-identity
     and spawn-lineage parity scripts. Reads stay tolerant: ``AgentEntry``
     itself keeps field defaults so legacy rows without these keys still load.
     """
+    if kwargs.get("origin") == "spawn" and not spawned_by_session and not lineage_reason:
+        raise ValueError("origin=spawn row needs spawned_by_session or lineage_reason")
     return AgentEntry(
         harness_session_id=harness_session_id,
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,
+        lineage_reason=lineage_reason,
         **kwargs,
     )
 
@@ -2154,9 +2174,11 @@ def register_existing_session(
         # OTHER self-registration caller: a row never stamps itself as its
         # own parent.
         _sb_session = _sb_harness = _sb_cwd = None
+        _sb_reason = None
         _adopted_by = None
         if origin != "operator":
             from fno.agents.dispatch import _capture_parent_edge
+            from fno.agents.spawn_lineage import _lineage_reason
 
             _sb_session, _sb_harness, _sb_cwd = _capture_parent_edge()
             if _sb_session is not None and _sb_session == session_id:
@@ -2164,11 +2186,17 @@ def register_existing_session(
             if origin == "adopted":
                 _adopted_by = _sb_session
                 _sb_session = _sb_harness = _sb_cwd = None
+            else:
+                # An adopted row's parent edge is empty by the vouch split
+                # (adopted_by_session carries the grantor), not because
+                # identity could not be read - no reason text for those.
+                _sb_reason = _lineage_reason(_sb_session)
         fresh = mint_agent_entry(
             harness_session_id=session_id,
             spawned_by_session=_sb_session,
             spawned_by_harness=_sb_harness,
             spawned_by_cwd=_sb_cwd,
+            lineage_reason=_sb_reason,
             name=chosen,
             harness=harness,
             provider=provider,

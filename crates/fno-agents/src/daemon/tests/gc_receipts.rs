@@ -4798,10 +4798,10 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
 #[path = "gc_receipts/blueprint_retirement.rs"]
 mod blueprint_retirement;
 
-/// The retirement-keeps-the-session families: the production active-surface
+/// The retirement-removes-the-session families: the production active-surface
 /// seam runs for real against a fake `claude` on PATH.
-#[path = "gc_receipts/retire_keeps_session.rs"]
-mod retire_keeps_session;
+#[path = "gc_receipts/retire_removes_session.rs"]
+mod retire_removes_session;
 
 /// The spawn-edge kind families (a PEER handoff never holds its spawner),
 /// split by the file budget; the fixtures above are the shared seams.

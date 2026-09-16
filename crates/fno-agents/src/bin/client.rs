@@ -280,7 +280,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::naming::run_name_parse();
     }
     if matches!(verb, "name-codes") {
-        return fno_agents::naming::run_name_codes();
+        return fno_agents::naming::run_name_codes(&args[1..]);
     }
 
     // `review-summary` is the display-line author for a pre-push reviewed PR:
@@ -3187,8 +3187,10 @@ fn run_node_route(rest: &[String]) -> i32 {
     let graph = fno_agents::gc_sweep::read_graph_entries(&home);
     let mut answers = serde_json::Map::new();
     for name in &names {
-        let mut entry =
-            fno_agents::state::RegistryEntry::new(None, fno_agents::state::Lineage::none());
+        let mut entry = fno_agents::state::RegistryEntry::new(
+            None,
+            fno_agents::state::Lineage::unproven("synthetic row for a read, never written"),
+        );
         entry.name = name.clone();
         let answer = match &graph {
             None => serde_json::json!({"state": "graph-unreadable"}),
@@ -3242,7 +3244,7 @@ fn run_node_route(rest: &[String]) -> i32 {
             };
             let mut entry = fno_agents::state::RegistryEntry::new(
                 Some(sid.to_string()),
-                fno_agents::state::Lineage::none(),
+                fno_agents::state::Lineage::unproven("synthetic row for a read, never written"),
             );
             entry.harness = Some(harness.to_string());
             let answer = match store.matches(&entry) {
@@ -3372,6 +3374,9 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
     let mut params = Map::new();
     let mut positional: Vec<String> = Vec::new();
     let mut argv: Option<Vec<String>> = None;
+    // Where a `--` fence drained the remaining tokens, counted in pre-fence
+    // positionals; spawn uses it to tell a passthrough tail from a seed.
+    let mut fence_at: Option<usize> = None;
 
     // Click/Typer accepts `--flag=value` for every string option; the Python
     // path forwards e.g. `fno agents ask <name> <msg> --cwd=/repo --timeout=30
@@ -3777,6 +3782,7 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             "--" => {
                 // End-of-options: everything after is positional (the seed
                 // fence, same contract as the Python CLI's click parser).
+                fence_at = Some(positional.len());
                 for a in it.by_ref() {
                     positional.push(a);
                 }
@@ -3875,6 +3881,21 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
 
     let method = match verb {
         "spawn" => {
+            // The client runs as a child of the spawning session, so its env
+            // still carries the harness markers the daemon's scrubbed env
+            // lost. Stamp the ambient parent edge onto the request so a
+            // daemon mint reads the parent from HERE, never from its own
+            // environment (node-provenance.md: capture is ambient).
+            let (session, harness, cwd) = fno_agents::claims::ambient_parent_edge();
+            if let Some(s) = session {
+                params.insert("spawned_by_session".into(), Value::String(s));
+            }
+            if let Some(h) = harness {
+                params.insert("spawned_by_harness".into(), Value::String(h));
+            }
+            if let Some(c) = cwd {
+                params.insert("spawned_by_cwd".into(), Value::String(c));
+            }
             // With --name the whole positional tail is the message; without it the
             // first positional is still the name (a direct `fno-agents spawn`
             // bypasses the seam normalizer that would have minted one).
@@ -3885,6 +3906,22 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 params.insert("name".into(), Value::String(name.clone()));
                 1
             };
+            // A message already collected before the fence makes the fenced
+            // tail provider passthrough (the same harness_args list
+            // --harness-arg fills; the daemon-side vocabulary check stays the
+            // trust boundary). Without a message before the fence the tail is
+            // still the seed (the fenced `--timeout=5 do X` case).
+            if let Some(pre_len) = fence_at {
+                if pre_len > msg_from {
+                    let tail = positional.split_off(pre_len);
+                    let items = params
+                        .entry(String::from("harness_args"))
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if let Value::Array(list) = items {
+                        list.extend(tail.into_iter().map(Value::String));
+                    }
+                }
+            }
             if !params.contains_key("message") && positional.len() > msg_from {
                 params.insert(
                     "message".into(),
@@ -3908,6 +3945,8 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
             if substrate == "pane" && pty_capable {
                 apply_interactive_defaults(&mut params);
             }
+            fno_agents::spawn_context::refuse_inherited_tier_remap(&params)?;
+            fno_agents::spawn_context::stamp_spawn_lineage(&mut params)?;
             "agent.spawn"
         }
         "ask" => {

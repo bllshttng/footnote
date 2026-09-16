@@ -141,9 +141,10 @@ fn rust_probe(graph: &Path, ops: &serde_json::Value) -> serde_json::Value {
     };
 
     // The soft read swallows corruption to [] (read_graph's contract); the
-    // strict read surfaces the error kind.
+    // strict read surfaces the error kind. The closure models the Python soft
+    // reader over the soft opts spelling; `read_defaulted` itself is strict.
     let soft = |g: &Path| -> Result<Vec<Value>, graph_store::StoreError> {
-        match graph_store::read_defaulted(g, false) {
+        match graph_store::read_defaulted_opts(g, false, true) {
             Ok(v) => Ok(v),
             Err(
                 e @ graph_store::StoreError::Corrupt(_)
@@ -659,4 +660,52 @@ fn concurrent_writers_never_lose_an_update_through_the_bounded_cycle() {
             "writer {i}'s node must survive: {ids:?}"
         );
     }
+}
+
+/// x-786d: the default read is strict, so a starved store can never answer
+/// empty; the soft answers stay reachable only through the explicit opts
+/// spelling the keeper and the rows reader take.
+#[test]
+fn a_starved_read_is_an_error_never_an_empty_answer() {
+    use fno_agents::graph_store::{self, StoreError};
+    let dir = tempfile::tempdir().unwrap();
+    // {} parses but carries no entries key: the MalformedRoot shape.
+    let malformed = dir.path().join("malformed.json");
+    std::fs::write(&malformed, "{}").unwrap();
+    // `{` does not parse at all: the Corrupt shape.
+    let corrupt = dir.path().join("corrupt.json");
+    std::fs::write(&corrupt, "{").unwrap();
+
+    match graph_store::read_defaulted(&malformed, false) {
+        Err(StoreError::MalformedRoot(_)) => {}
+        other => panic!("malformed root must surface, got {other:?}"),
+    }
+    assert!(matches!(
+        graph_store::read_defaulted(&corrupt, false),
+        Err(StoreError::Corrupt(_))
+    ));
+    // The strict read writes nothing.
+    assert!(!dir.path().join("backups").exists());
+
+    // The explicit soft spelling keeps the Python soft reader's answers and
+    // the corrupt-file .bak (AC1-EDGE, the keeper and rows-reader sites).
+    assert_eq!(
+        graph_store::read_defaulted_opts(&malformed, false, true).unwrap(),
+        Vec::<Value>::new()
+    );
+    assert!(matches!(
+        graph_store::read_defaulted_opts(&corrupt, false, true),
+        Err(StoreError::Corrupt(_))
+    ));
+    let bak = dir.path().join("backups").join("corrupt.json.bak");
+    assert_eq!(std::fs::read_to_string(&bak).unwrap(), "{");
+
+    assert_eq!(
+        graph_store::read_rows(&malformed).unwrap(),
+        Vec::<Value>::new()
+    );
+    assert!(matches!(
+        graph_store::read_rows(&corrupt),
+        Err(StoreError::Corrupt(_))
+    ));
 }

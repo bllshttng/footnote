@@ -27,6 +27,7 @@ fn main() {
     sync_merge_posture();
     sync_page_reload();
     sync_spawn_phase();
+    sync_slot_lanes();
     sync_registry_schema();
     sync_events_limits();
     sync_check_supersession();
@@ -240,6 +241,26 @@ fn sync_spawn_phase() {
     };
     let Some(root) = repo_root() else { return };
     let cli_copy = root.join("cli/src/fno/agents/spawn_phase.toml");
+    if !cli_copy.is_file() {
+        return;
+    }
+    write_if_different(&cli_copy, &bytes);
+}
+
+/// PRODUCE the downstream copy of the inline slot-lane vocabulary.
+///
+/// Same shape as [`sync_spawn_phase`]: the canonical TOML lives in this
+/// crate (`route_slot.rs` `include_str!`s it), and the Python package reads
+/// a byte copy as package data so the lanes JSON projection cannot drift
+/// from the Rust fold's field vocabulary.
+fn sync_slot_lanes() {
+    println!("cargo:rerun-if-changed=src/slot_lanes.toml");
+    let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/slot_lanes.toml");
+    let Ok(bytes) = std::fs::read(&canonical) else {
+        return;
+    };
+    let Some(root) = repo_root() else { return };
+    let cli_copy = root.join("cli/src/fno/agents/slot_lanes.toml");
     if !cli_copy.is_file() {
         return;
     }

@@ -29,6 +29,10 @@ use crate::AgentStatus;
 /// fallback_chain already applies to its own health reads).
 const PROVIDER_HEALTH_TTL_SECONDS: f64 = 60.0 * 60.0;
 
+// ponytail: fixed 5-hour hold matches the vendor window in the measured 429;
+// upgrade is parsing the window length from the excerpt.
+const UNKNOWN_RESET_HOLD_S: i64 = 5 * 3600;
+
 /// Pane-probe wall-clock budget: the shared mux subprocess bound
 /// (mux_spawn._MUX_SUBPROCESS_TIMEOUT_S).
 const PANE_PROBE_BUDGET: Duration = Duration::from_secs(30);
@@ -797,19 +801,44 @@ pub(crate) fn check_lane_quota_lock(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
+    let now_epoch = now as i64;
     let Some(lane) = snapshot.lanes.iter().find(|l| {
-        l.provider == provider
-            && l.state == "open"
-            && l.reset_epoch.map(|r| r as f64 > now).unwrap_or(false)
+        if l.provider != provider || l.state != "open" || l.reset_passed_epoch.is_some() {
+            return false;
+        }
+        if l.reset_epoch.map(|r| r as f64 > now).unwrap_or(false) {
+            return true;
+        }
+        l.reset_epoch.is_none()
+            && l.members
+                .iter()
+                .filter(|m| m.capped)
+                .filter_map(|m| m.newest_assistant.as_deref())
+                .filter_map(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|ts| ts.timestamp())
+                .max()
+                .is_some_and(|ts| now_epoch >= ts && now_epoch - ts < UNKNOWN_RESET_HOLD_S)
     }) else {
         return Ok(());
     };
-    let reset = lane.reset_epoch.unwrap_or_default() as f64;
-    let when = chrono_like_iso(reset);
-    warnings.push(format!(
-        "spawn-gate: provider lane {} is rate-limited until {when}; refusing; no worker launched",
-        lane.lane
-    ));
+    let reset_unknown = lane.reset_epoch.is_none();
+    if reset_unknown {
+        let target = lane
+            .missing_reset_timezone
+            .first()
+            .map(String::as_str)
+            .unwrap_or(&lane.account);
+        warnings.push(format!(
+            "spawn-gate: provider lane {} has an unknown reset; refusing; set reset_timezone on the [[accounts.records]] entry for {target}; no worker launched",
+            lane.lane
+        ));
+    } else {
+        let when = chrono_like_iso(lane.reset_epoch.unwrap() as f64);
+        warnings.push(format!(
+            "spawn-gate: provider lane {} is rate-limited until {when}; refusing; no worker launched",
+            lane.lane
+        ));
+    }
     Err(Refusal::with_receipt(
         EXIT_PROVIDER_CAP,
         serde_json::json!({
@@ -817,7 +846,9 @@ pub(crate) fn check_lane_quota_lock(
             "reason": "provider_quota_lock",
             "provider": provider,
             "lane": lane.lane,
-            "resets_at": reset,
+            "resets_at": lane.reset_epoch.map(|r| r as f64),
+            "reset_unknown": reset_unknown,
+            "missing_reset_timezone": lane.missing_reset_timezone,
         }),
     ))
 }
@@ -1450,6 +1481,78 @@ mod tests {
 
         warnings.clear();
         assert!(check_lane_quota_lock(&dir.join("absent"), "zai", &mut warnings).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lane_quota_lock_holds_recent_unknown_reset_but_not_old_or_returning_lane() {
+        let dir = std::env::temp_dir().join(format!("fno-lanes-unknown-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let snapshot = |newest: i64, reset_passed_epoch: Option<i64>| {
+            serde_json::json!({
+                "lanes": [{
+                    "lane": "zai:default",
+                    "provider": "zai",
+                    "account": "default",
+                    "reset_epoch": null,
+                    "reset_passed_epoch": reset_passed_epoch,
+                    "missing_reset_timezone": ["default"],
+                    "state": "open",
+                    "members": [{
+                        "name": "w-1",
+                        "session_id": null,
+                        "harness": "claude",
+                        "provider": "zai",
+                        "account": "default",
+                        "node": null,
+                        "cwd": null,
+                        "capped": true,
+                        "cap_unknown": null,
+                        "newest_assistant": chrono::DateTime::from_timestamp(newest, 0).unwrap().to_rfc3339(),
+                        "held": null,
+                        "excerpt": "API Error: 429"
+                    }]
+                }],
+                "measured_at": "probe",
+                "measured_at_epoch": now
+            })
+        };
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            snapshot(now - 600, None).to_string(),
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let err = check_lane_quota_lock(&dir, "zai", &mut warnings).unwrap_err();
+        assert_eq!(err.exit_code, crate::spawn_gate::EXIT_PROVIDER_CAP);
+        assert_eq!(err.receipt.as_ref().unwrap()["reset_unknown"], true);
+        assert!(err.receipt.as_ref().unwrap()["resets_at"].is_null());
+        assert_eq!(
+            err.receipt.as_ref().unwrap()["missing_reset_timezone"],
+            serde_json::json!(["default"])
+        );
+        assert!(warnings[0].contains("set reset_timezone"));
+
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            snapshot(now - 6 * 3600, None).to_string(),
+        )
+        .unwrap();
+        warnings.clear();
+        assert!(check_lane_quota_lock(&dir, "zai", &mut warnings).is_ok());
+
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            snapshot(now - 600, Some(now - 60)).to_string(),
+        )
+        .unwrap();
+        warnings.clear();
+        assert!(check_lane_quota_lock(&dir, "zai", &mut warnings).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

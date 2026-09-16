@@ -1618,19 +1618,15 @@ fn update_registry_accounts_for_a_removed_row() {
     assert_eq!(receipt["row_name"], "dropped");
     assert_eq!(receipt["removed_by"], event["data"]["remover"]);
     assert!(receipt["resume"].as_str().is_some_and(|s| !s.is_empty()));
-    // The write choke point records and never acts on a harness: no
-    // active-surface effect, and the event names no harness attempt. The
-    // only door that removes session state is `fno agents rm`.
+    // The door that dropped the row also removes the harness side, and its
+    // receipt records the attempt as a typed active-surface effect - whatever
+    // outcome the probe reached, the attempt is never silent.
+    let effects = receipt["effects"].as_array().expect("effects recorded");
+    assert_eq!(effects.len(), 1, "one active-surface effect: {receipt}");
+    assert_eq!(effects[0]["op"], "active-surface");
     assert!(
-        receipt
-            .get("effects")
-            .and_then(|e| e.as_array())
-            .is_none_or(|effects| effects.is_empty()),
-        "no harness effects from a registry write: {receipt}"
-    );
-    assert!(
-        event["data"].get("active_surface").is_none(),
-        "the event names no harness attempt: {event}"
+        effects[0]["outcome"].is_string(),
+        "typed outcome recorded: {receipt}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

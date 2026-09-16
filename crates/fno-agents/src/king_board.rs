@@ -606,7 +606,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         .unwrap_or_else(|| h.clone())
                 })
                 .collect();
-            Some(s.spawn(move || crate::truth_probe::family1_truth_probe_many_checked(&tokens)))
+            Some(s.spawn(move || crate::truth_probe::family1_truth_probe_many_measured(&tokens)))
         };
         // The needs fold rides a thread too: in-process, but its
         // refused-worker leg batch probes the whole registry and measured
@@ -697,11 +697,19 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         ) = match t_truth {
             None => (HashMap::new(), None),
             Some(h) => match h.join() {
-                Ok(Ok(map)) => (map, None),
-                // A timed-out batch is UNREADABLE, not empty: an empty map
-                // read as "every holder answered nothing" is how live workers
-                // rendered stalled.
-                Ok(Err(e)) => (HashMap::new(), Some(e)),
+                Ok((map, crate::truth_probe::BatchOutcome::Measured)) => (map, None),
+                Ok((map, crate::truth_probe::BatchOutcome::NotMeasured)) if !map.is_empty() => {
+                    (map, None)
+                }
+                // An empty timed-out page is UNREADABLE. A non-empty partial
+                // page remains usable, and queues name its missing holders.
+                Ok((_, crate::truth_probe::BatchOutcome::NotMeasured)) => (
+                    HashMap::new(),
+                    Some(format!(
+                        "truth probe: batch of {} handles timed out",
+                        holders.len()
+                    )),
+                ),
                 Err(_) => (
                     HashMap::new(),
                     Some("truth probe: reader panicked".to_string()),

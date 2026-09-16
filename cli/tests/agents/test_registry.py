@@ -885,11 +885,15 @@ def test_us2_schema_version_is_three() -> None:
     # a bounded Codex thread.
     # v31: additive `harness_args` - the fenced codex thread tokens a daemon
     # restart re-parses onto thread/resume.
-    # v32: additive `stop` - fno's own stop of a worker, so its `stopped`
-    # roster state is never read as finished work.
-    # v33: additive `lineage_kind` - the served CHILD/PEER word the liveness
+    # v32: additive `stop` - fno's own stop, so a harness-stopped state never
+    # reads as finished work to the retirement sweep.
+    # v33: additive `lineage_reason` - why no parent session could be named;
+    # an origin=spawn row carries a parent or a reason, never neither.
+    # v33 also added `spawn_id` and structured `spawn_provenance` (the door's
+    # attempt id and validated birth record).
+    # v34: additive `lineage_kind` - the served CHILD/PEER word the liveness
     # sweep stamps on rows with a spawn edge.
-    assert SCHEMA_VERSION == 33
+    assert SCHEMA_VERSION == 34
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:

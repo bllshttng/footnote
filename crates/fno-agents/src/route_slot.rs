@@ -14,19 +14,42 @@
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::OnceLock;
 
-const SLOT_LANE_FIELDS: [&str; 9] = [
-    "provider",
-    "model",
-    "effort",
-    "substrate",
-    "permission_mode",
-    "route",
-    "account",
-    "pane_group",
-    "args",
-];
-const LANE_PASSTHROUGH_FIELDS: [&str; 4] = ["substrate", "permission_mode", "pane_group", "args"];
+const SLOT_LANES_TABLE: &str = include_str!("slot_lanes.toml");
+
+/// The inline slot-lane vocabulary, read once from the canonical table
+/// (`slot_lanes.toml`; `build.rs` projects the byte copy Python reads).
+/// Lane fields are closed: every field has resolver code behind it. Slot
+/// VERBS are the open surface instead (`SLOT_VERBS` plus profiles keys).
+struct LaneVocabulary {
+    fields: Vec<String>,
+    passthrough: Vec<String>,
+}
+
+fn lane_vocabulary() -> &'static LaneVocabulary {
+    static CELL: OnceLock<LaneVocabulary> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let raw: toml::Value =
+            toml::from_str(SLOT_LANES_TABLE).expect("slot_lanes.toml must parse");
+        let list = |key: &str| -> Vec<String> {
+            raw[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("slot_lanes.toml {key} must be a list"))
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .expect("lane vocabulary entries must be strings")
+                        .to_string()
+                })
+                .collect()
+        };
+        LaneVocabulary {
+            fields: list("fields"),
+            passthrough: list("passthrough"),
+        }
+    })
+}
 const ON_EXHAUSTED: [&str; 3] = ["queue", "degrade", "refuse"];
 const ON_LOW: [&str; 3] = ["allow", "prefer_healthy", "skip"];
 const ON_UNKNOWN: [&str; 2] = ["allow", "skip"];
@@ -123,9 +146,10 @@ fn fold(
                 plan.push((rung, name.to_string()));
             }
             Value::Object(table) => {
+                let lanes = lane_vocabulary();
                 let unknown: Vec<&String> = table
                     .keys()
-                    .filter(|k| !SLOT_LANE_FIELDS.contains(&k.as_str()))
+                    .filter(|k| !lanes.fields.iter().any(|f| f == *k))
                     .collect();
                 if let Some(first) = unknown.first() {
                     return Err(fault(&rung, format!("has unknown field '{first}'")));
@@ -159,7 +183,7 @@ fn fold(
                         .to_string()
                 };
                 let mut fields = Map::new();
-                for k in SLOT_LANE_FIELDS {
+                for k in lanes.fields.iter() {
                     let v = get(k);
                     if !v.is_empty() {
                         fields.insert(k.to_string(), Value::String(v));
@@ -175,9 +199,9 @@ fn fold(
                 }
                 let mut row = Map::new();
                 row.insert("name".into(), Value::String(rung.clone()));
-                for k in SLOT_LANE_FIELDS {
+                for k in lanes.fields.iter() {
                     let v = get(k);
-                    if !v.is_empty() && !LANE_PASSTHROUGH_FIELDS.contains(&k) {
+                    if !v.is_empty() && !lanes.passthrough.iter().any(|f| f == k) {
                         let key = if k == "provider" { "harness" } else { k };
                         row.insert(key.to_string(), Value::String(v));
                     }

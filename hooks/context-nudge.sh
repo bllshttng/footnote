@@ -243,6 +243,11 @@ if command -v fno >/dev/null 2>&1; then
                     and ((.crown_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and .liveness == "alive"
+                    # a door-stamped row names its owner (mission,
+                    # crown, operator or test run); it is owned autonomous
+                    # work, never an unlinked orphan. No provenance at all
+                    # stays a visible defect here.
+                    and ((.spawn_provenance // null) == null)
                 )] | (map(.name) | join(", ")), length' \
                 2>/dev/null)
             UNLINKED_ORPHANS=$(printf '%s\n' "$_bucket" | head -n1)
@@ -255,6 +260,11 @@ if command -v fno >/dev/null 2>&1; then
                     and ((.crown_level // 0) == 0)
                     and ((.session_id // .harness_session_id // "") != $sid)
                     and (.liveness != "alive" and .liveness != "dead")
+                    # a door-stamped row names its owner (mission,
+                    # crown, operator or test run); it is owned autonomous
+                    # work, never an unlinked orphan. No provenance at all
+                    # stays a visible defect here.
+                    and ((.spawn_provenance // null) == null)
                 )] | (map(.name) | join(", ")), length' \
                 2>/dev/null)
             UNLINKED_UNKNOWN=$(printf '%s\n' "$_bucket" | head -n1)

@@ -72,6 +72,7 @@ pub mod claude_attach;
 pub mod claude_drive;
 pub mod claude_roster;
 pub mod claude_sessions;
+pub mod claude_stream_entry;
 pub mod cli_args;
 pub mod client;
 pub mod client_verbs;
@@ -224,13 +225,19 @@ pub mod session_names_fold;
 pub mod session_start_bytes;
 pub mod single_flight;
 pub mod source_pin;
+pub mod spawn;
 pub mod spawn_axes;
+pub mod spawn_backends;
+pub mod spawn_context;
+pub mod spawn_contract;
 pub mod spawn_edge;
 pub mod spawn_gate;
 pub mod spawn_gate_lanes;
 pub mod spawn_gate_verb;
+pub mod spawn_lineage;
 pub mod spawn_overlay;
 pub mod spawn_payload;
+pub mod spawn_transaction;
 pub mod state;
 pub mod state_path;
 pub mod stream_worker;
@@ -920,6 +927,9 @@ mod tests {
 pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
+    // Spawn coordinator: the durable accepted record written BEFORE
+    // any backend launch; not a birth, correlated to it by spawn_id.
+    "agent_spawn_accepted",
     // The keeper's render trigger failed a pass (waves 8-9 store cutover);
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",
