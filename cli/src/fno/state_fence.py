@@ -1,6 +1,6 @@
 """The source-ahead write fence, as a named mechanism instead of a private helper.
 
-Epic x-3d21 R1: a process running from a source checkout whose schema is ahead
+Epic R1: a process running from a source checkout whose schema is ahead
 of the deployed binary's must write the PROCESS root, never the operator root.
 The failure it exists to stop is fleet-wide and silent: a worktree whose branch
 raised a schema constant writes that number into the shared file on its next
@@ -11,7 +11,7 @@ WHICH STATE FILES THIS REACHES, and it is fewer than "generalize" suggests.
 The fence works by comparing a writer's version against the one already on
 disk, so it needs a monotone BUILD version on both sides. Measured on main:
 
-  registry.json    SCHEMA_VERSION, a build version. ARMED (x-665d).
+  registry.json    SCHEMA_VERSION, a build version. ARMED.
   claims/*.lock    carries a `schema_version` KEY, but it is a per-claim SHAPE
                    discriminator, not a build version: 1 means a pid claim and
                    2 means a pid_unavailable claim, bound to the `pid_unavailable`
@@ -82,7 +82,7 @@ def refuse_source_ahead_write(
 ) -> None:
     """Refuse to RAISE a shared state file's schema from a source checkout.
 
-    Three conditions gate it, each load-bearing, and they are x-665d's WORKING
+    Three conditions gate it, each load-bearing, and they are WORKING
     key rather than the one its plan first proposed. That plan's first
     condition (``explicit_path = path is not None``) shipped INERT, because the
     only caller resolves the default itself; the condition that actually works

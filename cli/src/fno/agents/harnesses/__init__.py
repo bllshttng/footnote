@@ -11,7 +11,7 @@ package fixed the container; the field is a separate, ruled-out surface.
 """
 
 # Harnesses Python can DISPATCH (select_provider + availability checks).
-# THE dispatch gate (x-8dfc): enforced only at the spawn/ask seam (dispatch.py
+# THE dispatch gate: enforced only at the spawn/ask seam (dispatch.py
 # _check_known_provider, spawn_defaults, mux_spawn), never at registry LOAD --
 # the load gate is a shape check now, so an alien harness reads fine and is
 # refused only where a dispatchable provider is actually required.
@@ -22,8 +22,8 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 from fno.harness_names import SPAWN_HARNESSES as SPAWN_HARNESSES  # noqa: E402
 
 # The spawn/pane read-tolerance roster: harnesses a pane can HOST even without a
-# Python ask adapter. `agy` (Antigravity) and `opencode` (x-51f6) land pane rows
-# via Rust spawn paths / the mux pane back half. NOTE (x-8dfc): this is no longer
+# Python ask adapter. `agy` (Antigravity) and `opencode` land pane rows
+# via Rust spawn paths / the mux pane back half. NOTE: this is no longer
 # the registry LOAD gate -- load_registry now shape-checks identity, so a row
 # with any provider reads without bricking. READABLE_PROVIDERS survives as the
 # spawn-default / pane-host tolerance set (spawn_defaults.py), NOT a read gate.

@@ -103,7 +103,7 @@ def cmd_ask(
 
     # ask never launches in workdir, so it stays in the caller cwd
     # (here=True): the canonical default or redirect note would be a false
-    # diagnostic for a non-consuming op (x-85fe review).
+    # diagnostic for a non-consuming op (review).
     workdir = _resolve_dispatch_workdir(cwd, fresh, here=True)
 
     # Project mode: the message is the sole positional, so it may park in

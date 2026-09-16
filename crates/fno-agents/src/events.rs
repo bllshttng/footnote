@@ -22,7 +22,7 @@
 //!   [`ROTATE_AT_BYTES`] is ingested into its `events.db` (`events_store`)
 //!   BEFORE the rename, so one generation on disk still means no lost rows.
 //!
-//! Envelope (x-2901): the unified line is `{ts, type, source, data:{...}}` -
+//! Envelope : the unified line is `{ts, type, source, data:{...}}` -
 //! the same shape the Python/fno emitter and the Rust loop runtime already
 //! write. The retired `{ts, kind, <flat fields>}` shape is read-tolerated by
 //! `subscribe`/`digest` during the mixed-binary window; nothing emits it here.
@@ -39,13 +39,13 @@ use std::path::{Path, PathBuf};
 /// first, so the rename never destroys history.
 pub const ROTATE_AT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Sibling journal suffix for ephemeral-class rows (x-add3). The Python
+/// Sibling journal suffix for ephemeral-class rows. The Python
 /// `fno.events` module declares the same string; a parity test
 /// (`cli/tests/events/test_ephemeral_set_parity.py`) holds the two equal so
 /// both languages write the same sibling file.
 pub const EPHEMERAL_SUFFIX: &str = ".ephemeral";
 
-/// Event types the schema declares `retention: ephemeral` (x-add3). These are
+/// Event types the schema declares `retention: ephemeral`. These are
 /// routed to the `.ephemeral` sibling journal at the write boundary so a
 /// high-cadence gauge (mux_pane_counters: 30s samples, ~5KB a row) cannot
 /// consume the durable journal's rotation budget. Kept equal to
@@ -147,7 +147,7 @@ impl EventEmitter {
     }
 
     fn write_line(&self, event_type: &str, payload: Map<String, Value>) -> Result<(), EmitError> {
-        // Unified envelope (x-2901): the payload nests under `data`, the kind is
+        // Unified envelope: the payload nests under `data`, the kind is
         // stamped as `type`. The schema cap is measured on `payload` before
         // this framing (in emit/emit_fields), so nesting never changes which
         // events are dropped.
@@ -160,7 +160,7 @@ impl EventEmitter {
             .map_err(|e| EmitError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
         line.push('\n');
 
-        // Honor the declared retention class (x-add3): an ephemeral row goes to
+        // Honor the declared retention class: an ephemeral row goes to
         // the sibling journal beside this emitter's file, rotating on its own
         // size; every other class keeps the emitter's path. The sibling shares
         // the emitter's directory, so the append/rotate machinery below runs

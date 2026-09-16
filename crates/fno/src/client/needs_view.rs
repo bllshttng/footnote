@@ -1,5 +1,5 @@
 //! The needs-me overlay's projection and render, moved out of client.rs
-//! (x-4433 file-budget shrink): the projection is one question - "what needs
+//! (file-budget shrink): the projection is one question - "what needs
 //! me, worst first" - so it answers from its own module. The gesture sites,
 //! the run-loop arms and the tests all read these items through the re-exports
 //! in the parent. The feed overlay (`feed_view.rs`) reuses
@@ -11,7 +11,7 @@ use super::*;
 impl View {
     /// The roster row a fold item joins to: a name / node / session-id match
     /// against a layout row's name or its cwd basename (`cwd_base`, now carried
-    /// on every row since x-6851 US3, not only orphans).
+    /// on every row since US3, not only orphans).
     pub(crate) fn join_fold_row(&self, item: &crate::needs_overlay::FoldItem) -> Option<&AgentRow> {
         let keys: Vec<&str> = [
             item.name.as_deref(),
@@ -44,9 +44,9 @@ impl View {
             .map(NeedsOverlayRow::Mine)
             .collect();
 
-        // Questions lead the NEED section (x-f730 task 2.3): a real operator
+        // Questions lead the NEED section (task 2.3): a real operator
         // question, with an asker to answer back to, outranks a bare
-        // carveout/claims pile. Ranked by the record's own `rank` (x-7979
+        // carveout/claims pile. Ranked by the record's own `rank` (
         // already orders these); an unranked row sorts last within the group
         // rather than floating to the front on a missing field.
         let mut questions: Vec<crate::needs_overlay::QuestionItem> =
@@ -93,7 +93,7 @@ impl NeedsProjection {
     }
 }
 
-/// Build the needs-me overlay lines (x-feec, two-laned by x-f730): MINE (the
+/// Build the needs-me overlay lines (two-laned by): MINE (the
 /// operator's own priorities) above THEY NEED YOU (the severity-ranked union
 /// + the selected row's answer options), each with its own state footer, on
 /// the shared inverse-video chrome. `sel` is pre-clamped by the caller and

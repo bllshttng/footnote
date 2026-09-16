@@ -105,7 +105,7 @@ def _node_aware_root(key: str):
 
     Global-id kinds (``node:``/``dispatch:``/``reconcile:``/``session:``) route to
     the global ``~/.fno/claims`` so operator commands work without the env var
-    (ab-fcf9cec5); repo-local keys keep the cwd/env default. See
+; repo-local keys keep the cwd/env default. See
     :func:`fno.claims.io.claims_root_for` for the single source of truth.
     """
     from .io import claims_root_for
@@ -548,7 +548,7 @@ def _owned_do_identity(claim, holder: str) -> "tuple[str, str, str | None]":
     The harness the claim was pinned to (init passes the proven --harness;
     ``claim.harness`` carries it) and the session encoded in the holder
     (``target-session:<id>``). Ambient marker precedence would launder an
-    inherited foreign marker into the row (x-0bb9), so ambient is only a
+    inherited foreign marker into the row, so ambient is only a
     fallback when the owned values are absent. Shared by the acquire and
     release stamps so they always agree on the row key - release must fill the
     row acquire opened, not open a second one."""
@@ -609,7 +609,7 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     pinned to (init passes the proven --harness; ``claim.harness`` carries it)
     and the session encoded in the holder (``target-session:<id>``). Ambient
     marker precedence would launder an inherited foreign marker into the row
-    (x-0bb9), so it is only a fallback when the owned values are absent.
+, so it is only a fallback when the owned values are absent.
 
     Two reachable acquire paths both call this: the CLI ``claim acquire`` verb
     (the init-script cold start) and ``_reacquire_node_claim`` (a target-start
@@ -845,7 +845,7 @@ def _roster_verdict_line(info: dict) -> str:
     Five outcomes, not three: a node whose only roster rows are finished
     sessions is genuinely unworked, and printing the live-worker alarm for it
     would train every reader to ignore the alarm; and rows the predicate
-    could not date read UNKNOWN, never live-by-default (x-dead).
+    could not date read UNKNOWN, never live-by-default.
     """
     # The claim's OWN state, never the hardcoded word free. The cross-check runs
     # for every unheld state, and `stale` is one of them, so a line saying free
@@ -864,7 +864,7 @@ def _roster_verdict_line(info: dict) -> str:
         line = f"UNCLAIMED but a live worker is on this node: {', '.join(worked_by)}"
         unresolved = info.get("roster_rows_unresolved", 0)
         if unresolved:
-            # x-dead task 2.1: the verdict is only as good as its coverage,
+            # task 2.1: the verdict is only as good as its coverage,
             # so the engaged line names the fraction too.
             scanned = info.get("roster_rows_scanned", 0)
             line += f"; coverage degraded: {unresolved} of {scanned} rows unresolved"
@@ -919,7 +919,7 @@ def _roster_verdict_line(info: dict) -> str:
 
 
 def _expiry_clause(info: dict) -> str:
-    """One stderr line when a live holder's TTL lapsed (x-74aa): the word live
+    """One stderr line when a live holder's TTL lapsed : the word live
     alone cannot tell a fresh lease from one that lapsed an hour ago. Empty
     for every non-live state - "holder live by" would lie about stale."""
     if info.get("expired") is not True or info.get("state") != "live":
@@ -1038,7 +1038,7 @@ def status(
         if reachable:
             info["worked_by"] = reachable
             # A positively-live worker on an unheld node is never `free`.
-            # x-dead task 2.1: degraded coverage enters the verdict, not a
+            # task 2.1: degraded coverage enters the verdict, not a
             # field beside it (31 of 53 rows went unresolved under a flat
             # `live-worker`).
             info["state"] = "unknown"
@@ -1150,7 +1150,7 @@ def _merge_claims_across_roots(
 # age_s None means unreadable, not silent or healthy - a separate bucket.
 ClaimSilenceRow = NamedTuple("ClaimSilenceRow", [("key", str), ("holder", str), ("age_s", Optional[float])])
 # scanned = live claims examined, always populated: a detector silent on a
-# healthy fleet is indistinguishable from one that never ran (x-1182).
+# healthy fleet is indistinguishable from one that never ran.
 ClaimSilenceReport = NamedTuple(
     "ClaimSilenceReport",
     [("scanned", int), ("silent", List[ClaimSilenceRow]), ("unreadable", List[ClaimSilenceRow])],
@@ -1302,7 +1302,7 @@ HANDOVER_HOLDER_PREFIX = _HANDOVER_HOLDER_PREFIX
 
 def _node_settlement(reading: Optional[RosterReading] = None):
     """The closure-shaped reading ``sweep_verdict`` runs FIRST on a node claim
-    (x-94f8): is this claim's own node still the holder's workplace?
+    : is this claim's own node still the holder's workplace?
 
     Two positive findings, both proven by FINDING things, never by failing to:
 
@@ -1312,8 +1312,8 @@ def _node_settlement(reading: Optional[RosterReading] = None):
         leaks, a closer that crashed mid-release) protects nothing once its
         lease is spent or its pid is gone. A LIVE holder keeps the claim
         until its own lease ends: measured 2026-09-05, this arm reaped four
-        unexpired, live-pid claims on closed nodes (x-a114 twice, x-04ce,
-        x-9223-node) on every sweep, killing active loop-check leases and
+        unexpired, live-pid claims on closed nodes (twice,
+        -node) on every sweep, killing active loop-check leases and
         opening the dup-PR window each time.
       * The lease is EXPIRED and the holder's roster row resolves to a
         DIFFERENT node. An expired lease is the holder's own statement that
@@ -1365,8 +1365,8 @@ def _node_settlement(reading: Optional[RosterReading] = None):
         terminal = _terminal_ids()
         if terminal is not None and node_id in terminal:
             # Closure settles a holder that cannot be proven alive, never one
-            # that can. Measured 2026-09-05 on four premature reaps (x-a114
-            # twice, x-04ce, x-9223-node): every one was an UNEXPIRED lease
+            # that can. Measured 2026-09-05 on four premature reaps (
+            # twice, -node): every one was an UNEXPIRED lease
             # with a live recorded pid on a node the graph had closed, reaped
             # by this arm on each sweep - a live session's loop-check lease
             # (the follow-up-work shape) died with it, and every reap opened
@@ -1611,7 +1611,7 @@ def _abandonment_probe(reading: Optional[RosterReading] = None):
     an opencode worker, and any hand-started session are invisible to it BY
     CONSTRUCTION. A forty-row scan that cannot represent the holder at all would
     have read as forty rows of proof, and reaping on it archives a live worker's
-    claim - x-ba4b's disaster from the other side, which the
+    claim - disaster from the other side, which the
     ``reaped_a_live_worker`` kill criterion exists to stop.
 
     So the roster's coverage gap now costs a missed reap rather than a wrongly
@@ -1839,7 +1839,7 @@ def session_pid(
     claude/codex/gemini/opencode/agy) for the hybrid liveness pid-arm. Prints the
     pid on stdout, or nothing when uncapturable (plain-shell / no harness
     ancestor; the caller degrades to TTL-only liveness). Always exit 0 - a
-    missing pid is a safe degrade, not an error (ab-cc5553f2)."""
+    missing pid is a safe degrade, not an error."""
     from .session_pid import resolve_session_pid
 
     pid = resolve_session_pid(from_pid=from_pid)
@@ -1890,7 +1890,7 @@ def _release_lane(*, lane: str, json_output: bool) -> None:
 def _force_release(*, key: str, reason: str, json_output: bool) -> None:
     """Archived to .expired/; nothing at the resolved path REFUSES (exit 1),
     naming the path read and any other default root that holds the file
-    (the x-cff2 specimen released nothing while printing success)."""
+    (the specimen released nothing while printing success)."""
     try:
         outcome = _claims_core.force_release_claim(
             key=key, reason=reason, root=_node_aware_root(key)

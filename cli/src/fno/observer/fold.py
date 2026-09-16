@@ -1,4 +1,4 @@
-"""Pure fold: corpus construction + scoring for the observer harness (x-57a5).
+"""Pure fold: corpus construction + scoring for the observer harness.
 
 Read-only over already-captured signals (ledger, graph, events, postmortems) -
 corpus construction is a read-time fold, never a new write-path for historical
@@ -252,7 +252,7 @@ def score_review_item(
 
 
 # --------------------------------------------------------------------------- #
-# target: PR-anchored corpus (x-6ff0)
+# target: PR-anchored corpus
 #
 # The denominator is real merged+closed PRs, walked BACK to node -> sessions,
 # never the ledger (which drops ~52% of merged PRs and so is a *process* record,
@@ -493,7 +493,7 @@ def build_target_corpus(
             continue
         node_rows = rows_by_node.get(nid, [])
         session_ids: set[str] = set()
-        for s in node.get("sessions") or []:  # x-b6e4 phase stamps: dicts, or legacy bare strings
+        for s in node.get("sessions") or []:  # phase stamps: dicts, or legacy bare strings
             if isinstance(s, dict) and isinstance(s.get("session_id"), str) and s["session_id"]:
                 session_ids.add(s["session_id"])
             elif isinstance(s, str) and s:  # older graph rows stored sessions as [str]
@@ -760,7 +760,7 @@ if __name__ == "__main__":
         addressed_ids={"c1"}, skipped_ids=set(), all_finding_ids={"c1", "c2"}
     ) == {"finding_precision": "degraded"}
 
-    # -- target: PR-anchored corpus (x-6ff0) --------------------------------- #
+    # -- target: PR-anchored corpus --------------------------------- #
     t_now = datetime(2026, 7, 18, 12, 0, 0)
     t_nodes: list[dict] = [
         {"id": "x-a", "pr_number": 10, "pr_url": "https://github.com/o/r/pull/10", "reverted": False,

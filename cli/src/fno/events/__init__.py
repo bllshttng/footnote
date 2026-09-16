@@ -146,13 +146,13 @@ ENVELOPE_REQUIRED: list[str]
 MAX_DATA_BYTES: int
 DATA_SIZE_ENCODING: str
 ALLOWED_SOURCES: set[str]
-# x-2901: per-agent worker sources (worker:<id>, stream-worker:<id>) validate by
+# per-agent worker sources (worker:<id>, stream-worker:<id>) validate by
 # regex, not enum membership. Compiled from envelope.properties.source.patterns.
 ALLOWED_SOURCE_PATTERNS: list[Any]
 ALLOWED_GATES: set[str]
 RETENTION_DEFAULT: str
 RETENTION_MINIMUM_TTL_HOURS: int
-# EPHEMERAL_SUFFIX (sibling journal for ephemeral-class rows, x-add3) is
+# EPHEMERAL_SUFFIX (sibling journal for ephemeral-class rows) is
 # aliased from fno.paths at import time, one definition shared by every
 # Python reader and writer; a parity test holds it equal to the Rust const.
 _schema_load_error: SchemaUnavailableError | None = None
@@ -234,7 +234,7 @@ def _ensure_schema_loaded() -> None:
                 raise SchemaUnavailableError(
                     f"unsupported limits.data_size_encoding: {DATA_SIZE_ENCODING!r}"
                 )
-            # a2a status-breakpoint family (x-dbaf): types carrying the extended envelope.
+            # a2a status-breakpoint family: types carrying the extended envelope.
             family = schema.get("protocol_family", {})
             globals().update(
                 PROTOCOL_FAMILY_TYPES=set(family.get("types", [])),
@@ -359,7 +359,7 @@ def validate(event: dict[str, Any]) -> None:
                 f"event type {type_name} pid_unavailable=true requires pid=null"
             )
 
-    # a2a status-breakpoint family (x-dbaf): the extended envelope. Routable
+    # a2a status-breakpoint family: the extended envelope. Routable
     # fields live at envelope level; additionalProperties:false for this family
     # ONLY (legacy types keep today's tolerance). Enforced pre-lock so a
     # malformed emit rejects before touching events.jsonl.
@@ -407,7 +407,7 @@ def validate(event: dict[str, Any]) -> None:
             raise ValidationError("failover_swapped redispatched must be boolean")
         # The reason is what makes an abandonment diagnosable, so an
         # abandonment without one is refused at the writer rather than
-        # discovered later as an untraceable false (x-763a).
+        # discovered later as an untraceable false.
         if not data["redispatched"] and not str(data.get("reason") or "").strip():
             raise ValidationError(
                 "failover_swapped with redispatched=false must name a reason"
@@ -622,7 +622,7 @@ def validate(event: dict[str, Any]) -> None:
                 )
 
     # Same chokepoint rationale: skill_eval_finding's dimension/verdict drive
-    # x-0ca7's downstream ranking logic, so a typo'd enum value must fail here
+    # downstream ranking logic, so a typo'd enum value must fail here
     # rather than silently landing as an unrecognized bucket.
     if type_name == "skill_eval_finding":
         type_props = type_spec["data"]["properties"]
@@ -635,7 +635,7 @@ def validate(event: dict[str, Any]) -> None:
                 )
 
     # Same chokepoint rationale: review_attestation is a trust-core gate event
-    # (x-e703). loop-check fail-closes on anything but an exact `pass`, but a
+    #. loop-check fail-closes on anything but an exact `pass`, but a
     # producer typo (`verdict: passs`) should fail LOUD at emit rather than land
     # a silently-never-satisfying record. The generic emit CLI is a writer, so
     # the enum must be enforced here, not only in the typed helper.
@@ -773,7 +773,7 @@ def validate(event: dict[str, Any]) -> None:
             )
 
     # Same chokepoint rationale: gate_escape's reason drives the retro
-    # autonomy-debt ranking (x-f894). A typo'd reason must fail CLOSED here so
+    # autonomy-debt ranking. A typo'd reason must fail CLOSED here so
     # it is loud, not a silent bucket - the design's #1 correctness invariant.
     if type_name == "gate_escape":
         allowed = type_spec["data"]["properties"]["reason"]["enum"]
@@ -784,7 +784,7 @@ def validate(event: dict[str, Any]) -> None:
 
     # Same chokepoint rationale: post_merge_dispatch_receipt is the attribution
     # record for a merge hand-off, and its phase drives the reserved-before-
-    # accepted lifecycle the seven-day observation relies on (x-a35a). The typed
+    # accepted lifecycle the seven-day observation relies on. The typed
     # emit_receipt helper constrains phase at call time, but the generic emit
     # path is also a writer, so a typo'd phase/route must fail loud here, not
     # land a silently-misattributed record.
@@ -883,7 +883,7 @@ def _build(
 ) -> dict[str, Any]:
     event = {"ts": _ts_now(), "type": type_name, "source": source, "data": data}
     if envelope:
-        # Extra top-level routable fields (x-dbaf protocol family). A None value
+        # Extra top-level routable fields (protocol family). A None value
         # means "omit" (a non-session producer drops from/model entirely rather
         # than faking an empty string), so it is never written.
         for k, v in envelope.items():
@@ -1010,7 +1010,7 @@ def phase_0_decision(
     measurement-gated phases). Routes through ``_build`` so the canonical
     ``data`` envelope is used and the event passes schema validation.
 
-    As of ab-a1118224 the ``fno doctor event emit`` CLI subcommand also routes
+    As of the ``fno doctor event emit`` CLI subcommand also routes
     through ``_build`` + ``append_event``, so generic callers can now use
     either path. This typed builder is preferred for code paths that
     construct the event in Python (it enforces the decision enum at build
@@ -1298,7 +1298,7 @@ def agent_raw_inject(
     """Build an ``agent_raw_inject`` provenance event.
 
     Records an UNWRAPPED injection (no ``<fno_mail`` envelope) at the transport,
-    so the audit trail survives the loss of the in-transcript marker (x-f26c's
+    so the audit trail survives the loss of the in-transcript marker (
     greppability property moves to the ledger). Keyed on the payload not starting
     with ``<fno_mail``; emitted best-effort from both the mail-inject binary and
     the mux pane send. ``sender``/``target_cwd``/``target_head`` are optional
@@ -1849,7 +1849,7 @@ def append_event(
 
         events_path = project_events_json()
     requested_path = Path(events_path)
-    # Honor the declared retention class (x-add3): an ephemeral row goes to the
+    # Honor the declared retention class: an ephemeral row goes to the
     # sibling journal beside the requested one, so a high-cadence gauge cannot
     # consume the durable journal's rotation budget. Every other class keeps
     # the requested path. The sibling is derived from the RESOLVED journal

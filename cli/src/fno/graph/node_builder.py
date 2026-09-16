@@ -229,7 +229,7 @@ def _build_backlog_node(
         source_kind=source_kind, birth_channel=origin_channel, origin_evidence=origin_evidence
     )
 
-    # Parent-edge provenance (x-30f6): stamped from the running session's env +
+    # Parent-edge provenance: stamped from the running session's env +
     # manifest, or from an explicit --source-node. Centralized here so
     # every creator verb (add/idea/decompose) self-describes its origin.
     prov = _session_provenance(source_node=source_node, known_ids=known_ids)
@@ -435,7 +435,7 @@ def cmd_new(
 
     commit_rows_via_store(_graph_path(), mutator)
 
-    # Filing-time dedup net (plan x-6ac7): `fno backlog new` is a reachable plan-less
+    # Filing-time dedup net (plan): `fno backlog new` is a reachable plan-less
     # birth path with its own mutator, so it gets the same post-write warn as
     # idea/add/intake (codex P2). Non-fatal; this verb's stdout is the bare id,
     # not JSON, so the stderr receipt cannot corrupt a machine-readable payload.

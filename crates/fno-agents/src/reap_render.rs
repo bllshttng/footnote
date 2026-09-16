@@ -82,7 +82,7 @@ pub fn render_state_files_reap(summary: &StateFilesReapSummary, json_out: bool) 
 }
 
 /// Human clock for a hold line: `2h00m`, `3m48s`, `41s`. The shape the
-/// escalation suffix and the release refusals both print (x-e3cc).
+/// escalation suffix and the release refusals both print.
 pub(crate) fn human_duration(secs: i64) -> String {
     let s = secs.max(0) as u64;
     if s >= 3600 {
@@ -100,7 +100,7 @@ pub(crate) fn human_duration(secs: i64) -> String {
 /// bucket nothing prints is not a count - the verb would report zero
 /// retirements while rows were being removed.
 pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String {
-    // The hold clock (x-e3cc): the age suffix on a hold line. Reads the
+    // The hold clock: the age suffix on a hold line. Reads the
     // summary's own `holds` projection, so a bucket line and its hold entry
     // can never disagree; a row with no hold entry renders bare, exactly as
     // before this change.
@@ -290,7 +290,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         out.push_str(&format!("  kept {id} (not a spawn row: {why})\n"));
     }
     for id in &summary.kept_no_provenance {
-        // x-2774 change 4: this line used to emit an unbalanced paren and a
+        // change 4: this line used to emit an unbalanced paren and a
         // literal backslash-n; invisible only while the bucket measured
         // empty. One spelling with every other kept line.
         out.push_str(&format!(
@@ -363,7 +363,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         } else {
             String::new()
         };
-        // Main's x-1b90 line carries the clock and the 6h rm ask; the hold
+        // Main's line carries the clock and the 6h rm ask; the hold
         // projection renders no second age here, so one line reads one
         // clock. The escalated hold still asks for its release through the
         // [reap-hold] question lane.
@@ -437,12 +437,12 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
 }
 
 /// Render a sweep outcome plus, for the dry-run JSON read, the census the
-/// projection exists to expose (x-70e1 task 4): the complete per-session
+/// projection exists to expose (task 4): the complete per-session
 /// identity, its observed surfaces, and the source coverage that says how
 /// complete the enumeration is. `None` renders exactly like
 /// [`render_reap`].
 ///
-/// `mux` (x-91eb) is the second surface this verb sweeps: the mux tab
+/// `mux` is the second surface this verb sweeps: the mux tab
 /// sideline through `fno mux workspace prune --tabs-only
 /// --include-used-shells`. It renders in one of three distinguishable states
 /// - ran, unread, skipped - in both the JSON object and the human receipt.
@@ -519,7 +519,7 @@ pub fn parse_prune_receipt(stdout: &str) -> Option<PruneReceipt> {
     })
 }
 
-/// The mux half of one reap pass (x-91eb), in one of three distinguishable
+/// The mux half of one reap pass, in one of three distinguishable
 /// states. `Unread` carries no count field at all, so an unparsable sweep can
 /// never render as a measured zero; `Skipped` names the flag that asked for
 /// it.
@@ -602,7 +602,7 @@ pub fn mux_sweep_text_line(mux: &MuxSweep, dry_run: bool) -> String {
     }
 }
 
-/// (x-1b90 change 3) `i64` seconds as `16h31m`, `59m`, `59s`.
+/// (change 3) `i64` seconds as `16h31m`, `59m`, `59s`.
 fn hold_age(held_s: i64) -> String {
     let s = held_s.max(0) as u64;
     if s >= 3600 {
@@ -796,7 +796,7 @@ mod tests {
         );
     }
 
-    /// x-2774 change 4: the no-provenance keep line carries a closing paren
+    /// change 4: the no-provenance keep line carries a closing paren
     /// and a real newline. The old spelling emitted an unbalanced paren and
     /// a literal backslash-n; invisible only while the bucket measured
     /// empty.
@@ -821,7 +821,7 @@ mod tests {
         );
     }
 
-    /// x-2774 change 2: a terminal-state retirement names the session state
+    /// change 2: a terminal-state retirement names the session state
     /// and the reader in the basis; the all-done basis is byte-identical to
     /// its old string.
     #[test]
@@ -855,7 +855,7 @@ mod tests {
 
     #[test]
     fn reap_no_bucket_reads_an_exit_vocabulary_word() {
-        // The retired vocabulary (x-c672): no bucket, reason string, or
+        // The retired vocabulary: no bucket, reason string, or
         // receipt field reads exited_at, not-terminal, contradicted,
         // within-grace, uncorroborated, or backstop.
         let s = GcSummary {
@@ -980,7 +980,7 @@ mod tests {
 
     #[test]
     fn parse_prune_receipt_fails_closed_on_garbage_and_reads_the_real_keys() {
-        // (x-91eb) None over a zeroed report: garbage stdout and a receipt
+        // None over a zeroed report: garbage stdout and a receipt
         // missing the tab counts parse as None; the real verb's keys parse
         // into the receipt.
         assert_eq!(parse_prune_receipt("nothing to prune"), None);
@@ -1060,7 +1060,7 @@ mod tests {
         assert_eq!(lines[6], "(dry-run: no changes made)");
     }
 
-    /// (x-1b90 change 3) AC3-HP: a 17h hold on done work names its age and
+    /// (change 3) AC3-HP: a 17h hold on done work names its age and
     /// ends with the decision. AC3-EDGE: a 2h hold carries no decision.
     /// AC3-ERR: an old hold whose node is not done carries no decision.
     #[test]
@@ -1115,11 +1115,11 @@ mod tests {
     fn a_held_planner_line_names_the_node_age_and_release() {
         let mut s = summary(&[]);
         s.kept_planning_unclosed
-            .push(("bp-x-861c".to_string(), "x-861c".to_string()));
+            .push(("bp-x-aaaa".to_string(), "x-aaaa".to_string()));
         s.holds.push(crate::gc_sweep::Hold {
-            id: "bp-x-861c".to_string(),
+            id: "bp-x-aaaa".to_string(),
             reason: "planning assignment not finished by this session",
-            detail: "x-861c ready: no close and no plan written by this session".to_string(),
+            detail: "x-aaaa ready: no close and no plan written by this session".to_string(),
             age_s: Some(5401),
             age_basis: "row created",
             escalated: true,
@@ -1128,16 +1128,16 @@ mod tests {
         let text = render_reap(&s, false, true);
         let line = text
             .lines()
-            .find(|l| l.contains("bp-x-861c"))
+            .find(|l| l.contains("bp-x-aaaa"))
             .expect("the planner line renders");
         assert!(
-            line.contains("planning assignment not finished by this session: x-861c"),
+            line.contains("planning assignment not finished by this session: x-aaaa"),
             "{line}"
         );
         assert!(line.contains("[held "), "{line}");
         assert!(line.contains("row created]"), "{line}");
         assert!(
-            line.contains("fno agents reap --release bp-x-861c"),
+            line.contains("fno agents reap --release bp-x-aaaa"),
             "{line}"
         );
     }

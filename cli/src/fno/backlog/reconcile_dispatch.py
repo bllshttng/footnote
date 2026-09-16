@@ -51,7 +51,7 @@ from fno.backlog.advance import (
 # The pending sentinel covers the window between the blocker's merge and the
 # dependent's manifest-write. Generous TTL: a first pass can run for many
 # minutes. If it never writes (the pass died), the sentinel expires and the
-# stranded draft PR is surfaced by `triage health` (x-a10e reuse), not by us.
+# stranded draft PR is surfaced by `triage health` (reuse), not by us.
 _PENDING_TTL_MS = 6 * 60 * 60 * 1000  # 6h
 
 
@@ -93,7 +93,7 @@ def _sentinel_is_live(node_id: str) -> bool:
 
     key = f"reconcile:{node_id}"
     try:
-        # live OR suspect (x-ba4b) => occupied; a suspect reservation (TTL-
+        # live OR suspect => occupied; a suspect reservation (TTL-
         # unexpired, dead pid) must still dedup so reconcile never double-fires.
         return claim_status(key, root=_claims_root_for(key)).get("state") in (
             "live",
@@ -132,11 +132,11 @@ def _contract_dependents(closed_node_id: str) -> list[dict]:
             "project": e.get("project"),
             "slug": e.get("slug") or e.get("title"),
             "cwd": e.get("cwd"),
-            # x-571f: carry the model pin so the reconcile worker (a /target
+            # carry the model pin so the reconcile worker (a /target
             # --reconcile build) honors it, not just advance's dependents.
             # difficulty rides alongside so the grid resolver sees the work axis;
             # provider so the band scopes to (and the worker spawns on) the same
-            # harness as the other dispatch paths (x-da6e).
+            # harness as the other dispatch paths.
             "model": e.get("model"),
             "difficulty": e.get("difficulty"),
             "provider": e.get("provider"),
@@ -267,7 +267,7 @@ def _dispatch_reconcile(
         "node_id": node_id,
         "short_id": short_id,
         "kind": "reconcile",
-        # The exact registered rd-t-* name from the spawn receipt (x-84b2).
+        # The exact registered rd-t-* name from the spawn receipt.
         "agent_name": spawn_receipt.get("agent_name", ""),
         "notes": list(spawn_receipt.get("notes") or ()),
     }

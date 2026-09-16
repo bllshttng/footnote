@@ -2,7 +2,7 @@
 
 Retro files a backlog node from a reviewer's inline comment. On an
 autonomously-merged, bot-reviewed PR the fixing commit often lands AFTER the
-comment (x-632c: the codex comment posted at 10:14, the fix at 10:36) without
+comment (: the codex comment posted at 10:14, the fix at 10:36) without
 anyone resolving the thread or replying, so the node is filed for work that is
 already done. ``harvest.addressed_ids_from_*`` now identifies that case; this
 module re-runs that detection against each open retro node's SOURCE PR and
@@ -60,7 +60,7 @@ def _retro_targets(entries: list, *, include_planned: bool = False) -> list:
 
     A node anyone has INVESTED in - a linked plan/design (``plan_path``) - is
     skipped too. The commit-after signal cannot tell a fully-addressed finding
-    from one whose loud half was fixed while a residual remains (x-3f39/x-cde1:
+    from one whose loud half was fixed while a residual remains (/
     a commit landed on PR #555 after their codex comments, but the residual was
     left for a follow-up PR). A designed node is real tracked work; only
     untouched raw phantoms are safe to close on the heuristic.

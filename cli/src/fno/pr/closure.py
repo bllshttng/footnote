@@ -4,9 +4,9 @@ A merged PR's body may name several backlog nodes, but only the ONE node
 stamped into `.fno/target-state.md` at creation ever gets its `pr_number`
 written to the graph - every other named node stays open forever, because
 the forward scan in `_reconcile.scan_merge_drift` needs a PR ref to query and
-the reverse branch-name map only carries the primary node's id (x-59a6).
+the reverse branch-name map only carries the primary node's id.
 
-Free-text mentions ("this also fixes x-1234", "blocked by x-5678") are
+Free-text mentions ("this also fixes x-aaaa", "blocked by x-bbbb") are
 measurement-only (see `scripts/metrics/pr-node-closure-audit.py`) and must
 NEVER become a closure claim - a dependency note or a follow-up filing reads
 identically to a close claim to a prose scanner. The exact trailer is the
@@ -74,7 +74,7 @@ def render_closure_trailer(node_ids: list[str]) -> str:
 def contained_descendant_ids(entries: list[dict], node_id: str) -> list[str]:
     """Every node whose ``contained_in`` points at ``node_id``, in graph order.
 
-    These are units that ship INSIDE the same delivery (x-e957's convention),
+    These are units that ship INSIDE the same delivery (convention),
     so they belong in the same trailer as the primary target without an
     operator having to name them by hand.
     """
@@ -109,8 +109,8 @@ def render_pr_closure_trailer(
 
 # Delimiter-bounded candidates from a head ref, the producer half of the set
 # `scripts/ci/check-pr-node-closure.sh` demands. Non-overlapping left-to-right
-# scanning is what makes the two agree on a ref like "feature/x-cdef-1234":
-# once "x-cdef" is consumed the scan resumes at "-1234", which is not
+# scanning is what makes the two agree on a ref like "feature/x-cccc-1234":
+# once "x-cccc" is consumed the scan resumes at "-1234", which is not
 # letter-led, so the bogus "cdef-1234" candidate the gate's skip-both-segments
 # step exists to prevent is never produced on this side either.
 _BRANCH_NODE_ID_RE = re.compile(rf"(?:^|[/-])({NODE_ID_BODY})(?=$|[/-])")
@@ -120,7 +120,7 @@ def branch_node_ids(head_ref: str) -> list[str]:
     """Well-formed node ids named as delimiter-bounded segments of ``head_ref``.
 
     Order-preserved, deduplicated. A bare substring never counts - fixed-width
-    hex makes ``x-5b66`` a prefix of ``x-5b667`` - which is the same rule
+    hex makes ```` a prefix of ``x-5b667`` - which is the same rule
     ``_branch_matches_node`` enforces on the reconcile side.
     """
     if not isinstance(head_ref, str) or not head_ref:
@@ -193,7 +193,7 @@ def ensure_closure_trailer(
     before it is claimed; ``extra_ids`` is a caller's ASSERTION that those nodes
     ship here, so it is trusted. That asymmetry is the whole point: the CI gate
     may be liberal because it only DEMANDS a claim, but a producer that MINTS
-    one has to be right. ``branch_node_ids("feature/x-49ec-cache-dead")`` yields
+    one has to be right. ``branch_node_ids("feature/x-dddd-cache-dead")`` yields
     ``cache-dead`` from ordinary English, and claiming it made every real claim
     on the line void at merge while CI stayed green.
 

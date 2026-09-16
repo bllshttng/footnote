@@ -1,4 +1,4 @@
-# github-copilot readiness manifest (x-83e7) - full-roster parity port from
+# github-copilot readiness manifest - full-roster parity port from
 # the reference manifest for github-copilot (the reference id
 # "copilot") per ADAPTING.md. Resolved under the agent key "copilot" (see the
 # bundled_manifest arm), mirroring the reference's own agent->file mapping.

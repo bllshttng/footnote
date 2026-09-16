@@ -75,7 +75,7 @@ fi
 [[ -n "$SID" ]] || exit 0
 
 # ---------------------------------------------------------------------------
-# Compaction marker (x-7e05 wave 1): stamp "this session is compacting" so the
+# Compaction marker (wave 1): stamp "this session is compacting" so the
 # cap actor and every idle reader can tell a compacting session from an idle
 # one. Best-effort: a failed mark must not fail the hook, so every failure
 # degrades to no marker (the reader reports Unknown, never a false all-clear).
@@ -349,7 +349,7 @@ if crowned:
         "",
         # `workers` is spawned_by_session, not crown-scope-filtered: a
         # successor omits a predecessor workers list, and unrelated-territory
-        # workers of this session leak in. Follow-up under x-5226.
+        # workers of this session leak in. Follow-up under.
         "## King: live workers in scope (auto)",
         workers,
     ]

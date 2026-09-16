@@ -107,7 +107,7 @@ def _resolve_init_script() -> Path:
 
 
 def _refuse_unsatisfiable_reviewers() -> None:
-    """Refuse a `config.review.reviewers` gate nothing here can satisfy (x-cdc7).
+    """Refuse a `config.review.reviewers` gate nothing here can satisfy.
 
     The gate is fail-closed, so a reviewer that cannot run in this harness and
     substrate wedges the session at the stop gate AFTER the work is done. That
@@ -173,7 +173,7 @@ def _refuse_unsatisfiable_reviewers() -> None:
 
 
 def _refuse_unreachable_github_apps() -> None:
-    """Refuse a `config.review.github_apps` login that cannot review here (x-b167).
+    """Refuse a `config.review.github_apps` login that cannot review here.
 
     Mirror of `_refuse_unsatisfiable_reviewers` on the App-bot axis: a required
     App that footnote does not recognize AND has never acted in this repository
@@ -483,7 +483,7 @@ def _resolve_dispatch_node(
             continue
     if len(matches) > 1:
         # A plan shared by a delivery unit and its contained children is the
-        # LEGAL shape, not an ambiguity (x-e957): exactly one of those nodes
+        # LEGAL shape, not an ambiguity: exactly one of those nodes
         # owns the PR. Resolving it to None here treated the normal contained
         # graph as unresolvable, so `--plan-path <shared plan>` sailed past the
         # containment redirect and the retro dedup gate alike. Narrow to the
@@ -509,7 +509,7 @@ def _resolve_dispatch_node(
 def _redirect_if_contained(node: Optional[dict]) -> None:
     """Route a named contained node to the delivery unit that owns its PR.
 
-    A node carrying ``contained_in`` ships inside another node's PR (x-e957),
+    A node carrying ``contained_in`` ships inside another node's PR,
     so initializing a session on it would claim it, build it, and open a SECOND
     PR for one plan - the double-binding this invariant exists to prevent.
 
@@ -976,13 +976,13 @@ def blast_check(
 # this verb exits 2 with "No such command" - indistinguishable from a refusal if
 # the gate also spoke 2, which would turn every outdated CLI into a hard refusal
 # of the mandatory bootstrap. Anything Click can emit on its own must never mean
-# "refused" (x-4a60).
+# "refused".
 REVIEW_GATE_REFUSED = 9
 
 
 @target_app.command("check-review-gate", hidden=True)
 def check_review_gate() -> None:
-    """Run both review-capability refusals for a non-Python caller (x-4a60).
+    """Run both review-capability refusals for a non-Python caller.
 
     Exists so `hooks/helpers/init-target-state.sh` can reach the ONE
     implementation of these verdicts from bash. SKILL.md documents running that
@@ -1020,7 +1020,7 @@ def review_invocation_cmd(
         "that already resolved a harness pass it so the render matches their view.",
     ),
 ) -> None:
-    """Print the sized self-review invocation for this session (x-dae5).
+    """Print the sized self-review invocation for this session.
 
     Stdout is exactly one line: the invocation the worker should run, level
     sized from the branch's diff via ``level_for_diff`` (never a hardcoded
@@ -1143,7 +1143,7 @@ def _hold_branch_under_review(
     what the caller resolved: the local branch on the pre-push form, the PR's
     own head ref on the post-push form - a local alias with a matching sha
     keys a hold the merge guard, which reads GitHub, never looks up. The cwd
-    is never read for one (x-b5f6): a hold on a guessed branch reports
+    is never read for one : a hold on a guessed branch reports
     protection of a PR it is not protecting.
 
     Best-effort throughout. An unconfirmed send takes nothing. A refused
@@ -1278,7 +1278,7 @@ def resolve_owned_identity_cmd() -> None:
     'unavailable' rather than bricking init.
 
     Resolution routes through :func:`fno.claims.self_identity.resolve_self_identity`,
-    the one owned-identity implementation every caller shares (x-0992).
+    the one owned-identity implementation every caller shares.
 
     Read-only; writes no state. Always exits 0 - it is a resolver, not a gate.
     """
@@ -1298,10 +1298,10 @@ def resolve_owned_identity_cmd() -> None:
     def _collide(harness: str, sid: str, own_pair: Optional[tuple[str, str]]) -> Optional[str]:
         # own_pair arrives from claims.self_identity (None when it could not);
         # the registry applies the agreement check, so this site never answers
-        # the own-row question itself (x-0992).
+        # the own-row question itself.
         return row_owning_session_id(sid, self_binding=own_pair)
 
-    # Same injection seam self_stamp uses (x-a409).
+    # Same injection seam self_stamp uses.
     from fno.agents.codex_rollout import codex_rollout_witness
 
     owned = resolve_self_identity(env, collide=_collide, witness=codex_rollout_witness)
@@ -1324,7 +1324,7 @@ def resolve_owned_identity_cmd() -> None:
 
 @target_app.command("check-contained", hidden=True)
 def check_contained() -> None:
-    """Refuse a contained node for a non-Python caller (x-e957 task 1.3b).
+    """Refuse a contained node for a non-Python caller (task 1.3b).
 
     The bash twin of the redirect ``init`` performs in-process. SKILL.md
     documents running ``hooks/helpers/init-target-state.sh`` directly when the
@@ -1406,7 +1406,7 @@ def denominator_ratio(
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the ratio as JSON."),
 ) -> None:
-    """The deliverables-1 ratio (x-cbab): is the cheap --deliverables exit a bypass?
+    """The deliverables-1 ratio : is the cheap --deliverables exit a bypass?
 
     Reads ``target_denominator`` events. Of declared-denominator inits (plan or
     deliverables), the fraction that used ``--deliverables 1``: past roughly 80
@@ -1555,7 +1555,7 @@ def init(
         help="Revoke auto-merge for this run (writes `auto_merge_approved: "
         "false`). The sole carrier for the refusal posture: it survives "
         "`fno do target start`, which forwards only the resolved node id, and the "
-        "init fold reads no free text (x-9d11). There is deliberately no "
+        "init fold reads no free text. There is deliberately no "
         "--auto-merge twin; granting stays on config/TARGET_AUTO_MERGE.",
     ),
     deliverables: Optional[int] = typer.Option(
@@ -1677,7 +1677,7 @@ def init(
     _refuse_dispatch_hold(_dispatch_node, entries=_dispatch_entries)
 
     # A named contained node is redirected to its delivery unit before anything
-    # is claimed (x-e957 task 1.3b).
+    # is claimed (task 1.3b).
     _redirect_if_contained(_dispatch_node)
 
     from fno.review_capability import env_marks_unattended
@@ -1691,7 +1691,7 @@ def init(
         unattended=env_marks_unattended(os.environ),
     )
 
-    # Blast-radius modulation (x-518f): a deterministic blast read on the plan's
+    # Blast-radius modulation: a deterministic blast read on the plan's
     # File Ownership Map can raise ceremony to an M floor (high blast) or drop to
     # the S fast path (low blast, unpinned size) BEFORE the immutable manifest is
     # written. Plan AND node inputs are covered (a free-text input has no surface
@@ -1742,7 +1742,7 @@ def init(
     # gave a node input but no --plan-path. init-target-state.sh sources plan_path
     # only from TARGET_PLAN_PATH (= --plan-path), so without this a `start <node>`
     # whose node already has a plan bound writes plan_path: "" to the immutable
-    # manifest and the orienter reports "plan: none" (x-39c0), forcing a manual
+    # manifest and the orienter reports "plan: none", forcing a manual
     # first-fill. An explicit --plan-path wins; an idea-first free-text input
     # resolves no node and stays empty for the legitimate blueprint-then-first-fill
     # flow. Reuses the same fail-safe node->plan resolver the blast read uses.
@@ -1786,7 +1786,7 @@ def init(
                 )
                 raise typer.Exit(code=2)
 
-    # Scope denominator gate (x-cbab): a code node dispatched with no plan and no
+    # Scope denominator gate: a code node dispatched with no plan and no
     # --deliverables makes 'shipped M of N' inexpressible. Fires only for a
     # resolved node - a free-text idea makes its own denominator via /blueprint,
     # and a bound plan back-filled just above already satisfies it. Sits AFTER
@@ -1818,9 +1818,9 @@ def init(
             typer.echo(f"fno do target init: task-context gate refused: {gate.get('reason')}{detail}", err=True)
             raise typer.Exit(code=2)
 
-    # First-bind the graph pointer (x-f8b1 change 2), the reverse leg of the
-    # x-39c0 backfill above: init --plan-path wrote only the manifest, so the
-    # graph never learned the plan exists (x-7649). Sits after every refusal
+    # First-bind the graph pointer (change 2), the reverse leg of the
+    # backfill above: init --plan-path wrote only the manifest, so the
+    # graph never learned the plan exists. Sits after every refusal
     # and outside every claim gate - a fact about the node, not about who
     # holds the claim.
     if plan_path and isinstance(_dispatch_node, dict):
@@ -1828,7 +1828,7 @@ def init(
 
     env = dict(os.environ)
     env["TARGET_START"] = "1"
-    # Change D (x-a7be): resolve `attended` from the substrate before the bash
+    # Change D: resolve `attended` from the substrate before the bash
     # manifest writer runs. Marking the run unattended makes init stamp
     # `attended: false`, so the skill surfaces offers as non-blocking lines
     # instead of a [Y/n] that hangs a detached session.
@@ -1836,7 +1836,7 @@ def init(
     # The read used to be FNO_AGENT_SELF presence, which is not the substrate:
     # every spawn substrate injects it, pane included, and pane is the default.
     # A context-warm pane worker with an operator watching stamped
-    # `attended: false` (x-be78). `env_marks_unattended` reads the substrate the
+    # `attended: false`. `env_marks_unattended` reads the substrate the
     # spawner stamped. An explicit TARGET_UNATTENDED still always wins.
     if "TARGET_UNATTENDED" not in env and env_marks_unattended(env):
         env["TARGET_UNATTENDED"] = "1"
@@ -1862,12 +1862,12 @@ def init(
     if no_merge:
         env["TARGET_NO_MERGE"] = "1"
     # The review-capability gate already ran in-process above; say so, or the
-    # script runs it again (x-4a60). Not free to repeat: resolve_github_apps
+    # script runs it again. Not free to repeat: resolve_github_apps
     # probes GitHub with two 30s-timeout `gh` calls per unrecognized login.
     env["FNO_TARGET_INIT_GATED"] = "1"
 
     # Stamp the launcher's process-bound harness proof for the script and the
-    # owned-identity verb it spawns (x-a0cd). THIS process is the outermost
+    # owned-identity verb it spawns. THIS process is the outermost
     # spawn of the command, where os.getppid() is still readable; under the
     # codex sandbox every DEEPER fork (the script bash, the verb inside it)
     # hits PermissionError reading its parent's ppid, so their walk returns
@@ -1899,7 +1899,7 @@ def init(
 
 
 def _bind_node_plan_path(node: dict, plan_path: str) -> None:
-    """First-bind the graph node's ``plan_path`` at init (x-f8b1 change 2).
+    """First-bind the graph node's ``plan_path`` at init (change 2).
 
     Shells to ``fno backlog update`` because that verb is the one choke point
     every plan_path write already goes through (same posture as
@@ -1951,7 +1951,7 @@ def _bind_node_plan_path(node: dict, plan_path: str) -> None:
 def _record_denominator_choice(
     plan_path: Optional[str], deliverables: Optional[int], node: Optional[dict]
 ) -> None:
-    """Emit a ``target_denominator`` event for the deliverables-1 ratio (x-cbab).
+    """Emit a ``target_denominator`` event for the deliverables-1 ratio.
 
     Best-effort: a recording failure never fails a successful init. The cheap
     ``--deliverables`` exit is the load-bearing bypass risk (reflexive N=1
@@ -2078,7 +2078,7 @@ def _maybe_reconcile_lane_slot() -> None:
 
 
 def _maybe_check_resume_receipt() -> None:
-    """Best-effort resume-receipt gate on the successor entry path (x-c3a2).
+    """Best-effort resume-receipt gate on the successor entry path.
 
     When a prior session left a durable receipt for this node, revalidate it
     against live claim/HEAD/worktree state and surface the verdict. Non-blocking:
@@ -2171,7 +2171,7 @@ def _receipt_event_node(e: dict) -> Optional[str]:
 
 
 def _print_orientation_report() -> None:
-    """Change A (x-a7be): print the resolved situation report as init's first
+    """Change A : print the resolved situation report as init's first
     orientation output. Reads the just-written manifest; strictly read-only and
     fully non-fatal -- a degraded report never affects the init exit code.
     """
@@ -2185,7 +2185,7 @@ def _print_orientation_report() -> None:
 
 
 def _maybe_dispatch_work_start() -> None:
-    """A2 (x-122a): fire a ``work-start`` context /think after a node is claimed.
+    """A2 : fire a ``work-start`` context /think after a node is claimed.
 
     Runs right after the init script returns success - the authoritative
     ``fno agents claim acquire node:<id>`` has completed and the manifest is written, so
@@ -2242,12 +2242,12 @@ def _maybe_dispatch_work_start() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# `fno do target start` - one-verb cold-start (x-d91b).
+# `fno do target start` - one-verb cold-start.
 # --------------------------------------------------------------------------- #
 def _wt_name(node: str) -> str:
     """Filesystem-safe worktree name from a node id/slug or feature text.
 
-    A node id (``x-d91b``) or slug is already clean and round-trips unchanged;
+    A node id (````) or slug is already clean and round-trips unchanged;
     free-text input is slugified so the dir/branch name never carries spaces or
     shell-hostile characters. Bounded so a long feature string cannot produce a
     pathological path component.
@@ -2528,7 +2528,7 @@ def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
     """Resolved policy iff this is a canonical Codex Desktop Local chat."""
     from fno.harness_identity import resolve_harness_identity
 
-    # READ-ONLY (x-20f1 LD5): branches on whether this is a Codex Desktop
+    # READ-ONLY (LD5): branches on whether this is a Codex Desktop
     # chat. Nothing is stamped.
     identity = resolve_harness_identity()
     if identity.harness != "codex" or not identity.session_id:
@@ -2626,7 +2626,7 @@ _TIMED_OUT_REMOTES: set = set()
 
 
 def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> Tuple[bool, str]:
-    """One fetch per (repo, remote, refspec) per process (x-3ae1).
+    """One fetch per (repo, remote, refspec) per process.
 
     Shared by the base-ref resolution and the truthful-base measurement so a
     start that already refreshed origin never pays a second network round
@@ -2681,7 +2681,7 @@ def _unmeasured_base(base_label: str, why: str) -> str:
 
 def _truthful_base(cwd: Path, base_label: str, *, measure: bool = True) -> str:
     """The base label with a MEASURED distance, or an explicit unmeasured
-    marker (x-d401 / x-3ae1).
+    marker (/).
 
     A bare ref reads as a distance: ``rev-list --count HEAD..origin/main``
     consults the LOCAL ref, so a branch dozens of commits behind answers 0
@@ -2752,7 +2752,7 @@ def _codex_native_repo(cwd: Path) -> Optional[Path]:
     """
     from fno.harness_identity import resolve_harness_identity
 
-    # READ-ONLY (x-20f1 LD5): branches on whether this is a Codex Desktop chat.
+    # READ-ONLY (LD5): branches on whether this is a Codex Desktop chat.
     identity = resolve_harness_identity()
     if identity.harness != "codex" or not identity.session_id:
         return None
@@ -3371,7 +3371,7 @@ def start(
         False, "--no-merge",
         help="Revoke auto-merge for this run (forwarded to init). The sole "
         "prose-level carrier: start resolves its argument to a bare node id, and "
-        "the init fold reads no free text (x-9d11).",
+        "the init fold reads no free text.",
     ),
     deliverables: Optional[int] = typer.Option(
         None, "--deliverables",
@@ -3426,7 +3426,7 @@ def _bind_worktree(
     # session's view: foreign-live -> park; ours -> idempotent already-claimed;
     # a dead predecessor (or stale-free) -> re-acquire under this session so
     # the lockfile never keeps naming a dead pid that silently expires
-    # (x-a7ab successor-takeover gap: two sessions once shared one worktree
+    # (successor-takeover gap: two sessions once shared one worktree
     # because start short-circuited here without re-acquiring the claim).
     verdict, claim_info = _classify_node_claim(node)
     if verdict == "foreign_live":
@@ -3532,7 +3532,7 @@ def _init_from_worktree(
     """Init the session FROM an existing worktree: binds owner_cwd and claims
     the node exactly once (preserve the existing one-call claim)."""
     fno = _resolve_fno_cmd()
-    # Project the node's model pin into init's dispatch pin (x-d7a7). An
+    # Project the node's model pin into init's dispatch pin. An
     # explicit -m wins (precedence, resolved inside the helper); no pin ->
     # None -> nothing forwarded. When the operator pinned --harness the
     # worker's spawn argv carries it, which stands the spawn-CLI capacity
@@ -3583,7 +3583,7 @@ def _init_from_worktree(
 
     # 4. Receipt - one parse-friendly line a memory-less agent acts on. When a
     #    model was resolved, record it + its decision_source so the dispatch is
-    #    auditable (x-d7a7); absent -> today's line, byte-identical.
+    #    auditable; absent -> today's line, byte-identical.
     model_note = f"  model={model} ({decision_source})" if model else ""
     typer.echo(
         f"worktree={wt_path}  "
@@ -3603,7 +3603,7 @@ def _start_body(
 
     cwd = Path.cwd()
 
-    # Boundary: already isolated -> no-op, create nothing (x-45e6 case). But
+    # Boundary: already isolated -> no-op, create nothing (case). But
     # first refuse if a DIFFERENT live session holds this node's claim: this cwd
     # is that session's worktree and sharing its git index corrupts the build.
     if _is_linked_worktree(cwd):
@@ -3717,14 +3717,14 @@ def _start_body(
             _base_receipt(repo_root, native_base),
         )
 
-    # 1. Create/reuse the worktree off origin/main (x-73ca). ensure prints the
+    # 1. Create/reuse the worktree off origin/main. ensure prints the
     #    worktree path on stdout and is idempotent (reuse) + refuses to nest.
     #    Forward the current session's harness so a claude cold-start lands
     #    harness-native at <repo>/.claude/worktrees/<name>; a bare terminal with no
     #    ambient marker omits it and ensure degrades to the external base.
     from fno.harness_identity import resolve_harness_identity
 
-    # READ-ONLY (x-20f1 LD5): selects a worktree LOCATION. Nothing durable
+    # READ-ONLY (LD5): selects a worktree LOCATION. Nothing durable
     # records this harness, and a wrong guess costs a path, not an identity.
     ambient_harness = resolve_harness_identity().harness
     # Deliberately the PRE-FOLD spelling, and the reason generalizes to every

@@ -1,4 +1,4 @@
-//! The mux Connections modal (x-84d7): a stateful overlay listing managed
+//! The mux Connections modal : a stateful overlay listing managed
 //! provider accounts + combos, driving register/use/remove/add and combo-order
 //! edits through the `fno config accounts` CLI. The UI is a thin wrapper over that CLI
 //! - it never writes provider records, combos, or runtime state directly (one
@@ -50,7 +50,7 @@ pub struct Account {
     #[serde(default)]
     pub active: bool,
     /// Headroom state name (ok/low/exhausted/unknown). `unknown` is a
-    /// first-class value rendered distinctly, never as healthy (x-d6be).
+    /// first-class value rendered distinctly, never as healthy.
     #[serde(default = "unknown_headroom")]
     pub headroom: String,
     /// Snapshot age label for managed accounts; None for oauth/api-key records.
@@ -139,7 +139,7 @@ pub enum ConnIntent {
     /// PaneRun front door - zero proto bump). Not single-flight/re-read: it opens
     /// a pane and returns; the modal marks the id pending-login locally.
     SpawnLogin(Vec<String>),
-    /// (x-c914) Set the client's session-local active account to the carried
+    /// Set the client's session-local active account to the carried
     /// value (the post-toggle state: `Some(id)`, or `None` when toggled off).
     /// Shells NOTHING - the client mirrors this into its own `active_account`
     /// so later spawns append `--account`. Distinct from the `use` verb (the
@@ -314,7 +314,7 @@ pub struct ConnectionsView {
     /// Generation token, bumped per open/refresh so a read landing after a newer
     /// refresh (or a close) is discarded.
     pub gen: u64,
-    /// (x-c914) The client's session-local active account, mirrored here for the
+    /// The client's session-local active account, mirrored here for the
     /// "active for spawns" marker. Seeded from the client on open and re-set by
     /// the set-active toggle (`act_set_active`); the client reads the yielded
     /// `SetActiveAccount` intent back into its own authoritative copy. Never a
@@ -361,7 +361,7 @@ impl ConnectionsView {
         }
     }
 
-    /// (x-c914) Seed the "active for spawns" marker from the client's current
+    /// Seed the "active for spawns" marker from the client's current
     /// session-local active account when the modal opens, so the marker is
     /// correct on first paint (the client owns the authoritative value across
     /// modal open/close).
@@ -1162,7 +1162,7 @@ impl ConnectionsView {
         for (i, a) in self.accounts.iter().enumerate() {
             let cursor = if i == self.acct_sel { ">" } else { " " };
             let badge = if a.active { "●" } else { " " };
-            // (x-c914) A distinct billing marker for the active-for-spawns
+            // A distinct billing marker for the active-for-spawns
             // account, kept separate from the global-active `●` (Locked
             // Decision 1). Always a column so alignment never shifts.
             let spawn = if self.active_account.as_deref() == Some(a.id.as_str()) {
@@ -1219,7 +1219,7 @@ impl ConnectionsView {
             let caret = if active { "_" } else { "" };
             format!("{} {label}: {val}{caret}", if active { ">" } else { " " })
         };
-        // x-e9c3: "id" read as an opaque identifier; "name" + a format hint
+        // "id" read as an opaque identifier; "name" + a format hint
         // makes the lowercase/hyphen constraint (valid_account_id) visible
         // while typing instead of only surfacing on a rejected submit.
         let id_hint = if w.step == WizardStep::Id {
@@ -1610,7 +1610,7 @@ mod tests {
         assert!(out.contains("2h")); // snap age cell, no snap= prefix
     }
 
-    // x-c914 piece 1: set-active-account (`s`) is a session-local spawn-routing
+    // piece 1: set-active-account (`s`) is a session-local spawn-routing
     // toggle, distinct from `use` (the global slot-swap). AC1-HP / AC1-UI / AC1-ERR.
     #[test]
     fn set_active_marks_and_routes_new_spawns(/* AC1-HP + AC1-UI */) {

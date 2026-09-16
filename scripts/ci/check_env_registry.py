@@ -4,7 +4,7 @@ in docs/env-vars.md, and every row has a reader.
 
 295 config keys carry a Meta row in cli/src/fno/config/registry.py; the ~218
 environment variable names read across the Python and Rust trees had no
-inventory at all (node x-72fc, measured 2026-09-12). This check closes that:
+inventory at all (node, measured 2026-09-12). This check closes that:
 the doc IS the registry, the scanner is the ratchet.
 
 Failures (each names the file:line and the doc):

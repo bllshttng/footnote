@@ -263,7 +263,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "check-event-schema-parity: diffing against on-disk schemas..."
 
-# x-2901: events-v3.json is a SINGLE envelope now (the W7 oneOf split-brain is
+# events-v3.json is a SINGLE envelope now (the W7 oneOf split-brain is
 # retired). Both emitters diff against the same on-disk envelope. compare_json
 # strips doc-only keys ($schema/title/$comment/description), so passing the whole
 # file is equivalent to passing just its envelope object.
@@ -343,7 +343,7 @@ collisions = python_types & rust_kinds
 # Deliberately dual-owned names: emitted at the same semantic boundary by
 # BOTH languages, one schema.yaml entry documenting the shared payload.
 # Everything else that lands in both sets is an accidental name reuse and
-# still fails below. x-a879: the registry removal instrument fires at the
+# still fails below.: the registry removal instrument fires at the
 # Rust and Python write choke points by design. control_plane_tick: the shape
 # is owned by tick_ledger.rs; Rust daemon arms and the Python arms (until they
 # port) both emit it at the same scheduled-tick boundary.
@@ -390,7 +390,7 @@ if [[ $_COLLISION_STATUS -ne 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 6: Registry completeness (x-2901)
+# Step 6: Registry completeness
 # ---------------------------------------------------------------------------
 # schema.yaml is the single cross-language name registry now that the
 # events-v3.json kind enum is retired. Every KNOWN_EVENT_KINDS entry (Rust

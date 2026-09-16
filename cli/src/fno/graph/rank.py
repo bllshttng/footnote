@@ -10,7 +10,7 @@ import typer
 def _drain_receipt() -> dict:
     """The Rust drain receipt (active-backlog-receipt), parsed.
 
-    Returns the x-338c reading shape (``targets``/``missions``/``skip_reason``);
+    Returns the reading shape (``targets``/``missions``/``skip_reason``);
     a bare target list (a pre-338c binary) still parses, with the count for
     ``missions`` and no zero-path. Raises on an unreadable source so the caller
     can answer `unknown` instead of pretending no dispatcher is live. Test
@@ -48,7 +48,7 @@ def _dispatch_note(task_id: str, graph_path) -> str | None:
         if any(task_id in descendants_of(entries, m) for m in missions):
             return None
         # A switched-off drain is a config fact, not a mission fact: prescribe
-        # the config fix, never the epic lever that cannot work (x-338c).
+        # the config fix, never the epic lever that cannot work.
         if reading["skip_reason"] == "drain_disabled":
             return (
                 f"no live dispatcher will take it (the drain is disabled in config; "

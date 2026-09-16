@@ -4,7 +4,7 @@
 //! the graph and plan artifact files; it is a filesystem read, not an
 //! agent-lifecycle operation.
 //!
-//! The census this verb answers (x-6d64): `/fno:review prove-it` ends every
+//! The census this verb answers : `/fno:review prove-it` ends every
 //! report with the machine line `fno-prove-it: {"verdict":"...","claim":"..."}`,
 //! and nothing read it after it was written. The PR 1599 coverage audit sat in
 //! a plan artifacts directory with verdict FAIL while three sessions worked the
@@ -290,7 +290,7 @@ fn walk_md(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
 /// The terminal record: the LAST non-empty line, the exact `fno-prove-it: `
 /// prefix at the line's start (the validator's own rule), parseable JSON with
 /// a legal verdict. Ok(None): no terminal record (a mid-file mention is not a
-/// record -- the negative control is the x-5aef plan, which quotes the marker
+/// record -- the negative control is the plan, which quotes the marker
 /// mid-file). Err: a terminal line EXISTS but is not a legal record, which
 /// must surface in `unreadable` and never silently read as zero records.
 fn terminal_record(text: &str) -> Result<Option<(String, String, Option<String>)>, String> {
@@ -562,7 +562,7 @@ mod tests {
                 Some("/p/REPORT.md".to_string())
             ))
         );
-        // Negative control: the marker quoted mid-file (the x-5aef plan shape).
+        // Negative control: the marker quoted mid-file (the plan shape).
         let mid = format!("fno-prove-it: quoted\ntrailing prose\n");
         assert_eq!(terminal_record(&mid).expect("parse"), None);
         assert_eq!(terminal_record("").expect("parse"), None);

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # pin-skill.sh - create / remove top-level shortcut "pin" skills that redirect
-# to a cluster router mode (epic ab-0d05a9b7, group 5: front-door + pinning).
+# to a cluster router mode (epic, group 5: front-door + pinning).
 #
 # A pin is an OPT-IN, repo-level shortcut. `pin sigma --to "review sigma"`
 # writes skills/sigma/SKILL.md whose body tells the agent to invoke
@@ -31,7 +31,7 @@ die() { echo "pin-skill: $*" >&2; exit 1; }
 usage() {
   cat <<'EOF'
 pin-skill.sh - create / remove top-level shortcut "pin" skills that redirect
-to a cluster router mode (epic ab-0d05a9b7, group 5).
+to a cluster router mode (epic, group 5).
 
 Usage:
   scripts/pin-skill.sh pin   <name> --to "<verb> [mode]" [--desc "text"] [--replace]

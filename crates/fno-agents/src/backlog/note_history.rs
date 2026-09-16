@@ -1,4 +1,4 @@
-//! Permanent node-prose history journal (x-920a wave 1).
+//! Permanent node-prose history journal (wave 1).
 //!
 //! One append-only JSONL journal derived from the canonical graph path: the
 //! sibling directory `<graph-file-name>.history/notes feed keyed to the graph file, not to

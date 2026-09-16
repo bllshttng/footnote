@@ -124,7 +124,7 @@ def dispatch(
         raise typer.Exit(code=2)
 
     # Resolve the LIVE session pointer ambiently across all three harnesses (the
-    # same capture node-birth provenance uses, x-30f6), so the verb works in a
+    # same capture node-birth provenance uses), so the verb works in a
     # codex/gemini session too, not only claude (codex P2). Explicit flags win.
     prov = _session_provenance()
     sid = (session_id or prov.get("source_session_id") or "").strip()

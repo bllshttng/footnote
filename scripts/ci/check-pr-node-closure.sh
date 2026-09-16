@@ -2,7 +2,7 @@
 # check-pr-node-closure.sh - CI gate: a node-bearing branch must exact-claim
 # its own node in the PR's Backlog-Closure trailer.
 #
-# x-59a6: a PR naming several backlog nodes only ever closed the ONE node
+# x-aaaa: a PR naming several backlog nodes only ever closed the ONE node
 # individually stamped at creation; every other named node stayed open
 # forever. The fix is an exact `Backlog-Closure: <id> [<id>...]` trailer,
 # bound atomically at merge - this gate is its CI backstop for the direct
@@ -61,16 +61,16 @@ for _path in "${_paths[@]}"; do
   i=0
   while [[ $i -lt ${#_segments[@]} ]]; do
     # Re-glue two adjacent segments (the id's own prefix/suffix straddle the
-    # '-' IFS split point: "x" and "59a6" from "feature/x-59a6").
+    # '-' IFS split point: "x" and "59a6" from "feature/x-aaaa").
     if [[ $((i + 1)) -lt ${#_segments[@]} ]]; then
       pair="${_segments[$i]}-${_segments[$((i + 1))]}"
       if [[ "$pair" =~ ^${node_id_re}$ ]]; then
         candidates+=("$pair")
         # Skip BOTH consumed segments, not just one: a real id's all-hex
-        # suffix (e.g. "cdef" in "x-cdef") is itself a valid node-id PREFIX
+        # suffix (e.g. "cdef" in "x-bbbb") is itself a valid node-id PREFIX
         # shape, so sliding by one would re-glue it with the next segment
         # ("cdef-1234") and invent a second, bogus candidate. Reproduced
-        # live: PR_HEAD_REF="feature/x-cdef-1234" used to demand a
+        # live: PR_HEAD_REF="feature/x-bbbb-1234" used to demand a
         # "Backlog-Closure: cdef-1234" line that names nothing real.
         i=$((i + 2))
         continue
@@ -95,7 +95,7 @@ trailer_line=$(printf '%s\n' "$PR_BODY" | grep -iE '^Backlog-Closure:[[:space:]]
 # tokenizes THAT captured remainder, on whitespace and "," alone, never a
 # bare ":". Matching against the raw trailer_line (label prefix still
 # attached) let ANY colon in the line - including a stray one BETWEEN two
-# ids, e.g. "Backlog-Closure:x-59a6:x-1111" - read as a valid separator via
+# ids, e.g. "Backlog-Closure:x-aaaa:x-1111" - read as a valid separator via
 # the leading-boundary group below, so the gate passed a trailer the real
 # parser tokenizes as one malformed run and binds zero ids from (round-10
 # review fix: reproduced live, gate passed / parser returned []).
@@ -108,7 +108,7 @@ missing=()
 for cand in "${candidates[@]}"; do
   # The preceding boundary also accepts "," - the runtime parser's
   # `.replace(",", " ")` before splitting treats a comma as an equivalent
-  # separator with no space required either side. "x-59a6,x-1111" binds both
+  # separator with no space required either side. "x-aaaa,x-1111" binds both
   # ids at merge time; without "," in the LEADING alternation this gate
   # reports the second id as missing even though it closes correctly
   # (round-8 fix). No ":" in this alternation - trailer_body already has the
@@ -126,7 +126,7 @@ done
 # bind_closure_claims refuse the WHOLE binding at merge.
 #
 # Demanding all of them therefore made some branches unsatisfiable rather than
-# merely strict: on "feature/x-49ec-cache-dead" the producer writes x-49ec and
+# merely strict: on "feature/x-cccc-cache-dead" the producer writes x-cccc and
 # this gate demanded "cache-dead", so no body passed both. Reproduced live
 # before this change. An unsatisfiable gate is worse than a liberal one - it
 # has no green state, so the only way past it is to ignore it.

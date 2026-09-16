@@ -1,4 +1,4 @@
-"""`fno doctor scratch`: the scratch-shape sweep leaf (x-caf8).
+"""`fno doctor scratch`: the scratch-shape sweep leaf.
 
 The sweep lives in the fno-agents Rust binary; this leaf resolves the
 installed binary and execs it. No Python fallback exists on purpose: the

@@ -1,8 +1,8 @@
 //! The one owner of "which backlog node does this registry row work"
-//! (x-5a62, law d-bbcd48b5).
+//! (law d-bbcd48b5).
 //!
 //! The retirement sweep used to key provenance on ONE route, the reverse
-//! join from `node.sessions[]` (x-c672). When the forward write into
+//! join from `node.sessions[]`. When the forward write into
 //! `sessions[]` was missed, nothing else was consulted, and 26 of 44 live
 //! rows kept for `no provenance`. The law withdrew that: provenance is
 //! RECOVERED from any declared source, the sources cross-check rather than
@@ -248,8 +248,8 @@ fn transcript_last(paths: Option<&[PathBuf]>, ids: &HashSet<String>) -> Option<S
     answer
 }
 
-/// x-1379's name route, ported verbatim from
-/// `git show 76144e5c1:cli/src/fno/agents/retirement.py`, widened in x-a634
+/// name route, ported verbatim from
+/// `git show 76144e5c1:cli/src/fno/agents/retirement.py`, widened in
 /// to scan for the node token instead of hard-indexing position 1, so a
 /// wrapper prefix (`k-t-c08a-...`) does not shift it out of view. Pass one
 /// walks adjacent token pairs and returns the first pair naming a full id.
@@ -308,7 +308,7 @@ pub fn resolve(
     let ids: HashSet<String> = graph.statuses.keys().cloned().collect();
     let key = crate::graph_store::work_state_key(sid);
     let mut route = NodeRoute::default();
-    // The sessions witness is the whole set (x-e3cc): a session dispatched
+    // The sessions witness is the whole set: a session dispatched
     // under several nodes carries one sessions[] row per node, so a later
     // source answering ANY of them agrees with the witness - only an answer
     // outside the set is a conflict. `graph_store::work_state` already reads
@@ -454,14 +454,14 @@ mod tests {
     // AC1-HP: the name route resolves what the reverse join missed.
     #[test]
     fn name_route_resolves_node_the_sessions_join_missed() {
-        let g = graph(&[("x-c5bf", "done")]);
-        let e = entry("target-x-c5bf-gc-sweep-reap-guard-checks-ide", None);
+        let g = graph(&[("x-dddd", "done")]);
+        let e = entry("target-x-dddd-gc-sweep-reap-guard-checks-ide", None);
         let route = resolve(&e, "01a078c3-not-anywhere", &g, None);
-        assert_eq!(route.node.as_deref(), Some("x-c5bf"));
+        assert_eq!(route.node.as_deref(), Some("x-dddd"));
         assert_eq!(route.source, Some(NodeSource::Name));
     }
 
-    // The registry field outranks the name (x-1379's rule, ported).
+    // The registry field outranks the name (rule, ported).
     #[test]
     fn registry_field_outranks_name() {
         let g = graph(&[("x-aaaa", "done"), ("x-bbbb", "done")]);
@@ -494,14 +494,14 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let path = write_transcript(
             &tmp,
-            &[r#"{"type":"user","message":{"content":"execute plan for node x-9d11 now"}}"#],
+            &[r#"{"type":"user","message":{"content":"execute plan for node x-eeee now"}}"#],
         );
-        let ids = ids_of(&[("x-9d11", "done")]);
+        let ids = ids_of(&[("x-eeee", "done")]);
         assert_eq!(
             transcript_first(Some(&[path.clone()]), &ids).as_deref(),
-            Some("x-9d11")
+            Some("x-eeee")
         );
-        let g = graph(&[("x-9d11", "done")]);
+        let g = graph(&[("x-eeee", "done")]);
         let e = entry("planner-row-no-id-in-name", None);
         let route = resolve(&e, "sid-none", &g, Some(&[path]));
         assert_eq!(route.source, Some(NodeSource::TranscriptFirst));
@@ -520,19 +520,19 @@ mod tests {
         let path = write_transcript(
             &tmp,
             &[
-                r#"{"type":"user","message":{"content":"work node x-9d11 to done"}}"#,
+                r#"{"type":"user","message":{"content":"work node x-eeee to done"}}"#,
                 &format!(
                     r#"{{"type":"user","message":{{"content":"retasked to node x-aaaa {filler}"}}}}"#
                 ),
             ],
         );
-        let ids = ids_of(&[("x-9d11", "done"), ("x-aaaa", "open")]);
+        let ids = ids_of(&[("x-eeee", "done"), ("x-aaaa", "open")]);
         assert_eq!(
             transcript_last(Some(&[path.clone()]), &ids).as_deref(),
             Some("x-aaaa"),
             "the retask is the newest naming line"
         );
-        let g = graph(&[("x-9d11", "done"), ("x-aaaa", "open")]);
+        let g = graph(&[("x-eeee", "done"), ("x-aaaa", "open")]);
         let e = entry("retasked-row", None);
         let route = resolve(&e, "sid-none", &g, Some(&[path]));
         assert!(
@@ -601,7 +601,7 @@ mod tests {
         assert!(route.agreeing.is_empty());
     }
 
-    // AC1-HP (x-e3cc): a session dispatched under several nodes carries one
+    // AC1-HP: a session dispatched under several nodes carries one
     // sessions[] row per node, so a later strong source answering ANY of
     // them agrees with the witness. Only an answer outside the set is a
     // conflict, and `route.node` stays the first row so the work verdict
@@ -624,7 +624,7 @@ mod tests {
         assert_eq!(route.conflict, None);
     }
 
-    // AC1-EDGE (x-e3cc): an answer outside the set is still a conflict.
+    // AC1-EDGE: an answer outside the set is still a conflict.
     #[test]
     fn a_registry_answer_outside_the_sessions_set_conflicts() {
         let mut g = graph(&[("x-aaaa", "done"), ("x-cccc", "done")]);
@@ -648,8 +648,8 @@ mod tests {
     // nothing; the cascade falls through.
     #[test]
     fn ambiguous_bare_hex_answers_nothing_and_falls_through() {
-        let g = graph(&[("x-feed", "done"), ("y-feed", "done")]);
-        let e = entry("target-feed-row", None);
+        let g = graph(&[("x-ffff", "done"), ("y-ffff", "done")]);
+        let e = entry("target-ffff-row", None);
         let route = resolve(&e, "sid-none", &g, None);
         assert_eq!(route.node, None);
         assert_eq!(route.source, None);
@@ -657,24 +657,24 @@ mod tests {
     }
 
     // A hex-looking slug word in a later position is never read as an id
-    // (x-1379's rule, ported).
+    // (rule, ported).
     #[test]
     fn slug_hex_in_later_position_is_ignored() {
-        let g = graph(&[("x-d15a", "done"), ("x-feed", "done")]);
-        let e = entry("t-x-d15a-feed-timeout", None);
+        let g = graph(&[("x-0000", "done"), ("x-ffff", "done")]);
+        let e = entry("t-x-0000-feed-timeout", None);
         let route = resolve(&e, "sid-none", &g, None);
-        assert_eq!(route.node.as_deref(), Some("x-d15a"));
+        assert_eq!(route.node.as_deref(), Some("x-0000"));
         assert_eq!(route.source, Some(NodeSource::Name));
     }
 
-    // AC1-HP (x-a634): a wrapper prefix no longer shifts the node token
+    // AC1-HP: a wrapper prefix no longer shifts the node token
     // out of the name route's view.
     #[test]
     fn k_wrapped_target_row_resolves() {
-        let g = graph(&[("x-c08a", "done")]);
-        let e = entry("k-t-c08a-lane-reap-glm", None);
+        let g = graph(&[("x-1111", "done")]);
+        let e = entry("k-t-1111-lane-reap-glm", None);
         let route = resolve(&e, "sid-none", &g, None);
-        assert_eq!(route.node.as_deref(), Some("x-c08a"));
+        assert_eq!(route.node.as_deref(), Some("x-1111"));
         assert_eq!(route.source, Some(NodeSource::Name));
     }
 
@@ -682,20 +682,20 @@ mod tests {
     // shaped to one wrapper.
     #[test]
     fn k_wrapped_blueprint_row_resolves() {
-        let g = graph(&[("x-6436", "done")]);
-        let e = entry("k-bp-6436-settings-filename-opus", None);
+        let g = graph(&[("x-2222", "done")]);
+        let e = entry("k-bp-2222-settings-filename-opus", None);
         let route = resolve(&e, "sid-none", &g, None);
-        assert_eq!(route.node.as_deref(), Some("x-6436"));
+        assert_eq!(route.node.as_deref(), Some("x-2222"));
         assert_eq!(route.source, Some(NodeSource::Name));
     }
 
     // AC3-EDGE: the unwrapped path that already worked still resolves.
     #[test]
     fn unwrapped_row_still_resolves() {
-        let g = graph(&[("x-c08a", "done")]);
-        let e = entry("t-c08a-lane-reap-glm", None);
+        let g = graph(&[("x-1111", "done")]);
+        let e = entry("t-1111-lane-reap-glm", None);
         let route = resolve(&e, "sid-none", &g, None);
-        assert_eq!(route.node.as_deref(), Some("x-c08a"));
+        assert_eq!(route.node.as_deref(), Some("x-1111"));
         assert_eq!(route.source, Some(NodeSource::Name));
     }
 
@@ -703,7 +703,7 @@ mod tests {
     // rule, not a blanket match, keeps `feed` inert behind `lane`.
     #[test]
     fn wrapped_row_encoding_no_node_answers_nothing() {
-        let g = graph(&[("x-feed", "done")]);
+        let g = graph(&[("x-ffff", "done")]);
         let e = entry("k-t-lane-feed-timeout", None);
         let route = resolve(&e, "sid-none", &g, None);
         assert_eq!(route.node, None);
@@ -715,11 +715,11 @@ mod tests {
     // the scan replaced the hard index.
     #[test]
     fn pair_arm_census_shapes_still_resolve() {
-        let g = graph(&[("x-338c", "done"), ("x-d135", "done")]);
-        let a = resolve(&entry("t-x-338c", None), "sid-none", &g, None);
-        assert_eq!(a.node.as_deref(), Some("x-338c"));
-        let b = resolve(&entry("bp-x-d135", None), "sid-none", &g, None);
-        assert_eq!(b.node.as_deref(), Some("x-d135"));
+        let g = graph(&[("x-3333", "done"), ("x-4444", "done")]);
+        let a = resolve(&entry("t-x-3333", None), "sid-none", &g, None);
+        assert_eq!(a.node.as_deref(), Some("x-3333"));
+        let b = resolve(&entry("bp-x-4444", None), "sid-none", &g, None);
+        assert_eq!(b.node.as_deref(), Some("x-4444"));
     }
 
     // AC7-EDGE shape: no source resolves, nothing is invented.

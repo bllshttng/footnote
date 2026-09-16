@@ -1,4 +1,4 @@
-//! (x-91ba) The pane-send audit row: the record `fno mux pane send` writes so
+//! The pane-send audit row: the record `fno mux pane send` writes so
 //! "who told this worker to do that" is one grep, not a transcript sweep.
 
 use std::io::Write;
@@ -66,7 +66,7 @@ impl PaneSendAudit {
 
     /// Best-effort, like every other events write: a failed or refused row
     /// must not break the send itself. The envelope and field names match the
-    /// Rust mail-inject rows (`EventEmitter`'s unified x-2901 shape).
+    /// Rust mail-inject rows (`EventEmitter`'s unified shape).
     fn emit_at(self, path: &Path, session: &str, exit_code: i32) {
         let pid = std::process::id();
         // The occupant identity is resolved from the registry by pane address,

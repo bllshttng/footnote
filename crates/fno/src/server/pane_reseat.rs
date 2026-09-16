@@ -260,7 +260,7 @@ impl Core {
         };
         let key = row.attach_id.clone().unwrap_or_else(|| row.name.clone());
         // Slot: caller index or the next free one; a live seat is never
-        // displaced, a full space refuses (the x-0719 texts).
+        // displaced, a full space refuses (the texts).
         let slot = match portal_idx {
             Some(idx) => {
                 if let Some(occupied) = self.portals.get(&idx) {

@@ -1,6 +1,6 @@
 """fno agents autonomy status - one table listing every path that can start a
 session without an operator asking: its trigger, its gate key, its resolved
-value, and the precedence rank that supplied it (x-aaaf wave 1).
+value, and the precedence rank that supplied it (x-aaaa wave 1).
 
 The deliverable an operator actually asked for: "what can spawn without me"
 answerable in one command, buildable before any gate is unified (wave 3).
@@ -42,12 +42,12 @@ class SpawnerStatus:
     gate_key: str
     armed: Optional[bool]  # None = ungated (no gate exists yet)
     rank: str  # "env" | "config" | "default" | "autonomy" | "ungated"
-    source: Optional[str] = None  # x-84b2 dispatch source code; None = n/a
+    source: Optional[str] = None  # dispatch source code; None = n/a
     verb: Optional[str] = None  # dispatch verb code, or "resolved" at runtime
 
 
 def dispatch_provenance() -> list[tuple[str, str, str]]:
-    """The 18 dispatch paths (x-84b2) as ``(site, source, verb)`` rows, served
+    """The 18 dispatch paths as ``(site, source, verb)`` rows, served
     by the binary."""
     from fno.agents.naming import provenance_rows
 
@@ -114,7 +114,7 @@ def _advance_status(project_root: Optional[Path]) -> SpawnerStatus:
 def _dispatch_lanes_status(project_root: Optional[Path]) -> SpawnerStatus:
     # dispatch_lanes has no gate check of its own; every caller invokes it
     # only after auto_continue_enabled() already passed (design doc,
-    # x-aaaf), so its armed state and rank are the SAME resolution.
+    # x-aaaa), so its armed state and rank are the SAME resolution.
     from fno.backlog.advance import _auto_continue_resolve
 
     armed, rank = _auto_continue_resolve(project_root)
@@ -185,7 +185,7 @@ def _pr_watch_status(project_root: Optional[Path]) -> SpawnerStatus:
 
 
 def _recovery_status(project_root: Optional[Path]) -> SpawnerStatus:
-    """x-aaaf wave 3: found while building the registry ratchet (task 3.3) --
+    """x-aaaa wave 3: found while building the registry ratchet (task 3.3) --
     recovery.py's crash-recovery respawn had a real config.recovery.enabled
     gate but was reachable with the master switch off (pr_watch/cli.py checked
     recovery.enabled alone, never autonomy.enabled). Fixed alongside this row."""
@@ -263,7 +263,7 @@ def _evals_status(project_root: Optional[Path]) -> SpawnerStatus:
 
 
 def _king_loop_status(project_root: Optional[Path]) -> SpawnerStatus:
-    """The king loop (x-e747), the first row here that is a loop rather than a
+    """The king loop, the first row here that is a loop rather than a
     trigger.
 
     Every other row in this table is woken by an external event: a PR merge, a
@@ -303,13 +303,13 @@ def collect_status(project_root: Optional[Path] = None) -> list[SpawnerStatus]:
         _pr_watch_status(project_root),
         _recovery_status(project_root),
         _keep_going_status(project_root),
-        # x-aaaf wave 2: previously ungated, now gated - see GroomBlock /
+        # x-aaaa wave 2: previously ungated, now gated - see GroomBlock /
         # RestartBlock / EvalsBlock in fno.config.
         _groom_status(project_root),
         _evals_status(project_root),
         _king_loop_status(project_root),
     ]
-    # x-84b2: stamp each row with its dispatch provenance codes.
+    # stamp each row with its dispatch provenance codes.
     stamped = []
     for r in rows:
         codes = _provenance_by_spawner().get(r.name)

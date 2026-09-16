@@ -1,5 +1,5 @@
 //! How `handle_rm`'s blocking chain runs without stalling the daemon
-//! executor (x-4775). Extracted from the parent under the file-budget gate:
+//! executor. Extracted from the parent under the file-budget gate:
 //! `off_executor`, the directory-size walk it bounds, and the
 //! reclaimed-bytes null-vs-zero rule all moved with the code they touched.
 
@@ -31,7 +31,7 @@ pub(super) fn off_executor<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Wall-clock budget for [`directory_bytes`]. It is the last unbounded wait
-/// left in the `rm` path (x-4775): every subprocess in the chain already
+/// left in the `rm` path: every subprocess in the chain already
 /// carries a timeout, but a recursive `read_dir` walk over a large or
 /// slow-storage worktree does not. Checked once per directory entered, not
 /// per file, so the cost of checking never dominates the walk itself.
@@ -77,7 +77,7 @@ pub(super) fn directory_bytes_within(path: &std::path::Path, budget: Duration) -
 /// The `rm` receipt's `reclaimed_bytes`, `Option<u64>` so a removed tree
 /// whose size walk hit its budget serializes as `null` rather than `0` -
 /// both would otherwise read as "nothing reclaimed" to a caller that cannot
-/// tell "measured, zero bytes" from "never measured" apart (x-4775). A tree
+/// tell "measured, zero bytes" from "never measured" apart. A tree
 /// that was NOT removed keeps reporting `0`, because that zero is true
 /// regardless of whether the walk ran. `explicit` is the audit override
 /// (`audit_reclaimed_bytes`, tests only); it wins unconditionally when set.

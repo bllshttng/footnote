@@ -24,7 +24,7 @@ name = "fno"
 path = "src/main.rs"
 
 [dependencies]
-# `fno mux serve --web` (x-6a14): the read-only web bridge's HTTP + WebSocket
+# `fno mux serve --web`: the read-only web bridge's HTTP + WebSocket
 # surface. axum handles the untrusted-input HTTP parsing and WS handshake so
 # the web-facing bridge does not hand-roll that security-sensitive code.
 axum = { version = "0.8", features = ["ws"] }
@@ -39,7 +39,7 @@ regex = "1"
 # name; the same crate version fno-agents pins, so one build stack.
 sha2 = "0.10"
 # Re-verify a picked answer's region fingerprint against the live grid before
-# injecting (x-c929). Must match the daemon's hash byte-for-byte across
+# injecting. Must match the daemon's hash byte-for-byte across
 # processes, so the same content hash both sides use - not a per-process
 # DefaultHasher.
 blake3 = "1"
@@ -49,13 +49,13 @@ serde = { version = "1", features = ["derive"] }
 # every key in the file on each flip. fno-agents enables it for the same
 # registry-interop reason.
 serde_json = { version = "1", features = ["preserve_order"] }
-# Read the flat `config.toml` (x-8526 stage 3): the interactive server reads
+# Read the flat `config.toml` (stage 3): the interactive server reads
 # `config.mux.*` directly (digest_overlay Pattern B) instead of shelling `fno`.
 toml = "0.8"
-# Native mux argv parsing (x-861c): one typed declaration per flag, so the
+# Native mux argv parsing: one typed declaration per flag, so the
 # flag registry is structural rather than a hand-copied convention.
 clap = { version = "4", features = ["derive"] }
-# Popup chrome measures and paints in terminal columns (x-1b68): a fullwidth
+# Popup chrome measures and paints in terminal columns: a fullwidth
 # glyph is one char and two cells. Already resolved transitively via
 # alacritty_terminal, so this adds no new build artifact.
 unicode-width = "0.2"
@@ -68,6 +68,6 @@ tokio = { version = "1", features = [
     "time",
     "macros",
     "signal",
-    # x-4e2d: bounded, fail-open shell-out to `fno-agents digest` on attach.
+    # bounded, fail-open shell-out to `fno-agents digest` on attach.
     "process",
 ] }

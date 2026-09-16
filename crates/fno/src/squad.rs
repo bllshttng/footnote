@@ -93,7 +93,7 @@ impl Squad {
         self.owning_origin_len(path).is_some()
     }
 
-    /// The tab dictionary entry for the tab at vector index `idx` (x-1499):
+    /// The tab dictionary entry for the tab at vector index `idx`:
     /// all three identifier forms of one live tab in one workspace. The
     /// ordinal is 1-based and positional (the UI's `·N`), the id is stable
     /// and never reused, the name is optional and mutable.
@@ -107,7 +107,7 @@ impl Squad {
     }
 
     /// Resolve any addressable tab form - 1-based ordinal, stable id, unique
-    /// name, or the active tab - to the current vector index (x-1499). The
+    /// name, or the active tab - to the current vector index. The
     /// one translation point between the identifier the operator can SEE (the
     /// ordinal) and the one every reference should HOLD (the id).
     pub fn resolve_tab(&self, sel: &TabSel) -> Result<usize, String> {
@@ -156,7 +156,7 @@ impl Squad {
     }
 }
 
-/// One live tab's three identifier forms (x-1499). See [`Squad::tab_dict`].
+/// One live tab's three identifier forms. See [`Squad::tab_dict`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabDictEntry {
     /// 1-based positional ordinal; shifts when an earlier tab closes.
@@ -228,7 +228,7 @@ impl Session {
     /// squad. Named (empty-origin) squads own nothing, so they are bypassed
     /// here - explicit creation is the only way into them. The LONGEST owning
     /// origin wins, so a home-rooted squad never captures a repo cwd its
-    /// deeper origin describes better (x-6e79); on equal length the FIRST
+    /// deeper origin describes better; on equal length the FIRST
     /// squad keeps it, because two rows may share one origin by design and
     /// the first is the established answer. An empty `cwd` owns nothing.
     pub fn find_by_cwd(&self, cwd: &str) -> Option<u64> {
@@ -322,7 +322,7 @@ impl Session {
         RemoveOutcome::SquadRemoved
     }
 
-    /// Re-home a whole tab (and every pane in it) into another squad (x-96e8).
+    /// Re-home a whole tab (and every pane in it) into another squad.
     /// Pure data surgery - the caller does pane-free view fixup after. Panes
     /// are NEVER reaped here (they ride with the tab); only [`RemoveOutcome`]'s
     /// remove_tab path reaps. Can never produce a session-empty state: `dst`
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn squad_find_by_cwd_prefers_the_longest_matching_origin() {
-        // AC1-HP (x-6e79): the home-rooted squad is added FIRST, as squad 1,
+        // AC1-HP: the home-rooted squad is added FIRST, as squad 1,
         // and iterates first. A first-match walk hands it every cwd under
         // home; the assertion is that the DEEPER origin wins anyway, because
         // iteration order is the whole defect. Asserting some squad answers
@@ -631,7 +631,7 @@ mod tests {
 
     #[test]
     fn squad_find_by_cwd_keeps_first_on_equal_length_origins() {
-        // AC2-EDGE (x-6e79): two rows may share one origin by design
+        // AC2-EDGE: two rows may share one origin by design
         // (`squad_named_squads_stay_distinct_on_shared_or_empty_origins`).
         // Only a STRICTLY longer origin beats the incumbent, so the first
         // squad stays the established answer and the duplicate home rows keep
@@ -645,7 +645,7 @@ mod tests {
 
     #[test]
     fn squad_find_by_cwd_returns_none_for_an_empty_cwd() {
-        // AC3-EDGE (x-6e79): the inline `!cwd.is_empty()` guards at the
+        // AC3-EDGE: the inline `!cwd.is_empty()` guards at the
         // placement call sites move into the shared helper, so a caller added
         // later cannot omit it. An empty cwd owns nothing.
         let mut s = Session::default();
@@ -672,11 +672,11 @@ mod tests {
         assert_eq!(s.active_squad, None);
     }
 
-    // -- x-1499 tab dictionary: ordinal <-> stable id ---------------------
+    // -- tab dictionary: ordinal <-> stable id ---------------------
 
     #[test]
     fn tab_ordinal_shifts_on_close_while_tab_id_is_stable() {
-        // The x-1499 regression: closing an earlier tab moves every later
+        // The regression: closing an earlier tab moves every later
         // ordinal down one while every stable tab id stays put. A test that
         // only creates or renames tabs cannot see this instability.
         let mut s = Session::default();
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(s.active_squad, Some(1), "active falls back to a survivor");
     }
 
-    // -- x-96e8 move_tab ------------------------------------------------
+    // -- move_tab ------------------------------------------------
 
     #[test]
     fn move_tab_rehomes_a_tab_and_reclamps_source_active() {

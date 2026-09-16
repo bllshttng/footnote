@@ -1,4 +1,4 @@
-//! `fno-agents` substrate crate (Phase 6, ab-a09e1eaf).
+//! `fno-agents` substrate crate (Phase 6).
 #![recursion_limit = "512"]
 //!
 //! This crate is the Rust substrate for PTY-managed agents (codex / gemini /
@@ -610,7 +610,7 @@ mod tests {
     // surfaces. This test scans every production call site and fails on drift.
 
     // ── fire the registry check HERE, not only in CI ──────────────────────
-    /// The reign events (x-7b36): a king journals these from the session, and
+    /// The reign events: a king journals these from the session, and
     /// `fno doctor event audit --type` resolves the name through this table.
     /// A kind dropped here makes the done-probe read "unknown type", which is
     /// the absence-lie in audit form.
@@ -921,7 +921,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // carries the version and a stderr tail, and the backoff retries it.
     "graph_render_failed",
     "agent_stopped",
-    // Stop/rm claims release (x-9c91): the receipt event for the claims a
+    // Stop/rm claims release: the receipt event for the claims a
     // stopped or removed worker held; one emit per stop/rm that ran one.
     "agent_stop_claims_released",
     // A stop the daemon REFUSED to claim: the interrupt never confirmed a
@@ -945,7 +945,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "merge_cleanup_skipped",
     "merge_cleanup_completed",
     "merge_cleanup_refused",
-    // Merge reaper (daemon-emitted, x-07dc): a pending request was HELD (the
+    // Merge reaper (daemon-emitted): a pending request was HELD (the
     // node reads open, the list is empty, or the graph would not read) and is
     // retried next pass; a request aged past its expiry window and is
     // tombstoned; a row's harness was stopped ahead of its registry removal.
@@ -960,18 +960,18 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Orphaned-test-binary reap sweep (daemon-emitted): one event per pid
     // the footprint verb killed on the daemon's behalf.
     "orphan_test_binary_reaped",
-    // Late bind (daemon-emitted, x-9de7 task 2): a pane-hosted codex row whose
+    // Late bind (daemon-emitted, task 2): a pane-hosted codex row whose
     // spawn-time bind window expired got its `harness_session_id` resolved on
     // a later reconcile tick, from the pane-tree rollout probe. Makes "the row
     // bound 40 seconds after spawn" visible instead of inferred.
     "agent_late_bind",
-    // Late-bind write failure (daemon-emitted, x-9de7 follow-up): the registry
+    // Late-bind write failure (daemon-emitted, follow-up): the registry
     // write that would have bound `harness_session_id` failed, most often a
     // collision with a session id already claimed by another row. Distinct
     // from a probe miss (no event, just skipped) and from `agent_late_bind`
     // (the write succeeded).
     "agent_late_bind_failed",
-    // Dead-row GC (daemon/reap-verb-emitted, x-b1aa): a terminal, past-grace,
+    // Dead-row GC (daemon/reap-verb-emitted): a terminal, past-grace,
     // clean agent-view row was removed from the registry by the GC sweep or
     // `fno agents reap`. Distinct from `agent_orphan_reaped` (which flips a
     // live-but-unowned PID to exited); this REMOVES the row entirely.
@@ -986,12 +986,12 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // One 5-minute parity sample: relational export vs authoritative JSON
     // while JSON is still the backend (the 7-day soak clock's input).
     "graph_parity_sample",
-    // Choke-point removal accounting (x-a879): ANY write path that drops a
+    // Choke-point removal accounting: ANY write path that drops a
     // registry row emits one of these, receipt staged first. Distinct from
     // `agent_row_reaped` (the GC door's own event); this fires for every
     // door, including ones nobody has enumerated yet.
     "registry_row_removed",
-    // One lossy save, grouped (x-f0d2): the writer, pid, verb, and every
+    // One lossy save, grouped: the writer, pid, verb, and every
     // lost id in one event, beside the per-row receipts above, so a save
     // that drops rows can never vanish without a door being named.
     "registry_rows_lost",
@@ -1001,7 +1001,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // nothing, because a reaper that speaks only when it kills cannot be told
     // apart from a reaper that never ran.
     "orphan_reap_sweep",
-    // Worktree report sweep (daemon-emitted, x-5a30): one line per repo per 24h
+    // Worktree report sweep (daemon-emitted): one line per repo per 24h
     // saying what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by
     // construction, because a timer tick is not proof that work landed; removal
     // stays on the merge-triggered path. Emitted even when the counts are zero,
@@ -1017,11 +1017,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
     "node_failed",
-    // The merge reaper (x-07dc) emits the same kind the cleanup verb does when
+    // The merge reaper emits the same kind the cleanup verb does when
     // it takes a merged node's tree, so one removal, one event, wherever the
     // caller lives.
     "worktree_removed",
-    // Terminal-stop sweep (daemon-emitted, x-fcbf): a fire-and-forget
+    // Terminal-stop sweep (daemon-emitted): a fire-and-forget
     // `claude --bg` worker that finalize marked terminal was `claude stop`ped so
     // its slot frees instead of parking at an idle prompt forever.
     "bg_worker_terminal_stopped",
@@ -1033,13 +1033,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "pr_nudge_paused",
     "agent_spawn_failed",
     // A codex thread was auto-resumed with no reconstructible state-root grant
-    // (x-f22f). The roots reach a spawn as an RPC param from the Python seam,
+    //. The roots reach a spawn as an RPC param from the Python seam,
     // and daemon-side recovery has no such param, so that worker may be unable
     // to claim or mail. Emitted so the loss is readable instead of silent.
     "codex_thread_resumed_without_state_grant",
     "agent_stop_error",
     "agent_spawn_cwd_fallback",
-    // Claude stream-json adoption front door (daemon-emitted, ab-734fcd6c):
+    // Claude stream-json adoption front door (daemon-emitted):
     // advisory note that the single-writer claim substrate could not be consulted
     // before spawning, so the adopt proceeded fail-open (the registry one-host
     // re-check is the authoritative guard).
@@ -1052,13 +1052,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "daemon_idle_pending_exit",
     "daemon_shutting_down",
     // The socket path stopped resolving to the inode this daemon bound, so
-    // something else now owns it and this process is unreachable (x-ef7f).
+    // something else now owns it and this process is unreachable.
     // It retires rather than keep running as an invisible CPU burner.
     "daemon_socket_lost",
     "daemon_state",
     "daemon_recovery_error",
     "daemon_recovery_interrupted_temp",
-    // Binary-version drift (daemon-emitted, plan ab-1891cdff): advisory note that
+    // Binary-version drift (daemon-emitted, plan): advisory note that
     // the daemon could not fingerprint its own executable at startup, so every
     // client drift check fails safe to Unknown.
     "daemon_exe_fingerprint_unavailable",
@@ -1075,15 +1075,15 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "reconcile_deferred",
     "reconcile_done",
     "reconcile_error",
-    // Reign (king-emitted, x-7b36): the tenured-king skill journals these from
+    // Reign (king-emitted): the tenured-king skill journals these from
     // the reigning session; audit resolves the names through this table.
     "reign_armed",
     "reign_checkin",
     "reign_dispatch_exception",
-    // Startup reconcile sweep (daemon-emitted, plan ab-70faa65b Architecture B)
+    // Startup reconcile sweep (daemon-emitted, plan Architecture B)
     "startup_reconcile_done",
     "startup_reconcile_failed",
-    // Registry-side keeper sweep (daemon-emitted, x-ac6b): the daemon-start
+    // Registry-side keeper sweep (daemon-emitted): the daemon-start
     // walk of the lane-B keeper thread sockets. Every dead or wedged verdict
     // carries its reason; the rebound/dead/wedged row events name the row.
     "keeper_sweep_done",
@@ -1105,7 +1105,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_deliver_injected",
     "agent_deliver_demoted",
     "agent_deliver_status_write_failed",
-    // Unwrapped-injection audit (mail-inject binary + mux pane, x-c24d): an
+    // Unwrapped-injection audit (mail-inject binary + mux pane): an
     // agent_raw_inject records a payload delivered without the <fno_mail>
     // envelope, so the provenance marker survives in the ledger, not transcript.
     "agent_raw_inject",
@@ -1120,25 +1120,25 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // exempt from this registry by design.
     "active_backlog_task_crashed",
     // A mission drain loop retired (its epic deactivated / all children done,
-    // x-a4dc K2). An EventEmitter emit, so a first-class registered kind.
+    // K2). An EventEmitter emit, so a first-class registered kind.
     "active_backlog_mission_retired",
-    // Harness-aware dispatch guard (walker-emitted, x-3e70): the shared node
+    // Harness-aware dispatch guard (walker-emitted): the shared node
     // chokepoint deferred a node to a foreign harness that owns / is working it
     // (a foreign-tagged claim, a codex/gemini branch, or a foreign worktree)
     // instead of default-spawning a claude worker. Unlike the journal-based
     // active_backlog decision events above, this is an EventEmitter emit, so it
     // is a first-class registered kind.
     "dispatch_deferred",
-    // Control-plane arms readout (x-1b88): the supervisor-level
+    // Control-plane arms readout: the supervisor-level
     // active_backlog tick row is an EventEmitter emit (the mission-level rows
     // ride Journal::append and are exempt like the drain decision events).
     "control_plane_tick",
-    // Evals demand (x-ab72, Python-emitted from the pr-watch tick's evals
+    // Evals demand (Python-emitted from the pr-watch tick's evals
     // leg): the scheduled regression-tier run's outcome, and the could-not-
     // fire row whose journal entries are the operator-notice rate bound.
     "evals_scheduled_run",
     "evals_stale",
-    // Scratch-shape sweep (x-caf8, agents-emitted from the `scratch sweep`
+    // Scratch-shape sweep (agents-emitted from the `scratch sweep`
     // stage of the daily eval-sweep ignition): one row per new (job, shape)
     // recurrence the jobs-dir walker found, and one row per node the sweep
     // filed, folded, or seeded for a shape. The journal is the sweep's own
@@ -1161,7 +1161,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // flushed onto the row at creation.
     "inside_leg_report_buffered",
     "inside_leg_buffer_flushed",
-    // Driver-sourced thread-row status (x-fd66): the codex thread actor's
+    // Driver-sourced thread-row status: the codex thread actor's
     // turn phases land on the row's inside_leg through the shared seq gate;
     // one event per accepted write.
     "codex_thread_inside_leg",
@@ -1169,21 +1169,21 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // verdict was stored/refreshed/cleared on a hook-less mux row, or a
     // provider's manifest failed to load.
     "screen_state_change",
-    // CI heal drive loop (pr-heal verb, x-974c): one row per --all --apply
+    // CI heal drive loop (pr-heal verb): one row per --all --apply
     // invocation carrying the per-tick counts, so the arm is visible in the
     // journal even on a quiet cycle. Emitted even when every PR is skipped,
     // for the same reason worktree_sweep is: a quiet repo must not read as a
     // loop that never ran. The Python tick emits nothing for this family.
     "pr_heal_tick",
     // NOTE: the a2a status-breakpoint kinds (task_started/task_done/blocked/
-    // run_summary, x-dbaf) are NOT registered here. They are Python-defined in
+    // run_summary) are NOT registered here. They are Python-defined in
     // cli/src/fno/events/schema.yaml; the parity gate partitions names (a kind
     // in both the Python schema and this Rust registry is a COLLISION). finalize
     // emits run_summary via a custom envelope writer (not the registered
     // `.emit()` path), so the production-emit-kind guard does not require it.
 ];
 
-/// Build the unified (x-2901) events.jsonl envelope JSON Schema and the
+/// Build the unified events.jsonl envelope JSON Schema and the
 /// `status-v1` AgentState schema as static JSON objects.
 ///
 /// This mirrors `schemas/events-v3.json` (single envelope) and
@@ -1204,7 +1204,7 @@ pub fn emit_schema_json() -> serde_json::Value {
     use serde_json::json;
     json!({
         "envelope": {
-            "$comment": "Unified events.jsonl envelope (x-2901). Emitted by crates/fno-agents/src/events.rs; structurally equal to schemas/events-v3.json after doc-key stripping (the parity gate diffs them).",
+            "$comment": "Unified events.jsonl envelope. Emitted by crates/fno-agents/src/events.rs; structurally equal to schemas/events-v3.json after doc-key stripping (the parity gate diffs them).",
             "type": "object",
             "required": ["ts", "type", "source", "data"],
             "properties": {

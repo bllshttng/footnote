@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Emit a head-pinned review_attestation event (x-e703, Phase 2).
+# Emit a head-pinned review_attestation event (Phase 2).
 #
 # WHAT THIS CERTIFIES: a CLEAN review at the current head. It is a hand-run of
 # a producer that missed, never a way past an open finding. Running it over
@@ -10,12 +10,12 @@
 # local reviewer that leaves NO GitHub review object emits this event so
 # `fno-agents loop-check` can read it as gate evidence. The reviewer name is
 # NOT an allowlist here - a project-registered reviewer
-# (config.review.reviewer_registry, x-a534) attests through this same helper,
+# (config.review.reviewer_registry) attests through this same helper,
 # which is why the registry needed no new producer machinery.
 #
 # STILL RUN THIS AFTER THE REVIEWED COMMIT IS THE TIP. The old rule here was
 # "a pass on a prior commit stops counting the moment a new commit lands",
-# and that is no longer true (x-5b99 / x-62a1): loop-check now decides
+# and that is no longer true (/): loop-check now decides
 # freshness from the PR's own code-diff identity, so an attestation carries
 # across a rebase or a documentation-only advance. It still dies on any real
 # code change, and it still dies on every failure path, so emitting before
@@ -40,7 +40,7 @@
 #                       prose_unparseable means the review ANSWERED and its
 #                       answer was not machine-readable; it always rides a
 #                       fail verdict, because an unreadable answer must leave
-#                       a row without clearing coverage (x-c446).
+#                       a row without clearing coverage.
 #   [--findings-file <path>]  a JSON findings payload; classified by `fno do
 #               review classify` and carried on the event as the finding record.
 #               A malformed or unreadable file is a refusal, never an empty record.
@@ -307,7 +307,7 @@ if (( reviewed_file_count == 0 )); then
   if [[ "$branch" == "$base" ]]; then
     # The rewrite cannot produce the base name, so branch == base with an empty
     # diff is the canonical checkout sitting on the repo default: exactly the
-    # x-a8a1 shape, where the attestation would be lost for the real PR and in
+    # shape, where the attestation would be lost for the real PR and in
     # scope for any PR whose headRefName is literally the base. Name it rather
     # than refusing here - work committed directly ON the default branch attests
     # honestly (the actor producer runs on main-based sessions), so only the
@@ -448,7 +448,7 @@ if [[ -n "$findings_file" ]]; then
   # stays for `declare` and for hand runs with no findings file.
   # The declared scope rides BOTH emit paths, and so does the branch: classify
   # re-resolves the branch from cwd, which in a reviewer worktree names the
-  # LOCAL checkout, not the PR (x-a8a1). The rewrite's result crosses through
+  # LOCAL checkout, not the PR. The rewrite's result crosses through
   # FNO_ATTEST_BRANCH - a new typer.Option is refused by the flag-surface
   # ratchet (scripts/ci/check_flag_registry.py), so the producer passes the
   # branch through the environment. The hold join/release inside classify

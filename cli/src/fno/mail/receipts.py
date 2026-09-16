@@ -13,7 +13,7 @@ from typing import Optional
 
 
 def _live_miss_age_suffix(recipient: str) -> str:
-    """The transcript-age suffix a bare live-miss receipt carries (x-6d89 AC8).
+    """The transcript-age suffix a bare live-miss receipt carries (AC8).
 
     A bare live-miss reads the same for a transient miss to a genuinely live
     peer (re-send works) and for a session that stood down hours ago (nothing
@@ -31,10 +31,10 @@ def _live_miss_age_suffix(recipient: str) -> str:
 
 
 # Live-lane failures where the recipient WAS live and reachable but the inject
-# did not confirm (node x-1904). For these the durable preamble must NOT say
+# did not confirm (node). For these the durable preamble must NOT say
 # "is not live" -- the recipient was live, so that wording read as a liveness
 # lie and cost a wrong hypothesis on measured evidence. The receipt names the
-# real cause instead. ``no-confirm-source`` joins that set (x-175a): the keeper
+# real cause instead. ``no-confirm-source`` joins that set: the keeper
 # lane refuses it only AFTER the socket connect, so the recipient was reachable
 # and the honest receipt is "unconfirmed", not "is not live".
 _LIVE_LANE_FAILURE_REASONS = frozenset(
@@ -59,7 +59,7 @@ def _is_live_lane_failure(reason: Optional[str]) -> bool:
 
 
 def durable_window_clause(owner: Optional[str]) -> str:
-    """The drain-window tail every ``queued (durable)`` receipt carries (x-1602).
+    """The drain-window tail every ``queued (durable)`` receipt carries.
 
     ``queued (durable)`` says nothing about time, so "not yet" and "never"
     read identically. The tail quotes the owner-class horizon the stranded
@@ -79,7 +79,7 @@ def durable_window_clause(owner: Optional[str]) -> str:
 
 
 def durable_leg_story(reason: Optional[str]) -> Optional[str]:
-    """Positive stdout wording for a live-lane failure demotion (x-1602): a
+    """Positive stdout wording for a live-lane failure demotion : a
     live-inject miss plus a durable success is a normal outcome, and the raw
     token (``io-error``, ``attach-failed``, ...) rendered an error string
     inside a success receipt. None when the reason is not a live-lane
@@ -98,7 +98,7 @@ def demotion_receipt(
     project: Optional[str] = None,
     age_target: Optional[str] = None,
 ) -> str:
-    """The stdout line for a durable demotion (x-1904, refined by x-1602)."""
+    """The stdout line for a durable demotion (refined by x-aaaa)."""
     token = durable_leg_story(reason)
     if token is None:
         token = reason or "live-miss"
@@ -166,7 +166,7 @@ def _warn_deferred(target: str, *, project: bool = False, reason: Optional[str] 
     the injected turn past the confirm budget and receive it anyway, so a blind
     re-send is the documented double-delivery edge rather than a fix.
 
-    ``reason`` is the live lane's own cause (node x-1904). When it names a
+    ``reason`` is the live lane's own cause (node). When it names a
     live-lane failure (see :data:`_LIVE_LANE_FAILURE_REASONS`) the recipient WAS
     live and reachable, so the preamble says so and names the cause rather than
     claiming "is not live" -- a receipt naming the wrong cause is worse than one

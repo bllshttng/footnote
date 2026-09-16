@@ -175,7 +175,7 @@ def _manifest_only_crowns(held: list[str]) -> tuple[list[dict[str, Any]], bool]:
 def find_presiding_crown(
     scope: str, level: Optional[int], crowns: list[dict[str, Any]], by_id: Optional[dict[str, dict]]
 ) -> Optional[dict[str, Any]]:
-    """The live crown one rung above scope/level, or None (x-3ecf AC4-HP)."""
+    """The live crown one rung above scope/level, or None (AC4-HP)."""
     if level is None or level <= 0:
         return None
     live = [c for c in crowns if c.get("status") != "manifest-only"]
@@ -417,7 +417,7 @@ def crowned_sessions(rows: list) -> set[str]:
     """The sessions that hold a crown, read the way ``gather_court`` reads.
 
     Same non-terminal rows, same ``crown_level`` field: a row is a king here
-    iff it is a king in the court (x-5283 LD1). The spawn gate divides
+    iff it is a king in the court (LD1). The spawn gate divides
     ``max_live`` by this set; callers guard readability themselves.
     """
     from fno.agents.registry import TERMINAL_STATUSES

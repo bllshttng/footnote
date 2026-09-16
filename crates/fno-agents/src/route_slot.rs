@@ -132,7 +132,7 @@ fn fold(
                 }
                 for (k, v) in table {
                     if k == "args" {
-                        // x-8975: the lane's native-bundle vector, opaque and
+                        // the lane's native-bundle vector, opaque and
                         // passed through verbatim; never a ranked field.
                         match v.as_array() {
                             Some(items)
@@ -166,7 +166,7 @@ fn fold(
                     }
                 }
                 // args is an array, not a string, so the loop above cannot
-                // carry it; copy it verbatim (x-8975).
+                // carry it; copy it verbatim.
                 if let Some(args) = table.get("args").and_then(Value::as_array) {
                     fields.insert("args".into(), Value::Array(args.clone()));
                 }
@@ -2074,7 +2074,7 @@ fn native_view_for(harness: &str) -> Option<&'static str> {
     }
 }
 
-/// x-ebd2: the derived verb is the phase authority. The old planless-target ->
+/// the derived verb is the phase authority. The old planless-target ->
 /// blueprint rewrite lived here and is retired: the Python layer derives the
 /// workflow verb before this call, so the work verb IS the slot verb.
 fn effective_work_kind(work_verb: &str) -> (String, Option<String>) {
@@ -2143,9 +2143,9 @@ fn read_route_slot_payload(args: &[String]) -> Result<Value, (i32, String, Strin
 }
 
 /// `route-slot journal`: append one spawn_defaults_applied receipt to the
-/// agents event journal (x-90a9). The WRITE belongs to the verb; the row keeps
+/// agents event journal. The WRITE belongs to the verb; the row keeps
 /// the flat envelope (`kind` plus flattened fields) every reader of this event
-/// parses, so the emitter here is a plain appender, not the x-2901 framing.
+/// parses, so the emitter here is a plain appender, not the framing.
 /// The caller passes the resolved journal path: the binary reads no config.
 pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
     let path = match payload.get("path").and_then(Value::as_str) {
@@ -2216,7 +2216,7 @@ pub fn run_route_slot_journal(payload: &Value) -> (i32, String, String) {
 }
 
 /// `route-slot audit`: read-only completion evidence for the routing policy
-/// (x-90a9). The snapshot loader is Python (`fno config route
+///. The snapshot loader is Python (`fno config route
 /// audit-snapshot`), which reads config, registry, journal and decision
 /// records through their established readers; the VERDICT is made here, the
 /// same owner that qualifies every launch, and repeats read exactly.
@@ -3141,7 +3141,7 @@ mod tests {
 
     #[test]
     fn an_older_payload_still_renders_off_the_harness_window() {
-        // No sources/observed_at maps: the pre-x-a0c4 payload shape falls back
+        // No sources/observed_at maps: the pre-change payload shape falls back
         // to the harness-wide window and prints no age token.
         let out = resolve_slot_payload(&payload(json!({
             "lanes_raw": ["flash-x"],
@@ -3434,7 +3434,7 @@ mod tests {
 
     #[test]
     fn strict_planless_target_stays_the_target_slot() {
-        // x-ebd2: the derived verb is the phase authority; a planless target
+        // the derived verb is the phase authority; a planless target
         // no longer rewrites to the blueprint slot - the walk reads the target
         // slot's own lane and picks it.
         let out = resolve_slot_payload(&strict_payload(json!({
@@ -4060,8 +4060,8 @@ mod tests {
         };
         let registry = crate::state::Registry {
             entries: vec![
-                entry("sid-1", fresh.clone(), "x-90a9"),
-                entry("sid-old", stale, "x-90a9"),
+                entry("sid-1", fresh.clone(), "x-aaaa"),
+                entry("sid-old", stale, "x-aaaa"),
             ],
             ..crate::state::Registry::default()
         };
@@ -4095,7 +4095,7 @@ mod tests {
             &state_root,
             &agents_root.join("registry.json"),
             "/tmp/proj",
-            "x-90a9",
+            "x-aaaa",
             1800,
         )
         .unwrap();

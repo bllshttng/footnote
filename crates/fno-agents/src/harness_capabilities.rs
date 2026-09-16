@@ -4,7 +4,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 /// The capability contract. This in-crate TOML is the CANONICAL table
-/// (x-244c, operator ruling 2026-09-02): `build.rs` copies it over the
+/// (operator ruling 2026-09-02): `build.rs` copies it over the
 /// Python-tree table (`cli/src/fno/agents/harness_capabilities.toml`) on
 /// every build, so this is the only file a human edits. `crates/fno` reads
 /// the table through the dep instead of carrying its own copy, and the
@@ -43,7 +43,7 @@ const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", 
 /// vendor-produced state marker settles it. `unprobeable`: no authority and
 /// no marker, and the declaration must say why.
 const PROBE_KINDS: [&str; 3] = ["declared", "behavioral", "unprobeable"];
-/// The closed feature key set (x-a3e8). A feature is what a harness can DO -
+/// The closed feature key set. A feature is what a harness can DO -
 /// a review command, an RPC surface, a plugin system - as opposed to the
 /// keystroke mechanics above, which model how fno PUPPETS a pane. Closed so a
 /// typo is a parse error rather than a silent new dimension.
@@ -80,7 +80,7 @@ pub struct ContractError(String);
 pub struct HarnessContract {
     pub map_version: u32,
     pub harness: BTreeMap<String, HarnessCapabilities>,
-    /// HOW each named field can be settled (x-244c), keyed by field path.
+    /// HOW each named field can be settled, keyed by field path.
     /// `declared` carries an authority command (`{bin}` = the harness's own
     /// binary) plus the pattern that settles it in the authority's output;
     /// `behavioral` carries the vendor-produced marker a scratch-PTY run
@@ -162,7 +162,7 @@ pub struct HarnessCapabilities {
     /// argv lane; a flag outside both demotes the spawn to the pane.
     #[serde(default)]
     pub thread: Option<ThreadArm>,
-    /// What this harness can DO, keyed by [`FEATURE_KEYS`] (x-a3e8) - a second
+    /// What this harness can DO, keyed by [`FEATURE_KEYS`] - a second
     /// dimension beside the pane mechanics, not a rewrite of them. A key
     /// ABSENT here reads `unmeasured`, which is legal and renders as a
     /// visible gap; the refusal lives in the lanes that consume a feature,
@@ -322,7 +322,7 @@ impl HarnessContract {
     }
 
     /// Gate ONE merged candidate row (bundled + config override) through the
-    /// same per-row contract the bundled table ships under (x-244c). The row
+    /// same per-row contract the bundled table ships under. The row
     /// arrives as generic TOML so an override reader hands over its merged
     /// candidate without assembling a whole contract. `deny_unknown_fields`
     /// still applies: a key the row vocabulary does not carry is a
@@ -363,7 +363,7 @@ impl HarnessContract {
         // A feature declaration may only name a key in the closed set, and a
         // feature USED on any row may only exist beside a declaration: the
         // declaration is what makes the claim checkable, so a claim without
-        // one is a guess the table refuses to carry (x-a3e8, AC2).
+        // one is a guess the table refuses to carry (AC2).
         for field in self.probe.keys() {
             if let Some(key) = field.strip_prefix("features.") {
                 if !FEATURE_KEYS.contains(&key) {
@@ -485,7 +485,7 @@ impl HarnessContract {
     /// portal - even with no such subcommand). This split exists for a
     /// harness that ships no attach subcommand at all, yet has a real,
     /// working thread destination reached through the daemon-kept lane - a
-    /// fact its own `features.attach` claim already records (x-df08). A row
+    /// fact its own `features.attach` claim already records. A row
     /// with no `features.attach` stanza reads as absent, never as a claim,
     /// so this never promotes a row silently.
     pub fn thread_lane(&self, harness: &str) -> Result<&'static str, ContractError> {
@@ -700,7 +700,7 @@ fn validate_model_switch_strategy(
 
 /// The per-harness half of [`HarnessContract::validate`], extracted so an
 /// override reader can gate ONE merged candidate row through the same
-/// contract the bundled table ships under (x-244c).
+/// contract the bundled table ships under.
 /// A probe declaration may carry only the instrument its kind names, and a
 /// declared pattern must compile: the declaration IS an instrument spec, and
 /// a spec that cannot run is a guess with extra steps.
@@ -1136,7 +1136,7 @@ mod tests {
         // (interactive_attach reads unsupported), but dispatch_opencode_serve
         // is a real, working thread destination reached through the
         // daemon-kept lane - the row's own features.attach claim already
-        // says so (x-df08).
+        // says so.
         assert_eq!(lane("opencode"), "attach");
         assert_eq!(lane("agy"), "keeper");
         assert_eq!(lane("gemini"), "keeper");
@@ -1317,7 +1317,7 @@ mod tests {
         assert_eq!(codex.ready_marker, "idle_prompt");
         assert_eq!(claude.send_keys_enter_delay_ms, 800);
         // codex submits on a carriage return like claude. Measured floor is 0
-        // (short payload, codex 0.148.0; and x-4b0b 2026-08-23: 0.7-2.0 KB
+        // (short payload, codex 0.148.0; and 2026-08-23: 0.7-2.0 KB
         // envelopes, idle and mid-turn, every D in 0..800ms submitted). The
         // table reads 800 as a margin: the operator's queued-envelope pile-up
         // with the table at 0 never reproduced, and 800 matches claude's row
@@ -1572,7 +1572,7 @@ mod tests {
         assert!(err.contains("drops its attach id"), "{err}");
     }
 
-    /// AC3 (x-296f): codex's declared attach form renders action-then-assertion
+    /// AC3: codex's declared attach form renders action-then-assertion
     /// (`daemon start`, then the TUI), execs so the pane's child is the
     /// harness, and substitutes the FULL session id - a codex UUIDv7 head-8 is
     /// a ~65.5s clock bucket and would attach the wrong sibling. Measured
@@ -1612,7 +1612,7 @@ mod tests {
         assert!(err.contains("session_id, not a short_id"), "{err}");
     }
 
-    /// The features dimension beside the keystrokes (x-a3e8). The measured
+    /// The features dimension beside the keystrokes. The measured
     /// cells are pinned: the spawn set must equal the roster the spawn
     /// refusal used to hardcode, and the pane-only rows must read absent,
     /// because a state that silently drifted would put a refusal back in a

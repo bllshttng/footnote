@@ -9,7 +9,7 @@
 # (done via `fno do state set --field plan_path` after blueprint resolves it).
 # No gate booleans, status, phase, iteration, or mutable tracking lists are
 # written here. All control-plane decisions live in fno-agents loop-check.
-# See: ab-d0337fbc (control-plane collapse wedge).
+# See: (control-plane collapse wedge).
 #
 # TRIGGER GUARDS
 # --------------
@@ -57,7 +57,7 @@ fi
 unset TARGET_START
 rm -f "$STATE_DIR/.target-starting" "$REPO_ROOT/.fno/.target-starting" 2>/dev/null || true
 
-# ── Review-capability gate on the unwrapped path (x-4a60) ────────────
+# ── Review-capability gate on the unwrapped path ────────────
 # `fno do target init` runs both review refusals in-process and says so with
 # FNO_TARGET_INIT_GATED; the direct path SKILL.md documents never ran them, so
 # a typo'd config.review.github_apps login started a full run and surfaced only
@@ -93,7 +93,7 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
       echo "[init-target-state] REFUSED: dispatch hold gate unavailable (rc=$_DH_RC); refusing to assume unheld. Run \`fno doctor --fix\` and retry." >&2
       exit 2
     fi
-    # Containment gate (x-e957), same seam and same rc idiom. A node carrying
+    # Containment gate, same seam and same rc idiom. A node carrying
     # `contained_in` ships inside another node's PR, and this script acquires
     # the claim and writes the manifest - so bootstrapping one here opens the
     # second PR for one plan that the invariant exists to prevent. Its own verb
@@ -197,7 +197,7 @@ Pick ONE:
   3) Genuinely intend to target on $_TARGET_DESC (rare; hotfix-on-trunk):
        TARGET_LOCATION_OK=main-acknowledged <re-run your target command>
 
-Refusing to write state file. See backlog ab-efcde945 for context.
+Refusing to write state file. See backlog for context.
 EOF
       exit 1
     fi
@@ -236,7 +236,7 @@ detect_provider() {
 
 # ── has_ui inference (predictive, from plan) ─────────────────────────
 # Delegates to canonical scripts/lib/infer-has-ui.sh so plan-time inference
-# shares the same locked globs as executor routing (ab-15c470cf).
+# shares the same locked globs as executor routing.
 _derive_has_ui_from_plan() {
   local plan_path="${1:-}"
   [[ -z "$plan_path" ]] && { printf 'false'; return 0; }
@@ -304,7 +304,7 @@ esac
 no_external=$( [[ -n "${TARGET_NO_EXTERNAL:-}" ]] && _bool "$TARGET_NO_EXTERNAL" || printf '%s' "$no_external_default" )
 no_docs=$(     [[ -n "${TARGET_NO_DOCS:-}"     ]] && _bool "$TARGET_NO_DOCS"     || printf '%s' "$no_docs_default" )
 no_ship=$(     [[ -n "${TARGET_NO_SHIP:-}"     ]] && _bool "$TARGET_NO_SHIP"     || printf '%s' "$no_ship_default" )
-# batch-lane Wave 2/3 (x-6cdf): a batched member commits to a shared batch branch
+# batch-lane Wave 2/3: a batched member commits to a shared batch branch
 # and ships via the batch PR, not its own. loop-check reads this flag to
 # terminate as DoneBatched (not a hang) on the member's promise. Set by the
 # active-backlog daemon's batched dispatch (TARGET_BATCHED=1); default false.
@@ -333,7 +333,7 @@ fi
 # GLOBAL fno home ($HOME/.fno) - a name collision with this
 # script's project-local STATE_DIR. Re-derive ours or every sentinel/manifest
 # path below silently retargets the global dir (caught by
-# tests/hooks/test_pending_plan_wipe.sh, ab-d0337fbc).
+# tests/hooks/test_pending_plan_wipe.sh).
 STATE_FILE=$(_space_state_path target-state)
 STATE_DIR="$(dirname "$STATE_FILE")"
 SPACE_DIR="$(dirname "$(_space_state_path events)")"
@@ -381,7 +381,7 @@ fi
 # ── Auto-merge inputs (read-only at init; no mutable tracking lists) ──
 AUTO_MERGE_ENABLED="false"
 AUTO_MERGE_APPROVED="false"
-# Which input set the posture (x-9d11): closed enum
+# Which input set the posture: closed enum
 # config|flag-no-merge|env-target-auto-merge|default-off. Absent on
 # pre-provenance manifests; consumers must render that as `unknown`, never a
 # guessed origin.
@@ -392,7 +392,7 @@ if declare -F get_auto_merge_enabled >/dev/null 2>&1; then
     AUTO_MERGE_ENABLED="false"
   }
 fi
-# The env grant is the OPERATOR's lever (x-3855, codex P1 on PR 1131):
+# The env grant is the OPERATOR's lever (codex P1 on PR 1131):
 # TARGET_AUTO_MERGE reaches a child only by inheritance, and a mesh-spawned
 # worker can export it before init to mint merge authority no config
 # granted. The bar here is the crown's own (cli/src/fno/agents/crown.py:
@@ -403,7 +403,7 @@ fi
 # carries no mesh identity either, and sits inside the operator's trust
 # boundary - the documented carrier of this grant, with the stamp
 # (auto_merge_source) keeping every use auditable. Provenance an env test
-# cannot establish is the x-f3d0 class.
+# cannot establish is the class.
 _AUTO_MERGE_ENV_GRANT="false"
 if [[ "${TARGET_AUTO_MERGE:-}" == "1" ]]; then
   if [[ -z "${FNO_AGENT_SELF:-}" && "$_attended" == "true" ]]; then
@@ -419,14 +419,14 @@ elif [[ "$_AUTO_MERGE_ENV_GRANT" == "true" ]]; then
   AUTO_MERGE_APPROVED="true"
   AUTO_MERGE_SOURCE="env-target-auto-merge"
 elif _is_true "$AUTO_MERGE_ENABLED"; then
-  # The who-may-merge gate (allowed_invokers) was removed (x-04ab): auto-merge
+  # The who-may-merge gate (allowed_invokers) was removed: auto-merge
   # is approved whenever it is `enabled`, gated further by the merge command's
   # own CI-green / external-review / stub-manifest guards.
   AUTO_MERGE_APPROVED="true"
   AUTO_MERGE_SOURCE="config"
 fi
-# Posture is flag/env/config only (x-9d11): free text in INITIAL_INPUT is NOT a
-# control input. Grants were hardened against prose by x-51a3; refusals match
+# Posture is flag/env/config only: free text in INITIAL_INPUT is NOT a
+# control input. Grants were hardened against prose by; refusals match
 # here. A brief that says no-merge must reach --no-merge on `fno do target
 # start/init` to take effect - attributable, not parsed out of prose.
 # An EXPLICIT config refusal is still `config`, not `default-off`: the operator
@@ -438,8 +438,8 @@ if [[ "$AUTO_MERGE_SOURCE" == "default-off" ]] && declare -F get_config >/dev/nu
   [[ -n "$_am_set" ]] && AUTO_MERGE_SOURCE="config"
 fi
 # The legacy interactive spelling gets a LOUD no-op, never a quiet one: prose
-# still manufactures nothing (that is x-9d11's whole point), but an operator
-# typing the pre-x-9d11 bare token deserves to learn their refusal did not
+# still manufactures nothing (that is whole point), but an operator
+# typing the pre-change bare token deserves to learn their refusal did not
 # land rather than discover it from a merged PR. Warn-only by design; the
 # carrier vocabulary's owner is harness_map (_TARGET_FAMILY and the flag
 # spelling), not this script.
@@ -541,10 +541,10 @@ if ! _init_acquire_lock; then
 fi
 trap _init_release_lock EXIT
 
-# ── Contested-liveness activity probe (x-ba4b) ───────────────────────
+# ── Contested-liveness activity probe ───────────────────────
 # The steal guard for the stale-session archive below. A free/stale node claim
 # is NOT sufficient to archive a prior manifest and reclaim: the observed bug
-# (x-e780) was a live session working under a dead supervisor pid whose claim
+# was a live session working under a dead supervisor pid whose claim
 # read non-live, then got archived+stolen. This probe asks the second question:
 # does the worktree show FRESH activity? Newest mtime among git-tracked-modified
 # files + the .fno/scratchpad tree (a live /target writes there continuously).
@@ -557,7 +557,7 @@ trap _init_release_lock EXIT
 # cwd'd in the worktree, so it would false-positive on every run and strand
 # genuinely-dead nodes. mtime measures actual work, not mere presence.
 # Validate the env override is a bare integer (seconds); a non-numeric value
-# like "15m" or "abc" must NOT reach the `(( now - newest < window ))` arithmetic
+# like "15m" or "abc" must NOT reach the `((now - newest < window ))` arithmetic
 # (it would abort under set -u). Fall through to config, then the 900s default.
 _ACTIVITY_WINDOW="${TARGET_CLAIM_ACTIVITY_WINDOW:-}"
 if ! [[ "$_ACTIVITY_WINDOW" =~ ^[0-9]+$ ]]; then
@@ -570,7 +570,7 @@ _ACTIVITY_EVIDENCE=""
 _stat_mtime() {  # portable epoch-seconds mtime; 0 if absent/unreadable
   # GNU first: GNU stat reads -f as --file-system, so a BSD-first spelling
   # SUCCEEDS there printing prose instead of a number, which then aborts the
-  # (( mt > newest )) arithmetic under set -u. BSD stat rejects -c and falls
+  # ((mt > newest )) arithmetic under set -u. BSD stat rejects -c and falls
   # through. The numeric guard keeps the "unreadable reads as 0" contract.
   local m
   m="$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || true)"
@@ -695,8 +695,8 @@ PYEOF
   fi
   if [[ -z "$_STALE_REASON" && -n "$_STALE_CLAIM_KEY" ]]; then
     # `fno agents claim status --json` is single-line; parse `state`. The reap decision
-    # is now two-factor (x-ba4b), because a not-live claim ALONE is not proof the
-    # slot is abandoned - the bug (x-e780) was a live session under a dead pid:
+    # is now two-factor, because a not-live claim ALONE is not proof the
+    # slot is abandoned - the bug was a live session under a dead pid:
     #   live | suspect -> preserve. The claim is protected (suspect = TTL-
     #     unexpired dead pid, a respawned worker); never archive+steal.
     #   "" (error/unparseable) -> preserve (degrade-safe; do NOT reap on a bad
@@ -739,7 +739,7 @@ PYEOF
   unset _STALE_STATUS _STALE_CLAIM_KEY _STALE_SESSION_ID _STALE_REASON _CLAIM_STATE _ARCHIVE_PATH
 fi
 
-# ── Foreign-manifest refusal (x-7040) ────────────────────────────────
+# ── Foreign-manifest refusal ────────────────────────────────
 # A manifest that survived the preserves above may still belong to a stranger.
 # The manifest-exists branch below serves resume, but resume and stranger both
 # look like "the file is there": a stranger used to be told "leaving unchanged"
@@ -900,7 +900,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     fi
   fi
 
-  # ── in_review dispatch guard (x-2dc5) ─────────────────────────────
+  # ── in_review dispatch guard ─────────────────────────────
   # A FRESH named-node dispatch (/target <id>, fno do target start <id>, direct
   # init) must not re-launch a node that already carries an open, unmerged PR
   # (derives status == in_review) - it would redo shipped work and race a
@@ -1137,7 +1137,7 @@ EOF
   _HARNESS_EFFORT="${TARGET_HARNESS_EFFORT:-}"
 
   # session_id: {UTC-timestamp}-{infix}{PPID}-{6 hex chars of /dev/urandom}
-  # ab-7303e5d7: TARGET_SESSION_ID is the absolute override (megawalk walkers
+  # TARGET_SESSION_ID is the absolute override (megawalk walkers
   # pre-assign it). Otherwise mint one id per target run. CODEX_THREAD_ID is a
   # durable conversation/claim-owner identity, but reusing it as session_id
   # would collide with prior loop termination and finalize events when the same
@@ -1230,7 +1230,7 @@ EOF
   # Authority grant (`/target yolo`): omitted unless granted, so absence is the default.
   _authority_line=""
   [[ "${TARGET_BEASTMODE:-}" == "1" ]] && _authority_line="authority: full"$'\n' || true
-  # Scope denominator (x-cbab): a declared deliverable count for a plan-less
+  # Scope denominator: a declared deliverable count for a plan-less
   # code run. Omitted unless --deliverables was passed, so absence (not 0) is
   # the unmeasurable state the denominator gate and the deliverables-1 ratio
   # measurement key on - a stamped 0 would invert the gate, so the Python side
@@ -1313,7 +1313,7 @@ EOF
 
   mv "$local_temp" "$STATE_FILE"
 
-  # ── Graph + node claim (gate-provenance phase 02b; ab-fcf9cec5) ───
+  # ── Graph + node claim (gate-provenance phase 02b;) ───
   # _GRAPH_FILE + node-id resolution hoisted to the in_review guard above (same
   # fresh-init branch): _GUARD_NODE already holds the resolved id-input, so reuse
   # it instead of re-running the identical regex + graph grep.
@@ -1362,7 +1362,7 @@ try:
     entries = wire_rows(path=path)
 except Exception:
     sys.exit(0)
-# Collect ALL holders, then prefer the delivery unit (x-e957). First-match-wins
+# Collect ALL holders, then prefer the delivery unit. First-match-wins
 # picked whichever came first in entry order, and adopted children precede the
 # group child that was minted for them - so `--plan-path <shared plan>` resolved
 # to a CONTAINED node, the post-claim containment check refused, and the plan
@@ -1444,7 +1444,7 @@ PYEOF
 
   # A two-node payload used to take ZERO claims. That is the worst of the three
   # options available: the work is real, two nodes are being built, and the store
-  # recorded neither, so both read free to every king that checked (x-cd1e).
+  # recorded neither, so both read free to every king that checked.
   #
   # The ambiguity refusal was written for `graph_node_id` and the in_review
   # guard, which genuinely need ONE node. A claim does not: a session building
@@ -1580,7 +1580,7 @@ PYEOF
 
   if [[ -n "$_NODE_ID" && -n "$claim_owner_id" ]]; then
     # Does THIS session own the node? Set by `fno agents claim` below, the sole liveness
-    # authority (x-4af4). The TTL claim runs FIRST and the graph lock is stamped
+    # authority. The TTL claim runs FIRST and the graph lock is stamped
     # only on its success, so a legitimate STALE steal never leaves a dead prior
     # owner on the node (the stale-locked-by-leak this reorder fixes).
     _NODE_OWNED=0
@@ -1590,7 +1590,7 @@ PYEOF
       _CLAIM_KEY="node:${_NODE_ID}"
       _CLAIM_HOLDER="target-session:${claim_owner_id}"
       _CLAIM_TTL="${TARGET_CLAIM_TTL:-2h}"
-      # Durable session pid for the hybrid liveness pid-arm (ab-cc5553f2): the
+      # Durable session pid for the hybrid liveness pid-arm: the
       # nearest `claude` ancestor outlives the transient init subprocess, so an
       # alive-but-suspended session keeps its node claim past the TTL. Empty =>
       # pass the explicit PID-unavailable marker so the TTL is the liveness
@@ -1649,7 +1649,7 @@ PYEOF
             $_HANDOVER_FLAGS \
             $_CLAIM_HARNESS_FLAG --metadata "$_CLAIM_METADATA" \
             --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
-        # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
+        # Acquire-then-validate (codex P1), BEFORE the manifest lines
         # below so a refusal leaves no claim fields behind. Every containment
         # gate above runs before this claim, so adoption committing in that
         # window left a worker holding the claim on a node that no longer

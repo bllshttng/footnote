@@ -1,5 +1,5 @@
 #!/bin/bash
-# repro-x-1b88: end-to-end arms-readout proof in a sandbox, no machine state touched.
+# repro-arms-readout.sh: end-to-end arms-readout proof in a sandbox, no machine state touched.
 #
 # Emits real control_plane_tick rows for every interval-driven arm through the
 # Python emitter into a pinned sandbox journal, then reads them back through

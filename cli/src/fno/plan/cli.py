@@ -244,7 +244,7 @@ def fidelity(
         180, "--since-days", help="Ledger lookback window in days."
     ),
 ) -> None:
-    """The plan-fidelity gate decision for one plan (x-cbab)."""
+    """The plan-fidelity gate decision for one plan."""
     from fno.plan.fidelity import compute_plan_fidelity
 
     decision = compute_plan_fidelity(plan_path=plan_path, since_days=since_days)
@@ -330,7 +330,7 @@ def validate(
     if execution:
         from fno.plan.execution_validation import validate_execution
 
-        # The creation-time half of the difficulty gate (x-baef round-5):
+        # The creation-time half of the difficulty gate (round-5):
         # validate-plan.sh runs --execution, which used to reach neither this
         # branch's body checks nor PlanFrontmatter below, so a post-gate plan
         # with no difficulty sailed through authoring and only died later at
@@ -643,7 +643,7 @@ def sync(
         help="Force a full walk, bypassing the store-version short-circuit.",
     ),
 ) -> None:
-    """Idempotent whole-vault mirror-field sweep (x-5d84)."""
+    """Idempotent whole-vault mirror-field sweep."""
     from fno.graph import api as graph_api
     from fno.plan._project import project_graph_nodes
     from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries

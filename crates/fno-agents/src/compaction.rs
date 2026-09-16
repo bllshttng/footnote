@@ -1,4 +1,4 @@
-//! Compaction awareness (x-7e05 wave 1).
+//! Compaction awareness (wave 1).
 //!
 //! Before this module, every reader in the outage stack treated a compacting
 //! session as an idle session: a claude transcript writes nothing for the
@@ -49,7 +49,7 @@ impl CompactionState {
     /// measured while a stamp is live - is never acted on. `Unknown` with a
     /// live stamp is deliberately NOT false here: between `PreCompact` and
     /// the boundary line the session is structurally idle, and trap 5 of
-    /// x-7e05 forbids rendering an unmeasured state as a healthy one.
+    /// forbids rendering an unmeasured state as a healthy one.
     pub fn possibly_compacting(&self) -> bool {
         match self {
             CompactionState::Compacting { .. } => true,
@@ -351,8 +351,8 @@ pub fn now_epoch_secs() -> i64 {
 
 // ---------------------------------------------------------------------------
 // Tests. Fixtures quote the REAL transcript shapes measured on this machine:
-// the assistant 429 tail (x-a13e worktree transcript, 2026-08-17) and the
-// system compact_boundary line (x-e5fc worktree transcript, 2026-09-08).
+// the assistant 429 tail (worktree transcript, 2026-08-17) and the
+// system compact_boundary line (worktree transcript, 2026-09-08).
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

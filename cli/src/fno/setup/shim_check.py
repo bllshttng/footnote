@@ -1,4 +1,4 @@
-"""fno shims must never dangle into a cleaned mktemp dir (x-c911).
+"""fno shims must never dangle into a cleaned mktemp dir.
 Scans the tool bin for fno* symlinks that dangle or resolve under a temp
 root, and repoints them to the durable uv tools copy.
 """

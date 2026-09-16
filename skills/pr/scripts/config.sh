@@ -27,7 +27,7 @@ if [[ -z "${CONFIG_FILE:-}" ]] && command -v fno >/dev/null 2>&1; then
 fi
 # GLOBAL_SETTINGS is the per-user global config and must NEVER alias CONFIG_FILE
 # (the ACTIVE config = the project-local file when one exists; aliasing it hid
-# every global-only key from bash consumers - ab-5d6c3d47). Honor
+# every global-only key from bash consumers -). Honor
 # FNO_GLOBAL_SETTINGS_PATH so bash matches Python's _global_settings_path().
 GLOBAL_SETTINGS="${GLOBAL_SETTINGS:-${FNO_GLOBAL_SETTINGS_PATH:-$HOME/.fno/config.toml}}"
 # LOCAL_SETTINGS is the active project config. Prefer CONFIG_FILE (the stub's

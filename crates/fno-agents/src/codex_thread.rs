@@ -17,7 +17,7 @@
 //! # The rule this module must keep
 //!
 //! fno never renders a harness interface. Viewing a thread is codex's own
-//! declared attach form (`codex resume <id> --remote unix://`, x-296f)
+//! declared attach form (`codex resume <id> --remote unix://`)
 //! EXEC'd in a pane; the frames read here drive
 //! turns and never paint a screen. A future change that reads frames to draw
 //! something has rebuilt the layer this lane deleted, and the process tree is
@@ -88,7 +88,7 @@ const COMPLETED_PARK_CAP: usize = 8;
 const THREAD_CHANNEL_CAP: usize = 32;
 
 /// What the driver's own turn state says, fired at the transitions the actor
-/// already observes (x-fd66). The daemon maps these onto inside-leg reports:
+/// already observes. The daemon maps these onto inside-leg reports:
 /// the ack and every refresh write `working`, the completion writes `done`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadTurnPhase {
@@ -175,7 +175,7 @@ pub fn thread_start_request_json(cwd: &str, approval_policy: &str) -> String {
     .to_string()
 }
 
-/// Build the `thread/archive` request (x-70e1 task 3): the history-preserving
+/// Build the `thread/archive` request (task 3): the history-preserving
 /// active-surface removal. The stored conversation survives; `thread/resume`
 /// searches the archived store, and `thread/unarchive` (the matching builder
 /// below) puts the same id back before a resume that needs it live.
@@ -230,7 +230,7 @@ pub fn turn_start_request_json_with_effort(
     turn_start_request_json_full(id, thread_id, text, effort, &[], None)
 }
 
-/// `turn/start` with the optional state-root grant (x-f22f).
+/// `turn/start` with the optional state-root grant.
 ///
 /// `turn/start` is the carrier, and that is a MEASUREMENT rather than a
 /// reading of the protocol docs. Against the live app-server on 2026-08-28,
@@ -593,7 +593,7 @@ pub struct CodexThread {
     cwd: PathBuf,
     effort: Option<String>,
     /// The fno state roots this thread is granted, spent on every `turn/start`
-    /// (x-f22f). Per THREAD, never per daemon: the daemon is shared and owns
+    ///. Per THREAD, never per daemon: the daemon is shared and owns
     /// every thread on the box, so a grant applied at daemon scope would widen
     /// every other worker's sandbox at once. Empty for a yolo thread, which is
     /// already `danger-full-access` and would be NARROWED by a workspaceWrite
@@ -651,7 +651,7 @@ impl CodexThread {
         // `launch` completes the app-server handshake as part of connecting,
         // so the driver is protocol-ready the moment it exists.
         let mut driver = Self::launch(cwd.clone()).await?;
-        // Project assignment (x-dc97): the thread rolls up under its repo's
+        // Project assignment: the thread rolls up under its repo's
         // ChatGPT Project instead of a cwd-keyed bucket. Resolution is
         // fail-open and bounded; a None below drops the key and the request
         // stays byte-identical to the unassigned form.
@@ -681,7 +681,7 @@ impl CodexThread {
 
     /// Resume an existing thread by its app-server id.
     ///
-    /// The state-root grant (x-f22f) cannot be reconstructed on this path, and
+    /// The state-root grant cannot be reconstructed on this path, and
     /// the loss is announced rather than taken quietly. The roots reach a
     /// spawn from the Python seam's `FNO_WORKER_ADD_DIRS`, which the long-lived
     /// shared daemon does not have, and Rust deliberately runs no second copy
@@ -1021,7 +1021,7 @@ impl CodexThread {
         }
     }
 
-    /// Archive this thread history-preservingly (x-70e1 task 3): the codex
+    /// Archive this thread history-preservingly (task 3): the codex
     /// app-server's `thread/archive` removes the thread from the ACTIVE
     /// surface while the stored conversation survives and `thread/resume`
     /// (which searches active and archived stores) still opens it. An error
@@ -1158,7 +1158,7 @@ impl CodexThread {
     /// every submitter class (ask, seed, mail steer) - the daemon uses it for
     /// the `agent_ask_done` event and the `last_message_at` bump.
     ///
-    /// `on_turn_phase` fires at the driver's own turn transitions (x-fd66):
+    /// `on_turn_phase` fires at the driver's own turn transitions:
     /// [`ThreadTurnPhase::Working`] at the ack and on every keepalive tick
     /// that lands while a turn drives, [`ThreadTurnPhase::Done`] at the
     /// completion. The daemon maps these onto the row's inside-leg report, so
@@ -1426,7 +1426,7 @@ async fn actor_task(
         on_turn_done,
         on_turn_phase,
     };
-    // The driver-status keepalive (x-fd66) lives as a select arm, NOT a
+    // The driver-status keepalive lives as a select arm, NOT a
     // separate task: a separate task would hold a `cmd_tx` clone forever, and
     // `cmds.recv()` would then never answer None - the "every handle dropped"
     // exit the arm below promises would be unreachable. A turn drives while
@@ -2477,7 +2477,7 @@ mod tests {
         assert!(value["params"].get("sandboxPolicy").is_none());
     }
 
-    /// The assigned form carries `params.projectId` (x-dc97): the thread lane's
+    /// The assigned form carries `params.projectId`: the thread lane's
     /// whole side of the assignment contract is one conditional key on the map
     /// it already builds for `model`.
     #[test]

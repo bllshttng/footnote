@@ -433,7 +433,7 @@ fn default_fmt_crates() -> Vec<String> {
 }
 
 /// The node ids `check-pr-node-closure` said the branch names. Its refusal
-/// reads `... names x-f8e3, and the exact trailer claims none of them.`
+/// reads `... names x-aaaa, and the exact trailer claims none of them.`
 ///
 /// Several candidates are joined with commas and NO space (`IFS=,` in the
 /// guard), so a `[^,]+` capture cannot cross them: on a two-node branch it
@@ -1403,7 +1403,7 @@ fn escalate_unknown_signature(a: &Args, pr: &str, check: &str, head_ref: &str) -
 }
 
 /// One `pr_heal_tick` row per drive-loop invocation: the arm's visibility
-/// (x-1b88's shared row widens onto this later). Written to the global
+/// (shared row widens onto this later). Written to the global
 /// `~/.fno/events.jsonl`, the same default journal the tick's own
 /// `_emit_event` writes, so `fno doctor event find` reads one place.
 fn emit_tick_event(
@@ -1824,7 +1824,7 @@ mod tests {
     #[test]
     fn a_missing_closure_trailer_edits_the_body_with_the_named_node() {
         let log = concat!(
-            "check-pr-node-closure: HEAD ref 'feature/x-f8e3' names x-f8e3, ",
+            "check-pr-node-closure: HEAD ref 'feature/x-aaaa' names x-aaaa, ",
             "and the exact trailer claims none of them.\n",
             "  Add a line reading:\n",
         );
@@ -1833,7 +1833,7 @@ mod tests {
         assert_eq!(
             f.remedy,
             Remedy::EditBody {
-                nodes: vec!["x-f8e3".to_string()]
+                nodes: vec!["x-aaaa".to_string()]
             }
         );
     }
@@ -2561,15 +2561,15 @@ exit 0
         assert_eq!(branch_node_ids("main"), Vec::<String>::new());
         assert_eq!(branch_node_ids("fix/respawn-race"), Vec::<String>::new());
         assert_eq!(
-            branch_node_ids("feature/x-974c"),
-            vec!["x-974c".to_string()]
+            branch_node_ids("feature/x-bbbb"),
+            vec!["x-bbbb".to_string()]
         );
         assert_eq!(
-            branch_node_ids("feature/x-cdef-1234"),
-            vec!["x-cdef".to_string()],
+            branch_node_ids("feature/x-cccc-1234"),
+            vec!["x-cccc".to_string()],
             "the all-hex suffix must not re-glue into cdef-1234"
         );
-        // Fixed-width hex makes x-5b66 a prefix of x-5b667: only the
+        // Fixed-width hex makes a prefix of x-5b667: only the
         // delimiter-bounded one counts.
         assert_eq!(
             branch_node_ids("feature/x-5b667"),

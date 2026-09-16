@@ -1,4 +1,4 @@
-//! Native task-context execution binding (x-59b0).
+//! Native task-context execution binding.
 //!
 //! One binding per executing attempt: who is executing (node, attempt, full
 //! harness/session identity, worktree), what it must have read (plan reference
@@ -695,11 +695,11 @@ mod tests {
     fn binding(sources: Vec<SourceRef>) -> TaskContextBinding {
         TaskContextBinding {
             version: BINDING_VERSION,
-            node: "x-59b0".to_string(),
+            node: "x-aaaa".to_string(),
             attempt: "20260912T052218Z-cl63988-4133dc".to_string(),
             harness: "claude".to_string(),
             session: "850a419a".to_string(),
-            worktree: "/wt/x-59b0".to_string(),
+            worktree: "/wt/x-aaaa".to_string(),
             plan_path: "plans/20260907-task-context.md".to_string(),
             plan_digest: "a".repeat(64),
             bundle_reference: Some("roles/fno-archer.md".to_string()),
@@ -854,7 +854,7 @@ mod tests {
         // The caller's live HEAD is NOT consulted: only content decides.
         let verdict = revalidate_request(&json!({
             "binding": bound_value(&b),
-            "expect": {"node": "x-59b0", "attempt": b.attempt, "session": b.session},
+            "expect": {"node": "x-aaaa", "attempt": b.attempt, "session": b.session},
             "root": root,
         }));
         assert_eq!(verdict["ok"], json!(true), "{verdict}");
@@ -871,7 +871,7 @@ mod tests {
             source("docs/GONE.md", "gone\n"),
         ]);
         b.worktree = root.clone();
-        let expect = json!({"node": "x-59b0", "attempt": b.attempt, "session": b.session});
+        let expect = json!({"node": "x-aaaa", "attempt": b.attempt, "session": b.session});
         let value = bound_value(&b);
         assert_eq!(
             revalidate_request(&json!({"binding": value, "expect": expect, "root": root}))
@@ -896,7 +896,7 @@ mod tests {
         b.worktree = root.clone();
         let wrong_attempt = json!({
             "binding": bound_value(&b),
-            "expect": {"node": "x-59b0", "attempt": "OTHER", "session": b.session},
+            "expect": {"node": "x-aaaa", "attempt": "OTHER", "session": b.session},
             "root": root,
         });
         assert!(revalidate_request(&wrong_attempt)["reason"]
@@ -905,7 +905,7 @@ mod tests {
             .starts_with("wrong_attempt"));
         let foreign = json!({
             "binding": bound_value(&b),
-            "expect": {"node": "x-59b0", "attempt": b.attempt, "session": "someone-else"},
+            "expect": {"node": "x-aaaa", "attempt": b.attempt, "session": "someone-else"},
             "root": root,
         });
         assert!(revalidate_request(&foreign)["reason"]
@@ -925,7 +925,7 @@ mod tests {
         b.worktree = dir.path().to_string_lossy().to_string();
         let verdict = revalidate_request(&json!({
             "binding": bound_value(&b),
-            "expect": {"node": "x-59b0"},
+            "expect": {"node": "x-aaaa"},
             "root": other.path().to_string_lossy(),
         }));
         assert!(verdict["reason"]
@@ -987,7 +987,7 @@ mod tests {
 
     #[test]
     fn gate_absent_when_nothing_declared() {
-        let verdict = gate_request(&json!({"node": "x-59b0", "root": "/wt", "env": {}}));
+        let verdict = gate_request(&json!({"node": "x-aaaa", "root": "/wt", "env": {}}));
         assert_eq!(verdict["ok"], json!(true));
         assert_eq!(verdict["declared"], json!(false));
     }
@@ -995,7 +995,7 @@ mod tests {
     #[test]
     fn gate_names_unreadable_by_context_prefix() {
         let verdict = gate_request(&json!({
-            "node": "x-59b0",
+            "node": "x-aaaa",
             "root": "/wt",
             "env": {"FNO_TASK_CONTEXT_FILE": "/nonexistent/gone.json"},
         }));
@@ -1010,7 +1010,7 @@ mod tests {
         write_source(dir.path(), "docs/PLAN.md", "plan bytes\n");
         let mut b = binding(vec![source("docs/PLAN.md", "plan bytes\n")]);
         b.worktree = root.clone();
-        let binding_file = dir.path().join("task-context-x-59b0.json");
+        let binding_file = dir.path().join("task-context-x-aaaa.json");
         std::fs::write(
             &binding_file,
             serde_json::to_string(&bound_value(&b)).expect("serialize"),
@@ -1024,14 +1024,14 @@ mod tests {
             }))
         };
         // Unchanged sources pass and carry the native answer.
-        let ok = gate_on("x-59b0");
+        let ok = gate_on("x-aaaa");
         assert_eq!(ok["ok"], json!(true));
         assert_eq!(ok["declared"], json!(true));
         assert_eq!(ok["answer"]["ok"], json!(true));
         assert_eq!(ok["answer"]["checked_sources"], json!(1));
         // A changed source refuses with the context_ prefix + full detail.
         write_source(dir.path(), "docs/PLAN.md", "CHANGED bytes\n");
-        let stale = gate_on("x-59b0");
+        let stale = gate_on("x-aaaa");
         assert_eq!(stale["ok"], json!(false));
         assert_eq!(stale["reason"], json!("context_stale_source"));
         assert!(stale["detail"].as_str().unwrap().contains("stale_source"));

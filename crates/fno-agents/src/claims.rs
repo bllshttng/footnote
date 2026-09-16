@@ -611,7 +611,7 @@ pub mod basis {
     pub const TTL_EXPIRED_UNRESOLVED: &str = "ttl-expired-unresolved";
 }
 
-/// The session-keyed liveness answer beside the pid probe (x-a613). A pid
+/// The session-keyed liveness answer beside the pid probe. A pid
 /// dies on every harness resume while the session survives, so pid
 /// arithmetic alone cannot classify a resumed holder.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -829,7 +829,7 @@ pub fn classify_with_basis(
 /// Classify with optional sweep-time sibling evidence. `None` is the honest
 /// value for single-key reads; a full scan passes the PID exclusivity map's
 /// result for the record being classified. `session_witness` is the
-/// session-keyed liveness reader (x-a613); `None` keeps the pid-only
+/// session-keyed liveness reader; `None` keeps the pid-only
 /// verdicts legacy records were characterized under.
 /// The pid verdict for a claim whose holder is one short-lived process, at
 /// TTL expiry. Live keeps the claim; any pid cause except a refused probe
@@ -921,11 +921,11 @@ pub fn classify_with_basis_and_exclusivity(
                 return (ClaimState::Live, cause);
             }
         }
-        // Session witness (x-a613). The recorded pid is a corpse after every
+        // Session witness. The recorded pid is a corpse after every
         // harness resume, so pid arithmetic alone collapses UNKNOWN into a
         // verdict - 1509 collapsed it into alive (nothing reapable, the reaper
         // starved) and before it, into dead (a session that wrote 18 seconds
-        // earlier read provably dead, x-0c29). The witness is the third
+        // earlier read provably dead). The witness is the third
         // state's exit: a LIVE session heals the verdict, and an UNRESOLVED
         // one reads Suspect only inside a bounded grace, then Stale -
         // reapable by policy, never held for a proof that never arrives
@@ -968,7 +968,7 @@ pub fn classify_with_basis_and_exclusivity(
     }
     // TTL claim, still inside its window: live pid => Live, dead/replaced pid
     // => Suspect (TTL-protected, not stealable) - unless the session witness
-    // proves the holder (x-ba96): a resumed session's recorded pid is
+    // proves the holder: a resumed session's recorded pid is
     // permanently dead, so without this heal the claim sits Suspect until the
     // heartbeat lapses and the dead pid decides at expiry.
     let witnessed = session_witness.and_then(|witness| {
@@ -1517,7 +1517,7 @@ fn steal_if_stale(lock_dir: &Path) -> bool {
                 // steal threshold, so hand back only an honest-hold grace
                 // window instead - a live holder releases inside it; an
                 // orphan becomes stealable in RESTORE_GRACE rather than
-                // STALE_MUTEX_STEAL (mirrors the Python fix, x-474a).
+                // STALE_MUTEX_STEAL (mirrors the Python fix).
                 backdate_mtime(&reaped, STALE_MUTEX_STEAL - RESTORE_GRACE);
                 if std::fs::rename(&reaped, lock_dir).is_err() {
                     eprintln!(
@@ -1685,7 +1685,7 @@ pub(crate) fn append_event_line(
 ) -> Result<(), String> {
     let mut line = serde_json::to_vec(event).map_err(|e| e.to_string())?;
     line.push(b'\n');
-    // Honor the declared retention class (x-add3): ephemeral rows (the claim
+    // Honor the declared retention class: ephemeral rows (the claim
     // lifecycle, single_flight_gate) go to the sibling journal - the same
     // routing EventEmitter::write_line and the Python append_event apply - so
     // an event lands in one store whichever language emitted it.
@@ -1831,7 +1831,7 @@ fn validate_inputs(
 }
 
 /// Ambient harness session markers, highest precedence first. Mirrors
-/// `cli/src/fno/harness_identity.py::HARNESS_SESSION_MARKERS` (x-efc7) so the
+/// `cli/src/fno/harness_identity.py::HARNESS_SESSION_MARKERS` so the
 /// Rust writer tags a claim with the same harness the Python resolver would.
 pub(crate) const HARNESS_SESSION_MARKERS: &[(&str, &str)] = &[
     ("CODEX_THREAD_ID", "codex"),
@@ -1852,7 +1852,7 @@ pub(crate) const AMBIENT_IDENTITY_NAMES: &[&str] = &[
     "FNO_AGENT_HARNESS",
     "FNO_AGENT_PROVIDER",
     "FNO_AGENT_SESSION",
-    // Where the session runs, stamped by the spawn path that knows (x-be78).
+    // Where the session runs, stamped by the spawn path that knows.
     // The ask lanes below launch one-shot children and stamp no substrate, so
     // this entry is the whole job here: without the scrub, a child of a pane
     // worker inherits `pane` and reads as attended for the rest of its life.
@@ -1962,7 +1962,7 @@ fn vendor_identity_from(get: &impl Fn(&str) -> Option<String>) -> (Option<(Strin
             // case (the durable CODEX_THREAD_ID against the legacy
             // CODEX_SESSION_ID naming two sessions). Degrade like Python's
             // _vendor_identity does; without proof the id could belong to
-            // either session (x-0992).
+            // either session.
             Some(_) => {
                 if !session
                     .as_deref()
@@ -2102,7 +2102,7 @@ pub fn resolve_harness_from(get: impl Fn(&str) -> Option<String>) -> Option<Stri
     resolve_identity_from(get).1
 }
 
-/// The spawn-time parent edge (x-132c), the Rust mirror of Python's
+/// The spawn-time parent edge, the Rust mirror of Python's
 /// `_capture_parent_edge` (dispatch.py): ambient-captured from the SPAWNING
 /// session's environment at every registry mint site, never required of a
 /// caller. Returns `(session, harness, cwd)` for the spawned row's
@@ -2114,7 +2114,7 @@ pub fn resolve_harness_from(get: impl Fn(&str) -> Option<String>) -> Option<Stri
 /// Within one family the DURABLE marker leads (`CODEX_THREAD_ID` over legacy
 /// `CODEX_SESSION_ID`), the winner's VALUE is the parent session id, not just
 /// its harness kind, and two ids of one family that DISAGREE attribute
-/// nothing - the same degrade Python's `_vendor_identity` applies (x-0992).
+/// nothing - the same degrade Python's `_vendor_identity` applies.
 pub fn ambient_parent_edge() -> (Option<String>, Option<String>, Option<String>) {
     ambient_parent_edge_from(|k| std::env::var(k).ok())
 }
@@ -2611,7 +2611,7 @@ pub fn parse_ttl_ms(s: &str) -> Option<i64> {
         .filter(|v| *v > 0)
 }
 
-/// Best-effort lease renewal (x-ba4b): reset a live TTL claim's `expires_at` to
+/// Best-effort lease renewal: reset a live TTL claim's `expires_at` to
 /// `now + ttl_ms`, but ONLY if the on-disk holder still matches `holder`.
 /// `fno-agents loop-check` calls this on every stop with the manifest's own
 /// TTL, so a respawned worker (whose supervisor pid died) keeps its claim fresh
@@ -2622,7 +2622,7 @@ pub fn parse_ttl_ms(s: &str) -> Option<i64> {
 /// session's claim over-extended for hours. `holder`, `reason` and `metadata`
 /// are always preserved.
 ///
-/// RE-ANCHORING (x-05be). When the recorded pid is NOT live and the renewer is
+/// RE-ANCHORING. When the recorded pid is NOT live and the renewer is
 /// on this machine, renewal rewrites `pid`, `host`, `machine_id` and
 /// `acquired_at` together alongside `expires_at`. This function used to
 /// preserve the pid, and that is what made SUSPECT mean two different things: a
@@ -2653,13 +2653,13 @@ pub fn parse_ttl_ms(s: &str) -> Option<i64> {
 /// refuse as mutex-busy. Inside the lock the record is extended only when
 /// `holder`, `acquired_at` and `expires_at` still equal the values that
 /// verdict was computed from; a record that moved between the two reads is
-/// not the one the verdict described, and the next stop retries (x-b445).
+/// not the one the verdict described, and the next stop retries.
 ///
 /// An expired claim is renewed exactly when `fno agents claim status` calls it
 /// LIVE or SUSPECT. `classify` keeps a claim whose pid or session witness
 /// reads live unstealable past its TTL, so refusing to extend it left a live
 /// session unable to renew a lease no peer could take: every such stop burned
-/// a turn on a refused watch idle (x-b445, 738 refusals in 4 days). Only a
+/// a turn on a refused watch idle (738 refusals in 4 days). Only a
 /// STALE verdict refuses: the claim is then reclaimable, and resurrecting it
 /// would race a legitimate recovery.
 ///
@@ -2677,14 +2677,14 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
     let path = claim_path(key, root)?;
     // Cheap pre-check outside the mutex: skip the lock for the common
     // not-ours/absent/PID-liveness cases so idle stops stay lock-free. The
-    // status verdict is computed HERE for the same reason (x-b445): the
+    // status verdict is computed HERE for the same reason: the
     // session witness may read transcripts, and slow I/O under the recovery
     // mutex makes a successor's `target init --handover-from` refuse as
     // mutex-busy.
     let observed = match read_claim_file(&path) {
         Ok(rec) if rec.holder == holder && rec.expires_at.is_some() => {
             // Extend exactly what `fno agents claim status` would call live:
-            // only a STALE verdict refuses (x-b445). Live and Suspect both
+            // only a STALE verdict refuses. Live and Suspect both
             // extend, so a session past its TTL whose pid or session witness
             // reads live can renew its own lease again. The verdict runs only
             // for an EXPIRED record: TTL expiry is the only refused state a
@@ -2836,7 +2836,7 @@ const SESSION_PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// changed while we grabbed it), then extend only a still-live, still-ours claim.
 /// `observed` is the record the caller's verdict was computed from; if any of
 /// the identity fields moved between that read and this lock, what is on disk
-/// is not the record the verdict described, so back off (x-b445) - the next
+/// is not the record the verdict described, so back off - the next
 /// stop recomputes and retries.
 fn renew_locked(
     path: &Path,
@@ -2858,11 +2858,11 @@ fn renew_locked(
     if existing.expires_at.is_none() {
         return Ok(false); // PID-liveness claim: no TTL to extend
     }
-    // No TTL-expiry refusal here (x-b445): the caller refuses a STALE verdict
+    // No TTL-expiry refusal here: the caller refuses a STALE verdict
     // before the lock; an expired claim whose status verdict reads Live or
     // Suspect extends.
     let now = now_ms();
-    // Re-anchor a corpse (x-05be). Guarded three ways: the holder already
+    // Re-anchor a corpse. Guarded three ways: the holder already
     // matched above, the recorded pid must be dead or reused, and the claim must
     // be on THIS machine - off-host we cannot read the pid table, so a
     // dead-looking pid is unverified and only the deadline may move. A LIVE
@@ -2876,16 +2876,16 @@ fn renew_locked(
         && is_same_machine(&existing.host, existing.machine_id.as_deref())
         && !is_live(&existing)
     {
-        // Session-keyed re-anchor (x-a613). When the claim carries a session
+        // Session-keyed re-anchor. When the claim carries a session
         // id and the fleet registry row keyed by it carries a live pid, that
         // row's pid becomes the anchor REGARDLESS of create time versus
         // acquired_at: the resumed harness starts after the claim was filed,
         // and the row's session binding - not create-time arithmetic - is the
         // proof the pid is the same logical session. This is the guard
-        // x-05be's fix needed and could not express: without it, a resumed
+        // fix needed and could not express: without it, a resumed
         // session's only candidate anchor is rejected forever and the claim
         // rides Suspect on a corpse pid until the heartbeat lapses
-        // (node:x-ba96, node:x-5f06, node:x-87fb).
+        // (node:, node:, node:).
         let session_anchor = existing
             .session_id
             .as_deref()
@@ -2980,7 +2980,7 @@ mod tests {
     }
 
     /// Pin FNO_AGENTS_HOME for a test whose renew call consults the session
-    /// witness (renew classifies through the registry leg, x-b445), so an
+    /// witness (renew classifies through the registry leg), so an
     /// ambient session id never reads the operator's real registry. Callers
     /// hold test_env_lock; restore with restore_agents_home.
     fn pin_agents_home(td: &TempDir) -> Option<std::ffi::OsString> {
@@ -3079,7 +3079,7 @@ mod tests {
 
     fn read_events(root: &TempDir) -> Vec<Value> {
         // The claim lifecycle kinds are ephemeral-class, so they live in the
-        // .ephemeral sibling since retention routing (x-add3). Read both files
+        // .ephemeral sibling since retention routing. Read both files
         // so the assertions below keep describing the full audit trail.
         let mut text =
             std::fs::read_to_string(root.path().join(".fno/events.jsonl")).unwrap_or_default();
@@ -3138,7 +3138,7 @@ mod tests {
         );
     }
 
-    // ---- lease renewal (x-ba4b) -----------------------------------------
+    // ---- lease renewal -----------------------------------------
 
     fn read_claim(root: &TempDir, key: &str) -> ClaimRecord {
         read_claim_file(&lockfile(root, key)).unwrap()
@@ -3220,7 +3220,7 @@ mod tests {
 
     #[test]
     fn renew_reanchors_a_dead_pid_to_the_durable_session_pid() {
-        // x-05be: preserving a corpse is what made SUSPECT mean two things. A
+        // preserving a corpse is what made SUSPECT mean two things. A
         // respawned worker and a dead one left byte-identical claims.
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
@@ -3459,7 +3459,7 @@ mod tests {
             Ok(false)
         );
         // An expired claim is refused only when its status verdict reads
-        // STALE (x-b445): dead pid, no session id for a witness to heal.
+        // STALE: dead pid, no session id for a witness to heal.
         // A live-pid expired fixture now RENEWS (see
         // renew_extends_an_expired_claim_the_status_verdict_calls_live).
         let mut o = opts_in(&td);
@@ -3488,7 +3488,7 @@ mod tests {
 
     #[test]
     fn renew_extends_an_expired_claim_the_status_verdict_calls_live() {
-        // x-b445 AC1-HP: a session past its TTL whose pid is verifiably alive
+        // AC1-HP: a session past its TTL whose pid is verifiably alive
         // extends its own claim, on the same verdict `claim status` prints.
         let td = TempDir::new().unwrap();
         let mut o = opts_in(&td);
@@ -3531,7 +3531,7 @@ mod tests {
 
     #[test]
     fn renew_refuses_a_stale_verdict_and_leaves_the_lockfile_bytes_alone() {
-        // x-b445 AC1-ERR: verdict-gated renewal still refuses a corpse, and a
+        // AC1-ERR: verdict-gated renewal still refuses a corpse, and a
         // refused renew writes nothing.
         let td = TempDir::new().unwrap();
         let mut o = opts_in(&td);
@@ -3568,7 +3568,7 @@ mod tests {
 
     #[test]
     fn renew_locked_refuses_a_record_that_moved_between_verdict_and_lock() {
-        // x-b445 AC1-EDGE: the verdict described `observed`; a lockfile that
+        // AC1-EDGE: the verdict described `observed`; a lockfile that
         // changed before the mutex was taken is a different record, so extend
         // nothing.
         let td = TempDir::new().unwrap();
@@ -3790,7 +3790,7 @@ mod tests {
         assert_eq!(back, rec);
     }
 
-    // ---- session witness (x-a613) ------------------------------------------
+    // ---- session witness ------------------------------------------
 
     /// A live-session record: session-proven pid that is DEAD (the resume
     /// shape every dated specimen shares - a resumed session keeps its
@@ -3804,7 +3804,7 @@ mod tests {
 
     #[test]
     fn resumed_session_registry_row_keeps_expired_claim_live() {
-        // x-0c29: a session that wrote 18 seconds before the read was declared
+        // a session that wrote 18 seconds before the read was declared
         // provably dead and its work freed, because the recorded pid had
         // stopped tracking the session. A live session NEVER reads stale.
         let now = now_ms();
@@ -3818,7 +3818,7 @@ mod tests {
 
     #[test]
     fn resumed_session_in_window_reads_live_not_suspect() {
-        // x-ba96: the in-window Suspect arm protects a resumed session's slot
+        // the in-window Suspect arm protects a resumed session's slot
         // but never heals it; the moment the heartbeat lapses the dead
         // recorded pid decides. A LIVE session witness ends the limbo.
         let now = now_ms();
@@ -4018,7 +4018,7 @@ mod tests {
             classify(&record(me, now, Some(now + 60_000), &host), Some(now)),
             ClaimState::Live
         );
-        // SUSPECT arm (x-ba4b): unexpired TTL + dead/replaced pid -> SUSPECT
+        // SUSPECT arm: unexpired TTL + dead/replaced pid -> SUSPECT
         // (was LIVE). A respawned worker's slot stays TTL-protected, but the
         // distinct state lets init/dispatch refuse-and-skip rather than steal.
         assert_eq!(
@@ -4242,7 +4242,7 @@ mod tests {
 
     #[test]
     fn shared_host_harness_stales_an_expired_prover_claim_by_name() {
-        // AC2-HP, the specimen: node:x-fa8b, expired 3h45m earlier, stamped
+        // AC2-HP, the specimen: node:, expired 3h45m earlier, stamped
         // session-prover, its pid answering as `codex app-server
         // --remote-control` up 9h20m. The record is built as a PRE-FIX binary
         // wrote it, because the fix must reach records already on disk.

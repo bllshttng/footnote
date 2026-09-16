@@ -916,7 +916,7 @@ def _review_hold_refusal(command=""):
 
 
 def _live_merge_switch_armed(repo_root, fm):
-    """One authoritative posture for raw `gh pr merge` (x-3855): the same
+    """One authoritative posture for raw `gh pr merge` : the same
     resolution the sanctioned verb (`fno do pr merge`) and `fno-agents
     finalize` apply. Live config.auto_merge.enabled arms, or the run's
     explicit spawn-time grant (auto_merge_source: env-target-auto-merge) arms
@@ -924,12 +924,12 @@ def _live_merge_switch_armed(repo_root, fm):
 
     The manifest alone does NOT arm. It is a snapshot, and a snapshot whose
     `true` merely mirrored config must not outlive an operator flipping the
-    live switch off mid-flight (x-2270) - without this read, the raw path was
+    live switch off mid-flight - without this read, the raw path was
     the weaker gate, merging past a disarm the sanctioned verb refuses.
 
     The config answer comes from the shared resolver, never a local TOML
     parse: layer precedence and the legacy dispatch.auto_merge ->
-    auto_merge.grant fold live there (x-93ff), and a second parser here is
+    auto_merge.grant fold live there, and a second parser here is
     how the hook drifts from every other reader. In-process first (the hook
     interpreter often carries the package); the resolver CLI as the fallback
     when it does not, budgeted at 5s because the lineage and coverage probes
@@ -2287,7 +2287,7 @@ def main():
         _emit("deny", reason)
         _exit_allow()
 
-    # gh pr create - gated only on the closure trailer (x-49ec). Everything
+    # gh pr create - gated only on the closure trailer. Everything
     # else about ad-hoc creation stays ungated; the merge gate below is where
     # pipeline discipline is enforced.
     if segments is not None:

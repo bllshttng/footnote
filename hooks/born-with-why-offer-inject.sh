@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hooks/born-with-why-offer-inject.sh -- surface a pending born-with-why offer (x-af8d).
+# hooks/born-with-why-offer-inject.sh -- surface a pending born-with-why offer.
 #
 # UserPromptSubmit hook. The attended born-with-why path (spawn_think.py) emits a
 # `think_offered` event to .fno/events.jsonl, but its only surfacing to the agent
@@ -17,13 +17,13 @@
 # sessions sharing .fno should not both nag. Bursts DO happen (four births 3s
 # apart, 2026-07-30T02:39:58..02:40:08), so only the newest gets the full offer,
 # but the rest ride along as bare ids: the cursor eats them either way, and
-# naming them is the difference between deferred and destroyed (x-965f).
+# naming them is the difference between deferred and destroyed.
 
 set -uo pipefail
 
 # fno shells can wedge on a stalled daemon / graph lock; bound every call with
 # the shared wall-clock helper rather than the harness's 30s hook timeout
-# (x-989d). Fails closed like the other injection hooks: a missing helper exits 0.
+#. Fails closed like the other injection hooks: a missing helper exits 0.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/with-timeout.sh
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
@@ -249,7 +249,7 @@ Nodes born this gap, not offered: ${older_ids}.
 #       born-with-why /think only makes sense on a just-born, not-yet-started
 #       node; once it is claimed or has a PR the "why" conversation already
 #       happened, so re-offering just spawns a DUPLICATE /think on a live
-#       session (observed: x-ef41 offered in an unrelated session AND in its
+#       session (observed: offered in an unrelated session AND in its
 #       own, while claimed + PR open). Keyed off the resolved JSON.
 # Degrade to surfacing whenever `fno` is unavailable or its output cannot be
 # parsed, so a missing/garbled resolver never eats a real fresh offer. Run from

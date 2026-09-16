@@ -54,7 +54,7 @@ def lift_retire_grace(data: object) -> object:
     """Lift a legacy ``recovery.retire_grace_s`` onto ``agents.retire_grace_s``.
 
     The key moved to the agents block when retirement became the daemon
-    sweep's question (x-c672); the daemon reads ``agents.retire_grace_s``
+    sweep's question ; the daemon reads ``agents.retire_grace_s``
     (agents_config.rs). A config still carrying the recovery spelling parses,
     answers under the new key, and prints ONE line naming the legacy key.
     The new spelling wins when both are present.
@@ -70,7 +70,7 @@ def lift_retire_grace(data: object) -> object:
         agents["retire_grace_s"] = recovery["retire_grace_s"]
         print(
             "fno config: recovery.retire_grace_s moved to agents.retire_grace_s; "
-            "using the legacy value (x-c672)",
+            "using the legacy value ",
             file=sys.stderr,
         )
     recovery = {k: v for k, v in recovery.items() if k != "retire_grace_s"}

@@ -5,7 +5,7 @@ every layer: the backlog CLI, target, mail, provenance and the agents CLI all
 validate the same two flags. Parking it in the runtime package forced core
 callers into an upward import for what is pure flag validation.
 
-The residual upward edge this module used to carry is closed (x-cec8):
+The residual upward edge this module used to carry is closed :
 ``fno.harness_identity`` built ``LEGACY_HANDLE_RE`` at import time from
 ``fno.agents.harness_map.known_harnesses()``, so importing it eagerly imported
 ``fno.agents``. The harness-name set now lives at this layer
@@ -23,7 +23,7 @@ defaults the harness the same way:
 
 Every rung of that chain is on the HARNESS axis: the middle rung reads harness
 markers out of the environment, and the builtin ``claude`` is a CLI binary, not
-a vendor. It resolved a "provider" until x-c55f, which is why an operator could
+a vendor. It resolved a "provider" until, which is why an operator could
 read a harness name out of a provider-shaped field and conclude a route had
 fallen back. See ``docs/architecture/axis-vocabulary.md``.
 
@@ -67,7 +67,7 @@ def infer_invoking_harness(env: Optional[Mapping[str, str]] = None) -> Optional[
     when they carry the same id; two DIFFERENT ids of one family (the durable
     codex thread id against the legacy codex session id) are a disagreement
     and fall through to None, exactly as markers naming different harnesses
-    do (x-0992).
+    do.
     """
     environ = os.environ if env is None else env
     return resolve_harness_identity(environ).harness

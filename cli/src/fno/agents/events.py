@@ -196,7 +196,7 @@ def emit_identity_resolution(owned: Any, *, path: Optional[Path] = None) -> None
 
 
 # ---------------------------------------------------------------------
-# Spawn-lifecycle births (x-8cd5 Wave 6): deaths already land in the daemon's
+# Spawn-lifecycle births (Wave 6): deaths already land in the daemon's
 # agent-lifecycle log (~/.fno/agents/events.jsonl) — agent_orphan_reaped,
 # agent_row_reaped, agent_stopped, agent_removed. A birth that lands anywhere
 # else splits the lineage tree across two files, so it is unreconstructible:
@@ -221,7 +221,7 @@ def daemon_lifecycle_log() -> Path:
 def _emit_daemon_envelope(
     kind: str, data: dict[str, Any], *, source: str = "python"
 ) -> None:
-    """Write one record in the daemon's unified envelope (x-2901) to the daemon
+    """Write one record in the daemon's unified envelope to the daemon
     lifecycle log.
 
     The Rust daemon nests the payload under ``data`` and stamps the kind as
@@ -282,7 +282,7 @@ def emit_spawned(
         "spawned_by_session": spawned_by_session,
         "spawned_by_harness": spawned_by_harness,
         "spawned_by_cwd": spawned_by_cwd,
-        # x-5283: a birth names its parent or why it could not.
+        # a birth names its parent or why it could not.
         "lineage_reason": lineage_reason,
     }
     if pid is not None:
@@ -318,7 +318,7 @@ def emit_spawn_failed(
 
 
 # ---------------------------------------------------------------------
-# Classified session-id transitions (x-dfe7). Written to the SAME daemon
+# Classified session-id transitions. Written to the SAME daemon
 # lifecycle log births and deaths use, so a succession is joinable with the
 # predecessor's eventual `agent_row_reaped` from one file - the lineage event
 # must exist before any reap can erase the row it names.

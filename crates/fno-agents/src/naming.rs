@@ -1,4 +1,4 @@
-//! The x-84b2 worker-name vocabulary owner, ported from Python `naming.py`
+//! The x-aaaa worker-name vocabulary owner, ported from Python `naming.py`
 //! (crown ruling on laws d-4b39ad4c / d-52ae01cb: the tree budget ports the
 //! touched verb to crates/ rather than raising the allowance).
 //!
@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 pub const MAX_LEN: usize = 64;
 /// Per-component cap for human-readable text.
 pub const SLUG_CAP: usize = 30;
-/// Dispatch-form slug cap (x-57fe): a worker name must stay readable in a
+/// Dispatch-form slug cap: a worker name must stay readable in a
 /// narrow terminal, so the human slug gives up more room to the model tag.
 pub const DISPATCH_SLUG_CAP: usize = 12;
 
@@ -147,7 +147,7 @@ pub fn slug_component(raw: Option<&str>, cap: usize) -> String {
     s
 }
 
-/// The short per-model name tag (x-57fe): a known key in `model_codes`
+/// The short per-model name tag: a known key in `model_codes`
 /// matched longest-first as a substring of the lowered model, else the first
 /// 8 alphanumeric characters. `None` for a blank model.
 pub fn model_code_for(model: Option<&str>) -> Option<String> {
@@ -174,9 +174,9 @@ pub fn model_code_for(model: Option<&str>) -> Option<String> {
     Some(tag)
 }
 
-/// A node-shaped identity (`x-4129`) emits its bare hex: every row in a
+/// A node-shaped identity (``) emits its bare hex: every row in a
 /// dispatch shares the prefix, so the name spends those bytes on the model
-/// tag instead (x-57fe).
+/// tag instead.
 fn node_hex(identity: &str) -> Option<&str> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"^[a-z][a-z0-9]*-([0-9a-f]+)$").unwrap());
@@ -311,7 +311,7 @@ pub fn verb_code_for(word: Option<&str>) -> Result<String, NameError> {
 /// Build `[<source>-]<verb>-<hex>[-<qualifier>][-<slug>][-<model>][-<disc>]`.
 /// `source` None is the attended manual form; unknown codes raise rather than
 /// fabricating provenance. The dispatch form caps the human slug at
-/// [`DISPATCH_SLUG_CAP`] and carries the model tag (x-57fe).
+/// [`DISPATCH_SLUG_CAP`] and carries the model tag.
 pub fn dispatch_agent_name(
     source: Option<&str>,
     verb: &str,
@@ -457,7 +457,7 @@ pub fn parse_dispatch_agent_name(name: Option<&str>) -> Option<Parsed> {
             verb: verb.to_string(),
             node: Some(match (c.get(1), c.get(2)) {
                 // Full form keeps the prefix; bare hex stays bare - the
-                // Python bridge re-attaches the id via the graph (x-57fe).
+                // Python bridge re-attaches the id via the graph.
                 (Some(p), Some(hex)) => format!("{}{}", p.as_str(), hex.as_str()),
                 (_, Some(hex)) => hex.as_str().to_string(),
                 _ => joined.clone(),
@@ -641,16 +641,16 @@ mod tests {
         let n = dispatch_agent_name(
             Some("ab"),
             "bp",
-            "x-84b2",
+            "x-aaaa",
             Some("Ab Names"),
             None,
             None,
             None,
         )
         .unwrap();
-        assert_eq!(n, "ab-bp-84b2-ab-names");
-        let manual = dispatch_agent_name(None, "t", "x-84b2", None, None, None, None).unwrap();
-        assert_eq!(manual, "t-84b2");
+        assert_eq!(n, "ab-bp-aaaa-ab-names");
+        let manual = dispatch_agent_name(None, "t", "x-aaaa", None, None, None, None).unwrap();
+        assert_eq!(manual, "t-aaaa");
     }
 
     #[test]
@@ -659,14 +659,14 @@ mod tests {
         let n = dispatch_agent_name(
             Some("sob"),
             "bp",
-            "x-57fe",
+            "x-bbbb",
             Some("250ms Read Floor"),
             None,
             None,
             Some("glm-5.3-flash[1m]"),
         )
         .unwrap();
-        assert_eq!(n, "sob-bp-57fe-250ms-read-glm");
+        assert_eq!(n, "sob-bp-bbbb-250ms-read-glm");
         // Unknown model squeezes to 8 alphanumeric characters.
         let n = dispatch_agent_name(
             Some("ab"),
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(verb_code_for(Some("builtin")).unwrap(), "t");
     }
 
-    /// x-c976: the name mint strips either sigil through the parse owner.
+    /// the name mint strips either sigil through the parse owner.
     #[test]
     fn verb_code_reads_both_sigils() {
         assert_eq!(verb_code_for(Some("$target")).unwrap(), "t");
@@ -759,34 +759,34 @@ mod tests {
 
     #[test]
     fn parse_positional_grammar() {
-        let p = parse_dispatch_agent_name(Some("ab-bp-x-84b2-slug")).unwrap();
+        let p = parse_dispatch_agent_name(Some("ab-bp-x-aaaa-slug")).unwrap();
         assert_eq!(p.source.as_deref(), Some("ab"));
         assert_eq!(p.verb, "bp");
-        assert_eq!(p.node.as_deref(), Some("x-84b2"));
+        assert_eq!(p.node.as_deref(), Some("x-aaaa"));
         assert_eq!(p.tail, "slug");
         // Bare-hex node: parsed as the node, hex kept bare.
         let p = parse_dispatch_agent_name(Some("ab-bp-84b2-slug")).unwrap();
         assert_eq!(p.node.as_deref(), Some("84b2"));
         assert_eq!(p.tail, "slug");
         // A node prefix colliding with a code never misreads as a source.
-        let p = parse_dispatch_agent_name(Some("t-x-84b2")).unwrap();
+        let p = parse_dispatch_agent_name(Some("t-x-aaaa")).unwrap();
         assert!(p.source.is_none());
         assert_eq!(p.verb, "t");
-        assert_eq!(p.node.as_deref(), Some("x-84b2"));
+        assert_eq!(p.node.as_deref(), Some("x-aaaa"));
         // Typed identities stay opaque.
         let p = parse_dispatch_agent_name(Some("ro-t-session-abcd1234")).unwrap();
         assert!(p.node.is_none());
         assert_eq!(p.tail, "session-abcd1234");
         // Pre-cutover names are not canonical.
-        assert!(parse_dispatch_agent_name(Some("target-x-84b2-1")).is_none());
-        assert!(parse_dispatch_agent_name(Some("j-x-3218-2")).is_none());
+        assert!(parse_dispatch_agent_name(Some("target-x-aaaa-1")).is_none());
+        assert!(parse_dispatch_agent_name(Some("j-x-cccc-2")).is_none());
     }
 
     #[test]
     fn bridge_forms() {
         let n = bridge_name(
             None,
-            "x-84b2",
+            "x-aaaa",
             Some("Ab Names"),
             None,
             None,
@@ -795,7 +795,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(n, "ab-bp-84b2-ab-names");
+        assert_eq!(n, "ab-bp-aaaa-ab-names");
         assert_eq!(
             bridge_name(
                 Some("legacy"),
@@ -823,12 +823,12 @@ mod tests {
                 .exit,
             2
         );
-        let n = bridge_name(Some("target"), "x-3218", None, None, None, None, None, None).unwrap();
-        assert_eq!(n, "target-3218");
+        let n = bridge_name(Some("target"), "x-cccc", None, None, None, None, None, None).unwrap();
+        assert_eq!(n, "target-cccc");
         // One positional (empty prefix) with a verb is the node.
         let n = bridge_name(
             None,
-            "x-84b2",
+            "x-aaaa",
             None,
             None,
             None,
@@ -837,7 +837,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(n, "kl-th-84b2");
+        assert_eq!(n, "kl-th-aaaa");
     }
 
     #[test]

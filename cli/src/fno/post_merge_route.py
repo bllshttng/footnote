@@ -38,7 +38,7 @@ def _live_codex_registry_entry(session_id: str):
     """A codex registry candidate addressable as ``session_id``, preferring one
     that carries a live transport (``mux``), or ``None``.
 
-    v10 (x-880e): every codex row records its id in the canonical
+    v10 : every codex row records its id in the canonical
     ``harness_session_id`` (a mux_spawn pane row carries it plus a ``mux`` ref; a
     SessionStart-registered row carries it with no transport). Both match on that
     one field, so the transportless row alone would make ``_deliver_live`` fall
@@ -503,11 +503,11 @@ def _default_run_ritual_verb(
     """Run ``fno do pr ritual <n> --autonomous`` from the candidate canonical root.
 
     A bounded subprocess: the launchd tick never overlaps, so an unbounded verb
-    would wedge every future tick (x-97d8). A non-zero exit is a dispatch failure
+    would wedge every future tick. A non-zero exit is a dispatch failure
     the retry/park machinery handles. The verb owns its default-on conditional
     headless judgment leg, so this is the ONLY model-capable layer on the cold
     path - pr-watch adds none of its own (AC1-HP). The timeout is the caller's
-    phase slice (x-c79d): the verb must fail as an ordinary, recorded dispatch
+    phase slice : the verb must fail as an ordinary, recorded dispatch
     failure before the slice's alarm fires, because an alarm cut mid-subprocess
     would skip the caller's state persist and replay the same ritual next tick."""
     try:

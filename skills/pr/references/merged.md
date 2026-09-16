@@ -14,7 +14,7 @@ headless LLM leg) reading the merged diff.
    write parking-lot prose / file triage nodes from the merged diff.
 
 The verb replaced a 1117-line bash ritual whose snippets carried a proven
-zsh/ugrep silent-misfire class (x-f47f: `${VAR:+...}` word-splitting,
+zsh/ugrep silent-misfire class (: `${VAR:+...}` word-splitting,
 empty-alternation grep). Python builds each argv explicitly, so that whole class
 is structurally gone and every leg's failure is loud - there is no `|| true`
 anywhere in the verb.
@@ -72,10 +72,10 @@ step=reap-rows status=ok detail=no lingering rows
 
 The verb absorbed four prior ritual bugs (each verified by a test in `cli/tests/`):
 
-- **x-c4ff** - only real verbs are called. `skill-diff reconcile` and `pr sync-canonical` both exist. No dangling references.
-- **x-fb99** - `parking_lot_path` resolved against the canonical root, never a worktree cwd.
-- **x-adf9** - canonical-sync pipes closed + timeouted, so a trailing `fno agents restart` daemon cannot wedge it.
-- **x-0d66** - the advance leg bounded + streamed.
+- **** - only real verbs are called. `skill-diff reconcile` and `pr sync-canonical` both exist. No dangling references.
+- **** - `parking_lot_path` resolved against the canonical root, never a worktree cwd.
+- **** - canonical-sync pipes closed + timeouted, so a trailing `fno agents restart` daemon cannot wedge it.
+- **** - the advance leg bounded + streamed.
 
 ## Step 3: Judgment residue (attended only)
 
@@ -242,7 +242,7 @@ rule), never as `backlog idea` nodes.
 - **Run from inside the merged PR's own worktree** - the archive leg defers and mints a reap order. The order is a TTL `reap:pr-<n>` claim. The daemon's daily sweep executes standing orders with the guarded `--apply` pass. It never self-removes. An order expires rather than forcing a protected tree.
 ## See also
 - The verb: `fno do pr ritual` (`cli/src/fno/pr/_ritual.py`) and its command in `cli/src/fno/pr/cli.py`.
-- Plan + locked decisions: `internal/fno/plans/20260723-post-merge-mechanical-core-x-bbde.md`.
+- Plan + locked decisions: the maintainers' vault plan note (post-merge mechanical core, 2026-07-23).
 - Design + locked decisions (original ritual): `internal/fno/design/2026-05-30-auto-post-merge-ritual.md`.
 - Reused verbs: `fno backlog reconcile`, `fno backlog retro run`, `fno backlog advance`, `fno doctor skill-diff reconcile`, `fno do pr sync-canonical`, `fno backlog find`, `fno backlog capture add`, `fno backlog carveout`, `fno agents spawn`.
 - The cross-project message bus (different thing): `skills/mail/SKILL.md`.

@@ -31,7 +31,7 @@ from fno.time_budget import validate_timeout_budget
 ENVELOPE_VERSION = 1
 HOSTED_DELIVERY = "hosted"
 #: `fno agents mail send --force`: the body was TYPED into a pane as keystrokes. Kept
-#: distinct from `hosted` on purpose (node x-3a64). Bytes written to a PTY is
+#: distinct from `hosted` on purpose (node). Bytes written to a PTY is
 #: not delivery and is certainly not action -- a full payload can arrive, render,
 #: and be discarded while the return selects a prompt's default. The row says
 #: what happened and no more, and names the pane a reader can go read.
@@ -103,7 +103,7 @@ class Envelope:
     in_reply_to: Optional[str] = None
     delivery: Optional[str] = None
     meta: dict = field(default_factory=dict)
-    # Addressed-delivery enrichment (Group 1, ab-ba91b807 / cv-d54ddd45). All
+    # Addressed-delivery enrichment (Group 1, / cv-d54ddd45). All
     # optional and omitted from the line when unset, so pre-existing lines are
     # byte-unchanged and old lines still parse (LD11 additive read).
     #  - from_session: the sender's session id, used to exclude the sender on a
@@ -113,7 +113,7 @@ class Envelope:
     from_session: Optional[str] = None
     from_model: Optional[str] = None
     to_kind: Optional[str] = None
-    # Send-time masked prose count (x-3700). Additive: a row written before this
+    # Send-time masked prose count. Additive: a row written before this
     # field existed reads back as None and never acquires a fabricated count.
     # The send lane supplies it so the row and Rule 7 both carry the count of
     # the SAME string -- the raw body, not the wire wrapper.
@@ -417,7 +417,7 @@ def append(env: Envelope) -> None:
         live.parent.mkdir(parents=True, exist_ok=True)
         # 0o600: the log holds message bodies; on a single global bus the
         # filesystem mode is the backstop behind the mediated read, so it is
-        # owner-only (Group 1 privacy hardening, ab-ba91b807). umask may narrow
+        # owner-only (Group 1 privacy hardening). umask may narrow
         # this further but never widens it. O_CREAT's mode applies only on
         # creation, so a segment created at 0o644 before this change would keep
         # appending bodies group/other-readable; tighten an existing segment
@@ -535,7 +535,7 @@ def record_typed_delivery(
 ) -> Envelope:
     """Append one audit-only record after a ``--force`` pane send typed the body.
 
-    The mapping from ``msg_id`` to ``pane_id`` is the whole point (node x-3a64).
+    The mapping from ``msg_id`` to ``pane_id`` is the whole point (node).
     A message delivered by keystroke used to be invisible to every mail surface:
     the recipient saw text with no id and the sender's outbox had no row. With
     the mapping, ``fno agents mail sent`` shows the message and names the transport, and

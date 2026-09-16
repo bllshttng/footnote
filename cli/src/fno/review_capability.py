@@ -1,4 +1,4 @@
-"""Can this session's configured reviewers actually run, here (node x-cdc7)?
+"""Can this session's configured reviewers actually run, here (node)?
 
 `config.review.reviewers` names a gate that only a head-pinned
 `review_attestation` clears. Whether anything in THIS session can produce that
@@ -219,7 +219,7 @@ def detect_session(
     for the key, which is a larger change than this node.
     """
     environ = os.environ if env is None else env
-    # READ-ONLY (x-20f1 LD5): branches to name this harness's review verb.
+    # READ-ONLY (LD5): branches to name this harness's review verb.
     harness = resolve_harness_identity(environ).harness or "unknown"
 
     if unattended_configured is None:
@@ -543,7 +543,7 @@ def self_review_invocation(
     above rather than a preference. `--fix` writes to the tree; `--comment`
     writes to the PR, moves no commit, and so cannot void the attestation the
     round earns. Without it a machinery-issued review keeps its findings in
-    the transcript, which is the same defect x-c446 fixed one layer down: a
+    the transcript, which is the same defect fixed one layer down: a
     review that ran and left no durable record reads exactly like a review
     that never ran. Measured at the time: all 18 machinery uses of
     `--comment` attached to native verbs, none to this lane. The `comment`
@@ -624,7 +624,7 @@ def diff_review_level(project_root: Optional[Path]) -> Optional[str]:
     None means no measurable diff yet (init, or no merge base): the caller then
     leaves the `<level>` placeholder in the invocation rather than guessing a
     level the diff has not earned. Advisory only; never raises. Moved here from
-    `fno.target.orient._diff_review_level` (x-dae5) so the renderer below and
+    `fno.target.orient._diff_review_level` so the renderer below and
     the orienter share ONE sizing path."""
     if project_root is None:
         return None
@@ -668,7 +668,7 @@ def render_self_review_invocation(
 ) -> str:
     """Render the native review request, pinned to one PR head or one local branch.
 
-    The render every refusal site names (x-dae5): a worker held at the stop
+    The render every refusal site names : a worker held at the stop
     gate reads THIS string, not a `<level>` placeholder it has no renderer for.
     Sizing always goes through `diff_review_level` (-> `level_for_diff`),
     never the builder's `medium` default - the standing instruction is to size
@@ -931,7 +931,7 @@ def refusal_message(
     return "\n".join(lines)
 
 
-# ── github_apps axis (x-b167 section 6) ──────────────────────────────────────
+# ── github_apps axis (section 6) ──────────────────────────────────────
 #
 # `config.review.reviewers` (above) refuses in two seconds when the LOCAL
 # attestation gate cannot be satisfied here. The `github_apps` gate had no
@@ -946,7 +946,7 @@ def refusal_message(
 # and the `_OPTIONAL_BOTS` tuple (cli/src/fno/pr/_reviews.py): the review Apps
 # footnote recognizes. A recognized login is `satisfiable` at init even before
 # it has acted on a fresh repo, because footnote knows it is a real bot (and for
-# the nudgeable ones, knows how to reach it). NOTE (x-b167): this is the third
+# the nudgeable ones, knows how to reach it). NOTE: this is the third
 # copy of the bot-login set across two languages; folding all three behind one
 # parity-checked source is a follow-up the plan explicitly deferred.
 _KNOWN_REVIEW_APP_LOGINS: frozenset[str] = frozenset(
@@ -1021,7 +1021,7 @@ def _app_ever_acted(login: str, cwd: Optional[str] = None) -> Optional[bool]:
         #
         # Proving absence under substring semantics means enumerating the
         # repository's participants, which is unbounded; until something does
-        # that, unverifiable is the honest answer (x-4a60).
+        # that, unverifiable is the honest answer.
         return None
     try:
         return int(total.strip()) > 0

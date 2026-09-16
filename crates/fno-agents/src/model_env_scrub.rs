@@ -29,7 +29,7 @@ pub const MODEL_ENV_KEYS: [&str; 5] = [
 /// route_settings_path_for test, which keys on the SETTINGS FILE a route or
 /// account wrote, never on the overlay being merely non-empty: the bg lane
 /// passes no extra_env at all (the TARGET_NO_MERGE carrier rides the
-/// inherited env since x-8151), and a carrier owns no slot, so the unrouted
+/// inherited env since), and a carrier owns no slot, so the unrouted
 /// floor still applies (main's behavior, which an any-overlay stand-down
 /// regressed).
 pub fn overlay_is_route(extra_env: &[(&str, &str)]) -> bool {

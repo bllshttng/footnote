@@ -92,7 +92,7 @@ Assemble the payload with a quoted heredoc so the clause's single and double quo
 
 ```bash
 read -r -d '' payload <<'CLAUSE' || true   # read -d '' exits 1 at EOF; absorb it so set -e does not abort
-Take node x-b3a8 through /fno:think.
+Take node through /fno:think.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
 See the canonical implementation worker spawn under [Control surfaces](#control-surfaces).
@@ -115,21 +115,21 @@ Next: /fno:blueprint <node>." --from-self
 # spawn the successor FIRST, carrying the phase artifact - same quoted-heredoc
 # assembly as the primary spawn (the clause's single and double quotes need it here too)
 read -r -d '' payload <<'CLAUSE' || true
-Continue node x-b3a8 at /fno:blueprint. Prior /think artifact: <path>.
+Continue node at /fno:blueprint. Prior /think artifact: <path>.
 <minion clause - paste verbatim from references/minion-clause.md>
 CLAUSE
-fno agents spawn --name node-x-b3a8-g2 "$payload" --substrate thread --effort high
+fno agents spawn --name node-x-aaaa-g2 "$payload" --substrate thread --effort high
 # ...only after the successor's session header prints, close the predecessor.
-fno agents stop node-x-b3a8
-fno agents rm node-x-b3a8
+fno agents stop node-x-aaaa
+fno agents rm node-x-aaaa
 ```
 
 **Corpse check before respawn (no report, pane looks gone):**
 
 ```bash
-fno agents peek node-x-7a53          # alive?
-fno agents claim status node:x-7a53         # still claimed?
-gh pr list --head feature/x-7a53     # already shipped?
+fno agents peek node-x-bbbb          # alive?
+fno agents claim status node:         # still claimed?
+gh pr list --head feature/     # already shipped?
 # only if all three say dead/absent: respawn from the graph-encoded artifact
 ```
 
@@ -137,8 +137,8 @@ gh pr list --head feature/x-7a53     # already shipped?
 
 ```bash
 # read the artifact, rule, then:
-fno backlog update x-b3a8 --dispatch-verb /fno:target --dispatch-brief "Blueprint approved; ship the court section + short_id fix."
-fno backlog update x-b3a8 --add-blocker x-7a53   # if a merge-order constraint applies
+fno backlog update --dispatch-verb /fno:target --dispatch-brief "Blueprint approved; ship the court section + short_id fix."
+fno backlog update --add-blocker   # if a merge-order constraint applies
 ```
 
 ## Caveats

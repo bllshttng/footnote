@@ -23,11 +23,11 @@ For each phase, read the resolved skill/command from `domain_phases` in target-s
 - If value is a skill name (contains `:`): invoke via the Skill tool
 - If value is a bash command (contains spaces or starts with a command): run via Bash
 - If value is `"none"`: skip phase (the corresponding skip flag in the manifest controls this)
-- The plan phase is NOT domain-resolved (always uses `fno:blueprint`). `/think` is not a pipeline phase (x-42c5, operator ruling). It is a research verb outside the delivery path. It never runs automatically here. Run it only as a deliberate choice before `/blueprint`.
+- The plan phase is NOT domain-resolved (always uses `fno:blueprint`). `/think` is not a pipeline phase (operator ruling). It is a research verb outside the delivery path. It never runs automatically here. Run it only as a deliberate choice before `/blueprint`.
 
 ## Phase Details Table
 
-`/think` is not a phase in this table (x-42c5): a bare idea routes directly to Plan below, which self-grounds via its own discovery gate. Run `/think` beforehand only as a deliberate choice, never as an automatic step 1.
+`/think` is not a phase in this table : a bare idea routes directly to Plan below, which self-grounds via its own discovery gate. Run `/think` beforehand only as a deliberate choice, never as an automatic step 1.
 
 | Phase | Condition | Skill |
 |-------|-----------|-------|
@@ -75,6 +75,6 @@ If the linear plugin is not installed, skip all Linear sync steps.
 
 `validate` is a bash command (from `domain_phases.validate`), not a skill invocation. Run it, and on a non-zero exit loop into the validation-failure-recovery flow ([failure-recovery.md](failure-recovery.md)) to either rollback to the pre-execute checkpoint or fix forward. The local run is the work - it is how failures get caught and fixed BEFORE pushing.
 
-The `output_validated` GATE, however, reads external truth (control-plane collapse step 1, ab-10cb7d28): the stop hook checks `gh pr checks` on the recorded PR at promise time. There is no validate artifact, no provenance requirement, and no verifier to satisfy - CI green on the PR is the gate; CI red or pending blocks the promise regardless of any state boolean. Do not write `.fno/artifacts/validate-*.md`; nothing reads it.
+The `output_validated` GATE, however, reads external truth (control-plane collapse step 1): the stop hook checks `gh pr checks` on the recorded PR at promise time. There is no validate artifact, no provenance requirement, and no verifier to satisfy - CI green on the PR is the gate; CI red or pending blocks the promise regardless of any state boolean. Do not write `.fno/artifacts/validate-*.md`; nothing reads it.
 
 After the validate command exits 0 the local run is done. The loop-check verb verifies CI on the PR at promise time; there is no state boolean to write.

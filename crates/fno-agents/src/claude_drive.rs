@@ -1,10 +1,10 @@
 //! Transcript-location + detach-sentinel primitives shared by the live-inject
 //! transport (`crates/fno-agents/src/mail_inject.rs`).
 //!
-//! G1 substrate (epic x-07c1, node x-26df). This file originally also carried
+//! G1 substrate (epic, node). This file originally also carried
 //! the drive primitive itself (`control.sock op:'reply' {short,text,auth}`,
 //! confirmed by a new assistant transcript turn) -- superseded, and removed as
-//! dead code, by node x-1904: the live transport is the bracketed-paste +
+//! dead code, by node : the live transport is the bracketed-paste +
 //! wire-level-CR inject in `mail_inject.rs` (`inject_with_submit` /
 //! `confirm_content_after`), which confirms by CONTENT rather than by
 //! assistant-turn role, and whose `<fno_mail>` envelope is rendered

@@ -50,12 +50,12 @@ class TriageReport:
     # Carve-out ids harvested this run; consumed (removed from the ledger) by the
     # caller on a clean land so they are never re-filed under a later PR.
     harvested_carveout_ids: list[str] = field(default_factory=list)
-    # Count of carve-outs surfaced READ-ONLY this run (x-90b8): an explicit
+    # Count of carve-outs surfaced READ-ONLY this run: an explicit
     # `--pr-number` harvest that resolves no owning session must never file or
     # consume cross-session carve-outs under that PR. They are listed for the
     # operator but neither landed nor consumed.
     readonly_carveout_count: int = 0
-    # Autonomous keep-going follow-up dispatches (x-3360): one FollowupResult per
+    # Autonomous keep-going follow-up dispatches: one FollowupResult per
     # landed carve-out node the engine classified (think/build dispatched, or
     # file-only / capped). Empty unless the engine ran (autonomous mode +
     # config.keep_going.enabled).
@@ -107,7 +107,7 @@ def triage_pr(
     # The carve-out ledger lives under the CANONICAL root (see
     # carveout.core.resolve_carveout_root). ``carveout_root`` carries it from
     # the production caller; it defaults to ``repo_root`` so tests that pass a
-    # single tmp root stay hermetic (ab-44408b6e).
+    # single tmp root stay hermetic.
     carveouts = _harvest.harvest_carveouts(
         carveout_root or repo_root,
         session_ids=session_ids,
@@ -115,7 +115,7 @@ def triage_pr(
         warnings=warnings,
     )
 
-    # x-90b8: when an explicit `--pr-number` harvest resolves NO owning session,
+    # when an explicit `--pr-number` harvest resolves NO owning session,
     # the carve-out source is READ-ONLY. A carve-out is session-scoped (an
     # unrelated session's deferred work), so stamping every unconsumed carve-out
     # onto an arbitrary PR and consuming it mis-attributes cross-session work
@@ -216,7 +216,7 @@ def triage_pr(
         mode=mode,
         repo_root=repo_root,
         project=project,
-        # Canonical node cwd threaded from retro.cli (ab-b4da4664); land_candidates
+        # Canonical node cwd threaded from retro.cli; land_candidates
         # falls back to repo_root only when this is None (direct callers/tests).
         cwd=cwd,
         create_fn=create_fn,
@@ -226,7 +226,7 @@ def triage_pr(
         dedup_entries=existing_nodes,
     )
 
-    # Autonomous keep-going engine (x-3360): after the carve-out follow-ups are
+    # Autonomous keep-going engine: after the carve-out follow-ups are
     # filed as nodes, classify each and dispatch the next unit of work under the
     # shared per-day firehose ceiling. Autonomous mode only (interactive queues
     # nodes for a human ack; auto-dispatch would bypass it) and gated OFF by
@@ -263,7 +263,7 @@ def triage_pr(
     )
 
 
-# ── postmortem pass (W6 6.2, x-f063) ─────────────────────────────────────────
+# ── postmortem pass (W6 6.2) ─────────────────────────────────────────
 
 @dataclass
 class PostmortemReport:

@@ -1,4 +1,4 @@
-"""Relay claude transport (cross-session agent relay, x-908b -> inside-out E4).
+"""Relay claude transport (cross-session agent relay, -> inside-out E4).
 
 E4.3 (the relay-unification capstone) retired this module's PTY ownership. The
 relay no longer holds a `os.openpty()` master fd and no longer scrapes the TUI
@@ -246,8 +246,8 @@ def resolve_worker_short_id(session_id: str) -> Optional[str]:
 
 def resolve_attached_short_id(session_id: str) -> Optional[str]:
     """Resolve a claude session uuid to its ADOPTED (``host_mode == "attached"``)
-    row's 8-hex wire short (v9: ``short_id``) -- the G3 adopt lane (epic x-07c1,
-    node x-e027).
+    row's 8-hex wire short (v9: ``short_id``) -- the G3 adopt lane (epic,
+    node).
 
     An adopted ``claude --bg`` session is not a footnote PTY worker, but since v9
     its wire short lives in ``short_id`` (the unified transport key), and its only
@@ -313,7 +313,7 @@ def submit_via_worker(sock_path: Path, framed: str, *, settle_ms: int = DEFAULT_
 
 
 # ---------------------------------------------------------------------------
-# Per-harness reply capture seam (G4 / x-3f34): structured | transcript | pty-tail.
+# Per-harness reply capture seam (G4 /): structured | transcript | pty-tail.
 #
 # Injection is harness-agnostic (worker.submit drives any owned-PTY worker), but
 # reply capture is NOT: claude reads its transcript jsonl, a codex/gemini/shell pane
@@ -512,7 +512,7 @@ def _submit_and_capture(
 
 
 # ---------------------------------------------------------------------------
-# agy relay prime-and-discard (x-defe). agy 1.0.13 has no spawn-time
+# agy relay prime-and-discard. agy 1.0.13 has no spawn-time
 # system-prompt flag (no `--append-system-prompt`, no `-c key=value`; its `-c`
 # is `--continue`), and `--add-dir`/AGENTS.md does NOT load as rules. Its only
 # steer channel is a PRIMING USER-TURN, which persists across same-session
@@ -710,7 +710,7 @@ INJECT_NOT_SENT = "not_sent"        # the inject never reached the session (not-
 def submit_via_control_reply(session_id: str, framed: str) -> str:
     """Inject one framed turn into an ADOPTED ``claude --bg`` session over the daemon
     ``control.sock`` via the ``fno-agents mail-inject`` verb (the G1 op:'reply'
-    primitive, node x-26df; the one live-delivery vehicle, node x-1f23). NEVER raises.
+    primitive, node ; the one live-delivery vehicle, node). NEVER raises.
 
     Returns one of :data:`INJECT_CONFIRMED` / :data:`INJECT_UNCONFIRMED` /
     :data:`INJECT_NOT_SENT`. mail-inject emits ``{"delivered": bool, "reason": str}``:
@@ -770,7 +770,7 @@ def deliver_attached(
 ) -> str:
     """Deliver a hop to an ADOPTED ``claude --bg`` session (``host_mode=attached``)
     via the ``control.sock`` op:'reply' inject and capture the peer's next sentinel
-    reply from the transcript -- the G3 relay re-point (epic x-07c1, node x-e027).
+    reply from the transcript -- the G3 relay re-point (epic, node).
 
     The adopted session has no fno agents worker socket; :func:`submit_via_control_reply`
     (the ``mail-inject`` verb) is the only live handle. The hard failure is ONLY a
@@ -788,7 +788,7 @@ def deliver_attached(
     reads. A generic ``claude --bg`` session carries no such prompt and is NOT
     relay-readable -- that surfaces as the ``TimeoutError`` below (a missing sentinel
     is indistinguishable from a slow turn at read time). Wiring that spawn-lane is the
-    LD#2 amendment, deferred to its own review (carveout for node x-e027).
+    LD#2 amendment, deferred to its own review (carveout for node).
 
     Raises RuntimeError when the inject never reached the session (NOT_SENT) and
     TimeoutError when the turn may have landed but no reply appeared within

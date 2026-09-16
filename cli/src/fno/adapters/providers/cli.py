@@ -1,6 +1,6 @@
 """Typer sub-app for fno config accounts commands.
 
-Phase 02 of the provider rotation substrate (ab-256f6b6e).
+Phase 02 of the provider rotation substrate.
 Provides: list, show, add, test, use, remove.
 
 Phase 03 will wire in staging.stage(record) inside the `add` command.
@@ -190,7 +190,7 @@ def list_providers(
 
 
 # ---------------------------------------------------------------------------
-# usage (quota-aware dispatch, x-5d3e)
+# usage (quota-aware dispatch)
 # ---------------------------------------------------------------------------
 
 
@@ -593,7 +593,7 @@ def window_providers(
 
 
 # ---------------------------------------------------------------------------
-# required-bot-check (quota-aware dispatch, x-5d3e US5)
+# required-bot-check (quota-aware dispatch, US5)
 # ---------------------------------------------------------------------------
 
 # Map a required-bot GitHub login (substring match) to the provider CLI kind
@@ -617,7 +617,7 @@ def _bot_provider_cli(bot: str) -> Optional[str]:
 def required_bot_headroom_check() -> list[dict]:
     """Return one dict per required-bot whose provider is EXHAUSTED.
 
-    Read-only + fail-open (x-5d3e US5): reads the CACHED snapshot only (never
+    Read-only + fail-open (US5): reads the CACHED snapshot only (never
     probes at promise time), unions config.review.github_apps + required_bots,
     maps each bot to a provider record via its CLI kind, and reports those whose
     headroom is EXHAUSTED. Any read failure yields an empty list - a telemetry
@@ -745,7 +745,7 @@ def show_provider(
         typer.echo(f"error: account '{provider_id}' not found", err=True)
         raise typer.Exit(1)
     if print_binding:
-        # x-d285: the secret-free projection the Rust re-entry resolver
+        # the secret-free projection the Rust re-entry resolver
         # consumes (`fno-agents reentry-plan` shells this). Same KEY=VALUE
         # grammar as `pick --print-env`, but only the identity/namespace
         # facts - an api_key record's env never reaches stdout, so the
@@ -900,7 +900,7 @@ def _register_config_dir_account(
     config_dir: str,
     scope: str,
 ) -> None:
-    """Register a per-account CLAUDE_CONFIG_DIR account (x-d012).
+    """Register a per-account CLAUDE_CONFIG_DIR account.
 
     The dir IS the account (a full second login); no shared-slot snapshot. The
     resolver keys `spawn --account` off config_dir, so auth is a formality -
@@ -958,7 +958,7 @@ def register_provider(
         None,
         "--config-dir",
         help=(
-            "Register a per-account CLAUDE_CONFIG_DIR account (x-d012) instead of "
+            "Register a per-account CLAUDE_CONFIG_DIR account instead of "
             "a shared-slot managed snapshot. Point at a full second login in its "
             "own dir (e.g. ~/.claude-alt sharing projects/plugins/settings with "
             "~/.claude via symlinks). This is the verified-correct multi-account "
@@ -1101,7 +1101,7 @@ def register_provider(
 
 
 # ---------------------------------------------------------------------------
-# pick (launch-time headroom picking, x-7d45)
+# pick (launch-time headroom picking)
 #
 # The ONE picker. No in-session credential swap is possible - a claude process
 # reads CLAUDE_CONFIG_DIR once at launch - so every switch has to happen at a
@@ -1668,7 +1668,7 @@ def use_provider(
 
     record = config.by_id[provider_id]
 
-    # A config-dir account (x-d012) lives in its own dir; there is no shared-slot
+    # A config-dir account lives in its own dir; there is no shared-slot
     # snapshot to materialize, so a daemon-wide `use` switch does not apply. Refuse
     # cleanly instead of letting managed.switch fail with a cryptic no-snapshot
     # error. Use it per-worker via `fno agents spawn --account <id>`.
@@ -1835,7 +1835,7 @@ def remove_provider(
 
 # ---------------------------------------------------------------------------
 # combos sub-app: add / list / remove / test / use
-# Plan B (Spec 4, ab-0e5a921e). Combos are named ordered provider lists
+# Plan B (Spec 4). Combos are named ordered provider lists
 # with a rotation strategy (fallback | round_robin). Storage lives under
 # ``config.providers.combos.<name>`` in settings.yaml.
 # ---------------------------------------------------------------------------

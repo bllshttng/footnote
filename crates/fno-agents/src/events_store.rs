@@ -393,13 +393,13 @@ mod tests {
         let live = journal(dir.path(), "events.jsonl");
         append(
             &live,
-            &[checkin("2026-09-10T12:00:00Z", "x-a792", "newest")],
+            &[checkin("2026-09-10T12:00:00Z", "x-aaaa", "newest")],
         );
         let rotated = journal(dir.path(), "events.jsonl.1");
         append(
             &rotated,
             &[
-                checkin("2026-09-09T08:00:00Z", "x-a792", "older"),
+                checkin("2026-09-09T08:00:00Z", "x-aaaa", "older"),
                 checkin("2026-09-09T09:00:00Z", "x-other", "elsewhere"),
             ],
         );
@@ -420,18 +420,18 @@ mod tests {
         let rotated = journal(dir.path(), "events.jsonl.1");
         append(
             &rotated,
-            &[checkin("2026-09-09T08:00:00Z", "x-a792", "gen 1")],
+            &[checkin("2026-09-09T08:00:00Z", "x-aaaa", "gen 1")],
         );
-        append(&live, &[checkin("2026-09-10T08:00:00Z", "x-a792", "gen 2")]);
+        append(&live, &[checkin("2026-09-10T08:00:00Z", "x-aaaa", "gen 2")]);
         sync(&live).unwrap();
         // The rename: gen 2 becomes the new .1, gen 3 lands live.
         std::fs::rename(&live, &rotated).unwrap();
-        append(&live, &[checkin("2026-09-11T08:00:00Z", "x-a792", "gen 3")]);
+        append(&live, &[checkin("2026-09-11T08:00:00Z", "x-aaaa", "gen 3")]);
         let receipt = sync(&live).unwrap();
         assert_eq!(receipt.ingested, 1, "only gen 3 is new");
         assert_eq!(count_events(&receipt.store), 3);
         assert_eq!(
-            count_checkins(&receipt.store, "x-a792"),
+            count_checkins(&receipt.store, "x-aaaa"),
             3,
             "every generation survives the rotation"
         );
@@ -456,8 +456,8 @@ mod tests {
         append(
             &live,
             &[
-                checkin("2026-09-10T08:00:00Z", "x-a792", "kept"),
-                checkin("2026-09-10T09:00:00Z", "x-a792", "also kept"),
+                checkin("2026-09-10T08:00:00Z", "x-aaaa", "kept"),
+                checkin("2026-09-10T09:00:00Z", "x-aaaa", "also kept"),
             ],
         );
         sync(&live).unwrap();
@@ -465,9 +465,9 @@ mod tests {
         append(
             &live,
             &[
-                checkin("2026-09-10T08:00:00Z", "x-a792", "kept"),
-                checkin("2026-09-10T09:00:00Z", "x-a792", "also kept"),
-                checkin("2026-09-10T10:00:00Z", "x-a792", "post-gc"),
+                checkin("2026-09-10T08:00:00Z", "x-aaaa", "kept"),
+                checkin("2026-09-10T09:00:00Z", "x-aaaa", "also kept"),
+                checkin("2026-09-10T10:00:00Z", "x-aaaa", "post-gc"),
             ],
         );
         let receipt = sync(&live).unwrap();
@@ -484,7 +484,7 @@ mod tests {
             &live,
             &[
                 json!({"ts": "2026-09-14T22:28:43Z", "type": "reign_checkin", "source": "loop",
-                     "data": {"scope": "x-0c60 ready no build, x-8984 idea", "change": "corrupted"}}),
+                     "data": {"scope": "x-bbbb ready no build, idea", "change": "corrupted"}}),
             ],
         );
         // A genuinely non-JSON line, the way a torn write or foreign writer
@@ -526,16 +526,16 @@ mod tests {
     fn canonical_scope_stamps_the_column() {
         let dir = tempfile::tempdir().unwrap();
         let live = journal(dir.path(), "events.jsonl");
-        append(&live, &[checkin("2026-09-10T08:00:00Z", "x-a792", "clean")]);
+        append(&live, &[checkin("2026-09-10T08:00:00Z", "x-aaaa", "clean")]);
         let receipt = sync(&live).unwrap();
-        assert_eq!(count_checkins(&receipt.store, "x-a792"), 1);
+        assert_eq!(count_checkins(&receipt.store, "x-aaaa"), 1);
     }
 
     #[test]
     fn ephemeral_journal_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let live = journal(dir.path(), "events.jsonl.ephemeral");
-        append(&live, &[checkin("2026-09-10T08:00:00Z", "x-a792", "gauge")]);
+        append(&live, &[checkin("2026-09-10T08:00:00Z", "x-aaaa", "gauge")]);
         let err = sync(&live).unwrap_err();
         assert!(err.contains("ephemeral"), "err: {err}");
         assert!(!store_path(&live).exists(), "no store was created");
@@ -548,8 +548,8 @@ mod tests {
         append(
             &live,
             &[
-                checkin("2026-05-01T08:00:00Z", "x-a792", "ancient"),
-                checkin("2026-09-10T08:00:00Z", "x-a792", "fresh"),
+                checkin("2026-05-01T08:00:00Z", "x-aaaa", "ancient"),
+                checkin("2026-09-10T08:00:00Z", "x-aaaa", "fresh"),
             ],
         );
         let receipt = sync(&live).unwrap();
@@ -565,6 +565,6 @@ mod tests {
         sync(&live).unwrap();
         let store = receipt.store;
         assert_eq!(count_events(&store), 1);
-        assert_eq!(count_checkins(&store, "x-a792"), 1);
+        assert_eq!(count_checkins(&store, "x-aaaa"), 1);
     }
 }

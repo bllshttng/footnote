@@ -4,7 +4,7 @@ A job address names the WORK, not the process holding it. It resolves at
 delivery time to whoever holds the ``node:<id>`` claim RIGHT NOW, so the address
 outlives any one session: when a holder dies and a successor re-claims the node,
 the successor's drain picks up mail the dead session never read. That dissolves
-the dead-handle strand (x-8f8c part 2): a mail address used to name a process
+the dead-handle strand (part 2): a mail address used to name a process
 that dies, so the address expired faster than the message.
 
 Resolution is a read over the EXISTING claim system -- ``claim_status`` already

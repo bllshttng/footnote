@@ -2,7 +2,7 @@
 
 Plans stay FLAT in the plans dir; an Obsidian Base filters by frontmatter
 ``status``. Drifted or blank statuses lie to that Base, so this one-shot-then-
-idempotent sweep rewrites them to the canonical vocabulary (x-ff83 W2):
+idempotent sweep rewrites them to the canonical vocabulary (W2):
 
     axis:      design ready in_progress in_review
     terminals: done superseded   (off-axis, written directly)
@@ -13,7 +13,7 @@ that is closed -> ``done``, else ``superseded`` (an honest "off the board", neve
 a false ``done``) - but only when a node status is actually available; with no
 readable graph Tier 2 stands down rather than reading absent evidence as a no.
 Tier 3 recomputes a CANONICAL-but-stale status from the linked node's derived
-``status`` (the x-76ea class: plan ``design`` while its node is ``done``),
+``status`` (the class: plan ``design`` while its node is ``done``),
 forward-only and graph-required. Dry-run by default; ``--apply`` writes.
 
 Only DRIFT tokens are in scope, so a canonical status is never touched: the
@@ -46,7 +46,7 @@ _TIER1: dict[str, str] = {
     "pending": "design",
     "ready-for-blueprint": "design",
     "design-locked": "ready",
-    "reviewing": "in_review",  # pruned axis states (x-f34f) fold into in_review
+    "reviewing": "in_review",  # pruned axis states fold into in_review
     "shipping": "in_review",
     "superseded-by-implementation": "superseded",
 }
@@ -151,7 +151,7 @@ def _plan_link_id(frontmatter: dict) -> Optional[str]:
 
     Callers use the result as a dict key and a set member, so it must be a
     string or None: some doc-generating paths write a one-element list
-    (``claims: [x-1d91]``), which unwraps here rather than raising TypeError
+    (``claims: []``), which unwraps here rather than raising TypeError
     deep in the sweep. Anything else - a multi-node list, a mapping, an empty
     list - reads as unlinked, since no single node owns the plan's status and
     guessing one would rewrite on ambiguous evidence.
@@ -214,7 +214,7 @@ def _tier3_target(
 ) -> Optional[str]:
     """Canonical-but-stale -> the node's forward projection, or None to leave it.
 
-    Fixes the x-76ea class (plan ``design`` while its node is ``done``). Requires
+    Fixes the class (plan ``design`` while its node is ``done``). Requires
     a readable graph: an empty ``status_map`` disables Tier 3 (never rewrite on
     absent evidence). An unlinked plan is skipped; a link that resolves to no
     node in a readable graph is treated as unlinked and warned.

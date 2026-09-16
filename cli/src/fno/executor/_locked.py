@@ -1,7 +1,7 @@
 """Extract /think's executor lock from a design doc.
 
 Ported byte-for-byte from the retired ``scripts/lib/parse-locked-executor.sh``
-(internalized for self-contained packaging, ab-58645f63). This module is now
+(internalized for self-contained packaging). This module is now
 the one definition of the locked-decision parser.
 
 Reads design-doc text. Emits one of:
@@ -245,7 +245,7 @@ _MODEL_PROVENANCE_RE = re.compile(r"[ \t]*\([^)]*\)[ \t]*$")
 
 
 def parse_locked_model(text: str) -> str:
-    """Parse a locked ``Model:`` decision from design-doc ``text`` (x-571f).
+    """Parse a locked ``Model:`` decision from design-doc ``text``.
 
     Scans the ``## Locked Decisions`` section (a bare ``model:`` mention in prose
     elsewhere is not a lock) for the LAST ``Model: <value>`` entry and returns

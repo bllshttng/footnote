@@ -19,7 +19,7 @@
 //! concurrently: reads share the state gate (`RwLock` read guards), writes
 //! exclude on it (`write` guards) and on the bounded flock. A store RPC must
 //! never starve a concurrent client or a SIGTERM (the `gc_sweep` lesson,
-//! x-d78a): each request runs on its own thread, and the accepting loop never
+//!): each request runs on its own thread, and the accepting loop never
 //! blocks on request work.
 //!
 //! Reapability is a release condition (the 2026-09-01 seven-unreaped-keepers
@@ -722,7 +722,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     // `_seat` is a named binding, the daemon's bind_supervisor_socket
     // shape: the File holds the flock, so an `if take_seat(..).is_none()`
     // temporary drops at the end of the condition and the lock guards
-    // nothing (x-252e).
+    // nothing.
     let Some(_seat) = take_seat(&cfg.sock) else {
         eprintln!(
             "store keeper: {} is owned by a live keeper (lock held); exiting",
@@ -854,7 +854,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     let mut last_activity = std::time::Instant::now();
     let mut last_seat_check = std::time::Instant::now();
     let mut last_drift_check = std::time::Instant::now();
-    // x-f188 change 3: the drift tick period. 30s default, env-overridable
+    // change 3: the drift tick period. 30s default, env-overridable
     // for tests, next to its idle-exit sibling's override.
     let drift_check_every = std::env::var("FNO_STORE_KEEPER_DRIFT_CHECK_SECS")
         .ok()
@@ -941,7 +941,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
                         std::process::exit(EXIT_SEAT_OWNED);
                     }
                 }
-                // Drift self-retire (x-f188 change 3): a keeper idling on a
+                // Drift self-retire (change 3): a keeper idling on a
                 // binary that a rebuild replaced is a stale server no
                 // restart reaches. Every drift tick with no client,
                 // re-stat the own executable; Drifted -> break so the
@@ -2262,7 +2262,7 @@ fn apply_op_impl(entries: &mut Vec<Value>, name: &str, p: &Value) -> Result<Valu
             let kind = opt_str(p, "kind")
                 .map(str::to_string)
                 .or_else(|| classify_deferred_reason(reason).map(str::to_string));
-            // The shared defer leg (x-665f): the blank-reason refusal and the
+            // The shared defer leg: the blank-reason refusal and the
             // kind vocabulary live in the patch planner, so the mux op and
             // the CLI door cannot disagree.
             crate::backlog::patch::defer_facts(entries, node_id, reason, kind.as_deref())?;

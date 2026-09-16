@@ -34,7 +34,7 @@ class SpawnDefaultsBlock(BaseModel):
     CLI flag > these defaults > the built-in. Every bare `fno agents spawn`
     inherits any field set here, autonomous dispatch included; an unpinned
     `model` or `effort` DOES inherit. Empty string = unset. No value
-    validation here: config stays a leaf module (x-7fdd); provider and effort
+    validation here: config stays a leaf module ; provider and effort
     are checked at the spawn seam. `route`/`account` sit beside the legacy
     `provider` field (ruling 4), which keeps meaning harness.
     """
@@ -54,7 +54,7 @@ class SpawnDefaultsBlock(BaseModel):
     # never reads them as bindings.
     route: str = ""
     account: str = ""
-    # Per-harness answers (x-8975): the scalars above are the base; an entry
+    # Per-harness answers: the scalars above are the base; an entry
     # here re-answers one harness whose flag vocabulary differs.
     harness: dict[str, HarnessOverlayBlock] = Field(default_factory=dict)
 

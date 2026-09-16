@@ -1,4 +1,4 @@
-//! The running-process census (x-f188): one row per long-lived process,
+//! The running-process census : one row per long-lived process,
 //! answering "is this running fno process an older build than the binary it
 //! was launched from?". Python's `update.running_components` is a thin
 //! adapter over `fno-agents census --json`; the walking and classifying live
@@ -719,7 +719,7 @@ pub struct CycledKeeper {
     pub result: String,
 }
 
-/// Shutdown the stale store keepers the census found (x-f188 change 6). No
+/// Shutdown the stale store keepers the census found (change 6). No
 /// respawn is attempted here: the next read respawns each keeper on the
 /// installed binary - the same self-heal the fate text promises - and the
 /// Python client's spawner owns the launch flags (read_source, events).

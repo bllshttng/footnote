@@ -1,4 +1,4 @@
-"""fno do pr sync-canonical - post-merge canonical-checkout sync (x-47be).
+"""fno do pr sync-canonical - post-merge canonical-checkout sync.
 
 Pure-mechanical, fail-open. After a PR merges, bring the CANONICAL checkout and
 its installed tooling up to the merged HEAD by running the project's configured
@@ -45,7 +45,7 @@ _SYNC_CLAIM_TTL_MS = 30 * 60 * 1000
 # would wedge the daemon this feature exists to work around. `timeout(1)` is
 # absent on stock macOS, so the bound is _proc.run's own, never a shell wrapper.
 _CATCHUP_PROBE_TIMEOUT_S = 30.0
-# Bound sync_command itself (x-adf9): a trailing `fno agents restart` detaches a
+# Bound sync_command itself: a trailing `fno agents restart` detaches a
 # daemon; the closed pipes detach it cleanly, and this timeout is the backstop
 # for a genuinely stuck command. Generous (pull + update + restart can be slow)
 # and well inside the 30m single-flight claim TTL.
@@ -237,10 +237,10 @@ def run_sync_canonical(
             )
             return 0
 
-        # 6.5 Divergence gate (x-a150): `canonical-check` owns the read - the
+        # 6.5 Divergence gate: `canonical-check` owns the read - the
         #    dirty-overlap refusal (a pull dies over locally modified paths the
         #    merge touches) and the ahead refusal (a clean canonical that is AHEAD
-        #    of origin is the wedge x-f066 recorded: the pull cannot fast-forward,
+        #    of origin is the wedge recorded: the pull cannot fast-forward,
         #    the marker stays withheld, and the retry loop has no owner). Report,
         #    never an auto-stash or auto-reset. Fail-open: an answer that cannot
         #    be had must not refuse every sync.
@@ -630,7 +630,7 @@ def _read_tail_text(path: Path) -> str:
 def _default_shell_runner(command: str, cwd: str) -> Result:
     """Run ``command`` via a login shell in ``cwd``; return its captured result.
 
-    Output is captured to temp FILES, never ``subprocess.PIPE`` (x-adf9): a
+    Output is captured to temp FILES, never ``subprocess.PIPE`` : a
     ``sync_command`` ending in ``fno agents restart`` detaches a daemon that INHERITS
     the child's stdout/stderr and never closes them, and with PIPE the parent's
     ``communicate()`` would block on the EOF that live daemon never sends (the

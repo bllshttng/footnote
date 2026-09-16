@@ -524,7 +524,7 @@ fn family1_truth_attempt(
         // basis, ...}` body - typically `state: "unknown"` with a genuine
         // `reachability`/`basis` pair, not a bare refusal. Discarding it here
         // used to turn a correct "unmeasured" answer into `None`, which the
-        // next reader is free to interpret as death (x-9de7). Salvage it, but
+        // next reader is free to interpret as death. Salvage it, but
         // only when it is NOT a live-seeming state: a failed probe run has no
         // standing to assert liveness, so this is monotone-lowering only,
         // exactly like `lower_state_with_verdict` above - it can report
@@ -554,7 +554,7 @@ fn family1_truth_attempt(
 }
 
 /// Build a [`TruthProbe`] from a parsed truth JSON body and its already-read
-/// `state`. Shared by the success path and the x-9de7 non-zero-exit salvage
+/// `state`. Shared by the success path and the non-zero-exit salvage
 /// path so the field extraction has exactly one implementation.
 fn build_truth_probe(parsed: Option<&serde_json::Value>, state: &str) -> TruthProbe {
     TruthProbe {
@@ -845,7 +845,7 @@ fn family1_truth_batch_latched(
 /// probes once did.
 fn family1_truth_batch_timeout(handles: usize) -> Duration {
     const BASE: Duration = Duration::from_secs(5);
-    // Measured on the 42-row live roster (x-e3cc): the batch cost 15.9 s, about
+    // Measured on the 42-row live roster: the batch cost 15.9 s, about
     // 370 ms a row once transcript tails dominate, and the previous 300 ms a
     // row put the bound at 17.9 s, which ordinary contention tipped. A tipped
     // batch falls back to per-row probes that time out too, and the whole page
@@ -1153,7 +1153,7 @@ mod tests {
 
     #[test]
     fn resume_lowering_treats_a_gone_process_as_dead() {
-        // x-b84f: the resume variant lowers a live-seeming state the verdict
+        // the resume variant lowers a live-seeming state the verdict
         // falsified with PROCESS-gone evidence to "stalled", so the relaunch arm
         // fires for a pane-gone worker instead of the inconclusive refusal.
         assert_eq!(
@@ -1507,7 +1507,7 @@ mod tests {
 
     #[test]
     fn family1_truth_nonzero_exit_still_salvages_the_unknown_verdict() {
-        // x-9de7: truth writes its full computed verdict to stdout BEFORE
+        // truth writes its full computed verdict to stdout BEFORE
         // deciding the exit code, so exit 13 with `state: "unknown"` is a
         // correct "unmeasured" answer, not a bare refusal - discarding it
         // used to become `reachability: null, basis: null`, an absence the
@@ -1538,7 +1538,7 @@ mod tests {
 
     #[test]
     fn family1_truth_nonzero_exit_carries_the_real_reachability_and_basis() {
-        // The realistic shape from the plan's own repro (cx-x-e14b): a row
+        // The realistic shape from the plan's own repro (cx-x-aaaa): a row
         // with no corroborating identity surface resolves `state: "unknown"`
         // with a genuinely computed `reachability`/`basis` pair, still on
         // exit 13. The salvage must carry those through, not just the state.
@@ -1548,7 +1548,7 @@ mod tests {
             "printf '{\"state\":\"unknown\",\"reason\":\"not-found\",\
              \"reachability\":\"unreachable\",\"basis\":\"process-gone\"}'; exit 13",
         ]);
-        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "cx-x-e14b")
+        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "cx-x-aaaa")
             .expect("a real computed verdict on exit 13 must not be discarded");
         assert_eq!(probe.state, "unknown");
         assert_eq!(probe.reachability.as_deref(), Some("unreachable"));
@@ -1571,7 +1571,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // family1_truth_probe_many: N handles, ONE cold start (x-0d93)
+    // family1_truth_probe_many: N handles, ONE cold start
     // -----------------------------------------------------------------
 
     #[test]
@@ -1708,7 +1708,7 @@ mod tests {
         );
         assert!(
             forty >= Duration::from_secs(30),
-            "42 handles took 15.9s measured (x-e3cc)"
+            "42 handles took 15.9s measured "
         );
 
         // Capped, so one pathological transcript cannot wedge a sweep for
@@ -1767,7 +1767,7 @@ mod tests {
     fn family1_truth_batch_timeout_reads_as_timed_out_not_empty() {
         // A run that outlives its bound sets `timed_out`, so the checked
         // caller can return Err instead of printing an empty map as a verdict.
-        // This is the x-db9c defect: the batch timed out, the map was empty,
+        // This is the defect: the batch timed out, the map was empty,
         // and every live holder rendered stalled.
         let attempt = family1_truth_batch_answer(
             &["h1".to_string()],

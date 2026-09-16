@@ -1,4 +1,4 @@
-"""Spawn gate (x-c5cc): global concurrency cap + free-RAM floor + queue loop.
+"""Spawn gate : global concurrency cap + free-RAM floor + queue loop.
 
 Called at the top of ``cmd_spawn`` before the substrate fan-out. Mirrors
 ``crates/fno-agents/src/spawn_gate.rs`` — the two gates sit on mutually
@@ -7,7 +7,7 @@ the Rust ``pane`` arm re-execs this CLI), so every spawn passes exactly one.
 
 The gate is READ-ONLY: the ``max_live`` slot cap counts fno registry rows
 (worker provenance) and the RAM floor reads real system RAM. The claude daemon
-roster is never a population to count toward the slot cap (x-bdf9: only a row
+roster is never a population to count toward the slot cap (: only a row
 ALSO in the fno registry counts). Its only writes are its own claims under the
 GLOBAL claims root - the RAM budget is machine-wide. Global guards fail OPEN
 on read errors; the per-provider cap is stricter: an unreadable live count
@@ -78,11 +78,11 @@ WAITABLE_REFUSAL_REASONS = frozenset(
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
 QUEUE_TIMEOUT_S = 600.0
-#: x-7783 LD4: hold re-sample gap and admission debounce (the macOS `ps`
+#: LD4: hold re-sample gap and admission debounce (the macOS `ps`
 #: CPU column is a decaying average; two reads 2s apart are one sample).
 CPU_HOLD_POLL_S = 15.0
 CPU_ADMIT_SAMPLES = 2
-#: x-e32e: a slow bg-socket census names its own wait instead of silence.
+#: : a slow bg-socket census names its own wait instead of silence.
 SLOW_SCAN_WARN_S = 5.0
 GATE_CLAIM_TTL_MS = 5 * 60 * 1000
 #: The mutex claim key. Prefixed so `claims_root_for` routes it to the global
@@ -222,17 +222,17 @@ class LiveWorker:
     #: is the LAST 8 -- and an operator comparing them by eye finds no overlap.
     #: That is how a census once got read as "all agents are dead".
     session_id: Optional[str] = None
-    #: The pid of the process that IS the session (x-3f84 W2), resolved through
+    #: The pid of the process that IS the session (W2), resolved through
     #: the claude bg rendezvous sockets when the row is a bg session. ``pid``
     #: above keeps the RECORDED pid, which for a bg row names the PTY HOST;
     #: cost readers (``agents top``, the process-cost gate) must use this one.
     session_pid: Optional[int] = None
-    #: The session id of the KING that spawned this worker (x-3f84 W4): the
+    #: The session id of the KING that spawned this worker (W4): the
     #: row's ``spawned_by_session``, None for an operator-run or legacy row.
     #: Cost is attributed through this field so a shared ceiling can be
     #: divided without minting a second budget record.
     spawned_by: Optional[str] = None
-    #: (x-d401) Why ``status`` is not the registry's stored token, when it is
+    #: Why ``status`` is not the registry's stored token, when it is
     #: not: a row the contradiction rules rewrote (e.g. a `spawning` token a
     #: live pid outlived renders `live` + basis `stale-spawning-live-pid`).
     #: None means the stored token passed through untouched.
@@ -251,7 +251,7 @@ class LiveCensus:
     fno_slot_workers: int = 0
     #: False when the registry read failed: share counts unknown, never zero.
     registry_readable: bool = True
-    #: Crowned sessions via court.crowned_sessions (x-5283 LD1); the divisor.
+    #: Crowned sessions via court.crowned_sessions (LD1); the divisor.
     crowned_sessions: set[str] = field(default_factory=set)
     #: Worker rows per ``spawned_by_session``; None = the LD4 bucket.
     worker_rows: dict[Optional[str], list[str]] = field(default_factory=dict)
@@ -265,7 +265,7 @@ class LiveCensus:
 
     @property
     def slot_count(self) -> int:
-        """Worker SLOTS in use for the ``max_live`` cap (x-bdf9): live fno
+        """Worker SLOTS in use for the ``max_live`` cap : live fno
         registry rows + headless slot claims. Counted straight from the
         registry, NOT by filtering the display union — a bg/adopted fno agents worker
         is display-deduped into its roster row (``source == "claude"``) but is
@@ -278,7 +278,7 @@ class LiveCensus:
 
 @dataclass(frozen=True)
 class LoadSnapshot:
-    # x-7783: display/trend only; nothing gates on these.
+    # display/trend only; nothing gates on these.
     load_1m: float | None
     load_cpu_count: int
     load_5m: float | None = None
@@ -291,10 +291,10 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
     RAM-ground-truth view (``fno agents top`` renders every row). The spawn
     gate's ``max_live`` decision uses :attr:`LiveCensus.slot_count`, which
     counts fno-sourced rows only — the roster is kept here for visibility but
-    does NOT consume worker slots (x-bdf9). Read-only; every source failure
+    does NOT consume worker slots. Read-only; every source failure
     degrades to zero contribution with one warning.
 
-    ``socket_map`` injects the bg-socket pid join (x-e32e): the lsof scan
+    ``socket_map`` injects the bg-socket pid join : the lsof scan
     costs seconds under load, so a caller that censuses repeatedly across one
     decision (the spawn gate's queue loop) scans ONCE and passes the map back
     in. None (the default) scans, one read per census."""
@@ -302,7 +302,7 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
     counted_short_ids: set[str] = set()
     live_registry_names: set[str] = set()
 
-    # One socket-farm read per census (x-3f84 W2): every claude row below joins
+    # One socket-farm read per census (W2): every claude row below joins
     # through this map so no consumer re-runs lsof, and the recorded pid stays
     # on the row beside the resolved one. An empty map is "unknown", never
     # "no bg sessions" - rows then keep their recorded (host) pid.
@@ -424,10 +424,10 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
         # not pay twice for the claim that spawned it).
         live_registry_names.add(row.name)
         # A live fno row is fno work: it holds a slot regardless of the display
-        # dedup below (x-bdf9 — a bg/adopted worker also appears in the roster,
+        # dedup below (— a bg/adopted worker also appears in the roster,
         # but its registry row is the slot, matching the registry-only Rust gate).
         out.fno_slot_workers += 1
-        # x-5283: a crowned row divides the cap and pays no per-king tax.
+        # a crowned row divides the cap and pays no per-king tax.
         if row.crown_level is None:
             out.worker_rows.setdefault(row.spawned_by_session, []).append(row.name)
         dedup_key = row.short_id or None
@@ -436,7 +436,7 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
             # row carries no lineage of its own, so the KING the fno row
             # attributes this cost to rides onto it here - without the backfill
             # the one view built to show ownership names '-' for exactly the
-            # rows the king-share gate counts (review finding, x-3f84).
+            # rows the king-share gate counts (review finding).
             for shown in out.workers:
                 if shown.source == "claude" and shown.name == dedup_key:
                     shown.spawned_by = row.spawned_by_session
@@ -454,7 +454,7 @@ def census(socket_map: Optional[dict[str, int]] = None) -> LiveCensus:
             pid=row.pid,
             socket_map=sock_map,
         )
-        # (x-d401) The stored token goes through the contradiction rules with
+        # The stored token goes through the contradiction rules with
         # the liveness this census ALREADY measured: a `spawning` token a
         # live pid outlived renders the movement-derived state with a basis
         # naming the contradiction, never a bare `spawning` for a working
@@ -696,7 +696,7 @@ def provider_lanes_cap(budget: object) -> Optional[int]:
     """The `lanes` dimension of one provider budget, whichever spelling arrived.
 
     `config.agents.provider_limits.<provider>` is a :class:`~fno.config.ProviderBudget`
-    record since x-c703, and was a bare integer before it. Both reach this seam:
+    record since, and was a bare integer before it. Both reach this seam:
     the configured table carries the record, and the fail-safe fallback below
     carries the integer. Reading them through one function is what keeps the two
     paths from disagreeing about a cap.
@@ -721,7 +721,7 @@ _CURRENT_SPAWN: "contextvars.ContextVar[tuple[Optional[str], Optional[str]]]" = 
     contextvars.ContextVar("fno_spawn_gate_current", default=(None, None))
 )
 
-#: x-7783 AC13: axes read so far plus the axis being decided, stamped onto
+#: AC13: axes read so far plus the axis being decided, stamped onto
 #: refusals that carry no explicit axis fields.
 _CURRENT_AXES_READ: "contextvars.ContextVar[dict[str, str]]" = (
     contextvars.ContextVar("fno_spawn_gate_axes_read", default={})
@@ -748,7 +748,7 @@ def _refuse(
     stdout and is passed through untouched. Every event carries
     ``gate: "python"`` and the spawn's ``substrate``, so a reader can tell
     this journal's population (the pane substrate, the sole leg this gate
-    covers) from the Rust gate's refusals, which x-ab75 owns.
+    covers) from the Rust gate's refusals, which owns.
 
     ``event`` is extra telemetry for
     the refusals that deliberately carry no receipt, so a refusal can name
@@ -760,7 +760,7 @@ def _refuse(
     """
     spawn_name, substrate = _CURRENT_SPAWN.get()
     event_data = {**(receipt or {}), **event}
-    # x-7783 AC13: an explicit axis field wins; the contextvar is the best
+    # AC13: an explicit axis field wins; the contextvar is the best
     # effort a non-CPU refusal site can supply.
     axes_read = _CURRENT_AXES_READ.get()
     if axes_read and "axes_read" not in event_data:
@@ -797,7 +797,7 @@ _NOT_PREFETCHED: object = object()
 def _prefetch_fleet_reading() -> tuple[Optional[Any], Optional[str]]:
     """Take the footprint reading OUTSIDE the gate mutex, ALWAYS.
 
-    x-7783 LD2: every spawn takes the reading. A trigger that fires on a
+ LD2: every spawn takes the reading. A trigger that fires on a
     number the node proved does not track the work is not a cost
     optimisation, it is a second decider. The read is one `ps` snapshot
     behind a deadline, and the gate mutex serializes every spawner on the
@@ -995,7 +995,7 @@ def run_gate(
     # Set before the first branch that can refuse, so every refusal event in
     # this run names the spawn it refused (see _CURRENT_SPAWN).
     _CURRENT_SPAWN.set((name, substrate))
-    # The calling king's session id (x-3f84 W4), resolved through the same
+    # The calling king's session id (W4), resolved through the same
     # self-identity source that stamps `spawned_by_session` onto the spawned
     # row, so the gate attributes a spawn exactly the way the row will.
     try:

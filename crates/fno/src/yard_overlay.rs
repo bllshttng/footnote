@@ -1,4 +1,4 @@
-//! The yard identity fold's shell-out leg (x-b2bf): a bounded, fail-open
+//! The yard identity fold's shell-out leg : a bounded, fail-open
 //! call to `fno agents yard --json`, mirroring [`crate::needs_overlay`]'s idiom.
 //!
 //! The client owns the status leg (badge / need / PR readings from the
@@ -56,7 +56,7 @@ fn fno_bin() -> PathBuf {
 pub async fn fold_now() -> Option<Vec<YardItem>> {
     let mut command = crate::process_admission::tokio_command(fno_bin());
     command
-        // x-6233: the yard verb lives under `agents` now; the bare root
+        // the yard verb lives under `agents` now; the bare root
         // spelling is a one-release shim whose stderr move-line this call
         // would otherwise pay on every overlay open.
         .args(["agents", "yard", "--json"])
@@ -102,7 +102,7 @@ struct Payload {
 
 use crate::client::{pad_to, NeedsFooter, YARD_OVERLAY_W};
 
-/// Build the yard overlay lines (x-b2bf): the CROWD as one glyph per citizen
+/// Build the yard overlay lines: the CROWD as one glyph per citizen
 /// (the cheap layer - many cats, one cell each, the only multi-citizen
 /// render) and the SPOTLIGHT as exactly one 12-column sprite for the
 /// selected citizen. One sprite at a time is the capacity ruling: a

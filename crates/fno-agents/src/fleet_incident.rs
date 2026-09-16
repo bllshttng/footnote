@@ -1,4 +1,4 @@
-//! Durable fleet incident state (x-77db): one machine-wide circuit breaker.
+//! Durable fleet incident state : one machine-wide circuit breaker.
 //!
 //! `fleet-stop.json` in the agents home is the authority. `stop` writes a
 //! positive `stopped` record; `clear` writes a positive `clear` record; both

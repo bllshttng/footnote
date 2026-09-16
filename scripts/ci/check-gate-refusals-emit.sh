@@ -15,12 +15,12 @@
 #
 # SCOPE, stated because a partial instrument that looks complete is worse than
 # an absent one. This covers the PYTHON side of the one spawn gate
-# (x-6089): spawn_gate.py now holds exactly one refusal CONSTRUCTION site
+# spawn_gate.py now holds exactly one refusal CONSTRUCTION site
 # (inside _refuse) plus the transport's call into it - the gate's axes
 # themselves live in crates/fno-agents/src/spawn_gate.rs and answer the
 # Python transport as data, so a spawn that enters Python still emits its
 # refusal through this seam, and a native (bg/headless) spawn emits nothing
-# (x-ab75 owns a Rust emit).
+# (owns a Rust emit).
 #
 # Exit 0 when every Python refusal routes through the seam; exit 1 naming file
 # and line otherwise.

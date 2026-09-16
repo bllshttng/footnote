@@ -1,4 +1,4 @@
-//! URL detection and open-safety for clickable links in mux panes (x-a2d0).
+//! URL detection and open-safety for clickable links in mux panes.
 //!
 //! Two sources feed the same model. An app can declare a link explicitly with
 //! OSC 8, which `alacritty_terminal` already parses into `Cell::hyperlink()`;
@@ -258,7 +258,7 @@ pub enum PlanUnavailable {
 }
 
 /// Resolve an open-plan target. Pure: reads no files. The vault root is resolved
-/// the same way `paths.py :: vault_root` resolves it (bare name -> `~/<name>`;
+/// the same way `paths.py:: vault_root` resolves it (bare name -> `~/<name>`;
 /// absolute or `~`-prefixed honored as-is), and the URI carries the BASENAME of
 /// that root, so a bare `myvault` and an absolute `/Users/x/myvault` produce the
 /// same URI (a test pins this).
@@ -295,7 +295,7 @@ pub fn plan_link(plan_path: Option<&Path>, cfg: &ObsidianCfg) -> PlanLink {
 }
 
 /// Resolve the obsidian vault root from its config value, mirroring
-/// `paths.py :: vault_root`. Takes `home` so a test can fix HOME without touching
+/// `paths.py:: vault_root`. Takes `home` so a test can fix HOME without touching
 /// the process environment.
 fn resolve_vault_root_with(vault: &str, home: Option<&Path>) -> PathBuf {
     // `~/rest` and bare `~` share the crate's one tilde-expansion helper

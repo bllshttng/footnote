@@ -3,7 +3,7 @@
 Two commands (``fno whoami`` / ``fno whoami status``) give an agent operating fno a
 curated view of its operating context (fleet -> walker -> session). Read-only;
 no state mutations, no events emitted. Formerly the ``fno agent`` (singular)
-namespace; retired in ab-12dd2a5d (the ``suggest`` / ``capabilities`` verbs were
+namespace; retired in (the ``suggest`` / ``capabilities`` verbs were
 trimmed and the survivors relocated to top-level). ``fno agents`` (plural, the
 dispatch mesh) is unrelated and untouched.
 

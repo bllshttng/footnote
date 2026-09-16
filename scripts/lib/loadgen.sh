@@ -3,7 +3,7 @@
 #
 # Why this exists: 2026-08-13, one worker hand-rolled `yes > /dev/null` to
 # reproduce a race under contention, never reaped it, and left 73 processes at
-# PPID 1 burning 8 cores for 7.5 hours (node x-4825). The PreToolUse guard now
+# PPID 1 burning 8 cores for 7.5 hours (node). The PreToolUse guard now
 # refuses that shape at the Bash boundary, but the guard cannot see a pytest or
 # cargo fixture, and a codex/opencode worker has no Claude hook lane at all.
 # Every lane that can run bash can run this script, so it - not the guard - is

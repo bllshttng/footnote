@@ -1,9 +1,9 @@
-# opencode readiness manifest (x-8f7f) - adapted from the reference's
+# opencode readiness manifest - adapted from the reference's
 # src/detect/manifests/opencode.toml per manifests/ADAPTING.md.
 #
 # STAGED / INERT (AC2-FR): opencode is not a hosted fno provider yet (its
-# buildout is node x-51f6: READABLE_PROVIDERS membership + provider impl +
-# readiness detector + mux-pane argv). Until x-51f6 lands, `scrape_targets`
+# buildout is node: READABLE_PROVIDERS membership + provider impl +
+# readiness detector + mux-pane argv). Until lands, `scrape_targets`
 # selects no opencode row, so this manifest parses and is bundled but never
 # fires. It is staged here so the badge derives with zero further change to
 # this node's files the moment opencode becomes mux-hostable.
@@ -43,7 +43,7 @@ gate = { any = [
     ] },
   ] },
 ] }
-# No [rule.answer] (x-5103): validated from opencode source
+# No [rule.answer]: validated from opencode source
 # (packages/tui/src/routes/session/permission.tsx) - the permission dialog is a
 # horizontal Allow once / Allow always / Reject button row navigated with
 # left/right (or vim h/l) + Enter, NOT a numbered-digit menu. Like agy, that is

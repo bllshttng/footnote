@@ -1,4 +1,4 @@
-"""Boundary-reconcile detection (x-d0ad).
+"""Boundary-reconcile detection.
 
 When ``/target`` picks up a node whose plan/brief was written BEFORE a done
 blocker's PR merged, the fresh-context worker builds on stale assumptions. This

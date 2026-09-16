@@ -13,7 +13,7 @@ When named evidence must exist before work starts or merges, author one `dispatc
 Before any other classifier runs, check if the argument is an existing graph
 node ID. `parse-claims-arg.sh` recognizes the config-agnostic node-id shape
 `^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$` - the configured `id_prefix`/`id_hex_width`
-(e.g. `x-8af8`) and the legacy `ab-<8hex>` alike, never a hard-coded `ab-` only.
+(e.g. ``) and the legacy `ab-<8hex>` alike, never a hard-coded `ab-` only.
 A node id never collides with file paths or raw descriptions, so this check is
 cheap and goes first.
 
@@ -137,7 +137,7 @@ Trigger: a Files-to-Modify row, or a task `surface`, names a path under `cli/src
 
 `cli/src/fno` is the compatibility shell and `crates/` is the product. The tree is shrink-only as a TREE, net: `scripts/ci/check-file-budget.sh` refuses a change whose net Python growth exceeds `PY_TREE_ALLOWANCE` (default 100). The allowance is sized so a bug fix never has to port a verb to land, while a feature does. Standing law: the refusal is answered by refactoring in the same PR, never by raising the allowance and never by splitting the PR.
 
-State the expected net Python delta in the plan body, in one line. Over the allowance, the plan is planning a feature in the shell. Pick a remedy HERE rather than at push time. Land it in `crates/`, port the verb the change touches, or name the offsetting Python deletion the same PR makes. A plan that names none of these is the x-7b36 shape, where roughly 600 lines were written, reviewed and only then refused.
+State the expected net Python delta in the plan body, in one line. Over the allowance, the plan is planning a feature in the shell. Pick a remedy HERE rather than at push time. Land it in `crates/`, port the verb the change touches, or name the offsetting Python deletion the same PR makes. A plan that names none of these is the shape, where roughly 600 lines were written, reviewed and only then refused.
 
 The gate is a statement, not a refusal: a plan under the allowance passes by saying so. When the trigger fires and the plan names no remedy, `scripts/validate-plan.sh` warns.
 
@@ -255,7 +255,7 @@ since the previous invocation, re-transcribe: the parser is deterministic
 and the frontmatter overwrite is idempotent. Stale executor fields are
 the worst-case outcome; this guard prevents them.
 
-## Model Pin Transcription (x-571f: when a plan supplies a model)
+## Model Pin Transcription (: when a plan supplies a model)
 
 A plan can pin the model its dispatchers launch the node's worker on. Like the
 executor lock, the choice is made once at planning time; `/blueprint`
@@ -310,7 +310,7 @@ DIFFICULTY="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^difficulty:/{sub(/^d
 
 `fno backlog update --difficulty` validates the band (`high|medium|low`). An invalid value exits non-zero and leaves the node unchanged (surface it, do not fabricate a band). The retired `--model-tier` spelling exits 2 with a message naming `--difficulty`.
 
-## Blueprint Provenance Stamp (x-b6e4)
+## Blueprint Provenance Stamp
 
 Blueprint provenance is written by the identity-guarded `fno backlog session close` transaction and verified by an exact graph readback before the Blueprint handoff. Plan binding is artifact-only and never claims that the Blueprint phase completed.
 

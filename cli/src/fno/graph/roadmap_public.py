@@ -417,7 +417,7 @@ def render_configured_targets(
     skip_canonical: bool = False,
     _only: "RenderTargetConfig | None" = None,
 ) -> None:
-    """Render every configured backlog projection (x-9415). Called from
+    """Render every configured backlog projection. Called from
     ``locked_mutate_graph`` AFTER graph.json is written, so it must never
     raise: a failing operator target warns and is skipped, never wedging the
     mutation. The leak gate stays fail-closed - a refusal leaves the target

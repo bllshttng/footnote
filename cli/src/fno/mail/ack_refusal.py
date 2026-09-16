@@ -2,7 +2,7 @@
 
 Every non-deliverable shape gets one line naming what the row actually is.
 Each refusal must never make the claim its transport cannot back: a typed row
-never claims confirmation, a landed row is never mistaken for mail (x-22ce).
+never claims confirmation, a landed row is never mistaken for mail.
 """
 from __future__ import annotations
 

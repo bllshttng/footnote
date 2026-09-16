@@ -1,4 +1,4 @@
-//! The question-to-law matcher (x-cf6a): one pure function set behind a hidden
+//! The question-to-law matcher: one pure function set behind a hidden
 //! JSON verb, reached as `fno-agents law-match`. The `stage` and `law` modes
 //! read the decision index through [`crate::decision_index`]; the `ask` and
 //! `validate` modes read no file - Python keeps the decision lifecycle read
@@ -752,13 +752,13 @@ mod tests {
             ),
             law(
                 "d-7678146e",
-                "x-84b2-file-budget-exception",
+                "x-aaaa-file-budget-exception",
                 "PR 84b2's allowance exception stands.",
                 "2026-09-11T12:00:00Z",
             ),
             law(
                 "d-5fff6924",
-                "x-e64b-file-budget-exception",
+                "x-bbbb-file-budget-exception",
                 "PR e64b's allowance exception stands.",
                 "2026-09-11T09:00:00Z",
             ),
@@ -779,7 +779,7 @@ mod tests {
 
     #[test]
     fn ac3_tokens_drops_hex_ids_and_stop_words() {
-        let got = tokens("x-14c8 pr-1847 cf6a file-budget added");
+        let got = tokens("x-1111 pr-1847 cf6a file-budget added");
         let want: BTreeSet<String> = ["added", "budget", "file"]
             .iter()
             .map(|s| s.to_string())
@@ -801,7 +801,7 @@ mod tests {
 
     #[test]
     fn ac1_nearby_finds_the_five_file_budget_laws() {
-        let req = ask_req(Q470, Some("pr-1847-budget-exception"), Some("x-14c8"));
+        let req = ask_req(Q470, Some("pr-1847-budget-exception"), Some("x-cccc"));
         let ans = ask_answer(&req);
         assert!(ans.exact.is_empty());
         let ids: Vec<&str> = ans.nearby.iter().map(|h| h.decision_id.as_str()).collect();
@@ -828,7 +828,7 @@ mod tests {
         ] {
             question.push_str(&format!(" {id}"));
         }
-        let req = ask_req(&question, Some("pr-1847-budget-exception"), Some("x-14c8"));
+        let req = ask_req(&question, Some("pr-1847-budget-exception"), Some("x-cccc"));
         let ans = ask_answer(&req);
         assert!(ans.uncited.is_empty());
         assert!(ans.nearby_refusal.is_none());

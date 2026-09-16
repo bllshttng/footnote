@@ -1,4 +1,4 @@
-//! `fno-agents needs` - the needs-me-queue events-fold leg (x-feec).
+//! `fno-agents needs` - the needs-me-queue events-fold leg.
 //!
 //! A pure read-time fold over events.jsonl producing the two event-derived
 //! attention reasons the mux client cannot see from live badges alone:
@@ -34,7 +34,7 @@ pub const DEFAULT_FIRES_FLOOR: u64 = 2;
 
 /// Below this age, a pile of unharvested carve-outs or stale claims is not yet
 /// a needs-me item - only a pile that has actually gone stale belongs in the
-/// queue (x-801b measured 44 carve-out rows, oldest 29 days; x-e3be measured
+/// queue (measured 44 carve-out rows, oldest 29 days; x-bbbb measured
 /// 573 claim files, oldest specimens 56-75 days). Both legs are "somebody
 /// should look at this pile" signals, read from durable on-disk state rather
 /// than a recent event, so neither is windowed by `since` at all.
@@ -71,7 +71,7 @@ pub struct NeedItem {
 
 /// Read `<field>` regardless of envelope: nested under `/data` (unified) or
 /// top-level (retired flat). Mirrors [`crate::digest`] - kept local so this
-/// module stays a self-contained leaf (x-7fdd: no function-local cross-imports).
+/// module stays a self-contained leaf (: no function-local cross-imports).
 fn field<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     v.get("data")
         .and_then(|d| d.get(key))
@@ -179,7 +179,7 @@ pub fn fold(events_raw: &str, ledger_raw: &str, since: u64, fires_floor: u64) ->
         let ts = event_ts(&v);
         let kind = event_kind(&v);
         // operator_question/_closed are exempt from the `since` window: a
-        // question does not expire (no auto-close, x-99dc), so time-windowing
+        // question does not expire (no auto-close), so time-windowing
         // it here would silently resurrect the exact failure that node fixed
         // for the SessionStart block - just inside the mux queue instead.
         let windowed = !matches!(
@@ -598,7 +598,7 @@ fn default_sources(home: &AgentsHome, cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
     (vec![project_events, global_events, questions], ledger)
 }
 
-/// Stamp each item's `live` bit from its node claim (x-feec 1.4): an item whose
+/// Stamp each item's `live` bit from its node claim (x-aaaa 1.4): an item whose
 /// node holds a Live or Suspect claim (a suspect TTL-unexpired claim still
 /// protects the slot) renders even without a roster row; an unclaimed or
 /// node-less one stays `live=false` and the client drops it when unjoined. This
@@ -650,7 +650,7 @@ fn stamp_liveness(mut items: Vec<NeedItem>) -> Vec<NeedItem> {
 /// convention as `events.jsonl`) rather than the events fold: a carve-out has
 /// no natural expiry, so this is never windowed by `since` at all.
 ///
-/// One aggregate row, not one per carve-out: x-801b measured 44 rows at once,
+/// One aggregate row, not one per carve-out: measured 44 rows at once,
 /// and a needs-me queue flooded with individual rows would just get truncated
 /// by the client's worst-first cap anyway. "N carve-outs, oldest Xd" is what
 /// actually answers "should I go clean this up."
@@ -718,7 +718,7 @@ pub struct ClaimAge {
 /// One stale-claim summary row, when the oldest `Stale` claim has actually
 /// gone stale for a while (>= [`DECISION_STALE_FLOOR_SECS`]). A `Stale` claim
 /// (dead pid, TTL expired) that is minutes old is normal churn; one that is
-/// weeks old is an orphaned lock nobody cleaned up (x-e3be measured 573 claim
+/// weeks old is an orphaned lock nobody cleaned up (x-bbbb measured 573 claim
 /// files, 570 dead pids, oldest specimens 56-75 days).
 ///
 /// One aggregate row, not one per claim, for the same reason as
@@ -760,7 +760,7 @@ pub fn stale_claim_item(claims: &[ClaimAge], now_ms: i64) -> Option<NeedItem> {
 }
 
 /// One item per registry row the progress axis classifies `refused`
-/// (x-cbd9 Task 3.4): alive, reachable, and unable to think, because its
+/// (Task 3.4): alive, reachable, and unable to think, because its
 /// endpoint was handed a model it cannot serve. Nothing else rotates this
 /// state today -- `status` reads `live`, the pid is real, and every roster
 /// reader that stops at reachability keeps it forever. This is the leg that
@@ -1120,7 +1120,7 @@ mod tests {
 
     #[test]
     fn refused_leg_pays_exactly_one_batch_call_regardless_of_roster_size() {
-        // x-0d93: this leg used to spawn one Python interpreter per registry
+        // this leg used to spawn one Python interpreter per registry
         // row on every `fno agents needs`. One batch, one process, 24 rows.
         let home = refused_home("batchonce", 24);
         let calls = std::cell::RefCell::new(Vec::new());
@@ -1651,10 +1651,10 @@ mod tests {
             false,
             5,
         );
-        let ledger = r#"{"entries":[{"session_id":"sess-x","graph_node_id":"x-feec","title":"needs queue","worktree":"/w/footnote/x-feec"}]}"#;
+        let ledger = r#"{"entries":[{"session_id":"sess-x","graph_node_id":"x-aaaa","title":"needs queue","worktree":"/w/footnote/x-aaaa"}]}"#;
         let items = fold(&events, ledger, ALL, DEFAULT_FIRES_FLOOR);
-        assert_eq!(items[0].node.as_deref(), Some("x-feec"));
-        assert_eq!(items[0].name.as_deref(), Some("x-feec"));
+        assert_eq!(items[0].node.as_deref(), Some("x-aaaa"));
+        assert_eq!(items[0].name.as_deref(), Some("x-aaaa"));
         assert_eq!(items[0].title.as_deref(), Some("needs queue"));
     }
 
@@ -1675,7 +1675,7 @@ mod tests {
         assert_eq!(items[0].session_id, "ghost");
     }
 
-    // --- operator_question (x-e3be: NeedKind::Decision producer) --------------
+    // --- operator_question (x-bbbb: NeedKind::Decision producer) --------------
 
     fn operator_question(ts: &str, qid: &str, question: &str, node: Option<&str>) -> String {
         let node_field = node
@@ -1698,12 +1698,12 @@ mod tests {
             "2026-07-03T02:00:00Z",
             "q-abc",
             "auto-merge or hold?",
-            Some("x-e3be"),
+            Some("x-bbbb"),
         );
         let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, "operator_question");
-        assert_eq!(items[0].node.as_deref(), Some("x-e3be"));
+        assert_eq!(items[0].node.as_deref(), Some("x-bbbb"));
         assert!(items[0].evidence.contains("auto-merge or hold?"));
     }
 
@@ -1780,7 +1780,7 @@ mod tests {
 
     #[test]
     fn operator_questions_rank_newest_first_and_other_kinds_stay_ascending() {
-        // AC11 (x-0dc5): the fold mirrors outstanding/core.py's rank - question
+        // AC11: the fold mirrors outstanding/core.py's rank - question
         // rows newest-first among themselves, every other kind keeps ascending
         // (ts, session_id, kind) stream order. Interleaved streams, so push
         // order alone can satisfy neither half.

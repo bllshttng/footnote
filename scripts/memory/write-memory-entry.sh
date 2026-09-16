@@ -10,12 +10,12 @@
 #                       mutate an existing file (not required for a new file
 #                       or a dedup hit). Proves the write is grounded in a
 #                       real read this turn, not a hallucinated memory of the
-#                       file's contents (x-8fc0).
+#                       file's contents.
 #   --empty-pass        Declare an explicit empty pass (no candidate). Writes
 #                       only the gate artifact + event. The LLM ran the
 #                       pre-promise pass and concluded nothing was memory-
 #                       worthy this session. Phase 3 of loop-correctness-
-#                       sweep (ab-83be25ea).
+#                       sweep.
 #
 # Behavior:
 #   - Compute target path: {memory-dir}/{type}_{slug(name)}.md
@@ -33,7 +33,7 @@
 #   - On any successful write OR --empty-pass, also writes a gate artifact at
 #       ${ARTIFACTS_DIR:-${REPO_ROOT}/.fno/artifacts}/memory-{sid}.md
 #       with frontmatter (phase, session_id, entries_written, approved) and
-#       writes the memory artifact (gate flip removed in ab-d0337fbc).
+#       writes the memory artifact (gate flip removed in).
 #
 # Exit codes:
 #   0  wrote a new file or updated an existing entry (success), OR --empty-pass success
@@ -107,7 +107,7 @@ ARTIFACTS_DIR="${ARTIFACTS_DIR:-${PROJECT_ROOT}/.fno/artifacts}"
 # emit_memory_gate ENTRIES_WRITTEN APPROVED
 #
 # Writes the memory gate artifact at ARTIFACTS_DIR/memory-${SESSION_ID}.md.
-# set-gate.sh removed in Task 3.2 (control-plane collapse, ab-d0337fbc);
+# set-gate.sh removed in Task 3.2 (control-plane collapse);
 # the gate-flip leg is gone - the artifact alone serves the notification path.
 emit_memory_gate() {
     local entries_written="$1" approved="$2"
@@ -326,7 +326,7 @@ if [[ -f "$TARGET" ]]; then
         exit 2
     fi
 
-    # ── read-before-write + provenance guards (x-8fc0) ──────────────────
+    # ── read-before-write + provenance guards ──────────────────
     # A mutating update to an EXISTING file must prove two things before
     # this writer touches it:
     #   1. read-before-write: the caller read the CURRENT on-disk content

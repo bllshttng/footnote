@@ -1,7 +1,7 @@
 //! Read Claude Code's own daemon roster and resolve its `control.sock` /
 //! `control.key`.
 //!
-//! G1 held-attach substrate (epic x-07c1, node x-26df). footnote ADOPTS an
+//! G1 held-attach substrate (epic, node). footnote ADOPTS an
 //! externally-spawned `claude --bg` worker by reading Claude's daemon roster
 //! (`~/.claude/daemon/roster.json`), then holds that worker's session live via a
 //! programmatic `control.sock` attach (see [`crate::claude_attach`]). This module
@@ -31,12 +31,12 @@ pub struct ClaudeAgentRow {
     pub short_id: String,
     pub state: Option<String>,
     /// Full harness session id, name and cwd, when the listing carries them
-    /// (x-aad0): the roster-side sweep needs the identity a registry row
+    /// the roster-side sweep needs the identity a registry row
     /// would have had, and the registry-side surfaces ignore them.
     pub session_id: Option<String>,
     pub name: Option<String>,
     pub cwd: Option<String>,
-    /// (x-c914 mirror) Which claude account root this row was read from:
+    /// (mirror) Which claude account root this row was read from:
     /// `None` = the ambient `~/.claude`, `Some(id)` = an isolated account's
     /// config dir from the fno accounts config. Set by the union reader,
     /// never by `parse_all_agents` (the parse stays dir-blind).
@@ -718,7 +718,7 @@ impl ClaudeRoster {
 mod tests {
     use super::*;
 
-    // x-9419: the roster snapshot shells out with EXACTLY
+    // the roster snapshot shells out with EXACTLY
     // [agents, --json, --all]. A duplicated .args chain once issued
     // `claude agents ... agents --json --all`, which the CLI refuses with
     // exit 1, so every snapshot read Unknown, claude_row_provably_absent

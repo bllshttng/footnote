@@ -194,7 +194,7 @@ _PM_ONEOFF_RE = re.compile(r"cancel|interrupt|abort", re.IGNORECASE)
 # Finalize-format STUCK TerminationReasons (finalize.rs POSTMORTEM_REASONS). NOT
 # benign one-offs even though "Interrupted"/"Aborted" contain the interrupt/abort
 # tokens _PM_ONEOFF_RE matches - they classify by body (wedge -> node, else
-# inbox) so the widened stuck-session corpus (x-42f6) is surfaced, not silently
+# inbox) so the widened stuck-session corpus is surfaced, not silently
 # archived. Exact-match on the whole subkind, so a legacy cancel kind still archives.
 _PM_STUCK_REASONS = frozenset({"noprogress", "budget", "interrupted", "aborted"})
 # Wedge-class: a named, repeatable failure mode worth a backlog node.
@@ -204,7 +204,7 @@ _PM_WEDGE_RE = re.compile(
     re.IGNORECASE,
 )
 # Deterministic backstop for two of the four blocklisted lesson classes from
-# skills/target/references/pre-promise.md (x-8fc0): a negative claim about a
+# skills/target/references/pre-promise.md: a negative claim about a
 # tool ("X is absent/missing/not installed", "X is broken/doesn't work") and
 # a transient/one-off error signature. The other two classes (env-dependent
 # findings stated as durable fact, unresolved-failure-as-validated-workflow)

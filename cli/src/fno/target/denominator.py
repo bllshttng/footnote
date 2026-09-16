@@ -1,9 +1,9 @@
-"""The scope denominator and its refusal predicate (x-cbab).
+"""The scope denominator and its refusal predicate.
 
 Two facts drove this module's shape, both proven on real specimens in the plan:
 
-1. Multi-deliverable scope cannot be DETECTED from node prose. x-0707's real ask
-   is a coordinated noun phrase with zero numerals; x-0707's measurement line is
+1. Multi-deliverable scope cannot be DETECTED from node prose. x-aaaa's real ask
+   is a coordinated noun phrase with zero numerals; x-aaaa's measurement line is
    five digit pairs that look exactly like an enumeration. A regex tight enough
    to skip the measurements misses the ask; a regex loose enough to catch the ask
    fires on every measurement bullet. So count is a DECLARATION, never a detection.
@@ -51,7 +51,7 @@ _NON_PLURAL = {
 # (1), (2) ... parenthesized ordinals anywhere in the text.
 _ORDINAL_PAREN = re.compile(r"\((\d{1,2})\)")
 # A markdown/list numbered marker at a line start: "1. " / "2. ". Requires the
-# line-start anchor so "see section 21." and "x-0707." (a sentence ending in a
+# line-start anchor so "see section 21." and "x-aaaa." (a sentence ending in a
 # node id) do not read as enumeration.
 _ORDINAL_LIST = re.compile(r"(?m)^\s*(\d{1,2})\.\s")
 # "both <word> ... and <word>" - the literal two-member construction.
@@ -91,7 +91,7 @@ def _cardinal_governs_plural(text: str) -> bool:
 def enumerated_scope(title: str, details: str) -> bool:
     """True iff title+details carry an unambiguous multi-deliverable enumeration.
 
-    A NON-FIRE ASSERTS NOTHING. x-0707's actual ask (a coordinated noun phrase
+    A NON-FIRE ASSERTS NOTHING. x-aaaa's actual ask (a coordinated noun phrase
     with no numerals) does not fire, and that is correct, not a gap: detecting it
     would require parsing meaning, which is the trap this module exists to avoid.
     The structural ``denominator_absent`` predicate below is what protects that

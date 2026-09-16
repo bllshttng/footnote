@@ -300,7 +300,7 @@ pub enum CloseOutcome {
     /// Unit was parked for later (e.g. dependents not yet resolved).
     Parked(String),
     /// Unit built successfully (PR up, reviewed) but its PR is not yet merged
-    /// (x-aba7: graph done = merged). Success-shaped: the claim is RELEASED and
+    /// (: graph done = merged). Success-shaped: the claim is RELEASED and
     /// no failure is recorded; the node stays `in_review` and is closed at the
     /// actual merge by `fno backlog reconcile` / merge-triggered advance.
     AwaitingMerge,
@@ -350,7 +350,7 @@ pub trait Session {
     /// driver redirects claude stdout+stderr into), if available. The walk reads
     /// it to classify a non-termination exit: claude's bg-guard refusal
     /// ("running as a background agent (bg)") must terminate the unit rather than
-    /// be re-dispatched into an infinite respawn loop (x-4504, AC1-ERR). Default
+    /// be re-dispatched into an infinite respawn loop (AC1-ERR). Default
     /// `None` -> a Session that captures no output is treated as an ordinary
     /// crash and re-dispatched exactly as before.
     fn output_tail(&self) -> Option<String> {
@@ -502,7 +502,7 @@ impl Journal {
 
     /// Scan journals for the LAST termination event matching `session_key`.
     ///
-    /// ## Search order (ab-7303e5d7: cross-cwd delivery via global mirror)
+    /// ## Search order (: cross-cwd delivery via global mirror)
     ///
     /// 1. Scan the project journal first (authoritative for single-cwd target walks).
     /// 2. When no match is found AND the global path differs from the project path,
@@ -746,7 +746,7 @@ pub struct LoopOutcome {
 /// via `exit_with_message` (exit 1) after printing a message containing this
 /// phrase (e.g. "<sid> is currently running as a background agent (bg)"). The
 /// walk resumes by shelling `claude --resume`, so re-dispatching just re-hits
-/// the guard forever -- the x-4504 respawn loop. Match is case-insensitive.
+/// the guard forever -- the respawn loop. Match is case-insensitive.
 const BG_GUARD_MARKER: &str = "running as a background agent";
 
 /// True iff a non-termination session exit is claude's bg-guard refusal and
@@ -785,7 +785,7 @@ fn is_bg_guard_refusal(exit_code: i32, output_tail: Option<&str>) -> bool {
 ///     run session, wait
 ///     if journal has termination event: close unit, journal node_closed, break
 ///     if exit is claude's bg-guard refusal: close unit (NoProgress) + node_closed,
-///       break -- do NOT re-dispatch (x-4504, AC1-ERR)
+///       break -- do NOT re-dispatch (AC1-ERR)
 ///     else: emit node_failed, continue inner loop (re-dispatch)
 /// ```
 ///
@@ -1015,7 +1015,7 @@ pub fn run_loop(
                 break; // Break inner loop -> continue outer loop (next unit).
             }
 
-            // x-4504 / AC1-ERR: claude's bg-guard refusal is terminal, not a
+            // / AC1-ERR: claude's bg-guard refusal is terminal, not a
             // crash to re-dispatch. When `/target --resume` lands on a session
             // claude still holds as a live background agent, claude refuses with
             // `exit_with_message` ("running as a background agent (bg)"). The

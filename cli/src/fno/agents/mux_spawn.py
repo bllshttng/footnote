@@ -157,7 +157,7 @@ class MuxSpawnResult:
     # Why this spawn is unbound, in the receipt whenever `bound` is False. Never
     # set when bound.
     unbound_reason: Optional[str] = None
-    # (x-b029, AC4-ERR) The session-id stamp never landed and the reconcile
+    # (AC4-ERR) The session-id stamp never landed and the reconcile
     # pass found nothing: the row is id-less for good, so the receipt names
     # the defect instead of returning zero with a silent None. Set alongside
     # `unbound_reason` (which says why the pane is unbound at receipt time);
@@ -168,13 +168,13 @@ class MuxSpawnResult:
     # close_pane), so this file is the only evidence the death ever leaves.
     log_path: str = ""
     effective_message: Optional[str] = None
-    # Server-authored exact-placement receipt (x-6928): anchor/direction/fallback
+    # Server-authored exact-placement receipt: anchor/direction/fallback
     # + squad/tab the split landed in. None unless `--at` pinned the origin.
     placement: Optional[dict] = None
     # LD5: true only when this pane was adopted after `pane run`'s
     # control read went unanswered. A painted frame plus a captured session id
     # proves the provider booted with the argv it was given; it does NOT prove
-    # the prompt was consumed (x-7ebd is the sibling failure for that). Callers
+    # the prompt was consumed (is the sibling failure for that). Callers
     # must render this receipt as "recovered", never "spawned".
     recovered: bool = False
     readiness: Optional[str] = None
@@ -234,7 +234,7 @@ def _shell_integration() -> str:
         return "mux-panes"
 
 
-# Moved to fno.agents.mux_server (x-f209, file budget); re-exported here.
+# Moved to fno.agents.mux_server (file budget); re-exported here.
 from fno.agents.mux_server import mux_server_env as mux_server_env  # noqa: E402
 from fno.agents.mux_server import resolve_mux_session  # noqa: E402
 
@@ -473,7 +473,7 @@ def claude_argv_is_interactive(argv: list[str]) -> bool:
 # Providers with an interactive-pane form below. This is the pane-hostable set -
 # a DISTINCT invariant from READABLE_PROVIDERS (which only means "the registry
 # loader tolerates this string in a row"). The two coincide today (opencode
-# graduated from staged-manifest-only to hosted at x-51f6) but diverge the
+# graduated from staged-manifest-only to hosted at) but diverge the
 # moment the next readable-but-argvless provider is staged. Gate the pane path
 # on THIS, so a staged provider is refused with an honest message rather than
 # slipping to build_pane_argv's backstop raise.
@@ -489,7 +489,7 @@ PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = (
     "grok",
 )
 
-#: x-f579: the token shape an UNDECLARED harness name must match before the
+#: : the token shape an UNDECLARED harness name must match before the
 #: pane lane will even look it up on PATH. Checked first, so a shell-hostile
 #: string never reaches shutil.which() or an argv. Undeclared names name CLI
 #: binaries, and this is the shape of one; declared harnesses never hit it.
@@ -578,7 +578,7 @@ def tier3_pane_tokens(
     deny_tools: Optional[str] = None,
 ) -> list[str]:
     """Map the Tier-3 harness-native passthrough flags to provider-native pane
-    argv tokens (x-b6e2), in a fixed order (add-dir, agent, allowedTools,
+    argv tokens, in a fixed order (add-dir, agent, allowedTools,
     disallowedTools). Fail-closed per cell: a set flag with no equivalent for
     ``provider`` raises before spawn - never a silent drop. An empty/None value
     is unset (no token). Mirrors the Rust HarnessFlags mapping + the client.rs
@@ -633,7 +633,7 @@ def effort_tokens(harness: str, value: str) -> list[str]:
     reasoning-effort surface at all, which is a property of that binary. agy
     was measured into this same deny set until its own ``--help`` said
     otherwise (`--effort (low|medium|high)` on 1.1.24, quoted by
-    `fno agents harness probe agy` - x-4e62/x-244c); it now translates like
+    `fno agents harness probe agy` - /); it now translates like
     claude. The sibling that reads the same axis, ``harness_map.effort_values``,
     was already spelled this way. The provider/model at the far end still owns
     the accepted VALUES; fno translates the spelling and keeps no catalog.
@@ -659,7 +659,7 @@ def effort_tokens(harness: str, value: str) -> list[str]:
         return ["--thinking", value]
     if harness == "grok":
         # grok's first-class effort flag, exact passthrough (launched with
-        # `--reasoning-effort high` against 1.0.13 in the x-fd31 measurement).
+        # `--reasoning-effort high` against 1.0.13 in the measurement).
         return ["--reasoning-effort", value]
     if harness == "cursor-agent":
         raise DispatchAskError(
@@ -670,7 +670,7 @@ def effort_tokens(harness: str, value: str) -> list[str]:
     from fno.agents.harness_map import is_declared
 
     if not is_declared(harness):
-        # x-f579: the CLI seam validates --effort before routing, so an
+        # the CLI seam validates --effort before routing, so an
         # undeclared harness reaches THIS raise first. The advice names the
         # undeclared lane's own escape (the operator's `--` passthrough), not
         # "omit the flag" - the vendor's spelling is real, just unmeasured.
@@ -916,7 +916,7 @@ def pane_passthrough_tokens(
     emitted: Sequence[str],
 ) -> list[str]:
     """Validate `--` passthrough tokens against what fno itself emitted, for
-    splicing into a provider arm (x-1caa).
+    splicing into a provider arm.
 
     A passthrough token naming a flag the arm already carries is a named
     refusal, never a silent last-wins: two sources for one value make the
@@ -960,7 +960,7 @@ def refuse_cursor_native_worktree_tokens(passthrough: Optional[Sequence[str]]) -
             )
 
 
-#: x-1caa: provider tokens that turn a pane into a dead one-shot, promoted from
+#: : provider tokens that turn a pane into a dead one-shot, promoted from
 #: the comments on the arms below into guards now that passthrough hands the
 #: operator the exact token each comment warned about. Bare tokens match too -
 #: opencode's `run` is a subcommand, not a flag. claude is deliberately absent:
@@ -977,7 +977,7 @@ PANE_HEADLESS_FORM_TOKENS: Mapping[str, tuple[str, ...]] = {
 
 def refuse_pane_headless_form(provider: str, argv: Sequence[str]) -> None:
     """Refuse a composed pane argv carrying a provider's headless-form token
-    (x-1caa). Checked on the COMPOSED argv next to the claude billing guard, so
+. Checked on the COMPOSED argv next to the claude billing guard, so
     a token reaches this check whichever side of ``--`` it came from."""
     refused = PANE_HEADLESS_FORM_TOKENS.get(provider)
     if not refused:
@@ -1046,7 +1046,7 @@ def build_pane_argv(
     (e.g. opencode: bare ``opencode --prompt`` here vs ``opencode run
     --dangerously-skip-permissions`` there, NOT the stale docs' ``--auto``); no parity contract.
 
-    ``model`` (x-c772): an explicit ``--model`` forwarded to the provider's own
+    ``model`` : an explicit ``--model`` forwarded to the provider's own
     TUI flag (claude/codex/gemini/agy ``--model <m>``; opencode
     ``--model <provider/model>``). Exact passthrough, no fuzzy resolution;
     empty/None = provider default. A CLI ``--model`` arg beats any role-routing
@@ -1061,7 +1061,7 @@ def build_pane_argv(
     Only claude is wired: the other pane arms have no verified equivalent flag,
     and guessing one fails the spawn rather than degrading.
 
-    ``passthrough`` (x-1caa): tokens after a ``--`` on the spawn command line,
+    ``passthrough`` : tokens after a ``--`` on the spawn command line,
     spliced INSIDE the arm - upstream of the composed-argv refusals in
     :func:`dispatch_spawn_pane` - so they inherit the same guards fno's own
     flags pass through, rather than appending past them. Absent/empty composes
@@ -1079,7 +1079,7 @@ def build_pane_argv(
         else [provider]
     )
 
-    # x-b6e2: resolve the Tier-3 passthrough tokens once, up front, so an
+    # resolve the Tier-3 passthrough tokens once, up front, so an
     # unmappable (provider, flag) cell fails closed BEFORE any provider arm builds
     # an argv. Supported cells return the tokens; every arm splices them in below.
     tier3 = tier3_pane_tokens(
@@ -1197,7 +1197,7 @@ def build_pane_argv(
         return argv
     if provider == "agy":
         effort_argv = effort_tokens("agy", effort) if effort else []
-        # agy (Antigravity) interactive pane (x-8f7f US1). Mirrors AgyProvider in
+        # agy (Antigravity) interactive pane (US1). Mirrors AgyProvider in
         # provider.rs: `--dangerously-skip-permissions` is the never-prompt lane
         # so an unattended pane can't wedge on its first approval. This LANE
         # mints no session id (the thread lane does), so no --session-id pin;
@@ -1217,7 +1217,7 @@ def build_pane_argv(
     if provider == "opencode":
         if effort:
             effort_tokens("opencode", effort)
-        # Bare `opencode` is the TUI (x-51f6); `opencode run` is the HEADLESS
+        # Bare `opencode` is the TUI; `opencode run` is the HEADLESS
         # form and must not be pane-hosted. The positional is a PROJECT PATH,
         # not a prompt, so the message rides --prompt (argv pinned from
         # opencode source, packages/opencode/src/cli/cmd/tui.ts). --auto is
@@ -1329,7 +1329,7 @@ def build_pane_argv(
         # flag, no model, no effort, no permission mapping and no tier3 state
         # grant - every one of those is a per-vendor spelling, and inventing one
         # is the guess this lane exists to refuse. Whatever the binary needs
-        # rides the operator's own `-- <flags>` (x-1caa passthrough).
+        # rides the operator's own `-- <flags>` (passthrough).
         #
         # The seed is deliberately NOT in argv: `seed_rode_in_argv` then answers
         # False and `_submit_spawn_seed` types it after readiness, the same path
@@ -1355,8 +1355,8 @@ def _mesh_env_pairs(
     config-set leaves.
 
     The mesh identity the daemon worker used to set on its PTY child
-    (worker.rs), plus any role-routing env (x-d2fe) and node provenance
-    (x-84a8). ``pane run`` transports argv only, so env rides the wrapper;
+    (worker.rs), plus any role-routing env and node provenance
+. ``pane run`` transports argv only, so env rides the wrapper;
     the spawn-name validation already forbids ``=``/newlines in ``name``.
 
     ``provenance`` is an already-resolved map of provenance env vars (e.g.
@@ -1380,7 +1380,7 @@ def _mesh_env_pairs(
     # FNO_AGENT_SUBSTRATE says where this worker runs, because the worker cannot
     # ask. It is what makes `attended` readable: a pane has an operator's view,
     # and FNO_AGENT_SELF beside it says only "spawned", which every substrate is
-    # (x-be78). It rides the ambient identity scrub above, so the nested child a
+    #. It rides the ambient identity scrub above, so the nested child a
     # pane worker launches drops this value instead of inheriting `pane`.
     from fno.harness_identity import FNO_AGENT_SUBSTRATE
 
@@ -1423,15 +1423,15 @@ def _mesh_env_pairs(
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")
         # Raise the harness Stop-hook block cap so fno's repeated-block loop is
-        # not force-ended at the default 9 (x-1680). The helper honors an
+        # not force-ended at the default 9. The helper honors an
         # operator-set value, so an explicit env wins over the fno default.
         from fno.agents.harnesses.claude import claude_stop_hook_block_cap
 
         pairs.append(f"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP={claude_stop_hook_block_cap()}")
-    # Per-spawn account overlay (x-d012) and any route compose through ONE
-    # function (x-8552), same as bg/headless: scrub inherited auth vars
+    # Per-spawn account overlay and any route compose through ONE
+    # function, same as bg/headless: scrub inherited auth vars
     # (env -u), layer the account (profile + its own login), layer the route
-    # last so it wins endpoint+auth+model as one unit (x-2af5). env(1)
+    # last so it wins endpoint+auth+model as one unit. env(1)
     # assignments are left-to-right last-wins, so rendering the composed
     # overlay as pairs below expresses that order without re-deriving it.
     resolved_route = route_env
@@ -1502,7 +1502,7 @@ def _mesh_env_pairs(
         if _k not in resolved_prov:
             unset += ["-u", _k]
     pairs += [f"{k}={v}" for k, v in resolved_prov.items()]
-    # Seed provenance (x-3a64), set-or-cleared as a whole group for exactly the
+    # Seed provenance, set-or-cleared as a whole group for exactly the
     # reason the node triple above is: a pane worker spawning a child passes its
     # whole environment down, so leaving these behind would hand the child the
     # PARENT's seed and sender - an envelope attributing the wrong message to the
@@ -1554,7 +1554,7 @@ PROVENANCE_KEYS: tuple[str, ...] = (
     "FNO_NODE_CLAIM_HOLDER",
 )
 
-#: Re-exported (x-3a64), never redefined: the clear list must not drift from the
+#: Re-exported, never redefined: the clear list must not drift from the
 #: module that writes the fields, and this module's `_mesh_env_wrapper` is one of
 #: several callers that clear them.
 from fno.mail.seed_provenance import SEED_PROVENANCE_KEYS  # noqa: E402
@@ -1587,7 +1587,7 @@ def resolve_provenance(
     plan: Optional[str] = None,
 ) -> dict[str, str]:
     """Build the ``FNO_NODE``/``FNO_SLUG``/``FNO_PLAN`` provenance map for a
-    node-driven pane spawn (x-84a8).
+    node-driven pane spawn.
 
     ``node`` is the only required input (a node id or slug). ``slug``/``plan``
     fill from the graph node record when absent - a single graph read that a
@@ -1705,7 +1705,7 @@ def _resolve_group_tab(requested: str) -> tuple[Optional[str], Optional[str]]:
     /``ordinal:``/a bare integer) rides the placement path untouched: they named
     a target, and fno has nothing to resolve. A bare integer is the VISIBLE
     1-based ordinal the tab bar shows; the Rust tab dictionary owns resolving
-    it against the live tab order (x-1499), so Python forwards it verbatim and
+    it against the live tab order, so Python forwards it verbatim and
     never converts it to a stable id or predicts one with a tab read. A bare
     name is a GROUP, and a group is placed after the spawn rather than before
     it - see :func:`place_pane_in_group_tab`.
@@ -2703,7 +2703,7 @@ def _await_interactive_readiness(
     cwd: Optional[Path] = None,
     codex_hook_trust_bypassed: bool = False,
 ) -> tuple[str, str]:
-    """Interactive readiness gate (x-6928).
+    """Interactive readiness gate.
 
     Liveness is necessary but never sufficient. A pane is READY only when the
     Rust manifest engine returns this harness's configured positive rule id.
@@ -2757,7 +2757,7 @@ def _await_interactive_readiness(
             return "failed", trust_refusal
     from fno.agents.harness_map import capabilities_or_undeclared
 
-    # x-f579: the readiness probe reads the posture, so an undeclared harness
+    # the readiness probe reads the posture, so an undeclared harness
     # takes the "no pinned ready marker" arm one line below (live) instead of
     # raising. A pinned marker is a measurement; an unmeasured harness has none.
     expected = capabilities_or_undeclared(provider)["ready_marker"]
@@ -2853,7 +2853,7 @@ def _send_permission_response(
                 # showing prompt. An envelope around a digit is nonsense, and
                 # the enveloped lane's read-back gate refuses exactly the pane
                 # state this caller requires. It is the archetypal keystroke
-                # case, not an oversight (node x-3a64).
+                # case, not an oversight (node).
                 ["mux", "pane", "send", pane, "--text", raw, "--server", session, "--raw"],
                 runner,
             )
@@ -3096,7 +3096,7 @@ def _submit_spawn_seed(
             cleared = _run_mux(
                 # --raw: a bare submit keystroke clearing a modal. There is no
                 # text to attribute and the modal IS the prompt the enveloped
-                # lane refuses (node x-3a64).
+                # lane refuses (node).
                 ["mux", "pane", "send", "--server", session, str(pane_id), "--text", "", "--submit", "--raw"],
                 runner,
             )
@@ -3188,7 +3188,7 @@ def _submit_spawn_seed(
             # leading-slash verb whose routing keys off that first character;
             # whether an envelope can ride behind the verb line without the
             # harness REPL swallowing it into the verb's ARGUMENTS is a separate,
-            # probe-gated question (node x-3a64 task 5). Until that probe answers,
+            # probe-gated question (node task 5). Until that probe answers,
             # this arm types the seed verbatim rather than forcing a shape the
             # harness may refuse.
             ["mux", "pane", "send", "--server", session, str(pane_id), "--text", payload, "--submit", "--raw"],
@@ -3247,7 +3247,7 @@ def dispatch_spawn_bounded_pane(
     from fno.claims.core import CLAIM_UNAVAILABLE, acquire_claim, release_claim
     from fno.claims.io import global_claims_root
 
-    # No provider allowlist here on purpose: x-f579 gives an undeclared
+    # No provider allowlist here on purpose: gives an undeclared
     # harness a pane lane. But the shared named refusals run BEFORE the claim
     # and any mux subprocess - a refusal that costs a placement lease first is
     # a refusal that contends the lease it must not take.
@@ -3277,7 +3277,7 @@ def dispatch_spawn_bounded_pane(
             f"placement lease held by {live_holder}; no pane spawned", exit_code=2
         ) from exc
     try:
-        # (x-ae47) The bounded lane forwards every placement directive to the
+        # The bounded lane forwards every placement directive to the
         # server: `pane run --fit` picks the tab (first below max-panes, else
         # a new one) where the Python pre-read used to, so a bare isolated
         # server with no squad answers instead of refusing at `tab ls`.
@@ -3305,7 +3305,7 @@ def dispatch_spawn_bounded_pane(
 def validate_pane_provider(
     provider: str, *, model=None, effort=None, permission_mode=None, yolo=None
 ) -> None:
-    """The x-f579 named refusals for an UNDECLARED harness, shared by every
+    """The named refusals for an UNDECLARED harness, shared by every
     pane lane. Three fail-closed refusals replace the old membership raise,
     each before any pane exists; a declared harness skips all three. The
     declared/undeclared fact is read from the TABLE (is_declared), the same
@@ -3438,9 +3438,9 @@ def dispatch_spawn_pane(
         message, crown_level, crown_scope, revive=False
     )
 
-    # Launch-time headroom picking (x-7d45): `pane` is the DEFAULT substrate and
+    # Launch-time headroom picking: `pane` is the DEFAULT substrate and
     # `cmd_spawn` routes it straight here, so the picker must live on this lane.
-    # x-d285: the picked OVERLAY (not just its env) so the row can stamp the
+    # the picked OVERLAY (not just its env) so the row can stamp the
     # account id it picked; an explicit launch_account from the caller wins.
     effective_launch_account = launch_account
     launch_account_source = launch_provenance.seam_launch_source(launch_account)
@@ -3550,8 +3550,8 @@ def dispatch_spawn_pane(
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(provider, permission_pinned=bool(permission_mode or yolo))
     validate_spawn_name(name)
-    # x-f579: undeclared has a lane - fno hosts the binary as a pane and is the
-    # viewport (x-8f7f's agy observation, a pane host needs only an interactive
+    # undeclared has a lane - fno hosts the binary as a pane and is the
+    # viewport (agy observation, a pane host needs only an interactive
     # argv, taken to its conclusion). The named refusals live in
     # validate_pane_provider, shared with the bounded wrapper so no lane can
     # refuse them differently.
@@ -3585,7 +3585,7 @@ def dispatch_spawn_pane(
         # prevents the generic env wrapper from resolving a Claude route.
         route_env = dict(codex_route.env) if codex_route is not None else {}
         launch_role = None
-        # x-3954: the row records the route IDENTITY (never an endpoint or a
+        # the row records the route IDENTITY (never an endpoint or a
         # key); a relaunch re-resolves the route in Rust from today's config.
         if codex_route is not None and codex_route.provider:
             route_provider_id = codex_route.provider
@@ -3644,7 +3644,7 @@ def dispatch_spawn_pane(
     # unpeekable and its registry row id-less whether it is healthy or a corpse.
     # resolved_monitor was settled above, before the route guard.
     pin_session = provider == "claude" and resolved_monitor != "happy"
-    # (x-c198) pi's id is CALLER-ASSIGNED and fno must never let pi mint one.
+    # pi's id is CALLER-ASSIGNED and fno must never let pi mint one.
     # pi's own default is a UUIDv7, whose head-8 is the same ~65s clock bucket
     # that collides two codex short ids, and its capability row declares
     # `session_binding.required = true`. Dropping the flag here would leave the
@@ -3699,7 +3699,7 @@ def dispatch_spawn_pane(
         print(f"codex pane: identity leaves skipped; argv[0] is {argv[0]!r}", file=sys.stderr)
     if codex_route is not None:
         argv = [argv[0], *codex_route.config_args, *argv[1:]]
-        # x-1caa: the route's config args splice AFTER build_pane_argv, so the
+        # the route's config args splice AFTER build_pane_argv, so the
         # in-arm duplicate-flag check never saw them; re-run it against the
         # route tokens or a passthrough `-c`/`--model` flag is a silent
         # last-wins against the route's own setting.
@@ -3716,7 +3716,7 @@ def dispatch_spawn_pane(
             "claude",
             exit_code=2,
         )
-    # x-1caa: same choke point as the billing guard above, reading the composed
+    # same choke point as the billing guard above, reading the composed
     # argv so a passthrough token faces the identical check an fno-emitted one
     # would (a splice inside build_pane_argv, never an append past the guards).
     refuse_pane_headless_form(provider, argv)
@@ -3729,13 +3729,13 @@ def dispatch_spawn_pane(
     if resolved_monitor == "happy":
         assert route_env is not None
         argv = happy_pane_argv(argv, route_env, explicit=monitor is not None)
-    # QoS (x-c5cc): demote the provider command INSIDE the env wrapper -
+    # QoS: demote the provider command INSIDE the env wrapper -
     # wrapping outermost would break the mux server's FNO_NODE provenance
     # parse, which is anchored on argv[0] == "env" (server.rs node_from_argv).
     # env(1) applies its assignments and then execs taskpolicy/nice -> provider.
     from fno.agents.spawn_gate import qos_wrap
 
-    # Seed provenance (x-3a64): the seed argument itself stays byte-identical -
+    # Seed provenance: the seed argument itself stays byte-identical -
     # normalize.sh and the harness REPL both key off its leading slash - so the
     # attribution travels as env and a SessionStart hook renders it. Quotes the
     # message as this launcher received it; the provider-specific respelling
@@ -3797,7 +3797,7 @@ def dispatch_spawn_pane(
         # inherits the config-derived knob. Latched at server birth - an
         # already-running server keeps its value.
         # Placement directives ride the OUTER pane-run transport, before the `--`
-        # that fences the provider argv (x-3e38). build_pane_argv stays
+        # that fences the provider argv. build_pane_argv stays
         # placement-blind so provider-native commands are never contaminated.
         placement_args: list[str] = ["--max-panes", str(_pane_group_max())]
         if squad:
@@ -3818,7 +3818,7 @@ def dispatch_spawn_pane(
             # flag as a caller tab; the id: shape is enforced at the gate.
             placement_args += ["--tab", tab_id.strip()]
         if enforce_tab_capacity and not (split or at or tab or tab_id):
-            # (x-ae47) The bounded lane with no geometry asks the SERVER to
+            # The bounded lane with no geometry asks the SERVER to
             # pick the tab: first below max-panes, else a new one. The raw
             # `tab` check keeps a pane-group --tab <name> on its
             # new-tab-then-join path.
@@ -3864,7 +3864,7 @@ def dispatch_spawn_pane(
             if json_receipt:
                 run_args.append("--json")
             run_args += ["--", *wrapped]
-        # x-42c5: pop FNO_SPAWN_TRIGGER BEFORE this env snapshot, mirroring the
+        # pop FNO_SPAWN_TRIGGER BEFORE this env snapshot, mirroring the
         # bg_create ordering fix in dispatch.py. `{**os.environ, ...}` here
         # seeds the pane-run transport (and, at server birth, the mux server
         # that spawns pane shells) - popped after this snapshot is too late.
@@ -3888,7 +3888,7 @@ def dispatch_spawn_pane(
             assert pane is not None
             proc = start_existing_pane(session, pane, str(cwd), wrapped, _run_mux, runner)
         elif provider == "pi" and session_uuid:
-            # (x-c198) Launching pi on an id is a CREATE when that id has no
+            # Launching pi on an id is a CREATE when that id has no
             # session yet, and concurrent creates on one id are unserialised
             # and SILENT: four at once produced four sessions, every process
             # exiting 0 and every file internally perfect, after which a resume
@@ -4029,7 +4029,7 @@ def dispatch_spawn_pane(
         child_pid = _lookup_child_pid(session, pane_id, runner)
         if tab_id or enforce_tab_capacity:
             try:
-                # x-18c4: one listing read must not condemn the pane. The
+                # one listing read must not condemn the pane. The
                 # verifier re-lists once and names its cause; the reap wrapper
                 # below keeps the fail-closed contract.
                 verify_bounded_placement(
@@ -4206,7 +4206,7 @@ def dispatch_spawn_pane(
                 if session_uuid is not None
                 else None
             )
-            # Same verdict the row projection uses, not a bare != : a bare
+            # Same verdict the row projection uses, not a bare !=: a bare
             # vs [1m]-suffixed spelling of one family is a match, so this
             # lane cannot cry wolf on a route's own suffix spelling.
             from fno.agents.row_contradiction import model_substitution as _sub_verdict
@@ -4408,7 +4408,7 @@ def dispatch_spawn_pane(
         # actually requested (crown_level is not None).
         crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
 
-        # x-ae2d: record WHICH route this pane launched with, so a later relaunch
+        # record WHICH route this pane launched with, so a later relaunch
         # (which re-launches a process rather than attaching to this live one) can
         # re-apply it or refuse. A happy pane carries its route as env(1) plus
         # --claude-env rather than --settings, so nothing has materialized the
@@ -4492,7 +4492,7 @@ def dispatch_spawn_pane(
                 r.harness_session_id == session_uuid for r in rows
             )
             stored_session_uuid = None if claimed else session_uuid
-            # One-live-crown guard (x-7685): if another non-terminal row already
+            # One-live-crown guard: if another non-terminal row already
             # holds this scope, decline the crown and spawn uncrowned. Same lock,
             # same rows, same idiom as the claim check above. A worker without a
             # crown is recoverable; a duplicate crown over one scope is not.
@@ -4544,7 +4544,7 @@ def dispatch_spawn_pane(
                     else "live"
                 )
             )
-            # Resolvable-handle fallback (x-7bcd): the pane itself is a live
+            # Resolvable-handle fallback: the pane itself is a live
             # ref (the `mux` field below), but that is not one of the three
             # legs the write-choke-point guard checks. Evaluated HERE, with
             # the FINAL stored_session_uuid (post claim-dedup above) rather
@@ -4579,7 +4579,7 @@ def dispatch_spawn_pane(
                     model=actual_model or route_model,
                     model_basis="requested" if (actual_model or route_model) else None,
                     effort=effort,
-                    # v23 (x-2019): the request verbatim beside the effect; the
+                    # v23: the request verbatim beside the effect; the
                     # observed half may land on actual_model, the request never
                     # does - it is what the flags spelled.
                     requested_model=model or route_model,
@@ -4599,7 +4599,7 @@ def dispatch_spawn_pane(
                     # human start this session by hand" reads no. The operator
                     # stamp already existed at both register paths; without this
                     # one a worker row stayed ABSENT, and absent is the value
-                    # that cannot be told apart from never-recorded (x-944f).
+                    # that cannot be told apart from never-recorded.
                     origin="spawn",
                     # The mux pane back half: this row's PTY is a pane in
                     # mux.session (the mux ref stamped below).
@@ -4608,14 +4608,14 @@ def dispatch_spawn_pane(
                     crown_scope=crown_scope,
                     crown_grantor=crown_grantor_val,
                     route_settings_path=route_settings_path,
-                    # x-d285: this seam positively knows whether an account was
+                    # this seam positively knows whether an account was
                     # pinned, so a claude row always carries "default" or the
                     # account id - never an absence a re-entry would have to
                     # guess at. Non-claude rows stay None: the account axis is
                     # claude-only, same boundary as route_settings_path.
                     launch_account=row_launch_account,
                     launch_account_source=row_launch_source,
-                    # x-98ab: the node this pane works, from the SAME resolved
+                    # the node this pane works, from the SAME resolved
                     # provenance map the child env got - never the spawning
                     # session's ambient value.
                     node=(provenance or {}).get("FNO_NODE") or None,
@@ -4693,7 +4693,7 @@ def dispatch_spawn_pane(
                     f"spawn: crown over {_declined_scope!r} recorded; reign typed",
                     file=sys.stderr,
                 )
-            # Birth (x-8cd5 Wave 6): the row is written, so the pane worker now
+            # Birth (Wave 6): the row is written, so the pane worker now
             # exists in the registry. Emit to the daemon lifecycle log so this
             # birth joins the daemon's death events. The registry row leaves
             # short_id empty (mux is its one live transport ref) and carries
@@ -4719,7 +4719,7 @@ def dispatch_spawn_pane(
             )
         except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
             # No row was written, so the orphan's later death would join no
-            # birth. Record the failed start in the daemon log (x-8cd5 Wave 6).
+            # birth. Record the failed start in the daemon log (Wave 6).
             from fno.agents import events as _spawn_events
 
             _spawn_events.emit_spawn_failed(
@@ -4896,7 +4896,7 @@ def dispatch_spawn_pane(
                     exit_code=1,
                 )
             else:
-                # (x-b029, AC4-ERR) An OPTIONAL binding whose stamp never
+                # (AC4-ERR) An OPTIONAL binding whose stamp never
                 # landed: this branch used to fall through and return zero
                 # with an id-less row and no journal entry, so the unstamped
                 # pane was a defect only a hand audit of `pane ls` found
@@ -4944,7 +4944,7 @@ def dispatch_spawn_pane(
     from fno.agents.harness_map import is_declared
 
     if not is_declared(provider):
-        # x-f579 AC9: the receipt STATES the lane, so a caller reading only it
+        # AC9: the receipt STATES the lane, so a caller reading only it
         # cannot infer a thread lane, steering, or `ask` that are not there, and
         # knows submit_keys=enter is an unmeasured default rather than a row.
         # Same predicate as the gate and the generic arm: one table fact.

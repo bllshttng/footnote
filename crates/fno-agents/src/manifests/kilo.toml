@@ -1,4 +1,4 @@
-# kilo readiness manifest (x-83e7) - full-roster parity port from
+# kilo readiness manifest - full-roster parity port from
 # the reference manifest for kilo per ADAPTING.md. kilo shares
 # opencode's TUI chrome, so opencode_permission mirrors opencode.toml's rule.
 #

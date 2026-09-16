@@ -1,4 +1,4 @@
-//! The off-loop registry reader's between-tick memory (x-c914, x-688b):
+//! The off-loop registry reader's between-tick memory :
 //! mtime-gated document caches, per-source last-good rows, per-account
 //! roster caches, and the read_ok signal that gates the daemon-side
 //! registry-absence death rule. Pure over the bytes the server's scan
@@ -16,29 +16,29 @@ pub struct ReaderState {
     reg_stamp: Option<(std::time::SystemTime, u64)>,
     roster_raw: Option<String>,
     roster_stamp: Option<(std::time::SystemTime, u64)>,
-    /// (x-688b) The registry leg resolved for the death rule: parsed bytes,
+    /// The registry leg resolved for the death rule: parsed bytes,
     /// real last-good rows, or a confirmed absence. A present-but-garbage
     /// document with nothing last-good reads false.
     reg_ok: bool,
-    /// (x-688b) The same resolved fact for the roster leg.
+    /// The same resolved fact for the roster leg.
     roster_ok: bool,
     /// Last successfully-derived rows per source, so a torn concurrent write
     /// keeps that source's last-good instead of blanking it (the merged
     /// `last_sent` alone can't distinguish which source went stale).
     last_good_reg: Option<Vec<RegistryAgent>>,
     last_good_roster: Option<Vec<RosterWorker>>,
-    /// (x-c914) Per-isolated-account roster caches, keyed by account id. Each
+    /// Per-isolated-account roster caches, keyed by account id. Each
     /// isolated account's `<config_dir>/daemon/roster.json` is stamp-gated and
     /// parsed independently so a torn/corrupt one keeps ITS last-good without
     /// blanking the default roster or the other accounts (AC1-FR per source).
     isolated: std::collections::HashMap<String, IsolatedRoster>,
     last_sent: Option<Vec<RegistryAgent>>,
-    /// (x-688b) The read_ok published with `last_sent`, so a readability flip
+    /// The read_ok published with `last_sent`, so a readability flip
     /// with unchanged rows still republishes.
     last_sent_ok: bool,
 }
 
-/// (x-c914) One isolated account's roster cache: the mtime stamp gate plus the
+/// One isolated account's roster cache: the mtime stamp gate plus the
 /// already-parsed+tagged workers (re-parsed only when the stamp moves).
 #[derive(Default)]
 struct IsolatedRoster {
@@ -46,7 +46,7 @@ struct IsolatedRoster {
     last_good: Option<Vec<RosterWorker>>,
 }
 
-/// (x-c914) One isolated account's per-tick roster read, assembled by the
+/// One isolated account's per-tick roster read, assembled by the
 /// server's off-loop scanner (the same stat+conditional-read the default
 /// roster uses): `raw` is `Some` only when `stamp` moved past the cache.
 pub struct IsolatedRead {
@@ -68,14 +68,14 @@ impl ReaderState {
         self.roster_stamp
     }
 
-    /// (x-c914) The cached stamp of `account`'s isolated roster, so the
+    /// The cached stamp of `account`'s isolated roster, so the
     /// server's scanner gates that dir's read the same way it gates the
     /// default roster. `None` for a never-seen account (its first scan reads).
     pub fn isolated_stamp(&self, account: &str) -> Option<(std::time::SystemTime, u64)> {
         self.isolated.get(account).and_then(|c| c.stamp)
     }
 
-    /// (x-688b) Both primary stores resolved: PARSED bytes, real last-good
+    /// Both primary stores resolved: PARSED bytes, real last-good
     /// rows, or a confirmed absence. A present-but-garbage document with no
     /// last-good reads false, and so does a present file whose read keeps
     /// failing (its stamp never advances) - the daemon-side registry-absence
@@ -106,7 +106,7 @@ impl ReaderState {
         // raced/failed read: leave the stamp behind so the next tick's scan gate
         // (stamp != cached) re-attempts the SAME stamp instead of freezing the
         // last-good rows until an unrelated later write happens to move mtime.
-        // (x-688b) A no-file-on-either-side agreement is a confirmed absence
+        // A no-file-on-either-side agreement is a confirmed absence
         // too (the startup-before-first-write state never enters the arms);
         // the derivation below folds absence into `reg_ok`/`roster_ok`.
         if reg_stamp != self.reg_stamp {
@@ -136,7 +136,7 @@ impl ReaderState {
             }
         }
 
-        // (x-688b) Completeness is PARSE success, not byte presence: a
+        // Completeness is PARSE success, not byte presence: a
         // present-but-garbage registry with no last-good rows reads NOT ok,
         // and so does a file whose read keeps failing (cached bytes absent
         // while this tick still SAW the file). Last-good rows carry the ok
@@ -163,7 +163,7 @@ impl ReaderState {
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        // fno-truth junior badge (x-4a48): fill the no-badge/Idle gap for a
+        // fno-truth junior badge: fill the no-badge/Idle gap for a
         // bg /target worker between turns from its claim + loop_check recency.
         if let Some(raw) = &self.reg_raw {
             overlay_truth_badges(&mut reg_rows, &build_truth_badges(raw, now_secs));
@@ -187,7 +187,7 @@ impl ReaderState {
         };
         self.last_good_roster = Some(roster.clone());
 
-        // (x-c914) Fold each isolated account's roster into the union, tagging
+        // Fold each isolated account's roster into the union, tagging
         // its workers with the source account. Same stamp-gate + per-source
         // last-good contract as the default roster above; a torn/corrupt file
         // keeps THIS account's last-good and never blanks the others (AC1-FR),
@@ -223,7 +223,7 @@ impl ReaderState {
         }
 
         let rows = merge_rows(reg_rows, &all);
-        // (x-688b) Publish when the READ STATE moves too, not only the rows:
+        // Publish when the READ STATE moves too, not only the rows:
         // a readability flip with unchanged last-good rows must still reach
         // the core, or `agents_read_ok` goes stale over a file nobody
         // re-mentions.
@@ -245,7 +245,7 @@ mod tests {
         Some((std::time::UNIX_EPOCH, n))
     }
 
-    /// (x-688b, codex P1) A present-but-garbage registry with no last-good
+    /// (codex P1) A present-but-garbage registry with no last-good
     /// rows is NOT a successful read: the absence death rule must stay inert
     /// over a document that was never derived.
     #[test]
@@ -297,7 +297,7 @@ mod tests {
         );
     }
 
-    /// (x-688b, codex P1) A readability flip with unchanged rows must still
+    /// (codex P1) A readability flip with unchanged rows must still
     /// publish: garbage-from-startup (not ok) turning into a valid empty
     /// registry (ok) keeps the row set identical, and the core would never
     /// learn the read succeeded.

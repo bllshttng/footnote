@@ -1,4 +1,4 @@
-//! Daemon binary-version drift detection (ab-1891cdff).
+//! Daemon binary-version drift detection.
 //!
 //! The `fno-agents` daemon is a long-lived process. A `cargo install` (or any
 //! rebuild) replaces the on-disk binary, but the *running* daemon keeps
@@ -124,7 +124,7 @@ pub fn drift_label(state: &DriftState) -> &'static str {
     }
 }
 
-/// The live store keeper's path note (x-d6ad AC13): name the path the keeper
+/// The live store keeper's path note (x-aaaa AC13): name the path the keeper
 /// runs from, and mark it against the installed release path. The keeper's
 /// identity comes from the footprint payload's `top` array - its own argv
 /// string - so no new probe is needed. The note always names the path (a
@@ -351,7 +351,7 @@ mod tests {
         // runs from, and marks what it is, by its own string.
         let commands = vec![
             "Google Chrome Helper (Renderer)".to_string(),
-            "/Users/dev/.fno/worktrees/footnote/x-d6ad/target/debug/fno-agents --store-keeper --sock /tmp/x".to_string(),
+            "/Users/dev/.fno/worktrees/footnote/x-aaaa/target/debug/fno-agents --store-keeper --sock /tmp/x".to_string(),
         ];
         let note = keeper_path_note(&commands, None).expect("note");
         assert!(

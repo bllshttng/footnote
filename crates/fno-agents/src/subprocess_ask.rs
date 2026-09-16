@@ -1,9 +1,9 @@
 //! Shared one-shot-subprocess primitives for the client-side `ask` ports
-//! (codex + gemini). Extracted from `codex_ask.rs` (ab-73da4ac2) so the SIGINT
+//! (codex + gemini). Extracted from `codex_ask.rs` so the SIGINT
 //! forwarding, process-group kill, grace reap, watchdog, and output tee live in
 //! ONE place and the PR #371/#372 hardening carveouts apply to every provider:
 //!
-//! - cv-cfdb7a56 (SIGINT forwarding, ab-e7fdbcb6): forward operator Ctrl-C to
+//! - cv-cfdb7a56 (SIGINT forwarding): forward operator Ctrl-C to
 //!   the child's process group so codex/gemini + their sandbox descendants are
 //!   not orphaned. Both providers' one-shot subprocess is `setpgid(0,0)` into
 //!   its own group, so terminal SIGINT never reaches it without forwarding.
@@ -24,7 +24,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 // ===========================================================================
-// SIGINT forwarding (ab-e7fdbcb6 / cv-cfdb7a56) — shared across providers
+// SIGINT forwarding (/ cv-cfdb7a56) — shared across providers
 // ===========================================================================
 //
 // The one-shot ask subprocess (codex or gemini) runs in its OWN process group

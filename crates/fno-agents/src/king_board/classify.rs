@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 /// Live node claims resolved per board read; the cut is reported (the
-/// x-f8e3 reference carried the same cap).
+/// reference carried the same cap).
 pub(crate) const MAX_CLAIMED_NODE_READS: usize = 20;
 
 /// The activity vocabulary that counts as a staffed lane (reachability
@@ -108,7 +108,7 @@ pub(crate) fn read_claimed_nodes(
 }
 
 /// The holder verdict, read off the probe the Python predicate already
-/// classified (x-dead task 1.3). `holder_is_active` re-derived liveness from
+/// classified (x-1111 task 1.3). `holder_is_active` re-derived liveness from
 /// `probe.state` + `probe.last_activity_age_s` and collapsed every UNKNOWN
 /// into not-active - the exact fold this node measured rendering a dead
 /// process live (state word `working`, process gone) and an unmeasurable
@@ -124,7 +124,7 @@ pub(crate) enum HolderReading {
 pub(crate) fn holder_reading(probe: Option<&crate::truth_probe::TruthProbe>) -> HolderReading {
     let Some(probe) = probe else {
         // A holder the probe never answered for is a hole in the evidence,
-        // not a verdict (x-db9c).
+        // not a verdict.
         return HolderReading::Unmeasured;
     };
     if let Some(reachability) = probe.reachability.as_deref() {
@@ -328,7 +328,7 @@ pub(crate) fn roster_verdict(
 /// that shape, and a PR needs a driver of its own. In-scope leaves stay
 /// claim-driven: a dead worker under a crown is still a dead handoff.
 ///
-/// A CONTAINED node never reads none (x-dead task 1.4b): `contained_in` set
+/// A CONTAINED node never reads none (x-1111 task 1.4b): `contained_in` set
 /// means an owner exists by definition and the node never dispatches alone,
 /// so `none` - the word that fills unheld_progress, undriven_pr and
 /// unreachable_worker - is not an available verdict for it. One check here
@@ -341,14 +341,14 @@ pub(crate) fn roster_verdict(
 /// health - a deadlocked worker was measured holding an unexpired one - so a
 /// lease must never suppress the row, and (structurally: the claim scan strips
 /// `expires_at`) it cannot. This ruling is pinned by the three
-/// `*_asks_for_progress_*` tests below; x-caf7 is the failure the obvious
+/// `*_asks_for_progress_*` tests below; is the failure the obvious
 /// lease-keyed fix would have silenced.
 ///
 /// The UNMEASURED arm is a measurement that did not happen: a probe the batch
-/// never answered (x-db9c), a probe the shared predicate could not classify
-/// (x-dead task 1.3), or - for a node with NO claim row - a worked feed that
+/// never answered, a probe the shared predicate could not classify
+/// (x-1111 task 1.3), or - for a node with NO claim row - a worked feed that
 /// could not answer whether a driverless-looking node has a roster worker
-/// (x-dead task 1.4: a live worker with no claim row is not an undriven PR,
+/// (x-1111 task 1.4: a live worker with no claim row is not an undriven PR,
 /// and PR 1747 was measured wearing exactly that shape). None of these is
 /// `none`; `none` requires the worked feed to have answered and found
 /// nothing.
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn holder_reading_maps_the_shared_verdict() {
-        // x-dead task 1.3: the board reads the Python predicate's verdict off
+        // x-1111 task 1.3: the board reads the Python predicate's verdict off
         // the wire instead of re-deriving liveness from state+age. Each pole
         // asserts its literal state word: a positive marker.
         let mut probed = crate::truth_probe::TruthProbe {
@@ -537,8 +537,8 @@ mod tests {
         // A roster row whose probe answered unknown + silent + aged past the
         // stall line is the measured-no shape: node_driver none, so
         // undriven_pr may name the node.
-        let node = json!({"id": "x-5767", "priority": "p2", "pr_number": 1881});
-        let drivers = drivers_read(json!([driver_row("x-5767", "quiet-worker")]));
+        let node = json!({"id": "x-aaaa", "priority": "p2", "pr_number": 1881});
+        let drivers = drivers_read(json!([driver_row("x-aaaa", "quiet-worker")]));
         let mut activity = HashMap::new();
         activity.insert(
             "quiet-worker".to_string(),
@@ -693,12 +693,12 @@ mod tests {
         // AC1-HP: the holder probe outranks the clock. The 2026-09-09 board
         // read five stale handover leases whose holders were writing at that
         // moment; the old ordering returned none before the probe ever ran.
-        let node = json!({"id": "x-7471", "priority": "p1"});
+        let node = json!({"id": "x-bbbb", "priority": "p1"});
         let mut claims = HashMap::new();
         claims.insert(
-            "x-7471".to_string(),
+            "x-bbbb".to_string(),
             json!({
-                "key": "node:x-7471", "state": "stale",
+                "key": "node:x-bbbb", "state": "stale",
                 "holder": "spawn-handover:target-7471-worker",
             }),
         );
@@ -834,11 +834,11 @@ mod tests {
         assert!(text.contains(r#"STALE_TRANSCRIPT = "stale-transcript""#));
     }
 
-    // --- x-9958: stalled asks for progress, never for a lease ---------------
+    // ---: stalled asks for progress, never for a lease ---------------
     //
-    // The plan for x-9958 requires three tests: advancing evidence clears the
+    // The plan for requires three tests: advancing evidence clears the
     // row, no evidence keeps it, and an UNEXPIRED spawn-handover lease under a
-    // silent holder must never suppress it (the x-caf7 deadlocked worker held
+    // silent holder must never suppress it (the deadlocked worker held
     // a fresh lease; keying on the lease would have gone silent about exactly
     // that row). Each asserts the literal state word: a positive marker.
 
@@ -910,15 +910,15 @@ mod tests {
         );
     }
 
-    // --- x-dead: contained nodes and the no-claim arm ----------------------
+    // --- x-1111: contained nodes and the no-claim arm ----------------------
 
     #[test]
     fn a_contained_node_never_reads_none() {
-        // x-dead task 1.4b (the x-58a5 shape): `contained_in` set means an
+        // x-1111 task 1.4b (the x-cccc shape): `contained_in` set means an
         // owner exists by definition and the node never dispatches alone, so
         // `none` - the word that fills the board queues - is not an available
         // verdict for it, whatever its claim edge says.
-        let node = json!({"id": "x-58a5", "priority": "p1", "contained_in": "x-b7f8"});
+        let node = json!({"id": "x-cccc", "priority": "p1", "contained_in": "x-dddd"});
         let claims: HashMap<String, Value> = HashMap::new();
         let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
         let (state, claim) =
@@ -933,7 +933,7 @@ mod tests {
         // nominates, the probe decides: a listed row with no probed tokens
         // reads unmeasured, never active. Unlisted is the one positive none;
         // an unreadable feed is unmeasured, never none.
-        let node = json!({"id": "x-1747", "priority": "p1"});
+        let node = json!({"id": "x-eeee", "priority": "p1"});
         let claims: HashMap<String, Value> = HashMap::new();
         let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
         let (state, claim) = node_driver(
@@ -941,7 +941,7 @@ mod tests {
             &claims,
             &activity,
             None,
-            Some(&ok_worked(&["x-1747"])),
+            Some(&ok_worked(&["x-eeee"])),
             None,
         );
         // No tokens on the listed row: the probe never got a candidate, so
@@ -951,7 +951,7 @@ mod tests {
         // A listed row whose worker token reads reachable is the new active:
         // the probe, not the listing, answers.
         let listed = crate::king_board::SourceRead::ok(json!([
-            {"id": "x-1747", "tokens": ["t-1747"]},
+            {"id": "x-eeee", "tokens": ["t-1747"]},
         ]));
         let mut alive: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
         alive.insert("t-1747".to_string(), probe("working", 30.0));
@@ -962,7 +962,7 @@ mod tests {
         // A label the registry never confirmed maps to no token: unmeasured,
         // never active and never none.
         let unmapped_row = crate::king_board::SourceRead::ok(json!([
-            {"id": "x-1747", "unmapped": true},
+            {"id": "x-eeee", "unmapped": true},
         ]));
         assert_eq!(
             node_driver(&node, &claims, &alive, None, Some(&unmapped_row), None).0,
@@ -1002,11 +1002,11 @@ mod tests {
     fn a_live_roster_driver_with_a_free_claim_is_active() {
         // The measured shape that motivated the roster: claim free, driver
         // live mid-edit. The claim is a snapshot; the driver is a process.
-        let node = json!({"id": "x-5baf", "priority": "p1", "pr_number": 1});
+        let node = json!({"id": "x-ffff", "priority": "p1", "pr_number": 1});
         let claims: HashMap<String, Value> = HashMap::new();
         let mut activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
         activity.insert("uuid-5baf".to_string(), probe("working", 15.0));
-        let drivers = drivers_read(json!([driver_row("x-5baf", "uuid-5baf")]));
+        let drivers = drivers_read(json!([driver_row("x-ffff", "uuid-5baf")]));
         let (state, claim) = node_driver(
             &node,
             &claims,
@@ -1047,7 +1047,7 @@ mod tests {
     fn a_failed_roster_read_is_unmeasured_never_none() {
         // Measured in the field: a degraded roster read suppressed a real
         // undriven PR. Coverage must not produce a healthy-looking zero.
-        let node = json!({"id": "x-a792", "priority": "p1", "pr_number": 3});
+        let node = json!({"id": "x-0000", "priority": "p1", "pr_number": 3});
         let claims: HashMap<String, Value> = HashMap::new();
         let activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
         let drivers = crate::king_board::SourceRead::err("registry unreadable: boom");
@@ -1069,14 +1069,14 @@ mod tests {
     fn a_dead_roster_candidate_falls_through_to_the_claim() {
         // Positive death evidence is the one roster answer that steps aside:
         // the claim/worked verdict governs what the roster cannot see.
-        let node = json!({"id": "x-dead", "priority": "p1", "pr_number": 4});
+        let node = json!({"id": "x-1111", "priority": "p1", "pr_number": 4});
         let claims: HashMap<String, Value> = HashMap::new();
         let mut activity: HashMap<String, crate::truth_probe::TruthProbe> = HashMap::new();
         activity.insert(
             "dead-uuid".to_string(),
             probe("working", 3.0 * 3600.0 + 60.0),
         );
-        let drivers = drivers_read(json!([driver_row("x-dead", "dead-uuid")]));
+        let drivers = drivers_read(json!([driver_row("x-1111", "dead-uuid")]));
         assert_eq!(
             node_driver(
                 &node,
