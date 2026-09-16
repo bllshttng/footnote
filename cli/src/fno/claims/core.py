@@ -2233,7 +2233,18 @@ def _configured_claim_root() -> Optional[Path]:
 
 
 def _legacy_claim_call(key: str, root: Optional[Path]) -> bool:
-    return root is not None or _python_claim_runtime() or claims_root_for(key) is None
+    return root is not None or _python_claim_runtime() or (bool(key) and claims_root_for(key) is None)
+
+
+def _legacy_sweep_roots_if_present() -> Optional[list[Optional[Path]]]:
+    roots: list[Optional[Path]] = [global_claims_root(), None, Path.cwd()]
+    for _raw, directory in dedup_claims_roots(roots):
+        try:
+            if any(path.is_file() and path.name.endswith(".lock") for path in directory.iterdir()):
+                return roots
+        except OSError:
+            continue
+    return None
 
 
 _LEGACY_ACQUIRE_CLAIM = _legacy_acquire_claim
@@ -2445,6 +2456,15 @@ def reap_dead_claims(
     if roots is not None or _python_claim_runtime():
         return _LEGACY_REAP_DEAD_CLAIMS(
             roots=roots,
+            apply=apply,
+            abandonment_probe=abandonment_probe,
+            node_settlement=node_settlement,
+            optout_sink=optout_sink,
+        )
+    legacy_roots = _legacy_sweep_roots_if_present()
+    if legacy_roots is not None:
+        return _LEGACY_REAP_DEAD_CLAIMS(
+            roots=legacy_roots,
             apply=apply,
             abandonment_probe=abandonment_probe,
             node_settlement=node_settlement,
