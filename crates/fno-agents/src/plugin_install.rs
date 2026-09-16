@@ -31,9 +31,14 @@ fn state_root() -> PathBuf {
 }
 
 fn build_dir_value() -> String {
+    // Through the one base resolver, so an operator's
+    // `paths.cargo_targets_base` reaches the exported rc env too (it was
+    // ignored here); the FNO_RECLAIM_STATE_ROOT test seam still lands via the
+    // state fallback inside fno_build_base.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     format!(
-        "{}/cargo-build/{{workspace-path-hash}}",
-        state_root().display()
+        "{}/{{workspace-path-hash}}",
+        crate::cargo_build_dirs::fno_build_base(&cwd).display()
     )
 }
 

@@ -179,7 +179,7 @@ fn registered_trees(root: &Path) -> Vec<PathBuf> {
     }
 }
 
-fn workspace_manifests(tree: &Path) -> Vec<PathBuf> {
+pub(crate) fn workspace_manifests(tree: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     if let Ok(entries) = std::fs::read_dir(tree.join("crates")) {
         for entry in entries.flatten() {
@@ -480,6 +480,8 @@ pub struct SweepReport {
     pub orphans: usize,
     pub reaped: usize,
     pub reclaimed_bytes: u64,
+    /// Bytes this run reclaimed (`apply`) or would reclaim (dry run).
+    pub projected_bytes: u64,
     pub after_bytes: u64,
     pub effective_cap_bytes: u64,
     /// `None` = the orphan lane ran; `Some(manifest)` = disabled, named.
@@ -687,6 +689,12 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
         before_bytes.saturating_sub(planned_bytes)
     };
 
+    rep.projected_bytes = if apply {
+        rep.reclaimed_bytes
+    } else {
+        before_bytes.saturating_sub(planned_bytes)
+    };
+
     let orphan_lane = match &rep.orphan_lane {
         None => "on".to_string(),
         Some(manifest) => format!("disabled:{manifest}"),
@@ -741,8 +749,9 @@ mod tests {
     use super::*;
 
     /// Serializes every test that repoints the process-global env (CARGO,
-    /// FNO_CARGO_TARGETS_BASE, the fake-cargo answer vars).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// FNO_CARGO_TARGETS_BASE, the fake-cargo answer vars). One lock shared
+    /// with reclaim's tests: both suites mutate the same vars.
+    use crate::reclaim::tests::ENV_LOCK;
 
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("fno-cbd-{tag}-{}", std::process::id()));
@@ -993,5 +1002,39 @@ mod tests {
         std::env::set_var("CBD_FB_ANSWER", env.root.join("00/abc123"));
         let bases = managed_bases(&env.root);
         assert_eq!(bases, vec![env.fno_base.clone()], "{bases:?}");
+    }
+
+    /// AC8-EDGE: cargo absent from PATH but present at
+    /// `$CARGO_HOME/bin/cargo` is still found, so the daemon's merge reap
+    /// (no cargo on PATH) reclaims hash dirs again.
+    #[test]
+    fn cargo_bin_finds_cargo_via_cargo_home_when_path_has_none() {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = temp_root("cargo-home");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let script = dir.join("bin/cargo");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf '{\"build_directory\":\"%s\",\"packages\":[]}\\n' \"$CBD_FB\"\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // No CARGO, a PATH with no cargo in it, CARGO_HOME pointing at the
+        // sandbox: the fallback probe must land on the sandbox cargo.
+        std::env::remove_var("CARGO");
+        let real_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", &dir);
+        std::env::set_var("CARGO_HOME", &dir);
+        std::env::set_var("CBD_FB", dir.join("00").join("abcd11"));
+
+        let found = cargo_bin();
+
+        std::env::set_var("PATH", &real_path);
+        std::env::remove_var("CARGO_HOME");
+        std::env::remove_var("CBD_FB");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.as_deref(), Some(script.as_path()), "{found:?}");
     }
 }
