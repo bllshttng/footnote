@@ -477,6 +477,10 @@ pub struct TickTrace {
     pub end_age_s: Option<u64>,
     pub end_phase: Option<String>,
     pub end_outcome: Option<String>,
+    /// The phases the tick actually cut, from the end record's `cut` array.
+    /// `None` means the record carried no `cut` key (a killed/errored tick,
+    /// or a legacy record) - callers keep the pre-cut-list rule for those.
+    pub end_cut: Option<Vec<String>>,
     /// Set when a stale launchd tier's registered plist lives outside the
     /// installer's LaunchAgents path - the 2026-09-08 shape where a pytest
     /// tempdir registration displaced the real pr-watcher.
@@ -525,6 +529,11 @@ pub fn read_tick_trace(journals: &[PathBuf], now_unix: u64) -> TickTrace {
                 trace.end_age_s = Some(now_unix.saturating_sub(ts_unix));
                 trace.end_phase = str_field(&data, "phase");
                 trace.end_outcome = str_field(&data, "outcome");
+                trace.end_cut = data.get("cut").and_then(Value::as_array).map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                });
             }
         }
     }
@@ -697,17 +706,21 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
     if let (Some(i), Some(t)) = (pm_idx, trace) {
         if merge_row_masked_by_tick_end(&rows[i], t) {
             let outcome = t.end_outcome.as_deref().unwrap_or_default();
-            let phase = t.end_phase.as_deref().unwrap_or("unknown");
             let pm = &mut rows[i];
             pm.failing = true;
             // The synthesized failure is not an absence: the row itself was
             // the newest healthy run, so it anchors the duration too.
             pm.failing_for_s = pm.age_s;
             pm.cause = Some("tick_timeout".to_string());
-            pm_tick_hint = Some(format!(
-                "the tick containing this phase ended {outcome} in phase {phase}; \
-                 run fno do pr watch status"
-            ));
+            pm_tick_hint = Some(if t.end_cut.is_some() {
+                format!("ended {outcome} with phase merge cut; run fno do pr watch status")
+            } else {
+                let phase = t.end_phase.as_deref().unwrap_or("unknown");
+                format!(
+                    "the tick containing this phase ended {outcome} in phase {phase}; \
+                     run fno do pr watch status"
+                )
+            });
         }
     }
     // The cross-arm flip runs before anything reads `row.stale`, so
@@ -734,14 +747,15 @@ fn explain_inner(rows: &mut [ArmStatus], daemon: &DaemonFacts, trace: Option<&Ti
             let (cause, hint) = if pm_stale && row.scheduler.as_deref() == Some(SCHED_LAUNCHD) {
                 tick_overdue_cause(pm_last_ts.as_deref(), trace)
             } else {
-                let cause = stale_cause(row, daemon, pm_fresh_failure).unwrap_or_else(|| {
-                    if cross_arm[i] {
-                        "scheduler_down"
-                    } else {
-                        "unexplained"
-                    }
-                    .to_string()
-                });
+                let cause =
+                    stale_cause(row, daemon, pm_fresh_failure, trace).unwrap_or_else(|| {
+                        if cross_arm[i] {
+                            "scheduler_down"
+                        } else {
+                            "unexplained"
+                        }
+                        .to_string()
+                    });
                 let hint = cause_hint(&cause, daemon);
                 (cause, hint)
             };
@@ -817,14 +831,25 @@ fn merge_row_masked_by_tick_end(row: &ArmStatus, trace: &TickTrace) -> bool {
     let Some(row_ts) = row.last_ts.as_deref().and_then(parse_rfc3339_unix) else {
         return false;
     };
-    end_ts > row_ts
+    if end_ts <= row_ts {
+        return false;
+    }
+    match trace.end_cut.as_deref() {
+        Some(cut) => cut.iter().any(|p| p == "merge"),
+        None => true,
+    }
 }
 
 /// The first cause that holds for a stale row, in table order; `None` leaves
 /// the row to `unexplained`. A stale launchd tier with a stale
 /// pr_watch_merge is handled by the caller: it reads the tick trace and
 /// answers `tick_overdue` with evidence, not this table.
-fn stale_cause(row: &ArmStatus, daemon: &DaemonFacts, pm_fresh_failure: bool) -> Option<String> {
+fn stale_cause(
+    row: &ArmStatus,
+    daemon: &DaemonFacts,
+    pm_fresh_failure: bool,
+    trace: Option<&TickTrace>,
+) -> Option<String> {
     // Configured-off outranks every scheduler cause: a restart cannot help an
     // arm whose switch is off, even when the daemon is also down.
     if row
@@ -849,8 +874,14 @@ fn stale_cause(row: &ArmStatus, daemon: &DaemonFacts, pm_fresh_failure: bool) ->
         }
         return None;
     }
-    if sched == Some(SCHED_LAUNCHD) && row.arm != "pr_watch_merge" && pm_fresh_failure {
-        return Some("tick_timeout".to_string());
+    if sched == Some(SCHED_LAUNCHD) && row.arm != "pr_watch_merge" {
+        return match trace.and_then(|t| t.end_cut.as_deref()) {
+            Some(cut) => cut
+                .iter()
+                .any(|p| p == &row.arm)
+                .then(|| "tick_timeout".to_string()),
+            None => pm_fresh_failure.then(|| "tick_timeout".to_string()),
+        };
     }
     None
 }
@@ -870,7 +901,7 @@ fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
         }
         "daemon_down" => "daemon not running".to_string(),
         "tick_timeout" => {
-            "the pr-watch tick broke before this arm ran; see pr_watch_merge".to_string()
+            "the pr-watch tick cut this arm's phase; run fno do pr watch status".to_string()
         }
         "scheduler_down" => {
             "every arm on this scheduler is silent; the job is not running, the arm is fine"
@@ -1324,7 +1355,7 @@ mod tests {
             cause: None,
             line: String::new(),
         };
-        let cause = stale_cause(&row, &DaemonFacts::Down, false).unwrap();
+        let cause = stale_cause(&row, &DaemonFacts::Down, false, None).unwrap();
         assert_eq!(cause, "configured_off");
         assert!(cause_hint(&cause, &DaemonFacts::Down).contains("config"));
     }
@@ -1799,7 +1830,7 @@ mod tests {
         let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
         assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
         assert!(
-            kw.line.contains("the pr-watch tick broke"),
+            kw.line.contains("the pr-watch tick cut this arm's phase"),
             "line: {}",
             kw.line
         );
@@ -2542,6 +2573,165 @@ mod tests {
             assert!(!row.stale, "{arm} must read ok, line: {}", row.line);
             assert_eq!(row.cause, None);
         }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_cut_list_without_merge_leaves_the_merge_row_ok() {
+        // AC1-HP: the tick timed out, but the cut list names other phases.
+        // The merge phase ran, so the row keeps its own ok.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-16T11:58:20Z",
+                "pr_watch_merge",
+                SCHED_LAUNCHD,
+                3,
+                json!(null),
+                600,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-16T12:00:00Z").unwrap();
+        let trace = TickTrace {
+            end_ts_unix: Some(parse_rfc3339_unix("2026-09-16T11:59:30Z").unwrap()),
+            end_outcome: Some("timeout".to_string()),
+            end_cut: Some(vec!["sweep".to_string(), "king_wake".to_string()]),
+            ..TickTrace::default()
+        };
+
+        let mut rows = read_arms(&[journal], now);
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let pm = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
+        assert!(!pm.failing, "line: {}", pm.line);
+        assert_eq!(pm.cause, None);
+        assert!(!pm.line.contains("FAIL"), "line: {}", pm.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_cut_list_naming_merge_fails_the_merge_row() {
+        // AC2-HP: the cut list names the merge phase itself, so the tick
+        // timeout is a real merge fault.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[tick_envelope(
+                "2026-09-16T11:58:20Z",
+                "pr_watch_merge",
+                SCHED_LAUNCHD,
+                3,
+                json!(null),
+                600,
+            )],
+        );
+        let now = parse_rfc3339_unix("2026-09-16T12:00:00Z").unwrap();
+        let trace = TickTrace {
+            end_ts_unix: Some(parse_rfc3339_unix("2026-09-16T11:59:30Z").unwrap()),
+            end_outcome: Some("timeout".to_string()),
+            end_cut: Some(vec!["merge".to_string(), "recovery".to_string()]),
+            ..TickTrace::default()
+        };
+
+        let mut rows = read_arms(&[journal], now);
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let pm = rows.iter().find(|r| r.arm == "pr_watch_merge").unwrap();
+        assert!(pm.failing, "line: {}", pm.line);
+        assert_eq!(pm.cause.as_deref(), Some("tick_timeout"));
+        assert!(pm.line.contains("FAIL"), "line: {}", pm.line);
+        assert!(pm.line.contains("merge"), "line: {}", pm.line);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stale_arm_named_in_the_cut_list_blames_the_tick() {
+        // AC4-HP: king_wake is stale and the cut list names its own phase.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-11T09:52:20Z",
+                    "king_wake",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    900,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:57:20Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-11T10:59:00Z").unwrap();
+        let trace = TickTrace {
+            end_ts_unix: Some(parse_rfc3339_unix("2026-09-11T10:58:00Z").unwrap()),
+            end_outcome: Some("timeout".to_string()),
+            end_cut: Some(vec!["king_wake".to_string(), "stranded".to_string()]),
+            ..TickTrace::default()
+        };
+
+        let mut rows = read_arms(&[journal], now);
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let kw = rows.iter().find(|r| r.arm == "king_wake").unwrap();
+        assert!(kw.stale, "line: {}", kw.line);
+        assert_eq!(kw.cause.as_deref(), Some("tick_timeout"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_stale_arm_left_out_of_the_cut_list_does_not_blame_the_tick() {
+        // AC5-ERR: notify_watch is stale but the cut list names a different
+        // phase, so the tick is not the reason this arm went quiet.
+        let dir = temp_dir();
+        let journal = dir.join("global.jsonl");
+        write_rows(
+            &journal,
+            &[
+                tick_envelope(
+                    "2026-09-11T09:52:20Z",
+                    "notify_watch",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    300,
+                ),
+                tick_envelope(
+                    "2026-09-11T10:57:20Z",
+                    "pr_watch_merge",
+                    SCHED_LAUNCHD,
+                    0,
+                    json!(null),
+                    600,
+                ),
+            ],
+        );
+        let now = parse_rfc3339_unix("2026-09-11T10:59:00Z").unwrap();
+        let trace = TickTrace {
+            end_ts_unix: Some(parse_rfc3339_unix("2026-09-11T10:58:00Z").unwrap()),
+            end_outcome: Some("timeout".to_string()),
+            end_cut: Some(vec!["sweep".to_string()]),
+            ..TickTrace::default()
+        };
+
+        let mut rows = read_arms(&[journal], now);
+        explain_with_trace(&mut rows, &DaemonFacts::Unknown, &trace);
+        let nw = rows.iter().find(|r| r.arm == "notify_watch").unwrap();
+        assert!(nw.stale, "line: {}", nw.line);
+        assert_ne!(
+            nw.cause.as_deref(),
+            Some("tick_timeout"),
+            "line: {}",
+            nw.line
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

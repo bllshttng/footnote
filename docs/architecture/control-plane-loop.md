@@ -33,7 +33,7 @@ Every red row names its cause as the first rule that holds. If no rule fires, th
 - `daemon_young`: A daemon-scheduled arm reads `pending`, not red, while the daemon is up less than twice the interval. The first window has not elapsed.
 - `stale_daemon`: The daemon predates the installed build. Run `fno agents restart`.
 - `daemon_down`: The daemon is not running.
-- `tick_timeout`: The pr-watch tick broke (timeout or error) before this arm ran. See `pr_watch_merge`.
+- `tick_timeout`: The newest pr-watch tick end named this arm's phase (or, for `pr_watch_merge`, the `merge` phase) in its cut list. A killed, errored, or legacy tick end carries no cut list. That case falls back to blaming `pr_watch_merge`'s own row.
 - `tick_overdue`: No completed pr-watch tick stamp inside 2x interval. When the tick's attempt/end records show a tick started and did not complete, the cause names the phase. Run `fno do pr watch status`.
 - `scheduler_down`: Every interval-bearing arm on the scheduler is silent together, and at least one holds an observed receipt. The job is not running, and the arm is fine.
 - `unexplained`: The scheduler looks healthy. The arm itself did not tick.
