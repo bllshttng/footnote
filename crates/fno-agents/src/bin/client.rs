@@ -84,6 +84,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "feed",
     "ping",
     "pr-heal",
+    "pr-park",
     "probe-run",
     "honesty-sweep",
     "prove-it-verdicts",
@@ -876,8 +877,14 @@ async fn run(args: Vec<String>) -> i32 {
     // parity guard scrapes `verb == "..."` and would demand a RUST_CLIENT_VERBS
     // row for a verb that is not an `fno agents` verb. Daemon-free, so it
     // dispatches here before build_request.
-    if matches!(verb, "pr-heal") {
-        return fno_agents::heal::run_heal(&args[1..]);
+    if matches!(verb, "pr-heal" | "pr-park") {
+        // Both binary-direct behind `fno do pr watch`, like `kill-check`:
+        // they are NOT routable `fno agents` verbs. See the pr-heal comment
+        // above for why they stay out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS.
+        if verb == "pr-heal" {
+            return fno_agents::heal::run_heal(&args[1..]);
+        }
+        return fno_agents::pr_park::run(&args[1..]);
     }
     // `subscribe`: follow the daemon's own `events.jsonl` and stream registry
     // state transitions + pane exits as NDJSON. File-follow, no daemon RPC, so it

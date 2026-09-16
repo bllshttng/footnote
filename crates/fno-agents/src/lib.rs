@@ -197,6 +197,7 @@ pub mod paths;
 pub mod pi;
 pub mod plugin_install;
 pub mod pr_nudge;
+pub mod pr_park;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provider;

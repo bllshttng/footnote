@@ -46,7 +46,7 @@ envelope:
       # (worker:<id>, stream-worker:<id>) are pattern sources, validated by
       # both the Python and bash validators via the `patterns` list below
       # (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli, pr-park]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -4883,6 +4883,37 @@ event_types:
         reason:
           type: string
           description: "Why the PR was parked: 'closed', 'max-age', 'retries-exhausted', or decide()'s park reason."
+
+  - name: pr_watch_unparked
+    description: "A parked PR resumes polling: retries reset to 0, either by hand (fno-agents pr-park unpark, the king row's verb) or by the sweep (head moved or 24h old)."
+    sources: [pr-park]
+    data:
+      required: [pr, by]
+      properties:
+        pr:
+          type: integer
+          description: "GitHub PR number."
+        by:
+          type: string
+          description: "Who un-parked it: 'manual' (fno-agents pr-park unpark) or 'sweep'."
+
+  - name: park_sweep
+    description: "The daemon's park sweep on its 6h floor: fno-agents pr-park sweep ran over the registry's repo roots, un-parking open rows whose PR head moved or whose park passed 24h, and marking finished rows handled. Emitted for every run including a zero-count one, so a quiet run is never mistaken for a sweep that did not run."
+    sources: [daemon]
+    data:
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          description: "'ok' when the sweep ran; 'skipped' names why it did not; 'error' when the store could not be read."
+        unparked:
+          type: integer
+        handled:
+          type: integer
+        total:
+          type: integer
+        reason:
+          type: string
 
   - name: pr_watch_tick
     description: "Heartbeat and positive sweep receipt emitted at the end of every successful PR-state watcher poll interval, including quiet ticks with no actionable PRs."
