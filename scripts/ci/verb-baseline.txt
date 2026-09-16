@@ -68,6 +68,7 @@ config get
 config set
 context
 cost
+decide decide-reindex
 decide list
 decide reindex
 decide retract !--origin

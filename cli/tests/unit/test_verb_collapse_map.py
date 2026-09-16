@@ -236,7 +236,9 @@ def test_map_covers_current_surface_once():
     # argv-form transport leaves (refs 0: the flag surface never grows):
     # 628 -> 632. The hidden `agents autonomy provenance` audit verb retired
     # into the binary (`name-codes --check`, PR 1813): 632 -> 631.
-    assert len(mapped) == 631, (
+    # 628 -> 632. The compatibility decide-reindex spelling is also a live
+    # leaf under the decide shim: 631 -> 632.
+    assert len(mapped) == 632, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
