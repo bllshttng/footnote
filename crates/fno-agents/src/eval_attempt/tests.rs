@@ -199,7 +199,7 @@ fn export_train_writes_only_train_rows() {
         "bank_rev": "rev123",
         "train": ["q1", "t9"],
         "validation": [],
-        "qualification": ["q1"],
+        "qualification": [],
     });
     let out = export_train(&rows_text(), &decl, None, None, out_path.to_str().unwrap()).unwrap();
     assert_eq!(out["exported"], 4); // every q1 row, including infra + legacy
@@ -410,8 +410,8 @@ fn expected_rev_drives_rev_match() {
     with_rev["bank_rev"] = json!("abc123");
     assert_eq!(classify(&with_rev, Some("abc123")).rev_match, Some(true));
     assert_eq!(classify(&with_rev, Some("def456")).rev_match, Some(false));
-    // No bank_rev on the row: never matches a pinned revision.
-    assert_eq!(classify(&row, Some("abc123")).rev_match, Some(false));
+    // No bank_rev on the row: provenance unknown, not a proven mismatch.
+    assert_eq!(classify(&row, Some("abc123")).rev_match, None);
     // No expectation supplied: the field stays null, not false.
     assert_eq!(classify(&with_rev, None).rev_match, None);
 }

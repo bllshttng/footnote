@@ -145,8 +145,13 @@ pub fn classify(row: &Value, expected_rev: Option<&str>) -> Verdict {
             }
         }
     };
-    let rev_match =
-        expected_rev.map(|want| row.get("bank_rev").and_then(Value::as_str) == Some(want));
+    // A row with NO bank_rev has unknown provenance, not a proven mismatch:
+    // only an explicit differing rev excludes it as wrong-rev.
+    let row_rev = row.get("bank_rev").and_then(Value::as_str);
+    let rev_match = match (expected_rev, row_rev) {
+        (Some(want), Some(rev)) => Some(rev == want),
+        _ => None,
+    };
     let verdict = classify_obs(obs);
     Verdict {
         rev_match,
