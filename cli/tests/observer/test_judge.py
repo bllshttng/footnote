@@ -10,8 +10,6 @@ from __future__ import annotations
 import yaml
 from typer.testing import CliRunner
 
-from fno.observer import fold
-
 runner = CliRunner()
 
 
@@ -111,9 +109,19 @@ def test_judge_labels_calibration_prints_rates_and_exits_1(monkeypatch):  # AC5-
 def test_labels_yaml_controls_are_wellformed():
     from fno.paths import resolve_repo_root
 
+    repo = resolve_repo_root()
     rows = yaml.safe_load(
-        (resolve_repo_root() / "evals/blueprint-judge/labels.yaml").read_text(encoding="utf-8")
+        (repo / "evals/blueprint-judge/labels.yaml").read_text(encoding="utf-8")
     )
-    assert len(rows) == 5 and all(r["control"] for r in rows)
+    assert len(rows) == 9 and all(r["control"] for r in rows)
     dims = {d for r in rows for d in r["labels"]}
-    assert dims <= set(fold.JUDGE_DIMENSIONS)
+    schema = yaml.safe_load(
+        (repo / "cli/src/fno/events/schema.yaml").read_text(encoding="utf-8")
+    )
+    finding = next(
+        e
+        for e in schema["event_types"]
+        if e.get("name") == "skill_eval_finding"
+    )
+    enum = finding["data"]["properties"]["dimension"]["enum"]
+    assert dims <= set(enum)

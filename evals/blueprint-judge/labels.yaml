@@ -16,8 +16,17 @@
     second acquisition.
   split: test
   control: true
-  labels: {persona: pass, surface_fit: pass, uncovered_case: pass, deletable: pass, duplication: pass}
-  note: A plan that answers all five with named things; must pass everywhere.
+  sources:
+    epic_fit: >
+      x-groom live Groom reliability: overnight groom runs clean the board
+      without wedging a worker.
+    mission_fit: footnote ships the operator's work as reviewed PRs; groom is
+      part of that path.
+    customer_fit: The user is the operator who dispatches plans in the
+      morning and reads the groom report with coffee.
+  labels: {persona: pass, surface_fit: pass, uncovered_case: pass, deletable: pass, duplication: pass, epic_fit: pass, mission_fit: pass, customer_fit: pass}
+  note: A plan that answers all five with named things and whose sources
+    agree; must pass everywhere it is labeled.
 
 - plan: controls/empty-answers.md
   node_text: >
@@ -58,3 +67,60 @@
   note: A good plan judged against a DIFFERENT node's text; the who it names
     (groom lock waits) hits a different problem than the node (digest mail),
     so persona fails.
+
+- plan: controls/epic-duplicate.md
+  node_text: >
+    Add a board queue for undriven PRs under the parent epic that already
+    shipped one.
+  split: test
+  control: true
+  sources:
+    epic_fit: >
+      x-parent live Make the delivery path reliable
+      ## Siblings
+      x-7868 done Board queue for undriven PRs
+  labels: {epic_fit: fail}
+  note: A done sibling already delivers exactly this; epic_fit fails.
+
+- plan: controls/mission-split-repo.md
+  node_text: >
+    Move the Rust runtime into a second repository with a mirror CI.
+  split: test
+  control: true
+  sources:
+    mission_fit: Keep one monorepo and one brand.
+  labels: {mission_fit: fail}
+  note: The mission states the boundary verbatim; splitting the repo works
+    against it; mission_fit fails.
+
+- plan: controls/customer-anti-target.md
+  node_text: >
+    SSO and audit dashboards for 200-seat enterprise QA departments.
+  split: test
+  control: true
+  sources:
+    customer_fit: >
+      ## Target Users
+      ### Primary: Solo Founders
+      Solo founders building products cannot afford to context-switch between
+      product decisions and implementation details.
+      ### Secondary: Small Teams (2-5 developers)
+      Small teams where every developer is stretched across multiple concerns.
+      ### Anti-Targets
+      - Large enterprise teams with established CI/CD and dedicated QA - they
+        have humans for this
+      - Developers who want fine-grained control over every line - target
+        makes autonomous decisions
+      - Teams that do not use git-based workflows - the plugin assumes git +
+        PR-based delivery
+  labels: {customer_fit: fail}
+  note: The persona is the PDR's own named anti-target; customer_fit fails.
+
+- plan: controls/code-false-citation.md
+  node_text: >
+    Add a sixth judge dimension.
+  split: test
+  control: true
+  labels: {code_truth: fail}
+  note: The plan cites blueprint_judge.rs:29 as declaring no dimension list,
+    but the resolved lines carry JUDGE_DIMENSIONS; code_truth fails.
