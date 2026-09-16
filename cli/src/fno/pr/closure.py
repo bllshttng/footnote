@@ -175,6 +175,34 @@ class BranchResolutionError(Exception):
     """--from-branch could not resolve exactly one real node; message names why."""
 
 
+def _read_current_branch(
+    *,
+    cwd: Optional[str] = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> str:
+    """The checked-out branch name; "" when HEAD is detached.
+
+    The one branch read both consuming producers share (the --from-branch
+    resolver and the created-PR binder), so the two can never drift.
+    """
+    try:
+        proc = runner(
+            ["git", "branch", "--show-current"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BranchResolutionError(f"branch lookup failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise BranchResolutionError(
+            f"branch lookup failed: {(proc.stderr or '').strip()}"
+        )
+    return (proc.stdout or "").strip()
+
+
 def resolve_branch_node_id(
     known_ids: frozenset[str],
     *,
@@ -192,22 +220,7 @@ def resolve_branch_node_id(
     exception, never an empty set - because silent empty is how a trailer-less
     PR ships (x-5625) and reds CI an hour later.
     """
-    try:
-        proc = runner(
-            ["git", "branch", "--show-current"],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise BranchResolutionError(f"branch lookup failed: {exc}") from exc
-    if proc.returncode != 0:
-        raise BranchResolutionError(
-            f"branch lookup failed: {(proc.stderr or '').strip()}"
-        )
-    head_ref = (proc.stdout or "").strip()
+    head_ref = _read_current_branch(cwd=cwd, runner=runner)
     if not head_ref:
         raise BranchResolutionError("current branch is unknown (detached HEAD?)")
     real = [nid for nid in branch_node_ids(head_ref) if nid in known_ids]
@@ -519,17 +532,9 @@ def bind_created_pr_from_branch(
     authoritative = node_id.strip() if isinstance(node_id, str) and node_id.strip() else None
     if head_ref is None and authoritative is None:
         try:
-            proc = runner(
-                ["git", "branch", "--show-current"],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return ClosureBindResult(outcome="refused", refusal=f"branch lookup failed: {exc}")
-        head_ref = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+            head_ref = _read_current_branch(cwd=cwd, runner=runner)
+        except BranchResolutionError as exc:
+            return ClosureBindResult(outcome="refused", refusal=str(exc))
     head_ref = head_ref or ""
     if not head_ref and authoritative is None:
         return ClosureBindResult(outcome="refused", refusal="current branch is unknown")
