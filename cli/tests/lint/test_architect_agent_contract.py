@@ -93,3 +93,14 @@ def test_architect_links_the_skill_step():
     _, body = split
     assert "fno:blueprint" in body
     assert "2a-bis" in body
+
+
+def test_blueprint_substrate_launches_architect():
+    text = (resolve_repo_root() / "skills" / "blueprint" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    for token in ("subagent_type: fno:architect", "--agent fno:architect", "agent_type: architect"):
+        assert token in text, f"blueprint Substrate step 3 does not name the architect: {token}"
+    assert 'Use the Skill tool to run fno:blueprint with args' in text, (
+        "the one-line subagent prompt changed"
+    )
