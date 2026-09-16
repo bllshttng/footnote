@@ -38,7 +38,7 @@ fn root_declared(pin: Option<&str>) -> bool {
 }
 
 /// Whether this process declared a root, read from the environment.
-fn test_root_declared() -> bool {
+pub(crate) fn test_root_declared() -> bool {
     root_declared(std::env::var("FNO_TEST_HERMETIC").ok().as_deref())
 }
 
@@ -62,7 +62,7 @@ fn test_sandbox_claimed() -> bool {
 /// `declared` is an argument, not an environment read, so the receipt test
 /// constructs the case. Reproducing it by removing the pins process-globally
 /// raced every lock-free state-resolving test in the binary into this panic.
-fn refuse_undeclared_home_fallback(declared: bool, pin: &str) {
+pub(crate) fn refuse_undeclared_home_fallback(declared: bool, pin: &str) {
     if !cfg!(test) || declared {
         return;
     }

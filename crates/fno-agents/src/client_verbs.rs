@@ -4313,7 +4313,9 @@ mod tests {
     // rest of this module's tests use) so a panicking test never leaks a /tmp
     // tree.
     fn cv_tmpdir() -> tempfile::TempDir {
-        tempfile::TempDir::new().unwrap()
+        let td = tempfile::TempDir::new().unwrap();
+        crate::claims::pin_test_claims_root(td.path().join("claims-root").as_path());
+        td
     }
 
     #[test]

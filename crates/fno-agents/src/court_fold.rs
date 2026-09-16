@@ -1027,6 +1027,7 @@ mod tests {
     #[test]
     fn readers_follow_store_fold_reads_the_store() {
         let dir = tempfile::tempdir().unwrap();
+        crate::claims::pin_test_claims_root(dir.path());
         let graph = dir.path().join("graph.json");
         std::fs::write(
             &graph,
@@ -1058,6 +1059,7 @@ mod tests {
         let saved = std::env::var_os(crate::paths::HOME_ENV);
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var(crate::paths::HOME_ENV, dir.path());
+        crate::claims::pin_test_claims_root(dir.path());
         let graph = dir.path().join("graph.json");
         std::fs::write(
             &graph,

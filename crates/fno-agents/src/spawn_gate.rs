@@ -3750,6 +3750,7 @@ MemAvailable:    8000000 kB\n";
         let _g = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        claims::pin_test_claims_root(&std::env::temp_dir().join("fno-gate-slotcount-claims"));
         // Missing registry: fresh-machine semantics, zero contribution, no
         // panic (load_registry treats absent as empty).
         let mut warnings = Vec::new();

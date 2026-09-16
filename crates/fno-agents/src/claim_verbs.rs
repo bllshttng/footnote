@@ -1209,6 +1209,7 @@ mod tests {
         )
         .unwrap();
         std::env::set_var("FNO_AGENTS_HOME", td.path());
+        crate::claims::pin_test_claims_root(td.path());
         f();
         std::env::remove_var("FNO_AGENTS_HOME");
     }

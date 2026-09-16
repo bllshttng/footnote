@@ -291,10 +291,14 @@ pub const MERGE_GATING_OPTOUT_KEYS: &[&str] = &[
 /// the empty string, which is falsy there; resolving it here as a real path
 /// would silently fork the claims dir (the drive.rs empty-is-unset lesson).
 pub fn global_claims_root() -> Option<PathBuf> {
-    global_claims_root_from(
-        std::env::var_os("FNO_CLAIMS_ROOT"),
-        std::env::var_os("HOME"),
-    )
+    let claims_root = std::env::var_os("FNO_CLAIMS_ROOT").filter(|v| !v.is_empty());
+    if claims_root.is_none() {
+        crate::paths::refuse_undeclared_home_fallback(
+            crate::paths::test_root_declared(),
+            "FNO_CLAIMS_ROOT",
+        );
+    }
+    global_claims_root_from(claims_root, std::env::var_os("HOME"))
 }
 
 /// Testable core of [`global_claims_root`]: env values are explicit so the
@@ -314,6 +318,24 @@ pub fn global_claims_root_from(
 /// hand-built `<root>/.fno/claims`).
 pub fn global_claims_dir() -> Option<PathBuf> {
     global_claims_root().map(|root| root.join(CLAIMS_DIRNAME))
+}
+
+/// Pin `FNO_CLAIMS_ROOT` to `dir` for a test whose transitive reads resolve
+/// the global claims root. Under a bare `cargo test` the
+/// `refuse_undeclared_home_fallback` guard refuses the ambient `$HOME`
+/// fallback, so a test the guard names pins here instead of weakening the
+/// guard. Set-if-unset: a test that pins its own root still wins. Callers
+/// mutating env under `test_env_lock` should already hold it.
+#[cfg(test)]
+pub fn pin_test_claims_root(dir: &Path) {
+    let unset = match std::env::var_os("FNO_CLAIMS_ROOT") {
+        None => true,
+        Some(v) => v.is_empty(),
+    };
+    if unset {
+        let _ = std::fs::create_dir_all(dir.join(CLAIMS_DIRNAME));
+        std::env::set_var("FNO_CLAIMS_ROOT", dir);
+    }
 }
 
 /// Resolve the claims ROOT for `key` by prefix (mirrors `io.claims_root_for`):
@@ -2984,6 +3006,17 @@ pub fn test_env_lock() -> &'static std::sync::Mutex<()> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A bare `cargo test` whose test resolves the claims root with no pin
+    /// used to fall to ambient `$HOME` and mint production reservations in
+    /// the operator's live `~/.fno/claims` (the 2026-09-15 probe-lane-lock
+    /// row). The guard names the pin instead. The receipt mirrors
+    /// paths.rs `an_undeclared_root_refuses_and_names_the_pin`.
+    #[test]
+    #[should_panic(expected = "FNO_CLAIMS_ROOT")]
+    fn undeclared_home_fallback_is_refused_under_test() {
+        crate::paths::refuse_undeclared_home_fallback(false, "FNO_CLAIMS_ROOT");
+    }
 
     fn opts_in(root: &TempDir) -> AcquireOpts {
         AcquireOpts {

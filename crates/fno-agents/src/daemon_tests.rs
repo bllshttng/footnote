@@ -54,6 +54,9 @@ fn tmp_home(tag: &str) -> AgentsHome {
     ));
     let home = AgentsHome::at(&p);
     home.ensure_root().unwrap();
+    // Verbs like rm resolve the process-global claims root; pin it so a bare
+    // `cargo test` never lands reservations in the operator's HOME.
+    crate::claims::pin_test_claims_root(&p.join("claims-root"));
     home
 }
 
@@ -3157,6 +3160,9 @@ pub(super) fn short_home(tag: &str) -> AgentsHome {
     let p = PathBuf::from(format!("/tmp/fnosb{tag}{}_{n}", std::process::id()));
     let home = AgentsHome::at(&p);
     home.ensure_root().unwrap();
+    // rm/codex-thread tails resolve the process-global claims root; pin it so
+    // a bare `cargo test` never lands reservations in the operator's HOME.
+    crate::claims::pin_test_claims_root(&p.join("claims-root"));
     home
 }
 

@@ -3426,6 +3426,7 @@ pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
     let dir = tempfile::tempdir().unwrap();
     let home = AgentsHome::at(dir.path().join("agents"));
     home.ensure_root().unwrap();
+    crate::claims::pin_test_claims_root(dir.path());
     (dir, home)
 }
 
