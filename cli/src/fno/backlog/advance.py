@@ -1487,6 +1487,33 @@ def _finish_spawn(
     return row["short_id"]
 
 
+def _reap_cleared_row(name: str, cwd: Optional[str]) -> Optional[str]:
+    """Remove a retask row whose /clear already wiped its context."""
+    try:
+        proc = subprocess.run(
+            [
+                *_subprocess_util.fno_py_cmd(),
+                "agents",
+                "rm",
+                name,
+                "--force",
+                "--audit-reason",
+                "retask-cleared-unconfirmed",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+            cwd=cwd or None,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return str(exc)
+    tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+    if proc.returncode == 0:
+        return None
+    return f"rm exit {proc.returncode}: {tail[-1] if tail else ''}"
+
+
 def _retask_first(
     node_id: str, args, row: dict, dispatch_reservation: Optional[tuple],
     events_path: Optional[Path], receipt: Optional[dict],
@@ -1495,7 +1522,8 @@ def _retask_first(
 
     Returns ``(reused_session_id, fallthrough)``: a session id means the node
     was dispatched by retask, no spawn may run. A fallthrough names a refusal
-    before /clear for the cold row; one after /clear raises, never spawns.
+    before /clear or a refusal whose cleared row was reaped. A failed reap
+    raises, so no cold spawn runs over a row whose context was wiped.
     """
     from fno.agents.cli import _release_dispatch_claims, _spawn_guard_decision
     from fno.agents.registry import load_registry
@@ -1543,9 +1571,18 @@ def _retask_first(
         claims.append((guard["node_claim_key"], guard["node_claim_holder"]))
     _release_dispatch_claims(*claims)
     if receipt_row.get("cleared"):
-        raise SpawnError(
-            f"retask of {candidate.name} onto {node_id} refused after /clear: "
-            f"{reason}; not cold-spawning over the cleared row"
+        row_name = receipt_row.get("registry_name") or candidate.name
+        handle = getattr(candidate, "harness_session_id", None) or "unknown"
+        failure = _reap_cleared_row(row_name, getattr(candidate, "cwd", None))
+        if failure:
+            raise SpawnError(
+                f"retask of {row_name} onto {node_id} refused after /clear: "
+                f"{reason}; reap failed ({failure}); resume handle {handle}; "
+                f"run fno agents rm {row_name} --force"
+            )
+        return None, (
+            f"{row_name}: {reason}; reaped cleared row "
+            f"(resume handle {handle})"
         )
     return None, f"{candidate.name}: {reason}"
 
