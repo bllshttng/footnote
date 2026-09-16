@@ -133,26 +133,28 @@ def cleanup(
     cargo_targets: bool = typer.Option(
         False,
         "--cargo-targets",
-        help="Reap inactive Cargo target directories by age and total-byte cap. Dry-run by default.",
+        help="Reap inactive Cargo target directories by age and total-byte cap. "
+        "The build base itself is swept by `fno doctor reclaim` (lane "
+        "cargo_build_dirs). Dry-run by default.",
     ),
-    cap_bytes: int = typer.Option(
-        68_719_476_736,
+    cap_bytes: Optional[int] = typer.Option(
+        None,
         "--cap-bytes",
         min=1,
         help="With --cargo-targets, absolute ceiling on aggregate allocated "
         "target bytes (default 64 GiB). The effective ceiling is "
         "min(this, --free-share-pct percent of free disk space).",
     ),
-    free_share_pct: int = typer.Option(
-        50,
+    free_share_pct: Optional[int] = typer.Option(
+        None,
         "--free-share-pct",
         min=1,
         max=100,
         help="With --cargo-targets, percent of free disk space the effective "
         "ceiling never exceeds (default 50).",
     ),
-    target_max_age: str = typer.Option(
-        "7d",
+    target_max_age: Optional[str] = typer.Option(
+        None,
         "--target-max-age",
         help="With --cargo-targets, reap inactive targets at least this old (default 7d).",
     ),
@@ -161,7 +163,8 @@ def cleanup(
 
     Two selection modes (mutually exclusive): --older-than (commit age) or
     --merged (branch already merged into origin/main). --cargo-targets is a
-    separate dry-run-by-default mode bounded by target age and allocated bytes.
+    separate dry-run-by-default mode bounded by target age and allocated bytes;
+    the bash defaults are the only defaults.
     """
     if merged and older_than:
         typer.echo("worktree cleanup: --merged and --older-than are mutually exclusive", err=True)
@@ -180,17 +183,15 @@ def cleanup(
     if kill_orphans:
         args.append("--kill-orphans")
     if cargo_targets:
-        args.extend(
-            [
-                "--cargo-targets",
-                "--cap-bytes",
-                str(cap_bytes),
-                "--free-share-pct",
-                str(free_share_pct),
-                "--target-max-age",
-                target_max_age,
-            ]
-        )
+        args.append("--cargo-targets")
+        # Forwarded only when given: the bash defaults are the only defaults,
+        # so this surface cannot drift from them.
+        if cap_bytes is not None:
+            args.extend(["--cap-bytes", str(cap_bytes)])
+        if free_share_pct is not None:
+            args.extend(["--free-share-pct", str(free_share_pct)])
+        if target_max_age is not None:
+            args.extend(["--target-max-age", target_max_age])
     raise typer.Exit(code=_run_lifecycle(*args))
 
 

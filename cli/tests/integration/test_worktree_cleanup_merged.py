@@ -301,11 +301,27 @@ def test_cargo_target_cli_forwards_explicit_bounds(monkeypatch: pytest.MonkeyPat
         "--cargo-targets",
         "--cap-bytes",
         "8388608",
-        "--free-share-pct",
-        "50",
         "--target-max-age",
         "3d",
     ]
+
+
+def test_cargo_target_cli_omits_defaults(monkeypatch: pytest.MonkeyPatch):
+    """The bash defaults are the only defaults: unset bounds are not forwarded,
+    so the two surfaces cannot disagree about what a default is."""
+    from fno.worktree_cli import cli as worktree_cli
+
+    seen: list[str] = []
+
+    def fake_run(*args: str) -> int:
+        seen.extend(args)
+        return 0
+
+    monkeypatch.setattr(worktree_cli, "_run_lifecycle", fake_run)
+    result = runner.invoke(worktree_cli.app, ["cleanup", "--cargo-targets"])
+
+    assert result.exit_code == 0, result.output
+    assert seen == ["cleanup", "--cargo-targets"]
 
 
 def test_archive_cli_forwards_explicit_guard_flags(monkeypatch: pytest.MonkeyPatch):

@@ -92,6 +92,27 @@ if [[ -f "${_WT_LIFECYCLE_DIR}/cargo-build-dir.sh" ]]; then
     source "${_WT_LIFECYCLE_DIR}/cargo-build-dir.sh"
 fi
 
+# The fno-agents binary resolver, shared with the hooks. The canonical copy is
+# hooks/lib/agents-bin.sh; this same-shape inline fallback covers a partial
+# deploy whose hooks tree is not beside the scripts tree.
+if [[ -f "${_WT_LIFECYCLE_DIR}/../../hooks/lib/agents-bin.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/../../hooks/lib/agents-bin.sh"
+else
+    fno_agents_bin() {
+        local root="${1:-.}"
+        if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
+            printf '%s' "$FNO_AGENTS_BIN"
+        elif [[ -x "$root/crates/fno-agents/target/release/fno-agents" ]]; then
+            printf '%s' "$root/crates/fno-agents/target/release/fno-agents"
+        elif [[ -x "$root/crates/fno-agents/target/debug/fno-agents" ]]; then
+            printf '%s' "$root/crates/fno-agents/target/debug/fno-agents"
+        else
+            command -v fno-agents || printf ''
+        fi
+    }
+fi
+
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
 
 # Live target session? The manifest's `status:` field (legacy era) was once
@@ -475,27 +496,6 @@ _cargo_target_inventory() {
         done
         shopt -u nullglob
     done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
-    # Build-base hash dirs: cargo writes intermediates at
-    # <base>/<h2>/<hash> under build.build-dir (the hash dir is one
-    # segment deep: an h2 shard, then the hash itself), outside every
-    # checkout, so the worktree walk above never sees them. Rows carry
-    # wt=build-base; _cargo_target_cleanup protects the dirs live
-    # workspaces resolve to and never deletes here when that resolution
-    # is unverifiable.
-    local base hash
-    base="$(_cargo_build_base)"
-    if [[ -d "$base" ]]; then
-        shopt -s nullglob
-        for hash in "$base"/*/*/; do
-            [[ -d "$hash" ]] || continue
-            hash="${hash%/}"
-            [[ -f "$hash/CACHEDIR.TAG" ]] || continue
-            bytes="$(_cargo_target_bytes "$hash")"
-            mtime="$(_cargo_target_mtime "$hash")"
-            printf '%s\t%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "-" "build-base" "$hash" >> "$output"
-        done
-        shopt -u nullglob
-    fi
 }
 
 _cargo_target_registered() {
@@ -503,34 +503,8 @@ _cargo_target_registered() {
     git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}' | grep -Fqx "$wanted"
 }
 
-_cargo_live_build_dirs() {
-    # Resolved build_directory (cargo metadata, one call per workspace) of
-    # every live registered worktree, one path per line. cargo >= 1.91
-    # reports the field the tracked config's build-dir lands in. Exit 1 when
-    # any read fails: the caller must then treat EVERY build-base dir as
-    # protected, because a blind sweep is the one mistake this lane cannot
-    # undo.
-    local wt manifest
-    while IFS= read -r wt; do
-        _wt_live "$wt" || continue
-        for manifest in "$wt"/crates/*/Cargo.toml; do
-            [[ -f "$manifest" ]] || continue
-            cargo metadata --format-version 1 --no-deps --manifest-path "$manifest" 2>/dev/null \
-                | grep -o '"build_directory"[[:space:]]*:[[:space:]]*"[^"]*"' \
-                | sed 's/.*:[[:space:]]*"//; s/"$//' || return 1
-        done
-    done < <(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{sub(/^worktree /, ""); print}')
-}
-
 _cargo_target_path_is_owned() {
     local wt="$1" target="$2" resolved=""
-    if [[ "$wt" == "build-base" ]]; then
-        # A hash-dir row: owned iff it still sits under a managed base and
-        # carries cargo's tag. Registration is the base itself.
-        [[ -d "$target" ]] || return 1
-        _cargo_cache_dir_owned "$target" || return 1
-        return 0
-    fi
     case "$target" in
         "$wt/target"|"$wt"/crates/*/target) ;;
         *) return 1 ;;
@@ -623,6 +597,19 @@ _cargo_target_cleanup() {
         return 1
     fi
 
+    # Build-base rows are the Rust lane's answer now: `fno-agents reclaim
+    # cargo-build-dirs` sweeps both bases env-independently, matching by
+    # CACHEDIR.TAG, base, and member fingerprint. A missing binary skips, never
+    # fails: the in-checkout half below still runs.
+    local _build_base_bin
+    _build_base_bin="$(fno_agents_bin "${MAIN_DIR:-$(pwd)}")"
+    if [[ -z "$_build_base_bin" ]]; then
+        printf 'cargo-target build-base skipped reason=fno-agents-missing\n'
+    else
+        # shellcheck disable=SC2086  # one optional flag, by contract
+        "$_build_base_bin" reclaim cargo-build-dirs ${apply:+--apply} || true
+    fi
+
     # The absolute cap alone is a floor the sweep defends on a nearly full
     # disk (measured live: 63 GiB allocated, 4.2 GB free, "ok", 0 reaped).
     # The effective ceiling is min(absolute cap, free-share percent of free
@@ -649,33 +636,12 @@ _cargo_target_cleanup() {
     before_bytes="$(awk -F '\t' '{sum += $2} END {printf "%.0f", sum+0}' "$inventory")"
     projected_after="$before_bytes"
 
-    # Build-base protection: the hash dirs LIVE workspaces resolve to. An
-    # unreadable resolution (no cargo, a bad manifest) marks every build-base
-    # row unverifiable - protected this run, never deleted blind.
-    local live_build_dirs="" build_dirs_unverifiable=0
-    if ! live_build_dirs="$(_cargo_live_build_dirs)"; then
-        build_dirs_unverifiable=1
-        live_build_dirs=""
-    fi
-
     while IFS=$'\t' read -r mtime bytes protection wt target; do
         [[ -n "$target" ]] || continue
         if [[ "$protection" != "-" ]]; then
             protected=$((protected + 1))
             printf 'cargo-target protected bytes=%s reason=%s path=%s\n' "$bytes" "$protection" "$target"
             continue
-        fi
-        if [[ "$wt" == "build-base" ]]; then
-            if [[ "$build_dirs_unverifiable" == "1" ]]; then
-                protected=$((protected + 1))
-                printf 'cargo-target protected bytes=%s reason=build-dir-unverifiable path=%s\n' "$bytes" "$target"
-                continue
-            fi
-            if printf '%s\n' "$live_build_dirs" | grep -Fqx "$target"; then
-                protected=$((protected + 1))
-                printf 'cargo-target protected bytes=%s reason=live-workspace-build-dir path=%s\n' "$bytes" "$target"
-                continue
-            fi
         fi
         printf '%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$wt" "$target" >> "$candidates"
     done < "$inventory"
@@ -717,38 +683,10 @@ _cargo_target_cleanup() {
 
     mode="apply"
     _wt_refresh_cwd_snapshot || true
-    # Re-resolve live workspaces' build dirs for the delete pass: selection
-    # and deletion are separate walks over the same inventory, and a session
-    # that went live in between must find its hash dir protected here too.
-    local apply_live_dirs="" apply_unverifiable=0
-    if ! apply_live_dirs="$(_cargo_live_build_dirs)"; then
-        apply_unverifiable=1
-        apply_live_dirs=""
-    fi
     while IFS=$'\t' read -r mtime bytes wt target reason; do
         [[ -n "$target" ]] || continue
         if ! _cargo_target_path_is_owned "$wt" "$target"; then
             printf 'cargo-target kept bytes=%s reason=ownership-recheck path=%s\n' "$bytes" "$target"
-            continue
-        fi
-        if [[ "$wt" == "build-base" ]]; then
-            # Registration recheck does not apply (the base is the registrar)
-            # and there is no cwd to be rooted in; the live guard is the
-            # resolved-dir membership above, re-read for this pass.
-            if [[ "$apply_unverifiable" == "1" ]] \
-                || printf '%s\n' "$apply_live_dirs" | grep -Fqx "$target"; then
-                printf 'cargo-target protected bytes=%s reason=live-workspace-build-dir path=%s\n' "$bytes" "$target"
-                protected=$((protected + 1))
-                continue
-            fi
-            _srm -rf -- "$target"
-            if [[ ! -e "$target" ]]; then
-                printf 'cargo-target reaped bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
-                reaped=$((reaped + 1))
-                reclaimed=$((reclaimed + bytes))
-            else
-                printf 'cargo-target kept bytes=%s reason=delete-failed path=%s\n' "$bytes" "$target"
-            fi
             continue
         fi
         if ! _cargo_target_registered "$wt"; then

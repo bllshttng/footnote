@@ -11,7 +11,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from fno.cargo_build_dir import remove_build_dir_for_worktree
+from fno import rust_binary
 from fno.worktree_paths import (
     _validate_component,
     legacy_worktree_path,
@@ -220,8 +220,10 @@ def remove_worktree(
         wt_path = legacy
 
     # Reclaim the cargo build hash dir while the manifest can still answer;
-    # best-effort, the sweep reaps what resolution misses.
-    remove_build_dir_for_worktree(wt_path)
+    # best-effort, the sweep reaps what resolution misses. The Rust lane owns
+    # the answer (crates/fno-agents cargo_build_dirs.rs); failure is swallowed
+    # by contract.
+    rust_binary.call_binary_json("reclaim", ["remove-for", str(wt_path), "--json"], timeout=120)
 
     result = subprocess.run(
         ["git", "worktree", "remove", "--force", str(wt_path)],
