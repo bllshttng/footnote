@@ -1301,13 +1301,26 @@ fn clear_state_root_breadcrumb(granted_root: &str) {
 }
 
 fn create_via_link(parent: &Path, path: &Path, content: &str) -> std::io::Result<()> {
-    let _ = parent;
-    let mut file = std::fs::File::create_new(path)?;
-    if let Err(error) = file.write_all(content.as_bytes()) {
-        let _ = std::fs::remove_file(path);
-        return Err(error);
+    static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = parent.join(format!(
+        ".claim-tmp-{}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+        TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(content.as_bytes())?;
     }
-    Ok(())
+    let result = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    result
 }
 
 /// Replace `path` with `content` via write-temp + rename (idempotent
