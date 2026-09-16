@@ -360,9 +360,6 @@ def _legacy_acquire_claim(
     acquired_lock = False
 
     def _retry() -> Claim:
-        # Every contention/race branch below re-dispatches by recursing with
-        # the exact same arguments - one definition instead of the same
-        # 9-line call restated at each of the seven sites that need it.
         if _attempt + 1 >= _PY_LEGACY_RETRY_LIMIT:
             raise ClaimContended(
                 f"acquire_claim gave up after {_PY_LEGACY_RETRY_LIMIT} contention retries on {key!r}"
@@ -384,15 +381,6 @@ def _legacy_acquire_claim(
         )
 
     def _release_and_retry() -> Claim:
-        # `return _retry()` evaluates the recursive acquire_claim() call
-        # BEFORE this frame's own `finally` runs (Python evaluates a
-        # return expression, then unwinds through finally). Recursing while
-        # `acquired_lock` is still True would have the recursive call poll
-        # for the SAME per-key recovery mutex this frame is still sitting
-        # on if it lands back in a mutex-taking branch - self-contention
-        # that only resolves via the legacy retry limit instead of
-        # the near-instant re-dispatch (e.g. ClaimHeldByOther) it should.
-        # Release first, from whichever branch currently holds it.
         nonlocal acquired_lock
         if acquired_lock:
             release_dir_mutex(recovery_lock, recovery_token)
@@ -1241,38 +1229,7 @@ def _registry_session_pid(session_id: str) -> Optional[int]:
 def _reanchor_pid_for(
     existing: Claim, *, root: Optional[Path] = None, verdict: Optional[dict[str, Any]] = None
 ) -> Optional[int]:
-    """The durable pid a renewal should re-anchor EXISTING to, or None.
-
-    Returns None - meaning leave the anchor alone - in four cases, each for its
-    own reason:
-
-      * The recorded pid is still LIVE. There is nothing to repair, and
-        rewriting it would let any process holding the same holder string take
-        over a running session's anchor.
-      * The claim is off-machine. We cannot read another box's pid table, so a
-        dead-looking pid there is unverified.
-      * The claim carries a session id but the registry row keyed by it has no
-        live pid (or there is no row). There is no session-keyed anchor.
-      * No harness ancestor resolves. There is no better anchor to write, and a
-        transient pid is a worse one: ``fno-agents loop-check`` exits about a
-        second after it renews, so anchoring to the renewer would re-file the
-        corpse under a fresh number and fix nothing.
-
-    PID-reuse detection survives because the anchor moves WITH the pid:
-    ``_rebound_claim`` holds ``acquired_at`` on renewal, so a later recycle of
-    the anchor pid still reads ``create_time > acquired_at``.
-
-    THE TRUST BOUNDARY, stated rather than implied. The renewer is authenticated
-    by its holder string and nothing else, and `fno agents claim status` publishes that
-    string. So a different session on this machine that refreshes under a
-    published holder re-anchors the claim to ITS ancestor, and the claim then
-    reads LIVE until that session ends instead of SUSPECT.
-
-    That is the same credential `release_claim` and `refresh_claim` have always
-    accepted. The session id in the record narrows it to the acquiring
-    session: the registry row keyed by that id is the verifiable identity the
-    record was missing.
-    """
+    """Return a safer live-session pid anchor for a renewed claim, if one exists."""
     verdict = verdict or _claim_verdict(existing, root=root)
     if existing.pid_unavailable or verdict.get("expired") is True:
         return None
@@ -1335,25 +1292,7 @@ def _legacy_refresh_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Optional[Claim]:
-    """Extend a TTL claim's expires_at.
-
-    Returns the new Claim on success. Returns None for PID-liveness claims
-    (no expires_at). An expired TTL claim raises :class:`ClaimValidationError`:
-    it is reclaimable and must never be resurrected over concurrent recovery,
-    and a distinct non-success keeps callers from misreporting it as the
-    legitimate PID-liveness no-op.
-
-    ``_attempt`` is internal bookkeeping only (never pass it): on mutex
-    contention this recurses, bounded at the legacy retry limit (raises
-    ``ClaimContended`` past that), mirroring ``acquire_claim``.
-
-    Raises:
-        HolderMismatch: existing claim is held by someone else.
-        ClaimGoneAway: claim was released between read and rewrite.
-        ClaimValidationError: claim expired before the locked rewrite.
-        ClaimCorrupted: existing file fails parse/schema validation.
-        ClaimContended: mutex contention exhausted the legacy retry limit.
-    """
+    """Extend a TTL claim, or return None for PID-liveness claims."""
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
     if ttl_ms is not None and not (MIN_TTL_MS <= ttl_ms <= MAX_TTL_MS):
