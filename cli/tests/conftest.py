@@ -46,8 +46,10 @@ def _sandbox_decision_index(tmp_path, monkeypatch):
     because the write happens two layers down from any test that calls
     ``fno outstanding clear --answer``, which is not where anyone looks for it.
     """
-    sandbox = tmp_path / ".decision-index" / "decisions.jsonl"
+    decision_root = tmp_path / ".decision-index"
+    sandbox = decision_root / "decisions.jsonl"
     monkeypatch.setattr("fno.paths.decisions_jsonl", lambda: sandbox)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: decision_root / "graph.json")
 
 
 @pytest.fixture(autouse=True)
