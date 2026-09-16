@@ -18,6 +18,7 @@ def test_defaults_match_bash_defaults():
     assert b.merge_strategy == "merge"
     assert b.delete_branch_on_merge is True
     assert b.require_checks_pass is True
+    assert b.require_fresh_ci is True
     assert b.conflict_resolution == "opus"
     assert b.remediation == "attempt"
 
