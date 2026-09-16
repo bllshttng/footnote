@@ -161,6 +161,9 @@ def test_refuse_unknown_source_lives_in_advance():
     with pytest.raises(Exit) as exc:
         refuse_unknown_source("advance", "zz")
     assert exc.value.exit_code == 2
+    with pytest.raises(Exit) as retired:
+        refuse_unknown_source("advance", "sob")
+    assert retired.value.exit_code == 2
 
 
 def test_disabled_dispatches_nothing(iso, monkeypatch):

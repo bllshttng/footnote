@@ -475,7 +475,7 @@ pub fn parse_dispatch_agent_name(name: Option<&str>) -> Option<Parsed> {
 }
 
 /// Is this a blueprint dispatch name? The grammar answers it, never a
-/// prefix test: `bp-x-1-slug`, `ac-bp-x-2-slug` and `sob-bp-x-3-slug` all
+/// prefix test: `bp-x-1-slug` and `ac-bp-x-2-slug` both
 /// parse to verb `bp`; `t-x-4-slug` does not (AC4-HP).
 pub fn is_blueprint_name(name: &str) -> bool {
     parse_dispatch_agent_name(Some(name)).is_some_and(|p| p.verb == "bp")
@@ -632,7 +632,6 @@ mod tests {
     fn blueprint_names_parse_by_verb_not_prefix() {
         assert!(is_blueprint_name("bp-x-3-slug"));
         assert!(is_blueprint_name("ac-bp-x-1-slug"));
-        assert!(is_blueprint_name("sob-bp-x-2-slug"));
         assert!(!is_blueprint_name("t-x-4-slug"));
     }
 
@@ -657,7 +656,7 @@ mod tests {
     fn model_segment_appends_and_refuses_unknown_only_when_blank_squeezes() {
         // Known model: longest-key-first substring match on the lowered model.
         let n = dispatch_agent_name(
-            Some("sob"),
+            Some("ab"),
             "bp",
             "x-bbbb",
             Some("250ms Read Floor"),
@@ -666,7 +665,7 @@ mod tests {
             Some("glm-5.3-flash[1m]"),
         )
         .unwrap();
-        assert_eq!(n, "sob-bp-bbbb-250ms-read-glm");
+        assert_eq!(n, "ab-bp-bbbb-250ms-read-glm");
         // Unknown model squeezes to 8 alphanumeric characters.
         let n = dispatch_agent_name(
             Some("ab"),
@@ -846,8 +845,18 @@ mod tests {
         assert_eq!(legacy_verb_code(Some("think-x-1")).as_deref(), Some("th"));
         assert_eq!(legacy_verb_code(Some("jn-t-x-1")), None);
         assert!(dispatch_sources().contains("ab"));
-        assert!(provenance_rows().len() >= 18);
+        assert!(provenance_rows().len() >= 17);
         let disc = slug_component(Some("Path Consolidation: Wave 0"), SLUG_CAP);
         assert_eq!(disc, "path-consolidation-wave-0");
+    }
+
+    #[test]
+    fn sob_source_is_retired() {
+        assert!(!dispatch_sources().contains("sob"));
+        assert!(dispatch_agent_name(Some("sob"), "bp", "x-1", None, None, None, None).is_err());
+        assert!(!is_blueprint_name("sob-bp-x-2-slug"));
+        assert!(provenance_rows()
+            .iter()
+            .all(|(_, source, _)| source != "sob"));
     }
 }

@@ -47,7 +47,7 @@ class SpawnerStatus:
 
 
 def dispatch_provenance() -> list[tuple[str, str, str]]:
-    """The 18 dispatch paths as ``(site, source, verb)`` rows, served
+    """The 17 dispatch paths as ``(site, source, verb)`` rows, served
     by the binary."""
     from fno.agents.naming import provenance_rows
 
@@ -375,10 +375,9 @@ def audit_dispatch_provenance() -> None:
     from fno.agents.naming import dispatch_sources, dispatch_verbs
 
     rows = dispatch_provenance()
-    sources = {row[1] for row in rows}
     problems: list[str] = []
-    if len(rows) != 18:
-        problems.append(f"expected 18 coded paths, found {len(rows)}")
+    if len(rows) != 17:
+        problems.append(f"expected 17 coded paths, found {len(rows)}")
     for site, source, verb in rows:
         if source not in dispatch_sources():
             problems.append(f"{site}: unknown source {source!r}")
@@ -387,8 +386,6 @@ def audit_dispatch_provenance() -> None:
     sites = [row[0] for row in rows]
     if len(set(sites)) != len(sites):
         problems.append("duplicate site labels in the inventory")
-    if {"sob", "ac"} - sources:
-        problems.append("sob and ac must be distinct inventory rows")
     if sum(1 for row in rows if row[1] == "ab") != 2:
         problems.append("both active-backlog rows must carry ab")
     for site, source, verb in rows:
@@ -397,7 +394,7 @@ def audit_dispatch_provenance() -> None:
         typer.echo(f"error: {problem}", err=True)
     if problems:
         sys.exit(1)
-    typer.echo("dispatch provenance: 18/18 coded")
+    typer.echo("dispatch provenance: 17/17 coded")
 
 
 @autonomy_app.command("provenance", hidden=True)

@@ -8,7 +8,6 @@ sources:
   # same owner, same gate; the name names the source, not the internal branch.
   - ab   # active-backlog daemon
   - ac   # merge-triggered auto-continue
-  - sob  # spawn on blueprint
   - rd   # reconcile de-stub
   - th   # spawn_think
   - pm   # post-merge judgment
@@ -53,12 +52,11 @@ model_codes:
   sol: sol
 # Every dispatch path with its codes. verb "resolved" = decided at dispatch
 # time from the harness-map receipt. The CI audit refuses when a path loses
-# its row or the sob/ac split and the two ab rows stop holding.
+# its row or the two ab rows stop holding.
 provenance:
   - { site: "dispatch_lanes (parallel fill)",      source: ab,  verb: resolved }
   - { site: "epic converge (mission drain)",       source: ab,  verb: resolved }
   - { site: "advance (node-walk)",                 source: ac,  verb: resolved }
-  - { site: "spawn on blueprint",                  source: sob, verb: resolved }
   - { site: "reconcile_dispatch (G4 de-stub)",     source: rd,  verb: t }
   - { site: "spawn_think (context /think)",        source: th,  verb: th }
   - { site: "post-merge ritual",                   source: pm,  verb: r }

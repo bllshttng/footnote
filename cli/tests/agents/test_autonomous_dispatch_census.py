@@ -43,10 +43,6 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
         "skills/target/scripts/dispatch-node.sh",
         "dispatch-node.sh",
     )
-    blueprint = _read_with_positive_control(
-        "skills/blueprint/SKILL.md",
-        "fno backlog advance",
-    )
     active_backlog = _read_with_positive_control(
         "crates/fno-agents/src/active_backlog.rs",
         "dispatch_mission",
@@ -70,16 +66,6 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
     assert "fno agents spawn --node" in dispatch_node
     assert "dispatch resolve" not in dispatch_node
     assert "dispatch family" not in dispatch_node
-    # Blueprint completion's only launcher is the ordered advance nudge: the
-    # skill names the verb, never a direct spawn or a blueprint-specific
-    # dispatcher. The retired launch-on-write hook must stay gone.
-    assert "fno backlog advance --epic <parent>" in blueprint
-    assert "autolaunch-on-ready" not in blueprint
-    # The retired hook's native-plan-mode park survives at the skill layer: a
-    # plan stamped source: claude-plan-mode skips the nudge (the front door's
-    # confirm may still be pending).
-    assert "source: claude-plan-mode" in blueprint
-    assert "skip the nudge entirely" in blueprint
     assert '"backlog",\n                "advance",' in active_backlog
     # x-e53e: the resolve lives in the ONE resolver every node-dispatching
     # caller shares; advance reads it instead of inlining the call.
@@ -101,6 +87,22 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
         "capabilities_or_undeclared(harness).get(\"route_on_pane\", False)"
         in attended_spawn
     )
+
+
+def test_blueprint_completion_dispatches_nothing() -> None:
+    blueprint = _read_with_positive_control(
+        "skills/blueprint/SKILL.md",
+        "fno backlog session close",
+    )
+    decompose = _read_with_positive_control(
+        "skills/blueprint/references/epic-decomposition.md",
+        "fno backlog decompose",
+    )
+    for text in (blueprint, decompose):
+        assert "fno backlog advance" not in text
+        assert "--source sob" not in text
+        assert "fno agents spawn" not in text
+    assert "autolaunch-on-ready" not in blueprint
 
 
 def test_dispatch_harness_registry_entry_carries_its_migration() -> None:
