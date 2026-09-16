@@ -4,9 +4,7 @@
 fn keeper_list_parses_as_a_hidden_pane_verb() {
     let parsed = crate::mux_cli::parse_pane_args(
         &crate::cli_args::PaneOp::Keeper {
-            op: crate::cli_args::KeeperOp::List(crate::cli_args::MuxTail {
-                tail: Vec::new(),
-            }),
+            op: crate::cli_args::KeeperOp::List(crate::cli_args::MuxTail { tail: Vec::new() }),
         },
         &["--json".into()],
     )
@@ -20,9 +18,7 @@ fn keeper_list_parses_as_a_hidden_pane_verb() {
     );
     let parsed = crate::mux_cli::parse_pane_args(
         &crate::cli_args::PaneOp::Keeper {
-            op: crate::cli_args::KeeperOp::List(crate::cli_args::MuxTail {
-                tail: Vec::new(),
-            }),
+            op: crate::cli_args::KeeperOp::List(crate::cli_args::MuxTail { tail: Vec::new() }),
         },
         &["--stale-after".into(), "24h".into()],
     )
@@ -39,13 +35,8 @@ fn keeper_list_parses_as_a_hidden_pane_verb() {
     let pane_cmd = <crate::cli_args::FnoRoot as clap::CommandFactory>::command()
         .get_subcommands()
         .find(|c| c.get_name() == "mux")
-        .and_then(|m| {
-            m.get_subcommands()
-                .find(|c| c.get_name() == "pane")
-        })
+        .and_then(|m| m.get_subcommands().find(|c| c.get_name() == "pane"))
         .expect("pane declared in the tree")
         .clone();
-    assert!(pane_cmd
-        .get_subcommands()
-        .any(|c| c.get_name() == "keeper"));
+    assert!(pane_cmd.get_subcommands().any(|c| c.get_name() == "keeper"));
 }

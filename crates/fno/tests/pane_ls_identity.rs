@@ -5,7 +5,6 @@
 //! the classification, including the self-contradicting row (a worker name
 //! beside `-`) that a two-case fixture would pass against the old code.
 
-
 use fno::mux_cli::{pane_identity_cell, session_id_shaped};
 use fno::proto::PaneInfo;
 

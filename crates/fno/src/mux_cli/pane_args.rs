@@ -60,7 +60,10 @@ fn sargs_of(args: &[OsString]) -> Result<Vec<String>, String> {
         .ok_or_else(|| "non-UTF-8 argument".to_string())
 }
 
-pub fn parse_pane_args(op: &crate::cli_args::PaneOp, args: &[OsString]) -> Result<ParsedPane, String> {
+pub fn parse_pane_args(
+    op: &crate::cli_args::PaneOp,
+    args: &[OsString],
+) -> Result<ParsedPane, String> {
     // Hidden verb subtree: `pane keeper list` reads the keeper sockets
     // directly (no server), so it parses here and dispatches before any
     // session resolution.
@@ -116,9 +119,7 @@ pub fn parse_pane_args(op: &crate::cli_args::PaneOp, args: &[OsString]) -> Resul
         while i < sargs.len() {
             let tok = sargs[i].as_str();
             match tok {
-                "-h" | "--help" => {
-                    return Err(crate::cli_args::pane_group_help())
-                }
+                "-h" | "--help" => return Err(crate::cli_args::pane_group_help()),
                 "--" => {
                     i += 1;
                     break;
@@ -152,8 +153,7 @@ pub fn parse_pane_args(op: &crate::cli_args::PaneOp, args: &[OsString]) -> Resul
                     };
                     if !crate::squad_store::valid_worker_name(&name) {
                         return Err(
-                            "--worker needs a registry name ([A-Za-z0-9._-], <=64 chars)"
-                                .into(),
+                            "--worker needs a registry name ([A-Za-z0-9._-], <=64 chars)".into(),
                         );
                     }
                     worker = Some(name);

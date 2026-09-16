@@ -524,7 +524,8 @@ pub fn classify(args: &[OsString]) -> FrontDoor {
             // `fno mux -h` (or any explicit help request on a mux group)
             // renders clap's help for that group: the banner's replacement.
             let message = if args.first().and_then(|a| a.to_str()) == Some("mux")
-                && e.kind() == clap::error::ErrorKind::DisplayHelp {
+                && e.kind() == clap::error::ErrorKind::DisplayHelp
+            {
                 e.render().to_string()
             } else {
                 // One command-qualified line naming the bad token; the
@@ -764,8 +765,16 @@ pub fn render_inventory() -> String {
         } else {
             format!("{prefix} {name}")
         };
-        let kind = if cmd.has_subcommands() { "group" } else { "leaf" };
-        let visibility = if cmd.is_hide_set() { "hidden" } else { "visible" };
+        let kind = if cmd.has_subcommands() {
+            "group"
+        } else {
+            "leaf"
+        };
+        let visibility = if cmd.is_hide_set() {
+            "hidden"
+        } else {
+            "visible"
+        };
         let aliases = cmd.get_aliases().collect::<Vec<_>>().join(",");
         let aliases = if aliases.is_empty() {
             "-".to_string()
@@ -773,7 +782,11 @@ pub fn render_inventory() -> String {
             aliases
         };
         let flags = flags_of(cmd).join(",");
-        let flags = if flags.is_empty() { "-".to_string() } else { flags };
+        let flags = if flags.is_empty() {
+            "-".to_string()
+        } else {
+            flags
+        };
         rows.push(format!("{path}\t{kind}\t{visibility}\t{aliases}\t{flags}"));
         for sub in cmd.get_subcommands() {
             if sub.get_name() == "help" {
@@ -894,17 +907,29 @@ mod tests {
             classify(&os(&["--server"])),
             FrontDoor::Usage { .. }
         ));
-        assert!(matches!(classify(&os(&["--server", "work", "backlog", "list"])), FrontDoor::Usage { .. }));
+        assert!(matches!(
+            classify(&os(&["--server", "work", "backlog", "list"])),
+            FrontDoor::Usage { .. }
+        ));
         // The socket spelling obeys the same exact-pair rule: trailing argv
         // after `--server <path>` is usage, never a socket role that drops
         // the command.
-        assert!(matches!(classify(&os(&["--server", "/tmp/x.sock", "version"])), FrontDoor::Usage { .. }));
-        assert!(matches!(classify(&os(&["--server", "/tmp/x.sock", "backlog", "list"])), FrontDoor::Usage { .. }));
+        assert!(matches!(
+            classify(&os(&["--server", "/tmp/x.sock", "version"])),
+            FrontDoor::Usage { .. }
+        ));
+        assert!(matches!(
+            classify(&os(&["--server", "/tmp/x.sock", "backlog", "list"])),
+            FrontDoor::Usage { .. }
+        ));
         assert!(matches!(
             classify(&os(&["--session"])),
             FrontDoor::Usage { .. }
         ));
-        assert!(matches!(classify(&os(&["--session", "work", "backlog", "list"])), FrontDoor::Usage { .. }));
+        assert!(matches!(
+            classify(&os(&["--session", "work", "backlog", "list"])),
+            FrontDoor::Usage { .. }
+        ));
     }
 
     #[test]
@@ -1000,8 +1025,7 @@ mod tests {
             if path == "(root)" {
                 continue;
             }
-            let tokens: Vec<OsString> =
-                path.split(' ').map(OsString::from).collect();
+            let tokens: Vec<OsString> = path.split(' ').map(OsString::from).collect();
             if cols[1] == "group" {
                 let mut probe = tokens.clone();
                 probe.push(OsString::from("__fno_verb_probe__"));
@@ -1013,9 +1037,7 @@ mod tests {
                     FrontDoor::Mux(_) if path == "mux thread" => {
                         // `thread <name>` is the row's own argument surface.
                     }
-                    other => panic!(
-                        "group {path} accepted the probe without naming it: {other:?}"
-                    ),
+                    other => panic!("group {path} accepted the probe without naming it: {other:?}"),
                 }
             } else {
                 assert!(
@@ -1034,10 +1056,13 @@ mod tests {
             ("mux retire-session", "leaf"),
             ("mux pane keeper", "group"),
         ] {
-            let hit = render_inventory()
-                .lines()
-                .any(|l| l.starts_with(path) && l.contains('\t') && l.split('\t').nth(2) == Some("hidden"));
-            assert!(hit, "{path} must appear in the inventory as hidden ({kind})");
+            let hit = render_inventory().lines().any(|l| {
+                l.starts_with(path) && l.contains('\t') && l.split('\t').nth(2) == Some("hidden")
+            });
+            assert!(
+                hit,
+                "{path} must appear in the inventory as hidden ({kind})"
+            );
         }
         // The root's hidden deprecated flag is marked with `!` (AC3-EDGE).
         assert!(

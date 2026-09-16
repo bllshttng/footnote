@@ -63,8 +63,8 @@ pub use crate::cli_args::{BlockAnnotateArgs, BlockPipeArgs, MuxCommon};
 
 mod block_args;
 mod pane_args;
-use clap::Parser as _;
 use block_args::{parse_block_annotate, parse_block_args};
+use clap::Parser as _;
 pub use pane_args::{
     parse_pane_args, ParsedPane, PANE_LS_IDENTITY_HELP, PANE_REFERENCE_USAGE, PANE_RUN_WORKER_HELP,
     PANE_SEND_RAW_HELP,
@@ -5016,7 +5016,6 @@ fn render_reply(
 // `fno mux block pipe` - cross-pane block piping porcelain
 // ---------------------------------------------------------------------------
 
-
 /// Data-integrity gate on the source block's metadata: an open (still
 /// running) or byte-cap-truncated block must never pipe - partial text is
 /// worse than no pipe (the verb's contract). Distinct from the idle guard:
@@ -5672,11 +5671,7 @@ fn cap_excerpt(text: &str, cap: usize) -> String {
 /// `fno mux block <verb> ...`: route the block verb family. `pipe`
 /// pipes a completed block into another pane's input; `annotate`
 /// records it as an operator review finding.
-pub fn block(
-    op: crate::cli_args::BlockOp,
-    args: &[OsString],
-    env_session: Option<&str>,
-) -> i32 {
+pub fn block(op: crate::cli_args::BlockOp, args: &[OsString], env_session: Option<&str>) -> i32 {
     match op {
         crate::cli_args::BlockOp::Pipe(_) => block_pipe(args, env_session),
         crate::cli_args::BlockOp::Annotate(_) => block_annotate(args, env_session),
@@ -5686,8 +5681,8 @@ pub fn block(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use block_args::{ParsedBlockAnnotate, ParsedBlockPipe};
     use crate::pane_send_audit::{FNO_AGENTS_HOME_GUARD, FNO_BIN_GUARD};
+    use block_args::{ParsedBlockAnnotate, ParsedBlockPipe};
 
     // The paneless route-hint test lives in its own file; the parent is
     // shrink-only under the file-budget gate.
@@ -6025,7 +6020,9 @@ mod tests {
         );
         // Anything else is a selector resolved against the registry.
         assert_eq!(
-            parse_pane_args(&op_of("focus"), &os(&["x919"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["x919"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Selector("x919".into())
             }
@@ -6040,7 +6037,9 @@ mod tests {
         );
         // --fzf with no positional opens the picker; with one it is usage.
         assert_eq!(
-            parse_pane_args(&op_of("focus"), &os(&["--fzf"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["--fzf"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Pick
             }
@@ -6599,8 +6598,12 @@ mod tests {
     #[test]
     fn mux_pane_parse_run_tab_and_anchor() {
         // AC2-HP: `run --tab id:10 --at 2 --split down -- <argv>`.
-        let p = parse_pane_args(&op_of("run"), &os(&["--tab", "id:10", "--at", "2", "--split", "down", "--", "/bin/cat",
-        ]))
+        let p = parse_pane_args(
+            &op_of("run"),
+            &os(&[
+                "--tab", "id:10", "--at", "2", "--split", "down", "--", "/bin/cat",
+            ]),
+        )
         .unwrap();
         let PaneCmd::Run { placement, .. } = p.cmd else {
             panic!("expected Run");
@@ -6608,16 +6611,19 @@ mod tests {
         assert_eq!(placement.tab, Some(TabSel::Id(10)));
         assert_eq!(placement.at, Some(2));
         assert_eq!(placement.split, Some(Dir::Down));
-        let capped = parse_pane_args(&op_of("run"), &os(&[
-            "--at",
-            "2",
-            "--split",
-            "down",
-            "--max-panes",
-            "4",
-            "--",
-            "/bin/cat",
-        ]))
+        let capped = parse_pane_args(
+            &op_of("run"),
+            &os(&[
+                "--at",
+                "2",
+                "--split",
+                "down",
+                "--max-panes",
+                "4",
+                "--",
+                "/bin/cat",
+            ]),
+        )
         .unwrap();
         let PaneCmd::Run { placement, .. } = capped.cmd else {
             panic!("expected Run");
@@ -6643,14 +6649,10 @@ mod tests {
     #[test]
     fn mux_pane_parse_run_takes_argv_verbatim_after_flags() {
         // Leading flags are ours; the command argv (incl. ITS flags) is not.
-        let p = parse_pane_args(&op_of("run"), &os(&[
-            "--cwd",
-            "/code/foo",
-            "--",
-            "claude",
-            "--print",
-            "hi",
-        ]))
+        let p = parse_pane_args(
+            &op_of("run"),
+            &os(&["--cwd", "/code/foo", "--", "claude", "--print", "hi"]),
+        )
         .unwrap();
         assert_eq!(
             p,
@@ -6677,8 +6679,10 @@ mod tests {
 
     #[test]
     fn mux_pane_parse_run_accepts_typed_placement_before_argv() {
-        let p = parse_pane_args(&op_of("run"), &os(&["squad", "review", "split", "left", "claude", "--print",
-        ]))
+        let p = parse_pane_args(
+            &op_of("run"),
+            &os(&["squad", "review", "split", "left", "claude", "--print"]),
+        )
         .unwrap();
         assert!(matches!(
             p.cmd,
@@ -6694,8 +6698,11 @@ mod tests {
                 ..
             } if name == "review" && argv == &["claude", "--print"]
         ));
-        let aliases =
-            parse_pane_args(&op_of("run"), &os(&["-s", "review", "-x", "right", "--", "echo"])).unwrap();
+        let aliases = parse_pane_args(
+            &op_of("run"),
+            &os(&["-s", "review", "-x", "right", "--", "echo"]),
+        )
+        .unwrap();
         assert!(matches!(
             aliases.cmd,
             PaneCmd::Run {
@@ -6709,8 +6716,10 @@ mod tests {
                 ..
             } if name == "review"
         ));
-        let long = parse_pane_args(&op_of("run"), &os(&["--squad", "review", "--split", "up", "--", "echo",
-        ]))
+        let long = parse_pane_args(
+            &op_of("run"),
+            &os(&["--squad", "review", "--split", "up", "--", "echo"]),
+        )
         .unwrap();
         assert!(matches!(
             long.cmd,
@@ -6726,14 +6735,10 @@ mod tests {
             } if name == "review"
         ));
         // --workspace is an alias for --squad (US2): same PaneTarget.
-        let ws = parse_pane_args(&op_of("run"), &os(&[
-            "--workspace",
-            "review",
-            "--split",
-            "up",
-            "--",
-            "echo",
-        ]))
+        let ws = parse_pane_args(
+            &op_of("run"),
+            &os(&["--workspace", "review", "--split", "up", "--", "echo"]),
+        )
         .unwrap();
         assert!(matches!(
             ws.cmd,
@@ -6748,13 +6753,17 @@ mod tests {
         assert!(parse_pane_args(&op_of("run"), &os(&["squad", " ", "--", "echo"])).is_err());
         assert!(parse_pane_args(&op_of("run"), &os(&["--workspace", " ", "--", "echo"])).is_err());
         assert!(parse_pane_args(&op_of("run"), &os(&["split", "diagonal", "--", "echo"])).is_err());
-        assert!(parse_pane_args(&op_of("run"), &os(&["--target", "review", "--", "echo"])).is_err());
+        assert!(
+            parse_pane_args(&op_of("run"), &os(&["--target", "review", "--", "echo"])).is_err()
+        );
         // Bare "at" (mux_spawn.py's placement_args contract) used to have no
         // alias, so the parser broke its loop on "at" and folded it plus
         // everything after into argv instead of recognizing it as placement
         // - here paired with bare "split", the combo that crashed.
-        let bare_at = parse_pane_args(&op_of("run"), &os(&["split", "right", "at", "3", "--json", "--", "codex",
-        ]))
+        let bare_at = parse_pane_args(
+            &op_of("run"),
+            &os(&["split", "right", "at", "3", "--json", "--", "codex"]),
+        )
         .unwrap();
         assert!(bare_at.json);
         assert!(matches!(
@@ -6785,8 +6794,11 @@ mod tests {
                 command_done: false,
             }
         );
-        let p =
-            parse_pane_args(&op_of("wait"), &os(&["5", "--pattern", "done", "--timeout", "3"])).unwrap();
+        let p = parse_pane_args(
+            &op_of("wait"),
+            &os(&["5", "--pattern", "done", "--timeout", "3"]),
+        )
+        .unwrap();
         assert_eq!(
             p.cmd,
             PaneCmd::Wait {
@@ -6829,7 +6841,9 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--stdin"])).unwrap().cmd,
+            parse_pane_args(&op_of("send"), &os(&["2", "--stdin"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Send {
                 pane: 2,
                 source: SendSource::Stdin,
@@ -6876,9 +6890,12 @@ mod tests {
         // load-bearing half: an opt-in flag would leave every existing caller
         // unattributed and fix nothing.
         assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&["2", "--text", "1", "--raw", "--submit"]))
-                .unwrap()
-                .cmd,
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "1", "--raw", "--submit"])
+            )
+            .unwrap()
+            .cmd,
             PaneCmd::Send {
                 pane: 2,
                 source: SendSource::Text("1".into()),
@@ -6943,13 +6960,10 @@ mod tests {
     fn mux_pane_parse_send_style_exception() {
         // The reasoned one-send exception threads to the renderer.
         assert_eq!(
-            parse_pane_args(&op_of("send"), &os(&[
-                "2",
-                "--text",
-                "hi",
-                "--style-exception",
-                "quoted"
-            ]))
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "hi", "--style-exception", "quoted"])
+            )
             .unwrap()
             .cmd,
             PaneCmd::Send {
@@ -7226,7 +7240,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn mux_pane_run_cwd_resolves_relative_client_side() {
         let base = std::path::PathBuf::from("/home/u/proj");
@@ -7483,14 +7496,7 @@ mod tests {
     #[test]
     fn block_annotate_parses_required_flags() {
         assert_eq!(
-            parse_block_annotate(&os(&[
-                "--from",
-                "3",
-                "--node",
-                "x-1",
-                "-m",
-                "off-by-one",
-            ])),
+            parse_block_annotate(&os(&["--from", "3", "--node", "x-1", "-m", "off-by-one",])),
             Ok(ParsedBlockAnnotate {
                 session: None,
                 from: 3,
@@ -7530,14 +7536,11 @@ mod tests {
         // Missing --from, missing -m, empty -m, unknown flag all refuse.
         assert!(parse_block_annotate(&os(&["--node", "x-1", "-m", "x"])).is_err());
         assert!(parse_block_annotate(&os(&["--from", "3", "--node", "x-1"])).is_err());
-        assert!(parse_block_annotate(&os(&[
-            "--from", "3", "--node", "x-1", "-m", "  "
-        ]))
-        .is_err());
-        assert!(parse_block_annotate(&os(&[
-            "--from", "3", "--node", "x-1", "-m", "x", "--oops",
-        ]))
-        .is_err());
+        assert!(parse_block_annotate(&os(&["--from", "3", "--node", "x-1", "-m", "  "])).is_err());
+        assert!(
+            parse_block_annotate(&os(&["--from", "3", "--node", "x-1", "-m", "x", "--oops",]))
+                .is_err()
+        );
     }
 
     #[test]
