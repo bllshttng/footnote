@@ -46,6 +46,7 @@ fn a_closed_stdout_pipe_neither_loses_the_note_nor_fails_the_verb() {
             "--node",
             "t-pipe",
         ])
+        .envs(fno_agents::test_run::self_owner_env())
         .stdin(Stdio::piped())
         .stdout(Stdio::from(stdout))
         .spawn()
