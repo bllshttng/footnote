@@ -188,6 +188,16 @@ def test_using_fno_reach_is_pinned_to_its_carriers() -> None:
         or command.endswith("hooks/context-run.sh codex-session-start")
         for command in commands
     ), commands
+    context_hooks = json.loads(
+        (ROOT / "hooks" / "context-hooks.json").read_text(encoding="utf-8")
+    )
+    producers = context_hooks["groups"]["codex-session-start"]["producers"]
+    assert producers == [
+        {
+            "id": "session-start-combined",
+            "argv": ["${PLUGIN_ROOT}/hooks/session-start.sh"],
+        }
+    ]
     wrapper = (ROOT / "hooks" / "session-start.sh").read_text(encoding="utf-8")
     assert "session-start-using-fno.sh" in wrapper
 
