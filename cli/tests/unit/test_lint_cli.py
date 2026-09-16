@@ -117,6 +117,30 @@ def test_lint_cli_help_lists_promoted_flock_pattern() -> None:
     assert "provider-stderr-merge" in result.stdout
 
 
+def test_plan_filenames_lint_names_mismatched_claim(tmp_path: Path, monkeypatch) -> None:
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    (plans / "20260915-example-ab-aaaa1111.md").write_text(
+        "---\nclaims: ab-bbbb2222\n---\n# Example\n", encoding="utf-8"
+    )
+    (plans / "20260915-example-ab-bbbb2222.md").write_text(
+        "---\nclaims: ab-bbbb2222\n---\n# Matching\n", encoding="utf-8"
+    )
+    (plans / "20260915-example-births-dead.md").write_text(
+        "---\nclaims: ab-cdca1234\n---\n# Id-less\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(paths, "plans_content_dir", lambda: plans)
+
+    result = runner.invoke(app, ["plan-filenames"])
+
+    assert result.exit_code == 1
+    assert "20260915-example-ab-aaaa1111.md" in result.stdout
+    assert "ab-aaaa1111" in result.stdout
+    assert "ab-bbbb2222" in result.stdout
+    assert "20260915-example-ab-bbbb2222.md" not in result.stdout
+    assert "births-dead.md" not in result.stdout
+
+
 def test_registry_lint_reports_all_three_buckets_and_exits_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
