@@ -2669,13 +2669,13 @@ pub(crate) fn audit_load_snapshot(
                                                                             // Decisions read in-process through the typed API: the
                                                                             // store owns the index, so this consumer never reads a file. Rows are
                                                                             // flattened: data fields at the top level plus ts and _event_type.
-    for row in crate::backlog::api::decisions(
+    let decision_rows: Vec<Value> = crate::backlog::api::decisions(
         &crate::backlog::api::Store::new(&state_root.join("graph.json")),
         None,
         None,
     )
-    .unwrap_or_default()
-    {
+    .map_err(|error| error.0)?;
+    for row in decision_rows {
         let kind = row.get("_event_type").and_then(Value::as_str).unwrap_or("");
         if kind == "decision_retracted" {
             if let Some(target) = row.get("target_decision_id").and_then(Value::as_str) {

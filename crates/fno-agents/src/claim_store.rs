@@ -46,7 +46,19 @@ fn database_path(root: Option<&Path>) -> Result<PathBuf, String> {
 }
 
 pub fn open(root: Option<&Path>) -> Result<Connection, String> {
-    let path = database_path(root)?;
+    open_paths(database_path(root)?, claims_dir(root)?)
+}
+
+fn open_for_key(key: &str, root: Option<&Path>) -> Result<Connection, String> {
+    if root.is_some() || claims::claims_root_for(key).is_some() {
+        return open(root);
+    }
+    let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+    let space = crate::paths::space_dir(&cwd);
+    open_paths(space.join("graph.db"), space.join("claims"))
+}
+
+fn open_paths(path: PathBuf, directory: PathBuf) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
@@ -57,11 +69,11 @@ pub fn open(root: Option<&Path>) -> Result<Connection, String> {
     connection
         .execute_batch(DDL)
         .map_err(|error| error.to_string())?;
-    import_lockfiles(&mut connection, root)?;
+    import_lockfiles(&mut connection, &directory)?;
     Ok(connection)
 }
 
-fn import_lockfiles(connection: &mut Connection, root: Option<&Path>) -> Result<(), String> {
+fn import_lockfiles(connection: &mut Connection, directory: &Path) -> Result<(), String> {
     let imported: Option<String> = connection
         .query_row(
             "SELECT value FROM claim_meta WHERE key = 'lockfiles_imported'",
@@ -73,8 +85,8 @@ fn import_lockfiles(connection: &mut Connection, root: Option<&Path>) -> Result<
     if imported.is_some() {
         return Ok(());
     }
-    let directory = claims_dir(root)?;
     let records = if directory.is_dir() {
+        let directory = directory.to_path_buf();
         claims::list_in(std::slice::from_ref(&directory), None, true)?
     } else {
         Vec::new()
@@ -288,7 +300,7 @@ pub fn acquire_db(key: &str, holder: &str, options: &AcquireOpts) -> Result<Valu
             }
         }
     }
-    let mut connection = open(options.root.as_deref())?;
+    let mut connection = open_for_key(key, options.root.as_deref())?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -334,7 +346,7 @@ pub fn acquire_db(key: &str, holder: &str, options: &AcquireOpts) -> Result<Valu
 }
 
 pub fn release_db(key: &str, holder: &str, root: Option<&Path>) -> Result<Value, String> {
-    let mut connection = open(root)?;
+    let mut connection = open_for_key(key, root)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -364,7 +376,7 @@ pub fn status_db(key: &str, root: Option<&Path>) -> Result<Value, String> {
             }
         }
     }
-    let connection = open(root)?;
+    let connection = open_for_key(key, root)?;
     Ok(record_for(&connection, key)?
         .map(|record| status_json(&record))
         .unwrap_or_else(|| json!({"key": key, "state": "free"})))
@@ -409,7 +421,7 @@ pub fn renew_db(
     if ttl_ms <= 0 {
         return Err("ttl_ms must be positive".to_string());
     }
-    let mut connection = open(root)?;
+    let mut connection = open_for_key(key, root)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -434,7 +446,7 @@ pub fn force_release_db(key: &str, reason: &str, root: Option<&Path>) -> Result<
     if reason.trim().is_empty() {
         return Err("reason must be non-empty for force-release".to_string());
     }
-    let mut connection = open(root)?;
+    let mut connection = open_for_key(key, root)?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| error.to_string())?;
@@ -470,14 +482,21 @@ pub fn reap_db(root: Option<&Path>, apply: bool) -> Result<Value, String> {
             .filter(|row| row.get("state").and_then(Value::as_str) == Some(state))
             .count()
     };
+    let mut reaped = 0usize;
     if apply && !stale.is_empty() {
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
         for key in &stale {
+            let still_stale = record_for(&transaction, key)?
+                .is_some_and(|record| claims::classify(&record, None) == ClaimState::Stale);
+            if !still_stale {
+                continue;
+            }
             transaction
                 .execute("DELETE FROM claims WHERE key = ?1", params![key])
                 .map_err(|error| error.to_string())?;
+            reaped += 1;
         }
         transaction.commit().map_err(|error| error.to_string())?;
     }
@@ -485,7 +504,7 @@ pub fn reap_db(root: Option<&Path>, apply: bool) -> Result<Value, String> {
         "apply": apply,
         "scanned": stale.len(),
         "would_reap": stale.len(),
-        "reaped": if apply { stale.len() } else { 0 },
+        "reaped": reaped,
         "reap_failed": [],
         "kept_live": count("live"),
         "kept_suspect": count("suspect"),
