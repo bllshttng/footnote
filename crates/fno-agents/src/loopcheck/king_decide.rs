@@ -105,7 +105,6 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         chrono::Utc::now(),
     );
 
-
     // A reign that already ended does not read the board again :
     // the journal's newest king termination row for this session, when newer
     // than the manifest's created_at, IS the verdict. 675 of 728 king Stop
