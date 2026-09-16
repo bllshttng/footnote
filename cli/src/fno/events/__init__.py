@@ -323,6 +323,22 @@ def validate(event: dict[str, Any]) -> None:
         raise ValidationError(f"unknown event type: {type_name}")
 
     type_spec = EVENT_TYPES[type_name]
+
+    # The envelope enum above says which sources exist at all; this says which
+    # ones a given type may use. A type with no sources: list is undeclared,
+    # not unenforced-by-oversight, so it fails open rather than blocking every
+    # producer that predates the key.
+    type_sources = type_spec.get("sources") or []
+    if (
+        type_sources
+        and source not in type_sources
+        and not any(p.match(source) for p in ALLOWED_SOURCE_PATTERNS)
+    ):
+        raise ValidationError(
+            f"event type {type_name} does not allow source {source!r} "
+            f"(declared: {sorted(type_sources)})"
+        )
+
     raw_data = event.get("data")
     if raw_data is not None and not isinstance(raw_data, dict):
         raise ValidationError("event data must be an object")
@@ -414,8 +430,6 @@ def validate(event: dict[str, Any]) -> None:
             )
 
     if type_name == "context_snapshot":
-        if source not in {"hook", "test"}:
-            raise ValidationError(f"context_snapshot source must be hook or test (got {source!r})")
         session_id = data.get("session_id")
         harness = data.get("harness")
         entry_state = data.get("entry_state")
@@ -480,12 +494,6 @@ def validate(event: dict[str, Any]) -> None:
     if type_name == "verification_receipt":
         if _utc_timestamp(event["ts"]) is None:
             raise ValidationError("verification_receipt envelope ts must be RFC3339 UTC")
-        type_sources = type_spec.get("sources", [])
-        if source not in type_sources:
-            raise ValidationError(
-                f"verification_receipt does not allow source {source!r} "
-                f"(allowed: {sorted(type_sources)})"
-            )
         type_props = type_spec["data"]["properties"]
         mode = data.get("mode")
         result = data.get("result")

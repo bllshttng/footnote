@@ -61,17 +61,17 @@ def _event_callback(
     merge_json_flag(ctx, json_output)
 
 
-def _detect_source(state_path: Path) -> str:
+def _detect_source(state_path: Path) -> Optional[str]:
     """Resolve the event source from a state file's presence.
 
     Returns ``"target"`` when ``state_path`` exists and the file body contains
     a ``session_id:`` key (the marker for a real target session). Otherwise
-    returns ``"test"`` (an allowed source enum value for ad-hoc CLI use).
+    returns ``None``: there is no session to attribute the row to, and the
+    caller must name a producer with ``--source`` explicitly. ``test`` stays
+    a legal explicit value for fixtures; it is no longer the silent default.
 
     The detection is intentionally lightweight (substring match, not YAML
     parse) so the CLI does not pay PyYAML startup cost on every invocation.
-    Callers that want a different source for non-target contexts pass
-    ``--source`` explicitly.
     """
     try:
         if state_path.is_file():
@@ -80,7 +80,7 @@ def _detect_source(state_path: Path) -> str:
                 return "target"
     except OSError:
         pass
-    return "test"
+    return None
 
 
 def _read_manifest_fields(state_path: Path) -> dict[str, str]:
@@ -418,7 +418,7 @@ def emit(
         None,
         "--source",
         "-s",
-        help="event source enum (default: 'target' if state file present, else 'test')",
+        help="event source enum (default: 'target' if state file present; otherwise required)",
     ),
     state_path: Optional[Path] = typer.Option(
         None, "--state", help="path to target-state.md (for source auto-detection)"
@@ -438,8 +438,9 @@ def emit(
     ``cli/src/fno/events/schema.yaml``). Validation runs before the
     file lock is acquired so a malformed call cannot block writers.
 
-    Source defaults to ``target`` when a target state file is present and
-    ``test`` otherwise. Override with ``--source``.
+    Source defaults to ``target`` when a target state file is present.
+    Otherwise ``--source`` is required; the emit refuses rather than
+    guessing a producer.
     """
     if type_ == "verification_receipt":
         typer.echo(
@@ -545,6 +546,17 @@ def emit(
 
     resolved_state = state_path if state_path is not None else default_state
     resolved_source = source if source is not None else _detect_source(resolved_state)
+    if resolved_source is None:
+        from fno.events import EVENT_TYPES
+
+        declared = sorted((EVENT_TYPES or {}).get(type_, {}).get("sources") or [])
+        typer.echo(
+            "error: no target session detected and --source was not given, so this "
+            f"emit cannot name its producer. {type_} declares: "
+            f"{', '.join(declared) if declared else '(none declared)'}.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     envelope = None
     if type_ in PROTOCOL_FAMILY_TYPES:
