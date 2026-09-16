@@ -408,35 +408,6 @@ def _cargo_installed_mux() -> Optional[Path]:
     return candidate if candidate.is_file() else None
 
 
-def _live_mux_sessions(
-    runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
-) -> list[str]:
-    """Live mux session names from `fno mux ls --json` (entries with
-    `state == "live"`). Bounded + best-effort: no mux binary, a non-zero exit, a
-    timeout, or unparseable JSON all yield `[]` (advisory reads never cry wolf)."""
-    fno = _cargo_installed_mux() or shutil.which("fno")
-    if not fno:
-        return []
-    try:
-        proc = runner(
-            [str(fno), "mux", "ls", "--json"],
-            capture_output=True, text=True, check=False, timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if proc.returncode != 0:
-        return []
-    try:
-        rows = json.loads(proc.stdout or "[]")
-    except (ValueError, TypeError):
-        return []
-    return [
-        r["session"]
-        for r in rows
-        if isinstance(r, dict) and r.get("state") == "live" and r.get("session")
-    ]
-
-
 def running_components(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> "list[dict] | None":

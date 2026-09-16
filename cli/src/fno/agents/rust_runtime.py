@@ -598,16 +598,6 @@ def runtime_mode() -> str:
     return "auto"
 
 
-def rust_runtime_enabled() -> bool:
-    """True iff the caller *forced* the Rust runtime via ``FNO_AGENTS_RUNTIME=rust``.
-
-    Note this is narrower than "the Rust binary will run": under the default
-    ``auto`` mode an installed binary also runs, but only for supported verbs.
-    """
-    return runtime_mode() == "rust"
-
-
-
 #: Verbs other than `spawn` that build a worker argv and therefore need the
 #: writable-dir grant published before the route/fork.
 _WORKER_DIR_VERBS = ("resume", "ask", "revive", "wake")
