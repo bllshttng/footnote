@@ -68,17 +68,16 @@ grep -q 'command -v fno' "$HOOK" \
     || fail "hook does not graceful-skip when fno is missing"
 grep -q '\[\[ -d ".fno" \]\]' "$HOOK" \
     || fail "hook does not graceful-skip when .fno/ is missing"
-# hooks.json validates as JSON and contains the new entry under SessionStart.
+# hooks.json validates as JSON and the declaration registers the producer
+# under the claude-session-start group the runner executes.
 python3 -c "import json,sys; json.load(open('$HOOKS_JSON'))" \
     || fail "hooks.json failed JSON parse"
-python3 - "$HOOKS_JSON" <<'PYEOF' || fail "hooks.json does not register inject-fno-agent-whoami.sh under SessionStart"
+python3 - "${REPO_ROOT}/hooks/context-hooks.json" <<'PYEOF' || fail "context-hooks.json does not register inject-fno-agent-whoami.sh in claude-session-start"
 import json, sys
 data = json.load(open(sys.argv[1]))
-ss = data.get("hooks", {}).get("SessionStart", [])
-for group in ss:
-    for h in group.get("hooks", []):
-        if "inject-fno-agent-whoami.sh" in h.get("command", ""):
-            sys.exit(0)
+for producer in data["groups"]["claude-session-start"]["producers"]:
+    if "inject-fno-agent-whoami.sh" in producer["argv"][0]:
+        sys.exit(0)
 sys.exit(1)
 PYEOF
 pass "structural: hook script, skip guards, hooks.json registration"

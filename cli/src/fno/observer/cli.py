@@ -1070,38 +1070,25 @@ def _replay(
         typer.echo(f"tool-fault: recorded input for {corpus_item} unresolvable; emitted tool-fault finding.")
         raise typer.Exit(1)
 
-    from fno.claims import HOLDER_PROCESS
-    from fno.claims.core import ClaimContended, ClaimHeldByOther, acquire_claim, release_claim
+    from fno.backlog.single_flight import acquire_flight
     from fno.observer import isolation
 
     repo_root = _paths.resolve_repo_root()
     worktree_name = f"observer-{skill}-{corpus_item[:12]}"
     scratch = _paths.worktrees_base() / repo_root.name / worktree_name
     claim_key = f"observer:{skill}:{worktree_name}"
-    # Per-PROCESS holder (not corpus_item): two same-item replays share the
-    # scratch path, and an identical holder would make acquire_claim an
-    # idempotent re-acquire (no exclusion), letting both race on `git worktree
-    # add/remove` of one path (AC2-EDGE). A distinct holder -> the second gets
-    # ClaimHeldByOther and refuses cleanly instead of stomping.
-    holder = f"{corpus_item}:{os.getpid()}"
 
-    claim = None
+    flight = None
     result_state = "ok"
     try:
-        try:
-            claim = acquire_claim(
-                key=claim_key, holder=holder,
-                reason=f"observer replay {run_id}", ttl_ms=30 * 60 * 1000,
-                pid_provenance=HOLDER_PROCESS,
-            )
-        except ClaimHeldByOther as exc:
-            typer.echo(f"another replay holds {corpus_item}; exiting without touching its worktree ({exc}).")
-            raise typer.Exit(4)
-        except ClaimContended as exc:
-            # acquire_claim's own contention-retry-exhaustion guard: same
-            # clean-refusal posture as ClaimHeldByOther above, not a reason
-            # to crash through the finally-only outer try with a traceback.
-            typer.echo(f"contention acquiring {corpus_item}'s replay claim; retry shortly ({exc}).")
+        # The shim appends pid + uuid to the holder, so two same-item replays
+        # never read as an idempotent re-acquire of one scratch path (AC2-EDGE).
+        flight = acquire_flight(
+            claim_key, scope=f"observer replay {run_id}", name=corpus_item,
+            ttl_ms=30 * 60 * 1000,
+        )
+        if flight is None or flight.held:
+            typer.echo(f"another replay holds {corpus_item}, or its claim gate is unavailable; exiting without touching its worktree.")
             raise typer.Exit(4)
 
         if _run_worktree:
@@ -1196,11 +1183,8 @@ def _replay(
     finally:
         if _run_worktree:
             subprocess.run(["git", "worktree", "remove", "--force", str(scratch)], cwd=repo_root, capture_output=True, text=True)
-        if claim is not None:
-            try:
-                release_claim(claim_key, holder=holder)
-            except Exception:
-                pass
+        if flight is not None:
+            flight.release()
 
     if result_state == "tool-fault":
         raise typer.Exit(1)

@@ -135,6 +135,9 @@ def test_shared_session_start_does_not_duplicate_claude_registration(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     capture = tmp_path / "uv-argv"
+    # The observer's uv call is gone, so the capture may stay empty; it is
+    # pre-touched so the absence asserts below read a file, not a missing one.
+    capture.touch()
     uv = bin_dir / "uv"
     uv.write_text(
         "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> \"$UV_CAPTURE\"\n",
@@ -165,7 +168,7 @@ def test_shared_session_start_does_not_duplicate_claude_registration(
     )
 
     argv = capture.read_text(encoding="utf-8").splitlines()
-    assert any(item.endswith("context_observation.py") for item in argv)
+    assert not any(item.endswith("context_observation.py") for item in argv)
     assert "agents" not in argv
     assert "register" not in argv
 

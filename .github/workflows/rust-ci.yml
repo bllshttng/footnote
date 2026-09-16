@@ -1,9 +1,8 @@
 name: rust-ci
 
 # W7 moved: the heavy `cargo test + schema parity` job lives in cli-ci.yml
-# now, gated behind every smoke-pytest shard (x-861c: one verb is never
-# tested live on both sides in CI). This workflow keeps the coverage that is
-# not a duplicate heavy suite: formatting, the warnings ratchet, the PR
+# now, gated behind every smoke-pytest shard. This workflow keeps coverage that
+# is not a duplicate heavy suite: formatting, the warnings ratchet, the PR
 # stress trials, and dependency audit.
 
 # Cancel a PR's superseded runs on re-push (Actions minute conservation). Keyed by head_ref so PR re-pushes share a
@@ -22,36 +21,6 @@ on:
       - crates/**
       - schemas/**
       - cli/src/fno/events/schema.yaml
-      - scripts/check-event-schema-parity.sh
-      # The generated-copy dirty-tree step: a hand edit to a projected copy
-      # must trigger the job that diffs it against its regenerated form.
-      - cli/src/fno/agents/harness_capabilities.toml
-      - crates/fno/src/harness_capabilities.toml
-      - cli/src/fno/agents/merge_posture.toml
-      - cli/src/fno/graph/page_reload.js
-      - cli/src/fno/agents/spawn_phase.toml
-      - cli/src/fno/agents/slot_lanes.toml
-      - crates/fno-agents/src/events_limits.toml
-      - docs/harnesses/capability-matrix.md
-      - cli/src/fno/agents/registry_schema.toml
-      - scripts/ci/check-provider-vocabulary-parity.sh
-      - tests/ci/test_provider_vocabulary_parity.sh
-      - scripts/ci/check-product-boundaries.sh
-      - tests/mux-workspace-standalone.sh
-      - docs/architecture/product-boundaries.md
-      - scripts/ci/check-proto-version-bump.sh
-      - scripts/ci/check-reviewer-descriptor-parity.sh
-      - scripts/ci/check-review-app-parity.sh
-      - scripts/ci/check-parity-test-provenance.sh
-      # The provenance gate's differential oracles. A PR that deletes a Python
-      # leg without converting its parity test is the exact case the gate
-      # exists to catch, and such a PR need not touch crates/ at all.
-      - cli/src/fno/agents/harnesses/**
-      # The claim classifier parity harness's differential oracle. A PR that
-      # deletes the Python classifier without converting the parity test is
-      # exactly the case the provenance gate exists to catch, and it need not
-      # touch crates/ at all.
-      - cli/src/fno/claims/staleness.py
       - scripts/ci/preflight.sh
       - scripts/tests/stress-rust-e2e-concurrency.sh
       - cli/src/fno/config/__init__.py
@@ -129,7 +98,7 @@ jobs:
             crates/fno-agents/target
             crates/fno/target
           # Key prefix deliberately OUTSIDE the `test` job's `cargo-` restore
-          # prefix (same rule the `stressonly` key records below): this job
+          # prefix (same rule the `stressonly` key records below): the test job
           # builds check-only artifacts that the big job must never restore.
           # It still WARMS from the big cache via its own restore-keys - the
           # asymmetry is the point.
@@ -166,8 +135,9 @@ jobs:
     # The cap is SET from measurement, not raised to absorb slack. Two
     # components: the trials, measured 2026-08-25 at a flat 35.9s each, so 20
     # of them are about 12 minutes; and a cold build of the three test
-    # binaries, which the `test` job above shows costs the larger half of its
-    # own 20-minute run. That is roughly 24 minutes on a cold cache, and 35
+    # binaries, which the cargo test + schema parity job in cli-ci.yml shows
+    # costs the larger half of its own 20-minute run. That is roughly 24
+    # minutes on a cold cache, and 35
     # leaves room for a slow runner without leaving room for the suite to grow
     # unnoticed. If this job approaches the cap, cut trials or split the
     # binaries across two jobs; do not raise it.

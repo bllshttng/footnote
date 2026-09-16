@@ -9,6 +9,8 @@ subprocess or inject fires.
 """
 from __future__ import annotations
 
+import pytest
+
 from fno.graph._reconcile import (
     PrMergeState,
     query_pr_merge_state,
@@ -18,6 +20,25 @@ from fno.post_merge_route import (
     ColdRitualResult,
     dispatch_post_merge_ritual,
 )
+
+
+@pytest.fixture(autouse=True)
+def _fake_flight(monkeypatch, request):
+    """Stub the native flight gate; @pytest.mark.real_flight opts out. The
+    x-616b ritual-claim guard reads a different lease (reconcile:pr-N) through
+    the Python claims writer and stays untouched."""
+    if "real_flight" in request.keywords:
+        return
+    import fno.backlog.single_flight as sf
+
+    seen: list[dict] = []
+
+    def fake_acquire(key, *, scope, name="single-flight", root=None, ttl_ms=sf.FLIGHT_TTL_MS):
+        seen.append({"key": key, "scope": scope, "name": name, "root": root, "ttl_ms": ttl_ms})
+        return sf.Flight(key=key, holder=f"{name}:fake", held=False)
+
+    monkeypatch.setattr(sf, "acquire_flight", fake_acquire)
+    return seen
 
 
 class _RunVerb:
@@ -132,13 +153,13 @@ def test_second_dispatch_same_sha_is_noop(tmp_path):
 
 
 def test_lock_contention_distinguished_from_marker(tmp_path, monkeypatch):
-    """A concurrent holder (ClaimHeldByOther) is in-flight, NOT done."""
-    from fno import claims
+    """A concurrent holder is in-flight, NOT done."""
+    import fno.backlog.single_flight as sf
 
     def _held(*a, **kw):
-        raise claims.ClaimHeldByOther("other", pid=999, host="h", key="k")
+        return sf.Flight(key="post-merge-ritual:test", holder="post-merge-dispatch:7:held", held=True)
 
-    monkeypatch.setattr(claims, "acquire_claim", _held)
+    monkeypatch.setattr(sf, "acquire_flight", _held)
     verb = _RunVerb()
     res = dispatch_post_merge_ritual(
         7, dedup_key="shaLC", auto_run=True, canonical_root=tmp_path, run_verb=verb,
