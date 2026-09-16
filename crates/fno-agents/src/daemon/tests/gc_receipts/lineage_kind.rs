@@ -67,16 +67,16 @@ fn a_peer_handoff_child_never_holds_its_finished_parent() {
     stage_graph(
         dir.path(),
         json!([{
-            "id": "x-a75f",
+            "id": "x-demo",
             "status": "idea",
             "project": "p",
         }]),
     );
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     crate::state::update_registry(&home.registry_json(), |r| {
-        r.entries.push(parent_row("bp-x-a75f-repro", "s-bp-a75f"));
+        r.entries.push(parent_row("bp-x-demo-repro", "s-bp-demo"));
         r.entries
-            .push(child_row("sob-t-x-a75f-glm", "s-child", "s-bp-a75f"));
+            .push(child_row("sob-t-x-demo-glm", "s-child", "s-bp-demo"));
     })
     .unwrap();
     let summary = lineage_sweep(&home, &emitter);
@@ -84,7 +84,7 @@ fn a_peer_handoff_child_never_holds_its_finished_parent() {
         summary
             .retired
             .iter()
-            .any(|(id, _)| id == "bp-x-a75f-repro"),
+            .any(|(id, _)| id == "bp-x-demo-repro"),
         "{:?}",
         summary.retired
     );
@@ -99,19 +99,19 @@ fn a_peer_handoff_child_never_holds_its_finished_parent() {
 /// naming its session holds its retire-eligible lead.
 #[test]
 fn a_live_joiner_holds_its_retire_eligible_lead() {
-    for name in ["jn-t-x-a75f-1", "j-x-a75f-1"] {
+    for name in ["jn-t-x-demo-1", "j-x-demo-1"] {
         let (dir, home) = staged_graph_home();
         stage_graph(
             dir.path(),
             json!([{
-                "id": "x-a75f",
+                "id": "x-demo",
                 "status": "idea",
                 "project": "p",
             }]),
         );
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
         crate::state::update_registry(&home.registry_json(), |r| {
-            r.entries.push(parent_row("t-x-a75f-lead", "s-lead"));
+            r.entries.push(parent_row("t-x-demo-lead", "s-lead"));
             let mut joiner = child_row(name, "s-j1", "s-lead");
             joiner.status = crate::AgentStatus::Busy;
             r.entries.push(joiner);
@@ -119,7 +119,7 @@ fn a_live_joiner_holds_its_retire_eligible_lead() {
         .unwrap();
         let summary = lineage_sweep(&home, &emitter);
         assert!(
-            !summary.retired.iter().any(|(id, _)| id == "t-x-a75f-lead"),
+            !summary.retired.iter().any(|(id, _)| id == "t-x-demo-lead"),
             "{name}: {:?}",
             summary.retired
         );
@@ -127,7 +127,7 @@ fn a_live_joiner_holds_its_retire_eligible_lead() {
             summary
                 .kept_live_descendants
                 .iter()
-                .any(|(id, holder)| id == "t-x-a75f-lead" && holder == name),
+                .any(|(id, holder)| id == "t-x-demo-lead" && holder == name),
             "{name}: {:?}",
             summary.kept_live_descendants
         );
@@ -142,22 +142,22 @@ fn an_exited_joiner_releases_its_lead() {
     stage_graph(
         dir.path(),
         json!([{
-            "id": "x-a75f",
+            "id": "x-demo",
             "status": "idea",
             "project": "p",
         }]),
     );
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     crate::state::update_registry(&home.registry_json(), |r| {
-        r.entries.push(parent_row("t-x-a75f-lead", "s-lead"));
-        let mut joiner = child_row("jn-t-x-a75f-1", "s-j1", "s-lead");
+        r.entries.push(parent_row("t-x-demo-lead", "s-lead"));
+        let mut joiner = child_row("jn-t-x-demo-1", "s-j1", "s-lead");
         joiner.status = crate::AgentStatus::Exited;
         r.entries.push(joiner);
     })
     .unwrap();
     let summary = lineage_sweep(&home, &emitter);
     assert!(
-        summary.retired.iter().any(|(id, _)| id == "t-x-a75f-lead"),
+        summary.retired.iter().any(|(id, _)| id == "t-x-demo-lead"),
         "{:?}",
         summary.retired
     );
@@ -171,29 +171,29 @@ fn a_crowned_parent_is_kept_and_its_court_reads_as_child() {
     stage_graph(
         dir.path(),
         json!([{
-            "id": "x-b3a8",
+            "id": "x-demo2",
             "status": "idea",
             "project": "p",
         }]),
     );
     let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
     crate::state::update_registry(&home.registry_json(), |r| {
-        let mut king = parent_row("king-x-a75f", "s-king");
+        let mut king = parent_row("king-x-demo", "s-king");
         king.crown_level = Some(1);
         r.entries.push(king);
-        let mut court = child_row("node-x-b3a8-g2", "s-court", "s-king");
+        let mut court = child_row("node-x-demo2-g2", "s-court", "s-king");
         court.status = crate::AgentStatus::Busy;
         r.entries.push(court);
     })
     .unwrap();
     let summary = lineage_sweep(&home, &emitter);
     assert!(
-        !summary.retired.iter().any(|(id, _)| id == "king-x-a75f"),
+        !summary.retired.iter().any(|(id, _)| id == "king-x-demo"),
         "{:?}",
         summary.retired
     );
     assert!(
-        summary.kept_crowned.iter().any(|id| id == "king-x-a75f"),
+        summary.kept_crowned.iter().any(|id| id == "king-x-demo"),
         "{:?}",
         summary.kept_crowned
     );

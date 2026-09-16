@@ -642,7 +642,7 @@ mod tests {
         }
         let mut king = row("king-x-1", "s-king", None);
         king.crown_level = Some(1);
-        let mut court = row("node-x-b3a8-g2", "s-court", Some("s-king"));
+        let mut court = row("node-x-demo2-g2", "s-court", Some("s-king"));
         court.status = AgentStatus::Busy;
         let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead"));
         joiner.status = AgentStatus::Busy;
@@ -678,7 +678,7 @@ mod tests {
                 .find(|e| e.name == name)
                 .map(|e| e.lineage_kind.clone())
         };
-        assert_eq!(kind_of("node-x-b3a8-g2"), Some(Some("child".into())));
+        assert_eq!(kind_of("node-x-demo2-g2"), Some(Some("child".into())));
         assert_eq!(kind_of("jn-t-x-1-1"), Some(Some("child".into())));
         assert_eq!(kind_of("sob-t-x-2-glm"), Some(Some("peer".into())));
         assert_eq!(kind_of("solo-x-2"), Some(None), "no edge, no word");

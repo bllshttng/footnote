@@ -118,7 +118,7 @@ mod tests {
     fn kind_table() {
         assert_eq!(lineage_kind("jn-t-x-1-1", false), LineageKind::Child);
         assert_eq!(lineage_kind("j-x-1-1", false), LineageKind::Child);
-        assert_eq!(lineage_kind("node-x-b3a8-g2", true), LineageKind::Child);
+        assert_eq!(lineage_kind("node-x-demo2-g2", true), LineageKind::Child);
         assert_eq!(lineage_kind("sob-t-x-2-glm", false), LineageKind::Peer);
         assert_eq!(lineage_kind("ac-t-x-3-opus", false), LineageKind::Peer);
         assert_eq!(lineage_kind("bp-x-4-repro", false), LineageKind::Peer);
@@ -126,12 +126,12 @@ mod tests {
 
     #[test]
     fn live_child_of_finds_a_live_child_by_session() {
-        let parent = row("t-x-a75f-lead", "s-lead", None);
-        let mut joiner = row("jn-t-x-a75f-1", "s-j1", Some("S-LEAD "));
+        let parent = row("t-x-demo-lead", "s-lead", None);
+        let mut joiner = row("jn-t-x-demo-1", "s-j1", Some("S-LEAD "));
         joiner.status = crate::AgentStatus::Busy;
         let entries = vec![parent.clone(), joiner];
         let found = live_child_of(&parent, &entries).expect("the joiner holds the lead");
-        assert_eq!(found.name, "jn-t-x-a75f-1");
+        assert_eq!(found.name, "jn-t-x-demo-1");
     }
 
     #[test]
@@ -181,11 +181,11 @@ mod tests {
     fn a_crowned_parent_reads_its_court_as_child() {
         let mut king = row("king-x-5", "s-king", None);
         king.crown_level = Some(1);
-        let mut court = row("node-x-b3a8-g2", "s-court", Some("s-king"));
+        let mut court = row("node-x-demo2-g2", "s-court", Some("s-king"));
         court.status = crate::AgentStatus::Busy;
         let entries = vec![king.clone(), court.clone()];
         let found = live_child_of(&king, &entries).expect("the court row is a child");
-        assert_eq!(found.name, "node-x-b3a8-g2");
+        assert_eq!(found.name, "node-x-demo2-g2");
     }
 
     #[test]
@@ -193,7 +193,7 @@ mod tests {
         let mut r = crate::state::Registry::default();
         let mut king = row("king-x-6", "s-king", None);
         king.crown_level = Some(1);
-        let mut court = row("node-x-b3a8-g2", "s-court", Some("s-king"));
+        let mut court = row("node-x-demo2-g2", "s-court", Some("s-king"));
         court.status = crate::AgentStatus::Busy;
         let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead"));
         joiner.status = crate::AgentStatus::Busy;
