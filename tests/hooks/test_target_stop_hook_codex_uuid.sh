@@ -9,11 +9,21 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HOOK="$ROOT/hooks/target-stop-hook.sh"
-BIN="${FNO_AGENTS_BIN:-$ROOT/crates/fno-agents/target/release/fno-agents}"
-# A sibling leg of the packet may have cleaned the target dir between
-# provisioning and this run: rebuild quietly rather than fail on a binary the
+# Same resolution order as the wrapper: env, release, debug. A sibling leg
+# of the packet may have cleaned the target dir between provisioning and this
+# run: rebuild the debug binary quietly rather than fail on an artifact the
 # environment is documented to provide.
-[[ -x "$BIN" ]] || (cd "$ROOT/crates/fno-agents" && cargo build --bin fno-agents >/dev/null 2>&1)
+BIN="${FNO_AGENTS_BIN:-}"
+if [[ -z "$BIN" ]]; then
+    for candidate in "$ROOT/crates/fno-agents/target/release/fno-agents" \
+        "$ROOT/crates/fno-agents/target/debug/fno-agents"; do
+        [[ -x "$candidate" ]] && BIN="$candidate" && break
+    done
+fi
+if [[ -z "$BIN" ]] || [[ ! -x "$BIN" ]]; then
+    (cd "$ROOT/crates/fno-agents" && cargo build --bin fno-agents >/dev/null 2>&1)
+    BIN="$ROOT/crates/fno-agents/target/debug/fno-agents"
+fi
 [[ -x "$BIN" ]] || { echo "FAIL: fno-agents binary missing at $BIN" >&2; exit 1; }
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
