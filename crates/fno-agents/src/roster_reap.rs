@@ -818,7 +818,9 @@ mod tests {
     }
 
     // No provenance keeps the row: the positive reason is named, never an
-    // absence dressed as a removal.
+    // absence dressed as a removal. The row's harness state reads done, so
+    // the fall-through lands at the quiet gate, whose unresolved arm names
+    // the real reason the row cannot retire.
     #[test]
     fn unresolved_provenance_keeps_the_row() {
         let rows = vec![row("ab12cd34", Some("sid-1"), Some("hand-typed-name"))];
@@ -837,7 +839,7 @@ mod tests {
         );
         assert!(summary.retired.is_empty());
         assert!(
-            summary.kept[0].reason.contains("no provenance"),
+            summary.kept[0].reason.contains("transcript unresolved"),
             "{summary:?}"
         );
     }
@@ -1124,12 +1126,15 @@ mod tests {
     // no scope reaches a row with no provenance. ---
 
     // THE law under every setting: a session with no fno node is never a
-    // retire candidate. At `off` the sweep does not even judge the row, so
-    // the reason names the scope; at `provenanced` and `all` it names the
-    // missing provenance.
+    // retire candidate unless its own done report took it to the quiet
+    // gate. This row is still working, so the missing provenance keeps it
+    // at every scope. At `off` the sweep does not even judge the row, so
+    // the reason names the scope.
     #[test]
     fn no_provenance_row_is_never_a_candidate_at_any_scope() {
-        let rows = vec![row("ab12cd34", Some("sid-1"), Some("hand-typed-name"))];
+        let mut r = row("ab12cd34", Some("sid-1"), Some("hand-typed-name"));
+        r.state = Some("working".into());
+        let rows = vec![r];
         let scopes = [RosterScope::Off, RosterScope::Provenanced, RosterScope::All];
         for scope in scopes {
             let summary = run(
