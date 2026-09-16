@@ -13,8 +13,8 @@ The planner never loads these files. A grader read during drafting turns into a 
 
 ## Sources
 
-- `lenses/epic_fit.md`, `lenses/mission_fit.md`, `lenses/customer_fit.md` and `lenses/code_truth.md` distill MIT-licensed pm-skills material. Each lens names its source; `NOTICE` at the repo root carries the license terms.
+- `lenses/epic_fit.md`, `lenses/mission_fit.md`, `lenses/customer_fit.md` and `lenses/code_truth.md` distill MIT-licensed pm-skills material. Each lens names its source. `NOTICE` at the repo root carries the license terms.
 
 ## Known Limitations and Deferred Work
 
-- The lenses are advisory and uncalibrated, a reader sees only its own prompt, reader cost is untracked, and the pack ships in every install with no opt-out; the long form lives in [LIMITATIONS.md](LIMITATIONS.md).
+- The lenses are advisory and uncalibrated. A reader sees only its own prompt. Reader cost is untracked. The pack ships in every install with no opt-out. The long form lives in [LIMITATIONS.md](LIMITATIONS.md).
