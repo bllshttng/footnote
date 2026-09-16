@@ -407,6 +407,7 @@ fn run_tick_mode(o: &Opts, gate: &dyn Fn() -> GateReading, spawner: Spawner<'_>)
                 ttl_ms: Some((o.run_timeout_s as i64 + 600) * 1000),
                 reason: Some("evals scheduled regression run".into()),
                 metadata: None,
+                pid_provenance: None,
                 root: claims_root.clone(),
                 events_dir: None,
             };

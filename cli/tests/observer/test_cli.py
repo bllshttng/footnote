@@ -403,9 +403,11 @@ def test_target_gh_failure_is_repo_coverage_gap():
 def _wire_replay(monkeypatch, tmp_path, item):
     events_path = _wire(monkeypatch, tmp_path, [item])
     monkeypatch.setattr(cli, "_read_plan_text", lambda *a, **k: "# Doc\n\nbuild a widget\n")
-    import fno.claims.core as claims
-    monkeypatch.setattr(claims, "acquire_claim", lambda **k: object())
-    monkeypatch.setattr(claims, "release_claim", lambda *a, **k: None)
+    import fno.backlog.single_flight as sf
+    monkeypatch.setattr(
+        sf, "acquire_flight",
+        lambda key, **k: sf.Flight(key=key, holder="replay:fake", held=False),
+    )
     return events_path
 
 
@@ -448,10 +450,10 @@ def test_already_scored_tolerates_non_dict_json_lines(tmp_path):
 def test_replay_concurrent_holder_refuses_without_stomping(monkeypatch, tmp_path):
     item = _item("s-rep", "x-rep", None)
     _wire_replay(monkeypatch, tmp_path, item)
-    import fno.claims.core as claims
-    def _held(**k):
-        raise claims.ClaimHeldByOther(holder="peer:999", pid=999, host="h", key=k.get("key", "obs"))
-    monkeypatch.setattr(claims, "acquire_claim", _held)
+    import fno.backlog.single_flight as sf
+    def _held(key, **k):
+        return sf.Flight(key=key, holder="peer:999", held=True)
+    monkeypatch.setattr(sf, "acquire_flight", _held)
     with pytest.raises(typer.Exit) as exc:
         cli._replay(
             skill="blueprint", corpus_item="s-rep", skill_ref=None,
