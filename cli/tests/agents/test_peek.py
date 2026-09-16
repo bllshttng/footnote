@@ -143,10 +143,15 @@ def test_peek_mux_pane_ref_without_session_prints_bare_id(tmp_path):
     assert "mux pane=:33" not in out.getvalue()
 
 
-def test_peek_mux_pane_refusal_names_working_surface(tmp_path):
+def test_peek_mux_pane_refusal_names_working_surface(tmp_path, monkeypatch):
     """When the mux cannot answer, the refusal names `fno mux pane read <id>`
     instead of listing unrelated peers (the 2026-08-04 false-liveness incident
     where an empty resolver result was read as proof three live workers were wedged)."""
+    # Keep the refusal deterministic: an unclassifiable read (falsifier None)
+    # is the only shape that refuses; a real gone pane falls through instead.
+    monkeypatch.setattr(
+        "fno.agents.reachability.pane_falsifier", lambda mux: None
+    )
     out, err = io.StringIO(), io.StringIO()
     rc = peek(
         "boardsort-b63a",
@@ -164,6 +169,33 @@ def test_peek_mux_pane_refusal_names_working_surface(tmp_path):
     assert "boardsort-b63a" in msg
     # Unrelated peers must not be listed as "did you mean" for a pane worker.
     assert "board-survey" not in msg
+
+
+def test_peek_gone_pane_names_the_exit_and_the_resume(tmp_path, monkeypatch):
+    """A read failure the falsifier classifies as pane-gone is a DEAD pane:
+    say so, name the resume command, and fall through to the registry row
+    instead of claiming the mux did not answer (x-459f reading 4)."""
+    monkeypatch.setattr(
+        "fno.agents.reachability.pane_falsifier", lambda mux: "pane-gone"
+    )
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "king-4d9b-delivery",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, ["someone-else"]),
+        projects_root=tmp_path,
+        mux_lookup=lambda h: ("main", 2277, "king-4d9b-delivery"),
+        mux_reader=lambda sess, pane, n: (1, ""),
+    )
+    msg = err.getvalue()
+    assert "pane 2277 is gone" in msg
+    assert "fno agents resume king-4d9b-delivery" in msg
+    assert "the mux did not answer" not in msg
+    # The fall-through continues past the pane read, so the not-found shape
+    # (no registry row in this test) is the expected exit here, not 1.
+    assert rc == 13
+    assert "peer not found in the registry: king-4d9b-delivery" in msg
 
 
 def test_peek_mux_pane_no_row_falls_through_to_not_found(tmp_path):

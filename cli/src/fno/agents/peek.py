@@ -940,10 +940,11 @@ def _try_mux_pane(
     """Observe a pane-substrate worker, or None when the handle is not one.
 
     Called when the live-session resolver misses. If the registry holds a
-    ``mux`` row for ``handle``, read the pane scrollback and render it; on any
-    read failure emit a refusal that names the working surface (``fno mux pane
-    read <id>``) rather than listing unrelated peers - the misdirecting refusal
-    that manufactured false-liveness verdicts on 2026-08-04.
+    ``mux`` row for ``handle``, read the pane scrollback and render it; a
+    failed read the falsifier classifies as pane-gone falls through to the
+    registry-row read with the resume command; the refusal naming
+    ``fno mux pane read <id>`` fires only when the mux cannot say the pane
+    is gone.
 
     Returns an exit code when it handled the handle (read or named refusal),
     None to let the caller fall through to ``peer not found``.
@@ -957,6 +958,14 @@ def _try_mux_pane(
     reader = mux_reader or _read_mux_pane
     rc, text = reader(session, pane_id, n)
     if rc != 0 or not text.strip():
+        from fno.agents.reachability import pane_falsifier
+
+        if pane_falsifier({"session": session, "pane_id": pane_id}) == "pane-gone":
+            err.write(
+                f"{handle}: pane {pane_id} is gone; the worker exited. "
+                f"Resume: fno agents resume {handle}\n"
+            )
+            return None
         err.write(
             f"{handle} is a pane worker (mux pane {pane_id}, session {session}); "
             f"the mux did not answer. Read it directly: fno mux pane read {pane_id}\n"
