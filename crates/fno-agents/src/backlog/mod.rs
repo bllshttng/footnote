@@ -479,7 +479,9 @@ pub fn mutate_single_row(
     for attempt in 0..ATTEMPTS {
         match mutate_single_row_once(graph, mutation, &mut apply) {
             Ok(outcome) => {
-                emit_gate_event(mutation, started.elapsed().as_millis(), retries);
+                if outcome {
+                    emit_gate_event(mutation, started.elapsed().as_millis(), retries);
+                }
                 return Ok(outcome);
             }
             Err(error) => {
@@ -513,6 +515,49 @@ fn mutate_single_row_once(
     if !apply(&mut working)? {
         // Domain refusal: the transaction drops here, nothing is written.
         return Ok(false);
+    }
+    // The publish-seam invariants the whole-graph path ran on every publish
+    // hold here too: no empty presence field, a slug on every row, and a
+    // touched_at stamp when a row's curation fields moved.
+    for row in working.iter() {
+        let Some(obj) = row.as_object() else {
+            continue;
+        };
+        let id = crate::graph_store::entry_id(row).unwrap_or("<no id>");
+        for field in crate::graph_store::PRESENCE_TEXT_FIELDS {
+            if let Some(serde_json::Value::String(text)) = obj.get(*field) {
+                if text.trim().is_empty() {
+                    return Err(format!(
+                        "refusing to persist an empty '{field}' on entry '{id}': \
+                         pass real content, or remove the key to clear it"
+                    ));
+                }
+            }
+        }
+    }
+    crate::graph_store::ensure_slugs(&mut working);
+    let now_iso = crate::graph_store::now_isoformat();
+    for row in working.iter_mut() {
+        let (Some(id), true) = (
+            crate::graph_store::entry_id(row).map(str::to_string),
+            row.is_object(),
+        ) else {
+            continue;
+        };
+        let Some(before) = rows
+            .iter()
+            .find(|r| crate::graph_store::entry_id(r) == Some(id.as_str()))
+        else {
+            continue; // absent from the pre-image: new node, created_at carries it
+        };
+        // curation_key reads the curation fields only, so a stamped
+        // touched_at can never cancel its own trigger.
+        if crate::graph_store::curation_key(row) != crate::graph_store::curation_key(before) {
+            row.as_object_mut().unwrap().insert(
+                "touched_at".to_string(),
+                serde_json::Value::String(now_iso.clone()),
+            );
+        }
     }
     write_changed(&transaction, &rows, &working)?;
     nodes::recompute_status(&transaction)?;
