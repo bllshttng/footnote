@@ -38,6 +38,8 @@ The receipt keeps them apart. `Armed` is a queue entry, a promise GitHub keeps l
 | `Unknown` | an instrument could not answer | retry; never read it as clear |
 | `Failed` | the effect ran and failed | report |
 
+When enabled, `auto_merge.require_fresh_ci` makes the owner hold a green merge for `pull_request` runs that predate the current base tip. The receipt names this `ci_base_stale`. Rebase, wait for settled checks, and retry. `Effect::Arm` is not covered because GitHub merges the queue later. Only the ruleset's strict status policy covers that race.
+
 ## The decision, in order
 
 1. **One guarded fetch.** `fno do pr info` gives the number, the head, the state, the body, and whether GitHub's queue owns the PR. The armed flag rides that same payload. A second `gh pr view` probe describes a different head.

@@ -249,6 +249,8 @@ pub trait Probes {
     fn base_lineage(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
     /// Compile the merge result (merge-tree + the repo-wide static step).
     fn merge_result(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
+    fn ci_base(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
+    fn require_fresh_ci(&self, cwd: &Path) -> bool;
     /// `green` | `red` | `pending` | `unknown`.
     fn checks_verdict(&self, cwd: &Path, pr: u64) -> String;
     fn covered_head(&self, cwd: &Path) -> Option<String>;
@@ -359,7 +361,18 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         // fetch is rate-limited or the network is down - retries instead of
         // stamping the node's merge status failed.
         match probes.checks_verdict(cwd, facts.number).as_str() {
-            "green" => {}
+            "green" => {
+                if request.effect == Effect::Merge && probes.require_fresh_ci(cwd) {
+                    if let Some(reason) = probes.ci_base(cwd, &facts).fail_open() {
+                        return Err(Outcome::Held {
+                            reason: format!(
+                                "{reason}; remedy: fno do pr rebase {n}, then fno do pr wait {n} --until settled, then retry",
+                                n = facts.number
+                            ),
+                        });
+                    }
+                }
+            }
             "red" => {
                 return Err(Outcome::Failed {
                     reason: "checks are red; require_checks_pass forbids merging without green"
@@ -684,6 +697,91 @@ impl Probes for RealProbes {
         }
     }
 
+    fn ci_base(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome {
+        let endpoint = |path: String, jq: &str| {
+            self.run_gh(
+                cwd,
+                &["api".to_string(), path, "--jq".to_string(), jq.to_string()],
+            )
+        };
+        let compare = match endpoint(
+            format!(
+                "repos/{{owner}}/{{repo}}/compare/{}...{}",
+                facts.base_ref, facts.head_sha
+            ),
+            ".behind_by",
+        ) {
+            Ok((true, output)) => match output.trim().parse::<u64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    return ProbeOutcome::Inconclusive(format!(
+                        "ci base compare unreadable: expected behind_by, got {}",
+                        first_line(&output)
+                    ))
+                }
+            },
+            Ok((false, output)) => {
+                return ProbeOutcome::Inconclusive(format!(
+                    "ci base compare unreadable: {}",
+                    first_line(&output)
+                ))
+            }
+            Err(error) => {
+                return ProbeOutcome::Inconclusive(format!("ci base compare unreadable: {error}"))
+            }
+        };
+        let base_tip = match endpoint(
+            format!("repos/{{owner}}/{{repo}}/commits/{}", facts.base_ref),
+            ".commit.committer.date",
+        ) {
+            Ok((true, output)) => output.trim().to_string(),
+            Ok((false, output)) => {
+                return ProbeOutcome::Inconclusive(format!(
+                    "ci base tip unreadable: {}",
+                    first_line(&output)
+                ))
+            }
+            Err(error) => {
+                return ProbeOutcome::Inconclusive(format!("ci base tip unreadable: {error}"))
+            }
+        };
+        let runs = match endpoint(
+            format!(
+                "repos/{{owner}}/{{repo}}/actions/runs?event=pull_request&head_sha={}&per_page=100",
+                facts.head_sha
+            ),
+            ".workflow_runs[] | [.name, .created_at] | @tsv",
+        ) {
+            Ok((true, output)) => {
+                let mut runs = Vec::new();
+                for line in output.lines().filter(|line| !line.trim().is_empty()) {
+                    let Some((name, created_at)) = line.split_once('\t') else {
+                        return ProbeOutcome::Inconclusive(format!(
+                            "ci runs unreadable: expected workflow and created_at, got {}",
+                            first_line(line)
+                        ));
+                    };
+                    runs.push((name.to_string(), created_at.to_string()));
+                }
+                runs
+            }
+            Ok((false, output)) => {
+                return ProbeOutcome::Inconclusive(format!(
+                    "ci runs unreadable: {}",
+                    first_line(&output)
+                ))
+            }
+            Err(error) => {
+                return ProbeOutcome::Inconclusive(format!("ci runs unreadable: {error}"))
+            }
+        };
+        ci_base_verdict(compare, &base_tip, &runs)
+    }
+
+    fn require_fresh_ci(&self, cwd: &Path) -> bool {
+        crate::agents_config::auto_merge_require_fresh_ci(cwd)
+    }
+
     fn checks_verdict(&self, cwd: &Path, pr: u64) -> String {
         match Self::fno(cwd, &["do", "pr", "status", &pr.to_string()]) {
             Ok((_code, stdout, _stderr)) => serde_json::from_slice::<Value>(&stdout)
@@ -874,6 +972,67 @@ pub fn classify_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> Probe
     })
 }
 
+fn valid_github_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 20
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'Z'
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19) || byte.is_ascii_digit()
+        })
+}
+
+/// Did the green runs test a merge ref that already held the base tip?
+pub fn ci_base_verdict(
+    behind_by: u64,
+    base_tip_at: &str,
+    runs: &[(String, String)],
+) -> ProbeOutcome {
+    if behind_by == 0 || runs.is_empty() {
+        return ProbeOutcome::Clear;
+    }
+    if !valid_github_timestamp(base_tip_at)
+        || runs
+            .iter()
+            .any(|(_, created_at)| !valid_github_timestamp(created_at))
+    {
+        return ProbeOutcome::Inconclusive(
+            "ci base freshness unreadable: timestamp is not YYYY-MM-DDTHH:MM:SSZ".to_string(),
+        );
+    }
+
+    let mut newest_by_workflow: Vec<(String, String)> = Vec::new();
+    for (name, created_at) in runs {
+        if let Some((_, newest)) = newest_by_workflow
+            .iter_mut()
+            .find(|(known, _)| known == name)
+        {
+            if created_at > newest {
+                *newest = created_at.clone();
+            }
+        } else {
+            newest_by_workflow.push((name.clone(), created_at.clone()));
+        }
+    }
+    let Some((name, created_at)) = newest_by_workflow
+        .iter()
+        .min_by(|(_, left), (_, right)| left.cmp(right))
+    else {
+        return ProbeOutcome::Clear;
+    };
+    if created_at.as_str() >= base_tip_at {
+        ProbeOutcome::Clear
+    } else {
+        ProbeOutcome::Refused(format!(
+            "ci_base_stale: the oldest current run ({name}, created {created_at}) predates base tip {base_tip_at}; PR is {behind_by} behind"
+        ))
+    }
+}
+
 /// The head sha from the latest covered `review_coverage` event that matches the
 /// current HEAD, or None.
 pub fn covered_head_from_event(cwd: &Path) -> Option<String> {
@@ -1045,6 +1204,9 @@ mod tests {
         review_hold: Option<ProbeOutcome>,
         lineage: Option<ProbeOutcome>,
         merge_result: Option<ProbeOutcome>,
+        ci_base: Option<ProbeOutcome>,
+        fresh_ci: Option<bool>,
+        ci_base_calls: RefCell<u32>,
         checks: Option<String>,
         covered_head: Option<String>,
         enabled: bool,
@@ -1102,6 +1264,13 @@ mod tests {
         fn merge_result(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
             self.merge_result.clone().unwrap_or(ProbeOutcome::Clear)
         }
+        fn ci_base(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
+            *self.ci_base_calls.borrow_mut() += 1;
+            self.ci_base.clone().unwrap_or(ProbeOutcome::Clear)
+        }
+        fn require_fresh_ci(&self, _cwd: &Path) -> bool {
+            self.fresh_ci.unwrap_or(true)
+        }
         fn checks_verdict(&self, _cwd: &Path, _pr: u64) -> String {
             self.checks.clone().unwrap_or_else(|| "green".to_string())
         }
@@ -1157,6 +1326,120 @@ mod tests {
             assert!(outcome.detail().contains("review_in_flight"));
             assert!(fake.gh_calls.borrow().is_empty(), "{effect:?} ran gh");
         }
+    }
+
+    #[test]
+    fn ci_base_verdict_refuses_the_pr_2094_shape() {
+        let runs = (0..8)
+            .map(|i| (format!("workflow-{i}"), "2026-09-16T09:17:32Z".to_string()))
+            .collect::<Vec<_>>();
+        let outcome = ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs);
+        assert!(
+            matches!(outcome, ProbeOutcome::Refused(reason) if reason.contains("ci_base_stale"))
+        );
+    }
+
+    #[test]
+    fn ci_base_verdict_uses_each_workflows_newest_run() {
+        let runs = vec![
+            ("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string()),
+            ("cli-ci".to_string(), "2026-09-16T10:00:00Z".to_string()),
+            ("rust-ci".to_string(), "2026-09-16T10:00:01Z".to_string()),
+        ];
+        assert_eq!(
+            ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
+            ProbeOutcome::Clear
+        );
+    }
+
+    #[test]
+    fn ci_base_verdict_clears_when_head_contains_base() {
+        let runs = vec![("cli-ci".to_string(), "2026-09-16T09:17:32Z".to_string())];
+        assert_eq!(
+            ci_base_verdict(0, "2026-09-16T09:56:52Z", &runs),
+            ProbeOutcome::Clear
+        );
+    }
+
+    #[test]
+    fn ci_base_verdict_clears_without_runs() {
+        assert_eq!(
+            ci_base_verdict(3, "2026-09-16T09:56:52Z", &[]),
+            ProbeOutcome::Clear
+        );
+    }
+
+    #[test]
+    fn ci_base_verdict_is_inconclusive_for_malformed_timestamps() {
+        let runs = vec![("cli-ci".to_string(), "not-a-timestamp".to_string())];
+        assert!(matches!(
+            ci_base_verdict(3, "2026-09-16T09:56:52Z", &runs),
+            ProbeOutcome::Inconclusive(_)
+        ));
+    }
+
+    #[test]
+    fn a_stale_ci_base_holds_a_checked_merge_with_a_remedy() {
+        let fake = Fake {
+            ci_base: Some(ProbeOutcome::Refused(
+                "ci_base_stale: run predates base".to_string(),
+            )),
+            ..clean()
+        };
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "held");
+        assert!(outcome.detail().contains("ci_base_stale"));
+        assert!(outcome.detail().contains("fno do pr rebase"));
+        assert!(fake.gh_calls.borrow().is_empty());
+        assert_eq!(*fake.ci_base_calls.borrow(), 1);
+    }
+
+    #[test]
+    fn an_arm_skips_ci_base_freshness() {
+        let fake = Fake {
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
+            ..clean()
+        };
+        let mut req = request(Effect::Arm);
+        req.require_checks = true;
+        assert_eq!(run(&fake, &req).word(), "armed");
+        assert_eq!(*fake.ci_base_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn a_merge_without_required_checks_skips_ci_base_freshness() {
+        let fake = Fake {
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
+            ..clean()
+        };
+        assert_eq!(run(&fake, &request(Effect::Merge)).word(), "merged");
+        assert_eq!(*fake.ci_base_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn an_inconclusive_ci_base_probe_fails_open() {
+        let fake = Fake {
+            ci_base: Some(ProbeOutcome::Inconclusive("gh unavailable".to_string())),
+            ..clean()
+        };
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        assert_eq!(run(&fake, &req).word(), "merged");
+    }
+
+    #[test]
+    fn disabled_fresh_ci_requirement_skips_the_probe() {
+        let fake = Fake {
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: old".to_string())),
+            fresh_ci: Some(false),
+            ..clean()
+        };
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        assert_eq!(run(&fake, &req).word(), "merged");
+        assert_eq!(*fake.ci_base_calls.borrow(), 0);
     }
 
     #[test]
