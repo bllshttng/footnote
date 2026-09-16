@@ -468,7 +468,32 @@ pub fn authoritative_sync(
     let version = content_version(after);
     stamp_version(&transaction, &version)?;
     transaction.commit().map_err(|error| error.to_string())?;
+    confirm_ids_landed(&connection, after)?;
     Ok(version)
+}
+
+fn confirm_ids_landed(connection: &Connection, after: &[Value]) -> Result<(), String> {
+    let expected: std::collections::BTreeSet<String> = after
+        .iter()
+        .filter_map(crate::graph_store::entry_id)
+        .map(str::to_owned)
+        .collect();
+    let mut statement = connection
+        .prepare("SELECT id FROM nodes")
+        .map_err(|error| error.to_string())?;
+    let stored: std::collections::BTreeSet<String> = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())?;
+    if expected == stored {
+        return Ok(());
+    }
+    let missing: Vec<&str> = expected.difference(&stored).map(String::as_str).collect();
+    let extra: Vec<&str> = stored.difference(&expected).map(String::as_str).collect();
+    Err(format!(
+        "publish read-back mismatch: missing ids {missing:?}; extra ids {extra:?}"
+    ))
 }
 
 /// The single-row mutation path: under the sqlite backend,
@@ -707,12 +732,8 @@ pub(crate) fn write_changed(
         }
         match new {
             Some(body) => {
-                // Same best-effort rule as the write path: a row the model
-                // cannot represent is skipped so the JSON publish never
-                // inherits a shadow failure.
-                let Ok(mut node) = Node::from_json(body) else {
-                    continue;
-                };
+                let mut node = Node::from_json(body)
+                    .map_err(|error| format!("row {id} is unrepresentable: {error}"))?;
                 node.ordinal = ordinals.get(id.as_str()).copied().unwrap_or(0);
                 save_aggregate(connection, &node)?;
                 written += 1;
@@ -1655,6 +1676,49 @@ mod tests {
         assert_eq!(written, 1, "only the real change writes: {written}");
         drop(connection);
         drop(dir);
+    }
+
+    #[test]
+    fn an_unrepresentable_row_refuses_the_publish_instead_of_dropping_it() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after[0]["status"] = Value::String("not-a-status".into());
+
+        let error = authoritative_sync(&graph, &before, &after).unwrap_err();
+
+        assert!(error.contains("ab-one"), "error names the dropped row: {error}");
+        assert!(error.contains("status"), "error names the parse failure: {error}");
+    }
+
+    #[test]
+    fn a_landed_publish_reads_every_id_back() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after[0]["title"] = Value::String("One renamed".into());
+
+        authoritative_sync(&graph, &before, &after).unwrap();
+
+        let connection = open(&graph).unwrap();
+        let mut statement = connection
+            .prepare("SELECT id FROM nodes ORDER BY ordinal")
+            .unwrap();
+        let stored: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let expected: Vec<String> = after
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(stored, expected);
     }
 
     #[test]
