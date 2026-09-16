@@ -873,9 +873,10 @@ def _alias_predecessor(new_name: Optional[str], old_name: Optional[str]) -> None
 
 def _recovery_agent_name(
     predecessor: Optional[str], node_or_session: str, short: str
-) -> str:
-    """The ``rec-<verb>-<node-or-session>-<short>`` recovery name; the verb
-    parses from the predecessor (legacy spellings resolve in the binary, else t)."""
+) -> Optional[str]:
+    """The ``rec-<verb>-<node-or-session>-<short>`` recovery name, or None when
+    the mint refuses; the verb parses from the predecessor (legacy spellings
+    resolve in the binary, else t)."""
     from fno.agents.naming import mint_or_none, parse_dispatch_agent_name
 
     parsed = parse_dispatch_agent_name(predecessor or "")
