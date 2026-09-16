@@ -109,6 +109,13 @@ def dispatch_agent_name(source, verb, identity, *, slug=None, qualifier=None, di
                  *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator),
                          ("--model", model)))
 
+def mint_or_none(source, verb, identity, **kwargs):
+    """The mint for degradable seams: a stale/missing binary reads as None."""
+    try:
+        return dispatch_agent_name(source, verb, identity, **kwargs)
+    except (AgentNameError, BridgeUsageError):
+        return None
+
 def bridge_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None,
                 source=None, verb=None, model=None):
     # Usage refusals (both forms, missing verb/prefix) are the binary's texts:
@@ -202,7 +209,14 @@ def _enrich_hex_nodes(rows):
 def parse_dispatch_agent_name(name):
     return parse_many([name])[0] if name else None
 
-def legacy_verb_code(name):
-    if not name:
-        return None
-    return "t" if name.startswith("target-") else ("th" if name.startswith("think-") else None)
+def parse_node_ids(names):
+    """Batch node extraction: one name-parse subprocess for the whole list,
+    never one per row (the ``agents list`` join reads every row)."""
+    keys = list(names)
+    try:
+        rows = parse_many([name or "" for name in keys]) if keys else []
+    except AgentNameError:
+        # Stale/missing binary: every name reads as no node, no exception.
+        return {name: None for name in keys}
+    return {name: (row.node if row is not None and row.node else None)
+            for name, row in zip(keys, rows)}

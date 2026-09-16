@@ -24,6 +24,7 @@ Every graph node carries (all nullable, defaulted on read in `cli/src/fno/graph/
 | `spawned_by_session` | parent session that spawned the worker | worker spawn (registry row and, when the spawn names a node, the node) |
 | `spawned_by_harness` | parent harness | worker spawn |
 | `spawned_by_cwd` | parent cwd, for the transcript-path slug resolver | worker spawn |
+| `lineage_reason` | why no parent session could be proved: the identity disposition the capture read, or the daemon-mint miss. An origin=spawn row carries a session or a reason, never neither | worker spawn (schema v33) |
 
 The `agent_spawned` event (`cli/src/fno/events/schema.yaml`) carries the same `spawned_by_*` triple, so the durable event log keeps the parent edge even if a registry row is later rewritten.
 
@@ -41,14 +42,18 @@ Do not fill this field from `source_session_id`. They answer different questions
 
 The stamp refuses rather than half-writes. No node, no write. No proven parent session, no write, because a triple with a null session on a durable node asserts a launch nobody can trace. An existing edge is never overwritten: launch is the FIRST launch, so a second worker on the node does not rewrite who started it.
 
-**Reading a null parent.** `spawned_by_session` is null for more than one reason, and the harness half plus `spawn_trigger` say which:
+**Reading a null parent.** `spawned_by_session` is null for more than one reason, and the harness half plus `spawn_trigger` plus `lineage_reason` say which:
 
-| session | harness | spawn_trigger | means |
-|---|---|---|---|
-| set | set | - | full lineage |
-| null | set | - | a harness process spawned it; its session id could not be proved |
-| null | null | - | no harness ancestor: a human shell or a daemon |
-| null | set | `dispatch:<source>` | a dispatcher chose this spawn; the session that ran it did not ask |
+| session | harness | spawn_trigger | reason | means |
+|---|---|---|---|---|
+| set | set | - | - | full lineage |
+| null | set | - | - | a harness process spawned it; its session id could not be proved |
+| null | null | - | - | no harness ancestor: a human shell or a daemon |
+| null | set | `dispatch:<source>` | - | a dispatcher chose this spawn; the session that ran it did not ask |
+| null | - | - | `daemon mint: spawn request carried no parent edge` | a daemon minted the row and the spawn request carried no parent edge |
+| null | - | - | `identity disposition=..., markers=...` | the ambient capture resolved no parent; the disposition names what it read |
+
+A daemon mint reads the parent edge from the spawn REQUEST, never from the daemon's own environment. The daemon lazy-start scrubs the harness session markers. An ambient read there stamped None by construction: every row it minted lost who spawned it. The Rust spawn client stamps its own ambient `spawned_by_*` triple onto the request. The mint (`Lineage::from_request`) reads the request the way the `node` field is already trusted. A request with no parent edge stamps `lineage_reason` instead of a silent null. `fno agents registry-json` now projects `spawned_by_harness` and `lineage_reason` beside `spawned_by_session`, so this table applies through that reader too.
 
 When the spawning process carries NO identity marker at all, `_capture_parent_edge` takes the harness from the process-tree walk and leaves the session id null. The walk is the prover, and a harness ancestor cannot be a stranger the way an inherited marker can. The fallback is gated on an empty marker set, not on a missing harness. A marker that IS present and resolved to nothing is a contradiction, and a contradiction attributes nothing. The `agent_spawned` event carries the `lineage_reason` in every case.
 
@@ -73,6 +78,29 @@ fno backlog provenance <node-id> --json   # structured: node_id, title, edges[]
 ```
 
 Read-only. For each edge a node carries (node-birth and/or spawn), it runs the resolver and reports the resolved transcript path or the reason it could not resolve. The node-birth edge resolves against `source_cwd` (the originating session's cwd, which claude transcript dirs are slugged by), falling back to the node's durable `cwd` only for legacy pre-`source_cwd` nodes; the spawn edge resolves against `spawned_by_cwd`. Using the durable project `cwd` would point at the wrong `~/.claude/projects/<slug>` whenever a node was filed from a worktree, which is the common mid-pipeline case.
+
+## The spawn door: required origin, separate owner (schema v33)
+
+The one spawn door lives in `crates/fno-agents/src/spawn_contract.rs` and `spawn_transaction.rs`. It replaced ambient capture as the birth contract. Every new worker birth carries a validated structured record, and the ambient triple becomes a generated compatibility projection of it.
+
+| Field | Meaning |
+|---|---|
+| `spawn_id` | coordinator-allocated attempt id (`sp-<hex>`) correlating journal accepted record, birth row, and receipt |
+| `spawn_provenance.origin` | `session` (proven parent: harness, full session id, caller cwd, plus an optional invocation reference for a script the session ran) or `non_session` (typed source: daemon arm + cause, LaunchAgent label, shell with TTY and process identity, or test script + run id) |
+| `spawn_provenance.owner` | session, project-qualified mission, project-qualified crown scope, operator/TTY, or test run. Separate from origin by design. Daemon work names its mission or crown without inventing a parent. A kingless scope is still a valid owner |
+| `spawned_by_*` | generated compatibility projection of a session origin, never independently writable on a new birth |
+
+Rules the door enforces before any launch:
+
+- a daemon or launch-agent origin requires a mission or crown owner. The daemon starter is never substituted.
+- a cause code must speak the naming-codes vocabulary. The retired `sob` refuses.
+- a known-shape session id attributed to the wrong harness refuses (the forgery shape).
+- a session-launched test keeps its live session parent. The script is recorded as the invocation, never as a parent replacement.
+- rows predating the door read as `legacy_missing` provenance. That is a visible defect, never silently blessed, and never repaired from a name prefix, crown holder, or adopter.
+
+Producers carry context through the `FNO_SPAWN_ORIGIN` / `FNO_SPAWN_OWNER` env carrier (validated, malformed refuses) or the `agent.spawn` request's `origin`/`owner` fields. Explicit dispatch context outranks ambient capture. A session spawning by hand keeps its real session parent. Adoption is a voucher, not a birth: the adopter lands in `adopted_by_session`, and a re-adopt preserves every birth field. The crown hook reads ownership. A door-stamped row is owned autonomous work, never an unlinked orphan.
+
+Read-only runtime verification: `scripts/diagnostics/verify-spawn-contract.py --plan <plan.md>` checks the correlated real-path proof (spawn ids, journal correlation, sha pinning, freshness) and refuses anything self-asserted.
 
 ## Scope and sequencing
 

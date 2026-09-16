@@ -14,6 +14,11 @@
 #   4. CI parity test (test_validator_parity.py) runs both validators
 #      against the corpus; both must give the same verdict on every record.
 #
+# Data keys are OPEN: data.required must be present, data.forbidden is
+#   refused, and an undeclared key validates for every type. Extra keys
+#   are evidence, not series; trend and diff on declared keys. A builder
+#   function's keyword-only signature is a convenience, not the contract.
+#
 # Removing an event type:
 #   Add a `deprecated: <UTC ISO8601>` marker to the entry rather than
 #   deleting it outright. test_no_undocumented_deletions enforces the marker
@@ -2919,6 +2924,29 @@ event_types:
         archived_to:
           type: string
 
+  - name: agent_spawn_accepted
+    retention: durable
+    description: "The spawn coordinator accepted a validated spawn request and allocated its spawn_id; recorded BEFORE any backend launch. An accepted record is not a live worker: the birth settles with agent_spawned or agent_spawn_failed, correlated by spawn_id."
+    sources: [daemon]
+    data:
+      required: [spawn_id, name]
+      properties:
+        spawn_id:
+          type: string
+          description: "The coordinator-allocated spawn-attempt id; correlates accepted, birth and receipt."
+        name:
+          type: string
+        origin:
+          type: object
+          description: "The validated SpawnOrigin (session parent or named non-session source)."
+        owner:
+          type: object
+          description: "The validated SpawnOwner (session, mission, crown, operator or test run)."
+        substrate:
+          type: string
+        harness:
+          type: string
+
   - name: agent_spawn_failed
     description: "The agent worker process could not be launched (binary not found, exec error, etc.)."
     sources: [daemon]
@@ -5557,8 +5585,8 @@ event_types:
           description: "The historical session's real session_id - no new ID scheme is minted for corpus items."
         dimension:
           type: string
-          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged, persona, surface_fit, uncovered_case, deletable, duplication]
-          description: "Which rubric dimension this finding scores. structural_validity was RETIRED 2026-09-12 : the failure-modes heading it graded is no longer refused, so it is kept in this enum only so historical events validate, and it is never emitted again. collision_free/shipped_outcome are the blueprint code dimensions (fold.BLUEPRINT_DIMENSIONS); persona/surface_fit/uncovered_case/deletable/duplication are the blueprint judge dimensions (fold.JUDGE_DIMENSIONS, model-graded, never replayable); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (sweep-only)."
+          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged, persona, surface_fit, uncovered_case, deletable, duplication, epic_fit, mission_fit, customer_fit, code_truth]
+          description: "Which rubric dimension this finding scores. structural_validity was RETIRED 2026-09-12 : the failure-modes heading it graded is no longer refused, so it is kept in this enum only so historical events validate, and it is never emitted again. collision_free/shipped_outcome are the blueprint code dimensions (fold.BLUEPRINT_DIMENSIONS); persona/surface_fit/uncovered_case/deletable/duplication are the five question dimensions and epic_fit/mission_fit/customer_fit/code_truth the four source dimensions of the blueprint judge (JUDGE_DIMENSIONS in crates/fno-agents/src/blueprint_judge.rs, model-graded, never replayable); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (sweep-only)."
         verdict:
           type: string
           enum: [pass, degraded, fail]

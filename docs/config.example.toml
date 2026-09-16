@@ -639,6 +639,14 @@ sandbox = false
 [worktree]
 # Global worktree-isolation policy (never|harness-native|external); default harness-native. `never` launches code payloads in place (e.g. an Obsidian vault checkout). A per-project work.workspaces.<slug>.projects[].worktree key overrides it.
 # policy = <unset>   # optional; no default
+# Run dependency install when a new worktree is set up (read by skills/speculate/scripts/worktree-setup.sh); set false to skip it. Default true.
+auto_install = true
+# Explicit setup command run after a new worktree is created, whatever auto_install says (read by skills/speculate/scripts/worktree-setup.sh). Default empty.
+setup_command = ""
+# Skip the post-setup verification step in a new worktree (read by skills/speculate/scripts/worktree-setup.sh). Default false.
+skip_verification = false
+# Verification command for a new worktree (read by skills/speculate/scripts/worktree-setup.sh); falls back to the script's own detection when empty. Default empty.
+test_command = ""
 
 [model_routing]
 # Route auxiliary roles (coordinate/tidy/orient/consolidate/post-merge) and the opt-in build lane to a secondary provider at spawn.

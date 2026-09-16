@@ -1856,7 +1856,7 @@ pub fn ask_followup(
 
 use crate::paths::AgentsHome;
 use crate::state::{
-    find_keyed_mut, load_registry, registry_write_key, update_registry, Lineage, RegistryEntry,
+    find_keyed_mut, load_registry, registry_write_key, update_registry, RegistryEntry,
 };
 use crate::AgentStatus;
 
@@ -3045,7 +3045,7 @@ fn create(
     // The spawning session's ambient identity: create runs in the
     // CLIENT process, which inherited the spawning session's env, so the
     // markers read here name this row's true parent.
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    let spawned_by = crate::spawn_lineage::ambient_lineage();
     let (launch_account, launch_account_source) = crate::state::launch_provenance_from_env();
     let new_entry = RegistryEntry {
         // client-side mint - this process inherited the spawning
@@ -3140,14 +3140,7 @@ fn create(
         // The session id itself is NOT folded into it: a bounded miss is a
         // legitimate None at birth (this row stays a named spawning row), so
         // the explicit field above keeps that semantics.
-        ..RegistryEntry::new(
-            session_uuid.clone(),
-            Lineage {
-                session: parent_session,
-                harness: parent_harness,
-                cwd: parent_cwd,
-            },
-        )
+        ..RegistryEntry::new(session_uuid.clone(), spawned_by)
     };
 
     // Re-check the name UNDER the registry lock before appending. The per-agent

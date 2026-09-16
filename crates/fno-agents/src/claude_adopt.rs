@@ -230,10 +230,11 @@ pub fn crown_from_king_manifests(
 /// storage move does not affect claim/control.sock routing.
 pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
     let short = w.short_id().to_string();
-    // The adopting session's ambient identity: adoption runs in the
-    // session that found the worker, and that session is the best answer the
-    // registry can hold for "who is responsible for this row".
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    // The adopting session's ambient identity, recorded as the VOUCHER:
+    // adoption is not a birth, so the adopter must never be laundered into
+    // the spawned_by_* parent edge. An adopted row's actual parent is
+    // unknown - the adopt observed no spawn - and unknown stays unknown.
+    let adopter_session = crate::spawn_lineage::ambient_lineage().session;
     // the crown restored from a live manifest naming this session,
     // or none. Computed once, before the literal, so the row and the file can
     // never disagree about what was restored.
@@ -319,13 +320,10 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         git_grant: None,
         spawn_trigger: None,
         legacy_claude_short_id: None,
+        adopted_by_session: adopter_session,
         ..RegistryEntry::new(
             Some(w.session_id.clone()),
-            Lineage {
-                session: parent_session,
-                harness: parent_harness,
-                cwd: parent_cwd,
-            },
+            Lineage::captured((None, None, None)),
         )
     }
 }
@@ -355,11 +353,31 @@ pub fn upsert_adopted_row(registry_path: &Path, entry: RegistryEntry) -> Result<
                 // the node, so replacing the row must not erase one a spawn
                 // or register path stamped.
                 let node = reg.entries[i].node.clone();
+                // The birth context is what adoption must
+                // PRESERVE, not rewrite. Origin, the parent edge, the door's
+                // structured provenance, the requested axes, and the
+                // predecessor/fork edges all belong to the row's birth; the
+                // fresh mint observed none of them. Only the adopter's own
+                // voucher (adopted_by_session) refreshes.
+                let prev = reg.entries[i].clone();
                 reg.entries[i] = entry;
                 reg.entries[i].delivery_policy = policy;
                 if reg.entries[i].node.is_none() {
                     reg.entries[i].node = node;
                 }
+                reg.entries[i].origin = prev.origin;
+                reg.entries[i].spawned_by_session = prev.spawned_by_session;
+                reg.entries[i].spawned_by_harness = prev.spawned_by_harness;
+                reg.entries[i].spawned_by_cwd = prev.spawned_by_cwd;
+                reg.entries[i].lineage_reason = prev.lineage_reason;
+                reg.entries[i].spawn_id = prev.spawn_id;
+                reg.entries[i].spawn_provenance = prev.spawn_provenance;
+                reg.entries[i].requested_model = prev.requested_model;
+                reg.entries[i].requested_provider = prev.requested_provider;
+                reg.entries[i].requested_effort = prev.requested_effort;
+                reg.entries[i].forked_from_session_id = prev.forked_from_session_id;
+                reg.entries[i].predecessor_session_ids = prev.predecessor_session_ids;
+                reg.entries[i].created_at = prev.created_at;
             }
             None => reg.entries.push(entry),
         }
@@ -748,6 +766,74 @@ mod tests {
         upsert_adopted_row(&reg, mint_adopted_entry(&worker(), "2026-06-27T18:00:00Z")).unwrap();
         let loaded = crate::state::load_registry(&reg).unwrap();
         assert_eq!(loaded.entries[0].node.as_deref(), Some("x-aaaa"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upsert_refresh_preserves_birth_provenance() {
+        // A re-adopt is an observed-field merge.
+        // The door's structured provenance, the spawn id, the birth parent
+        // edge, and the requested axes all belong to the row's BIRTH, so a
+        // whole-row replace that dropped them is the defect this test pins.
+        // The one field that DOES refresh is the new adopter's voucher.
+        let _root = crate::paths::DeclaredRoot::declare("upsert_birth_provenance");
+        let dir = std::env::temp_dir().join(format!(
+            "fno-adopt-birth-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let reg = dir.join("registry.json");
+        // Birth: a door-shaped spawn row.
+        let provenance = crate::spawn_contract::SpawnProvenance {
+            origin: crate::spawn_contract::SpawnOrigin::Session {
+                parent: crate::spawn_contract::SessionRef {
+                    harness: "claude".into(),
+                    session_id: "0f0e7865-86b8-4a9e-8d99-6bd94b0ea9c9".into(),
+                    cwd: "/repo".into(),
+                },
+                invocation: None,
+            },
+            owner: crate::spawn_contract::SpawnOwner::Session(crate::spawn_contract::SessionRef {
+                harness: "claude".into(),
+                session_id: "0f0e7865-86b8-4a9e-8d99-6bd94b0ea9c9".into(),
+                cwd: "/repo".into(),
+            }),
+        };
+        let mut born = crate::state::RegistryEntry::new_spawn("sp-abc123", &provenance);
+        born.name = "adopted-ab12cd34".into();
+        born.claude_session_uuid = Some("a1b2c3d4-1111-2222-3333-444455556666".into());
+        born.harness = Some("claude".into());
+        born.cwd = "/work".into();
+        born.requested_model = Some("glm-5.3-flash[1m]".into());
+        upsert_adopted_row(&reg, born).unwrap();
+        // Re-adopt mints a fresh adopted row for the same session uuid.
+        upsert_adopted_row(&reg, mint_adopted_entry(&worker(), "2026-06-27T18:00:00Z")).unwrap();
+        let loaded = crate::state::load_registry(&reg).unwrap();
+        assert_eq!(loaded.entries.len(), 1, "same uuid, one row");
+        let row = &loaded.entries[0];
+        assert_eq!(
+            row.spawn_id.as_deref(),
+            Some("sp-abc123"),
+            "spawn id survives"
+        );
+        assert!(
+            row.spawn_provenance.is_some(),
+            "structured provenance survives"
+        );
+        assert_eq!(
+            row.spawned_by_session.as_deref(),
+            Some("0f0e7865-86b8-4a9e-8d99-6bd94b0ea9c9"),
+            "birth parent edge survives"
+        );
+        assert_eq!(
+            row.requested_model.as_deref(),
+            Some("glm-5.3-flash[1m]"),
+            "requested axes survive"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

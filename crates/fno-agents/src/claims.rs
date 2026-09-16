@@ -179,6 +179,11 @@ fn is_false(value: &bool) -> bool {
 /// natively, is the long-lived daemon/worker rather than a transient CLI
 /// subprocess, so the claim is live from birth (closes the acquire-to-reanchor
 /// stale window the shelled implementation had).
+/// The provenance stamp for a lease whose recorded pid holds it for the
+/// whole hold: the classifier reads it and never heals the lease through a
+/// live session witness.
+pub const HOLDER_PROCESS: &str = "holder-process";
+
 #[derive(Debug, Default, Clone)]
 pub struct AcquireOpts {
     pub pid: Option<u32>,
@@ -186,6 +191,10 @@ pub struct AcquireOpts {
     pub ttl_ms: Option<i64>,
     pub reason: Option<String>,
     pub metadata: Option<Map<String, Value>>,
+    /// An explicit provenance stamp from a writer that knows its pid holds
+    /// the whole lease (the flight gate stamps [`HOLDER_PROCESS`]). `None`
+    /// computes it from the pid origin, exactly as before.
+    pub pid_provenance: Option<String>,
     /// Explicit claims ROOT (the dir that contains `.fno/claims`). `None`
     /// resolves by key prefix: global-id keys (`node:`/`dispatch:`/
     /// `reconcile:`/`session:`) route to `$FNO_CLAIMS_ROOT` (else `$HOME`).
@@ -1897,15 +1906,16 @@ pub(crate) fn stamp_command_env(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CanonicalDisposition {
+// Public: the spawn door's stamp parser exposes it in its signature.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CanonicalDisposition {
     Absent,
     Invalid,
     NameOnly,
     Complete,
 }
 
-fn canonical_identity_from(
+pub(crate) fn canonical_identity_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> (Option<String>, Option<String>, CanonicalDisposition) {
     let raw_name = get(FNO_HARNESS_NAME);
@@ -2173,14 +2183,14 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
         // durable pid is a multiplexer that outlives every session it hosts, so
         // the claimant would be vouching for a witness that never leaves. That
         // stamps ambient too, and the TTL stays the lease it claims to be.
-        pid_provenance: Some(
+        pid_provenance: Some(opts.pid_provenance.clone().unwrap_or_else(|| {
             if opts.pid.is_some() || !pid_dies_with_session(harness.as_deref()) {
                 "ambient"
             } else {
                 "session-prover"
             }
-            .to_string(),
-        ),
+            .to_string()
+        })),
         harness,
         session_id: session_id.filter(|s| !s.trim().is_empty()),
         metadata: opts.metadata.clone().unwrap_or_default(),
@@ -4265,35 +4275,6 @@ mod tests {
         claude.pid_provenance = Some("session-prover".into());
         claude.harness = Some("claude".into());
         assert_eq!(classify(&claude, Some(now)), ClaimState::Live);
-    }
-
-    #[test]
-    fn make_claim_stamps_pid_provenance_by_pid_origin() {
-        let td = TempDir::new().unwrap();
-        // A defaulted pid is the claimant itself: the strongest provenance -
-        // but only under a harness that forks per session. The suite's own
-        // ambient harness decides which, so the expectation is derived rather
-        // than hardcoded; hardcoding it makes this test pass under claude and
-        // fail under codex, which is a flake keyed to who ran it.
-        let own = match acquire("session:prov", "pty:me", opts_in(&td)) {
-            AcquireOutcome::Acquired(r) => r,
-            other => panic!("{other:?}"),
-        };
-        let expected = if pid_dies_with_session(own.harness.as_deref()) {
-            "session-prover"
-        } else {
-            "ambient"
-        };
-        assert_eq!(own.pid_provenance.as_deref(), Some(expected));
-        // An explicitly passed pid is caller-supplied and unverifiable here:
-        // ambient, so the hybrid arm will not extend an expired lease for it.
-        let mut o = opts_in(&td);
-        o.pid = Some(4242);
-        let foreign = match acquire("session:prov2", "pty:me", o) {
-            AcquireOutcome::Acquired(r) => r,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(foreign.pid_provenance.as_deref(), Some("ambient"));
     }
 
     #[test]

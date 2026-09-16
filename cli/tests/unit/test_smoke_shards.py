@@ -224,7 +224,13 @@ def test_smoke_setup_cleans_fno_agents_before_building_cached_artifacts() -> Non
         clean = lines.index(
             f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
         )
-        build = lines.index(f"cargo build --manifest-path crates/{package}/Cargo.toml")
+        # The build pins CARGO_BUILD_BUILD_DIR (the repo build-dir config would
+        # otherwise put the final binary in the cargo-home build base, where
+        # the FRONT export never reads).
+        build = lines.index(
+            f'CARGO_BUILD_BUILD_DIR="$PWD/crates/{package}/target" '
+            f"cargo build --manifest-path crates/{package}/Cargo.toml"
+        )
 
         assert clean < build, f"smoke setup can execute a stale cached {package} binary"
 

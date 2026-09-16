@@ -885,7 +885,13 @@ def test_us2_schema_version_is_three() -> None:
     # a bounded Codex thread.
     # v31: additive `harness_args` - the fenced codex thread tokens a daemon
     # restart re-parses onto thread/resume.
-    assert SCHEMA_VERSION == 32
+    # v32: additive `stop` - fno's own stop, so a harness-stopped state never
+    # reads as finished work to the retirement sweep.
+    # v33: additive `lineage_reason` - why no parent session could be named;
+    # an origin=spawn row carries a parent or a reason, never neither.
+    # v33 also added `spawn_id` and structured `spawn_provenance` (the door's
+    # attempt id and validated birth record).
+    assert SCHEMA_VERSION == 33
 
 
 def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
@@ -2378,7 +2384,7 @@ def test_node_field_stamps_and_round_trips_v21(tmp_path, monkeypatch):
         write_registry,
     )
 
-    assert SCHEMA_VERSION == 32
+    assert SCHEMA_VERSION == 33
     use_tmpdir(monkeypatch, tmp_path)
     entry = register_existing_session(
         provider=CLAUDE_HARNESS,
@@ -2444,7 +2450,7 @@ def test_v24_requested_axis_round_trips_verbatim(tmp_path: Path, monkeypatch) ->
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, SCHEMA_VERSION, load_registry, write_registry
 
-    assert SCHEMA_VERSION == 32
+    assert SCHEMA_VERSION == 33
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     entry = AgentEntry(
         name="requested-axis",

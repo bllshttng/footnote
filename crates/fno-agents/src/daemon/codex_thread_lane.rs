@@ -20,6 +20,7 @@ pub(super) async fn spawn_codex_thread_lane(
     name: &str,
     cwd: &Path,
     provider: &str,
+    provenance: Option<&crate::spawn_contract::SpawnProvenance>,
 ) -> Response {
     if provider != "codex" {
         return thread_spawn_refusal(
@@ -136,6 +137,8 @@ pub(super) async fn spawn_codex_thread_lane(
         node,
         req.params.get("account").and_then(Value::as_str),
         &harness_args,
+        &req.params,
+        provenance,
     );
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {

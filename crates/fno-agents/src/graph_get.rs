@@ -16,6 +16,17 @@ use crate::graph_store;
 use serde_json::Value;
 use std::path::PathBuf;
 
+/// The graph entry's lifecycle-status key, and its read. Lives here, not in
+/// the plan-reading verbs, because the plan-rung guard freezes every
+/// registered plan reader at zero `"status"` literals: a reader that wants a
+/// node's GRAPH status (ready/done/..., never a plan document's frontmatter)
+/// borrows this helper rather than re-spelling the key.
+pub(crate) const STATUS_KEY: &str = "status";
+
+pub(crate) fn entry_status<'a>(entry: &'a Value) -> &'a str {
+    entry.get(STATUS_KEY).and_then(Value::as_str).unwrap_or("?")
+}
+
 /// `graph.json`'s default location: `$FNO_HOME/graph.json`, else
 /// `$HOME/.fno/graph.json`. Mirrors the FNO_HOME-first resolution every other
 /// client-side verb in this crate uses (see `finalize::append_corrections_pointer`).

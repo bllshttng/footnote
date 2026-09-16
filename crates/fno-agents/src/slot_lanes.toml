@@ -1,0 +1,8 @@
+# slot_lanes.toml - the inline slot-lane vocabulary. ONE owner.
+# build.rs projects a byte copy to cli/src/fno/agents/slot_lanes.toml.
+# Lane fields are closed: every field has resolver code behind it
+# (provider becomes harness, passthrough fields skip ranking, args is
+# a validated string list). Slot verbs are open instead: SLOT_VERBS
+# plus every agents.profiles key.
+fields = ["provider", "model", "effort", "substrate", "permission_mode", "route", "account", "pane_group", "args"]
+passthrough = ["substrate", "permission_mode", "pane_group", "args"]

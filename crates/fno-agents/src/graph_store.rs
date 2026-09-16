@@ -2431,7 +2431,21 @@ pub fn locked_mutate_with_hook(
     let (backup, shadow_warning, version) = if sqlite_backend {
         let version = crate::backlog::authoritative_sync(path, &shadow_before, &entries)
             .map_err(StoreError::Sqlite)?;
-        (None, None, version)
+        // Keeper convergence: while sqlite is authoritative, the json file
+        // stays a full projection the file-path readers still resolve
+        // against (the backlog-note/update bridges read --graph as a path).
+        // Mirror every publish so a node filed after the backend flip stays
+        // visible to them. Best-effort: sqlite holds the truth, a mirror
+        // failure warns instead of refusing, like the json leg's shadow
+        // write.
+        let body = serialize_graph_file(&entries);
+        let warning = write_atomic(path, &body).err().map(|error| {
+            format!(
+                "JSON keeper mirror write for {} failed: {error}",
+                path.display()
+            )
+        });
+        (None, warning, version)
     } else {
         let backup = create_backup(path);
         let body = serialize_graph_file(&entries);
@@ -2488,7 +2502,7 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
         crate::backlog::Backend::Sqlite => {
             crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
         }
-        crate::backlog::Backend::Json => read_defaulted(path, false)?,
+        crate::backlog::Backend::Json => read_defaulted_opts(path, false, true)?,
     };
     apply_defaults(&mut rows, false);
     Ok(rows)
@@ -2560,15 +2574,21 @@ pub fn mutate_rows(
 /// contract). Applies defaults; junk rows are kept only when `keep_malformed`
 /// (load_graph's discovery caller needs them; ordinary reads filter).
 ///
-/// The soft read keeps `_read_json`'s corrupt side effect: the unreadable
-/// bytes are copied to a `.json.bak` sibling before the error surfaces, so
-/// the recovery the store's messages promise actually exists on disk.
+/// The strict read: an unreadable store is `Err`, never an empty answer, so
+/// a caller that misses on `Ok(vec![])` can only be reporting a genuinely
+/// absent node, never a read it could not make.
+///
+/// The soft read that degrades `MalformedRoot` to empty and copies the
+/// corrupt bytes to a `.json.bak` sibling first is the explicit
+/// `read_defaulted_opts(path, keep_malformed, true)` spelling.
 pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, StoreError> {
-    read_defaulted_opts(path, keep_malformed, true)
+    read_defaulted_opts(path, keep_malformed, false)
 }
 
-/// The strict variant takes `backup_on_corrupt = false`: read_graph_strict's
-/// contract is that diagnosis is read-only and never writes a .bak.
+/// `backup_on_corrupt = true` is the soft read, the deliberate exception:
+/// a root with no entries key reads EMPTY, and corrupt bytes are copied to a
+/// `.json.bak` before the error surfaces. `false` is strict and read-only:
+/// `MalformedRoot`/`Corrupt` surface untouched and nothing is written.
 pub fn read_defaulted_opts(
     path: &Path,
     keep_malformed: bool,
@@ -2579,8 +2599,7 @@ pub fn read_defaulted_opts(
         Ok(RawRead::MalformedRoot) => {
             if backup_on_corrupt {
                 // Soft read: a root with no entries key reads EMPTY, never an
-                // error -- the malformed-root signal is reachable only through
-                // the strict path, exactly as the Python soft reader answered.
+                // error, exactly as the Python soft reader answered.
                 Ok(vec![])
             } else {
                 Err(StoreError::MalformedRoot(path.display().to_string()))
@@ -2726,6 +2745,54 @@ mod tests {
     fn empty_containers_stay_inline_like_python() {
         let v = json!({"a": [], "b": {}});
         assert_eq!(to_python_json(&v), "{\n  \"a\": [],\n  \"b\": {}\n}");
+    }
+
+    #[test]
+    fn a_sqlite_publish_mirrors_the_json_file_for_path_readers() {
+        // The backlog-note/update bridges read --graph as a FILE. Under the
+        // sqlite backend the file froze at the backend flip, so every node
+        // filed after the flip refused to resolve. Convergence: a sqlite
+        // publish re-projects the json file, and the file reader sees it.
+        let root = tempfile::tempdir().unwrap();
+        let graph = root.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            json!({"entries": [json!({
+                "id": "x-old", "title": "pre-flip", "slug": "pre-flip",
+                "type": "feature", "status": "ready", "priority": "p2",
+            })]})
+            .to_string(),
+        )
+        .unwrap();
+        crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+
+        let mut entries = crate::backlog::read_entries(&graph).unwrap();
+        assert_eq!(entries.len(), 1, "positive control: the fixture imported");
+        entries.push(json!({
+            "id": "x-new", "title": "post-flip", "slug": "post-flip",
+            "type": "feature", "status": "idea", "priority": "p2",
+        }));
+        let input = MutateInput {
+            entries,
+            canonical_path: None,
+            base_version: crate::backlog::version(&graph).unwrap(),
+            plan_rungs: None,
+        };
+        locked_mutate(&graph, input, std::time::Duration::from_secs(5)).unwrap();
+
+        // The file-path reader (the bridge's exact read) resolves x-new.
+        let mirrored = read_defaulted(&graph, false).unwrap();
+        assert!(
+            mirrored.iter().any(|e| entry_id(e) == Some("x-new")),
+            "json mirror must carry the post-flip node"
+        );
+        assert!(
+            mirrored.iter().any(|e| entry_id(e) == Some("x-old")),
+            "json mirror must keep the pre-flip node"
+        );
+        // Both keepers carry the same rows.
+        let authoritative = crate::backlog::read_entries(&graph).unwrap();
+        assert_eq!(mirrored.len(), authoritative.len());
     }
 
     #[test]

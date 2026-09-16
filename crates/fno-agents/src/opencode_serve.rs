@@ -56,7 +56,7 @@ use std::time::Duration;
 use crate::claude_ask::{emit_event, validate_spawn_inputs};
 use crate::opencode_ask::{apply_opencode_variant, AskOutcome, OPENCODE_DEFAULT_MODEL};
 use crate::paths::AgentsHome;
-use crate::state::{load_registry, update_registry, Lineage, RegistryEntry};
+use crate::state::{load_registry, update_registry, RegistryEntry};
 use crate::AgentStatus;
 
 /// Everything the spawn needs from a live serve: the loopback base URL, the
@@ -799,7 +799,7 @@ fn dispatch_opencode_serve_inner(
     // against the concurrency cap while its turn runs and the row retires
     // when the writer exits (the store-membership probe alone could never
     // retire it - serve sessions persist after the work is done).
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    let spawned_by = crate::spawn_lineage::ambient_lineage();
     let new_entry = RegistryEntry {
         // client-side mint - this process inherited the spawning
         // session's env, so the exported FNO_NODE names the node THIS spawn
@@ -869,14 +869,7 @@ fn dispatch_opencode_serve_inner(
         delivery_policy: None,
         sandbox_posture: None,
         git_grant: None,
-        ..RegistryEntry::new(
-            Some(session_id.clone()),
-            Lineage {
-                session: parent_session,
-                harness: parent_harness,
-                cwd: parent_cwd,
-            },
-        )
+        ..RegistryEntry::new(Some(session_id.clone()), spawned_by)
     };
     let registry_path = home.registry_json();
     match update_registry(&registry_path, |reg| {

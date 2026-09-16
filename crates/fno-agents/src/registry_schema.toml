@@ -36,4 +36,16 @@
 # writer-protection, the same reason v16/v22 bumped: a pre-v32 writer would
 # accept the unknown key and erase the stamp on its next read-modify-write,
 # after which a worker fno stopped retires as finished.
-version = 32
+#
+# v33: additive `lineage_reason` - why a mint with no parent session could
+# not name one. The rule: an origin=spawn row carries `spawned_by_session`
+# or a non-empty `lineage_reason`, never neither; a daemon mint reads the
+# parent from the spawn REQUEST, so an edge-less request stamps the reason
+# instead of a silent null. Same additive-optional writer-protection
+# rationale as v28: a pre-v33 writer accepts the unknown key and erases it
+# on its next read-modify-write. Rationale lives beside the column in
+# state.rs / registry.py. v33 also adds `spawn_id` and structured
+# `spawn_provenance` - the coordinator's spawn-attempt id and the validated
+# origin+owner record every new birth carries; `spawned_by_*` become
+# generated compatibility fields derived from the origin at mint.
+version = 33

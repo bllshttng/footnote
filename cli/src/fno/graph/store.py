@@ -43,6 +43,7 @@ import socket
 import struct
 import subprocess
 import tempfile
+import uuid
 from functools import lru_cache
 import sys
 import time
@@ -104,6 +105,7 @@ STATE_ABSENT = "absent"
 STATE_SPAWN_FAILED = "spawn_failed"
 STATE_UNREACHABLE = "unreachable"
 STATE_SILENT = "silent"
+STATE_UNCONFIRMED = "unconfirmed"
 # The keeper answered but does not know the verb: it predates the client
 # (an installed worker behind the source). Remedied by restarting that
 # keeper on a current binary.
@@ -149,6 +151,14 @@ class StoreUnavailable(RuntimeError):
         self.state = state
         self.detail = detail
         super().__init__(f"graph store unavailable ({state}): {detail}")
+
+
+class WriteUnconfirmed(StoreUnavailable):
+    """A write was sent, but its keeper never confirmed the outcome."""
+
+    def __init__(self, state: str, detail: str):
+        self.ids: list[str] = []
+        super().__init__(state, detail)
 
 
 class ClaimsUnavailableError(RuntimeError):
@@ -451,13 +461,21 @@ class _Keeper:
     def request(self, method: str, params: dict) -> Any:
         # _connect already folds every connect failure into StoreUnavailable
         # with its state attached.
-        stream = self._connect()
+        is_write = method in {"commit", "commit_rows", "op", "api"}
+        request_id = uuid.uuid4().hex if is_write else ""
+        request_params = {**params, "request_id": request_id} if is_write else params
+        stream = None
+        sent = False
         try:
+            stream = self._connect()
             req_id = 1
-            payload = json.dumps({"id": req_id, "method": method, "params": params}).encode()
+            payload = json.dumps(
+                {"id": req_id, "method": method, "params": request_params}
+            ).encode()
             frame = bytes([_TAG_REQUEST]) + struct.pack("<I", len(payload)) + payload
             stream.settimeout(self.read_timeout)
             stream.sendall(frame)
+            sent = True
             header = _recv_exact(stream, 5)
             if header[0] != _TAG_RESPONSE:
                 raise StoreUnavailable(
@@ -468,14 +486,81 @@ class _Keeper:
                 raise StoreUnavailable(STATE_SILENT, f"oversized reply frame ({length} bytes)")
             data = _recv_exact(stream, length)
             reply = json.loads(data.decode("utf-8"))
+        except StoreUnavailable as exc:
+            if not is_write:
+                raise
+            if sent:
+                return self._resolve_write(request_id, method, exc)
+            raise StoreUnavailable(exc.state, f"{exc.detail}; the write was not sent") from None
         except (OSError, ValueError) as exc:
-            raise StoreUnavailable(STATE_UNREACHABLE, str(exc)) from None
+            failure = StoreUnavailable(STATE_UNREACHABLE, str(exc))
+            if not is_write:
+                raise failure from None
+            if sent:
+                return self._resolve_write(request_id, method, failure)
+            raise StoreUnavailable(
+                failure.state, f"{failure.detail}; the write was not sent"
+            ) from None
         finally:
-            stream.close()
+            if stream is not None:
+                stream.close()
         if reply.get("ok"):
             return reply.get("result")
         error = reply.get("error") or {}
         _raise_store_error(error.get("kind", "invalid"), str(error.get("message", error)))
+
+    def _resolve_write(self, request_id: str, method: str, failure: StoreUnavailable) -> Any:
+        """Resolve a reply lost after a complete write frame was sent."""
+        deadline = time.monotonic() + 120.0
+        unknown_method = 'store error (invalid): unknown store method "write_status"'
+        status_client = _Keeper(
+            self.sock,
+            connect_timeout=self.connect_timeout,
+            read_timeout=max(self.read_timeout, 5.0),
+        )
+        while time.monotonic() < deadline:
+            try:
+                status = status_client.request("write_status", {"request_id": request_id})
+            except RuntimeError as exc:
+                if str(exc) == unknown_method:
+                    break
+                raise
+            except StoreUnavailable:
+                time.sleep(0.5)
+                continue
+            state = status.get("state") if isinstance(status, dict) else None
+            if state == "done":
+                reply = status.get("reply")
+                if not isinstance(reply, dict):
+                    break
+                result = reply.get("result")
+                if isinstance(result, dict):
+                    targets = [result]
+                    outcome = result.get("outcome")
+                else:
+                    targets = []
+                    outcome = None
+                if isinstance(outcome, dict):
+                    targets.append(outcome)
+                if any(target.get("entries_elided") for target in targets):
+                    entries = status_client.request(
+                        "read", {"strict": True, "keep_malformed": False}
+                    )["entries"]
+                    for target in targets:
+                        if target.get("entries_elided"):
+                            target["entries"] = copy.deepcopy(entries)
+                if reply.get("ok"):
+                    return reply.get("result")
+                error = reply.get("error") or {}
+                _raise_store_error(error.get("kind", "invalid"), str(error.get("message", error)))
+            if state == "unknown":
+                break
+            time.sleep(0.5)
+        raise WriteUnconfirmed(
+            STATE_UNCONFIRMED,
+            f"{method} was sent and its outcome is unknown ({failure}); "
+            "read the graph before retrying",
+        )
 
     # -- typed helpers -----------------------------------------------------
     # The keeper is single-graph (it binds to whatever --graph named), so
@@ -1339,6 +1424,19 @@ def commit_rows_via_store(path: Path, mutator) -> list[dict]:
         try:
             outcome = _commit_snapshot(client, snap, base_entries, entries, plan_rungs, attempt + 1)
             break
+        except WriteUnconfirmed as exc:
+            diff = _row_diff(base_entries, entries)
+            if diff is not None:
+                changed, removed = diff
+                exc.ids = [row["id"] for row in changed] + removed
+            if exc.ids:
+                ids = ", ".join(exc.ids)
+                exc.detail = (
+                    f"{exc.detail}; it may have written {ids}: "
+                    "run fno backlog get <id> before retrying"
+                )
+                exc.args = (f"graph store unavailable ({exc.state}): {exc.detail}",)
+            raise
         except _Conflict as conflict:
             _emit_graph_tx_event(
                 attempt=attempt + 1,

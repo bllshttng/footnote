@@ -56,6 +56,64 @@ fn graph_arg(graph: &std::path::Path) -> [String; 2] {
     ["--graph".to_string(), graph.display().to_string()]
 }
 
+/// The note door with all three channels captured: the x-786d contract is
+/// asserted on stderr, so it must not inherit the test's stderr.
+fn note_captured(args: &[&str], body: &str) -> (i32, String, String) {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fno-agents"))
+        .args(std::iter::once("backlog-note").chain(args.iter().copied()))
+        .envs(fno_agents::test_run::self_owner_env())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fno-agents backlog-note");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// x-786d: a corrupt store answers as a read failure (exit 5), never as an
+/// absent node.
+#[test]
+fn corrupt_graph_names_the_read_failure_never_absence() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    std::fs::write(&graph, "{").unwrap();
+    let g = graph_arg(&graph);
+    let (code, stdout, stderr) = note_captured(&["t-1", "body", "--quiet", &g[0], &g[1]], "");
+    assert_eq!(code, 5, "stdout: {stdout} stderr: {stderr}");
+    assert!(stderr.contains("graph read failed"), "{stderr}");
+    assert!(
+        !stdout.contains("no node resolves") && !stderr.contains("no node resolves"),
+        "a starved read must not read as an absent node: {stdout} {stderr}"
+    );
+}
+
+/// The control: a genuinely absent id on a WELL-FORMED store still reads
+/// absent, at the unchanged exit code. An absence assertion with no control
+/// is the shape x-786d is about.
+#[test]
+fn absent_node_still_reports_absence_at_the_unchanged_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("graph.json");
+    write_graph(&graph, &[fixture("t-1", "ready")]);
+    let g = graph_arg(&graph);
+    let (code, stdout, stderr) = note_captured(&["t-nope", "body", "--quiet", &g[0], &g[1]], "");
+    assert_eq!(code, 1, "stdout: {stdout} stderr: {stderr}");
+    assert!(stderr.contains("no node resolves to 't-nope'"), "{stderr}");
+    assert!(!stderr.contains("graph read failed"), "{stderr}");
+}
+
 #[test]
 fn ac5_positional_stdin_and_file_bodies_all_replace_state() {
     let dir = tempfile::tempdir().unwrap();

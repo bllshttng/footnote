@@ -165,7 +165,9 @@ def build_corpus(
 
 
 BLUEPRINT_DIMENSIONS = ("collision_free", "shipped_outcome")
-JUDGE_DIMENSIONS = ("persona", "surface_fit", "uncovered_case", "deletable", "duplication")
+# The judge's dimension list lives in one place:
+# JUDGE_DIMENSIONS in crates/fno-agents/src/blueprint_judge.rs; the event
+# schema's dimension enum names the same nine.
 
 # The retired heading check and the diverged collision copy were deleted;
 # collision_free imports the validator's own parallel-surface check.

@@ -139,7 +139,67 @@ def test_report_is_sorted_and_marks_consumer(tmp_path: Path) -> None:
     assert result.stdout.index(".claude/rules/largest.md") < result.stdout.index(
         "AGENTS.md"
     )
-    assert "skills/using-fno/SKILL.md  [shipped to every consumer]" in result.stdout
+    assert (
+        "skills/using-fno/SKILL.md  [hook: claude, top-level codex; "
+        "shipped to every consumer]"
+    ) in result.stdout
+    assert "[claude only]" in result.stdout
+    assert "[every harness]" in result.stdout
+    reach = re.search(
+        r"by reach: every harness (\d+) B, hook (\d+) B, claude only (\d+) B",
+        result.stdout,
+    )
+    assert reach is not None, result.stdout
+    assert sum(int(g) for g in reach.groups()) == _reported_total(result)
+
+
+def test_reach_subtotals_sum_on_the_shipped_repo() -> None:
+    """AC1-HP against the real tree: the subtotals cover every counted byte."""
+    result = subprocess.run(
+        ["bash", str(GATE)], cwd=ROOT, capture_output=True, text=True, timeout=30
+    )
+
+    assert result.returncode == 0, result.stderr
+    reach = re.search(
+        r"by reach: every harness (\d+) B, hook (\d+) B, claude only (\d+) B",
+        result.stdout,
+    )
+    assert reach is not None, result.stdout
+    assert sum(int(g) for g in reach.groups()) == _reported_total(result)
+
+
+def test_using_fno_reach_is_pinned_to_its_carriers() -> None:
+    """AC7-HP: the reach label is only as true as the wiring that delivers it.
+
+    using-fno is labeled `hook: claude, top-level codex` because codex's
+    SessionStart injects it through a two-hop chain. If either hop is cut, the
+    label lies and every reach subtotal with it.
+    """
+    hooks_json = json.loads(
+        (ROOT / "hooks" / "codex-hooks.json").read_text(encoding="utf-8")
+    )
+    commands = [
+        hook["command"]
+        for block in hooks_json["hooks"]["SessionStart"]
+        for hook in block.get("hooks", [])
+    ]
+    assert any(
+        command.endswith("hooks/session-start.sh")
+        or command.endswith("hooks/context-run.sh codex-session-start")
+        for command in commands
+    ), commands
+    context_hooks = json.loads(
+        (ROOT / "hooks" / "context-hooks.json").read_text(encoding="utf-8")
+    )
+    producers = context_hooks["groups"]["codex-session-start"]["producers"]
+    assert producers == [
+        {
+            "id": "session-start-combined",
+            "argv": ["${PLUGIN_ROOT}/hooks/session-start.sh"],
+        }
+    ]
+    wrapper = (ROOT / "hooks" / "session-start.sh").read_text(encoding="utf-8")
+    assert "session-start-using-fno.sh" in wrapper
 
 
 def test_json_manifest_reports_hashes_without_changing_exit_semantics(
@@ -165,7 +225,12 @@ def test_json_manifest_reports_hashes_without_changing_exit_semantics(
         "bytes": 500,
         "estimated_tokens": 125,
         "content_hash": hashlib.sha256(b"a" * 500).hexdigest(),
+        "reach": "every harness",
     }
+    assert by_path["skills/using-fno/SKILL.md"]["reach"].startswith("hook:")
+    assert by_path["CLAUDE.md"]["reach"] == "claude only"
+    assert set(payload["reach_bytes"]) == {"every-harness", "hook", "claude-only"}
+    assert sum(payload["reach_bytes"].values()) == payload["total_bytes"]
 
 
 def test_exact_ceiling_passes_and_one_byte_over_fails(tmp_path: Path) -> None:
@@ -221,7 +286,7 @@ def test_all_zero_byte_roots_pass(tmp_path: Path) -> None:
 
 
 def test_breach_teaches_trade_before_raise(tmp_path: Path) -> None:
-    """AC6-FR: failure output makes the recurring cost and escape explicit."""
+    """AC4-HP: failure output makes the honest remedy order explicit."""
     # Pinned RELATIVE to the live ceiling, the same way the over/under tests
     # above read it from the gate: fixed bytes here went stale the moment the
     # ceiling followed a measurement up, and the breach quietly became a pass.
@@ -241,7 +306,70 @@ def test_breach_teaches_trade_before_raise(tmp_path: Path) -> None:
     assert "skills/using-fno/SKILL.md 12000" in result.stderr
     assert "CLAUDE.md 7000" in result.stderr
     assert "tok/turn" in result.stderr
-    assert result.stderr.index("Trade:") < result.stderr.index("Raise CEILING_BYTES")
+    assert result.stderr.index("Compress") < result.stderr.index(
+        "Raise CEILING_BYTES"
+    )
+    assert result.stderr.index("Raise CEILING_BYTES") < result.stderr.lower().index(
+        "barred"
+    )
+
+
+def _committed_fixture(tmp_path: Path, *, under: int) -> Path:
+    """A git repo whose committed file set sits `under` bytes below the ceiling."""
+    repo = tmp_path / "repo"
+    (repo / ".claude" / "rules").mkdir(parents=True)
+    (repo / "skills" / "using-fno").mkdir(parents=True)
+    (repo / "AGENTS.md").write_bytes(b"a" * (CEILING_BYTES - under - 110))
+    (repo / "CLAUDE.md").write_bytes(b"c" * 10)
+    (repo / "skills" / "using-fno" / "SKILL.md").write_bytes(b"s" * 100)
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(repo), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    git("init", "-q")
+    git("add", ".")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "base")
+    return repo
+
+
+def test_headroom_names_pre_change_headroom_and_delta(tmp_path: Path) -> None:
+    """AC3-HP: the refusal measures what the author had before the change."""
+    repo = _committed_fixture(tmp_path, under=3)
+    subprocess.run(
+        ["git", "-C", str(repo), "update-ref", "refs/remotes/origin/main", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "AGENTS.md").write_bytes(b"a" * (CEILING_BYTES - 3 - 110 + 822))
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert re.search(
+        r"Headroom before this change: 3 B at [0-9a-f]{7}; this change adds 822 B\.",
+        result.stderr,
+    ), result.stderr
+
+
+def test_headroom_unmeasured_without_origin_main(tmp_path: Path) -> None:
+    """AC3-ERR: no merge-base means no number, never a fabricated one."""
+    repo = _committed_fixture(tmp_path, under=3)
+    (repo / "AGENTS.md").write_bytes(b"a" * (CEILING_BYTES - 3 - 110 + 822))
+
+    result = _run(repo)
+
+    assert result.returncode == 1
+    assert (
+        "Headroom before this change: unmeasured (no merge-base with origin/main)."
+        in result.stderr
+    )
+    assert re.search(r"Headroom before this change: \d", result.stderr) is None
 
 
 def test_two_positional_roots_are_rejected(tmp_path: Path) -> None:

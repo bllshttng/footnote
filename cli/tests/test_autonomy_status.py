@@ -16,7 +16,6 @@ from fno.autonomy_cli import (
     SpawnerStatus,
     autonomy_app,
     collect_status,
-    dispatch_provenance,
     format_table,
 )
 
@@ -254,30 +253,25 @@ def test_format_table_renders_source_verb_columns() -> None:
     assert "ab" in table and "ungated" in table
 
 
-def test_provenance_inventory_is_complete() -> None:
-    rows = dispatch_provenance()
+def test_name_codes_check_prints_rows_and_marker() -> None:
+    """The provenance audit moved into the binary (PR 1813): the CI check
+    runs `fno-agents name-codes --check`, so the test drives the same verb
+    and asserts the same invariants the Python audit held."""
+    import subprocess
+
+    from tests.conftest import checkout_fno_agents_binary
+
+    binary = checkout_fno_agents_binary()
+    if binary is None:
+        pytest.skip("no fno-agents binary built in this checkout")
+    proc = subprocess.run(
+        [str(binary), "name-codes", "--check"], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, proc.stderr
+    rows = [line for line in proc.stdout.splitlines() if "\t" in line]
     assert len(rows) == 17
-    sites = [row[0] for row in rows]
-    assert len(set(sites)) == len(sites)
-    sources = {row[1] for row in rows}
+    sources = {row.split("\t")[1] for row in rows}
     assert "ac" in sources
     assert "sob" not in sources, "spawn-on-blueprint is retired"
-    assert sum(1 for row in rows if row[1] == "ab") == 2
-
-
-def test_provenance_audit_prints_marker_and_exits_zero(tmp_path: Path) -> None:
-    result = runner.invoke(_cli(), ["provenance"])
-    assert result.exit_code == 0
-    assert "dispatch provenance: 17/17 coded" in result.stdout
-
-
-def test_provenance_audit_fails_on_a_broken_inventory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import fno.autonomy_cli as autonomy_cli
-
-    broken = autonomy_cli.dispatch_provenance()[:-1]  # 16 rows: short one path
-    monkeypatch.setattr(autonomy_cli, "dispatch_provenance", lambda: broken)
-    result = runner.invoke(_cli(), ["provenance"])
-    assert result.exit_code == 1
-    assert "dispatch provenance: 17/17 coded" not in result.stdout
+    assert sum(1 for row in rows if row.split("\t")[1] == "ab") == 2
+    assert "dispatch provenance: 17/17 coded" in proc.stdout

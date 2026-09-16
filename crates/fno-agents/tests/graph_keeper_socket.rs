@@ -168,6 +168,60 @@ fn keeper_serves_reads_ops_and_shutdown_over_its_socket() {
 }
 
 #[test]
+fn a_lost_commit_rows_reply_is_recoverable_over_a_fresh_socket() {
+    let home = short_home("lost-write");
+    let graph = home.join("graph.json");
+    std::fs::write(&graph, "{\n  \"entries\": []\n}\n").unwrap();
+    let sock = home.join("graph.json.store.sock");
+    let _keeper = spawn_keeper("lost-write-test", &graph, &sock);
+    wait_for_socket(&sock);
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    let begin = ok_result(rpc(&mut stream, 1, "begin", json!({})));
+    let params = json!({
+        "request_id": "r1",
+        "base_version": begin["version"],
+        "base_digests": begin["base_digests"],
+        "base_plan_rungs": {},
+        "changed": [{"id": "x-disconnected", "title": "disconnected"}],
+        "removed": [],
+        "plan_rungs": {},
+    });
+    let request = json!({"id": 2, "method": "commit_rows", "params": params});
+    write_frame(
+        &mut stream,
+        TAG_REQUEST,
+        serde_json::to_vec(&request).unwrap().as_slice(),
+    );
+    drop(stream);
+
+    let mut status_stream = UnixStream::connect(&sock).unwrap();
+    let mut status = ok_result(rpc(
+        &mut status_stream,
+        3,
+        "write_status",
+        json!({"request_id": "r1"}),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while status["state"] == json!("in_flight") {
+        assert!(Instant::now() < deadline, "commit_rows never reached done");
+        std::thread::sleep(Duration::from_millis(20));
+        status = ok_result(rpc(
+            &mut status_stream,
+            4,
+            "write_status",
+            json!({"request_id": "r1"}),
+        ));
+    }
+    assert_eq!(status["state"], json!("done"));
+    assert_eq!(status["reply"]["ok"], json!(true));
+    assert_eq!(status["reply"]["result"]["entries"], Value::Null);
+    assert_eq!(status["reply"]["result"]["entries_elided"], json!(true));
+    let rows = ok_result(rpc(&mut status_stream, 5, "read", json!({})));
+    assert_eq!(rows["entries"][0]["id"], json!("x-disconnected"));
+}
+
+#[test]
 fn keeper_keeps_serving_after_its_client_hangs_up() {
     let home = short_home("survive");
     let graph = home.join("graph.json");

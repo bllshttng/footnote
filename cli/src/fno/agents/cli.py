@@ -3775,7 +3775,11 @@ agents_app.command("pane-identity", hidden=True)(cmd_pane_identity)
 
 
 
-def _registry_falsifiers(handles: list[str]) -> dict[str, str | None]:
+def _registry_falsifiers(
+    handles: list[str],
+    *,
+    errors: dict[str, str | None] | None = None,
+) -> dict[str, str | None]:
     """One registry read for N handles. Same three-key match as the single form.
 
     A handle with no registry row (a discovered-but-unadopted session) carries
@@ -3790,11 +3794,14 @@ def _registry_falsifiers(handles: list[str]) -> dict[str, str | None]:
 
     The batch is why ``--handles`` exists at all: ``load_registry`` was the
     per-handle cost inside a per-handle subprocess. First matching row wins per
-    handle, exactly as the single-handle ``next()`` lookup did. Never raises.
+    handle, exactly as the single-handle ``next()`` lookup did. A raising
+    falsifier is recorded for only the handles matched by that row; other rows
+    continue to answer normally.
     """
     from fno.agents.reachability import registry_falsifier
 
     out: dict[str, str | None] = dict.fromkeys(handles, None)
+    error_map: dict[str, str | None] = errors if errors is not None else {}
     wanted = {h for h in handles if h}
     if not wanted:
         return out
@@ -3820,7 +3827,13 @@ def _registry_falsifiers(handles: list[str]) -> dict[str, str | None]:
         keys = (row_keys & wanted) - resolved
         if not keys:
             continue
-        falsifier = registry_falsifier(row)
+        try:
+            falsifier = registry_falsifier(row)
+        except Exception as exc:  # noqa: BLE001 -- preserve the row's malfunction
+            for key in keys:
+                error_map[key] = type(exc).__name__
+            resolved |= keys
+            continue
         for key in keys:
             out[key] = falsifier
         resolved |= keys
@@ -3908,6 +3921,7 @@ def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
     }
     payload["reachability"] = reach.verdict
     payload["basis"] = reach.basis
+    payload["falsifier_error"] = result.get("falsifier_error")
     return payload
 
 
@@ -3974,13 +3988,21 @@ def cmd_truth(
         # chars, under 5 KB and far below ARG_MAX; read the list from stdin if
         # a roster ever outgrows that.
         names = [h.strip() for h in handles.split(",") if h.strip()]
-        falsifiers = _registry_falsifiers(names)
+        falsifier_errors: dict[str, str | None] = {}
+        falsifiers = _registry_falsifiers(names, errors=falsifier_errors)
         resolver = _batch_resolver()
         from fno.provenance.resolver import transcript_listing
 
         with transcript_listing():
             answers = [
-                (name, resolve_session_truth(name, resolve=resolver), falsifiers[name])
+                (
+                    name,
+                    {
+                        **resolve_session_truth(name, resolve=resolver),
+                        "falsifier_error": falsifier_errors.get(name),
+                    },
+                    falsifiers[name],
+                )
                 for name in names
             ]
         if json_out:

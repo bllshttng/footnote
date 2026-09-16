@@ -430,3 +430,49 @@ def test_set_multi_key_warns_only_for_overridden_keys(
     assert "warn: auto_merge.enabled set in" in res.stderr
     assert "max_prs_per_epic" not in res.stderr
 
+
+
+# ---------------------------------------------------------------------------
+# x-043f task 1.3: one resolver answers a key no file sets; an unknown scope
+# is refused instead of falling through to the global file.
+# ---------------------------------------------------------------------------
+
+
+def test_unset_loop_level_reports_the_model_default(tmp_path):
+    from fno.config.writer import unset_config_value
+
+    set_config_value(
+        "config.loops.blueprint_judge.level",
+        "assisted",
+        scope="project",
+        repo_root=tmp_path,
+    )
+    res = unset_config_value(
+        "config.loops.blueprint_judge.level", scope="project", repo_root=tmp_path
+    )
+    assert res.present is True
+    assert res.default == "report"
+
+
+def test_unset_absent_loop_level_still_names_the_default(tmp_path):
+    from fno.config.writer import unset_config_value
+
+    res = unset_config_value(
+        "config.loops.blueprint_judge.level", scope="project", repo_root=tmp_path
+    )
+    assert res.present is False
+    assert res.default == "report"
+
+
+def test_unknown_scope_is_refused_not_routed_to_global(tmp_path, monkeypatch):
+    from fno.config.writer import set_config_values
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    with pytest.raises(ConfigSetError) as exc:
+        set_config_values(
+            [("auto_merge.enabled", "true")], scope="local", repo_root=tmp_path
+        )
+    assert "unknown scope" in str(exc.value)
+    assert exc.value.exit_code == 2
+    assert not (tmp_path / ".fno" / "config.toml").exists()
+    assert not (tmp_path / "home" / ".fno" / "config.toml").exists()

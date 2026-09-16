@@ -105,7 +105,7 @@ def test_flip_is_idempotent_and_keeps_the_since_stamp(world):
     assert _meta(world["graph"], "backend_since_ms") == since_first
 
 
-def test_rollback_exports_first_then_flips(world):
+def test_sqlite_append_mirrors_and_rollback_exports(world):
     from fno.graph.store import _client_for
 
     doctor_graph._flip("sqlite")
@@ -120,8 +120,10 @@ def test_rollback_exports_first_then_flips(world):
             },
         },
     )
+    # Keeper convergence: a write under the sqlite backend reaches BOTH
+    # keepers, so the json projection carries the note right away.
     body = world["graph"].read_text(encoding="utf-8")
-    assert "flip probe" not in body, "no background export: graph.json is frozen"
+    assert "flip probe" in body, "sqlite publish must mirror the json keeper"
     doctor_graph._flip("json")
     body = world["graph"].read_text(encoding="utf-8")
     assert "flip probe" in body, "rollback exports current rows before the flip"

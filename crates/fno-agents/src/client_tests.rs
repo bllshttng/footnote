@@ -1335,6 +1335,60 @@ fn spawn_argv_payload_equals_form_survives_normalization() {
     assert!(params.get("cwd").is_none());
 }
 
+fn harness_args_of(params: &Value) -> Vec<String> {
+    params["harness_args"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn spawn_fence_after_a_message_is_harness_args() {
+    // A message already collected before the fence makes the tail provider
+    // passthrough, matching the Python front's stated contract (spawn_defaults).
+    let args = vec![
+        "--name".to_string(),
+        "bp-reader".to_string(),
+        "--substrate".to_string(),
+        "headless".to_string(),
+        "Reply OK".to_string(),
+        "--".to_string(),
+        "--strict-mcp-config".to_string(),
+        "--tools".to_string(),
+        String::new(),
+    ];
+    let (_m, params) = build_request("spawn", &args).unwrap();
+    assert_eq!(params["message"], "Reply OK");
+    assert_eq!(
+        harness_args_of(&params),
+        vec![
+            "--strict-mcp-config".to_string(),
+            "--tools".to_string(),
+            String::new(),
+        ]
+    );
+}
+
+#[test]
+fn spawn_fence_without_a_message_still_seeds() {
+    // No message before the fence: the tail is the seed (the fenced
+    // `--timeout=5 do X` case), never provider passthrough.
+    let args = vec![
+        "--name".to_string(),
+        "bp-reader".to_string(),
+        "--".to_string(),
+        "--timeout=5".to_string(),
+        "do X".to_string(),
+    ];
+    let (_m, params) = build_request("spawn", &args).unwrap();
+    assert_eq!(params["message"], "--timeout=5 do X");
+    assert!(params.get("harness_args").is_none());
+}
+
 #[test]
 fn mint_session_uuid_is_well_formed_v4() {
     let u = mint_session_uuid();
@@ -2842,4 +2896,65 @@ fn resume_through_run_inside_a_runtime_refuses_16_without_panicking() {
         .unwrap()
         .block_on(run(vec!["resume".into(), "w1".into()]));
     assert_eq!(code, 16);
+}
+
+mod tier_remap_guard {
+    // The native tier-remap refusal: a direct native
+    // claude spawn naming a tier alias the ambient env redefines refuses
+    // before launch, matching the Python seam's semantics.
+
+    use super::*;
+    use fno_agents::spawn_context::refuse_inherited_tier_remap_with;
+
+    fn params_of(model: Option<&str>, provider: Option<&str>) -> serde_json::Map<String, Value> {
+        let mut m = serde_json::Map::new();
+        if let Some(model) = model {
+            m.insert("model".to_string(), Value::String(model.to_string()));
+        }
+        if let Some(provider) = provider {
+            m.insert("provider".to_string(), Value::String(provider.to_string()));
+        }
+        m
+    }
+
+    #[test]
+    fn foreign_remap_refuses_before_launch() {
+        let params = params_of(Some("opus"), Some("claude"));
+        let env =
+            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "glm-5.3[1m]".to_string());
+        let err = refuse_inherited_tier_remap_with(&params, env).expect_err("must refuse");
+        assert!(err.contains("No worker launched"), "{err}");
+    }
+
+    #[test]
+    fn anthropic_pin_is_not_a_conflict() {
+        let params = params_of(Some("opus"), Some("claude"));
+        let env =
+            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "claude-opus-4-1".to_string());
+        refuse_inherited_tier_remap_with(&params, env).expect("anthropic pin passes");
+    }
+
+    #[test]
+    fn absent_remap_passes() {
+        let params = params_of(Some("sonnet"), Some("claude"));
+        refuse_inherited_tier_remap_with(&params, |_| None).expect("no remap passes");
+    }
+
+    #[test]
+    fn composed_route_is_exempt() {
+        let mut params = params_of(Some("opus"), Some("claude"));
+        params.insert("account".to_string(), Value::String("work".to_string()));
+        let env =
+            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "glm-5.3[1m]".to_string());
+        refuse_inherited_tier_remap_with(&params, env)
+            .expect("a pinned account composes endpoint+model as one unit");
+    }
+
+    #[test]
+    fn non_claude_harness_is_exempt() {
+        let params = params_of(Some("opus"), Some("codex"));
+        let env =
+            |k: &str| (k == "ANTHROPIC_DEFAULT_OPUS_MODEL").then(|| "glm-5.3[1m]".to_string());
+        refuse_inherited_tier_remap_with(&params, env).expect("non-claude unaffected");
+    }
 }
