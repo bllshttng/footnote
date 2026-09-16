@@ -279,14 +279,12 @@ def verb_call(
     if proc.returncode != 0:
         # With passthrough_stderr the child owns the real stderr (None here),
         # so name where it went instead of crashing on strip().
+        detail = f"fno-agents {verb} exited {proc.returncode}"
         if passthrough_stderr:
-            raise unavailable(
-                f"fno-agents {verb} exited {proc.returncode}"
-                " (its stderr went to your terminal)"
-            )
-        raised = unavailable(
-            f"fno-agents {verb} exited {proc.returncode}: {proc.stderr.strip()[:200]}"
-        )
+            detail += " (its stderr went to your terminal)"
+        else:
+            detail += f": {proc.stderr.strip()[:200]}"
+        raised = unavailable(detail)
         raised.returncode = proc.returncode
         raise raised
     try:

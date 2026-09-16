@@ -257,3 +257,27 @@ def test_verb_call_attaches_returncode(monkeypatch) -> None:
         rust_binary.verb_call("fleet-incident", {})
     assert excinfo.value.returncode == 1
     assert "exited 1" in str(excinfo.value)
+
+
+def test_verb_call_attaches_returncode_with_passthrough_stderr(monkeypatch) -> None:
+    """The passthrough_stderr failure path carries the code too.
+
+    The stream-it-live callers (spawn gates) raise on the same non-zero exit;
+    a consumer discriminating a signal kill must read None only when there
+    truly was no exit, never because the stderr went to the terminal.
+    """
+    import subprocess
+
+    import pytest
+
+    from fno.rust_binary import VerbUnavailable
+
+    proc = subprocess.CompletedProcess(
+        ["fno-agents", "spawn-axes"], returncode=-9, stdout="", stderr=""
+    )
+    monkeypatch.setattr(rust_binary, "find_dev_binary", lambda: "/dev/null/fno-agents")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: proc)
+    with pytest.raises(VerbUnavailable) as excinfo:
+        rust_binary.verb_call("spawn-axes", {}, passthrough_stderr=True)
+    assert excinfo.value.returncode == -9
+    assert "exited -9" in str(excinfo.value)
