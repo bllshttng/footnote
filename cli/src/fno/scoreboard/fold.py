@@ -90,8 +90,12 @@ def emission_failures_snapshot() -> dict:
 
 def _row_shipped(row: dict, deliveries: dict | None) -> bool:
     """A terminal proves the ROW shipped only when its node delivered; a row
-    with no node keeps the terminal check (nothing else to consult)."""
-    if not _is_shipped_reason(row.get("termination_reason")):
+    with no node keeps the terminal check (nothing else to consult). A
+    reconcile backstop is a delivery row created after a merged PR, even
+    though it is not a worker terminal."""
+    termination_reason = row.get("termination_reason")
+    is_backstop = termination_reason == "reconcile-backstop" and row.get("pr_number")
+    if not _is_shipped_reason(termination_reason) and not is_backstop:
         return False
     nid = row.get("graph_node_id")
     if not isinstance(nid, str) or not nid or deliveries is None:
@@ -2257,10 +2261,33 @@ def build_plan_fidelity(
             fixes.setdefault(origin, []).append(gn)
 
     deliveries = deliveries if deliveries is not None else classify_deliveries(graph_nodes, rows)["by_node"]
+    planned_keys_by_path: dict[str, set[str]] = {}
+    for r in windowed:
+        if not _is_planned_row(r):
+            continue
+        plan_path = r.get("plan_path")
+        key = _plan_key(plan_path, r.get("project"))
+        path_key = _plan_key(plan_path)
+        if key and path_key:
+            planned_keys_by_path.setdefault(path_key, set()).add(key)
     shipped_by_plan: dict[str, list[dict]] = {}
     for r in windowed:
         if _row_shipped(r, deliveries):
-            key = _plan_key(r.get("plan_path"), r.get("project"))
+            plan_path = r.get("plan_path")
+            project = r.get("project")
+            missing_plan_path = not plan_path
+            if not plan_path:
+                node_id = r.get("graph_node_id")
+                node = by_id.get(node_id) if isinstance(node_id, str) else None
+                if node:
+                    plan_path = node.get("plan_path")
+                    project = project or node.get("project")
+            key = _plan_key(plan_path, project)
+            path_key = _plan_key(plan_path)
+            candidates = planned_keys_by_path.get(path_key, set()) if path_key else set()
+            if missing_plan_path and key not in candidates:
+                if len(candidates) == 1:
+                    key = next(iter(candidates))
             if key:
                 shipped_by_plan.setdefault(key, []).append(r)
 

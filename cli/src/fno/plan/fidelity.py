@@ -97,7 +97,20 @@ def compute_plan_fidelity(
     # slug the ledger stamps, never a worktree basename.
     project = _paths._slug_from_git_remote(Path(repo_root) if repo_root else None)
     target = _plan_key(plan_path, project)
-    rows = [r for r in rows if _plan_key(r.get("plan_path"), r.get("project")) == target]
+    target_file = Path(plan_path.split("#", 1)[0]).resolve()
+    node_plan_paths = {
+        str(node.get("id")): Path(str(node["plan_path"]).split("#", 1)[0]).resolve()
+        for node in graph_nodes
+        if node.get("id") and node.get("plan_path")
+    }
+
+    def row_belongs_to_plan(row: dict) -> bool:
+        if _plan_key(row.get("plan_path"), row.get("project")) == target:
+            return True
+        node_id = row.get("graph_node_id")
+        return not row.get("plan_path") and isinstance(node_id, str) and node_plan_paths.get(node_id) == target_file
+
+    rows = [r for r in rows if row_belongs_to_plan(r)]
 
     fm = _plan_frontmatter(plan_file)
     # Any declared value but `allowed` is forbidden, so a typo fails closed.
