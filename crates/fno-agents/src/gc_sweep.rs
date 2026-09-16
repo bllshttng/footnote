@@ -2134,7 +2134,22 @@ pub(crate) fn run_with_release(
                 Some(KeepReason::Operator) => summary.kept_operator.push(id),
                 Some(KeepReason::Crowned) => summary.kept_crowned.push(id),
                 Some(KeepReason::NotSpawn { origin }) => summary.kept_not_spawn.push((id, origin)),
-                Some(KeepReason::NoProvenance) => summary.kept_no_provenance.push(id),
+                Some(KeepReason::NoProvenance) => {
+                    summary.kept_no_provenance.push(id.clone());
+                    // The keep gets the same shape every other keep has: a
+                    // hold with a clock, so `fno agents reap --release` and
+                    // the escalation read can reach it. The detail names why
+                    // no node resolved.
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::NoProvenance.as_str(),
+                        detail: "no source resolved a node: sessions, registry, name, transcript"
+                            .into(),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                }
                 Some(KeepReason::OpenWork { node, status }) => {
                     let reader = verdict
                         .route

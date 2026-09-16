@@ -376,13 +376,25 @@ pub(crate) fn run(
                 }
             }
             WorkState::NoProvenance => {
-                summary.kept.push(judgement(
-                    &ident,
-                    None,
-                    crate::gc::KeepReason::NoProvenance.as_str().to_string(),
-                    false,
-                ));
-                continue;
+                // The registry sweep's decision with the roster's own
+                // witness: a harness state of `done` is the row's own
+                // finished report, so it falls to the quiet gate every
+                // other state takes below. `stopped` and `failed` are not
+                // that report, and a row still working keeps.
+                if terminal == Some("done") {
+                    format!(
+                        "no provenance; harness state {state} is the row's own finished report",
+                        state = terminal.unwrap_or_default()
+                    )
+                } else {
+                    summary.kept.push(judgement(
+                        &ident,
+                        None,
+                        crate::gc::KeepReason::NoProvenance.as_str().to_string(),
+                        false,
+                    ));
+                    continue;
+                }
             }
         };
         // The quiet gate: an unresolved transcript is never quiet, and the

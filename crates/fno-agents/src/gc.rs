@@ -302,7 +302,18 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
         return (GcAction::Keep, Some(hold.clone()));
     }
     match &row.work {
-        WorkState::NoProvenance => (GcAction::Keep, Some(KeepReason::NoProvenance)),
+        WorkState::NoProvenance => {
+            // The row's own finished report is a positive marker:
+            // `turn_ended` says the latest inside-leg report reads done and
+            // fno never stopped the row. The grace gate supplies the quiet
+            // conjunct, so a done-and-quiet row with no node releases, and
+            // a row that never reported done keeps exactly as before.
+            if row.turn_ended {
+                grace_gate(row, grace_secs)
+            } else {
+                (GcAction::Keep, Some(KeepReason::NoProvenance))
+            }
+        }
         WorkState::Open { node, status } => {
             // The planning lane: the ROW's own job (write the plan) ends at
             // node-ready, so a planner whose every named node has moved past
@@ -2934,6 +2945,39 @@ mod tests {
             gc_decide(&live, GRACE),
             (GcAction::Keep, Some(KeepReason::NotSpawn { .. }))
         ));
+    }
+
+    /// A row that resolved no node releases on its own done report: the
+    /// latest inside-leg leg reads `done` and fno never stopped the row,
+    /// so the grace gate supplies the quiet conjunct. A row still working,
+    /// or one fno stopped, keeps under no provenance.
+    #[test]
+    fn a_no_provenance_row_releases_on_its_own_done_report() {
+        let base = GcRow {
+            work: WorkState::NoProvenance,
+            ..retiring()
+        };
+        let mut done = base.clone();
+        done.turn_ended = true;
+        assert_eq!(gc_decide(&done, GRACE), (GcAction::Retire, None));
+        done.transcript_age_s = Some(10);
+        assert_eq!(
+            gc_decide(&done, GRACE),
+            (GcAction::Keep, Some(KeepReason::Active { age_s: 10 })),
+            "the done report releases the forever keep, never recency"
+        );
+        assert_eq!(
+            gc_decide(&base, GRACE),
+            (GcAction::Keep, Some(KeepReason::NoProvenance)),
+            "a row that never reported done keeps"
+        );
+        let mut stopped = base.clone();
+        stopped.turn_ended = false;
+        assert_eq!(
+            gc_decide(&stopped, GRACE),
+            (GcAction::Keep, Some(KeepReason::NoProvenance)),
+            "a row fno stopped keeps: turn_ended is false for it"
+        );
     }
 
     /// Change 8: a provably dead pid (ESRCH) overrides transcript recency,

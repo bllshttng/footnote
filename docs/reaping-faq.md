@@ -32,6 +32,16 @@ rg '"type":"retire_holds"' ~/.fno/agents/events.jsonl
 
 A tick with zero holds writes no `retire_holds` row, so silence is the zero-reading.
 
+## Why is my finished worker still on the roster
+
+Three keeps used to hold finished rows with no way out. Each now reads a live reason, and each keeps refusing a specific wrong answer.
+
+- An open-PR hold asks GitHub once the row is quiet past the grace. A closed or merged PR releases the row. An open PR keeps it, and so does an unread answer, under `pr state contradicts`. A fresh row is never read and never released by this arm.
+- An adopted row keeps while its harness record says the session exists. A recorded pid that answers ESRCH, or a claude row missing from a known `claude agents` read, releases it to the ordinary gates. An unknown or partial roster read keeps the row: a failed instrument is never absence.
+- A row that resolved no node releases when its own inside-leg report reads done, fno never stopped it, and its transcript then went quiet. A row still working, blocked, or stopped by fno keeps. The keep now carries a clock, so `fno agents reap --release` reaches it.
+
+Quiet is only ever the second conjunct. Every release rests on a positive marker - GitHub answering, a roster read answering, a dead pid, the worker's own done report - never on silence alone.
+
 ## Three programs answer to the word reap
 
 Three programs share the word reap. A reader who watches one and concludes the others are broken has mixed them up. This exact confusion cost a real session. The arms readout showed `acted=0 skip=held` while the manual verb retired 3 rows in the same minute.
@@ -70,11 +80,11 @@ Three reasons are permanent by construction. The gate decides them before it rea
 
 - `kept {id} (operator row)`: a human started this session (`gc.rs:135-136`). No sweep touches it.
 - `kept {id} (crowned)`: the row belongs to a crowned orchestrator (`gc.rs:137-138`).
-- `kept {id} (not a spawn row: origin adopted)`: fno did not spawn the session. The row is someone else's fact about it, and done plus quiet does not make it fno's to remove (`gc.rs:229-236`).
+- `kept {id} (not a spawn row: origin adopted)`: fno did not spawn the session. The row is someone else's fact about it, and done plus quiet does not make it fno's to remove (`gc.rs:229-236`). One exit: a row that is provably a corpse, meaning a recorded pid that answered ESRCH or a claude row absent from a known `claude agents` roster read, falls through and is judged like any other row. An unknown or partial roster read keeps the row.
 
 When the registry holds no origin at all, the third reason prints `no origin recorded` (`reap_render.rs:216-220`).
 
-Do not act on these rows. A row quiet for 15 hours with no king is still permanent. The distinction matters: a row the sweep declined can leave on a later pass, while a row with a permanent exemption never leaves.
+Do not act on these rows. A row quiet for 15 hours with no king is still permanent while its harness record answers for the session. The distinction matters: a row the sweep declined can leave on a later pass, while a row with a permanent exemption never leaves.
 
 Measured on 2026-09-10: 4 of 51 judged rows carried `origin adopted` or `operator row`, and 4 more carried `crowned`. No sweep can take those 8 rows today or ever.
 
@@ -107,7 +117,7 @@ None of the four applies while the session drives an open PR. That keep outranks
 
 ### open pr
 
-The full line reads `kept {id} (open pr: {node} #<N>)`. The session has a `do` row on an open node that carries `pr_number`, and the node's recorded `merge_status` is not `merged`. The PR is unmerged and this session is its driver, so retiring the row strands the PR with nothing left to drive it. The fact is the graph record alone: the sweep makes no network call for an open node.
+The full line reads `kept {id} (open pr: {node} #<N>)`. The session has a `do` row on an open node that carries `pr_number`, and the node's recorded `merge_status` is not `merged`. The PR is unmerged and this session is its driver, so retiring the row strands the PR with nothing left to drive it. The graph record names the candidate; the PR itself settles it. While the row sits inside the grace window the candidate holds and nothing is read. Once the row is quiet past the grace, the sweep asks GitHub once per pass, cached per PR. A PR still open holds. A merged or closed PR releases the row through the same quiet gate every finished session takes. An unreadable answer holds the row under `pr state contradicts` - a failed read never retires a row.
 
 The keep outranks every release above it. A terminal roster state, a parked node, or a live newer peer that does not drive the PR leaves the row standing. Only a driving peer releases the row. Driving means the peer's session holds a `do` row on the node. A recorded `merge_status: merged` empties the keep. A merged PR is not an open one.
 
@@ -176,6 +186,8 @@ A reader who assumes the last cause is the only cause deletes a row that is mere
 ### no provenance
 
 The line reads `kept {id} (no provenance: no source resolved a node (sessions, registry, name, transcript))`. No declared source resolved a node (`gc.rs:142-147`). The sessions join answered nothing, the registry node field is empty, the name carries no node token, and the transcript mentions none.
+
+The keep is no longer forever. When the row's own inside-leg report reads done and fno never stopped it, the row takes the quiet gate: quiet past the grace retires it, and a row still working, blocked, or stopped by fno keeps. Every kept row now carries a hold with an age, so `fno agents reap --release` and the escalation clock reach it.
 
 Run `fno-agents node-route --names <name> --json` to read the cascade verdict for one row name.
 

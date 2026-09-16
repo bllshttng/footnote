@@ -1262,3 +1262,74 @@ fn an_adopted_row_with_a_live_roster_row_or_no_probe_keeps() {
     assert!(kept.contains(&"cxrow000"), "{:?}", summary.kept_not_spawn);
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+// ── a row that resolved no node releases on its own done report ─────────
+
+/// The high path: a quiet row whose inside-leg report reads done and that
+/// fno never stopped retires with no node resolved. A still-working twin
+/// keeps - and every kept no-provenance row now carries a hold with a
+/// clock, so the release verb can reach it.
+#[test]
+fn a_no_provenance_row_releases_on_its_done_report_and_keeps_carry_a_clock() {
+    let home = tmp_home("gc-np-done");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    let leg_done = state::InsideLegReport {
+        state: crate::state::InsideLegState::Done,
+        seq: 3,
+        reason: None,
+        received_at: "2026-09-15T19:52:20Z".into(),
+        ttl_ms: None,
+    };
+    let leg_working = state::InsideLegReport {
+        state: crate::state::InsideLegState::Working,
+        seq: 4,
+        reason: None,
+        received_at: "2026-09-15T19:52:20Z".into(),
+        ttl_ms: None,
+    };
+    state::update_registry(&home.registry_json(), |r| {
+        // The name carries no node token, the registry node field is empty,
+        // and the graph names the session nowhere: no source resolves.
+        let mut done = ask_row("standby-worker", None);
+        done.short_id = "npdone01".into();
+        done.harness_session_id = Some("sess-np-done".into());
+        done.origin = Some("spawn".into());
+        done.inside_leg = Some(leg_done);
+        r.entries.push(done);
+        let mut working = ask_row("midturn-worker", None);
+        working.short_id = "npwork01".into();
+        working.harness_session_id = Some("sess-np-work".into());
+        working.origin = Some("spawn".into());
+        working.inside_leg = Some(leg_working);
+        r.entries.push(working);
+    })
+    .unwrap();
+
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        graph_read(&[], &[]),
+        &|_| Some(vec![quiet.clone()]),
+        no_agents(),
+        &|_| true,
+    );
+
+    assert_eq!(
+        summary.retired.len(),
+        1,
+        "retired: {:?}, kept: {:?}",
+        summary.retired,
+        summary.kept_no_provenance
+    );
+    assert_eq!(summary.retired[0].0, "npdone01");
+    assert_eq!(summary.kept_no_provenance, vec!["npwork01"]);
+    let h = find_hold(&summary, "npwork01");
+    assert!(h.reason.contains("no provenance"), "{h:?}");
+    assert_eq!(h.age_s, Some(7200));
+    assert_eq!(h.age_basis, "transcript quiet");
+    std::fs::remove_dir_all(home.root()).ok();
+}
