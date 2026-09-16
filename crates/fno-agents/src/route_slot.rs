@@ -2666,7 +2666,7 @@ pub(crate) fn audit_load_snapshot(
     let mut view_rows: BTreeMap<String, (String, String, String)> = BTreeMap::new(); // subject -> (decision, ts, decision_id)
     let mut retired: BTreeMap<String, ()> = BTreeMap::new();
     let mut candidates: Vec<(String, String, String, String)> = Vec::new(); // subject, decision, ts, decision_id
-                                                                            // Decisions read in-process through the typed API (x-20d2 wave 12): the
+                                                                            // Decisions read in-process through the typed API: the
                                                                             // store owns the index, so this consumer never reads a file. Rows are
                                                                             // flattened: data fields at the top level plus ts and _event_type.
     for row in crate::backlog::api::decisions(
@@ -4102,7 +4102,7 @@ mod tests {
             ),
         )
         .unwrap();
-        // The store owns the decision index (x-20d2 wave 12): seed the db
+        // The store owns the decision index: seed the db
         // the audit reads, not a file.
         {
             let connection = crate::backlog::open(&state_root.join("graph.json")).unwrap();

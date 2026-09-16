@@ -128,8 +128,8 @@ def decisions(
     *,
     path: Path = GRAPH_JSON,
 ) -> list[dict]:
-    """The flattened decision rows from the store's decisions table (x-20d2
-    wave 12): data fields at the top level plus ``ts`` and ``_event_type``,
+    """The flattened decision rows from the store's decisions table after
+    migration: data fields at the top level plus ``ts`` and ``_event_type``,
     the shape the file reader handed out. A node filter reads the node's
     own list; no filter reads the machine-wide index in file order."""
     params: dict = {}
