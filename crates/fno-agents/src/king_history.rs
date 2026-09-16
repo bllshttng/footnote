@@ -377,6 +377,8 @@ pub(crate) struct VerdictReadings {
     pub compactions_measurable: bool,
     pub checkins: u64,
     pub checkins_expected: bool,
+    pub checkins_stale: bool,
+    pub last_checkin_epoch: Option<i64>,
     /// `king_context_nudge` rows for this scope. Context pressure is a
     /// reading the payload carries; the verdict itself keys on none of it.
     pub nudges: u64,
@@ -441,7 +443,7 @@ fn in_tenure(ts: &str, crown_start: &str) -> bool {
 /// The one decision, pure so tests need no journal.
 ///
 /// Degraded: any declared bound exceeded. Unknown: the crown is old enough to
-/// owe a check-in but none is readable. Stalled: nothing degraded, the
+/// owe a recent check-in but none is recent and readable. Stalled: nothing degraded, the
 /// last fire read a quiet board, and the scope the reign INHERITED shows no
 /// closure in the window. Filed nodes are deliberately excluded from the
 /// stalled test: a king that files real work into its own scope raises the
@@ -491,7 +493,7 @@ pub(crate) fn verdict(r: &VerdictReadings) -> (Verdict, Vec<BoundRow>) {
     let degraded = bounds.iter().any(|b| b.state == BoundState::Exceeded);
     let v = if degraded {
         Verdict::Degraded
-    } else if r.checkins == 0 && r.checkins_expected {
+    } else if r.checkins_stale {
         Verdict::Unknown
     } else if r.last_actionable == Some(0)
         && r.inherited_undelivered > 0
@@ -556,6 +558,7 @@ fn scan_readings(
                 kind,
                 KING_LOOP_CHECK
                     | TERMINATION
+                    | REIGN_CHECKIN
                     | CONTEXT_SNAPSHOT
                     | LOOP_CHECK_CONFIG
                     | KING_CONTEXT_NUDGE
@@ -581,6 +584,19 @@ fn scan_readings(
                 }
                 TERMINATION if row_session == fno_id && s_str(&data, "driver") == Some("king") => {
                     terminations.push(s_str(&data, "reason").unwrap_or("unknown").to_string());
+                }
+                REIGN_CHECKIN => {
+                    let (canonical, _, _) = classify(&event, scope);
+                    if canonical && in_tenure(s_str(&event, "ts").unwrap_or(""), crown_start) {
+                        r.checkins += 1;
+                        if let Some(epoch) = s_str(&event, "ts")
+                            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                            .map(|ts| ts.timestamp())
+                        {
+                            r.last_checkin_epoch =
+                                Some(r.last_checkin_epoch.map_or(epoch, |last| last.max(epoch)));
+                        }
+                    }
                 }
                 CONTEXT_SNAPSHOT
                     if !harness_session_id.is_empty()
@@ -701,6 +717,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         }
     };
     let manifest_path = inputs.manifest_path.clone();
+    let now = inputs.now;
     let checkin_interval_secs = inputs.checkin_interval_secs;
     let crown_age_secs = inputs.crown_age_secs;
     let manifest = inputs.manifest;
@@ -723,15 +740,12 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     readings.respawn_count = manifest.respawn_count;
     readings.respawn_ceiling = manifest.respawn_ceiling;
     readings.compaction_ceiling = Some(inputs.compaction_ceiling);
-    let checkins = match scan(&events_paths, &inputs.scope) {
-        Ok(payload) => payload["matched"].as_u64().unwrap_or(0),
-        Err(msg) => {
-            eprintln!("fno-agents king-history --verdict: check-in read failed: {msg}");
-            return 1;
-        }
-    };
-    readings.checkins = checkins;
     readings.checkins_expected = crown_age_secs > checkin_interval_secs;
+    readings.checkins_stale = readings.checkins_expected
+        && readings
+            .last_checkin_epoch
+            .map(|last| now.timestamp() - last >= checkin_interval_secs)
+            .unwrap_or(true);
     let compactions_source;
     let compactions_error;
     if harness_session_id.is_empty() {
@@ -790,6 +804,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         "compactions_error": compactions_error,
         "checkins": readings.checkins,
         "checkins_expected": readings.checkins_expected,
+        "checkins_stale": readings.checkins_stale,
         "nudges": readings.nudges,
         "terminations": readings.terminations.iter().map(|(reason, n)| json!({
             "reason": reason,
@@ -910,6 +925,8 @@ mod verdict_tests {
             compactions_measurable: true,
             checkins: 0,
             checkins_expected: false,
+            checkins_stale: false,
+            last_checkin_epoch: None,
             nudges: 0,
             terminations: Vec::new(),
             inherited_undelivered: 0,
@@ -998,10 +1015,12 @@ mod verdict_tests {
     fn an_old_crown_without_readable_checkins_reads_unknown() {
         let mut r = readings();
         r.checkins_expected = true;
+        r.checkins_stale = true;
         let (v, _) = verdict(&r);
         assert_eq!(v, Verdict::Unknown);
 
         r.checkins = 1;
+        r.checkins_stale = false;
         let (v, _) = verdict(&r);
         assert_eq!(v, Verdict::Converging);
     }
@@ -1010,6 +1029,7 @@ mod verdict_tests {
     fn a_breached_bound_outweighs_missing_checkins() {
         let mut r = readings();
         r.checkins_expected = true;
+        r.checkins_stale = true;
         r.fires = 40;
         let (v, _) = verdict(&r);
         assert_eq!(v, Verdict::Degraded);
@@ -1124,6 +1144,45 @@ mod verdict_tests {
         assert_eq!(r.block_cap.as_ref().unwrap().source, "default");
         assert_eq!(r.nudges, 1);
         assert_eq!(journals.len(), 1);
+    }
+
+    #[test]
+    fn scan_counts_only_current_crown_checkins_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("events.jsonl");
+        let second = dir.path().join("events.2.jsonl");
+        let old = json!({
+            "ts": "2026-09-01T00:00:00Z",
+            "type": REIGN_CHECKIN,
+            "source": "loop",
+            "data": {"scope": "x-bbbb", "change": "old"}
+        });
+        let current = json!({
+            "ts": "2026-09-10T00:00:00Z",
+            "type": REIGN_CHECKIN,
+            "source": "loop",
+            "data": {"scope": "x-bbbb", "change": "current"}
+        });
+        std::fs::write(&first, format!("{old}\n{current}\n")).unwrap();
+        std::fs::write(&second, format!("{current}\n")).unwrap();
+
+        let (r, _, _, _) = scan_readings(
+            &[first, second],
+            "kg1",
+            "hs1",
+            "x-bbbb",
+            "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(r.checkins, 1);
+        assert_eq!(
+            r.last_checkin_epoch,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-09-10T00:00:00Z")
+                    .unwrap()
+                    .timestamp()
+            )
+        );
     }
 
     #[test]

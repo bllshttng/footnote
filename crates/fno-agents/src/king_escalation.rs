@@ -566,10 +566,10 @@ mod tests {
     fn an_unknown_verdict_offers_the_same_handoff() {
         let text = question(&with_verdict(
             req(IDS.to_vec(), Some(true)),
-            "unknown check-ins unreadable",
+            "unknown",
             Some("x-bbbb"),
         ));
-        assert!(text.contains("Verdict unknown check-ins unreadable."));
+        assert!(text.contains("Verdict unknown."));
         assert!(text.contains("--crown x-bbbb --succeed"));
     }
 

@@ -111,6 +111,7 @@ pub(crate) struct VerdictInputs {
     /// The parsed manifest, carried so the verdict verb never re-reads it.
     pub manifest: crate::loopcheck::KingManifest,
     pub manifest_path: PathBuf,
+    pub now: chrono::DateTime<chrono::Utc>,
     pub window: String,
     pub checkin_interval_secs: i64,
     pub crown_age_secs: i64,
@@ -273,16 +274,17 @@ pub(crate) fn resolve_verdict_inputs(
         )
     })?;
 
+    let created_at = chrono::DateTime::parse_from_rfc3339(&crowned_at).map_err(|e| {
+        format!(
+            "{}: created_at is not RFC3339: {e}",
+            manifest_path.display()
+        )
+    })?;
     let current = now();
-    let crown_age_secs = chrono::DateTime::parse_from_rfc3339(&crowned_at)
-        .ok()
-        .map(|created| {
-            current
-                .signed_duration_since(created.with_timezone(&chrono::Utc))
-                .num_seconds()
-                .max(0)
-        })
-        .unwrap_or(0);
+    let crown_age_secs = current
+        .signed_duration_since(created_at.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0);
     let window_secs = WINDOW_INTERVALS * interval;
     let window_start = (current - chrono::Duration::seconds(window_secs))
         .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false);
@@ -304,6 +306,7 @@ pub(crate) fn resolve_verdict_inputs(
         scope,
         manifest,
         manifest_path,
+        now: current,
         window: window_display(window_secs),
         checkin_interval_secs: interval,
         crown_age_secs,
@@ -575,6 +578,30 @@ mod tests {
         )
         .expect_err("no created_at means no measurable split");
         assert!(err.contains("no created_at"), "{err}");
+    }
+
+    #[test]
+    fn an_unparseable_created_at_refuses_the_age_read() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("bad-created-at");
+        let path = dir.join("kings/x-root.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "---\nscope: x-root\nshape: pass\nfno_id: kd-test\ncreated_at: yesterday\n---\n",
+        )
+        .unwrap();
+        let err = resolve_verdict_inputs(
+            &dir,
+            Some("x-root"),
+            Some(&path),
+            &dir.join("registry.json"),
+            pinned_now,
+        )
+        .expect_err("an invalid created_at must not read as a young crown");
+        assert!(err.contains("created_at is not RFC3339"), "{err}");
     }
 
     #[test]
