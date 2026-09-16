@@ -75,7 +75,6 @@ session reap-open
 decide
 decisions
 decide-retract
-decide-reindex
 # sub-app mutations
 triage apply
 capture promote
