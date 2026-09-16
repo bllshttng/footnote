@@ -782,34 +782,18 @@ def _project(event: dict[str, Any]) -> str | None:
 
 
 def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list[dict], int]":
-    """The flattened index, read from the store's decisions table (x-20d2
-    wave 12). The path argument is accepted and ignored: the store is
-    machine-wide. A store that cannot answer raises, so an unreachable index
-    never reads as "no decisions"; an empty one reads as zero rows, which is
-    the before-the-first-write case. ``warn`` stays for signature
-    compatibility and has nothing left to warn about: damaged lines stopped
-    reaching readers when the table became the source.
-
-    The rows are data fields at the top level plus ``ts`` and
-    ``_event_type``, byte-equal in shape to what the file reader produced.
-    """
+    """Read graph.db decisions, falling back to the legacy JSONL index."""
     from fno import paths
     from fno.graph import api as graph_api
 
     if path is not None:
         return _read_legacy_index(Path(path), warn=warn)
-    # The graph resolves at CALL time: api.py's path default froze at import,
-    # so a redirected state dir (a hermetic test, a state_dir override) would
-    # otherwise read the import-time machine store.
     try:
         rows = graph_api.decisions(path=paths.graph_json())
     except Exception:
         rows = []
     if rows:
         return rows, 0
-    # Older callers and rollback windows still expose the machine-wide JSONL
-    # index. Use it only when the new store is empty so an import can migrate
-    # it without changing the post-migration source of truth.
     return _read_legacy_index(paths.decisions_jsonl(), warn=warn)
 
 
@@ -818,18 +802,11 @@ def _read_legacy_index(path: "Path", *, warn: bool = True) -> "tuple[list[dict],
     rows: list[dict] = []
     damaged = 0
     for line in _read_lines(path):
-        try:
-            event = json.loads(line)
-        except (json.JSONDecodeError, ValueError):
+        if not _is_index_line(line):
             damaged += 1
             continue
-        data = event.get("data") if isinstance(event, dict) else None
-        if not isinstance(event, dict) or event.get("type") not in DECISION_EVENT_TYPES:
-            damaged += 1
-            continue
-        if not isinstance(data, dict):
-            damaged += 1
-            continue
+        event = json.loads(line)
+        data = event["data"]
         row = dict(data)
         row["ts"] = event.get("ts")
         row["_event_type"] = event.get("type")
@@ -1536,35 +1513,22 @@ def _journal_events(paths: "list[Path]") -> "list[dict]":
 
 
 def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
-    """Backfill the compatibility JSONL index from durable event journals.
-
-    The graph store is the normal reader after wave 12. This bounded recovery
-    door remains for pre-migration files and older callers; it is idempotent by
-    event identity and never mints a second decision id.
-    """
+    """Backfill the compatibility JSONL index without minting new ids."""
     from fno import paths
     from fno.events import append_event
 
     index = Path(paths.decisions_jsonl())
     existing, damaged = _read_legacy_index(index, warn=False)
     prior_keys = {
-        (
-            str(row.get("_event_type") or DECISION_EVENT),
-            str(
-                row.get("decision_id")
-                or row.get("retraction_id")
-                or row.get("target_decision_id")
-                or ""
-            ),
-        )
+        (str(row.get("_event_type") or DECISION_EVENT),
+         str(row.get("decision_id") or row.get("retraction_id")
+             or row.get("target_decision_id") or ""))
         for row in existing
     }
     known = set(prior_keys)
     counted: set[tuple[str, str]] = set()
-    already = 0
-    added = 0
-    event_sources = list(sources) if sources is not None else _default_journals()
-    events = _journal_events(event_sources)
+    already = added = 0
+    events = _journal_events(list(sources) if sources is not None else _default_journals())
     try:
         events += _projection_events()
     except Exception:
@@ -1574,12 +1538,8 @@ def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
         event_type = str(event.get("type") or "") if isinstance(event, dict) else ""
         if event_type not in DECISION_EVENT_TYPES or not isinstance(data, dict):
             continue
-        event_id = str(
-            data.get("decision_id")
-            or data.get("retraction_id")
-            or data.get("target_decision_id")
-            or ""
-        )
+        event_id = str(data.get("decision_id") or data.get("retraction_id")
+                       or data.get("target_decision_id") or "")
         if not event_id:
             continue
         key = (event_type, event_id)
@@ -1591,13 +1551,8 @@ def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
         append_event(event, events_path=index)
         known.add(key)
         added += 1
-    return {
-        "added": added,
-        "already": already,
-        "repaired": damaged,
-        "invalid": 0,
-        "unusable": 0,
-    }
+    return {"added": added, "already": already, "repaired": damaged,
+            "invalid": 0, "unusable": 0}
 
 
 def _read_lines(path: Path) -> "list[str]":
