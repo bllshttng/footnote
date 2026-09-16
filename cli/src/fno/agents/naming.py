@@ -109,6 +109,13 @@ def dispatch_agent_name(source, verb, identity, *, slug=None, qualifier=None, di
                  *_flags(("--slug", slug), ("--qualifier", qualifier), ("--discriminator", discriminator),
                          ("--model", model)))
 
+def mint_or_none(source, verb, identity, **kwargs):
+    """The mint for degradable seams: a stale/missing binary reads as None."""
+    try:
+        return dispatch_agent_name(source, verb, identity, **kwargs)
+    except (AgentNameError, BridgeUsageError):
+        return None
+
 def bridge_name(prefix, node_id, *, slug=None, qualifier=None, discriminator=None,
                 source=None, verb=None, model=None):
     # Usage refusals (both forms, missing verb/prefix) are the binary's texts:
