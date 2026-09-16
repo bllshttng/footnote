@@ -29,6 +29,7 @@
             "approvals",
             "backlog",
             "bash",
+            "cli",
             "config",
             "daemon",
             "fno-loop",

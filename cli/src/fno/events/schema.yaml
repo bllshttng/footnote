@@ -39,10 +39,14 @@ envelope:
     source:
       type: string
       # single unified envelope. 'active-backlog' added (real emitter at
-      # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
-      # pattern sources, validated by both the Python and bash validators via the
-      # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal]
+      # daemon.rs). 'cli' added: provider_window_closing declared it in its
+      # own sources: list, but it was never in this enum, so every real emit
+      # (adapters/providers/cli.py:538) silently failed inside its own
+      # broad try/except and no row ever landed. Per-agent worker sources
+      # (worker:<id>, stream-worker:<id>) are pattern sources, validated by
+      # both the Python and bash validators via the `patterns` list below
+      # (previously only the parity-script layer checked them).
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -1691,7 +1695,11 @@ event_types:
 
   - name: session_satisfied
     description: "Signals that a target session's work is complete; alternative to <promise> tag emission. The stop hook scans for these and may auto-release the Stop hook when a fresh event matches the current session and the three-factor gates are still satisfied. Data.source is the constrained subsystem that produced the signal (check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated); envelope source is the producer identity."
-    sources: [target, megawalk, fno-loop, hook]
+    # 'backlog' added: cli/src/fno/graph/_reconcile.py's
+    # emit_session_satisfied_for_record stamps envelope source "backlog" for
+    # the post-merge reconcile path (trigger=pr_merge), a real live producer
+    # the earlier declaration missed.
+    sources: [target, megawalk, fno-loop, hook, backlog]
     data:
       required: [source, reason, session_id, gate_state_hash]
       properties:
@@ -2763,7 +2771,10 @@ event_types:
 
   - name: retire_holds
     description: "One row per daemon retire tick that HELD rows : every held id with its reason, detail, age and escalation flag, so a fleet question reads one event stream instead of parsing bucket counts. Zero holds writes nothing."
-    sources: [daemon]
+    # The live writer (loop_runtime.rs Journal::append) hardcodes envelope
+    # source "loop" for every kind it appends, including this one, even
+    # though the scheduler that ran the tick names itself "daemon" in data.
+    sources: [daemon, loop]
     data:
       required: [scheduler, holds]
       properties:
@@ -5837,7 +5848,7 @@ event_types:
 
   - name: active_backlog_task_crashed
     description: "The active-backlog dispatch task panicked/exited unexpectedly; the daemon logged it and continues."
-    sources: [daemon]
+    sources: [daemon, active-backlog]
     data:
       required: []
       properties:

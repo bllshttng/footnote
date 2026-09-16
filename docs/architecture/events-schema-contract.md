@@ -136,6 +136,7 @@ tolerated.
 | `active-backlog` | the daemon's active-backlog dispatch task |
 | `observer` | the skill-eval observer harness |
 | `skill_diff` | the skill-diff proposer loop |
+| `cli` | ad hoc emits from `fno` CLI-side code outside the main pipeline, e.g. the provider usage tracker's window-closing warning |
 
 Plus two **pattern** sources for per-agent Rust workers, matched by
 `envelope.properties.source.patterns` rather than the enum:
@@ -150,6 +151,8 @@ Adding a fixed-string source means editing the YAML manifest's
 source adds a regex to `source.patterns`. Both validators (Python
 `validate()` and `events-validate.sh`) accept a source that matches the
 enum OR any pattern; CI catches missed updates.
+
+Matching the enum or a pattern is only the first half of the rule. Every event type also declares its own `sources:` list in schema.yaml. Since 2026-09-16 `validate()` enforces that list too, unless the source matches a worker pattern (no type enumerates per-agent workers by name). When the envelope enum allows a source, a type's own declared list can still refuse it. A type with no `sources:` key stays undeclared, not unenforced by oversight, so it fails open instead of blocking a producer that predates the key. Add a new producer's source to the type's `sources:` list, not just the envelope enum. Otherwise the row validates at the envelope level and fails at the type level. `test` stays legal only where a type lists it. It is no longer a universal escape hatch for fixtures. With no target session and no `--source`, `fno doctor event emit` names the type's declared sources and exits nonzero instead of guessing a producer.
 
 ## Three event types you'll touch most
 

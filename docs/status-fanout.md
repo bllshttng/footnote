@@ -49,7 +49,7 @@ Put the value in `~/.fno/.env` (`FNO_STATUS_DISCORD=https://...`) for unattended
 
 ## Delivery semantics
 
-- **Fresh sink starts at EOF.** A new sink sees only events appended after its first tick. It never replays history. To test a sink, tick once to prime the cursor. Then emit an event (`fno doctor event emit --type blocked --data '{"reason":"test"}'`) and tick again.
+- **Fresh sink starts at EOF.** A new sink sees only events appended after its first tick. It never replays history. To test a sink, tick once to prime the cursor. Then emit an event (`fno doctor event emit --type blocked --source test --data '{"reason":"test"}'`) and tick again.
 - **At-least-once with retry.** A connect-class failure or a 5xx/429/401/403/408 holds the cursor and retries next tick (bounded by `retries`); a permanent 4xx drops the event and advances.
   Drops and short-circuits are logged to `.fno/status-sinks/<name>.errors.jsonl` (the var name, never its value).
 - **Discord User-Agent.** Every webhook POST sends an explicit `User-Agent`; Discord 403s the stdlib default `Python-urllib`, so without it a Discord sink would never deliver.

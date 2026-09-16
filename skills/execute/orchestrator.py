@@ -1172,7 +1172,9 @@ def emit_status_event(
     it never raises, so a boundary emit can never fail the task or the run.
     Skills shell to the installed CLI (never import repo code), matching
     resolve-executor.sh. Work coordinates fall back to the manifest inside the
-    emit CLI when the flags are empty.
+    emit CLI when the flags are empty. The source is always ``target``: this
+    function runs in the orchestrator's own process after it parses an
+    executor's result, never inside the executor's process.
     """
     argv = [
         "fno",
@@ -1183,6 +1185,8 @@ def emit_status_event(
         event_type,
         "-d",
         json.dumps(data or {}),
+        "--source",
+        "target",
     ]
     for flag, val in (("--run", run), ("--node", node), ("--task", task), ("--outcome", outcome)):
         if val:
