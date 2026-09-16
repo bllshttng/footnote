@@ -62,10 +62,9 @@ fn server_axis_take_common_flags_accepts_server_alias_pair() {
 fn server_axis_block_parsers_accept_server_alias_pair() {
     // AC1: block pipe and block annotate.
     let pipe_server =
-        parse_block_args(&os(&["pipe", "--from", "4", "--to", "2", "--server", "s4"]))
+        parse_block_args(&os(&["--from", "4", "--to", "2", "--server", "s4"]))
             .expect("must parse");
     let pipe_alias = parse_block_args(&os(&[
-        "pipe",
         "--from",
         "4",
         "--to",
@@ -77,12 +76,9 @@ fn server_axis_block_parsers_accept_server_alias_pair() {
     assert_eq!(pipe_server.session, pipe_alias.session);
     assert_eq!(pipe_server.session.as_deref(), Some("s4"));
 
-    let ann_server = parse_block_annotate(&os(&[
-        "annotate", "--from", "3", "--server", "s5", "--node", "n1", "-m", "hi",
-    ]))
+    let ann_server = parse_block_annotate(&os(&["--from", "3", "--server", "s5", "--node", "n1", "-m", "hi"]))
     .expect("must parse");
     let ann_alias = parse_block_annotate(&os(&[
-        "annotate",
         "--from",
         "3",
         "--session",

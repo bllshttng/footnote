@@ -24,8 +24,6 @@ use std::path::PathBuf;
 
 use fno::{bootstrap, cli_args, mux_cli, proto};
 
-use fno::mux_cli::{PANE_REFERENCE_USAGE, PANE_VERBS};
-
 /// Verbs removed from the mux front, and what replaced each one.
 ///
 /// A removed verb that lands on the bare usage banner makes the caller re-read
@@ -69,18 +67,16 @@ enum Role {
     /// (v78) `mux stats [--json]`: server-instance telemetry (the human_touch
     /// emission-failure counter with its measurement window). Hidden, read-only.
     MuxStats(bool),
-    /// `mux pane <verb> ...`: the v4 script API. Carries the tokens after
-    /// `mux pane` verbatim; `mux_cli::pane` parses the verb + flags. No TTY
-    /// needed (control verbs are scriptable one-shots).
-    MuxPane(Vec<OsString>),
-    /// `mux block <verb> ...`: block porcelain (`block pipe`). Same
-    /// carry-verbatim shape as `MuxPane`; `mux_cli::block` parses.
-    MuxBlock(Vec<OsString>),
-    /// `mux tab <verb> ...`: the layout-tab script verbs
-    /// (ls|create|rename|join). Same carry-verbatim shape; `mux_cli::tab` parses.
-    MuxTab(Vec<OsString>),
-    /// `mux layout <get> ...`: dump the nested layout tree + geometry.
-    MuxLayout(Vec<OsString>),
+    /// `mux pane <verb> ...`: the v4 script API. The operation is the typed
+    /// tree's verdict; the argv is the re-sliced family tail. No TTY needed
+    /// (control verbs are scriptable one-shots).
+    MuxPane(fno::cli_args::PaneOp),
+    /// `mux block <verb> ...`: block porcelain (`block pipe`, x-fe8f).
+    MuxBlock(fno::cli_args::BlockOp),
+    /// (x-d865) `mux tab <verb> ...`: the layout-tab script verbs.
+    MuxTab(fno::cli_args::TabOp),
+    /// (x-d865) `mux layout <get|apply|graft> ...`: nested layout trees and specs.
+    MuxLayout(fno::cli_args::LayoutOp),
     ///  `mux rows [--json]`: the one row-set receipt - the last
     /// derived `layout.agents` with the paint verdict per row.
     MuxRows(Vec<OsString>),
@@ -109,10 +105,8 @@ enum Role {
     /// location instead. Same carry-verbatim shape; `mux_cli::view`
     /// parses.
     MuxView(Vec<OsString>),
-    /// `mux workspace <verb> ...`: workspace-store maintenance
-    /// (`workspace prune`). Same carry-verbatim shape as `mux pane`;
-    /// `mux_cli::workspace` parses.
-    MuxWorkspace(Vec<OsString>),
+    /// (x-a572) `mux workspace prune|restore ...`: workspace-store maintenance.
+    MuxWorkspace(fno::cli_args::WorkspaceOp),
     /// `mux shell-init <zsh|bash> [--json]`: print the OSC 133 shell-integration
     /// snippet (v6). `None` / an unsupported shell is an error in the verb.
     MuxShellInit(Option<String>, bool),
@@ -124,9 +118,8 @@ enum Role {
     /// recorded start token, then SIGINTs (the bridge's graceful exit) with a
     /// SIGKILL escalation for a wedged one.
     MuxWeb(fno::web::WebArgs),
-    /// `mux web reap [--json]`: the corpse sweep for the `--web` bridge
-    /// marker. Same carry-verbatim shape; `mux_cli::web` parses.
-    MuxWebCtl(Vec<OsString>),
+    /// `mux web reap [--json]`: the corpse sweep for the `--web` bridge marker.
+    MuxWebCtl(fno::cli_args::WebOp),
     /// A verb named in [`MUX_TOMBSTONES`]: refuse, naming what replaced it.
     MuxRemoved(String),
     /// `version [--json]`: report the mux binary's own baked-in build rev so
@@ -134,8 +127,10 @@ enum Role {
     /// `--json`. Additive: `fno version` had no Python command (it errored), so
     /// intercepting it here breaks nothing; `fno --version` still forwards.
     MuxVersion(bool),
-    /// A malformed mux/server invocation: print usage, exit 2.
-    MuxUsage,
+    /// A malformed mux/server invocation: `message` prints on stderr, exit 2
+    /// (clap's rendered help for an explicit help request, else one
+    /// command-qualified refusal line naming the bad token).
+    MuxUsage(String),
     /// Any other args: the Python-CLI forwarding path.
     Forward,
 }
@@ -180,7 +175,19 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     use cli_args::FrontDoor;
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
-        FrontDoor::Usage => Role::MuxUsage,
+        FrontDoor::Usage { message } => {
+            // A removed verb is refused BY NAME, before the catch-all
+            // refusal turns it into an anonymous message (same order the
+            // old carry router applied the tombstone table in).
+            if args.first().and_then(|a| a.to_str()) == Some("mux") {
+                if let Some(v) = args.get(1).and_then(|a| a.to_str()) {
+                    if mux_tombstone(v).is_some() {
+                        return Role::MuxRemoved(v.to_string());
+                    }
+                }
+            }
+            Role::MuxUsage(message)
+        }
         FrontDoor::Version { json } => Role::MuxVersion(json),
         FrontDoor::Attach {
             name,
@@ -220,65 +227,38 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                     Role::NotTty
                 }
             }
-            cli_args::MuxCmd::Other(rest) => mux_carry_role(&rest),
+            cli_args::MuxCmd::Pane { op } => Role::MuxPane(op),
+            cli_args::MuxCmd::Block { op } => Role::MuxBlock(op),
+            cli_args::MuxCmd::Tab { op } => Role::MuxTab(op),
+            // layout keeps the operation word in its tail: a common flag may
+            // sit before it, and layout()'s own MuxCommon::take strips it.
+            cli_args::MuxCmd::Layout { common: _, op } => Role::MuxLayout(op),
+            cli_args::MuxCmd::Web { op } => Role::MuxWebCtl(op),
+            cli_args::MuxCmd::Workspace { op } => Role::MuxWorkspace(op),
+            cli_args::MuxCmd::Serve(t) => match parse_web_args(&t.tail) {
+                Some(w) => Role::MuxWeb(w),
+                None => Role::MuxUsage("fno mux serve: needs --web, --stop, or --status".into()),
+            },
+            cli_args::MuxCmd::Rows(t) => Role::MuxRows(t.tail),
+            cli_args::MuxCmd::Where(t) => Role::MuxWhere(t.tail),
+            cli_args::MuxCmd::RetireSession(t) => Role::MuxRetireSession(t.tail),
+            // An explicit -h/--help prints the view help (the verb family's
+            // one self-teaching surface) rather than parsing as a selector.
+            cli_args::MuxCmd::View(t)
+                if t.tail
+                    .first()
+                    .and_then(|a| a.to_str())
+                    .map(|v| v == "-h" || v == "--help")
+                    .unwrap_or(false) =>
+            {
+                Role::MuxUsage(cli_args::render_path_help(&["mux", "view"]))
+            }
+            cli_args::MuxCmd::View(t) => Role::MuxView(t.tail),
+            cli_args::MuxCmd::Thread { op } => match op {
+                cli_args::ThreadOp::Reseat(t) => Role::MuxThreadReseat(t.tail),
+                cli_args::ThreadOp::Name(words) => Role::MuxThread(words),
+            },
         },
-    }
-}
-
-/// Route a carry-verbatim mux family (`MuxCmd::Other`) to its role. The
-/// families keep their own parsers until the mux cutover wave, so the tail
-/// is handed off byte-exact: `rest` is the family verb plus its argv.
-fn mux_carry_role(rest: &[OsString]) -> Role {
-    match rest.first().and_then(|a| a.to_str()) {
-        // `mux serve --web ...`: the read-only web bridge. `--web`
-        // or `--stop` is required (the `serve` verb reserves room for
-        // future modes; `--stop` is the bridge's kill switch).
-        Some("serve") => match parse_web_args(&rest[1..]) {
-            Some(w) => Role::MuxWeb(w),
-            None => Role::MuxUsage,
-        },
-        // `mux web reap ...`: the bridge marker's corpse sweep. A bare
-        // `mux web` falls through to MuxUsage.
-        Some("web") if rest.len() > 1 => Role::MuxWebCtl(rest[1..].to_vec()),
-        // `mux pane <verb> ...`: hand the rest to the pane verb family;
-        // a bare `mux pane` (no verb) falls through to MuxUsage. Nothing
-        // under `mux pane` ever forwards to Python (AC).
-        Some("pane") if rest.len() > 1 => Role::MuxPane(rest[1..].to_vec()),
-        // `mux block <verb> ...`: block porcelain; a bare `mux block`
-        // falls through to MuxUsage. Never forwards to Python.
-        Some("block") if rest.len() > 1 => Role::MuxBlock(rest[1..].to_vec()),
-        // layout script porcelains, same carry-verbatim shape.
-        Some("tab") if rest.len() > 1 => Role::MuxTab(rest[1..].to_vec()),
-        Some("layout") if rest.len() > 1 => Role::MuxLayout(rest[1..].to_vec()),
-        // `mux rows [--json] [--session <name>]`: the one row-set receipt.
-        // No positional; the verb family parses its own flags.
-        Some("rows") => Role::MuxRows(rest[1..].to_vec()),
-        Some("where") if rest.len() > 1 => Role::MuxWhere(rest[1..].to_vec()),
-        // (hidden) thread: drive the dedicated thread pane for a
-        // row from outside the TUI - the door `fno agents attach` uses.
-        // (v72) `thread reseat <pane>` is its own door: the re-seat move.
-        Some("thread") if rest.len() > 2 && rest[1] == "reseat" => {
-            Role::MuxThreadReseat(rest[2..].to_vec())
-        }
-        Some("thread") if rest.len() > 1 => Role::MuxThread(rest[1..].to_vec()),
-        // (v75) The exact-session retirement door, same
-        // carry-verbatim shape: a bare verb falls through to MuxUsage.
-        Some("retire-session") if rest.len() > 1 => Role::MuxRetireSession(rest[1..].to_vec()),
-        // view: focus a pane by node id/slug/name; --fzf picks.
-        // An explicit -h/--help prints the usage banner (the verb family's
-        // one self-teaching surface) rather than parsing as a selector.
-        Some("view") if rest.len() > 1 => match rest[1].to_str() {
-            Some("-h") | Some("--help") => Role::MuxUsage,
-            _ => Role::MuxView(rest[1..].to_vec()),
-        },
-        // `mux workspace prune ...`: a bare verb is usage. The retired
-        // `squad` spelling was an unadvertised alias of this arm; it was
-        // named by nothing but its own test and is gone.
-        Some("workspace") if rest.len() > 1 => Role::MuxWorkspace(rest[1..].to_vec()),
-        // A removed verb is refused BY NAME, before the catch-all turns it
-        // into an anonymous usage banner.
-        Some(v) if mux_tombstone(v).is_some() => Role::MuxRemoved(v.to_string()),
-        _ => Role::MuxUsage,
     }
 }
 
@@ -296,30 +276,8 @@ fn main() {
                  Run `fno <subcommand>` for the CLI."
             );
         }
-        Role::MuxUsage => {
-            eprintln!(
-                "usage: fno [--server <name>] | fno version [--json] \
-                 | fno mux server [--server <name>] \
-                 | fno mux ls [--json] | fno mux attach <name> \
-                 | fno mux kill-server [<name>] [--json] \
-                 | fno mux shell-init <zsh|bash> [--json] | fno mux doctor [--json] \
-                 | fno mux serve --web [--server <name>] [--bind <addr>] [--port <n>] \
-                 | fno mux serve --stop [--server <name>] \
-                 | fno mux web reap [--json] \
-                 | fno mux serve --status [--server <name>] \
-                 | fno mux pane {PANE_VERBS} ... ({PANE_REFERENCE_USAGE}) \
-                 | fno mux block pipe|annotate ... \
-                 | fno mux tab ls|create|rename|join|move|close ... (--tab takes the visible \
-                   1-based ordinal, id:<n> for the stable id; move takes --to <ordinal>) \
-                 | fno mux layout get|apply|graft ... \
-                 | fno mux where <fno_id-or-tab> \
-                 | fno mux view <selector> [--url] [--fzf] [--json] \
-                   (a tab ordinal/id/name resolves as a location; qualify \
-                   with --workspace when it repeats) \
-                 | fno mux workspace prune [--dry-run] [--include-named] [--tabs-only] [--dead-only] \
-                   [--include-used-shells] [--json] \
-                 | fno mux workspace restore [--dry-run] [--harness <h>] [--json]"
-            );
+        Role::MuxUsage(message) => {
+            eprintln!("{message}");
             std::process::exit(2);
         }
         Role::MuxRemoved(verb) => {
@@ -351,11 +309,23 @@ fn main() {
             }
             exit_mux(fno::web::serve(web_args))
         }
-        Role::MuxWebCtl(rest) => exit_mux(mux_cli::web_ctl::web(&rest, env_session.as_deref())),
-        Role::MuxPane(rest) => exit_mux(mux_cli::pane(&rest, env_session.as_deref())),
-        Role::MuxBlock(rest) => exit_mux(mux_cli::block(&rest, env_session.as_deref())),
-        Role::MuxTab(rest) => exit_mux(mux_cli::tab(&rest, env_session.as_deref())),
-        Role::MuxLayout(rest) => exit_mux(mux_cli::layout(&rest, env_session.as_deref())),
+        Role::MuxWebCtl(op) => {
+            let tail = op.tail();
+            exit_mux(mux_cli::web_ctl::web(op, &tail, env_session.as_deref()))
+        }
+        Role::MuxPane(op) => exit_mux(mux_cli::pane(op, env_session.as_deref())),
+        Role::MuxBlock(op) => {
+            let tail = op.tail();
+            exit_mux(mux_cli::block(op, &tail, env_session.as_deref()))
+        }
+        Role::MuxTab(op) => {
+            let tail = op.tail();
+            exit_mux(mux_cli::tab(op, &tail, env_session.as_deref()))
+        }
+        Role::MuxLayout(op) => {
+            let tail = op.tail();
+            exit_mux(mux_cli::layout(op, &tail, env_session.as_deref()))
+        }
         Role::MuxRows(args) => exit_mux(mux_cli::mux_rows::rows(&args, env_session.as_deref())),
         Role::MuxWhere(rest) => exit_mux(mux_cli::where_(&rest, env_session.as_deref())),
         Role::MuxThread(rest) => exit_mux(mux_cli::thread(&rest, env_session.as_deref())),
@@ -364,7 +334,10 @@ fn main() {
             exit_mux(mux_cli::retire_session(&rest, env_session.as_deref()))
         }
         Role::MuxView(rest) => exit_mux(mux_cli::view(&rest, env_session.as_deref())),
-        Role::MuxWorkspace(rest) => exit_mux(mux_cli::workspace(&rest, env_session.as_deref())),
+        Role::MuxWorkspace(op) => {
+            let tail = op.tail();
+            exit_mux(mux_cli::workspace(op, &tail, env_session.as_deref()))
+        }
         Role::Client(flag) => {
             let env = env_session.as_deref().filter(|s| !s.is_empty());
             // Bare `fno` with nothing pinned: the pre-attach picker decides
@@ -438,15 +411,18 @@ mod tests {
     fn proto_role_malformed_session_flag_is_usage_never_forward() {
         // AC3-ERR: a bare flag or trailing args must never silently reach
         // Python and never open a TUI.
-        assert_eq!(decide_role(&os(&["--session"]), true), Role::MuxUsage);
-        assert_eq!(
+        assert!(matches!(
+            decide_role(&os(&["--session"]), true),
+            Role::MuxUsage(_)
+        ));
+        assert!(matches!(
             decide_role(&os(&["--session", "work", "backlog"]), true),
-            Role::MuxUsage
-        );
-        assert_eq!(
+            Role::MuxUsage(_)
+        ));
+        assert!(matches!(
             decide_role(&os(&["--session", "work", "backlog", "list"]), false),
-            Role::MuxUsage
-        );
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -454,14 +430,14 @@ mod tests {
         // The socket spelling obeys the same Locked-7 rule: trailing argv
         // after `--server <path>` is usage, never a ServerSocket role that
         // drops the command.
-        assert_eq!(
+        assert!(matches!(
             decide_role(&os(&["--server", "/tmp/x.sock", "version"]), true),
-            Role::MuxUsage
-        );
-        assert_eq!(
+            Role::MuxUsage(_)
+        ));
+        assert!(matches!(
             decide_role(&os(&["--server", "/tmp/x.sock", "backlog", "list"]), true),
-            Role::MuxUsage
-        );
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -469,13 +445,13 @@ mod tests {
         // The old in-order loop resolved `--server a --session b` to the
         // last spelling; the typed layer holds no order, so the ambiguous
         // combination refuses loudly instead of silently picking one.
-        assert_eq!(
+        assert!(matches!(
             decide_role(
                 &os(&["mux", "server", "--server", "a", "--session", "b"]),
                 false
             ),
-            Role::MuxUsage
-        );
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -492,9 +468,8 @@ mod tests {
             decide_role(&os(&["--server", "/tmp/x.sock"]), true),
             Role::ServerSocket("/tmp/x.sock".into())
         );
-        assert_eq!(
-            decide_role(&os(&["--server"]), true),
-            Role::MuxUsage,
+        assert!(
+            matches!(decide_role(&os(&["--server"]), true), Role::MuxUsage(_)),
             "a bare flag is usage, never a forward"
         );
     }
@@ -523,11 +498,14 @@ mod tests {
             decide_role(&os(&["mux", "kill-server", "work"]), false),
             Role::MuxKill(Some("work".into()), false)
         );
-        assert_eq!(
+        assert!(matches!(
             decide_role(&os(&["mux", "kill-server", "a", "b"]), false),
-            Role::MuxUsage
-        );
-        assert_eq!(decide_role(&os(&["mux", "ls", "x"]), false), Role::MuxUsage);
+            Role::MuxUsage(_)
+        ));
+        assert!(matches!(
+            decide_role(&os(&["mux", "ls", "x"]), false),
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -554,14 +532,14 @@ mod tests {
             Role::MuxDoctor(true)
         );
         // A repeated flag or an unknown flag is usage, not a silent accept.
-        assert_eq!(
+        assert!(matches!(
             decide_role(&os(&["mux", "ls", "--json", "--json"]), false),
-            Role::MuxUsage
-        );
-        assert_eq!(
+            Role::MuxUsage(_)
+        ));
+        assert!(matches!(
             decide_role(&os(&["mux", "doctor", "--wat"]), false),
-            Role::MuxUsage
-        );
+            Role::MuxUsage(_)
+        ));
         // `--` ends flag parsing: a dashed session name passes as a positional.
         assert_eq!(
             decide_role(&os(&["mux", "kill-server", "--", "--weird"]), false),
@@ -590,10 +568,10 @@ mod tests {
             decide_role(&os(&["mux", "shell-init"]), false),
             Role::MuxShellInit(None, false)
         );
-        assert_eq!(
+        assert!(matches!(
             decide_role(&os(&["mux", "shell-init", "a", "b"]), false),
-            Role::MuxUsage
-        );
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -606,7 +584,10 @@ mod tests {
             decide_role(&os(&["mux", "attach", "work"]), false),
             Role::NotTty
         );
-        assert_eq!(decide_role(&os(&["mux", "attach"]), true), Role::MuxUsage);
+        assert!(matches!(
+            decide_role(&os(&["mux", "attach"]), true),
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -634,7 +615,10 @@ mod tests {
             decide_role(&os(&["version", "--json"]), true),
             Role::MuxVersion(true)
         );
-        assert_eq!(decide_role(&os(&["version", "x"]), false), Role::MuxUsage);
+        assert!(matches!(
+            decide_role(&os(&["version", "x"]), false),
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -643,7 +627,10 @@ mod tests {
             decide_role(&os(&["--server", "/tmp/s.sock"]), false),
             Role::ServerSocket(OsString::from("/tmp/s.sock"))
         );
-        assert_eq!(decide_role(&os(&["--server"]), false), Role::MuxUsage);
+        assert!(matches!(
+            decide_role(&os(&["--server"]), false),
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -652,16 +639,19 @@ mod tests {
         // `mux pane` is usage; nothing under `mux pane` forwards to Python.
         assert_eq!(
             decide_role(&os(&["mux", "pane", "ls"]), false),
-            Role::MuxPane(os(&["ls"]))
+            Role::MuxPane(PaneOp::Ls(tail(vec![])))
         );
         assert_eq!(
             decide_role(
                 &os(&["mux", "pane", "run", "--cwd", "/x", "--", "claude"]),
                 true
             ),
-            Role::MuxPane(os(&["run", "--cwd", "/x", "--", "claude"]))
+            Role::MuxPane(PaneOp::Run(tail(os(&["--cwd", "/x", "--", "claude"]))))
         );
-        assert_eq!(decide_role(&os(&["mux", "pane"]), false), Role::MuxUsage);
+        assert!(matches!(
+            decide_role(&os(&["mux", "pane"]), false),
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -672,9 +662,12 @@ mod tests {
                 &os(&["mux", "block", "pipe", "--from", "4", "--to", "2"]),
                 false
             ),
-            Role::MuxBlock(os(&["pipe", "--from", "4", "--to", "2"]))
+            Role::MuxBlock(BlockOp::Pipe(tail(os(&["--from", "4", "--to", "2"]))))
         );
-        assert_eq!(decide_role(&os(&["mux", "block"]), false), Role::MuxUsage);
+        assert!(matches!(
+            decide_role(&os(&["mux", "block"]), false),
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -693,7 +686,10 @@ mod tests {
             decide_role(&os(&["mux", "view", "x919", "--url", "--json"]), false),
             Role::MuxView(os(&["x919", "--url", "--json"]))
         );
-        assert_eq!(decide_role(&os(&["mux", "view"]), false), Role::MuxUsage);
+        assert!(matches!(
+            decide_role(&os(&["mux", "view"]), false),
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -706,14 +702,17 @@ mod tests {
             decide_role(&os(&["mux", "server", "--session", "work"]), false),
             Role::ServerSession("work".into())
         );
-        assert_eq!(
+        assert!(matches!(
             decide_role(&os(&["mux", "server", "--session"]), false),
-            Role::MuxUsage
-        );
-        assert_eq!(decide_role(&os(&["mux", "bogus"]), false), Role::MuxUsage);
+            Role::MuxUsage(_)
+        ));
+        assert!(matches!(
+            decide_role(&os(&["mux", "bogus"]), false),
+            Role::MuxUsage(_)
+        ));
     }
 
-    // --- x-23fa characterization: the carry families' accepted argv, pinned
+    // --- Characterization: the carry families' accepted argv, pinned
     // before the command-tree cutover (AC1-HP). Every assert here passed on
     // the pre-cutover main; the same roles and byte-exact tails must survive
     // the typed-tree dispatch. ---
@@ -721,6 +720,12 @@ mod tests {
     fn os_raw(bytes: &[u8]) -> OsString {
         use std::os::unix::ffi::OsStringExt;
         OsString::from_vec(bytes.to_vec())
+    }
+
+    use fno::cli_args::{BlockOp, KeeperOp, LayoutOp, MuxTail, PaneOp, TabOp, WebOp, WorkspaceOp};
+
+    fn tail(v: Vec<OsString>) -> MuxTail {
+        MuxTail { tail: v }
     }
 
     #[test]
@@ -732,21 +737,28 @@ mod tests {
                 &os(&["mux", "pane", "run", "--cwd", "/x", "--", "claude", "--help"]),
                 true
             ),
-            Role::MuxPane(os(&["run", "--cwd", "/x", "--", "claude", "--help"]))
+            Role::MuxPane(PaneOp::Run(tail(os(&[
+                "--cwd", "/x", "--", "claude", "--help"
+            ]))))
         );
         // A non-UTF-8 byte in the tail survives byte-exact.
         let mut raw = os(&["mux", "pane", "ls"]);
         raw.push(os_raw(&[0xff]));
-        let mut expect = os(&["ls"]);
+        let mut expect = Vec::new();
         expect.push(os_raw(&[0xff]));
-        assert_eq!(decide_role(&raw, false), Role::MuxPane(expect));
+        assert_eq!(
+            decide_role(&raw, false),
+            Role::MuxPane(PaneOp::Ls(tail(expect)))
+        );
         // The hidden keeper subtree rides the pane family.
         assert_eq!(
             decide_role(
                 &os(&["mux", "pane", "keeper", "list", "--stale-after", "5s"]),
                 false
             ),
-            Role::MuxPane(os(&["keeper", "list", "--stale-after", "5s"]))
+            Role::MuxPane(PaneOp::Keeper {
+                op: KeeperOp::List(tail(os(&["--stale-after", "5s"])))
+            })
         );
         // layout: MuxCommon::take strips common flags from any position.
         assert_eq!(
@@ -754,14 +766,14 @@ mod tests {
                 &os(&["mux", "layout", "--json", "apply", "spec.toml"]),
                 false
             ),
-            Role::MuxLayout(os(&["--json", "apply", "spec.toml"]))
+            Role::MuxLayout(LayoutOp::Apply(tail(os(&["--json", "apply", "spec.toml"]))))
         );
         assert_eq!(
             decide_role(
                 &os(&["mux", "layout", "apply", "spec.toml", "--json"]),
                 false
             ),
-            Role::MuxLayout(os(&["apply", "spec.toml", "--json"]))
+            Role::MuxLayout(LayoutOp::Apply(tail(os(&["apply", "spec.toml", "--json"]))))
         );
         // thread: reseat takes the rest after the verb; a bare name is a row.
         assert_eq!(
@@ -773,10 +785,10 @@ mod tests {
             Role::MuxThread(os(&["wk"]))
         );
         // view: -h is usage; a selector rides verbatim.
-        assert_eq!(
+        assert!(matches!(
             decide_role(&os(&["mux", "view", "-h"]), false),
-            Role::MuxUsage
-        );
+            Role::MuxUsage(_)
+        ));
         assert_eq!(
             decide_role(&os(&["mux", "view", "x919", "--url", "--json"]), false),
             Role::MuxView(os(&["x919", "--url", "--json"]))
@@ -793,7 +805,7 @@ mod tests {
         // The remaining leaves and families carry their argv verbatim.
         assert_eq!(
             decide_role(&os(&["mux", "web", "reap", "--json"]), false),
-            Role::MuxWebCtl(os(&["reap", "--json"]))
+            Role::MuxWebCtl(WebOp::Reap(tail(os(&["--json"]))))
         );
         assert_eq!(
             decide_role(
@@ -820,23 +832,26 @@ mod tests {
         );
         assert_eq!(
             decide_role(&os(&["mux", "workspace", "prune", "--dry-run"]), false),
-            Role::MuxWorkspace(os(&["prune", "--dry-run"]))
+            Role::MuxWorkspace(WorkspaceOp::Prune(tail(os(&["--dry-run"]))))
         );
         assert_eq!(
             decide_role(
                 &os(&["mux", "block", "pipe", "--from", "4", "--to", "2"]),
                 false
             ),
-            Role::MuxBlock(os(&["pipe", "--from", "4", "--to", "2"]))
+            Role::MuxBlock(BlockOp::Pipe(tail(os(&["--from", "4", "--to", "2"]))))
         );
         assert_eq!(
             decide_role(&os(&["mux", "tab", "ls", "--json"]), false),
-            Role::MuxTab(os(&["ls", "--json"]))
+            Role::MuxTab(TabOp::Ls(tail(os(&["--json"]))))
         );
-        assert_eq!(
+        // The pane group keeps no help flag (the root disables it and clap
+        // propagates that); the explicit help door is `fno mux help pane`,
+        // which renders after_help with the pane reference texts.
+        assert!(matches!(
             decide_role(&os(&["mux", "pane", "-h"]), false),
-            Role::MuxPane(os(&["-h"]))
-        );
+            Role::MuxUsage(_)
+        ));
     }
 
     #[test]
@@ -862,16 +877,19 @@ mod tests {
         ] {
             let argv: Vec<OsString> = bad.iter().map(OsString::from).collect();
             assert!(
-                matches!(decide_role(&argv, false), Role::MuxUsage),
+                matches!(decide_role(&argv, false), Role::MuxUsage(_)),
                 "expected usage for {bad:?}"
             );
         }
-        // The family-internal unknown verbs ride the family role today;
-        // the families themselves refuse them (exit 2) downstream.
-        let argv = os(&["mux", "pane", "bogus"]);
-        assert_eq!(decide_role(&argv, false), Role::MuxPane(os(&["bogus"])));
-        let argv = os(&["mux", "tab", "bogus"]);
-        assert_eq!(decide_role(&argv, false), Role::MuxTab(os(&["bogus"])));
+        // The family-internal unknown verbs now refuse at the classifier,
+        // naming the verb and its path (AC1-ERR).
+        for bad in [["mux", "pane", "bogus"], ["mux", "tab", "bogus"]] {
+            let argv: Vec<OsString> = bad.iter().map(OsString::from).collect();
+            assert!(
+                matches!(decide_role(&argv, false), Role::MuxUsage(m) if m.contains("bogus")),
+                "expected a refusal naming bogus for {bad:?}"
+            );
+        }
     }
 
     #[test]

@@ -696,9 +696,10 @@ fn stop_refusal_names_a_pane_kill_the_mux_parser_accepts() {
     let selector = selector
         .strip_prefix("fno mux pane kill ")
         .expect("the printed command is the pane kill verb");
-    let args: Vec<std::ffi::OsString> = vec!["kill".into(), selector.into()];
+    let op = fno::cli_args::PaneOp::Kill(fno::cli_args::MuxTail { tail: Vec::new() });
+    let args: Vec<std::ffi::OsString> = vec![selector.into()];
     let parsed =
-        fno::mux_cli::parse_pane_args(&args).expect("the refusal's own command must parse");
+        fno::mux_cli::parse_pane_args(&op, &args).expect("the refusal's own command must parse");
     assert_eq!(parsed.session.as_deref(), Some("main"));
     assert_eq!(parsed.cmd, fno::mux_cli::PaneCmd::Kill { pane: 76 });
 }

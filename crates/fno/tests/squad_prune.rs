@@ -188,23 +188,21 @@ fn retired_squad_spelling_is_removed() {
 }
 
 /// A bare family verb and an unknown verb are both usage (exit 2), and the
-/// message names the one verb that exists. The two take DIFFERENT paths and the
-/// assertions say which: a bare `mux workspace` fails main.rs's arity guard and
-/// lands on the global usage banner, while an unknown verb reaches the family
-/// parser. Asserting only "names prune" cannot tell them apart, because the
-/// global banner also contains the word.
+/// message names the operation set or the bad verb: the typed tree refuses a
+/// bare `mux workspace` with the required-subcommand line and an unknown verb
+/// with a named unrecognized-subcommand refusal, both qualified by the path.
 #[test]
 fn workspace_family_usage_names_prune() {
     for (args, label, want) in [
         (
             vec!["mux", "workspace"],
             "bare",
-            "fno mux workspace prune [",
+            "fno mux workspace: 'fno mux workspace' requires a subcommand",
         ),
         (
             vec!["mux", "workspace", "bogus"],
             "unknown verb",
-            "fno mux workspace: unknown verb",
+            "fno mux workspace: unrecognized subcommand 'bogus'",
         ),
     ] {
         let out = fno().args(&args).output().unwrap();

@@ -123,7 +123,7 @@ fn the_listing_state_is_the_refusal_state() {
 fn pane_help_says_identity_not_idleness() {
     // AC6: the help states what the column answers and names the verb that
     // answers idleness, so `pane ls` stops being read as a reuse decision.
-    let help = parse_pane_args(&[OsString::from("--help")]).unwrap_err();
+    let help = fno::cli_args::render_path_help(&["mux", "pane"]);
     assert!(help.contains("identity"), "{help}");
     assert!(help.contains("not idleness"), "{help}");
     assert!(help.contains("pane wait"), "{help}");
