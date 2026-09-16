@@ -4132,7 +4132,10 @@ mod tests {
                 &json!({
                     "type": "decision_retracted",
                     "ts": fresh,
-                    "data": {"target_decision_id": "d-view2"},
+                    "data": {
+                        "retraction_id": "r-view2",
+                        "target_decision_id": "d-view2"
+                    },
                 }),
             )
             .unwrap();
