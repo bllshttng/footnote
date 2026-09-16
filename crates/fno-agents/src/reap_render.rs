@@ -242,6 +242,13 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "release_refused": summary.release_refused,
                 "open_pr_rows": summary.open_pr_rows,
                 "open_pr_nudge": nudge_json,
+                "schema_skew": match summary.schema_skew {
+                    Some((on_disk, understood)) => json!({
+                        "on_disk": on_disk,
+                        "understood": understood,
+                    }),
+                    None => Value::Null,
+                },
                 "dry_run": dry_run,
             })
         );
@@ -256,6 +263,16 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
         summary.retired.len(),
         summary.pruned.len(),
     );
+    // A receipt that says zero must say why it is zero. This line is not
+    // latched: it is a receipt, not a log loop, and the read drops fields
+    // and the write is refused on every pass while the skew stands.
+    if let Some((on_disk, understood)) = summary.schema_skew {
+        out.push_str(&format!(
+            "registry schema v{on_disk} is ahead of the v{understood} this fno understands: \
+             reads drop unknown fields and every write is refused, so no retirement can be \
+             written until this fno is upgraded\n"
+        ));
+    }
     for (id, basis) in &summary.retired {
         out.push_str(&format!("  {verb} {id} ({basis})\n"));
     }

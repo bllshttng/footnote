@@ -331,48 +331,57 @@ fi
 PRE_SPARE=""
 PRE_FIT=""
 PREAMBLE_BUDGET_SH="$(dirname "${BASH_SOURCE[0]}")/check-preamble-budget.sh"
-PRE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# pwd -P: a symlinked repo root must compare equal to itself, or the lint
+# invoked through the link silently skips the byte gate (the skip is visible
+# below, but the headroom is still not consulted).
+PRE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 
 # The byte half applies to the REPO's own preamble, so it runs only when TARGET
 # is that file. A fixture path parses a corpus that is not the preamble, and
 # reporting this repo's bytes beside it made one message describe two different
 # trees - and, at zero spare, failed every fixture test on an unrelated ceiling.
 CHECK_BYTES=0
-if [[ "$(cd "$(dirname "$TARGET")" && pwd)/$(basename "$TARGET")" == "$PRE_ROOT/AGENTS.md" ]]; then
+if [[ "$(cd "$(dirname "$TARGET")" && pwd -P)/$(basename "$TARGET")" == "$PRE_ROOT/AGENTS.md" ]]; then
   CHECK_BYTES=1
 fi
 
+# Fail CLOSED on a reading we could not take. Passing the root fixed the $PWD
+# trigger, but the SHAPE was the defect: any unmatched read left PRE_SPARE
+# empty, the refusal below no-opped, and the run printed "all valid" with the
+# byte gate silently gone. This gate declares that it consults the byte
+# budget, so a run that could not consult it is not a pass. The error is
+# CARRIED, not exited on, so one run emits every message: an unreadable byte
+# verdict beside an over-cap corpus must name both, not the first.
+BYTE_ERROR=""
+PRE_QUIET=""
 if (( CHECK_BYTES )); then
-  # Fail CLOSED on a reading we could not take. Passing the root fixed the $PWD
-  # trigger, but the SHAPE was the defect: any unmatched read left PRE_SPARE
-  # empty, the refusal below no-opped, and the run printed "all valid" with the
-  # byte gate silently gone. This gate declares that it consults the byte
-  # budget, so a run that could not consult it is not a pass.
+  PRE_EXIT=0
   if [[ ! -f "$PREAMBLE_BUDGET_SH" ]]; then
-    echo "check-pitfalls: cannot consult the byte budget: $PREAMBLE_BUDGET_SH is missing." >&2
-    echo "  This gate reports preamble headroom, so a run that cannot read it is not a pass." >&2
-    exit 1
-  fi
-  PRE_QUIET="$(bash "$PREAMBLE_BUDGET_SH" --quiet "$PRE_ROOT" 2>&1 || true)"
-  if [[ "$PRE_QUIET" =~ preamble:\ ([0-9]+)\ /\ ([0-9]+)\ B ]]; then
-    PRE_TOTAL="${BASH_REMATCH[1]}"
-    PRE_CEIL="${BASH_REMATCH[2]}"
-    PRE_SPARE=$((PRE_CEIL - PRE_TOTAL))
-    # Floor for one formatted entry (heading + 1-3 sentence trap + specimens +
-    # graduates-to + added). Real entries run 600-900 B; the floor is the
-    # smallest that still satisfies the format, so "N fit" never overstates -
-    # the message names the 400-B floor so the assumption is explicit.
-    if (( PRE_SPARE >= 0 )); then
-      PRE_FIT=$(( PRE_SPARE / 400 ))
-    else
-      PRE_FIT=0
-    fi
+    BYTE_ERROR="cannot consult the byte budget: $PREAMBLE_BUDGET_SH is missing."
   else
-    echo "check-pitfalls: could not read a byte verdict from $PREAMBLE_BUDGET_SH." >&2
-    echo "  Its --quiet output did not carry the expected 'preamble: N / M B' line:" >&2
-    echo "    ${PRE_QUIET:-(no output)}" >&2
-    echo "  Refusing rather than reporting 'all valid' with the byte gate absent." >&2
-    exit 1
+    PRE_QUIET="$(bash "$PREAMBLE_BUDGET_SH" --quiet "$PRE_ROOT" 2>&1)" || PRE_EXIT=$?
+    if (( PRE_EXIT != 0 )); then
+      BYTE_ERROR="the byte budget gate exited ${PRE_EXIT}; a run that consulted a failing budget is not a pass. Its output:"
+      BYTE_ERROR+=$'\n'"${PRE_QUIET:-(no output)}"
+    elif [[ "$PRE_QUIET" =~ preamble:\ ([0-9]+)\ /\ ([0-9]+)\ B ]]; then
+      PRE_TOTAL="${BASH_REMATCH[1]}"
+      PRE_CEIL="${BASH_REMATCH[2]}"
+      PRE_SPARE=$((PRE_CEIL - PRE_TOTAL))
+      # Floor for one formatted entry (heading + 1-3 sentence trap + specimens +
+      # graduates-to + added). Real entries run 600-900 B; the floor is the
+      # smallest that still satisfies the format, so "N fit" never overstates -
+      # the message names the 400-B floor so the assumption is explicit.
+      if (( PRE_SPARE >= 0 )); then
+        PRE_FIT=$(( PRE_SPARE / 400 ))
+      else
+        PRE_FIT=0
+      fi
+    else
+      BYTE_ERROR="could not read a byte verdict from $PREAMBLE_BUDGET_SH."
+      BYTE_ERROR+=$'\n'"  Its --quiet output did not carry the expected 'preamble: N / M B' line:"
+      BYTE_ERROR+=$'\n'"    ${PRE_QUIET:-(no output)}"
+      BYTE_ERROR+=$'\n'"  Refusing rather than reporting 'all valid' with the byte gate absent."
+    fi
   fi
 fi
 
@@ -390,20 +399,32 @@ if [[ -n "$PRE_SPARE" && $PRE_SPARE -lt 0 ]]; then
 fi
 
 CAP_SUFFIX=""
-[[ -n "$PRE_FIT" ]] && CAP_SUFFIX="; ${PRE_SPARE} B preamble headroom (~${PRE_FIT} more fit at the 400-B floor)"
+if [[ -n "$PRE_FIT" ]]; then
+  CAP_SUFFIX="; ${PRE_SPARE} B preamble headroom (~${PRE_FIT} more fit at the 400-B floor)"
+elif (( ! CHECK_BYTES )); then
+  # A skip must be visible, not silent: "all valid" with no byte verdict is
+  # exactly the pass-shaped lie this gate refuses.
+  CAP_SUFFIX="; byte gate skipped (target is not this repo's AGENTS.md)"
+fi
 
-if [[ $VIOLATIONS -eq 0 ]]; then
+if [[ $VIOLATIONS -eq 0 && -z "$BYTE_ERROR" ]]; then
   echo "check-pitfalls: ${ENTRY_COUNT}/${MAX_ENTRIES} entries, all valid${CAP_SUFFIX}"
   exit 0
 fi
 
 {
-  echo "check-pitfalls: ${VIOLATIONS} violation(s) in '${SECTION_HEADER}'${CAP_SUFFIX}"
-  echo
-  printf '%s' "$REPORT"
-  echo
-  echo "Fix: a landed graduates-to guard removes its entry in the same PR;"
-  echo "  over ${MAX_ENTRIES} entries -> evict or graduate one; older than"
-  echo "  ${MAX_AGE_DAYS} days -> graduate to a lint or evict."
+  if [[ -n "$BYTE_ERROR" ]]; then
+    printf '%s\n' "check-pitfalls: ${BYTE_ERROR}"
+    echo
+  fi
+  if (( VIOLATIONS > 0 )); then
+    echo "check-pitfalls: ${VIOLATIONS} violation(s) in '${SECTION_HEADER}'${CAP_SUFFIX}"
+    echo
+    printf '%s' "$REPORT"
+    echo
+    echo "Fix: a landed graduates-to guard removes its entry in the same PR;"
+    echo "  over ${MAX_ENTRIES} entries -> evict or graduate one; older than"
+    echo "  ${MAX_AGE_DAYS} days -> graduate to a lint or evict."
+  fi
 } >&2
 exit 1

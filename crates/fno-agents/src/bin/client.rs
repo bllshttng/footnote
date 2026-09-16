@@ -155,6 +155,14 @@ fn main() {
     if args.first().map(String::as_str) == Some("surface-check") {
         std::process::exit(fno_agents::surface_check::run_surface_check(&args[1..]));
     }
+    // `context-run`: one runner for every fno SessionStart/PostCompact context
+    // producer (see context_run.rs doc). Transport-only, dispatched BEFORE
+    // `run` like surface-check: hooks/context-run.sh is the only caller and
+    // the action list is shrink-only (d-fe66560a), so this verb is never
+    // registered and never routed.
+    if args.first().map(String::as_str) == Some("context-run") {
+        std::process::exit(fno_agents::context_run::run_context_run(&args[1..]));
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

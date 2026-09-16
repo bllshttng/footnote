@@ -1255,6 +1255,25 @@ def plans_content_dir(project_root: Optional[Path] = None) -> Path:
     return plans_dir(root)
 
 
+_NODE_PREFIX = r"[a-z]" + r"[a-z0-9]{0,7}"
+_NODE_HEX = r"[0-9a-f]{4,8}"
+_NODE_ID_RE = re.compile(_NODE_PREFIX + "-" + _NODE_HEX)
+_PLAN_NODE_RE = re.compile(
+    "-(?P<prefix>" + _NODE_PREFIX + ")-(?P<hex>" + _NODE_HEX + r")\.md$"
+)
+
+
+def plan_filename_node_id(path: str | os.PathLike[str], prefixes: set[str] | None = None) -> str | None:
+    """Return the node id encoded by a plan basename, if it has one."""
+    match = _PLAN_NODE_RE.search(Path(str(path).split("#", 1)[0]).name)
+    if match is None:
+        return None
+    prefix = match.group("prefix")
+    if prefixes is not None and prefix not in {p.rstrip("-") for p in prefixes}:
+        return None
+    return f"{prefix}-{match.group('hex')}"
+
+
 def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -> str:
     """Render ``config.plans_filename`` (strftime codes + {slug}/{node}).
 
@@ -1270,7 +1289,15 @@ def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -
     name = _re.sub(r"-{2,}", "-", name)
     if name.endswith("-.md"):
         name = name[: -len("-.md")] + ".md"
-    return name.lstrip("-")
+    name = name.lstrip("-")
+    if node and _NODE_ID_RE.fullmatch(node):
+        rendered_node = plan_filename_node_id(name, prefixes={node.split("-", 1)[0]})
+        if rendered_node != node:
+            raise ValueError(
+                f"plan filename {name!r} names {rendered_node or 'no node id'}, "
+                f"but requested node {node!r}"
+            )
+    return name
 
 
 def plan_doc_path(

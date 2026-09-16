@@ -91,6 +91,7 @@ mod codex_thread_entry;
 pub mod compaction;
 mod completion_output;
 pub mod component_update;
+pub mod context_run;
 pub mod court_fold;
 pub mod cursor_agent;
 pub mod daemon;

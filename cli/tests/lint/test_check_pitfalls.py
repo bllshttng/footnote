@@ -64,6 +64,68 @@ def test_shipped_agents_md_passes() -> None:
     r = _run(AGENTS)
     assert r.returncode == 0, r.stderr
     assert "all valid" in r.stdout
+    # The byte gate consults on the shipped target: a pass names the headroom
+    # it read, never "all valid" with the byte half silently gone.
+    assert "preamble headroom" in r.stdout
+
+
+def test_symlinked_repo_root_still_checks_bytes(tmp_path: Path) -> None:
+    """AC5-HP: the byte gate must survive a symlinked repo root."""
+    link = tmp_path / "repo-link"
+    link.symlink_to(ROOT)
+    r = _run(link / "AGENTS.md")
+    assert r.returncode == 0, r.stderr
+    assert "preamble headroom" in r.stdout
+
+
+def test_non_agents_target_reports_the_skip(tmp_path: Path) -> None:
+    """AC6-HP: a fixture target says the byte gate was skipped, not nothing."""
+    path = _fixture(tmp_path, [GOOD])
+    r = _run(path)
+    assert r.returncode == 0, r.stderr
+    assert "byte gate skipped" in r.stdout
+
+
+def _copied_lint_repo(tmp_path: Path, entries) -> tuple[Path, Path]:
+    """A fixture repo carrying its own copy of the lint plus a stub budget."""
+    repo = tmp_path / "repo"
+    (repo / "scripts" / "ci").mkdir(parents=True)
+    lint = repo / "scripts" / "ci" / "check-pitfalls.sh"
+    shutil.copy(LINT, lint)
+    body = [f"# AGENTS\n\n{SECTION}\n\nrationale.\n\n"]
+    for trap, grad, added in entries:
+        body.append(
+            f"### {trap}\n\n{trap} statement.\n\n"
+            f"- graduates-to: {grad}\n- added: {added}\n\n"
+        )
+    body.append(f"{NEXT_HEADING}\n")
+    (repo / "AGENTS.md").write_text("".join(body), encoding="utf-8")
+    stub = repo / "scripts" / "ci" / "check-preamble-budget.sh"
+    return lint, stub
+
+
+def test_failing_budget_refuses_even_when_line_parses(tmp_path: Path) -> None:
+    """AC5-ERR: a valid line from a failing budget run is not a pass."""
+    lint, stub = _copied_lint_repo(tmp_path, [GOOD])
+    stub.write_text('#!/usr/bin/env bash\necho "preamble: 10 / 100 B"\nexit 1\n')
+
+    r = _run(lint.parent.parent.parent / "AGENTS.md", lint=lint)
+
+    assert r.returncode == 1
+    assert "exited 1" in r.stderr
+    assert "preamble: 10 / 100 B" in r.stderr
+
+
+def test_unreadable_verdict_and_over_cap_report_together(tmp_path: Path) -> None:
+    """AC6-ERR: one run names both the byte error and the corpus violation."""
+    lint, stub = _copied_lint_repo(tmp_path, [GOOD] * 11)
+    stub.write_text('#!/usr/bin/env bash\necho "garbage"\n')
+
+    r = _run(lint.parent.parent.parent / "AGENTS.md", lint=lint)
+
+    assert r.returncode == 1
+    assert "could not read a byte verdict" in r.stderr
+    assert "exceed the 10-entry cap" in r.stderr
 
 
 def test_over_cap_fails(tmp_path: Path) -> None:

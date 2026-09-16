@@ -175,6 +175,11 @@ pub struct GcSummary {
     /// The registry file could not be read this pass. Never a retirement on
     /// a failed read; the tick names this instead of a quiet no_rows.
     pub registry_unreadable: bool,
+    /// Set when the on-disk registry is AHEAD of this binary: reads drop
+    /// unknown fields and every write is refused, so no row can retire this
+    /// pass whatever the policy decided. `None` when the versions agree.
+    /// `(on-disk version, understood version)`.
+    pub schema_skew: Option<(u32, u32)>,
     /// One per held row: its clock. The text buckets above stay
     /// exactly as they were; `holds` is the read-side projection that gives
     /// a keep an age, a basis, and an escalation flag. It is a projection
@@ -1279,6 +1284,78 @@ pub struct ProvenanceVerdict {
 /// owns the per-pass cache; the verdict itself stays network-free.
 pub type PrStateRead<'a> = &'a mut dyn FnMut(u64, &str) -> Option<bool>;
 
+/// The open-PR question, asked once for both sweeps. The graph record
+/// names the candidate; the PR itself settles it.
+#[derive(Debug)]
+pub enum OpenPrVerdict {
+    /// The PR reads open: hold, and name it.
+    Holds { node: String, pr: u64 },
+    /// The PR reads merged or closed: this session has nothing left to
+    /// drive, and the row falls through to the grace gate.
+    Settled { node: String, pr: u64 },
+    /// The read failed, or no reader was supplied: hold, and say so.
+    Unread { node: String, pr: u64 },
+    /// No candidate: no pr_number, a recorded merge, or this session
+    /// never drove the node.
+    None,
+}
+
+/// The candidate conjuncts are exactly the three the open-PR keep has
+/// always used: the node carries `pr_number`, its recorded `merge_status`
+/// is not `merged`, and this session has a `do` row on it. The attribution
+/// gate is unchanged, so a session that never drove the PR pays no read.
+/// `quiet_past_grace` is the read gate: a row inside the grace window is
+/// kept by `Active` anyway and a row with no age by `TranscriptUnresolved`
+/// anyway, so the read would change no verdict - pass `false` and every
+/// candidate holds, which is the keep's behavior before it learned to ask.
+pub fn open_pr_verdict(
+    graph: &GraphRead,
+    sid: &str,
+    node: &str,
+    cwd: &str,
+    quiet_past_grace: bool,
+    mut pr_read: Option<PrStateRead>,
+) -> OpenPrVerdict {
+    let pr = match graph.pr_number.get(node).copied().flatten() {
+        Some(pr) => pr,
+        None => return OpenPrVerdict::None,
+    };
+    let merged = graph
+        .pr_state
+        .get(node)
+        .and_then(|(merge_status, _, _)| merge_status.clone())
+        .as_deref()
+        == Some("merged");
+    let drives = graph
+        .do_nodes
+        .get(&sid.to_ascii_lowercase())
+        .is_some_and(|set| set.contains(node));
+    if merged || !drives {
+        return OpenPrVerdict::None;
+    }
+    if !quiet_past_grace {
+        return OpenPrVerdict::Holds {
+            node: node.to_string(),
+            pr,
+        };
+    }
+    match pr_read.as_mut().map(|f| f(pr, cwd)) {
+        Some(Some(false)) => OpenPrVerdict::Settled {
+            node: node.to_string(),
+            pr,
+        },
+        Some(Some(true)) => OpenPrVerdict::Holds {
+            node: node.to_string(),
+            pr,
+        },
+        // No reader, or the reader itself failed: both are an unread answer.
+        _ => OpenPrVerdict::Unread {
+            node: node.to_string(),
+            pr,
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn provenance_verdict(
     e: &state::RegistryEntry,
@@ -1428,6 +1505,36 @@ fn settle_blocker_detail(graph: &GraphRead, node: &str) -> String {
     }
 }
 
+/// An adopted row keeps only while there is a session to own it. Two
+/// positive markers say a row is a registry corpse, and only they let the
+/// origin gate skip the row: a recorded pid that answered ESRCH, or a
+/// claude row provably absent from a KNOWN roster snapshot (the same
+/// predicate the `rm` live gate applies, so "what counts as absent" cannot
+/// diverge between the two call sites). An unknown snapshot, a partial
+/// list, a missing pid that answers nothing: each keeps the row - absence
+/// alone never authorizes a reap. The snapshot is a subprocess read, so
+/// the roster leg fires only for a row quiet past the grace: a fresh
+/// adopted row cannot pass a later gate anyway, and keeps without the
+/// read, exactly as before.
+fn origin_corpse(
+    e: &state::RegistryEntry,
+    quiet_past_grace: bool,
+    agents_memo: &std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>>,
+    agents_read: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
+) -> bool {
+    if e.pid.is_some_and(crate::daemon::pid_is_gone) {
+        return true;
+    }
+    if quiet_past_grace && e.harness_name() == "claude" {
+        let mut memo = agents_memo.borrow_mut();
+        let snapshot = memo.get_or_insert_with(|| agents_read());
+        return crate::daemon::roster_death::claude_row_provably_absent(
+            Some(snapshot),
+            crate::daemon::roster_death::claude_row_id(e).as_deref(),
+        );
+    }
+    false
+}
 /// The one retirement pass. Every I/O seam (`read_graph`, `store_matches`,
 /// `age_many`, `stop_confirmed`, `tree_probe`, `prune_tree`) is injected so a
 /// test stages the world; production wiring is [`crate::gc::gc_sweep`] /
@@ -1516,6 +1623,14 @@ pub(crate) fn run_with_release(
         // failed sweep, not a quiet no_rows.
         summary.registry_unreadable = true;
     }
+    // A forward registry reads as the subset this binary understands and
+    // refuses every write, so a receipt that says `retired 0` would read as
+    // "nothing was reapable" when the truth is "nothing could be written".
+    // The skew rides the summary either way; `registry_unreadable` already
+    // names the read-failed case, and `Default::default()` carries the
+    // binary's own version, so a failed read never invents a skew here.
+    summary.schema_skew = (registry.schema_version > state::REGISTRY_SCHEMA_VERSION)
+        .then(|| (registry.schema_version, state::REGISTRY_SCHEMA_VERSION));
     if registry.entries.is_empty() {
         return summary; // empty registry -> nothing to sweep
     }
@@ -1547,18 +1662,50 @@ pub(crate) fn run_with_release(
     // One batched age read for the whole sweep: the seam answers
     // every candidate through one single-flighted read, keyed by row handle.
     // A row the seam does not answer reads None, and None is never quiet.
+    // A non-spawn row is staged too so a proven corpse can fall through to
+    // the normal pipeline: spawned rows always, plus the two corpse legs'
+    // populations (a row whose pid answers, and claude rows whose quiet
+    // fact the pass-2 origin gate reads). The roster snapshot itself stays
+    // lazy - the subprocess read fires in pass 2, quiet rows only.
     let age_entries: Vec<&state::RegistryEntry> = registry
         .entries
         .iter()
         .filter(|e| {
-            e.origin.as_deref() == Some("spawn") && e.crown_level.is_none() && graph.is_some()
+            e.crown_level.is_none()
+                && graph.is_some()
+                && (e.origin.as_deref() == Some("spawn")
+                    || e.pid.is_some_and(crate::daemon::pid_is_gone)
+                    || e.harness_name() == "claude")
         })
         .collect();
     let ages = age_many(&age_entries);
+    // The PR-state reader both askers share (the AllDone confirm arm in this
+    // pass and the open-PR keep in pass 2): a staged answer in the graph read
+    // wins; a miss resolves through gh. The cache lives for the whole sweep,
+    // keyed by cwd and PR, so two rows driving one PR pay one read.
+    let pr_cache: std::cell::RefCell<HashMap<(String, u64), Option<bool>>> = Default::default();
+    let mut pr_read_adapter = |pr: u64, cwd: &str| -> Option<bool> {
+        let key = (cwd.to_string(), pr);
+        if let Some(graph) = graph.as_ref() {
+            if let Some(staged) = graph.pr_reads.get(&key) {
+                return *staged;
+            }
+        }
+        let hit = pr_cache.borrow().get(&key).copied();
+        if let Some(cached) = hit {
+            return cached;
+        }
+        let fresh = gh_pr_is_open(pr, cwd);
+        pr_cache.borrow_mut().insert(key, fresh);
+        fresh
+    };
     let mut staged: Vec<Option<(ProvenanceVerdict, Option<i64>)>> =
         Vec::with_capacity(registry.entries.len());
     for e in &registry.entries {
-        let eligible = e.origin.as_deref() == Some("spawn") && e.crown_level.is_none();
+        let eligible = e.crown_level.is_none()
+            && (e.origin.as_deref() == Some("spawn")
+                || e.pid.is_some_and(crate::daemon::pid_is_gone)
+                || e.harness_name() == "claude");
         if !eligible {
             staged.push(None);
             continue;
@@ -1569,23 +1716,6 @@ pub(crate) fn run_with_release(
         };
         let sid = e.harness_session_id.as_deref().unwrap_or("").trim();
         let hits = store_matches(e);
-        // The PR-state reader the AllDone confirm arm may call: a staged
-        // answer in the graph read wins; a miss resolves through gh. The
-        // cache lives for this pass, keyed by cwd and PR.
-        let pr_cache: std::cell::RefCell<HashMap<(String, u64), Option<bool>>> = Default::default();
-        let mut pr_read_adapter = |pr: u64, cwd: &str| -> Option<bool> {
-            let key = (cwd.to_string(), pr);
-            if let Some(staged) = graph.pr_reads.get(&key) {
-                return *staged;
-            }
-            let hit = pr_cache.borrow().get(&key).copied();
-            if let Some(cached) = hit {
-                return cached;
-            }
-            let fresh = gh_pr_is_open(pr, cwd);
-            pr_cache.borrow_mut().insert(key, fresh);
-            fresh
-        };
         let verdict =
             provenance_verdict(e, sid, graph, hits.as_deref(), Some(&mut pr_read_adapter));
         let age = ages.get(&row_handle(e)).copied().flatten();
@@ -1601,6 +1731,11 @@ pub(crate) fn run_with_release(
     // so the open-PR keep can ask whether the PEER drives the PR.
     let mut live_peer: HashMap<String, (String, String, String)> = HashMap::new();
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
+        // A corpse is never a live successor: only a spawned row's own
+        // liveness can supersede a peer on the same node.
+        if e.origin.as_deref() != Some("spawn") {
+            continue;
+        }
         let Some((verdict, age)) = staged_row else {
             continue;
         };
@@ -1642,12 +1777,20 @@ pub(crate) fn run_with_release(
         // The origin gate runs BEFORE the graph read so a row fno never
         // spawned is named by its own gate whatever the graph's state - the
         // policy's own order (gc_decide checks origin first), not shadowed by
-        // kept_graph_unreadable.
-        if e.origin.as_deref() != Some("spawn") {
-            summary
-                .kept_not_spawn
-                .push((id, e.origin.clone().unwrap_or_default()));
-            continue;
+        // kept_graph_unreadable. One exit: a proven corpse has no session
+        // left to own it, so it falls through to the normal pipeline and is
+        // judged like any other row. The roster leg waits for a row quiet
+        // past the grace, so the subprocess read never fires for a row that
+        // could not pass a later gate anyway.
+        let is_spawn = e.origin.as_deref() == Some("spawn");
+        if !is_spawn {
+            let quiet = matches!(staged_row, Some((_, Some(a))) if *a > grace_secs);
+            if !origin_corpse(e, quiet, &agents_memo, agents_read) {
+                summary
+                    .kept_not_spawn
+                    .push((id, e.origin.clone().unwrap_or_default()));
+                continue;
+            }
         }
         let Some(graph) = &graph else {
             summary.kept_graph_unreadable.push(id);
@@ -1873,33 +2016,38 @@ pub(crate) fn run_with_release(
                 }),
             _ => false,
         };
-        // The open-PR fact (Locked Decision 1) is the graph record alone:
-        // this session has a `do` row on the open node, the node carries
-        // `pr_number`, and the recorded merge_status is not `merged`. The
-        // sweep makes no network call for an open node.
-        let open_pr = match &verdict.work {
+        // The open-PR keep (Locked Decision 1) asks the PR, not the record:
+        // the graph names the candidate, and once the row is quiet past the
+        // grace GitHub settles whether the PR still needs its driver. A
+        // settled PR releases through `pr_settled`; a failed read holds
+        // under `pr state contradicts` - never a retirement on an unread
+        // answer.
+        let (open_pr, pr_settled) = match &verdict.work {
             WorkState::Open { node, .. } => {
-                let pr = graph.pr_number.get(node).copied().flatten();
-                let merged = graph
-                    .pr_state
-                    .get(node)
-                    .and_then(|(merge_status, _, _)| merge_status.clone())
-                    .as_deref()
-                    == Some("merged");
-                match pr {
-                    Some(pr)
-                        if !merged
-                            && graph
-                                .do_nodes
-                                .get(&sid.to_ascii_lowercase())
-                                .is_some_and(|set| set.contains(node)) =>
-                    {
-                        Some((node.clone(), pr))
+                let quiet_past_grace = matches!(age, Some(a) if a > grace_secs);
+                match open_pr_verdict(
+                    graph,
+                    sid,
+                    node,
+                    &e.cwd,
+                    quiet_past_grace,
+                    Some(&mut pr_read_adapter),
+                ) {
+                    OpenPrVerdict::Holds { node, pr } => (Some((node, pr)), false),
+                    OpenPrVerdict::Settled { .. } => (None, true),
+                    OpenPrVerdict::Unread { node, pr } => {
+                        if confirm_hold.is_none() {
+                            confirm_hold = Some(KeepReason::PrStateContradicts {
+                                node,
+                                detail: format!("pr {pr} state unread"),
+                            });
+                        }
+                        (None, false)
                     }
-                    _ => None,
+                    OpenPrVerdict::None => (None, false),
                 }
             }
-            _ => None,
+            _ => (None, false),
         };
         let node_merged = verdict.merged_but_open.is_some();
         // change 8: the existence-specific probe on the row's own
@@ -1957,6 +2105,8 @@ pub(crate) fn run_with_release(
             release_quiet: release_quiet_row,
             open_pr,
             peer_drives_pr,
+            pr_settled,
+            origin_corpse: !is_spawn,
         };
         let (mut action, mut reason) = gc_decide(&row, grace_secs);
         // d-81c6da7e: a release matched to the planning hold answers the
@@ -1999,7 +2149,22 @@ pub(crate) fn run_with_release(
                 Some(KeepReason::Operator) => summary.kept_operator.push(id),
                 Some(KeepReason::Crowned) => summary.kept_crowned.push(id),
                 Some(KeepReason::NotSpawn { origin }) => summary.kept_not_spawn.push((id, origin)),
-                Some(KeepReason::NoProvenance) => summary.kept_no_provenance.push(id),
+                Some(KeepReason::NoProvenance) => {
+                    summary.kept_no_provenance.push(id.clone());
+                    // The keep gets the same shape every other keep has: a
+                    // hold with a clock, so `fno agents reap --release` and
+                    // the escalation read can reach it. The detail names why
+                    // no node resolved.
+                    summary.holds.push(Hold {
+                        id,
+                        reason: KeepReason::NoProvenance.as_str(),
+                        detail: "no source resolved a node: sessions, registry, name, transcript"
+                            .into(),
+                        age_s: hold_age_s,
+                        age_basis: hold_age_basis,
+                        escalated: false,
+                    });
+                }
                 Some(KeepReason::OpenWork { node, status }) => {
                     let reader = verdict
                         .route

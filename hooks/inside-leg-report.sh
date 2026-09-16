@@ -299,16 +299,9 @@ mark_reported() {
 should_report || exit 0
 
 # Resolve the fno-agents binary, most-local first (mirrors target-stop-hook.sh).
-BIN=""
-if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
-  BIN="$FNO_AGENTS_BIN"
-elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
-  BIN="${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
-elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
-  BIN="${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
-elif command -v fno-agents >/dev/null 2>&1; then
-  BIN=$(command -v fno-agents)
-fi
+# shellcheck source=lib/agents-bin.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/agents-bin.sh"
+BIN="$(fno_agents_bin "$REPO_ROOT")"
 # No binary -> nothing to report to; stay silent (the inside leg is best-effort).
 [[ -z "$BIN" ]] && exit 0
 

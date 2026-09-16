@@ -1007,6 +1007,21 @@ def test_intake_invalid_claim_value_exits_nonzero(fixture_graph, tmp_path, capsy
     assert "invalid claims value" in err.lower() or "not-an-id" in err
 
 
+def test_intake_refuses_filename_claim_mismatch(fixture_graph, tmp_path, capsys):
+    """A node-bearing filename cannot silently disagree with its claim."""
+    plan = _write_quick_plan(tmp_path, claims="ab-1dea1234")
+    mismatched = tmp_path / "20260915-plan-ab-0fff9999.md"
+    plan.rename(mismatched)
+
+    with pytest.raises((SystemExit, click.exceptions.Exit)):
+        _intake_impl(plan_paths=[str(mismatched)])
+
+    err = capsys.readouterr().err
+    assert "ab-0fff9999" in err
+    assert "ab-1dea1234" in err
+    assert len(_read_entries(fixture_graph)) == 3
+
+
 def test_intake_unknown_claim_id_exits_nonzero(fixture_graph, tmp_path, capsys):
     plan = _write_quick_plan(tmp_path)
     with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:

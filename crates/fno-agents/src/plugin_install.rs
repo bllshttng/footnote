@@ -119,7 +119,11 @@ fn carry_referenced_scripts(old_stage: &Path, new_stage: &Path) -> usize {
         Err(_) => return 0,
     };
     let mut carried = 0usize;
-    for config in ["hooks/hooks.json", "hooks/codex-hooks.json"] {
+    for config in [
+        "hooks/hooks.json",
+        "hooks/codex-hooks.json",
+        "hooks/context-hooks.json",
+    ] {
         let text = match std::fs::read_to_string(old_stage.join(config)) {
             Ok(t) => t,
             Err(_) => continue,

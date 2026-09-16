@@ -110,17 +110,9 @@ OTHER_WORKTREE_PRESENT=0
 SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
 [[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="${REPO_ROOT}/.fno"
 
-resolve_agents_bin() {
-    if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
-        printf '%s' "$FNO_AGENTS_BIN"
-    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
-        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
-    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
-        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
-    elif command -v fno-agents >/dev/null 2>&1; then
-        command -v fno-agents
-    fi
-}
+# shellcheck source=lib/agents-bin.sh
+source "$PLUGIN_ROOT/hooks/lib/agents-bin.sh"
+resolve_agents_bin() { fno_agents_bin "$REPO_ROOT"; }
 
 BIN=""
 TARGET_RESOLVE_BROKEN=0
@@ -201,7 +193,6 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
     DELIVERY_RETRY_OWNER="${CONVERSATION_ID:-${LIVE_HARNESS_ID:-harness}}"
     DELIVERY_RETRY_ID="${DELIVERY_RETRY_OWNER}.${LIVE_SESSION_ID:-session}"
     DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${DELIVERY_RETRY_ID}.md"
-    [[ -f "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 else
     DELIVERY_PENDING_STATE=""
     for pending in "${DELIVERY_PENDING_PREFIX}${CONVERSATION_ID}."*.md; do
@@ -388,6 +379,16 @@ synthesize_transcript() {
 
 SYNTH="${STATE_FILE%/*}/.agy-loopcheck-${CONVERSATION_ID:-session}.jsonl"
 mkdir -p "$SPACE_DIR" 2>/dev/null || true
+# Snapshot the manifest content BEFORE loop-check runs: the session's own
+# machinery may delete or replace the file while loop-check is deciding, and
+# the DoneDelivery staging below must still stage what the hook saw at entry.
+# A variable, not a candidate file: nothing lands in the checkout before the
+# stop is decided.
+STATE_SNAPSHOT=""
+if [[ -n "$STATE_FILE" && "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+    && [[ -f "$STATE_FILE" ]]; then
+    STATE_SNAPSHOT=$(cat "$STATE_FILE" 2>/dev/null || true)
+fi
 if [[ -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
     synthesize_transcript "$TRANSCRIPT_PATH" > "$SYNTH" 2>/dev/null || : > "$SYNTH"
 else
@@ -480,14 +481,15 @@ if [[ -n "$TERMINATION_REASON" ]]; then
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
         # Staged here only, as in target-stop-hook.sh: a stop that is not a
         # delivery writes nothing, and no candidate file exists for loop-check
-        # to see. The staging source is the live manifest only: a manifest
-        # deleted mid-loop stages nothing, and the next fire's pending scan
-        # engages the retry.
+        # to see. The staging source is the entry snapshot; the manifest
+        # itself may already be gone by the time finalize runs.
         if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]]; then
             [[ -n "$DELIVERY_PENDING_STATE" ]] \
                 || emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
             PENDING_TMP="${DELIVERY_PENDING_STATE}.tmp.$$"
-            if ! cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
+            if ! { cp "$STATE_FILE" "$PENDING_TMP" 2>/dev/null \
+                || { [[ -n "$STATE_SNAPSHOT" ]] \
+                    && printf '%s\n' "$STATE_SNAPSHOT" > "$PENDING_TMP"; }; } \
                 || ! mv "$PENDING_TMP" "$DELIVERY_PENDING_STATE" 2>/dev/null; then
                 rm -f "$PENDING_TMP" 2>/dev/null || true
                 emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
