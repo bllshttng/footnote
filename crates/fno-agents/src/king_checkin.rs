@@ -20,8 +20,8 @@
 //!              [--board-state PATH] [--emit-path PATH] [--change TEXT]
 //!              [--no-emit] [--json]`
 //!
-//! rc 0 a completed beat (a failed row write warns, never fails the beat),
-//! 2 usage failure.
+//! rc 0 a completed beat, 3 when an asked-for row was not journalled or
+//! stdout could not be written, 2 usage failure.
 use crate::court_fold::court_fold;
 use crate::king_board::{read_board, BoardOpts};
 use crate::king_history::REIGN_CHECKIN;
@@ -1383,6 +1383,20 @@ pub(crate) fn emit_row(path: &Path, source: &str, data: &Map<String, Value>) -> 
     }
 }
 
+fn finish_checkin(emit_requested: bool, emitted: bool, output_error: Option<String>) -> i32 {
+    if let Some(error) = output_error {
+        eprintln!("king-checkin: stdout write failed: {error}");
+        return 3;
+    }
+    if emit_requested && !emitted {
+        eprintln!(
+            "king-checkin: beat ran but no reign_checkin row was journalled; fno agents king history will not see it"
+        );
+        return 3;
+    }
+    0
+}
+
 /// The stop hook's half of the reign record: when this scope's newest
 /// check-in is older than two check-in intervals, journal one row from what
 /// the previous fire measured. It never decides anything.
@@ -1573,16 +1587,13 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let emitted = if ctx.emit {
         match ctx.emit_path.as_ref() {
             Some(path) => emit_row(path, "loop", &data),
-            None => {
-                eprintln!("king-checkin: WARNING: no emit path, so the beat was not journalled");
-                false
-            }
+            None => false,
         }
     } else {
         false
     };
 
-    if as_json {
+    let output_error = if as_json {
         let payload = json!({
             "scope": ctx.scope,
             "ts": ts,
@@ -1607,18 +1618,28 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             }).collect::<Vec<_>>(),
             "lines": lines,
         });
-        println!(
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        writeln!(
+            out,
             "{}",
             serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
+        )
+        .err()
+        .map(|e| e.to_string())
     } else {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
+        let mut error = None;
         for line in &lines {
-            let _ = writeln!(out, "{line}");
+            if let Err(e) = writeln!(out, "{line}") {
+                error = Some(e.to_string());
+                break;
+            }
         }
-    }
-    0
+        error
+    };
+    finish_checkin(ctx.emit, emitted, output_error)
 }
 
 #[cfg(test)]
@@ -2167,6 +2188,16 @@ mod tests {
         assert_eq!(rows.lines().count(), 1);
         assert!(rows.contains("reign_checkin"));
         assert!(rows.contains("\"source\":\"loop\""), "rows: {rows}");
+    }
+
+    #[test]
+    fn requested_emit_without_a_row_is_a_failure() {
+        assert_eq!(finish_checkin(true, false, None), 3);
+    }
+
+    #[test]
+    fn no_emit_is_success_when_no_row_was_requested() {
+        assert_eq!(finish_checkin(false, false, None), 0);
     }
 
     #[test]

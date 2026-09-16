@@ -110,7 +110,10 @@ pub(crate) struct VerdictInputs {
     pub scope: String,
     /// The parsed manifest, carried so the verdict verb never re-reads it.
     pub manifest: crate::loopcheck::KingManifest,
+    pub manifest_path: PathBuf,
     pub window: String,
+    pub checkin_interval_secs: i64,
+    pub crown_age_secs: i64,
     pub compaction_ceiling: u64,
     pub inherited_undelivered: u64,
     pub filed_undelivered: u64,
@@ -270,8 +273,18 @@ pub(crate) fn resolve_verdict_inputs(
         )
     })?;
 
+    let current = now();
+    let crown_age_secs = chrono::DateTime::parse_from_rfc3339(&crowned_at)
+        .ok()
+        .map(|created| {
+            current
+                .signed_duration_since(created.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .max(0)
+        })
+        .unwrap_or(0);
     let window_secs = WINDOW_INTERVALS * interval;
-    let window_start = (now() - chrono::Duration::seconds(window_secs))
+    let window_start = (current - chrono::Duration::seconds(window_secs))
         .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false);
 
     let entries = crate::graph_store::read_defaulted_opts(
@@ -290,7 +303,10 @@ pub(crate) fn resolve_verdict_inputs(
     Ok(VerdictInputs {
         scope,
         manifest,
+        manifest_path,
         window: window_display(window_secs),
+        checkin_interval_secs: interval,
+        crown_age_secs,
         compaction_ceiling: ceiling as u64,
         inherited_undelivered,
         filed_undelivered,

@@ -346,6 +346,7 @@ pub(crate) enum Verdict {
     Converging,
     Stalled,
     Degraded,
+    Unknown,
 }
 
 #[derive(Debug, PartialEq)]
@@ -374,6 +375,8 @@ pub(crate) struct VerdictReadings {
     /// Compaction count is only measurable against the manifest's harness
     /// session; without one the bound is unmeasurable, not zero.
     pub compactions_measurable: bool,
+    pub checkins: u64,
+    pub checkins_expected: bool,
     /// `king_context_nudge` rows for this scope. Context pressure is a
     /// reading the payload carries; the verdict itself keys on none of it.
     pub nudges: u64,
@@ -437,7 +440,8 @@ fn in_tenure(ts: &str, crown_start: &str) -> bool {
 
 /// The one decision, pure so tests need no journal.
 ///
-/// Degraded: any declared bound exceeded. Stalled: nothing degraded, the
+/// Degraded: any declared bound exceeded. Unknown: the crown is old enough to
+/// owe a check-in but none is readable. Stalled: nothing degraded, the
 /// last fire read a quiet board, and the scope the reign INHERITED shows no
 /// closure in the window. Filed nodes are deliberately excluded from the
 /// stalled test: a king that files real work into its own scope raises the
@@ -487,6 +491,8 @@ pub(crate) fn verdict(r: &VerdictReadings) -> (Verdict, Vec<BoundRow>) {
     let degraded = bounds.iter().any(|b| b.state == BoundState::Exceeded);
     let v = if degraded {
         Verdict::Degraded
+    } else if r.checkins == 0 && r.checkins_expected {
+        Verdict::Unknown
     } else if r.last_actionable == Some(0)
         && r.inherited_undelivered > 0
         && r.inherited_closed_in_window == 0
@@ -694,6 +700,9 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let manifest_path = inputs.manifest_path.clone();
+    let checkin_interval_secs = inputs.checkin_interval_secs;
+    let crown_age_secs = inputs.crown_age_secs;
     let manifest = inputs.manifest;
     let harness_session_id = manifest.harness_session_id.clone().unwrap_or_default();
     let crown_start = manifest.created_at.clone().unwrap_or_default();
@@ -714,6 +723,52 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     readings.respawn_count = manifest.respawn_count;
     readings.respawn_ceiling = manifest.respawn_ceiling;
     readings.compaction_ceiling = Some(inputs.compaction_ceiling);
+    let checkins = match scan(&events_paths, &inputs.scope) {
+        Ok(payload) => payload["matched"].as_u64().unwrap_or(0),
+        Err(msg) => {
+            eprintln!("fno-agents king-history --verdict: check-in read failed: {msg}");
+            return 1;
+        }
+    };
+    readings.checkins = checkins;
+    readings.checkins_expected = crown_age_secs > checkin_interval_secs;
+    let compactions_source;
+    let compactions_error;
+    if harness_session_id.is_empty() {
+        compactions_source = "unmeasurable";
+        compactions_error = None;
+    } else {
+        let transcript = crate::claude_drive::find_transcript_in(
+            &crate::claude_drive::claude_projects_dir(),
+            &harness_session_id,
+        );
+        match transcript {
+            Some(path) => {
+                let since = manifest.created_at.as_deref().and_then(|ts| {
+                    chrono::DateTime::parse_from_rfc3339(ts)
+                        .ok()
+                        .map(|value| value.timestamp())
+                });
+                match crate::compaction::count_boundaries_since(&path, since) {
+                    Ok(count) => {
+                        readings.compactions = count;
+                        compactions_source = "transcript";
+                        compactions_error = None;
+                    }
+                    Err(err) => {
+                        compactions_source = "journal";
+                        compactions_error = Some(format!("{}: {err}", path.display()));
+                    }
+                }
+            }
+            None => {
+                compactions_source = "journal";
+                compactions_error = Some(format!(
+                    "transcript not found for harness session {harness_session_id}"
+                ));
+            }
+        }
+    }
     readings.compactions_measurable = !harness_session_id.is_empty();
     readings.inherited_undelivered = inputs.inherited_undelivered;
     readings.inherited_closed_in_window = inputs.inherited_closed_in_window;
@@ -731,6 +786,10 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         "fires": readings.fires,
         "last_actionable": readings.last_actionable,
         "compactions": readings.compactions,
+        "compactions_source": compactions_source,
+        "compactions_error": compactions_error,
+        "checkins": readings.checkins,
+        "checkins_expected": readings.checkins_expected,
         "nudges": readings.nudges,
         "terminations": readings.terminations.iter().map(|(reason, n)| json!({
             "reason": reason,
@@ -741,6 +800,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
             "source": b.source,
         })),
         "manifest": {
+            "path": manifest_path.display().to_string(),
             "fno_id": manifest.fno_id,
             "created_at": manifest.created_at,
             "max_iterations": manifest.max_iterations,
@@ -803,6 +863,10 @@ fn render_verdict(payload: &Value) -> String {
         "verdict: {}",
         payload["verdict"].as_str().unwrap_or("")
     )];
+    lines.push(format!(
+        "manifest: {}",
+        payload["manifest"]["path"].as_str().unwrap_or("")
+    ));
     for b in payload["bounds"].as_array().unwrap() {
         let state = b["state"].as_str().unwrap_or("");
         let body = match (b["value"].as_u64(), b["ceiling"].as_u64(), state) {
@@ -813,9 +877,12 @@ fn render_verdict(payload: &Value) -> String {
         lines.push(format!("  {}: {}", b["name"].as_str().unwrap_or(""), body));
     }
     lines.push(format!(
-        "readings: {} fire(s), compactions {}, inherited undelivered {}, closed in window {}, scanned {} rows across {} journal(s)",
+        "readings: {} fire(s), check-ins {} (expected: {}), compactions {} ({}), inherited undelivered {}, closed in window {}, scanned {} rows across {} journal(s)",
         payload["fires"],
+        payload["checkins"],
+        payload["checkins_expected"],
         payload["compactions"],
+        payload["compactions_source"],
         payload["inherited_undelivered"],
         payload["inherited_closed_in_window"],
         payload["scanned"],
@@ -841,6 +908,8 @@ mod verdict_tests {
             compaction_ceiling: Some(3),
             block_cap: None,
             compactions_measurable: true,
+            checkins: 0,
+            checkins_expected: false,
             nudges: 0,
             terminations: Vec::new(),
             inherited_undelivered: 0,
@@ -923,6 +992,27 @@ mod verdict_tests {
             assert_eq!(b.state, BoundState::Absent, "{name}");
             assert_ne!(b.state, BoundState::Within, "{name}");
         }
+    }
+
+    #[test]
+    fn an_old_crown_without_readable_checkins_reads_unknown() {
+        let mut r = readings();
+        r.checkins_expected = true;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Unknown);
+
+        r.checkins = 1;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Converging);
+    }
+
+    #[test]
+    fn a_breached_bound_outweighs_missing_checkins() {
+        let mut r = readings();
+        r.checkins_expected = true;
+        r.fires = 40;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Degraded);
     }
 
     #[test]
