@@ -900,6 +900,12 @@ fn ac1_hp_open_pr_keep_survives_a_terminal_state_through_the_sweep() {
             sid.to_string(),
             std::collections::HashSet::from(["x-node".to_string()]),
         )]),
+        // The row is quiet past the grace, so the keep asks the PR: stage
+        // the open answer the sweep must read (no test touches the network).
+        pr_reads: HashMap::from([("/tmp".to_string(), 1943u64)])
+            .into_iter()
+            .map(|(cwd, pr)| ((cwd, pr), Some(true)))
+            .collect(),
         ..Default::default()
     });
     // The roster reads stopped: the exact state that reaped seven rows on
@@ -935,5 +941,506 @@ fn ac1_hp_open_pr_keep_survives_a_terminal_state_through_the_sweep() {
     // A stopped roster state reads as not live: the ladder's resume arm.
     assert!(!ladder_row.live);
     assert_eq!(summary.retired, vec![], "nothing retires");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── the open-PR keep asks the PR ─────────────────────────────────────────
+
+/// The candidate's graph: one in_review node this session drives, PR 4242.
+fn open_candidate_graph() -> GraphRead {
+    let mut g = graph_read(&[("sess-pr", "N1", "in_review")], &[]).unwrap();
+    g.pr_number.insert("N1".into(), Some(4242));
+    g.do_nodes.insert(
+        "sess-pr".into(),
+        std::collections::HashSet::from(["N1".into()]),
+    );
+    g
+}
+
+/// The read gate: a candidate inside the grace window is kept without the
+/// read firing at all.
+#[test]
+fn open_pr_verdict_asks_only_a_quiet_candidate() {
+    let g = open_candidate_graph();
+    let mut calls = 0u32;
+    {
+        let mut reader = |_pr: u64, _cwd: &str| -> Option<bool> {
+            calls += 1;
+            Some(true)
+        };
+        let fresh =
+            gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", false, Some(&mut reader));
+        assert!(
+            matches!(fresh, gc_sweep::OpenPrVerdict::Holds { .. }),
+            "{fresh:?}"
+        );
+    }
+    assert_eq!(calls, 0, "a fresh candidate pays no read");
+    let mut calls2 = 0u32;
+    let mut reader2 = |_pr: u64, _cwd: &str| -> Option<bool> {
+        calls2 += 1;
+        Some(true)
+    };
+    let quiet = gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, Some(&mut reader2));
+    assert!(matches!(quiet, gc_sweep::OpenPrVerdict::Holds { .. }));
+    assert_eq!(calls2, 1);
+}
+
+/// The three answers once the read fires: open holds, merged or closed
+/// settles, and both a failed read and no reader hold under unread - never
+/// a retirement on an unread answer. The attribution gate is unchanged: a
+/// session that never drove the node is no candidate and pays no read.
+#[test]
+fn open_pr_verdict_settles_on_a_closed_answer() {
+    let g = open_candidate_graph();
+    let mut closed = |_pr: u64, _cwd: &str| -> Option<bool> { Some(false) };
+    assert!(matches!(
+        gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, Some(&mut closed)),
+        gc_sweep::OpenPrVerdict::Settled { .. }
+    ));
+    let mut failed = |_pr: u64, _cwd: &str| -> Option<bool> { None };
+    assert!(matches!(
+        gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, Some(&mut failed)),
+        gc_sweep::OpenPrVerdict::Unread { .. }
+    ));
+    assert!(matches!(
+        gc_sweep::open_pr_verdict(&g, "sess-pr", "N1", "/tmp", true, None),
+        gc_sweep::OpenPrVerdict::Unread { .. }
+    ));
+    let mut never = |_pr: u64, _cwd: &str| -> Option<bool> { panic!("no candidate pays a read") };
+    assert!(matches!(
+        gc_sweep::open_pr_verdict(&g, "sess-other", "N1", "/tmp", true, Some(&mut never)),
+        gc_sweep::OpenPrVerdict::None
+    ));
+}
+
+/// The sweep asks: a quiet candidate whose PR reads closed retires, an open
+/// answer keeps the row with the hold named, an unread answer holds under
+/// `pr state contradicts`, and a candidate inside the grace window is kept
+/// without its staged answer ever being consulted.
+#[test]
+fn the_sweep_asks_the_pr_once_the_row_is_quiet() {
+    let home = tmp_home("gc-openpr-ask");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    let fresh = quiet_transcript(transcripts.path(), "fresh.jsonl", 30);
+    state::update_registry(&home.registry_json(), |r| {
+        for (name, short) in [
+            ("closed-row", "closedrow"),
+            ("open-row", "openrow"),
+            ("failed-row", "failedrow"),
+            ("fresh-row", "freshrow"),
+        ] {
+            let mut row = claude_worker_row(name, short);
+            row.origin = Some("spawn".into());
+            r.entries.push(row);
+        }
+    })
+    .unwrap();
+
+    let mut graph = graph_read(
+        &[
+            ("closedrow-1111-2222-3333-444444444444", "NC", "in_review"),
+            ("openrow-1111-2222-3333-444444444444", "NO", "in_review"),
+            ("failedrow-1111-2222-3333-444444444444", "NF", "in_review"),
+            ("freshrow-1111-2222-3333-444444444444", "NR", "in_review"),
+        ],
+        &[],
+    )
+    .unwrap();
+    for (node, pr) in [("NC", 101u64), ("NO", 102), ("NF", 103), ("NR", 104)] {
+        graph.pr_number.insert(node.into(), Some(pr));
+        graph.pr_state.insert(node.into(), (None, 0, 0));
+    }
+    for (sid, node) in [
+        ("closedrow-1111-2222-3333-444444444444", "NC"),
+        ("openrow-1111-2222-3333-444444444444", "NO"),
+        ("failedrow-1111-2222-3333-444444444444", "NF"),
+        ("freshrow-1111-2222-3333-444444444444", "NR"),
+    ] {
+        graph
+            .do_nodes
+            .insert(sid.into(), std::collections::HashSet::from([node.into()]));
+    }
+    // Staged answers keyed by (cwd, pr); the fixture rows cwd to /tmp.
+    for (pr, answer) in [
+        (101u64, Some(false)),
+        (102, Some(true)),
+        (103, None),
+        (104, Some(false)),
+    ] {
+        graph.pr_reads.insert(("/tmp".into(), pr), answer);
+    }
+
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        Some(graph),
+        &|e| match e.harness_session_id.as_deref() {
+            Some("freshrow-1111-2222-3333-444444444444") => Some(vec![fresh.clone()]),
+            _ => Some(vec![quiet.clone()]),
+        },
+        no_agents(),
+        &|_| true,
+    );
+
+    let retired: Vec<&str> = summary.retired.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(retired, vec!["closedrow"], "retired: {:?}", summary.retired);
+    let held: Vec<&str> = summary
+        .kept_open_pr
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(held, vec!["openrow", "freshrow"], "{held:?}");
+    let h = find_hold(&summary, "openrow");
+    assert_eq!(h.reason, "open pr");
+    assert_eq!(h.detail, "NO #102");
+    assert_eq!(
+        summary.kept_pr_contradicts,
+        vec![(
+            "failedrow".to_string(),
+            "NF".to_string(),
+            "pr 103 state unread".to_string()
+        )],
+        "{:?}",
+        summary.kept_pr_contradicts
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── an adopted row keeps only while there is a session to own it ────────
+
+/// The high path: an adopted claude row absent from a KNOWN roster
+/// snapshot, named on a done-and-merged node, quiet past the grace, retires
+/// through the normal pipeline - `kept_not_spawn` does not name it.
+#[test]
+fn an_adopted_corpse_absent_from_a_known_roster_retires() {
+    let home = tmp_home("gc-corpse-hp");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = claude_worker_row("ac-row", "acrow000");
+        row.origin = Some("adopted".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+
+    let mut graph = graph_read(
+        &[("acrow000-1111-2222-3333-444444444444", "NM", "done")],
+        &[],
+    )
+    .unwrap();
+    graph
+        .pr_state
+        .insert("NM".into(), (Some("merged".into()), 0, 0));
+    // A KNOWN snapshot listing nothing: absence from it is positive death
+    // evidence, the same predicate the rm live gate applies.
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![]);
+
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        Some(graph),
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| true,
+    );
+
+    assert_eq!(
+        summary.retired.len(),
+        1,
+        "retired: {:?}, kept_not_spawn: {:?}",
+        summary.retired,
+        summary.kept_not_spawn
+    );
+    assert_eq!(summary.retired[0].0, "acrow000");
+    assert!(
+        summary.kept_not_spawn.is_empty(),
+        "{:?}",
+        summary.kept_not_spawn
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// The failed read: the same corpse row with a snapshot that reads unknown
+/// keeps under `not a spawn row` - an unread instrument is never absence.
+#[test]
+fn an_adopted_row_with_an_unknown_snapshot_keeps() {
+    let home = tmp_home("gc-corpse-unknown");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = claude_worker_row("au-row", "aurow000");
+        row.origin = Some("adopted".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+
+    let graph = graph_read(
+        &[("aurow000-1111-2222-3333-444444444444", "NM", "done")],
+        &[],
+    );
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        true,
+        graph,
+        &|_| Some(vec![quiet.clone()]),
+        no_agents(),
+        &|_| true,
+    );
+
+    assert_eq!(summary.retired, vec![], "{:?}", summary.retired);
+    assert_eq!(
+        summary.kept_not_spawn,
+        vec![("aurow000".to_string(), "adopted".to_string())],
+        "{:?}",
+        summary.kept_not_spawn
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// Presence in a known snapshot keeps, whatever the node reads; and a codex
+/// row (no claude roster, no pid) with no death marker keeps too - the
+/// corpse predicate has exactly two legs and nothing else satisfies it.
+#[test]
+fn an_adopted_row_with_a_live_roster_row_or_no_probe_keeps() {
+    let home = tmp_home("gc-corpse-live");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut present = claude_worker_row("pr-row", "prrow000");
+        present.origin = Some("adopted".into());
+        r.entries.push(present);
+        let mut codex = ask_row("cx-row", None);
+        codex.short_id = "cxrow000".into();
+        codex.harness = Some("codex".into());
+        codex.harness_session_id = Some("sess-cx".into());
+        codex.origin = Some("adopted".into());
+        r.entries.push(codex);
+    })
+    .unwrap();
+
+    let graph = graph_read(
+        &[
+            ("prrow000-1111-2222-3333-444444444444", "NM", "done"),
+            ("sess-cx", "NM", "done"),
+        ],
+        &[],
+    );
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("prrow000", Some("idle")),
+    ]);
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        true,
+        graph,
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| true,
+    );
+
+    assert_eq!(summary.retired, vec![], "{:?}", summary.retired);
+    let kept: Vec<&str> = summary
+        .kept_not_spawn
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(kept.len(), 2, "{:?}", summary.kept_not_spawn);
+    assert!(kept.contains(&"prrow000"), "{:?}", summary.kept_not_spawn);
+    assert!(kept.contains(&"cxrow000"), "{:?}", summary.kept_not_spawn);
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── a row that resolved no node releases on its own done report ─────────
+
+/// The high path: a quiet row whose inside-leg report reads done and that
+/// fno never stopped retires with no node resolved. A still-working twin
+/// keeps - and every kept no-provenance row now carries a hold with a
+/// clock, so the release verb can reach it.
+#[test]
+fn a_no_provenance_row_releases_on_its_done_report_and_keeps_carry_a_clock() {
+    let home = tmp_home("gc-np-done");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    let leg_done = state::InsideLegReport {
+        state: crate::state::InsideLegState::Done,
+        seq: 3,
+        reason: None,
+        received_at: "2026-09-15T19:52:20Z".into(),
+        ttl_ms: None,
+    };
+    let leg_working = state::InsideLegReport {
+        state: crate::state::InsideLegState::Working,
+        seq: 4,
+        reason: None,
+        received_at: "2026-09-15T19:52:20Z".into(),
+        ttl_ms: None,
+    };
+    state::update_registry(&home.registry_json(), |r| {
+        // The name carries no node token, the registry node field is empty,
+        // and the graph names the session nowhere: no source resolves.
+        let mut done = ask_row("standby-worker", None);
+        done.short_id = "npdone01".into();
+        done.harness_session_id = Some("sess-np-done".into());
+        done.origin = Some("spawn".into());
+        done.inside_leg = Some(leg_done);
+        r.entries.push(done);
+        let mut working = ask_row("midturn-worker", None);
+        working.short_id = "npwork01".into();
+        working.harness_session_id = Some("sess-np-work".into());
+        working.origin = Some("spawn".into());
+        working.inside_leg = Some(leg_working);
+        r.entries.push(working);
+    })
+    .unwrap();
+
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        graph_read(&[], &[]),
+        &|_| Some(vec![quiet.clone()]),
+        no_agents(),
+        &|_| true,
+    );
+
+    assert_eq!(
+        summary.retired.len(),
+        1,
+        "retired: {:?}, kept: {:?}",
+        summary.retired,
+        summary.kept_no_provenance
+    );
+    assert_eq!(summary.retired[0].0, "npdone01");
+    assert_eq!(summary.kept_no_provenance, vec!["npwork01"]);
+    let h = find_hold(&summary, "npwork01");
+    assert!(h.reason.contains("no provenance"), "{h:?}");
+    assert!(h.age_s.is_some_and(|a| a >= 7200), "{h:?}");
+    assert_eq!(h.age_basis, "transcript quiet");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── the receipt names a registry it cannot write ────────────────────────
+
+/// A staged registry one version ahead of this binary: the summary carries
+/// the skew and the rendered receipt names both versions and the refused
+/// write, in text and JSON.
+#[test]
+fn a_forward_registry_names_itself_in_the_receipt() {
+    let home = tmp_home("gc-skew-hp");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let forward = crate::state::REGISTRY_SCHEMA_VERSION + 1;
+    let understood = crate::state::REGISTRY_SCHEMA_VERSION;
+    let registry = serde_json::json!({
+        "schema_version": forward,
+        "agents": [{
+            "name": "skew-row",
+            "cwd": "/tmp",
+            "status": "exited",
+            "created_at": "2026-09-06T00:00:00Z",
+            "harness": "claude",
+            "harness_session_id": "sess-skew",
+            "short_id": "skewrow1",
+            "origin": "spawn",
+        }],
+    });
+    std::fs::create_dir_all(home.root()).unwrap();
+    std::fs::write(
+        home.registry_json(),
+        serde_json::to_string(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let graph = graph_read(&[("sess-skew", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        true,
+        7,
+        &move |_| graph.clone(),
+        &|_| None,
+        &uniform_ages(7200),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+    );
+
+    assert_eq!(summary.schema_skew, Some((forward, understood)));
+    let text = crate::reap_render::render_reap(&summary, false, true);
+    assert!(
+        text.contains(&format!(
+            "schema v{forward} is ahead of the v{understood} this fno understands"
+        )),
+        "text: {text}"
+    );
+    assert!(
+        text.contains("no retirement can be written"),
+        "text must name the refused write: {text}"
+    );
+    let json_text = crate::reap_render::render_reap(&summary, true, true);
+    assert!(
+        json_text.contains(&format!(
+            "\"schema_skew\":{{\"on_disk\":{forward},\"understood\":{understood}}}"
+        )),
+        "json: {json_text}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// A registry at this binary's own version carries no skew, and the
+/// rendered text gains no line.
+#[test]
+fn a_registry_at_the_binary_version_carries_no_skew() {
+    let home = tmp_home("gc-skew-none");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(ask_row("plain-row", None));
+    })
+    .unwrap();
+
+    let graph = graph_read(&[("plain-row-sess", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        true,
+        7,
+        &move |_| graph.clone(),
+        &|_| None,
+        &uniform_ages(7200),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+    );
+
+    assert_eq!(summary.schema_skew, None);
+    let text = crate::reap_render::render_reap(&summary, false, true);
+    assert!(!text.contains("is ahead of the v"), "text: {text}");
+    let json_text = crate::reap_render::render_reap(&summary, true, true);
+    assert!(
+        json_text.contains("\"schema_skew\":null"),
+        "json: {json_text}"
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }
