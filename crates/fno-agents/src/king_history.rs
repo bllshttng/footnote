@@ -346,6 +346,7 @@ pub(crate) enum Verdict {
     Converging,
     Stalled,
     Degraded,
+    Unknown,
 }
 
 #[derive(Debug, PartialEq)]
@@ -374,6 +375,10 @@ pub(crate) struct VerdictReadings {
     /// Compaction count is only measurable against the manifest's harness
     /// session; without one the bound is unmeasurable, not zero.
     pub compactions_measurable: bool,
+    pub checkins: u64,
+    pub checkins_expected: bool,
+    pub checkins_stale: bool,
+    pub last_checkin_epoch: Option<i64>,
     /// `king_context_nudge` rows for this scope. Context pressure is a
     /// reading the payload carries; the verdict itself keys on none of it.
     pub nudges: u64,
@@ -437,7 +442,9 @@ fn in_tenure(ts: &str, crown_start: &str) -> bool {
 
 /// The one decision, pure so tests need no journal.
 ///
-/// Degraded: any declared bound exceeded. Stalled: nothing degraded, the
+/// Degraded: any declared bound exceeded. Unknown: the crown is old enough to
+/// owe a recent check-in but none is recent and readable. Stalled: nothing
+/// degraded, the
 /// last fire read a quiet board, and the scope the reign INHERITED shows no
 /// closure in the window. Filed nodes are deliberately excluded from the
 /// stalled test: a king that files real work into its own scope raises the
@@ -487,6 +494,8 @@ pub(crate) fn verdict(r: &VerdictReadings) -> (Verdict, Vec<BoundRow>) {
     let degraded = bounds.iter().any(|b| b.state == BoundState::Exceeded);
     let v = if degraded {
         Verdict::Degraded
+    } else if r.checkins_stale {
+        Verdict::Unknown
     } else if r.last_actionable == Some(0)
         && r.inherited_undelivered > 0
         && r.inherited_closed_in_window == 0
@@ -550,6 +559,7 @@ fn scan_readings(
                 kind,
                 KING_LOOP_CHECK
                     | TERMINATION
+                    | REIGN_CHECKIN
                     | CONTEXT_SNAPSHOT
                     | LOOP_CHECK_CONFIG
                     | KING_CONTEXT_NUDGE
@@ -575,6 +585,22 @@ fn scan_readings(
                 }
                 TERMINATION if row_session == fno_id && s_str(&data, "driver") == Some("king") => {
                     terminations.push(s_str(&data, "reason").unwrap_or("unknown").to_string());
+                }
+                REIGN_CHECKIN => {
+                    let (canonical, _, _) = classify(&event, scope);
+                    if canonical
+                        && s_str(&event, "source") == Some("loop")
+                        && in_tenure(s_str(&event, "ts").unwrap_or(""), crown_start)
+                    {
+                        r.checkins += 1;
+                        if let Some(epoch) = s_str(&event, "ts")
+                            .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                            .map(|ts| ts.timestamp())
+                        {
+                            r.last_checkin_epoch =
+                                Some(r.last_checkin_epoch.map_or(epoch, |last| last.max(epoch)));
+                        }
+                    }
                 }
                 CONTEXT_SNAPSHOT
                     if !harness_session_id.is_empty()
@@ -694,6 +720,11 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
             return 1;
         }
     };
+    let manifest_path = inputs.manifest_path.clone();
+    let harness = inputs.harness.clone();
+    let now = inputs.now;
+    let checkin_interval_secs = inputs.checkin_interval_secs;
+    let crown_age_secs = inputs.crown_age_secs;
     let manifest = inputs.manifest;
     let harness_session_id = manifest.harness_session_id.clone().unwrap_or_default();
     let crown_start = manifest.created_at.clone().unwrap_or_default();
@@ -714,6 +745,17 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     readings.respawn_count = manifest.respawn_count;
     readings.respawn_ceiling = manifest.respawn_ceiling;
     readings.compaction_ceiling = Some(inputs.compaction_ceiling);
+    readings.checkins_expected =
+        manifest.shape == "court" && crown_age_secs > checkin_interval_secs;
+    readings.checkins_stale = checkins_stale(
+        &readings,
+        now.timestamp(),
+        checkin_interval_secs,
+        crown_age_secs,
+    );
+    let (compactions, compactions_source, compactions_error) =
+        compaction_reading(&manifest, &harness, readings.compactions);
+    readings.compactions = compactions;
     readings.compactions_measurable = !harness_session_id.is_empty();
     readings.inherited_undelivered = inputs.inherited_undelivered;
     readings.inherited_closed_in_window = inputs.inherited_closed_in_window;
@@ -731,6 +773,11 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         "fires": readings.fires,
         "last_actionable": readings.last_actionable,
         "compactions": readings.compactions,
+        "compactions_source": compactions_source,
+        "compactions_error": compactions_error,
+        "checkins": readings.checkins,
+        "checkins_expected": readings.checkins_expected,
+        "checkins_stale": readings.checkins_stale,
         "nudges": readings.nudges,
         "terminations": readings.terminations.iter().map(|(reason, n)| json!({
             "reason": reason,
@@ -741,6 +788,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
             "source": b.source,
         })),
         "manifest": {
+            "path": manifest_path.display().to_string(),
             "fno_id": manifest.fno_id,
             "created_at": manifest.created_at,
             "max_iterations": manifest.max_iterations,
@@ -803,6 +851,10 @@ fn render_verdict(payload: &Value) -> String {
         "verdict: {}",
         payload["verdict"].as_str().unwrap_or("")
     )];
+    lines.push(format!(
+        "manifest: {}",
+        payload["manifest"]["path"].as_str().unwrap_or("")
+    ));
     for b in payload["bounds"].as_array().unwrap() {
         let state = b["state"].as_str().unwrap_or("");
         let body = match (b["value"].as_u64(), b["ceiling"].as_u64(), state) {
@@ -813,15 +865,79 @@ fn render_verdict(payload: &Value) -> String {
         lines.push(format!("  {}: {}", b["name"].as_str().unwrap_or(""), body));
     }
     lines.push(format!(
-        "readings: {} fire(s), compactions {}, inherited undelivered {}, closed in window {}, scanned {} rows across {} journal(s)",
+        "readings: {} fire(s), loop check-ins {} (expected: {}, stale: {}), compactions {} ({}), inherited undelivered {}, closed in window {}, scanned {} rows across {} journal(s)",
         payload["fires"],
+        payload["checkins"],
+        payload["checkins_expected"],
+        payload["checkins_stale"],
         payload["compactions"],
+        payload["compactions_source"].as_str().unwrap_or(""),
         payload["inherited_undelivered"],
         payload["inherited_closed_in_window"],
         payload["scanned"],
         payload["journals"].as_array().map(|a| a.len()).unwrap_or(0),
     ));
+    if let Some(error) = payload["compactions_error"].as_str() {
+        lines.push(format!("compactions read: {error}"));
+    }
     lines.join("\n")
+}
+
+fn checkins_stale(
+    readings: &VerdictReadings,
+    now_epoch: i64,
+    interval_secs: i64,
+    crown_age_secs: i64,
+) -> bool {
+    if !readings.checkins_expected {
+        return false;
+    }
+    if readings.checkins == 0 {
+        return crown_age_secs >= interval_secs.saturating_mul(2);
+    }
+    readings
+        .last_checkin_epoch
+        .map(|last| now_epoch - last >= interval_secs.saturating_mul(2))
+        .unwrap_or(true)
+}
+
+fn compaction_reading(
+    manifest: &crate::loopcheck::KingManifest,
+    harness: &str,
+    journal_count: u64,
+) -> (u64, &'static str, Option<String>) {
+    let session_id = manifest.harness_session_id.as_deref().unwrap_or_default();
+    if session_id.is_empty() {
+        return (journal_count, "unmeasurable", None);
+    }
+    if harness != "claude" {
+        return (journal_count, "journal", None);
+    }
+    let Some(path) = crate::claude_drive::find_transcript_in(
+        &crate::claude_drive::claude_projects_dir(),
+        session_id,
+    ) else {
+        return (
+            journal_count,
+            "journal",
+            Some(format!(
+                "transcript not found for harness session {session_id}"
+            )),
+        );
+    };
+    let since = manifest.created_at.as_deref().and_then(|ts| {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .ok()
+            .map(|value| value.timestamp())
+    });
+    match crate::compaction::count_boundaries_since(&path, since) {
+        Ok(count) => (count, "transcript", None),
+        Err(err) => (
+            journal_count,
+            "journal",
+            Some(format!("{}: {err}", path.display())),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -841,6 +957,10 @@ mod verdict_tests {
             compaction_ceiling: Some(3),
             block_cap: None,
             compactions_measurable: true,
+            checkins: 0,
+            checkins_expected: false,
+            checkins_stale: false,
+            last_checkin_epoch: None,
             nudges: 0,
             terminations: Vec::new(),
             inherited_undelivered: 0,
@@ -923,6 +1043,44 @@ mod verdict_tests {
             assert_eq!(b.state, BoundState::Absent, "{name}");
             assert_ne!(b.state, BoundState::Within, "{name}");
         }
+    }
+
+    #[test]
+    fn an_old_crown_without_readable_checkins_reads_unknown() {
+        let mut r = readings();
+        r.checkins_expected = true;
+        r.checkins_stale = true;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Unknown);
+
+        r.checkins = 1;
+        r.checkins_stale = false;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Converging);
+    }
+
+    #[test]
+    fn checkin_staleness_respects_the_two_interval_hook_cadence() {
+        let mut r = readings();
+        r.checkins_expected = true;
+        r.checkins = 1;
+        r.last_checkin_epoch = Some(1_000);
+        assert!(!checkins_stale(&r, 1_000 + 1_800, 1_800, 1_800));
+        assert!(checkins_stale(&r, 1_000 + 3_600, 1_800, 3_600));
+        r.checkins = 0;
+        r.last_checkin_epoch = None;
+        assert!(!checkins_stale(&r, 1_000 + 1_800, 1_800, 1_800));
+        assert!(checkins_stale(&r, 1_000 + 3_600, 1_800, 3_600));
+    }
+
+    #[test]
+    fn a_breached_bound_outweighs_missing_checkins() {
+        let mut r = readings();
+        r.checkins_expected = true;
+        r.checkins_stale = true;
+        r.fires = 40;
+        let (v, _) = verdict(&r);
+        assert_eq!(v, Verdict::Degraded);
     }
 
     #[test]
@@ -1034,6 +1192,51 @@ mod verdict_tests {
         assert_eq!(r.block_cap.as_ref().unwrap().source, "default");
         assert_eq!(r.nudges, 1);
         assert_eq!(journals.len(), 1);
+    }
+
+    #[test]
+    fn scan_counts_only_current_crown_checkins_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("events.jsonl");
+        let second = dir.path().join("events.2.jsonl");
+        let old = json!({
+            "ts": "2026-09-01T00:00:00Z",
+            "type": REIGN_CHECKIN,
+            "source": "loop",
+            "data": {"scope": "x-bbbb", "change": "old"}
+        });
+        let current = json!({
+            "ts": "2026-09-10T00:00:00Z",
+            "type": REIGN_CHECKIN,
+            "source": "loop",
+            "data": {"scope": "x-bbbb", "change": "current"}
+        });
+        let hook = json!({
+            "ts": "2026-09-11T00:00:00Z",
+            "type": REIGN_CHECKIN,
+            "source": "hook",
+            "data": {"scope": "x-bbbb", "change": "missed beat"}
+        });
+        std::fs::write(&first, format!("{old}\n{current}\n{hook}\n")).unwrap();
+        std::fs::write(&second, format!("{current}\n")).unwrap();
+
+        let (r, _, _, _) = scan_readings(
+            &[first, second],
+            "kg1",
+            "hs1",
+            "x-bbbb",
+            "2026-09-05T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(r.checkins, 1);
+        assert_eq!(
+            r.last_checkin_epoch,
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-09-10T00:00:00Z")
+                    .unwrap()
+                    .timestamp()
+            )
+        );
     }
 
     #[test]
@@ -1195,6 +1398,42 @@ mod verdict_tests {
             run_king_verdict(&verdict_args(&root, &manifest, &journal)),
             0
         );
+    }
+
+    #[test]
+    fn compaction_reading_names_transcript_and_journal_fallbacks() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = "a1b2c3d4-1111-2222-3333-444455556666";
+        let transcript = project.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            "{\"subtype\":\"compact_boundary\",\"timestamp\":\"2026-09-10T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, dir.path());
+
+        let mut manifest = crate::loopcheck::KingManifest::default();
+        manifest.harness_session_id = Some(session.into());
+        manifest.created_at = Some("2026-09-01T00:00:00Z".into());
+        assert_eq!(
+            compaction_reading(&manifest, "claude", 7),
+            (1, "transcript", None)
+        );
+
+        assert_eq!(
+            compaction_reading(&manifest, "codex", 7),
+            (7, "journal", None)
+        );
+
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        let (count, source, error) = compaction_reading(&manifest, "claude", 7);
+        assert_eq!((count, source), (7, "journal"));
+        assert!(error.unwrap().contains("transcript not found"));
     }
 
     #[test]

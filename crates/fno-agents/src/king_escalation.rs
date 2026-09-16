@@ -157,7 +157,7 @@ fn closing_for(live: Option<bool>, unknown_reason: Option<&str>, rows: bool) -> 
     closing
 }
 
-/// the reign verdict rides the question. `stalled`/`degraded` append
+/// the reign verdict rides the question. `stalled`/`degraded`/`unknown` append
 /// the spawn `--succeed` handoff offer; `unreadable` is a failed verdict
 /// read, and it is named - escalation never goes silent on it. Any other
 /// verdict (a converging reign stops on an actionable-board escalation)
@@ -166,7 +166,7 @@ fn closing_for(live: Option<bool>, unknown_reason: Option<&str>, rows: bool) -> 
 /// `<scope>` placeholder.
 fn append_verdict(closing: &mut String, verdict: &str, scope: Option<&str>, readings: &[String]) {
     let name = verdict.split(' ').next().unwrap_or("");
-    if name == "stalled" || name == "degraded" {
+    if name == "stalled" || name == "degraded" || name == "unknown" {
         let handoff = scope
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
@@ -559,6 +559,17 @@ mod tests {
             Some("x-bbbb"),
         ));
         assert!(text.contains("Verdict degraded 2 bounds breached."));
+        assert!(text.contains("--crown x-bbbb --succeed"));
+    }
+
+    #[test]
+    fn an_unknown_verdict_offers_the_same_handoff() {
+        let text = question(&with_verdict(
+            req(IDS.to_vec(), Some(true)),
+            "unknown",
+            Some("x-bbbb"),
+        ));
+        assert!(text.contains("Verdict unknown."));
         assert!(text.contains("--crown x-bbbb --succeed"));
     }
 
