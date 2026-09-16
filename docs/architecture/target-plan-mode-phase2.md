@@ -52,7 +52,7 @@ Locked behaviors:
 
 ### Layer 2: blueprint completion dispatches nothing
 
-A blueprint writes its plan, closes its session row, and stops. It runs no `fno backlog advance` and no spawn. A ready node starts through a door that already exists: a king's `fno backlog advance --epic <epic>`, the merge continuation (`ac`), the active-backlog drain (`ab`, gated by `config.active_backlog.enabled`), or a manual `fno agents spawn --node <id>` or `/fno:target bg <node>`.
+A blueprint writes its plan, closes its session row, and stops. It runs no `fno backlog advance` and no spawn. A ready node starts through a door that already exists: a king's `fno backlog advance --epic <epic>`, the merge continuation, or the active-backlog drain. The drain is gated by `config.active_backlog.enabled`. A manual `fno agents spawn --node <id>` or `/fno:target bg <node>` also starts one.
 
 Two earlier lanes started work from inside the planning step, and both are gone. The launch-on-write hook (`autolaunch-on-ready.sh`) dispatched the plan just written. The blueprint-completion advance nudge ran `fno backlog advance` and drained the whole epic from the planning worker. The tombstones live in `scripts/ci/retired-commands.txt` and `scripts/ci/retired-config-leaves.txt`.
 
