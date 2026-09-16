@@ -21,10 +21,20 @@ jobs:
         uses: actions/checkout@v4
 
       - name: PR node closure
+        id: closure
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_HEAD_REF: ${{ github.head_ref }}
-        run: bash scripts/ci/check-pr-node-closure.sh
+        # shell: bash sets pipefail, so the script's exit code fails the step
+        # while tee still captures the remedy text for the annotation step.
+        shell: bash
+        run: bash scripts/ci/check-pr-node-closure.sh 2>&1 | tee closure.log
+
+      - name: Annotate with the remedy
+        if: failure() && steps.closure.outcome == 'failure'
+        run: |
+          cat closure.log >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::PR node closure: the PR body needs the exact Backlog-Closure trailer. Generate it with: fno do pr closure-trailer <node-id> (or --from-branch), then EDIT the PR body. Do not rerun this failed run."
 
   self-test:
     runs-on: ubuntu-latest
