@@ -185,7 +185,7 @@ def run_sync_canonical(
         return 0
 
     # 5. Single-flight lock (canonical-scoped, TTL-live).
-    from fno import claims
+    from fno.backlog.single_flight import acquire_flight
 
     # Canonical-wide, NOT per-SHA. The claim's job is that two `fno agents restart`s
     # never overlap in one checkout, and a per-SHA key does not deliver that: a
@@ -193,28 +193,14 @@ def run_sync_canonical(
     # locks and pull, update, and restart concurrently. Exactly-once-per-SHA is
     # the marker's job, and it still is - separating the two is what lets this
     # key be the coarse one the non-overlap invariant actually needs.
-    lock_key = "post-merge-sync"
-    holder = f"sync-canonical:{pr_number}"
-    try:
-        claims.acquire_claim(
-            lock_key, holder, ttl_ms=_SYNC_CLAIM_TTL_MS,
-            reason="post-merge canonical sync", root=canonical,
-            # This subprocess IS the hold: stamp it so a dead sync process
-            # never outlives its lease through the writer session's witness.
-            pid_provenance=claims.HOLDER_PROCESS,
-        )
-    except claims.CLAIM_UNAVAILABLE:
-        # Someone else has this lock right now, not a reason to break this
-        # function's fail-open contract with an uncaught traceback.
-        held = claims.claim_status(lock_key, root=canonical)
-        by = ""
-        if held.get("holder"):
-            exp = held.get("expires_at")
-            until = (
-                datetime.fromtimestamp(exp / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                if exp else "no expiry"
-            )
-            by = f" (held by {held['holder']}, {held.get('state')}/{held.get('basis')}, expires {until})"
+    flight = acquire_flight(
+        "post-merge-sync", scope="post-merge canonical sync",
+        name=f"sync-canonical:{pr_number}", root=canonical, ttl_ms=_SYNC_CLAIM_TTL_MS,
+    )
+    if flight is None or flight.held:
+        # Someone else has this lock right now; skipping is the fail-open
+        # contract, and an unavailable gate reads the same way.
+        by = f" (held by {flight.holder}, expires {flight.expires or 'no expiry'})" if flight else ""
         typer.echo(f"post-merge sync: in progress elsewhere for {sha[:12]}{by}; skipping")
         return 0
 
@@ -278,10 +264,7 @@ def run_sync_canonical(
         typer.echo("\n".join(parts), err=True)
         return result.returncode
     finally:
-        try:
-            claims.release_claim(lock_key, holder, root=canonical)
-        except Exception:
-            pass  # lock is TTL-bounded; a failed release recovers on its own
+        flight.release()
 
 
 # ---------------------------------------------------------------------------
