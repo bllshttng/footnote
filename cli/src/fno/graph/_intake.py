@@ -1292,14 +1292,7 @@ def _prepare_intake(
 
 
 def _refuse_filename_claim_mismatch(plan_path: str, cli_claim: str | None) -> None:
-    """Refuse a node-bearing filename whose identity disagrees across
-    its most-visible filename, frontmatter, and CLI claim.
-
-    A plan is one delivery unit, so its identity must agree across
-    the filename, declarative frontmatter, and strict CLI override. Ignore
-    id-less filenames and malformed frontmatter values; the existing claim
-    resolver owns those cases.
-    """
+    """Refuse identity disagreement across filename, frontmatter, and CLI claim."""
     from fno.plan.identity import plan_filename_node_id
 
     declared = {
