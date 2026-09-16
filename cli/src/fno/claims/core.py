@@ -314,7 +314,7 @@ def _make_claim(
     )
 
 
-def acquire_claim(
+def _legacy_acquire_claim(
     key: str,
     holder: str,
     *,
@@ -367,7 +367,7 @@ def acquire_claim(
             raise ClaimContended(
                 f"acquire_claim gave up after {_PY_LEGACY_RETRY_LIMIT} contention retries on {key!r}"
             )
-        return acquire_claim(
+        return _legacy_acquire_claim(
             key,
             holder,
             reason=reason,
@@ -1119,7 +1119,7 @@ def _atomic_replace(path: Path, content: str) -> None:
         raise
 
 
-def release_claim(
+def _legacy_release_claim(
     key: str,
     holder: str,
     *,
@@ -1339,7 +1339,7 @@ def _reanchor_pid_for(
     return anchor
 
 
-def refresh_claim(
+def _legacy_refresh_claim(
     key: str,
     holder: str,
     *,
@@ -1396,7 +1396,9 @@ def refresh_claim(
                     f"refresh_claim gave up after {_PY_LEGACY_RETRY_LIMIT} "
                     f"contention retries on {key!r}"
                 )
-            return refresh_claim(key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt + 1)
+            return _legacy_refresh_claim(
+                key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt + 1
+            )
         recovery_token = token
         acquired_lock = True
 
@@ -1449,7 +1451,7 @@ def refresh_claim(
             release_dir_mutex(recovery_lock, recovery_token)
 
 
-def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
+def _legacy_claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
     """Inspect a single key. Never raises; returns a structured dict.
 
     Keys in the returned dict:
@@ -1586,7 +1588,7 @@ def _list_claims_impl(
     return out, {**counts, "total": sum(counts.values())}, states_by_key
 
 
-def list_claims(
+def _legacy_list_claims(
     *,
     prefix: Optional[str] = None,
     include_stale: bool = False,
@@ -1607,7 +1609,7 @@ def list_claims(
     return rows
 
 
-def list_claims_with_counts(
+def _legacy_list_claims_with_counts(
     *,
     prefix: Optional[str] = None,
     include_stale: bool = False,
@@ -1635,7 +1637,7 @@ class ForceReleaseOutcome(NamedTuple):
     previous_holder: Optional[str]
 
 
-def force_release_claim(
+def _legacy_force_release_claim(
     key: str,
     reason: str,
     *,
@@ -1792,7 +1794,7 @@ def _default_reap_roots() -> list[Path]:
     return _dedup_roots([global_claims_root(), None])
 
 
-def reap_dead_claims(
+def _legacy_reap_dead_claims(
     *,
     roots: Optional[list[Optional[Path]]] = None,
     apply: bool = False,
@@ -2292,14 +2294,14 @@ def _native_claim_model(payload: dict[str, Any]) -> Claim:
     if not isinstance(body, dict):
         raise ClaimVerdictError("fno-agents claim returned no claim object")
     return Claim.model_validate(body)
-_LEGACY_ACQUIRE_CLAIM = acquire_claim
-_LEGACY_RELEASE_CLAIM = release_claim
-_LEGACY_REFRESH_CLAIM = refresh_claim
-_LEGACY_CLAIM_STATUS = claim_status
-_LEGACY_LIST_CLAIMS = list_claims
-_LEGACY_LIST_CLAIMS_WITH_COUNTS = list_claims_with_counts
-_LEGACY_FORCE_RELEASE_CLAIM = force_release_claim
-_LEGACY_REAP_DEAD_CLAIMS = reap_dead_claims
+_LEGACY_ACQUIRE_CLAIM = _legacy_acquire_claim
+_LEGACY_RELEASE_CLAIM = _legacy_release_claim
+_LEGACY_REFRESH_CLAIM = _legacy_refresh_claim
+_LEGACY_CLAIM_STATUS = _legacy_claim_status
+_LEGACY_LIST_CLAIMS = _legacy_list_claims
+_LEGACY_LIST_CLAIMS_WITH_COUNTS = _legacy_list_claims_with_counts
+_LEGACY_FORCE_RELEASE_CLAIM = _legacy_force_release_claim
+_LEGACY_REAP_DEAD_CLAIMS = _legacy_reap_dead_claims
 
 
 def acquire_claim(
