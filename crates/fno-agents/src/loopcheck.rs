@@ -8307,12 +8307,15 @@ pub(crate) fn decide_with_payload(
     // done() fails simply blocks with the named reason.
     const MUTE_PROBE_N: u64 = 2;
 
-    // ── Watching: the lease-only idle is now the ONLY watching path, and it
-    // runs ahead of every read . A <watching> tag on a
-    // harness that can self-wake idles on the tag plus a renewed claim lease:
-    // this fire reads NO PR state - the watcher's exit re-evaluates with
-    // fresh evidence. A harness that cannot idle, or a lease that will not
-    // renew, blocks locally with the named refusal - never a dead watch.
+    // ── Watching: the lease-only idle runs ahead of every read. A
+    // <watching> tag on a harness that can self-wake idles on the tag plus a
+    // renewed claim lease: this fire reads NO PR state - the watcher's exit
+    // re-evaluates with fresh evidence. A harness that cannot idle, or a
+    // lease that will not renew, falls through with the named refusal riding
+    // the ordinary done() block, so the agent still sees the actionable
+    // blocker behind its own dead watch - never a dead watch, never a blind
+    // one.
+    let mut watching_fell_through = false;
     if let Intent::Watching {
         ref reason,
         ref timeout,
@@ -8372,44 +8375,10 @@ pub(crate) fn decide_with_payload(
                 "watching: idling until the watcher fires; this fire read no PR state",
             );
         }
-        // Not idlable, or the lease declined: block locally with the named
-        // refusal. No GitHub read decides the question.
-        let refusal = if !can_idle {
-            watch_lease::watching_harness_refusal(author_harness.as_deref(), is_loop_run_child)
-        } else {
-            let lease_cause = watch_lease::declined_cause(claim.as_ref(), renew_outcome.as_ref());
-            watch_lease::idle_refusal(
-                can_idle,
-                author_harness.as_deref(),
-                is_loop_run_child,
-                true,
-                0,
-                claim.is_some(),
-                lease_cause.as_ref(),
-            )
-            .reason
-        };
-        emit(
-            "loop_check",
-            serde_json::json!({
-                "session_id": session_id,
-                "fingerprint": fingerprint,
-                "fires": this_fire,
-                "consecutive_unchanged": consecutive_after,
-                "streak_window_secs": streak_window,
-                "decision": "block",
-                "intent": "watching",
-                "intent_source": intent_source,
-                "pr_state": last_pr_state,
-                "ci": last_ci,
-                "reviewed": false,
-                "fp_read_failed": false
-            }),
-        );
-        return (
-            0,
-            allow_output("block", None, &refusal, this_fire, Some(fingerprint)),
-        );
+        // Not idlable, or the lease declined: the refusal is composed after
+        // done() has named the real blocker, so the block keeps the
+        // actionable reason the agent needs alongside the refusal itself.
+        watching_fell_through = true;
     }
 
     // node_id is resolved once above, beside the <help> distress emit.
@@ -8456,6 +8425,7 @@ pub(crate) fn decide_with_payload(
         || intent != Intent::None
         || backstop_tripped
         || consecutive_after >= MUTE_PROBE_N
+        || watching_fell_through
     {
         // Handle aborted first
         if let Intent::Aborted { ref reason } = intent {
@@ -9369,6 +9339,42 @@ pub(crate) fn decide_with_payload(
                     return terminal("allow", Some(TerminationReason::NoProgress), &return_msg);
                 }
 
+                // A refused watch composes its refusal here, where the real
+                // blocker and finding count exist: the message keeps both the
+                // refusal and the actionable reason (never a blind block).
+                let watching_refusal = if watching_fell_through {
+                    let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
+                    let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
+                    let blocker = if can_idle { observed_async_wait } else { None };
+                    let claim = watch_lease::claim_pair(&manifest_content);
+                    let mut lease_cause: Option<watch_lease::RenewCause> = None;
+                    if can_idle && blocker.is_some() {
+                        let tag_timeout = match &intent {
+                            Intent::Watching { timeout, .. } => timeout.clone(),
+                            _ => None,
+                        };
+                        let window_ms = watch_window_ms(tag_timeout.as_deref());
+                        let renew_outcome = claim.as_ref().map(|(key, holder)| {
+                            crate::claims::renew(key, holder, window_ms, None)
+                        });
+                        if !matches!(renew_outcome.as_ref(), Some(Ok(true))) {
+                            lease_cause =
+                                watch_lease::declined_cause(claim.as_ref(), renew_outcome.as_ref());
+                        }
+                    }
+                    let r = watch_lease::idle_refusal(
+                        can_idle,
+                        author_harness.as_deref(),
+                        is_loop_run_child,
+                        blocker.is_none(),
+                        pr_info.unaddressed_findings.len(),
+                        claim.is_some(),
+                        lease_cause.as_ref(),
+                    );
+                    Some((r.reason, r.kind))
+                } else {
+                    None
+                };
                 // done() false on promise -> block with named reason. P2
                 // (ab-098967b4): enrich with a loop-boundary inbox nudge.
                 // A failed probe OR a fidelity refusal IS the blocker when
@@ -9385,7 +9391,24 @@ pub(crate) fn decide_with_payload(
                             head_shipped,
                         )
                     });
+                let block_reason = match &watching_refusal {
+                    // A permanent refusal already said no watcher can help, so
+                    // the arm hint the classifier appended would contradict it
+                    // inside one message: cut the hint, keep the blocker.
+                    Some((text, _)) if watch_lease::refusal_is_permanent(text) => {
+                        format!("{text}; {}", watch_lease::without_arm_hint(&block_reason))
+                    }
+                    Some((text, _)) => format!("{text}; {block_reason}"),
+                    None => block_reason,
+                };
                 let reason = crate::nudge::append_inbox_nudge(&block_reason, &cwd, &session_id);
+                let mut watch_extra = serde_json::json!({
+                    "done_probes": probe_results
+                });
+                watch_lease::attach_watch_refusal(
+                    &mut watch_extra,
+                    watching_refusal.as_ref().map(|(_, kind)| *kind),
+                );
                 fire_row(
                     "block",
                     if intent == Intent::Promise {
@@ -9394,9 +9417,7 @@ pub(crate) fn decide_with_payload(
                         "none"
                     },
                     false,
-                    serde_json::json!({
-                        "done_probes": probe_results
-                    }),
+                    watch_extra,
                 );
                 return (
                     0,

@@ -68,6 +68,29 @@ a session that holds the claim.";
 /// drift off the sentence it cuts.
 pub(super) const ARM_HINT_LEAD: &str = " Arm a harness-tracked watcher";
 
+/// The arm-and-tag hint's lead, shared with the writer: cutting a hint means
+/// cutting from this exact sentence on.
+pub(super) fn without_arm_hint(reason: &str) -> String {
+    match reason.find(ARM_HINT_LEAD) {
+        Some(i) => reason[..i].trim_end().to_string(),
+        None => reason.to_string(),
+    }
+}
+
+/// Whether a refusal text is permanent for the session: re-arming a watcher
+/// cannot change it, so the block drops the arm hint instead of contradicting
+/// itself inside one message.
+pub(super) fn refusal_is_permanent(reason: &str) -> bool {
+    reason == NO_CLAIM_REFUSAL || reason.starts_with(PERMANENT_REFUSAL_LEAD)
+}
+
+/// Attach the refusal's cause class to a loop_check row.
+pub(super) fn attach_watch_refusal(event: &mut serde_json::Value, kind: Option<&'static str>) {
+    if let Some(kind) = kind {
+        event["watch_refusal"] = serde_json::Value::String(kind.to_string());
+    }
+}
+
 /// Why a watch-lease renewal declined (x-b445). The first three are permanent
 /// for this session: arming another watcher cannot change them. `contended`
 /// (a peer held the recovery mutex, or the record answered nothing) and
@@ -179,9 +202,11 @@ pub(super) fn declined_cause(
     })
 }
 
-/// The refusal a watching fire falls through to when it cannot idle.
+/// The refusal a watching fire falls through to when it cannot idle, with
+/// the `watch_refusal` row field naming the cause class.
 pub(super) struct WatchRefusal {
     pub(super) reason: String,
+    pub(super) kind: &'static str,
 }
 
 pub(super) fn idle_refusal(
@@ -210,7 +235,16 @@ an async wait"
     } else {
         "watching ignored: watch lease could not be renewed".to_string()
     };
-    WatchRefusal { reason }
+    let kind = if !can_idle {
+        "harness"
+    } else if blocker_none {
+        "not_async"
+    } else if !claim_present {
+        "no_claim"
+    } else {
+        lease_cause.map(|c| c.as_str()).unwrap_or("write_failed")
+    };
+    WatchRefusal { reason, kind }
 }
 
 #[cfg(test)]

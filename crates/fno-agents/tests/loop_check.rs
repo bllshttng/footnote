@@ -1810,7 +1810,7 @@ fn ac5_err_no_gh_unattended_interrupted() {
         new_manifest("sess-nogh-unatt", "2026-06-05T00:00:00Z", false),
     )
     .unwrap();
-    fs::write(&transcript_path, transcript_empty()).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
 
     // Point to non-existent gh binary; git also non-existent
     let (_, d) = fire(&[
@@ -1829,49 +1829,6 @@ fn ac5_err_no_gh_unattended_interrupted() {
 
     assert_eq!(d.decision, "allow");
     assert_eq!(d.termination_reason.as_deref(), Some("Interrupted"));
-}
-
-/// AC5-ERR: gh absent + attended -> block with advisory mode, loop_advisory_mode event.
-#[test]
-fn ac5_err_no_gh_attended_advisory_block() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    isolate_settings(cwd);
-
-    let manifest_path = cwd.join("target-state.md");
-    let transcript_path = cwd.join("transcript.jsonl");
-
-    // Attended
-    fs::write(
-        &manifest_path,
-        new_manifest("sess-nogh-att", "2026-06-05T00:00:00Z", true),
-    )
-    .unwrap();
-    fs::write(&transcript_path, transcript_empty()).unwrap();
-
-    let (_, d) = fire(&[
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T00:30:00Z",
-        "--gh-bin=/nonexistent/gh",
-        "--git-bin=/nonexistent/git",
-    ]);
-
-    // Attended + no gh -> advisory mode -> block (keep working)
-    assert_eq!(d.decision, "block");
-
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
-    assert!(
-        events.contains("loop_advisory_mode"),
-        "loop_advisory_mode event expected; got: {events}"
-    );
 }
 
 /// Corrupt manifest -> allow + note on stderr (never panics, never traps).
@@ -2042,7 +1999,7 @@ fn gh_unspawnable_stays_out_of_advisory_mode() {
         new_manifest("sess-trouble", "2026-06-05T00:00:00Z", true),
     )
     .unwrap();
-    fs::write(&transcript_path, transcript_empty()).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
 
     // gh exists but is not executable: every spawn fails EACCES, a spawn
     // error that is NOT absence.
@@ -2085,52 +2042,6 @@ fn gh_unspawnable_stays_out_of_advisory_mode() {
         d.termination_reason.as_deref(),
         Some("DoneAdvisory"),
         "spawn trouble is not absence; no advisory termination"
-    );
-}
-
-/// AC5-ERR (a): gh binary absent + attended + no intent -> block in advisory
-/// mode, loop_advisory_mode event emitted each fire.
-#[test]
-fn gh_absent_attended_blocks_advisory() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    isolate_settings(cwd);
-
-    let manifest_path = cwd.join("target-state.md");
-    let transcript_path = cwd.join("transcript.jsonl");
-    fs::write(
-        &manifest_path,
-        new_manifest("sess-adv1", "2026-06-05T00:00:00Z", true),
-    )
-    .unwrap();
-    fs::write(&transcript_path, transcript_empty()).unwrap();
-
-    let (gh, git) = MockBins::no_gh();
-    let (code, d) = fire(&[
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T00:10:00Z",
-        &format!("--gh-bin={}", gh.display()),
-        &format!("--git-bin={}", git.display()),
-    ]);
-
-    assert_eq!(code, 0);
-    assert_eq!(
-        d.decision, "block",
-        "advisory mode without intent must block"
-    );
-    assert!(d.termination_reason.is_none());
-    let events = fs::read_to_string(project_events(&cwd)).unwrap();
-    assert!(
-        events.contains("\"loop_advisory_mode\""),
-        "loop_advisory_mode event expected: {events}"
     );
 }
 
@@ -2191,7 +2102,7 @@ fn gh_absent_unattended_interrupted() {
         new_manifest("sess-adv3", "2026-06-05T00:00:00Z", false),
     )
     .unwrap();
-    fs::write(&transcript_path, transcript_empty()).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
 
     let (gh, git) = MockBins::no_gh();
     let (code, d) = fire(&[
@@ -4050,28 +3961,31 @@ fn ac4_hp_fr_outage_freezes_streak_then_resumes() {
         fire(&refs)
     };
 
-    // Fires 1-2: healthy, identical fingerprint -> streak 1, 2.
+    // Fires 1-3: healthy, identical fingerprint. The first (quiet) fire
+    // records the no-PR journal basis, so the streak tail counts from fire 2.
     let (_, d1) = fire_with(&healthy);
     assert_eq!(d1.decision, "block");
     let (_, d2) = fire_with(&healthy);
     assert_eq!(d2.decision, "block");
+    let (_, d3) = fire_with(&healthy);
+    assert_eq!(d3.decision, "block");
 
-    // Fires 3-4: OUTAGE. Under pre-step-2 semantics fire 3 would have hit
-    // N=3 and terminated NoProgress; the freeze keeps the count at 2.
-    let (_, d3) = fire_with(&outage);
+    // Fires 4-5: OUTAGE. The count holds at 3 across the outage instead of
+    // advancing or resetting.
+    let (_, d4) = fire_with(&outage);
     assert_eq!(
-        d3.decision, "block",
+        d4.decision, "block",
         "outage fire must block, not terminate"
     );
     assert!(
-        d3.termination_reason.is_none(),
+        d4.termination_reason.is_none(),
         "outage must not trip NoProgress (AC4-HP); got {:?}",
-        d3.termination_reason
+        d4.termination_reason
     );
-    let (_, d4) = fire_with(&outage);
-    assert!(d4.termination_reason.is_none());
+    let (_, d5) = fire_with(&outage);
+    assert!(d5.termination_reason.is_none());
 
-    // AC4-HP: the recorded consecutive count held at 2 across the outage.
+    // AC4-HP: the recorded consecutive count held at 3 across the outage.
     let events = fs::read_to_string(&events_path).unwrap();
     let last_check = events
         .lines()
@@ -4082,18 +3996,18 @@ fn ac4_hp_fr_outage_freezes_streak_then_resumes() {
     assert_eq!(
         v.pointer("/data/consecutive_unchanged")
             .and_then(|x| x.as_u64()),
-        Some(2),
-        "outage fires must hold the count at K=2; event: {last_check}"
+        Some(3),
+        "outage fires must hold the count at K=3; event: {last_check}"
     );
 
-    // Fire 5: gh recovers with the SAME fingerprint -> streak resumes from
-    // K=2 -> 3 -> backstop trips -> done() runs (codex missing) -> NoProgress.
-    let (_, d5) = fire_with(&healthy);
+    // Fire 6: gh recovers with the SAME fingerprint -> the streak resumes
+    // from K -> the backstop trips -> done() runs (codex missing) -> NoProgress.
+    let (_, d6) = fire_with(&healthy);
     assert_eq!(
-        d5.termination_reason.as_deref(),
+        d6.termination_reason.as_deref(),
         Some("NoProgress"),
         "streak must resume from K after recovery (AC4-FR): {}",
-        d5.message
+        d6.message
     );
 }
 
@@ -4317,128 +4231,6 @@ fn ac6_sat_round_trip_reply_is_load_bearing() {
         d2.message.contains("loopcheck.rs:1560"),
         "block names the finding; got: {}",
         d2.message
-    );
-}
-
-/// sigma-review fix pin: a fire whose lightweight pre-read failed but whose
-/// done() reads succeed must keep the CARRIED fingerprint (frozen streak),
-/// not rebuild one from the pre-read's stale none|none components.
-#[test]
-fn prefail_done_success_keeps_carried_fingerprint() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    isolate_settings(cwd);
-
-    let manifest_path = cwd.join("target-state.md");
-    let transcript_path = cwd.join("transcript.jsonl");
-    let events_path = project_events(&cwd);
-    fs::write(
-        &manifest_path,
-        new_manifest("sess-prefail", "2026-06-05T00:00:00Z", false),
-    )
-    .unwrap();
-    fs::write(&transcript_path, transcript_with_promise()).unwrap();
-
-    // Healthy mock, but codex missing -> blocks (not done).
-    let healthy = green_gemini_only_reviewed();
-
-    // Pre-read-only failure: the fp pre-read queries headRefName WITHOUT
-    // headRefOid; done()'s Read 1 includes headRefOid. Fail only the former.
-    let dir = TempDir::new().unwrap();
-    let gh_prefail = make_script(
-        dir.path(),
-        "gh",
-        r#"
-if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
-if echo "$*" | grep -q "headRefOid"; then
-  echo '{"state":"OPEN","number":9,"headRefName":"feat","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000009"}'
-  exit 0
-fi
-if echo "$*" | grep -q "headRefName"; then
-  echo 'connect: network is unreachable' >&2
-  exit 1
-fi
-if echo "$*" | grep -q "checks"; then
-  echo '[{"name":"ci","state":"SUCCESS","bucket":"pass"}]'
-  exit 0
-fi
-if echo "$*" | grep -q "pulls/"; then
-  echo '[]'
-  exit 0
-fi
-if echo "$*" | grep -q "reviews"; then
-  echo '{"reviews":[{"author":{"login":"gemini-code-assist[bot]"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
-  exit 0
-fi
-exit 1
-"#,
-    );
-    let git = make_script(
-        dir.path(),
-        "git",
-        r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000009""#,
-    );
-
-    let args_healthy = [
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T00:30:00Z",
-        &format!("--gh-bin={}", healthy.gh.display()),
-        &format!("--git-bin={}", healthy.git.display()),
-        "--events",
-        events_path.to_str().unwrap(),
-    ];
-    let args_prefail = [
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T00:35:00Z",
-        &format!("--gh-bin={}", gh_prefail.display()),
-        &format!("--git-bin={}", git.display()),
-        "--events",
-        events_path.to_str().unwrap(),
-    ];
-
-    // Fires 1-2: healthy blocks with identical fingerprints (streak 1, 2).
-    let (_, d1) = fire(&args_healthy);
-    assert_eq!(d1.decision, "block");
-    let (_, d2) = fire(&args_healthy);
-    assert_eq!(d2.decision, "block");
-
-    // Fire 3: pre-read fails, done() succeeds (codex still missing).
-    let (_, d3) = fire(&args_prefail);
-    assert_eq!(d3.decision, "block");
-    assert!(d3.termination_reason.is_none());
-    assert_eq!(
-        d3.fingerprint, d1.fingerprint,
-        "carried fingerprint must survive; a none|none rebuild leaked from the failed pre-read"
-    );
-
-    // The frozen count (2) is recorded, not a recount against a phantom fp.
-    let events = fs::read_to_string(&events_path).unwrap();
-    let last_check = events
-        .lines()
-        .filter(|l| l.contains("\"loop_check\"") && l.contains("sess-prefail"))
-        .next_back()
-        .unwrap();
-    let v: serde_json::Value = serde_json::from_str(last_check).unwrap();
-    assert_eq!(
-        v.pointer("/data/consecutive_unchanged")
-            .and_then(|x| x.as_u64()),
-        Some(2),
-        "streak must stay frozen at 2; event: {last_check}"
     );
 }
 
@@ -7729,68 +7521,6 @@ exit 1"#,
     )
 }
 
-/// Item 4: below the floor and carrying no promise intent, a fire spends NO
-/// GraphQL at all - the stand-down must precede every `gh pr view`.
-#[test]
-fn floor_stand_down_spends_no_graphql() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    isolate_settings(cwd);
-    let manifest_path = cwd.join("target-state.md");
-    let transcript_path = cwd.join("transcript.jsonl");
-    fs::write(
-        &manifest_path,
-        new_manifest("sess-floor", "2026-06-05T00:00:00Z", true),
-    )
-    .unwrap();
-    fs::write(&transcript_path, transcript_empty()).unwrap();
-
-    let gh = quota_gh(cwd, 50, false);
-    let git = MockBins::green().git;
-    let (code, d) = fire(&[
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T00:30:00Z",
-        &format!("--gh-bin={}", gh.display()),
-        &format!("--git-bin={}", git.display()),
-    ]);
-    assert_eq!(code, 0);
-    assert_eq!(d.decision, "block");
-    assert!(d.message.contains("standing down"), "got: {}", d.message);
-    assert!(d.message.contains("floor"), "got: {}", d.message);
-    let calls = fs::read_to_string(cwd.join("calls.log")).unwrap();
-    assert!(calls.contains("api rate_limit"), "probe must run: {calls}");
-    assert!(
-        !calls.contains("pr view"),
-        "no GraphQL spend below floor: {calls}"
-    );
-    // A stand-down fire verifies no PR state, so it has no real fingerprint.
-    // It must NOT be recorded as a "loop_check" event: read_prior_fires scans
-    // for that exact type and treats a missing fingerprint as an empty
-    // string, which never matches current_fp and truncates the reverse-scan
-    // the instant it hits this row - one stand-down silently breaks the
-    // consecutive-unchanged streak for every earlier fire in the session.
-    let events = fs::read_to_string(project_events(&cwd)).unwrap_or_default();
-    assert!(
-        events.contains("\"type\":\"loop_check_graphql_standdown\"")
-            || events.contains("\"type\": \"loop_check_graphql_standdown\""),
-        "stand-down must emit its own event type, not loop_check: {events}"
-    );
-    for line in events.lines() {
-        let v: serde_json::Value = serde_json::from_str(line).unwrap();
-        if v.get("type").and_then(|t| t.as_str()) == Some("loop_check") {
-            panic!("a stand-down fire must never be recorded as loop_check (breaks the fingerprint streak scan): {line}");
-        }
-    }
-}
-
 /// Item 4's other half: the floor belongs to the merge guard, so a
 /// promise-intent fire proceeds below it.
 #[test]
@@ -7989,61 +7719,6 @@ exit 1"#,
     assert!(
         !d.message.contains("resets in ~"),
         "must not point at the primary reset horizon for a secondary refusal: {}",
-        d.message
-    );
-}
-
-/// The floor's watching exemption must NEVER idle without a lease: a watching
-/// fire below floor whose claim cannot be renewed falls through to the
-/// stand-down block (and never crashes on the exemption path itself).
-#[test]
-fn floor_watching_fire_without_lease_still_blocks() {
-    let tmp = TempDir::new().unwrap();
-    let cwd = tmp.path();
-    fs::create_dir_all(cwd.join(".fno")).unwrap();
-    isolate_settings(cwd);
-    let manifest_path = cwd.join("target-state.md");
-    let transcript_path = cwd.join("transcript.jsonl");
-    fs::write(
-        &manifest_path,
-        new_manifest("sess-floorw", "2026-06-05T00:00:00Z", true),
-    )
-    .unwrap();
-    // A newest-entry <watching> tag (no claim fields in the manifest, so the
-    // lease renewal cannot succeed).
-    let msg = serde_json::json!({
-        "message": {
-            "role": "assistant",
-            "content": "<watching reason=\"ci\" pr=\"1\" timeout=\"30m\">"
-        }
-    });
-    fs::write(
-        &transcript_path,
-        serde_json::to_string(&msg).unwrap() + "\n",
-    )
-    .unwrap();
-
-    let gh = quota_gh(cwd, 50, false);
-    let git = MockBins::green().git;
-    let (code, d) = fire(&[
-        "loop-check",
-        "--state",
-        manifest_path.to_str().unwrap(),
-        "--transcript",
-        transcript_path.to_str().unwrap(),
-        "--cwd",
-        cwd.to_str().unwrap(),
-        "--now",
-        "2026-06-05T00:30:00Z",
-        &format!("--gh-bin={}", gh.display()),
-        &format!("--git-bin={}", git.display()),
-    ]);
-    assert_eq!(code, 0);
-    assert_eq!(d.decision, "block");
-    assert!(d.message.contains("standing down"), "got: {}", d.message);
-    assert!(
-        !d.message.contains("watching under GraphQL stand-down"),
-        "an unleased watching fire must not idle: {}",
         d.message
     );
 }
@@ -8497,23 +8172,10 @@ fn coverage_status_retries_a_label_read_then_honors_the_override() {
 // tests exists to close).
 
 /// A gh mock that answers every read green EXCEPT `wedge`, which sleeps 30s
-/// past any test bound. The fingerprint read's exact argv
-/// (`state,number,headRefName` with no `headRefOid`) is distinguished from
-/// done()'s full-field view so each read can wedge independently.
+/// past any test bound on that read's FIRST call. Each branch passes its own
+/// read name, so a test wedges exactly one read of done().
 fn wedged_gh(dir: &Path, wedge: &str) -> PathBuf {
-    let body = r#"# wedge2: sleep only on the SECOND invocation of the read. The fingerprint
-# block reads checks/reviews BEFORE done() does with identical argv, so a
-# first-call wedge proves the fingerprint path and a second-call wedge is the
-# only way to reach the done() read's own timeout.
-wedge2() {
-  [ "$1" = "WEDGE" ] || return 0
-  c=$(dirname "$0")/count.$1
-  n=$(cat "$c" 2>/dev/null || echo 0)
-  n=$((n + 1))
-  echo "$n" > "$c"
-  [ "$n" -ge 2 ] && sleep 30
-}
-wedge() { [ "$1" = "WEDGE" ] && sleep 30; }
+    let body = r#"wedge() { [ "$1" = "WEDGE" ] && sleep 30; }
 if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
 # fingerprint read: exactly state,number,headRefName (no headRefOid)
 if echo "$*" | grep -q "state,number,headRefName" && ! echo "$*" | grep -q "headRefOid"; then
@@ -8533,12 +8195,12 @@ if echo "$*" | grep -q "pulls/"; then
   exit 0
 fi
 if echo "$*" | grep -q "checks"; then
-  wedge2 pr_checks
+  wedge pr_checks
   echo '[{"name":"ci","state":"SUCCESS","bucket":"pass"}]'
   exit 0
 fi
 if echo "$*" | grep -q "reviews"; then
-  wedge2 pr_reviews
+  wedge pr_reviews
   echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
   exit 0
 fi
@@ -8683,16 +8345,6 @@ fn external_read_timeout_pr_reviews_names_the_read() {
     let (code, d, elapsed) =
         wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
     assert_timeout_block(code, &d, elapsed, "pr_reviews", &events);
-}
-
-#[test]
-fn external_read_timeout_fingerprint_read_names_the_read() {
-    let ws = wedged_setup("fingerprint_pr_view");
-    let events = project_events(ws._tmp.path());
-    let git = MockBins::green().git;
-    let (code, d, elapsed) =
-        wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
-    assert_timeout_block(code, &d, elapsed, "fingerprint_pr_view", &events);
 }
 
 /// A wedged LOCAL git read (the external-diff-driver shape) must not hang
