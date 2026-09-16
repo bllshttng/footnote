@@ -23,15 +23,25 @@ pub(crate) fn build_codex_thread_entry(
     account: Option<&str>,
     harness_args: &[String],
     spawn_params: &serde_json::Value,
+    provenance: Option<&crate::spawn_contract::SpawnProvenance>,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     let session_id = driver.thread_id().to_string();
     // The daemon's env is scrubbed, so the parent edge rides the spawn
     // REQUEST the client stamped from its own ambient markers - the same
-    // trust the `node` field already gets. An edge-less request stamps the
-    // reason instead of a silent null.
-    let spawned_by = Lineage::from_request(spawn_params);
-    RegistryEntry {
+    // trust the `node` field already gets. A door-proved origin outranks
+    // the raw edge; an edge-less request stamps the reason instead of a
+    // silent null.
+    let spawned_by = match provenance {
+        Some(p) => match crate::spawn_contract::compatibility_parent(&p.origin) {
+            (Some(session), Some(harness), Some(cwd)) => {
+                Lineage::captured((Some(session), Some(harness), Some(cwd)))
+            }
+            _ => Lineage::from_request(spawn_params),
+        },
+        None => Lineage::from_request(spawn_params),
+    };
+    let mut entry = RegistryEntry {
         node: node.filter(|node| !node.is_empty()).map(str::to_string),
         // v25: the route axes this lane actually used. When the spawn request
         // pinned an account record id, the row stamps it verbatim (requested
@@ -134,7 +144,14 @@ pub(crate) fn build_codex_thread_entry(
         // resume frame's config.
         harness_args: harness_args.to_vec(),
         ..RegistryEntry::new(Some(session_id), spawned_by)
+    };
+    if let Some(p) = provenance {
+        // The door's record rides the row; the parent edge above is the
+        // compatibility projection of the same origin.
+        entry.spawn_id = Some(crate::spawn_transaction::allocate_spawn_id());
+        entry.spawn_provenance = Some(p.clone());
     }
+    entry
 }
 
 #[cfg(test)]

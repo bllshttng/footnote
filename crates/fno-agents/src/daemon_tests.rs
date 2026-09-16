@@ -7,12 +7,8 @@ use super::*;
 use crate::client_verbs::RowLiveness;
 use crate::codex_thread_entry::build_codex_thread_entry;
 
-/// The e2e restart-storm test only exercises `state_error_code` when the
-/// scheduler happens to race a task into shutdown-cancellation, so its
-/// coverage of the Cancelled -> ShuttingDown mapping is real but silent
-/// on a run where nothing races. Pin the mapping directly and
-/// deterministically: Cancelled must classify as ShuttingDown, and every
-/// other StateError variant must stay Internal.
+/// Pin the Cancelled -> ShuttingDown mapping deterministically (the e2e
+/// restart-storm test only races into it); every other variant stays Internal.
 #[test]
 fn state_error_code_classifies_cancelled_as_shutting_down() {
     assert_eq!(
@@ -84,13 +80,9 @@ async fn bind_supervisor_socket_concurrent_only_one_survives() {
             async move { bind_supervisor_socket(&h).await },
         ));
     }
-    // Collect every result FIRST, then count, so no winner's lock guard is
-    // dropped while another task is still trying for it. Counting inside
-    // the join loop released the lock at the first `Ok(_)` and handed it to
-    // a task still mid-retry, which read as three winners -- an artifact of
-    // the test's own teardown order, not of the guard. In production the
-    // holder keeps its guard for the whole process lifetime, which is what
-    // this shape reproduces.
+    // Collect every result FIRST, then count: counting inside the join loop
+    // dropped the first winner's lock guard to a task still mid-retry and
+    // read as three winners. The production holder keeps its guard for life.
     let mut results = Vec::new();
     for handle in handles {
         results.push(handle.await.unwrap());
@@ -2463,7 +2455,7 @@ async fn poll_until_ready_empty_settled_screen_returns_empty_string() {
 /// its `claude_session_uuid`, refusing a second writer on one pinned session.
 #[test]
 fn entry_holds_session_matches_claude_session_uuid() {
-    let row = build_claude_stream_entry(
+    let row = crate::claude_stream_entry::build_claude_stream_entry(
         "peer",
         "ab12cd34",
         std::path::Path::new("/work"),
@@ -2473,6 +2465,7 @@ fn entry_holds_session_matches_claude_session_uuid() {
         PathBuf::from("/tmp/log.jsonl"),
         None,
         &serde_json::Value::Null,
+        None,
     );
     assert!(
         entry_holds_session(&row, "sess-uuid-9"),
@@ -2489,7 +2482,7 @@ fn entry_holds_session_matches_claude_session_uuid() {
     );
     // The node rides the spawn REQUEST, never ambient env: a named node
     // stamps, an unnamed one stays unknown.
-    let bound = build_claude_stream_entry(
+    let bound = crate::claude_stream_entry::build_claude_stream_entry(
         "peer",
         "ab12cd34",
         std::path::Path::new("/work"),
@@ -2499,6 +2492,7 @@ fn entry_holds_session_matches_claude_session_uuid() {
         PathBuf::from("/tmp/log.jsonl"),
         Some("x-cafe"),
         &serde_json::Value::Null,
+        None,
     );
     assert_eq!(bound.node.as_deref(), Some("x-cafe"));
 }
@@ -4314,7 +4308,7 @@ fn claude_stream_worker_args_carry_stream_flags_and_child_argv() {
 
 #[test]
 fn build_claude_stream_entry_marks_interactive_claude_with_full_uuid() {
-    let e = build_claude_stream_entry(
+    let e = crate::claude_stream_entry::build_claude_stream_entry(
         "adopted",
         "sw3",
         std::path::Path::new("/proj"),
@@ -4324,6 +4318,7 @@ fn build_claude_stream_entry_marks_interactive_claude_with_full_uuid() {
         PathBuf::from("/proj/.fno/agents/sw3/timeline.jsonl"),
         None,
         &serde_json::Value::Null,
+        None,
     );
     assert_eq!(e.harness_name(), "claude");
     assert_eq!(

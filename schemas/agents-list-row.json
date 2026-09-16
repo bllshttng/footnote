@@ -131,6 +131,8 @@
       "route_settings_path",
       "sandbox_posture",
       "screen_state",
+      "spawn_id",
+      "spawn_provenance",
       "spawn_trigger",
       "spawned_by_cwd",
       "spawned_by_harness",

@@ -889,6 +889,8 @@ def test_us2_schema_version_is_three() -> None:
     # reads as finished work to the retirement sweep.
     # v33: additive `lineage_reason` - why no parent session could be named;
     # an origin=spawn row carries a parent or a reason, never neither.
+    # v33 also added `spawn_id` and structured `spawn_provenance` (the door's
+    # attempt id and validated birth record).
     assert SCHEMA_VERSION == 33
 
 

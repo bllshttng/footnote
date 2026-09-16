@@ -1906,8 +1906,9 @@ pub(crate) fn stamp_command_env(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CanonicalDisposition {
+// Public: the spawn door's stamp parser exposes it in its signature.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CanonicalDisposition {
     Absent,
     Invalid,
     NameOnly,

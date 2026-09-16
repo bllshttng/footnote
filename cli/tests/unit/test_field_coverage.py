@@ -78,10 +78,12 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # 58 -> 59. last_activity_basis joined the required list (the age's
     # instrument word): 43 -> 44. v32 added stop (fno's own stop record),
     # storage_only: 59 -> 60. v33 added lineage_reason (why no parent
-    # session could be named), storage_only: 60 -> 61.
-    assert payload["declared_count"] == 61
+    # session could be named), storage_only: 60 -> 61, and spawn_id +
+    # spawn_provenance (the spawn door's attempt id and structured birth
+    # record), storage_only: 61 -> 63.
+    assert payload["declared_count"] == 63
     assert payload["required_count"] == 44
-    assert payload["accounted_count"] == 61
+    assert payload["accounted_count"] == 63
     assert payload["known_gaps"] == {}
 
 

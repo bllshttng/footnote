@@ -79,6 +79,29 @@ fno backlog provenance <node-id> --json   # structured: node_id, title, edges[]
 
 Read-only. For each edge a node carries (node-birth and/or spawn), it runs the resolver and reports the resolved transcript path or the reason it could not resolve. The node-birth edge resolves against `source_cwd` (the originating session's cwd, which claude transcript dirs are slugged by), falling back to the node's durable `cwd` only for legacy pre-`source_cwd` nodes; the spawn edge resolves against `spawned_by_cwd`. Using the durable project `cwd` would point at the wrong `~/.claude/projects/<slug>` whenever a node was filed from a worktree, which is the common mid-pipeline case.
 
+## The spawn door: required origin, separate owner (schema v33)
+
+The one spawn door lives in `crates/fno-agents/src/spawn_contract.rs` and `spawn_transaction.rs`. It replaced ambient capture as the birth contract. Every new worker birth carries a validated structured record, and the ambient triple becomes a generated compatibility projection of it.
+
+| Field | Meaning |
+|---|---|
+| `spawn_id` | coordinator-allocated attempt id (`sp-<hex>`) correlating journal accepted record, birth row, and receipt |
+| `spawn_provenance.origin` | `session` (proven parent: harness, full session id, caller cwd, plus an optional invocation reference for a script the session ran) or `non_session` (typed source: daemon arm + cause, LaunchAgent label, shell with TTY and process identity, or test script + run id) |
+| `spawn_provenance.owner` | session, project-qualified mission, project-qualified crown scope, operator/TTY, or test run. Separate from origin by design. Daemon work names its mission or crown without inventing a parent. A kingless scope is still a valid owner |
+| `spawned_by_*` | generated compatibility projection of a session origin, never independently writable on a new birth |
+
+Rules the door enforces before any launch:
+
+- a daemon or launch-agent origin requires a mission or crown owner. The daemon starter is never substituted.
+- a cause code must speak the naming-codes vocabulary. The retired `sob` refuses.
+- a known-shape session id attributed to the wrong harness refuses (the forgery shape).
+- a session-launched test keeps its live session parent. The script is recorded as the invocation, never as a parent replacement.
+- rows predating the door read as `legacy_missing` provenance. That is a visible defect, never silently blessed, and never repaired from a name prefix, crown holder, or adopter.
+
+Producers carry context through the `FNO_SPAWN_ORIGIN` / `FNO_SPAWN_OWNER` env carrier (validated, malformed refuses) or the `agent.spawn` request's `origin`/`owner` fields. Explicit dispatch context outranks ambient capture. A session spawning by hand keeps its real session parent. Adoption is a voucher, not a birth: the adopter lands in `adopted_by_session`, and a re-adopt preserves every birth field. The crown hook reads ownership. A door-stamped row is owned autonomous work, never an unlinked orphan.
+
+Read-only runtime verification: `scripts/diagnostics/verify-spawn-contract.py --plan <plan.md>` checks the correlated real-path proof (spawn ids, journal correlation, sha pinning, freshness) and refuses anything self-asserted.
+
 ## Scope and sequencing
 
 This is the field + ambient stamp + claude resolver. Out of scope and tracked separately: the presence-aware `/think` spawn mechanism that consumes these pointers is a separate effort (blocked by this node); the codex and antigravity resolver lanes are deferred. Historical backfill of provenance for pre-existing nodes is best-effort and out of scope here: `source_session_id` was never captured for old nodes and is unrecoverable; forward-stamping is the cheap, high-leverage path and makes every future creation self-describing.

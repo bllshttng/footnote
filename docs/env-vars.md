@@ -84,9 +84,9 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_E2E_PTY_OUTPUT_DELAY_MS` | rs | unclear: crates/fno/src/pty.rs:1873 |
 | `FNO_EVENTS_PATH` | py+rs | unclear: cli/src/fno/agents/spawn_defaults.py:1830 |
 | `FNO_FLIGHT_BUDGET_S` | py | Overrides the seconds a live single-flight holder tolerates before its watchdog releases the flight and exits 124; the default trips a minute before the 30-minute TTL. |
+| `FNO_GH_BUDGET_POINTS_PER_MIN` | rs | Overrides the fleet GitHub request budget cap in points per 60s window (default 450). |
 | `FNO_GLOBAL_SETTINGS_PATH` | py+rs | unclear: cli/src/fno/adapters/providers/loader.py:48 |
 | `FNO_GRAPH_JSON` | rs | unclear: crates/fno/src/backlog_view.rs:47 |
-| `FNO_GH_BUDGET_POINTS_PER_MIN` | rs | Overrides the fleet GitHub request budget cap in points per 60s window (default 450). |
 | `FNO_HARNESS` | py | unclear: cli/src/fno/king/state.py:268 |
 | `FNO_HEALTH_HISTORY` | py | unclear: cli/src/fno/graph/triage.py:2038 |
 | `FNO_HOME` | py+rs | unclear: cli/src/fno/paths.py:1723 |
@@ -151,13 +151,15 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_RUST_FRONT` | py | unclear: cli/src/fno/lint_verb_ratchet.py:674 |
 | `FNO_SERVER` | py | Names the target mux server. |
 | `FNO_SESSION` | py+rs | Deprecated alias of FNO_SERVER; the Rust pane-send audit row also reads it as the calling session the send came from. |
-| `FNO_SESSION_HARNESS` | py | unclear: cli/src/fno/claims/session_pid.py:223 |
-| `FNO_SESSION_PID` | py | unclear: cli/src/fno/claims/session_pid.py:163 |
+| `FNO_SESSION_HARNESS` | py+rs | unclear: cli/src/fno/claims/session_pid.py:223 |
+| `FNO_SESSION_PID` | py+rs | unclear: cli/src/fno/claims/session_pid.py:163 |
 | `FNO_SIDECAR_SOCKET` | py | unclear: cli/src/fno/mcp/sidecar.py:97 |
 | `FNO_SKIP_MIGRATION` | py | unclear: cli/src/fno/cli.py:402 |
 | `FNO_SOURCE` | py | unclear: cli/src/fno/update.py:172 |
 | `FNO_SPACES_DIR` | py+rs | unclear: cli/src/fno/paths.py:299 |
 | `FNO_SPAWN_GATE` | py+rs | unclear: cli/src/fno/agents/spawn_gate.py:1554 |
+| `FNO_SPAWN_ORIGIN` | py+rs | Explicit dispatch-origin JSON the spawn door validates onto the request; malformed refuses. |
+| `FNO_SPAWN_OWNER` | py+rs | Explicit dispatch-owner JSON the spawn door validates onto the request; must be exported together with FNO_SPAWN_ORIGIN. |
 | `FNO_SPAWN_TRIGGER` | py | unclear: cli/src/fno/agents/dispatch.py:860 |
 | `FNO_STORE_KEEPER_DRIFT_CHECK_SECS` | rs | unclear: crates/fno-agents/src/graph_keeper.rs:654 |
 | `FNO_STORE_KEEPER_IDLE_SECS` | rs | unclear: crates/fno-agents/src/graph_keeper.rs:115 |
