@@ -527,8 +527,9 @@ fn pane_state(row: &RegistryEntry) -> Result<Option<bool>, String> {
 }
 
 /// Provider-tagged headless reservations not represented by rows
-/// (`_provider_live_slot_claims`). A claim whose liveness cannot be proved is
-/// a refusal, never an uncount.
+/// (`_provider_live_slot_claims`). A Suspect reservation (dead pid inside its
+/// TTL) counts as live, as `live_worker_slot_claims` counts it. A corrupted
+/// one refuses.
 fn provider_live_slot_claims(
     provider: &str,
     counted_names: &[String],
@@ -587,10 +588,7 @@ fn provider_live_slot_claims(
             continue;
         }
         match state {
-            ClaimState::Suspect => {
-                return Err(format!("worker reservation {key} liveness is suspect"))
-            }
-            ClaimState::Live => count += 1,
+            ClaimState::Live | ClaimState::Suspect => count += 1,
             _ => {}
         }
     }
@@ -902,6 +900,17 @@ fn chrono_like_iso(epoch_s: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pid the OS does not report, so `is_live` reads the claim as a corpse.
+    fn dead_pid() -> u32 {
+        let mut candidate = 999_999u32;
+        while std::path::Path::new(&format!("/proc/{candidate}")).exists()
+            || unsafe { libc::kill(candidate as i32, 0) } == 0
+        {
+            candidate += 1;
+        }
+        candidate
+    }
 
     fn write_registry(path: &Path, entries: &[String]) {
         std::fs::write(
@@ -1249,10 +1258,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A provider-tagged suspect reservation refuses (fail closed), and a
-    /// reservation minted without the provider tag only warns.
+    /// A Suspect reservation counts as live, like `live_worker_slot_claims`
+    /// counts it, and a reservation minted without the provider tag only warns.
     #[test]
-    fn provider_slot_claims_refuse_on_suspect_and_warn_without_tag() {
+    fn provider_slot_claims_count_suspect_as_live_and_warn_without_tag() {
         let _guard = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1294,6 +1303,22 @@ mod tests {
         warnings.clear();
         let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
         assert_eq!(n, 1, "a live zai-tagged claim counts");
+
+        // A Suspect reservation (dead pid inside its TTL) counts too, so one
+        // orphaned probe row cannot wedge the whole lane count behind an Err.
+        let suspect = claims_dir.join(format!("{}.lock", claims::encode_key("worker:suspect")));
+        std::fs::write(
+            &suspect,
+            format!("schema_version: {}\nkey: worker:suspect\nholder: h\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n", claims::SCHEMA_VERSION, now + 600_000, dead_pid()),
+        )
+        .unwrap();
+        assert!(matches!(
+            claims::status("worker:suspect", Some(&root)).0,
+            claims::ClaimState::Suspect
+        ));
+        warnings.clear();
+        let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
+        assert_eq!(n, 2, "a suspect zai-tagged claim counts as one slot");
 
         // Another provider's tag never counts for zai.
         let n = provider_live_slot_claims("codex", &[], &mut warnings).unwrap();
