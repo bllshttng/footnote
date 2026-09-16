@@ -184,10 +184,10 @@ fn keeper_pane_dies_when_its_surrogate_test_owner_is_killed() {
     owner.wait().expect("owner reaps");
 
     // The keeper unlinks its socket when the owner watchdog fires. A pid
-    // probe is NOT the marker here: the server holds the keeper's Child
-    // handle and never reaps it, so the dead keeper lingers as a zombie and
-    // `kill(pid, 0)` reads a zombie as alive. 8s gives a loaded CI runner
-    // headroom over the watchdog's 250ms poll interval.
+    // probe is NOT the marker here: a zombie reads alive to `kill(pid, 0)`
+    // until the server's waiter thread reaps it, so the socket stays the
+    // marker. 8s gives a loaded CI runner headroom over the watchdog's
+    // 250ms poll interval.
     let deadline = Instant::now() + Duration::from_secs(8);
     while keeper_sock.exists() {
         assert!(
@@ -201,4 +201,119 @@ fn keeper_pane_dies_when_its_surrogate_test_owner_is_killed() {
         std::os::unix::net::UnixStream::connect(&keeper_sock).is_err(),
         "a reaped keeper's socket must refuse connections"
     );
+}
+
+/// The keeper `setsid()`s but stays the server's child, so an exited keeper
+/// is reaped only if the server waits on it. It used to drop the `Child`
+/// handle instead, leaving one `Z` under the long-lived server per pane
+/// exit (one specimen: pid 47768, 18h14m as a zombie under the main
+/// server). One waiter thread
+/// per launched keeper reaps exactly that child.
+#[test]
+fn an_exited_keeper_pane_leaves_no_zombie_under_its_server() {
+    let scratch = Scratch::new("keeper_zombie");
+    let dir = scratch.0.to_str().unwrap().to_string();
+
+    let sock = scratch.main_sock();
+    let _server = common::spawn_server(
+        &sock,
+        &[(
+            "FNO_AGENTS_WORKER_BIN",
+            worker_bin().to_string_lossy().as_ref(),
+        )],
+    );
+    let up = Instant::now() + Duration::from_secs(10);
+    while !sock.exists() {
+        assert!(Instant::now() < up, "server socket never appeared");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let server_pid = _server.0.id();
+
+    let run = scratch
+        .command()
+        .args([
+            "mux",
+            "pane",
+            "run",
+            "--worker",
+            "zombie-probe",
+            "--cwd",
+            &dir,
+            "--",
+            "/bin/sh",
+            "-c",
+            "sleep 3",
+        ])
+        .env("FNO_AGENTS_WORKER_BIN", worker_bin())
+        .output()
+        .expect("fno binary runs");
+    assert!(
+        run.status.success(),
+        "pane run stderr: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    // AC3-ERR, the positive control: exactly one keeper worker sits under
+    // this server while its pane lives. Found by ppid + argv, never by
+    // name alone (a name sweep once deleted live trees).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let keeper_pid = loop {
+        let under_server: Vec<(i32, i32, String, String)> = ps_rows()
+            .into_iter()
+            .filter(|(_, ppid, _, cmd)| {
+                *ppid == server_pid as i32 && cmd.contains("fno-agents-worker")
+            })
+            .collect();
+        if let [row] = under_server.as_slice() {
+            break row.0;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected exactly one keeper under server {server_pid}; found {}",
+            under_server.len()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    // AC3-HP: after the pane child exits, the keeper must leave the process
+    // table entirely - a zombie still lists, so only an empty read proves
+    // the reap.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let gone = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &keeper_pid.to_string()])
+            .output()
+            .expect("ps runs");
+        if gone.stdout.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "keeper {keeper_pid} still in the process table (stat {:?}) under server {server_pid}",
+            String::from_utf8_lossy(&gone.stdout)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// One `ps` snapshot parsed into `(pid, ppid, stat, command)` rows. Both
+/// macOS and Linux accept this form; `command=` is last so a fixed-width
+/// split of four keeps whole command lines.
+fn ps_rows() -> Vec<(i32, i32, String, String)> {
+    let out = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,ppid=,stat=,command="])
+        .output()
+        .expect("ps runs");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(4, ' ');
+            Some((
+                parts.next()?.trim().parse().ok()?,
+                parts.next()?.trim().parse().ok()?,
+                parts.next()?.trim().to_string(),
+                parts.next().unwrap_or("").trim().to_string(),
+            ))
+        })
+        .collect()
 }
