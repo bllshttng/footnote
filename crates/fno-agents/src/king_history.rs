@@ -443,7 +443,8 @@ fn in_tenure(ts: &str, crown_start: &str) -> bool {
 /// The one decision, pure so tests need no journal.
 ///
 /// Degraded: any declared bound exceeded. Unknown: the crown is old enough to
-/// owe a recent check-in but none is recent and readable. Stalled: nothing degraded, the
+/// owe a recent check-in but none is recent and readable. Stalled: nothing
+/// degraded, the
 /// last fire read a quiet board, and the scope the reign INHERITED shows no
 /// closure in the window. Filed nodes are deliberately excluded from the
 /// stalled test: a king that files real work into its own scope raises the
@@ -587,7 +588,10 @@ fn scan_readings(
                 }
                 REIGN_CHECKIN => {
                     let (canonical, _, _) = classify(&event, scope);
-                    if canonical && in_tenure(s_str(&event, "ts").unwrap_or(""), crown_start) {
+                    if canonical
+                        && s_str(&event, "source") == Some("loop")
+                        && in_tenure(s_str(&event, "ts").unwrap_or(""), crown_start)
+                    {
                         r.checkins += 1;
                         if let Some(epoch) = s_str(&event, "ts")
                             .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
@@ -717,6 +721,7 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
         }
     };
     let manifest_path = inputs.manifest_path.clone();
+    let harness = inputs.harness.clone();
     let now = inputs.now;
     let checkin_interval_secs = inputs.checkin_interval_secs;
     let crown_age_secs = inputs.crown_age_secs;
@@ -740,49 +745,17 @@ pub fn run_king_verdict(args: &[String]) -> i32 {
     readings.respawn_count = manifest.respawn_count;
     readings.respawn_ceiling = manifest.respawn_ceiling;
     readings.compaction_ceiling = Some(inputs.compaction_ceiling);
-    readings.checkins_expected = crown_age_secs > checkin_interval_secs;
-    readings.checkins_stale = readings.checkins_expected
-        && readings
-            .last_checkin_epoch
-            .map(|last| now.timestamp() - last >= checkin_interval_secs)
-            .unwrap_or(true);
-    let compactions_source;
-    let compactions_error;
-    if harness_session_id.is_empty() {
-        compactions_source = "unmeasurable";
-        compactions_error = None;
-    } else {
-        let transcript = crate::claude_drive::find_transcript_in(
-            &crate::claude_drive::claude_projects_dir(),
-            &harness_session_id,
-        );
-        match transcript {
-            Some(path) => {
-                let since = manifest.created_at.as_deref().and_then(|ts| {
-                    chrono::DateTime::parse_from_rfc3339(ts)
-                        .ok()
-                        .map(|value| value.timestamp())
-                });
-                match crate::compaction::count_boundaries_since(&path, since) {
-                    Ok(count) => {
-                        readings.compactions = count;
-                        compactions_source = "transcript";
-                        compactions_error = None;
-                    }
-                    Err(err) => {
-                        compactions_source = "journal";
-                        compactions_error = Some(format!("{}: {err}", path.display()));
-                    }
-                }
-            }
-            None => {
-                compactions_source = "journal";
-                compactions_error = Some(format!(
-                    "transcript not found for harness session {harness_session_id}"
-                ));
-            }
-        }
-    }
+    readings.checkins_expected =
+        manifest.shape == "court" && crown_age_secs > checkin_interval_secs;
+    readings.checkins_stale = checkins_stale(
+        &readings,
+        now.timestamp(),
+        checkin_interval_secs,
+        crown_age_secs,
+    );
+    let (compactions, compactions_source, compactions_error) =
+        compaction_reading(&manifest, &harness, readings.compactions);
+    readings.compactions = compactions;
     readings.compactions_measurable = !harness_session_id.is_empty();
     readings.inherited_undelivered = inputs.inherited_undelivered;
     readings.inherited_closed_in_window = inputs.inherited_closed_in_window;
@@ -892,18 +865,79 @@ fn render_verdict(payload: &Value) -> String {
         lines.push(format!("  {}: {}", b["name"].as_str().unwrap_or(""), body));
     }
     lines.push(format!(
-        "readings: {} fire(s), check-ins {} (expected: {}), compactions {} ({}), inherited undelivered {}, closed in window {}, scanned {} rows across {} journal(s)",
+        "readings: {} fire(s), loop check-ins {} (expected: {}, stale: {}), compactions {} ({}), inherited undelivered {}, closed in window {}, scanned {} rows across {} journal(s)",
         payload["fires"],
         payload["checkins"],
         payload["checkins_expected"],
+        payload["checkins_stale"],
         payload["compactions"],
-        payload["compactions_source"],
+        payload["compactions_source"].as_str().unwrap_or(""),
         payload["inherited_undelivered"],
         payload["inherited_closed_in_window"],
         payload["scanned"],
         payload["journals"].as_array().map(|a| a.len()).unwrap_or(0),
     ));
+    if let Some(error) = payload["compactions_error"].as_str() {
+        lines.push(format!("compactions read: {error}"));
+    }
     lines.join("\n")
+}
+
+fn checkins_stale(
+    readings: &VerdictReadings,
+    now_epoch: i64,
+    interval_secs: i64,
+    crown_age_secs: i64,
+) -> bool {
+    if !readings.checkins_expected {
+        return false;
+    }
+    if readings.checkins == 0 {
+        return crown_age_secs >= interval_secs.saturating_mul(2);
+    }
+    readings
+        .last_checkin_epoch
+        .map(|last| now_epoch - last >= interval_secs.saturating_mul(2))
+        .unwrap_or(true)
+}
+
+fn compaction_reading(
+    manifest: &crate::loopcheck::KingManifest,
+    harness: &str,
+    journal_count: u64,
+) -> (u64, &'static str, Option<String>) {
+    let session_id = manifest.harness_session_id.as_deref().unwrap_or_default();
+    if session_id.is_empty() {
+        return (journal_count, "unmeasurable", None);
+    }
+    if harness != "claude" {
+        return (journal_count, "journal", None);
+    }
+    let Some(path) = crate::claude_drive::find_transcript_in(
+        &crate::claude_drive::claude_projects_dir(),
+        session_id,
+    ) else {
+        return (
+            journal_count,
+            "journal",
+            Some(format!(
+                "transcript not found for harness session {session_id}"
+            )),
+        );
+    };
+    let since = manifest.created_at.as_deref().and_then(|ts| {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .ok()
+            .map(|value| value.timestamp())
+    });
+    match crate::compaction::count_boundaries_since(&path, since) {
+        Ok(count) => (count, "transcript", None),
+        Err(err) => (
+            journal_count,
+            "journal",
+            Some(format!("{}: {err}", path.display())),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1023,6 +1057,20 @@ mod verdict_tests {
         r.checkins_stale = false;
         let (v, _) = verdict(&r);
         assert_eq!(v, Verdict::Converging);
+    }
+
+    #[test]
+    fn checkin_staleness_respects_the_two_interval_hook_cadence() {
+        let mut r = readings();
+        r.checkins_expected = true;
+        r.checkins = 1;
+        r.last_checkin_epoch = Some(1_000);
+        assert!(!checkins_stale(&r, 1_000 + 1_800, 1_800, 1_800));
+        assert!(checkins_stale(&r, 1_000 + 3_600, 1_800, 3_600));
+        r.checkins = 0;
+        r.last_checkin_epoch = None;
+        assert!(!checkins_stale(&r, 1_000 + 1_800, 1_800, 1_800));
+        assert!(checkins_stale(&r, 1_000 + 3_600, 1_800, 3_600));
     }
 
     #[test]
@@ -1163,7 +1211,13 @@ mod verdict_tests {
             "source": "loop",
             "data": {"scope": "x-bbbb", "change": "current"}
         });
-        std::fs::write(&first, format!("{old}\n{current}\n")).unwrap();
+        let hook = json!({
+            "ts": "2026-09-11T00:00:00Z",
+            "type": REIGN_CHECKIN,
+            "source": "hook",
+            "data": {"scope": "x-bbbb", "change": "missed beat"}
+        });
+        std::fs::write(&first, format!("{old}\n{current}\n{hook}\n")).unwrap();
         std::fs::write(&second, format!("{current}\n")).unwrap();
 
         let (r, _, _, _) = scan_readings(
@@ -1344,6 +1398,42 @@ mod verdict_tests {
             run_king_verdict(&verdict_args(&root, &manifest, &journal)),
             0
         );
+    }
+
+    #[test]
+    fn compaction_reading_names_transcript_and_journal_fallbacks() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let session = "a1b2c3d4-1111-2222-3333-444455556666";
+        let transcript = project.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &transcript,
+            "{\"subtype\":\"compact_boundary\",\"timestamp\":\"2026-09-10T00:00:00Z\"}\n",
+        )
+        .unwrap();
+        std::env::set_var(crate::claude_drive::PROJECTS_DIR_ENV, dir.path());
+
+        let mut manifest = crate::loopcheck::KingManifest::default();
+        manifest.harness_session_id = Some(session.into());
+        manifest.created_at = Some("2026-09-01T00:00:00Z".into());
+        assert_eq!(
+            compaction_reading(&manifest, "claude", 7),
+            (1, "transcript", None)
+        );
+
+        assert_eq!(
+            compaction_reading(&manifest, "codex", 7),
+            (7, "journal", None)
+        );
+
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        let (count, source, error) = compaction_reading(&manifest, "claude", 7);
+        assert_eq!((count, source), (7, "journal"));
+        assert!(error.unwrap().contains("transcript not found"));
     }
 
     #[test]

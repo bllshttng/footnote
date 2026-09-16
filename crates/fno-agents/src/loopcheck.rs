@@ -149,7 +149,7 @@ impl Default for Manifest {
 /// first, then APPENDS the node-claim fields (`target_claim_key/holder/ttl`)
 /// after the closing `---`, so `parse_manifest` (frontmatter-bounded) never sees
 /// them. Renewal reads them here instead. Surrounding quotes stripped.
-fn scan_manifest_field(content: &str, field: &str) -> Option<String> {
+pub(crate) fn scan_manifest_field(content: &str, field: &str) -> Option<String> {
     let prefix = format!("{field}:");
     content.lines().find_map(|line| {
         let line = line.trim();

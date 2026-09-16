@@ -111,6 +111,7 @@ pub(crate) struct VerdictInputs {
     /// The parsed manifest, carried so the verdict verb never re-reads it.
     pub manifest: crate::loopcheck::KingManifest,
     pub manifest_path: PathBuf,
+    pub harness: String,
     pub now: chrono::DateTime<chrono::Utc>,
     pub window: String,
     pub checkin_interval_secs: i64,
@@ -267,6 +268,7 @@ pub(crate) fn resolve_verdict_inputs(
         .map_err(|e| format!("{}: unreadable manifest: {e}", manifest_path.display()))?;
     let manifest = crate::loopcheck::parse_king_manifest(&content)
         .ok_or_else(|| "king manifest has no frontmatter".to_string())?;
+    let harness = crate::loopcheck::scan_manifest_field(&content, "harness").unwrap_or_default();
     let crowned_at = manifest.created_at.clone().ok_or_else(|| {
         format!(
             "{}: no created_at; no measurable split.",
@@ -306,6 +308,7 @@ pub(crate) fn resolve_verdict_inputs(
         scope,
         manifest,
         manifest_path,
+        harness,
         now: current,
         window: window_display(window_secs),
         checkin_interval_secs: interval,

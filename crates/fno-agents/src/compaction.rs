@@ -244,41 +244,9 @@ fn past_ceiling_or_compacting(stamp: &CompactionStamp, now_epoch: i64) -> Compac
     }
 }
 
-/// The newest boundary in a transcript with no stamp to compare against.
-fn newest_boundary(transcript: &Path) -> Result<Option<String>, String> {
-    let raw =
-        std::fs::read_to_string(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
-    let mut newest: Option<(i64, String)> = None;
-    for line in raw.lines() {
-        if !line.contains("compact_boundary") {
-            continue;
-        }
-        let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        if row.get("subtype").and_then(|v| v.as_str()) != Some("compact_boundary") {
-            continue;
-        }
-        let Some(ts) = row.get("timestamp").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if let Some(epoch) = rfc3339_to_epoch(ts) {
-            if newest.as_ref().is_none_or(|(e, _)| epoch > *e) {
-                newest = Some((epoch, ts.to_string()));
-            }
-        }
-    }
-    Ok(newest.map(|(_, ts)| ts))
-}
-
-/// Count the compactions a transcript records at or after `since_epoch`.
-/// The Claude CLI writes `compact_boundary` itself, so this counts what a
-/// hook-fed journal row can miss. An empty or unparseable `since` counts every
-/// boundary, the same conservative direction `in_tenure` takes.
-pub fn count_boundaries_since(transcript: &Path, since_epoch: Option<i64>) -> Result<u64, String> {
+fn visit_boundaries(transcript: &Path, mut visit: impl FnMut(i64, &str)) -> Result<(), String> {
     let file =
         std::fs::File::open(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
-    let mut count = 0;
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|e| format!("transcript unreadable: {e}"))?;
         if !line.contains("compact_boundary") {
@@ -293,13 +261,35 @@ pub fn count_boundaries_since(transcript: &Path, since_epoch: Option<i64>) -> Re
         let Some(ts) = row.get("timestamp").and_then(|v| v.as_str()) else {
             continue;
         };
-        let Some(epoch) = rfc3339_to_epoch(ts) else {
-            continue;
-        };
+        if let Some(epoch) = rfc3339_to_epoch(ts) {
+            visit(epoch, ts);
+        }
+    }
+    Ok(())
+}
+
+/// The newest boundary in a transcript with no stamp to compare against.
+fn newest_boundary(transcript: &Path) -> Result<Option<String>, String> {
+    let mut newest: Option<(i64, String)> = None;
+    visit_boundaries(transcript, |epoch, ts| {
+        if newest.as_ref().is_none_or(|(last, _)| epoch > *last) {
+            newest = Some((epoch, ts.to_string()));
+        }
+    })?;
+    Ok(newest.map(|(_, ts)| ts))
+}
+
+/// Count the compactions a transcript records at or after `since_epoch`.
+/// The Claude CLI writes `compact_boundary` itself, so this counts what a
+/// hook-fed journal row can miss. An empty or unparseable `since` counts every
+/// boundary, the same conservative direction `in_tenure` takes.
+pub fn count_boundaries_since(transcript: &Path, since_epoch: Option<i64>) -> Result<u64, String> {
+    let mut count = 0;
+    visit_boundaries(transcript, |epoch, _| {
         if since_epoch.is_none_or(|since| epoch >= since) {
             count += 1;
         }
-    }
+    })?;
     Ok(count)
 }
 

@@ -61,6 +61,9 @@ pub fn claude_projects_dir() -> PathBuf {
     if let Some(v) = std::env::var_os(PROJECTS_DIR_ENV) {
         return PathBuf::from(v);
     }
+    if let Some(v) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return PathBuf::from(v).join("projects");
+    }
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));

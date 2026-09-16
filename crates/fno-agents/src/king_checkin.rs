@@ -1383,8 +1383,15 @@ pub(crate) fn emit_row(path: &Path, source: &str, data: &Map<String, Value>) -> 
     }
 }
 
-fn finish_checkin(emit_requested: bool, emitted: bool, output_error: Option<String>) -> i32 {
+fn finish_checkin(
+    emit_requested: bool,
+    emitted: bool,
+    output_error: Option<std::io::Error>,
+) -> i32 {
     if let Some(error) = output_error {
+        if error.kind() == std::io::ErrorKind::BrokenPipe && emitted {
+            return 0;
+        }
         eprintln!("king-checkin: stdout write failed: {error}");
         return 3;
     }
@@ -1466,7 +1473,8 @@ pub(crate) fn hook_beat(
 ///              [--board-state PATH] [--emit-path PATH] [--change TEXT]
 ///              [--no-emit] [--json]`
 ///
-/// rc 0 a completed beat, 2 usage failure.
+/// rc 0 a completed beat, 3 when an asked-for row was not journalled or
+/// stdout could not be written, 2 usage failure.
 pub fn run_king_checkin(args: &[String]) -> i32 {
     let mut ctx = Ctx {
         scope: String::new(),
@@ -1587,7 +1595,10 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let emitted = if ctx.emit {
         match ctx.emit_path.as_ref() {
             Some(path) => emit_row(path, "loop", &data),
-            None => false,
+            None => {
+                eprintln!("king-checkin: WARNING: no emit path, so the beat was not journalled");
+                false
+            }
         }
     } else {
         false
@@ -1626,14 +1637,13 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             serde_json::to_string_pretty(&payload).unwrap_or_default()
         )
         .err()
-        .map(|e| e.to_string())
     } else {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
-        let mut error = None;
+        let mut error: Option<std::io::Error> = None;
         for line in &lines {
             if let Err(e) = writeln!(out, "{line}") {
-                error = Some(e.to_string());
+                error = Some(e);
                 break;
             }
         }
@@ -2198,6 +2208,30 @@ mod tests {
     #[test]
     fn no_emit_is_success_when_no_row_was_requested() {
         assert_eq!(finish_checkin(false, false, None), 0);
+    }
+
+    #[test]
+    fn a_broken_pipe_after_a_journalled_beat_is_success() {
+        assert_eq!(
+            finish_checkin(
+                true,
+                true,
+                Some(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn a_broken_pipe_without_a_journalled_beat_still_fails() {
+        assert_eq!(
+            finish_checkin(
+                true,
+                false,
+                Some(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            ),
+            3
+        );
     }
 
     #[test]
