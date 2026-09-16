@@ -2238,13 +2238,14 @@ def _legacy_claim_call(key: str, root: Optional[Path]) -> bool:
 
 def _legacy_sweep_roots_if_present() -> Optional[list[Optional[Path]]]:
     roots: list[Optional[Path]] = [global_claims_root(), None, Path.cwd()]
-    for _raw, directory in dedup_claims_roots(roots):
-        try:
-            if any(path.is_file() and path.name.endswith(".lock") for path in directory.iterdir()):
-                return roots
-        except OSError:
-            continue
-    return None
+    try:
+        present = any(
+            any(path.is_file() and path.name.endswith(".lock") for path in directory.iterdir())
+            for _raw, directory in dedup_claims_roots(roots)
+        )
+    except OSError:
+        present = False
+    return roots if present else None
 
 
 _LEGACY_ACQUIRE_CLAIM = _legacy_acquire_claim
