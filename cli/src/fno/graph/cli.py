@@ -3884,9 +3884,7 @@ def cmd_update(
     # Project the graph-authoritative fields (nav mirror + forward-only status)
     # onto the plan when a mirrored OR status-affecting field changed. Routed
     # through the fresh-re-read helper (not the pre-recompute `projected_node`)
-    # so the node carries its recomputed status: a `--locked-by` claim reads
-    # `claimed` -> plan `in_progress` (AC1-HP; the claim goes through this update
-    # path, not the `claim` verb). Best-effort.
+    # so the node carries its recomputed status. Best-effort.
     if projected_node[0] and (
         locked_by is not None
         or priority is not None
@@ -3902,16 +3900,18 @@ def cmd_update(
         # Include the OLD parent on a reparent so its now-stale rollup repaints
         # alongside the new parent's (the converger walks each id's ancestors in
         # the post-mutation graph, so the old chain is only reachable via this id).
+        # The operator typed --type/--difficulty, so THIS node's value is
+        # observed: write it through, scoped to this id, never the fan-out.
+        supplied = {"type": type_, "difficulty": difficulty}
         _project_plans_from_graph(
             [
                 projected_node[0]["id"],
                 *([reparent_old_parent[0]] if reparent_old_parent[0] else []),
             ],
-            # The operator typed `--type`, so THIS node's value is observed:
-            # write it through, or the graph and the doc disagree and Obsidian's
-            # `type == "epic"` view drops a node the graph is rolling up. Scoped
-            # to this id - the repaint fan-out must not carry it to siblings.
-            mirror_type_for=(projected_node[0]["id"] if type_ is not None else None),
+            mirror_keys_for=(
+                projected_node[0]["id"],
+                frozenset(k for k, v in supplied.items() if v is not None),
+            ),
             # An explicit `--difficulty null` is the ONE clear the projector
             # honors for that key; a graph None on its own never deletes it.
             clear_keys_for=(
@@ -7291,22 +7291,21 @@ def cmd_stuck_epics(
 def _project_plans_from_graph(
     node_ids: list[str],
     *,
-    mirror_type_for: str | None = None,
+    mirror_keys_for: tuple[str, frozenset[str]] | None = None,
     force_status_off_terminal_for: str | None = None,
     clear_keys_for: tuple[str, frozenset[str]] | None = None,
 ) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
 
-    Re-reads the graph so every node carries its recomputed ``status`` (a claim
-    reads ``claimed`` -> ``in_progress``; a close reads ``done`` -> ``done`` +
-    ``done_at``), then delegates to the shared converger. Covers cascade-closed
-    epic parents that ``_stamp_and_graduate_plan`` never stamps. Best-effort per
-    node: a missing or unreadable plan never fails the mutation.
+    Re-reads the graph so every node carries its recomputed ``status``, then
+    delegates to the shared converger. Covers cascade-closed epic parents that
+    ``_stamp_and_graduate_plan`` never stamps. Best-effort per node: a missing
+    or unreadable plan never fails the mutation.
 
-    ``mirror_type_for`` names the ONE node whose ``type`` may be written, set
-    only by the ``--type`` path where the operator supplied that node's value.
-    It is an id, not a flag: this projection repaints ancestors and siblings
-    too, and their ``type`` is still a mint-time default.
+    ``mirror_keys_for`` pairs the ONE node whose extra keys (``type``,
+    ``difficulty``) may be written with those keys, set only where the
+    operator supplied the value. It is an id, not a flag: this projection
+    repaints ancestors and siblings too, and their values are defaults.
     """
     ids = [i for i in dict.fromkeys(node_ids) if i]
     if not ids:
@@ -7325,7 +7324,7 @@ def _project_plans_from_graph(
     project_graph_nodes(
         entries,
         ids,
-        mirror_type_for=mirror_type_for,
+        mirror_keys_for=mirror_keys_for,
         force_status_off_terminal_for=force_status_off_terminal_for,
         clear_keys_for=clear_keys_for,
     )

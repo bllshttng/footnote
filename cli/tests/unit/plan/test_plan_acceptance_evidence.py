@@ -31,7 +31,6 @@ _AC = "**AC1-HP:** Given a probe, when it runs, then it passes."
 def _violations(fm_body: str) -> list[tuple[str, str]]:
     import yaml
 
-    fm = yaml.safe_load(fm_body)
     sections = OrderedDict(
         [
             ("Acceptance Criteria", _AC),

@@ -53,7 +53,11 @@ _INLINE_LIST_RE = re.compile(r"^\[(?P<body>.*)\]$")
 # Resolve the escapes `_serialize_item` emits inside a double-quoted item.
 _DQ_ESCAPE_RE = re.compile(r'\\(["\\])')
 # An inline item carrying either of these cannot be written bare.
-_NEEDS_QUOTE_RE = re.compile(r'[,"]')
+_NEEDS_QUOTE_RE = re.compile(r'[,"\[\]{}]')
+
+# A plain YAML item that starts with an indicator, holds ": " or " #", or has
+# edge whitespace reads back as a different node, or does not parse at all.
+_YAML_UNSAFE_RE = re.compile(r"""^[-?:](\s|$)|^[][{}#&*!|>%@`,'"]|:(\s|$)|\s#|^\s|\s$""")
 
 
 class RawBlock:
@@ -176,11 +180,9 @@ def _quote_item(item: str) -> str:
 def _bare_is_ambiguous(item: str) -> bool:
     """True when an unquoted item would not read back as itself.
 
-    Shared by both list forms: surrounding whitespace is eaten by the reader's
-    `.strip()`, an empty item is dropped entirely, and a leading quote
-    character makes `_parse_scalar` try to unwrap the item.
+    Shared by both list forms; quoting is on structure, never on type.
     """
-    return not item or item != item.strip() or item[0] in "\"'"
+    return not item or bool(_YAML_UNSAFE_RE.search(item))
 
 
 def _serialize_item(item: str) -> str:
@@ -364,7 +366,9 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
             else:
                 fields[key] = ""
         else:
-            fields[key] = raw_val  # scalar (string)
+            # _parse_scalar, as list items get: a writer-quoted value must
+            # not grow a second wrap on the next write.
+            fields[key] = _parse_scalar(raw_val)  # scalar (string)
 
     return fields, block, rest
 
@@ -386,7 +390,8 @@ def serialize_frontmatter(fields: dict[str, Any]) -> str:
         elif isinstance(value, list):
             lines.append(f"{key}: {_serialize_inline_list(value)}")
         else:
-            lines.append(f"{key}: {value}")
+            text = str(value)  # same structural quote rule as the list items
+            lines.append(f"{key}: {_quote_item(text) if _bare_is_ambiguous(text) else text}")
     return "\n".join(lines)
 
 

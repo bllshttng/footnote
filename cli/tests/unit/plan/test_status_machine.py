@@ -247,6 +247,6 @@ class TestProjectionRankSurvivesTheRename:
     def test_AC3_UI_the_two_none_gates_survive(self):
         from fno.plan._status import project_plan_status
 
-        for gate in ("blocked", "deferred"):
+        for gate in ("blocked", "deferred", "in_progress", "claimed"):
             assert project_plan_status("in_progress", gate) is None
             assert project_plan_status("shipped", gate) is None

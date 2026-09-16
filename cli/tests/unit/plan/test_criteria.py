@@ -16,7 +16,6 @@ from __future__ import annotations
 import pytest
 
 from fno.plan.criteria import (
-    Criterion,
     CriteriaParseError,
     compile_criteria,
 )
