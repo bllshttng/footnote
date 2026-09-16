@@ -61,8 +61,10 @@ mod server_axis;
 
 pub use crate::cli_args::{BlockAnnotateArgs, BlockPipeArgs, MuxCommon};
 
+mod block_args;
 mod pane_args;
 use clap::Parser as _;
+use block_args::{parse_block_annotate, parse_block_args};
 pub use pane_args::{
     parse_pane_args, ParsedPane, PANE_LS_IDENTITY_HELP, PANE_REFERENCE_USAGE, PANE_RUN_WORKER_HELP,
     PANE_SEND_RAW_HELP,
@@ -5014,45 +5016,6 @@ fn render_reply(
 // `fno mux block pipe` - cross-pane block piping porcelain
 // ---------------------------------------------------------------------------
 
-/// A parsed `block pipe` invocation. Pure-parse struct, mirrors [`ParsedPane`].
-#[derive(Debug, PartialEq, Eq)]
-struct ParsedBlockPipe {
-    session: Option<String>,
-    json: bool,
-    from: u64,
-    to: u64,
-    block: BlockSel,
-    force: bool,
-}
-
-/// Parse the tokens after `mux block` into a [`ParsedBlockPipe`]. Pure, so the
-/// grammar is unit-testable without a socket. `pipe` is the only block verb.
-fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
-    // The typed tree already routed on the operation word; args is the
-    // verb-excluded tail.
-    let a = BlockPipeArgs::try_parse_from(args)
-        .map_err(|e| crate::cli_args::refusal_line("fno mux block pipe", &e))?;
-    if a.session.is_some() {
-        note_server_flag("--session");
-    }
-    Ok(ParsedBlockPipe {
-        session: a.server.or(a.session),
-        json: a.json,
-        from: parse_u64(
-            a.from.as_deref().ok_or("block pipe needs --from <pane>")?,
-            "--from",
-        )?,
-        to: parse_u64(
-            a.to.as_deref().ok_or("block pipe needs --to <pane>")?,
-            "--to",
-        )?,
-        block: match &a.block {
-            Some(b) => parse_block_sel(b)?,
-            None => BlockSel::Last,
-        },
-        force: a.force,
-    })
-}
 
 /// Data-integrity gate on the source block's metadata: an open (still
 /// running) or byte-cap-truncated block must never pipe - partial text is
@@ -5554,58 +5517,6 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
 /// cap only bounds how much of a large completed block rides into the event.
 const ANNOTATE_EXCERPT_CAP: usize = 2048;
 
-/// A parsed `block annotate` invocation. Pure-parse struct, mirrors
-/// [`ParsedBlockPipe`]. `node` carries the backlog node the finding is scoped
-/// to (the caller supplies the pane's server-tracked `FNO_NODE`, surfaced to
-/// the mux client as `Layout::focus_node`); the porcelain never guesses it.
-#[derive(Debug, PartialEq, Eq)]
-struct ParsedBlockAnnotate {
-    session: Option<String>,
-    from: u64,
-    block: BlockSel,
-    node: String,
-    message: String,
-}
-
-/// Parse the tokens after `mux block annotate` into a [`ParsedBlockAnnotate`].
-/// Pure, so the grammar is unit-testable without a socket. `--node` and `-m`
-/// are required; a missing `--node` is the "specify the node" refusal (a
-/// non-agent pane has no provenance to resolve, so the caller must name it).
-fn parse_block_annotate(args: &[OsString]) -> Result<ParsedBlockAnnotate, String> {
-    // The typed tree already routed on the operation word; args is the
-    // verb-excluded tail.
-    let a = BlockAnnotateArgs::try_parse_from(args)
-        .map_err(|e| crate::cli_args::refusal_line("fno mux block annotate", &e))?;
-    if a.session.is_some() {
-        note_server_flag("--session");
-    }
-    let session = a.server.or(a.session);
-    let from = a
-        .from
-        .as_deref()
-        .map(|v| parse_u64(v, "--from"))
-        .transpose()?;
-    let block = match &a.block {
-        Some(b) => parse_block_sel(b)?,
-        None => BlockSel::Last,
-    };
-    let node = a.node;
-    let message = a.message.ok_or("block annotate needs -m <text>")?;
-    if message.trim().is_empty() {
-        return Err("block annotate: --message is empty".to_string());
-    }
-    Ok(ParsedBlockAnnotate {
-        session,
-        from: from.ok_or("block annotate needs --from <pane>")?,
-        block,
-        node: node.ok_or(
-            "block annotate needs --node <id> (a pane's node cannot be guessed; \
-             pass the node whose work this pane holds)",
-        )?,
-        message,
-    })
-}
-
 /// `fno mux block annotate --from <pane> [--block last|<seq>] -m <text> --node
 /// <id> [--session]`: read a COMPLETED block from the source pane and record it
 /// as an operator review finding against `--node` via `fno backlog annotate add`.
@@ -5775,6 +5686,7 @@ pub fn block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use block_args::{ParsedBlockAnnotate, ParsedBlockPipe};
     use crate::pane_send_audit::{FNO_AGENTS_HOME_GUARD, FNO_BIN_GUARD};
 
     // The paneless route-hint test lives in its own file; the parent is
