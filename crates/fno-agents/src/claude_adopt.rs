@@ -20,7 +20,7 @@ use std::io::BufRead;
 use std::path::{Path, PathBuf};
 
 use crate::claude_roster::RosterWorker;
-use crate::state::{update_registry, Lineage, RegistryEntry, StateError, HOST_MODE_ATTACHED};
+use crate::state::{update_registry, RegistryEntry, StateError, HOST_MODE_ATTACHED};
 use crate::AgentStatus;
 
 /// The single-writer claim holder for an adopted session: `pty:<short_id>`. The
@@ -233,7 +233,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
     // The adopting session's ambient identity: adoption runs in the
     // session that found the worker, and that session is the best answer the
     // registry can hold for "who is responsible for this row".
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    let spawned_by = crate::spawn_lineage::ambient_lineage();
     // the crown restored from a live manifest naming this session,
     // or none. Computed once, before the literal, so the row and the file can
     // never disagree about what was restored.
@@ -319,14 +319,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         git_grant: None,
         spawn_trigger: None,
         legacy_claude_short_id: None,
-        ..RegistryEntry::new(
-            Some(w.session_id.clone()),
-            Lineage {
-                session: parent_session,
-                harness: parent_harness,
-                cwd: parent_cwd,
-            },
-        )
+        ..RegistryEntry::new(Some(w.session_id.clone()), spawned_by)
     }
 }
 

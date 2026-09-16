@@ -38,7 +38,7 @@ use std::time::{Duration, Instant};
 use crate::claude_ask::emit_event;
 use crate::paths::AgentsHome;
 use crate::provider::render_verb_seed;
-use crate::state::{find_keyed_mut, load_registry, update_registry, Lineage};
+use crate::state::{find_keyed_mut, load_registry, update_registry};
 use crate::AgentStatus;
 
 // ===========================================================================
@@ -1266,7 +1266,7 @@ fn dispatch_create(
     use crate::state::RegistryEntry;
     // The spawning session's ambient identity: dispatch_create runs
     // in the CLIENT process that inherited the spawning session's env.
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    let spawned_by = crate::spawn_lineage::ambient_lineage();
     let new_entry = RegistryEntry {
         // client-side mint - this process inherited the spawning
         // session's env, so the exported FNO_NODE names the node THIS spawn
@@ -1349,14 +1349,7 @@ fn dispatch_create(
         delivery_policy: None,
         sandbox_posture: None,
         git_grant: None,
-        ..RegistryEntry::new(
-            Some(session_id.clone()),
-            Lineage {
-                session: parent_session,
-                harness: parent_harness,
-                cwd: parent_cwd,
-            },
-        )
+        ..RegistryEntry::new(Some(session_id.clone()), spawned_by)
     };
 
     match update_registry(registry_path, |reg| {

@@ -2460,8 +2460,7 @@ async fn poll_until_ready_empty_settled_screen_returns_empty_string() {
 // -----------------------------------------------------------------------
 
 /// E1 fix: the locked one-host re-check matches an interactive claude row by
-/// its `claude_session_uuid`, so a second writer on the same pinned session id
-/// is refused even when the file claim is unavailable (fail-open backstop).
+/// its `claude_session_uuid`, refusing a second writer on one pinned session.
 #[test]
 fn entry_holds_session_matches_claude_session_uuid() {
     let row = build_claude_stream_entry(
@@ -2473,16 +2472,15 @@ fn entry_holds_session_matches_claude_session_uuid() {
         None,
         PathBuf::from("/tmp/log.jsonl"),
         None,
+        &serde_json::Value::Null,
     );
     assert!(
         entry_holds_session(&row, "sess-uuid-9"),
         "a claude row must be matched by its claude_session_uuid"
     );
     assert!(!entry_holds_session(&row, "other-uuid"));
-    // v25: the vendor route stays UNKNOWN on this lane (it may be routed;
-    // the row's `provider` is None for the same reason), but the account
-    // record mirrors the launch read rather than sitting at None by
-    // omission - with no ambient config dir this env resolves "default".
+    // v25: the vendor route stays UNKNOWN on this lane, but the account
+    // record mirrors the launch read, not None by omission.
     assert_eq!(row.route_provider_id, None);
     assert_eq!(row.model_name, None);
     assert_eq!(
@@ -2500,6 +2498,7 @@ fn entry_holds_session_matches_claude_session_uuid() {
         None,
         PathBuf::from("/tmp/log.jsonl"),
         Some("x-cafe"),
+        &serde_json::Value::Null,
     );
     assert_eq!(bound.node.as_deref(), Some("x-cafe"));
 }
@@ -4324,6 +4323,7 @@ fn build_claude_stream_entry_marks_interactive_claude_with_full_uuid() {
         Some(99),
         PathBuf::from("/proj/.fno/agents/sw3/timeline.jsonl"),
         None,
+        &serde_json::Value::Null,
     );
     assert_eq!(e.harness_name(), "claude");
     assert_eq!(

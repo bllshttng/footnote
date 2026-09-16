@@ -1076,6 +1076,15 @@ pub struct RegistryEntry {
     pub spawned_by_harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_cwd: Option<String>,
+    /// Why a mint with no parent session could not name one (schema v33):
+    /// a daemon mint reads the parent edge from the spawn REQUEST, so an
+    /// edge-less request stamps its reason instead of a silent null, and an
+    /// ambient capture with no session stamps the identity disposition it
+    /// read. An origin=spawn row carries `spawned_by_session` or a non-empty
+    /// reason, never neither. Same X3 passthrough as the other spawned_by
+    /// columns, and the same writer-protection bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_reason: Option<String>,
     /// LD3: the session that VOUCHED for an adopted row (X3 passthrough).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adopted_by_session: Option<String>,
@@ -1110,21 +1119,28 @@ pub struct RegistryEntry {
 
 /// The spawn-time parent edge as one value. Ambient, never required of a
 /// caller, but never implicit either: the mint constructor takes it
-/// positionally, so a mint site with no parent names [`Lineage::none`] in its
-/// own code instead of inheriting a silent `None`.
+/// positionally, so a mint site with no parent names [`Lineage::unproven`]
+/// (with the reason it cannot name one) in its own code instead of
+/// inheriting a silent `None`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lineage {
     pub session: Option<String>,
     pub harness: Option<String>,
     pub cwd: Option<String>,
+    /// Why `session` is None, when a spawn row asserts a parent exists: the
+    /// identity disposition an ambient capture read, or the daemon-mint miss
+    /// [`Lineage::from_request`] records. A row never says nothing.
+    pub reason: Option<String>,
 }
 
 impl Lineage {
-    pub fn none() -> Self {
+    /// A mint with no parent, named as such by the site itself.
+    pub fn unproven(reason: &str) -> Self {
         Self {
             session: None,
             harness: None,
             cwd: None,
+            reason: Some(reason.to_string()),
         }
     }
 
@@ -1136,6 +1152,34 @@ impl Lineage {
             session,
             harness,
             cwd,
+            reason: None,
+        }
+    }
+
+    /// The parent edge a spawn REQUEST carried, read server-side: the daemon
+    /// mints from what the client sent, never from its own scrubbed
+    /// environment (the same trust the `node` field already gets). A request
+    /// with no parent edge stamps the reason, so the row never says nothing.
+    pub fn from_request(params: &serde_json::Value) -> Self {
+        let get = |key: &str| {
+            params
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let session = get("spawned_by_session");
+        let reason = if session.is_none() {
+            Some("daemon mint: spawn request carried no parent edge".to_string())
+        } else {
+            None
+        };
+        Self {
+            session,
+            harness: get("spawned_by_harness"),
+            cwd: get("spawned_by_cwd"),
+            reason,
         }
     }
 }
@@ -1153,6 +1197,7 @@ impl RegistryEntry {
             spawned_by_session: spawned_by.session,
             spawned_by_harness: spawned_by.harness,
             spawned_by_cwd: spawned_by.cwd,
+            lineage_reason: spawned_by.reason,
             ..Default::default()
         }
     }

@@ -22,10 +22,15 @@ pub(crate) fn build_codex_thread_entry(
     node: Option<&str>,
     account: Option<&str>,
     harness_args: &[String],
+    spawn_params: &serde_json::Value,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     let session_id = driver.thread_id().to_string();
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    // The daemon's env is scrubbed, so the parent edge rides the spawn
+    // REQUEST the client stamped from its own ambient markers - the same
+    // trust the `node` field already gets. An edge-less request stamps the
+    // reason instead of a silent null.
+    let spawned_by = Lineage::from_request(spawn_params);
     RegistryEntry {
         node: node.filter(|node| !node.is_empty()).map(str::to_string),
         // v25: the route axes this lane actually used. When the spawn request
@@ -128,10 +133,7 @@ pub(crate) fn build_codex_thread_entry(
         // The fenced tokens verbatim; startup recovery re-parses them into the
         // resume frame's config.
         harness_args: harness_args.to_vec(),
-        ..RegistryEntry::new(
-            Some(session_id),
-            Lineage::captured((parent_session, parent_harness, parent_cwd)),
-        )
+        ..RegistryEntry::new(Some(session_id), spawned_by)
     }
 }
 

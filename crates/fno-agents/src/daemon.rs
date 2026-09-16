@@ -3049,15 +3049,15 @@ fn build_claude_stream_entry(
     pid_start_time: Option<u64>,
     log_path: PathBuf,
     node: Option<&str>,
+    spawn_params: &serde_json::Value,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
-    // Ambient parent edge, captured for shape parity with the other
-    // mint sites. This fn runs IN THE DAEMON, and lazy-start scrubs the
-    // harness session markers from the daemon's env (client.rs), so this
-    // stamps None by construction: the daemon itself started this PTY worker
-    // and no session parent is claimable from here. A daemon that somehow
-    // still carries a marker attributes nothing rather than laundering it.
-    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    // The parent edge rides the spawn REQUEST, never this process's env:
+    // the daemon lazy-start scrubs the harness session markers (client.rs),
+    // so an ambient read here stamped None by construction and every row
+    // lost who spawned it. The client stamps its own ambient markers onto
+    // the request; an edge-less request stamps the reason instead.
+    let spawned_by = Lineage::from_request(spawn_params);
     let (launch_account, launch_account_source) = crate::state::launch_provenance_from_env();
     RegistryEntry {
         // The node this spawn was FOR, from the spawn request - never the
@@ -3129,10 +3129,7 @@ fn build_claude_stream_entry(
         fno_id: None,
         delivery_policy: None,
         sandbox_posture: None,
-        ..RegistryEntry::new(
-            Some(uuid.into()),
-            Lineage::captured((parent_session, parent_harness, parent_cwd)),
-        )
+        ..RegistryEntry::new(Some(uuid.into()), spawned_by)
     }
 }
 
@@ -3458,6 +3455,7 @@ async fn spawn_claude_stream_lane(
         worker_pid_start_time,
         ctx.home.timeline_jsonl(&short_id),
         req.params.get("node").and_then(Value::as_str),
+        &req.params,
     );
     let uuid_for_lock = uuid.to_string();
     let insert = update_registry_offloaded(ctx.home.registry_json(), move |r| {

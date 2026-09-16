@@ -55,6 +55,8 @@ pub(crate) fn registry_json_logic(rows: &[Value]) -> Value {
                 "crown_level": row.get("crown_level").cloned().unwrap_or(Value::Null),
                 "crown_scope": row.get("crown_scope").and_then(Value::as_str),
                 "spawned_by_session": row.get("spawned_by_session").and_then(Value::as_str),
+                "spawned_by_harness": row.get("spawned_by_harness").and_then(Value::as_str),
+                "lineage_reason": row.get("lineage_reason").and_then(Value::as_str),
                 "origin": row.get("origin").and_then(Value::as_str),
                 "liveness": crate::row_truth::served_fresh_liveness(word, measured_at),
                 "liveness_basis": crate::row_truth::served_liveness_basis(word, measured_at),
@@ -115,6 +117,21 @@ mod tests {
     }
 
     #[test]
+    fn harness_and_reason_project_beside_the_session() {
+        let out = registry_json_logic(&[row(json!({
+            "harness_session_id": "s-1",
+            "spawned_by_harness": "claude",
+            "lineage_reason": "identity disposition=absent, markers=no markers",
+        }))]);
+        let a = &out["agents"][0];
+        assert_eq!(a["spawned_by_harness"], "claude");
+        assert_eq!(
+            a["lineage_reason"],
+            "identity disposition=absent, markers=no markers"
+        );
+    }
+
+    #[test]
     fn unmeasured_rows_serve_null_with_never_measured() {
         let out = registry_json_logic(&[row(json!({ "harness_session_id": "s-1" }))]);
         let a = &out["agents"][0];
@@ -123,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn the_projection_keeps_the_eight_stored_keys_and_the_claude_session_rule() {
+    fn the_projection_keeps_the_stored_keys_and_the_claude_session_rule() {
         let out = registry_json_logic(&[
             row(
                 json!({ "harness": "claude", "short_id": "abc12345", "harness_session_id": "uuid-1" }),

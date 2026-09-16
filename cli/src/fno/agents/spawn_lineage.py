@@ -55,12 +55,13 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
     return identity.session_id, harness, parent_cwd
 
 
-def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
-    """Name an unrecorded parent edge in the spawn output, and return the
-    reason so the spawn event can carry it : the event holds either
-    a session id or this reason, never both empty. A null can be CORRECT
-    (a foreign inherited marker would record a stranger as parent); the
-    defect was its silence, so say it with the identity resolution's reason.
+def _lineage_reason(session_id: Optional[str]) -> Optional[str]:
+    """Why a mint with no parent session could not name one: the identity
+    resolution's disposition and markers, or None when a session was
+    captured. A null can be CORRECT (a foreign inherited marker would
+    record a stranger as parent); the defect was its silence. Pure: no
+    printing, so a register or fallback path can carry a reason without
+    emitting the spawn notice.
     """
     if session_id:
         return None
@@ -69,11 +70,20 @@ def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
 
         identity = resolve_self_identity()
         markers = ",".join(m for m, _h, _v in identity.markers_present) or "no markers"
-        reason = f"identity disposition={identity.disposition}, markers={markers}"
+        return f"identity disposition={identity.disposition}, markers={markers}"
     except Exception:  # noqa: BLE001 - the notice never breaks the spawn
-        reason = "identity unreadable"
-    print(f"spawn: parent edge NOT recorded ({reason}); this worker will not "
-          f"appear in its spawner's orphan check", file=sys.stderr)
+        return "identity unreadable"
+
+
+def _report_unlinked_parent(session_id: Optional[str]) -> Optional[str]:
+    """Name an unrecorded parent edge in the spawn output, and return the
+    reason so the spawn event can carry it : the event holds either
+    a session id or this reason, never both empty.
+    """
+    reason = _lineage_reason(session_id)
+    if reason is not None:
+        print(f"spawn: parent edge NOT recorded ({reason}); this worker will not "
+              f"appear in its spawner's orphan check", file=sys.stderr)
     return reason
 
 

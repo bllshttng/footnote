@@ -4570,6 +4570,7 @@ def dispatch_spawn_pane(
                     spawned_by_session=spawned_by_session,
                     spawned_by_harness=spawned_by_harness,
                     spawned_by_cwd=spawned_by_cwd,
+                    lineage_reason=lineage_reason,
                     name=name,
                     harness=provider,
                     provider=resolved_lane_provider,
