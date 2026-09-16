@@ -399,24 +399,38 @@ fn account_reset_timezones(candidates: &[PathBuf]) -> BTreeMap<String, String> {
 /// so a lane whose rows carry only the provider axis still resolves its
 /// vendor stamp.
 fn record_reset_timezones(cwd: &Path) -> BTreeMap<String, String> {
+    record_reset_timezones_from_candidates(&crate::agents_config::config_candidates(cwd))
+}
+
+fn record_reset_timezones_from_candidates(candidates: &[PathBuf]) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    let Some(records) = crate::agents_config::config_lookup(cwd, &["accounts", "records"]) else {
-        return out;
-    };
-    let Some(records) = records.as_array() else {
-        return out;
-    };
-    for rec in records {
-        let Some(tz) = rec.get("reset_timezone").and_then(|v| v.as_str()) else {
+    // Candidates are ordered highest priority first. Walk them in reverse so
+    // a higher tier replaces a lower tier for the same record or provider.
+    for path in candidates.iter().rev() {
+        let Ok(raw) = std::fs::read_to_string(path) else {
             continue;
         };
-        if let Some(id) = rec.get("id").and_then(|v| v.as_str()) {
-            out.entry(id.to_string()).or_insert_with(|| tz.to_string());
-        }
-        if let Some(route) = rec.get("route").and_then(|v| v.as_str()) {
-            if let Some(provider) = route.split('/').next().filter(|p| !p.is_empty()) {
-                out.entry(provider.to_string())
-                    .or_insert_with(|| tz.to_string());
+        let Ok(table) = raw.parse::<toml::Table>() else {
+            continue;
+        };
+        let Some(records) = table
+            .get("accounts")
+            .and_then(|v| v.get("records"))
+            .and_then(toml::Value::as_array)
+        else {
+            continue;
+        };
+        for rec in records {
+            let Some(tz) = rec.get("reset_timezone").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if let Some(id) = rec.get("id").and_then(|v| v.as_str()) {
+                out.insert(id.to_string(), tz.to_string());
+            }
+            if let Some(route) = rec.get("route").and_then(|v| v.as_str()) {
+                if let Some(provider) = route.split('/').next().filter(|p| !p.is_empty()) {
+                    out.insert(provider.to_string(), tz.to_string());
+                }
             }
         }
     }
@@ -1931,6 +1945,37 @@ mod tests {
             None,
             "beyond the 14-day horizon: a misread, not a deadline"
         );
+    }
+
+    #[test]
+    fn record_reset_timezones_overlays_low_to_high_priority_records() {
+        let root = std::env::temp_dir().join(format!("pc-record-zones-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let global = root.join("global.toml");
+        let project = root.join("project.toml");
+        write(
+            &global,
+            "[[accounts.records]]\nid = \"zai\"\nroute = \"zai/glm-5.3\"\nreset_timezone = \"Asia/Singapore\"\n",
+        );
+        write(
+            &project,
+            "[[accounts.records]]\nid = \"makers\"\nroute = \"anthropic/claude\"\nreset_timezone = \"America/Los_Angeles\"\n",
+        );
+
+        let zones = record_reset_timezones_from_candidates(&[project.clone(), global.clone()]);
+        assert_eq!(zones.get("zai").map(String::as_str), Some("Asia/Singapore"));
+        assert_eq!(
+            zones.get("makers").map(String::as_str),
+            Some("America/Los_Angeles")
+        );
+
+        write(
+            &project,
+            "[[accounts.records]]\nid = \"zai\"\nroute = \"zai/glm-5.3\"\nreset_timezone = \"UTC\"\n",
+        );
+        let zones = record_reset_timezones_from_candidates(&[project, global]);
+        assert_eq!(zones.get("zai").map(String::as_str), Some("UTC"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// AC4-HP: a config record's route-provider zone resolves the capped
