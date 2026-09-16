@@ -1243,13 +1243,6 @@ def _reanchor_pid_for(
 ) -> Optional[int]:
     """The durable pid a renewal should re-anchor EXISTING to, or None.
 
-    Mirrors ``renew`` in ``crates/fno-agents/src/claims.rs``. Renewal used to
-    preserve the recorded pid, and that is what made SUSPECT mean two things: a
-    respawned worker renewing under a new pid left a claim byte-identical to a
-    dead worker's, so nothing on disk separated a live session from a corpse and
-    every reader that must not steal from the first was forced to protect the
-    second.
-
     Returns None - meaning leave the anchor alone - in four cases, each for its
     own reason:
 
@@ -1280,11 +1273,6 @@ def _reanchor_pid_for(
     session: the registry row keyed by that id is the verifiable identity the
     record was missing.
     """
-    # An EXPIRED claim is already reclaimable, and re-anchoring one resurrects it
-    # as LIVE - taking a slot a peer is entitled to and racing whatever recovery
-    # was mid-flight. `renew_locked` in `crates/fno-agents/src/claims.rs`, which
-    # this mirrors, has always refused there; without the same refusal here the
-    # two implementations of one operation answered differently.
     verdict = verdict or _claim_verdict(existing, root=root)
     if existing.pid_unavailable or verdict.get("expired") is True:
         return None
