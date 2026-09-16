@@ -15,6 +15,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KGD="$REPO_ROOT/hooks/king-delegation-guard.sh"
 [[ -f "$KGD" ]] || { echo "FAIL: guard not found at $KGD" >&2; exit 1; }
 BIN="${FNO_AGENTS_BIN:-$REPO_ROOT/crates/fno-agents/target/release/fno-agents}"
+# A sibling leg of the packet (preflight, the cargo-isolation tests) may have
+# cleaned the target dir between provisioning and this run: rebuild quietly
+# rather than fail on a binary the environment is documented to provide.
+[[ -x "$BIN" ]] || (cd "$REPO_ROOT/crates/fno-agents" && cargo build --bin fno-agents >/dev/null 2>&1)
 [[ -x "$BIN" ]] || { echo "FAIL: fno-agents binary not executable at $BIN" >&2; exit 1; }
 
 PASS=0

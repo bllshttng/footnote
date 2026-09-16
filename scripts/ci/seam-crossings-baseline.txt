@@ -32,10 +32,9 @@ crossing	crates/fno-agents/src/gc_native.rs	312	let mut child = std::process::Co
 crossing	crates/fno-agents/src/king_checkin.rs	161	let mut argv = vec![fno_bin()];
 crossing	crates/fno-agents/src/lifecycle_child.rs	93	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/loop_dispatch.rs	364	let out = Command::new("fno")
-crossing	crates/fno-agents/src/loopcheck.rs	3451	pub(crate) fn loopcheck_fno_bin() -> String {
-crossing	crates/fno-agents/src/loopcheck.rs	10341	&loopcheck_fno_bin(),
-crossing	crates/fno-agents/src/loopcheck.rs	11934	let fno_bin = loopcheck_fno_bin();
-crossing	crates/fno-agents/src/nudge.rs	50	let output = Command::new("fno")
+crossing	crates/fno-agents/src/loopcheck.rs	3450	pub(crate) fn loopcheck_fno_bin() -> String {
+crossing	crates/fno-agents/src/loopcheck.rs	10342	&loopcheck_fno_bin(),
+crossing	crates/fno-agents/src/loopcheck.rs	12003	let fno_bin = loopcheck_fno_bin();
 crossing	crates/fno-agents/src/pane_relaunch.rs	338	let mut command = std::process::Command::new("fno");
 crossing	crates/fno-agents/src/pane_relaunch.rs	560	std::process::Command::new("fno")
 crossing	crates/fno-agents/src/pane_stop.rs	464	let Ok(output) = std::process::Command::new("fno")
@@ -89,11 +88,10 @@ resolver	crates/fno-agents/src/delivery_completion.rs	142	pub fn evaluate_manife
 resolver	crates/fno-agents/src/graph_keeper.rs	607	fn run_render_pass() -> Result<(), (i32, String)> {
 resolver	crates/fno-agents/src/loop_dispatch.rs	136	pub(crate) fn fno_cmd(fno_bin: &str) -> Command {
 resolver	crates/fno-agents/src/loop_target.rs	374	fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
-resolver	crates/fno-agents/src/loopcheck.rs	3451	pub(crate) fn loopcheck_fno_bin() -> String {
-resolver	crates/fno-agents/src/loopcheck.rs	3469	fn best_effort_notify(title: &str, body: &str) {
-resolver	crates/fno-agents/src/loopcheck.rs	7839	fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
-resolver	crates/fno-agents/src/loopcheck.rs	8200	fn decide_inner(args: &[String]) -> (i32, String) {
-resolver	crates/fno-agents/src/loopcheck.rs	10959	fn build_block_reason(
+resolver	crates/fno-agents/src/loopcheck.rs	3450	pub(crate) fn loopcheck_fno_bin() -> String {
+resolver	crates/fno-agents/src/loopcheck.rs	3468	fn best_effort_notify(title: &str, body: &str) {
+resolver	crates/fno-agents/src/loopcheck.rs	7877	pub(crate) fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
+resolver	crates/fno-agents/src/loopcheck.rs	10960	fn build_block_reason(
 resolver	crates/fno-agents/src/operator_notice.rs	33	pub fn notify_operator(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/operator_notice.rs	85	pub fn notify_operator_confirmed(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/plugin_install.rs	158	fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usize), String> {
@@ -106,4 +104,5 @@ resolver	crates/fno-agents/src/scrape.rs	174	pub fn fno_bin() -> std::ffi::OsStr
 resolver	crates/fno-agents/src/scrape.rs	212	fn fno_py_in_tools_dir(base: &std::path::Path) -> Option<std::path::PathBuf> {
 resolver	crates/fno/src/bootstrap.rs	1116	fn diagnose_locate_failure() -> Option<String> {
 resolver	crates/fno/src/mux_cli.rs	5153	fn prepare_pane_bytes(
-resolver	crates/fno/src/server.rs	2640	pub(crate) fn fno_bin() -> PathBuf {
+resolver	crates/fno/src/server.rs	2618	pub(crate) fn fno_bin() -> PathBuf {
+resolver	crates/fno-agents/src/loopcheck.rs	264	pub(crate) fn decide_with_payload(
