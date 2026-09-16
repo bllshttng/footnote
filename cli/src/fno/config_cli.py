@@ -1130,7 +1130,8 @@ def get_cmd(
 
     # One call resolves every spelling: the resolver itself drops a legacy
     # `config.` prefix and aliases `providers` to `accounts`.
-    ok, node = resolve_dotted(root, key.split("."))
+    descended_default = [False]
+    ok, node = resolve_dotted(root, key.split("."), descended_default)
     if not ok:
         typer.echo(f"error: unknown config key '{key}'", file=sys.stderr)
         raise typer.Exit(code=1)
@@ -1186,6 +1187,13 @@ def get_cmd(
 
     if is_leaf:
         source_line = f"source: {decider}" if decider else "source: default (no config file sets this key)"
+        if descended_default[0]:
+            # An absent dict[str, Model] key read as the model default. A
+            # typo'd name and an unset name land here alike; say so.
+            typer.echo(
+                f"note: no config file sets '{key}'; showing the schema default",
+                file=sys.stderr,
+            )
         if overridden:
             source_line += " (overrides " + ", ".join(str(p) for p in overridden) + ")"
     else:

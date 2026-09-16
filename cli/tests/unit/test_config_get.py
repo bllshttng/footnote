@@ -363,3 +363,15 @@ def test_get_block_key_does_not_claim_one_decider(
     assert "overrides" not in r.stderr
     # And the pointer suggests a leaf query.
     assert "auto_merge.enabled" in r.stderr
+
+
+def test_get_default_descent_names_itself_in_the_receipt(tmp_path, monkeypatch):
+    """An unset loop name reads as the default AND the receipt says so, so a
+    typo'd name is at least visible against a file-set one."""
+    r = _run(
+        ["config", "get", "loops.blueprint_judge.level"],
+        tmp_path, monkeypatch, "schema_version: 1\n",
+    )
+    assert r.exit_code == 0, r.output
+    assert "note:" in r.stderr
+    assert "schema default" in r.stderr

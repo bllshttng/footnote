@@ -773,7 +773,11 @@ def _deep_unset(
     return out, was, True
 
 
-def resolve_dotted(root: BaseModel, parts: list[str]) -> tuple[bool, Any]:
+def resolve_dotted(
+    root: BaseModel,
+    parts: list[str],
+    descended_default: Optional[list[bool]] = None,
+) -> tuple[bool, Any]:
     """Resolve ``parts`` against ``root``: one resolver for get, unset's
     default and the overridden-write check, so the copied walks cannot drift.
 
@@ -781,7 +785,10 @@ def resolve_dotted(root: BaseModel, parts: list[str]) -> tuple[bool, Any]:
     default-constructed Model, so an unset ``loops.<name>.level`` reads as the
     LoopEntry default instead of "unknown". A legacy leading ``config.`` is
     dropped (the model is flat) and ``providers.`` aliases to ``accounts.``.
-    Any other miss is (False, None).
+    Any other miss is (False, None). When that absent-key descent happens,
+    ``descended_default[0]`` flips True so a receipt can name it: a typo'd
+    name and an unset name read the same value, and the receipt is what
+    separates either from a file-set one.
     """
     if parts and parts[0] == "config":
         parts = parts[1:]
@@ -804,6 +811,8 @@ def resolve_dotted(root: BaseModel, parts: list[str]) -> tuple[bool, Any]:
             elif map_model is not None:
                 node = map_model()
                 map_model = None
+                if descended_default is not None:
+                    descended_default[0] = True
             else:
                 return (False, None)
         else:
