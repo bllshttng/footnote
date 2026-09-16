@@ -1,4 +1,4 @@
-//! `fno-agents hook` - the per-turn hooks as native entries (x-09d2).
+//! `fno-agents hook` - the per-turn hooks as native entries.
 //!
 //! The two shell hooks (Stop, PreToolUse) become 20-line exec wrappers of
 //! these entries: the policy they carried in shell + Python + jq moves here,
