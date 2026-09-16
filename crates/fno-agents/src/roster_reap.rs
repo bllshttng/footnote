@@ -20,8 +20,9 @@
 //! through the same cascade `rm` walks, with the typed outcome recorded and
 //! a receipt staged when none exists yet (an earlier retirement's receipt
 //! is the record it already made; this pass's outcome is in the summary).
-//! A history deletion never happens: the transcript survives, resume still
-//! opens it.
+//! A history deletion never happens: the transcript survives the `rm`. The
+//! receipt carries the resume command, but a removed claude background
+//! session no longer resumes - the job state is gone with it.
 //!
 //! The scope (`agents.reap.roster_scope`) names the population that may
 //! retire, as an operator setting: `off` retires nothing, `provenanced`
