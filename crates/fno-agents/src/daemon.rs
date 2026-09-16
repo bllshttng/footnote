@@ -7570,14 +7570,14 @@ pub(crate) fn run_reconcile_sweep(
     // Exited that still carries an inside-leg report, publish its completion
     // BEFORE the write below clears the report. Publishing first is the
     // contract: list/waiters see the final state before the badge goes blank.
-    // Serve-only skips it: the tick writes no lifecycle state, so there is no
-    // exit to tear down.
-    if matches!(mode, SweepMode::Full) {
-        for ch in &changes {
-            if matches!(ch.new_status, Some(AgentStatus::Exited)) {
-                if let Some(e) = registry.entries.iter().find(|e| e.name == ch.name) {
-                    emit_inside_leg_completion(emitter, e);
-                }
+    // Gated on the same predicate the applier uses, so a ServeOnly tick that
+    // writes a pid-proven exit also publishes its completion.
+    for ch in &changes {
+        if liveness_sweep::mode_writes_status(&mode, ch)
+            && matches!(ch.new_status, Some(AgentStatus::Exited))
+        {
+            if let Some(e) = registry.entries.iter().find(|e| e.name == ch.name) {
+                emit_inside_leg_completion(emitter, e);
             }
         }
     }

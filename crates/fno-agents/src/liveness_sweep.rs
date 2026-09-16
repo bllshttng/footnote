@@ -413,6 +413,17 @@ pub(crate) enum SweepMode {
     ServeOnly,
 }
 
+/// Whether this sweep mode writes `ch`'s planned status. Full writes every
+/// planned change; ServeOnly writes only a status the row's own pid proved.
+/// The status applier and the ordered exit teardown both read this, so the
+/// two can never disagree about which sweep wrote a lifecycle state.
+pub(crate) fn mode_writes_status(mode: &SweepMode, ch: &ReconcileChange) -> bool {
+    match mode {
+        SweepMode::Full => true,
+        SweepMode::ServeOnly => ch.pid_proven,
+    }
+}
+
 /// The one batched registry write both modes share: apply every planned
 /// change and the batch's title readings in one lock window. ServeOnly
 /// writes a status only when the row's own pid proved it (`pid_proven`), so a
@@ -442,10 +453,10 @@ pub(crate) fn apply_reconcile_changes(
             None => r.find_mut(&ch.name),
         };
         if let Some(e) = target {
-            let status = match mode {
-                SweepMode::Full => ch.new_status,
-                SweepMode::ServeOnly if ch.pid_proven => ch.new_status,
-                SweepMode::ServeOnly => None,
+            let status = if mode_writes_status(mode, ch) {
+                ch.new_status
+            } else {
+                None
             };
             apply_reconcile_change(e, status, ch.new_liveness, now);
         }
@@ -640,7 +651,7 @@ mod tests {
 
     #[test]
     fn a_dead_pid_plans_exited_and_the_tick_may_write_it() {
-        // AC (x-245f): a pid'd pane row whose pid is proven dead plans
+        // AC: a pid'd pane row whose pid is proven dead plans
         // `Exited` with `pid_proven`, even when the store probe answers
         // `Ok(true)` - the served word already read `dead`, and status now
         // agrees with it. The 60s tick may write a pid-proven status.
@@ -693,7 +704,7 @@ mod tests {
 
     #[test]
     fn serve_only_still_discards_a_probe_inferred_orphan_flip() {
-        // AC (x-245f) error case: a pid'd pane row with a LIVE pid whose
+        // AC error case: a pid'd pane row with a LIVE pid whose
         // store probe misses keeps `live` under ServeOnly - a store miss is
         // an inference, and the tick still cannot retire a live pane on it.
         let mut entry = pane_entry("live-pane", Some(4242));
@@ -734,5 +745,22 @@ mod tests {
             "a store miss still cannot retire a live pane from the tick"
         );
         assert_eq!(row.pid, Some(4242));
+    }
+
+    #[test]
+    fn mode_writes_status_gates_the_exit_teardown_and_the_applier_alike() {
+        // The applier and the ordered exit teardown read the same predicate,
+        // so a pid-proven exit written by the tick also publishes its
+        // completion, and a probe-inferred exit never does.
+        let mk = |pid_proven: bool| crate::daemon::ReconcileChange {
+            name: "row".into(),
+            new_status: Some(AgentStatus::Exited),
+            new_liveness: Some("dead"),
+            pid_proven,
+        };
+        assert!(mode_writes_status(&SweepMode::Full, &mk(true)));
+        assert!(mode_writes_status(&SweepMode::Full, &mk(false)));
+        assert!(mode_writes_status(&SweepMode::ServeOnly, &mk(true)));
+        assert!(!mode_writes_status(&SweepMode::ServeOnly, &mk(false)));
     }
 }
