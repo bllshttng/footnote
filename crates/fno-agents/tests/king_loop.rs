@@ -545,6 +545,62 @@ fn king_arm_honors_the_cancel_sentinel() {
 }
 
 #[test]
+fn a_crown_with_no_checkin_gets_one_hook_row_per_missed_beat() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-hook");
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    let (code1, d1) = king_fire(&state, cwd, &events, &fno);
+    let (code2, d2) = king_fire(&state, cwd, &events, &fno);
+
+    assert_eq!(code1, 0, "fire 1: {d1}");
+    assert_eq!(code2, 0, "fire 2: {d2}");
+    assert_eq!(d1["decision"], "block", "fire 1: {d1}");
+    assert_eq!(d2["decision"], "block", "fire 2: {d2}");
+    let rows = fs::read_to_string(&events).unwrap();
+    let checkins: Vec<&str> = rows
+        .lines()
+        .filter(|l| l.contains("\"reign_checkin\""))
+        .collect();
+    assert_eq!(checkins.len(), 1, "exactly one mechanical row: {rows}");
+    assert!(
+        checkins[0].contains("\"source\":\"hook\""),
+        "row: {}",
+        checkins[0]
+    );
+    let row: serde_json::Value = serde_json::from_str(checkins[0]).unwrap();
+    assert_eq!(row["data"]["scope"], "drain");
+    assert!(!row["data"]["change"].as_str().unwrap_or("").is_empty());
+}
+
+#[test]
+fn a_cancelled_crown_writes_no_hook_row() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    let state = king_manifest(cwd, "k-cancel-hook");
+    fs::write(state.with_extension("cancelled"), "").unwrap();
+    let events = cwd.join("events.jsonl");
+    let bin_dir = TempDir::new().unwrap();
+    let fno = king_board_bin(bin_dir.path(), BOARD_TWO_ACTIONABLE, 0);
+
+    let (code, d) = king_fire(&state, cwd, &events, &fno);
+    assert_eq!(code, 0);
+    assert_eq!(d["termination_reason"], "Interrupted");
+    let wrote_checkin = events.exists()
+        && fs::read_to_string(&events)
+            .map(|rows| rows.contains("\"reign_checkin\""))
+            .unwrap_or(false);
+    assert!(
+        !wrote_checkin,
+        "a cancelled crown writes no reign_checkin row"
+    );
+}
+
+#[test]
 fn king_arm_blocks_rather_than_certifying_a_board_it_cannot_read() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();

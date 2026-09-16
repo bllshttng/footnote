@@ -698,9 +698,11 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
     esac
     FINALIZE_STATE="$STATE_FILE"
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
-        # The retry state is staged here and nowhere earlier. The manifest is
-        # write-once, so this copy matches one taken before loop-check, and a
-        # stop that is not a delivery writes nothing.
+        # The retry state is staged here and nowhere earlier: a stop that is
+        # not a delivery writes nothing, and no candidate file exists for
+        # loop-check to see. The staging source is the live manifest only: a
+        # manifest deleted mid-loop stages nothing, the block refuses the
+        # finalize, and the next fire's pending scan engages the retry.
         if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]]; then
             [[ -n "$DELIVERY_PENDING_STATE" ]] \
                 || emit_block_for_harness "generic delivery state could not be preserved; will retry"

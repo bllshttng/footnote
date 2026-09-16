@@ -112,23 +112,6 @@ def emit(kind: str, *, path: Optional[Path] = None, **data: Any) -> None:
         )
 
 
-def emit_provider_rate_limited(
-    *,
-    provider: str,
-    account: Optional[str],
-    observed_at: Optional[str] = None,
-    path: Optional[Path] = None,
-) -> None:
-    """Record a provider Fair Usage rate-limit observation."""
-    emit(
-        "provider_rate_limited",
-        path=path,
-        provider=provider,
-        account=account,
-        observed_at=observed_at or _utc_now_iso(),
-    )
-
-
 def emit_with_context(
     ctx: "EventContext",
     kind: str,

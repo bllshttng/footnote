@@ -486,6 +486,45 @@ def test_closure_trailer_warns_on_a_dropped_malformed_extra_id(monkeypatch, tmp_
     assert "Backlog-Closure: x-1111" in result.output
 
 
+def test_closure_trailer_bare_invocation_resolves_from_branch(monkeypatch, tmp_path):
+    """The bare verb resolves the node the branch names and renders."""
+    from fno import paths
+    import fno.pr.closure as closure_mod
+
+    graph_path = tmp_path / "graph.json"
+    graph_path.write_text(json.dumps({"entries": [{"id": "x-1111", "status": "ready"}]}))
+    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
+    monkeypatch.setattr(
+        closure_mod,
+        "resolve_branch_node_id",
+        lambda known_ids, cwd=None, runner=None: "x-1111",
+    )
+
+    result = runner.invoke(app, ["do", "pr", "closure-trailer"])
+
+    assert result.exit_code == 0
+    assert "Backlog-Closure: x-1111" in result.output
+
+
+def test_closure_trailer_bare_invocation_refusal_is_loud(monkeypatch):
+    """A bare-verb resolution failure exits NONZERO naming the reason - the
+    legacy silent-empty contract is what shipped trailer-less PR 2080."""
+    import fno.pr.closure as closure_mod
+
+    def _raise(known_ids, cwd=None, runner=None):
+        raise closure_mod.BranchResolutionError(
+            "branch 'main' names 0 real node(s); pass the node explicitly instead"
+        )
+
+    monkeypatch.setattr(closure_mod, "resolve_branch_node_id", _raise)
+
+    result = runner.invoke(app, ["do", "pr", "closure-trailer"])
+
+    assert result.exit_code == 1
+    assert "main" in result.output
+    assert "pass the node explicitly" in result.output
+
+
 def test_global_receipt_path_uses_pinned_accessor(monkeypatch, tmp_path):
     from fno import paths
 

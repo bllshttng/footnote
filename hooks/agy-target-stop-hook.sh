@@ -478,7 +478,11 @@ fi
 if [[ -n "$TERMINATION_REASON" ]]; then
     FINALIZE_STATE="$STATE_FILE"
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
-        # Staged here only, as in target-stop-hook.sh: the manifest is write-once.
+        # Staged here only, as in target-stop-hook.sh: a stop that is not a
+        # delivery writes nothing, and no candidate file exists for loop-check
+        # to see. The staging source is the live manifest only: a manifest
+        # deleted mid-loop stages nothing, and the next fire's pending scan
+        # engages the retry.
         if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]]; then
             [[ -n "$DELIVERY_PENDING_STATE" ]] \
                 || emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'

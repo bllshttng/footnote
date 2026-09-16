@@ -90,10 +90,6 @@ class WorktreeError(Exception):
     """Base exception for all worktree operations."""
 
 
-class WorktreeStaleError(WorktreeError):
-    """Raised when a worktree registration is stale and unrecoverable."""
-
-
 class WorktreeDiskPressureError(WorktreeError):
     """Raised when free disk space falls below the 2GB minimum threshold."""
 

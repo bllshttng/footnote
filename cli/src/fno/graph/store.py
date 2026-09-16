@@ -1068,6 +1068,14 @@ def store_export_status(path: Path) -> dict:
         return {}
 
 
+def served_store_path(path: Path) -> Path:
+    """The store file the keeper served this read from: graph.db on the
+    sqlite backend, the json mirror only on the json rollback default."""
+    if store_export_status(path).get("backend") == "sqlite":
+        return path.with_suffix(".db")
+    return path
+
+
 def read_archive_entries() -> list[dict]:
     """The archived nodes, best-effort: an absent archive is []. Callers that
     may test many ids read once and pass the list to
