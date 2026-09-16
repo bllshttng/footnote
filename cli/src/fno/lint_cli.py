@@ -213,7 +213,7 @@ def _repo_root() -> Path:
 
 def plan_filenames() -> None:
     """Report node-bearing plan filenames that disagree with one claim."""
-    from fno.graph._constants import is_wellformed_node_id
+    from fno.graph._constants import LEGACY_PREFIX, is_wellformed_node_id, node_id_prefix
     from fno.graph._intake import plan_claims
     from fno.paths import plans_content_dir
     from fno.plan.identity import plan_filename_node_id
@@ -223,9 +223,10 @@ def plan_filenames() -> None:
         typer.echo(f"plan-filenames: plans dir not found: {plans_dir}", err=True)
         raise typer.Exit(code=1)
 
+    prefixes = {LEGACY_PREFIX, node_id_prefix()}
     mismatches: list[tuple[Path, str, str]] = []
     for path in sorted(plans_dir.rglob("*.md")):
-        filename_node = plan_filename_node_id(path)
+        filename_node = plan_filename_node_id(path, prefixes=prefixes)
         if filename_node is None:
             continue
         claims = {
