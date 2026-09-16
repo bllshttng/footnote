@@ -236,6 +236,20 @@ def test_plan_doc_filename_honors_custom_template(monkeypatch):
     assert name == "2026-07-11-dark-mode-x-8af8.md"
 
 
+def test_plan_doc_filename_refuses_rendered_node_mismatch(monkeypatch):
+    import datetime
+    import pytest
+
+    from fno import paths
+
+    class _S:
+        plans_filename = "%Y-%m-%d-fixed-x-bbbb.md"
+
+    monkeypatch.setattr(paths, "_settings", lambda: _S())
+    with pytest.raises(ValueError, match="x-bbbb.*x-aaaa|x-aaaa.*x-bbbb"):
+        paths.plan_doc_filename("feature", "x-aaaa", now=datetime.datetime(2026, 7, 11))
+
+
 def test_plan_doc_path_threads_now_for_stable_date(tmp_path, monkeypatch):
     import datetime
 
