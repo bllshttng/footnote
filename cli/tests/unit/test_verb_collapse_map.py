@@ -234,8 +234,9 @@ def test_map_covers_current_surface_once():
     # 627 -> 628. The eval cohort leaves then allocated `doctor evals export`
     # / `evals export` and `doctor evals qualify` / `evals qualify`, the four
     # argv-form transport leaves (refs 0: the flag surface never grows):
-    # 628 -> 632.
-    assert len(mapped) == 632, (
+    # 628 -> 632. The hidden `agents autonomy provenance` audit verb retired
+    # into the binary (`name-codes --check`, PR 1813): 632 -> 631.
+    assert len(mapped) == 631, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

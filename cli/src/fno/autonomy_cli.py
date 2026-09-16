@@ -18,7 +18,6 @@ Exit code is always 0 - this is introspection, never a gate (AC9-ERR).
 from __future__ import annotations
 
 import os
-import sys
 from functools import lru_cache
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -46,18 +45,12 @@ class SpawnerStatus:
     verb: Optional[str] = None  # dispatch verb code, or "resolved" at runtime
 
 
-def dispatch_provenance() -> list[tuple[str, str, str]]:
-    """The 17 dispatch paths as ``(site, source, verb)`` rows, served
-    by the binary."""
-    from fno.agents.naming import provenance_rows
-
-    return list(provenance_rows())
-
-
 @lru_cache(maxsize=1)
 def _provenance_by_spawner() -> dict:
     # Lazy: an import-time binary exec would break collection on a stale binary.
-    return {row[0]: row for row in dispatch_provenance()}
+    from fno.agents.naming import provenance_rows
+
+    return {row[0]: row for row in provenance_rows()}
 
 
 def _settings_for(project_root: Optional[Path]):
@@ -367,37 +360,3 @@ def status_command(
     except Exception as exc:  # noqa: BLE001 - AC9-ERR: introspection must not raise
         typer.echo(f"fno agents autonomy status: degraded read ({exc})", err=True)
     raise typer.Exit(code=0)
-
-
-def audit_dispatch_provenance() -> None:
-    """Positive completeness marker (AC5-GUARD): one row per dispatch path,
-    then the marker CI greps; exits 1 on any inventory defect."""
-    from fno.agents.naming import dispatch_sources, dispatch_verbs
-
-    rows = dispatch_provenance()
-    problems: list[str] = []
-    if len(rows) != 17:
-        problems.append(f"expected 17 coded paths, found {len(rows)}")
-    for site, source, verb in rows:
-        if source not in dispatch_sources():
-            problems.append(f"{site}: unknown source {source!r}")
-        if verb not in dispatch_verbs() and verb != "resolved":
-            problems.append(f"{site}: unknown verb {verb!r}")
-    sites = [row[0] for row in rows]
-    if len(set(sites)) != len(sites):
-        problems.append("duplicate site labels in the inventory")
-    if sum(1 for row in rows if row[1] == "ab") != 2:
-        problems.append("both active-backlog rows must carry ab")
-    for site, source, verb in rows:
-        typer.echo(f"{site}\t{source}\t{verb}")
-    for problem in problems:
-        typer.echo(f"error: {problem}", err=True)
-    if problems:
-        sys.exit(1)
-    typer.echo("dispatch provenance: 17/17 coded")
-
-
-@autonomy_app.command("provenance", hidden=True)
-def provenance_command() -> None:
-    """Print every dispatch path with its codes, then the completeness marker."""
-    audit_dispatch_provenance()
