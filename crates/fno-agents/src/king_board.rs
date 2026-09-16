@@ -308,15 +308,25 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // binding, and crown scope. It asks the store (`backlog::api::rows`),
     // never the file: the store applies the same defaults the Python board's
     // `read_graph_strict` runs, and a read failure surfaces as a warning the
-    // same way an unreadable file did.
+    // same way an unreadable file did. It is also the one IN-PROCESS source,
+    // so it takes its slice check up front like every subprocess source: with
+    // no time left it is marked unreadable and skipped, never run unbudgeted
+    // (the collector measured 40,776ms against a 30,000ms
+    // budget, and an unbounded in-process read cannot honor a deadline).
     let graph_path = graph_json_path(&cwd);
     let store = crate::backlog::api::Store::new(&graph_path);
-    let entries: Option<Vec<Value>> = match crate::backlog::api::rows(&store) {
-        Ok(e) => Some(e),
-        Err(e) => {
-            warnings.push(format!("graph unreadable: {}", e.0));
+    let entries: Option<Vec<Value>> = match budget.slice() {
+        None => {
+            warnings.push("graph not read: board budget exhausted".to_string());
             None
         }
+        Some(_) => match crate::backlog::api::rows(&store) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                warnings.push(format!("graph unreadable: {}", e.0));
+                None
+            }
+        },
     };
 
     let spent = |sources: &mut Map<String, Value>, name: &str, budget: &Budget| {
@@ -2208,13 +2218,37 @@ mod tests {
     /// catch it mid-flip (the same ENV_LOCK shape client_tests uses).
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Restores the env values a test pinned, whatever way the body ends.
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl EnvRestore {
+        fn take(vars: &[&'static str]) -> Self {
+            EnvRestore(vars.iter().map(|v| (*v, std::env::var_os(*v))).collect())
+        }
+    }
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (k, v) in self.0.iter() {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_driver_feed_projects_live_rows_only() {
         // A closed run (exited/failed/permanent_dead) whose transcript still
         // answers must never be a driver candidate: it would let a finished
         // worker suppress its node's undriven-PR row. Mirrors the
         // spawn_gate.LIVE_STATUSES vocabulary.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
         crate::paths::pin_test_claims_root(dir.path());
         let agents_home = dir.path().join(".fno").join("agents");
@@ -2268,7 +2302,13 @@ mod tests {
         // ~/.fno/agents via AgentsHome, which panics under test with no
         // declared root (paths.rs) - this test already pins HOME, so it also
         // pins FNO_AGENTS_HOME under the same tempdir to declare one.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
         std::env::set_var("FNO_AGENTS_HOME", dir.path().join(".fno").join("agents"));
@@ -2315,7 +2355,13 @@ mod tests {
 
     #[test]
     fn the_scope_error_queue_is_actionable_and_loud() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nscope: not-a-real-thing\n---\n").unwrap();
@@ -2336,7 +2382,13 @@ mod tests {
 
     #[test]
     fn a_manifest_without_a_scope_is_a_scope_error() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
         let dir = tempfile::tempdir().unwrap();
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nfno_id: k1\n---\n").unwrap();
@@ -2349,5 +2401,54 @@ mod tests {
         });
         let queues = payload.get("queues").and_then(Value::as_array).unwrap();
         assert_eq!(queues[0]["error"], "king manifest has no scope");
+    }
+
+    #[test]
+    fn a_slow_source_is_killed_inside_the_whole_board_budget() {
+        // A scripted `fno` that sleeps 5 seconds under a
+        // 2,000ms board budget must be killed at its slice, so the collector
+        // returns inside ~3s and the over-budget source reads as unreadable -
+        // never the measured 40,776ms-against-30,000ms overrun.
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _guard = HOME_LOCK.lock().unwrap();
+        // Pins die with the body: a later test must never read a dropped
+        // TempDir through a leaked env value.
+        let _restore = EnvRestore::take(&["FNO_AGENTS_HOME", "FNO_SPACES_DIR", "HOME"]);
+        let dir = tempfile::tempdir().unwrap();
+        // Hermetic state roots: the board reads resolve through pinned env.
+        std::env::set_var("FNO_AGENTS_HOME", dir.path().join("agents"));
+        std::env::set_var("FNO_SPACES_DIR", dir.path().join("spaces"));
+        std::env::set_var("HOME", dir.path());
+        let script = dir.path().join("sleepy-fno-py");
+        std::fs::write(&script, "#!/bin/sh\nexec sleep 5\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let prev = std::env::var_os("FNO_PY");
+        std::env::set_var("FNO_PY", &script);
+        let start = std::time::Instant::now();
+        let payload = read_board(&BoardOpts {
+            budget_ms: 2_000,
+            ..Default::default()
+        });
+        let elapsed = start.elapsed();
+        match prev {
+            Some(v) => std::env::set_var("FNO_PY", v),
+            None => std::env::remove_var("FNO_PY"),
+        }
+        // The kill bound is the SLEEP length: an unbounded read would blow
+        // past 5s, a slice-honoring kill must land well under it.
+        assert!(
+            elapsed < std::time::Duration::from_millis(4_900),
+            "board took {elapsed:?} against a 2,000ms budget with a 5s sleep source"
+        );
+        let parsed = crate::king_termination::parse_king_board_value(&payload).expect("parses");
+        assert!(
+            parsed.unreadable_sources,
+            "the killed source must read as unreadable"
+        );
     }
 }
