@@ -5839,10 +5839,8 @@ impl Core {
         if !has_sid {
             return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId);
         }
-        // Reconcile marks a row it measured gone `orphaned`, not `exited`,
-        // so a positive dead reading must resume whatever the status word
-        // says. A /exit mid-turn leaves a fresh transcript tail and an
-        // orphaned status word; the refusal named a live daemon not-live.
+        // Reconcile marks a row it measured gone `orphaned`, not `exited`:
+        // a positive dead reading resumes whatever the status word says.
         match (a.exited, &a.liveness) {
             (false, agents_view::Liveness::Alive) => {
                 RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
