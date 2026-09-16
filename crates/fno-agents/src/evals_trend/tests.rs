@@ -420,3 +420,96 @@ fn planned_bad_json_is_usage() {
     ]);
     assert_eq!(out, 2);
 }
+
+#[test]
+fn read_rows_skips_corrupt_lines() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let good = row_json("a", "regression", true, &ts_rfc(1.0, now));
+    let h = write_history(&tmp, &[good]);
+    // An interrupted append leaves a truncated JSON fragment with no newline.
+    {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(&h).unwrap();
+        write!(f, "{{\"task_id\": \"b\", \"pa").unwrap();
+    }
+    let rows = read_rows(&h, Some("baseline"), None);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the truncated fragment is skipped, not fatal"
+    );
+    assert_eq!(rows[0].task_id, "a");
+}
+
+#[test]
+fn summary_carries_the_staleness_fields() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            row_json("r", "regression", true, &ts_rfc(1.0, now)),
+            row_json("c", "capability", true, &ts_rfc(0.5, now)),
+        ],
+    );
+    let v = summary_payload(&h, 7, now);
+    assert_eq!(v["row_count"], json!(2));
+    assert_eq!(v["never_ran"], json!(false));
+    let age = v["age_days"].as_f64().unwrap();
+    assert!(
+        (age - 1.0).abs() < 0.001,
+        "newest regression ts is 1 day old, got {age}"
+    );
+    assert_eq!(v["stale"], json!(false));
+}
+
+#[test]
+fn summary_stale_when_newest_regression_exceeds_the_window() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[row_json("r", "regression", true, &ts_rfc(9.0, now))],
+    );
+    let v = summary_payload(&h, 7, now);
+    assert_eq!(v["stale"], json!(true));
+    assert_eq!(v["never_ran"], json!(false));
+}
+
+#[test]
+fn summary_never_ran_when_no_regression_rows() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[row_json("c", "capability", true, &ts_rfc(0.1, now))],
+    );
+    let v = summary_payload(&h, 7, now);
+    assert_eq!(v["never_ran"], json!(true));
+    assert_eq!(v["stale"], json!(false));
+    assert_eq!(v["age_days"], json!(null));
+    assert_eq!(v["row_count"], json!(1));
+}
+
+#[test]
+fn summary_row_count_counts_baseline_rows_only() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            row_json("r", "regression", true, &ts_rfc(1.0, now)),
+            format!(
+                "{{\"task_id\":\"r\",\"tier\":\"regression\",\"pass\":true,\"ts\":\"{}\",\"variant\":\"v1\"}}",
+                ts_rfc(0.5, now)
+            ),
+        ],
+    );
+    let v = summary_payload(&h, 7, now);
+    assert_eq!(
+        v["row_count"],
+        json!(1),
+        "v1 rows stay out of the baseline fold"
+    );
+}

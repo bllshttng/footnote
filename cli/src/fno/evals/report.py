@@ -1,126 +1,63 @@
-"""Eval history reads, graduation, and the health summary.
+"""Eval history graduation and the health summary.
 
-The report FOLD lives native (fno-agents evals-trend; law d-b6cc1a2a): one
-denominator authority, no Python second leg. Python keeps the row reader,
-the graduation file rewrite, and the health summary, which reads the native
-summary's alarm, `regressed`, pass rate, and flake count.
+The FOLD lives native (fno-agents evals-trend; law d-b6cc1a2a): one
+denominator authority, no Python second leg. Python keeps the graduation
+file rewrite and the health summary, a thin read of the native summary's
+JSON.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-import json
-
-from fno.evals import history as _history
 from fno.config import load_settings
-from fno.evals.runner import BASELINE
-
-
-def load_rows(
-    history_path: Path, *, since: Optional[int] = None, variant: Optional[str] = "baseline"
-) -> list[dict[str, object]]:
-    """History rows in order: one round by default (missing key = baseline), ``None`` = all."""
-    rows = [r for _, r in _history.iter_rows_tolerant(history_path)
-            if variant is None or (r.get("variant") or BASELINE) == variant]
-    if since is not None and since >= 0:
-        rows = rows[-since:]
-    return rows
-
-
-def _parse_ts(value: object) -> Optional[datetime]:
-    """Parse a history row's ``ts`` (ISO-8601, Z or offset), or None."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 def evals_health_summary(
     history_path: Path,
     *,
     stale_days: Optional[int] = None,
-    now: Optional[datetime] = None,
-    native_reads: bool = True,
 ) -> Optional[dict[str, Any]]:
     """One-line evals health for triage health and doctor; the demand row.
 
-    None when no history or no rows; never raises. The alarm, regressed set,
-    pass rate, and flake count all come from the native summary (one
-    denominator authority); an unreachable door degrades to empty/None, never
-    a second Python fold.
+    None when no history exists, no baseline rows are in it, or the native
+    door is unreachable; never raises. Every field is the native summary's
+    (one denominator authority); Python never re-folds.
     """
     if not history_path.exists():
-        return None
-    rows = load_rows(history_path)
-    if not rows:
         return None
     if stale_days is None:
         try:
             stale_days = int(load_settings().evals.stale_days)
         except Exception:  # noqa: BLE001 - the summary never raises
             stale_days = 7
-    if now is None:
-        now = datetime.now(timezone.utc)
-    reg_ts = [dt for r in rows if r.get("tier") == "regression"
-              and (dt := _parse_ts(r.get("ts"))) is not None]
-    never_ran = not reg_ts and not any(
-        r.get("tier") == "regression" for r in rows
-    )
-    newest_dt = max(reg_ts, default=None)
-    age_days = None if newest_dt is None else round(
-        (now - newest_dt).total_seconds() / 86400, 3)
-    stale = not never_ran and age_days is not None and age_days > stale_days
-    alarm, regressed, pass_rate, flake_count = (
-        _native_summary_reads(history_path, stale_days)
-        if native_reads else ([], [], None, 0)
-    )
+    payload = _native_summary(history_path, stale_days)
+    if payload is None or not payload.get("row_count"):
+        return None
     return {
-        "regression_pass_rate": pass_rate,
-        "flake_count": flake_count,
-        "regression_alarm": alarm,
-        "regressed": regressed,
+        "regression_pass_rate": payload.get("regression_pass_rate"),
+        "flake_count": int(payload.get("flake_count") or 0),
+        "regression_alarm": list(payload.get("regression_alarm") or []),
+        "regressed": list(payload.get("regressed") or []),
         "window_days": stale_days,
-        "age_days": age_days,
-        "stale": stale,
-        "never_ran": never_ran,
+        "age_days": payload.get("age_days"),
+        "stale": bool(payload.get("stale") or False),
+        "never_ran": bool(payload.get("never_ran") or False),
     }
 
 
-def _native_summary_reads(
-    history_path: Path, stale_days: int
-) -> tuple[list[str], list[str], Optional[float], int]:
-    """Alarm, `regressed`, tier pass rate, and flake count, read from the
-    native evals-trend summary (which owns the denominators); an absent
-    binary or a failed read degrades to empty/None/0."""
-    import subprocess
+def _native_summary(history_path: Path, stale_days: int) -> Optional[dict[str, Any]]:
+    """The native summary payload (fno-agents evals-trend, stdin summary
+    op); None when the door is unreachable or answers a non-dict."""
+    from fno.rust_binary import VerbUnavailable, verb_call
 
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        return [], [], None, 0
     try:
-        proc = subprocess.run(
-            [str(binary), "evals-trend", "--mode", "summary",
-             "--history", str(history_path), "--stale-days", str(stale_days)],
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-        payload = (
-            json.loads(proc.stdout.strip().splitlines()[-1])
-            if proc.returncode == 0 and proc.stdout.strip() else {}
-        )
-        return (
-            list(payload.get("regression_alarm") or []),
-            list(payload.get("regressed") or []),
-            payload.get("regression_pass_rate"),
-            int(payload.get("flake_count") or 0),
-        )
-    except Exception:  # noqa: BLE001 - the summary never raises
-        return [], [], None, 0
+        payload = verb_call("evals-trend", {
+            "op": "summary", "history": str(history_path), "stale_days": stale_days,
+        })
+    except VerbUnavailable:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 class GraduateError(ValueError):

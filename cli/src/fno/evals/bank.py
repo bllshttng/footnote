@@ -222,53 +222,32 @@ def resolve_lane(name: str, *, settings: object = None):
 COHORTS_FILENAME = "cohorts.yaml"
 
 
-def _door_binary():
-    """The native door binary: this checkout's build outranks any installed copy."""
-    from fno.rust_binary import find_dev_binary, resolve_binary
-
-    return find_dev_binary() or resolve_binary()
-
-
-def cohorts_gate(
-    bank_dir: Path,
-    *,
-    known_ids: Optional[list[str]] = None,
-    repo_root: Optional[Path] = None,
-) -> dict[str, Any]:
-    """One native door call for a run gate: load `cohorts.yaml`, validate
-    membership against *known_ids*, and (with *repo_root*) check the bank
-    rev. `None` = no declared split. Fail-closed: an unreachable door is a
-    refusal, never a silent pass."""
+def _cohort_door(tail: list[str]) -> tuple[int, dict[str, Any]]:
+    """One evals-attempt flag-mode door call: (returncode, last-line JSON).
+    An unreachable binary or an unreadable answer returns (2, {"error": ...})
+    so every caller refuses closed."""
     import json
     import subprocess
 
     from fno.rust_binary import find_dev_binary, resolve_binary
 
-    path = bank_dir / COHORTS_FILENAME
-    if not path.exists():
-        return {}
     binary = find_dev_binary() or resolve_binary()
     if binary is None:
-        return {"ok": False, "errors": ["native cohort door unreachable: fno-agents binary not found"]}
-    argv = [str(binary), "evals-attempt", "--cohorts-yaml", str(path)]
-    if known_ids is not None:
-        argv += ["--known-ids", json.dumps(known_ids)]
-    if repo_root is not None:
-        argv += ["--repo", str(repo_root)]
+        return 2, {"error": "fno-agents binary not found; the cohort door cannot run."}
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(
+            [str(binary), "evals-attempt", *tail],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
     except Exception as exc:  # noqa: BLE001 - a failed door read refuses
-        return {"ok": False, "errors": [f"native cohort door failed: {exc}"]}
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout or "door failed").strip().splitlines()[-1:]
-        return {"ok": False, "errors": [f"native cohort door refused: {tail[0]}"]}
+        return 2, {"error": f"native cohort door failed: {exc}"}
     try:
-        verdict = json.loads(proc.stdout.strip().splitlines()[-1])
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
-        return {"ok": False, "errors": ["native cohort door returned unreadable output"]}
-    if not isinstance(verdict, dict) or "ok" not in verdict:
-        return {"ok": False, "errors": ["native cohort door returned an unexpected shape"]}
-    return verdict
+        return proc.returncode or 2, {"error": "native cohort door returned unreadable output"}
+    if not isinstance(payload, dict):
+        return proc.returncode or 2, {"error": "native cohort door returned an unexpected shape"}
+    return proc.returncode, payload
 
 
 def discover_bank(bank_dir: Path) -> list[TaskSpec]:

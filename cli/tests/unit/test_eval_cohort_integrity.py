@@ -14,7 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 import fno.evals.bank as bank_mod
-from fno.evals.bank import COHORTS_FILENAME, cohorts_gate
+from fno.evals.bank import COHORTS_FILENAME, _cohort_door
 from fno.evals.cli import evals_app
 from fno.rust_binary import find_dev_binary
 
@@ -92,9 +92,10 @@ def _patch_repo_root(monkeypatch, root: Path) -> None:
     monkeypatch.setattr(fno.paths, "resolve_canonical_repo_root", lambda: root)
 
 
-def _stub_gate(monkeypatch, verdict: Optional[dict]) -> None:
-    """Canned cohorts_gate verdict; None = no declared split."""
-    monkeypatch.setattr(bank_mod, "cohorts_gate", lambda bank_dir, **kw: verdict or {})
+def _stub_gate(monkeypatch, door: Optional[tuple]) -> None:
+    """Canned `_cohort_door` answer: (rc, payload); None = no declared split."""
+    if door is not None:
+        monkeypatch.setattr(bank_mod, "_cohort_door", lambda tail: door)
 
 
 def _stub_run_pipeline(monkeypatch, calls: dict) -> None:
@@ -120,12 +121,20 @@ def test_gate_validates_and_checks_the_bank_rev(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_AGENTS_BIN", str(find_dev_binary()))
     root, bank, rev = _repo_with_bank(tmp_path, ["t1", "t2"])
     _write_decl(bank, train=["t1"], validation=["t2"], qualification=[], bank_rev=rev)
-    verdict = cohorts_gate(bank, known_ids=["t1", "t2"], repo_root=root)
-    assert verdict["ok"] is True
+    rc, verdict = _cohort_door([
+        "--cohorts-yaml", str(bank / COHORTS_FILENAME),
+        "--known-ids", json.dumps(["t1", "t2"]),
+        "--repo", str(root),
+    ])
+    assert rc == 0 and verdict["ok"] is True
     assert verdict["bank_unchanged"] is True
-    bad = cohorts_gate(bank, known_ids=["t1"], repo_root=root)
-    assert bad["ok"] is False
-    assert any("t2" in e for e in bad["errors"])
+    rc, bad = _cohort_door([
+        "--cohorts-yaml", str(bank / COHORTS_FILENAME),
+        "--known-ids", json.dumps(["t1"]),
+        "--repo", str(root),
+    ])
+    assert bad.get("ok") is False
+    assert any("t2" in e for e in bad.get("errors") or [])
 
 
 @requires_rust
@@ -138,7 +147,11 @@ def test_gate_reports_a_stale_pin(tmp_path, monkeypatch) -> None:
     g("add", "-A")
     g("commit", "-qm", "grow the bank")
     _write_decl(bank, train=["t1"], validation=[], qualification=[], bank_rev=rev)
-    verdict = cohorts_gate(bank, known_ids=["t1"], repo_root=root)
+    rc, verdict = _cohort_door([
+        "--cohorts-yaml", str(bank / COHORTS_FILENAME),
+        "--known-ids", json.dumps(["t1"]),
+        "--repo", str(root),
+    ])
     assert verdict["ok"] is True
     assert verdict["bank_unchanged"] is False
 
@@ -148,13 +161,8 @@ def test_gate_fail_closed_when_binary_absent(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: None)
     root, bank, rev = _repo_with_bank(tmp_path, ["t1"])
     _write_decl(bank, train=["t1"], validation=[], qualification=[], bank_rev=rev)
-    verdict = cohorts_gate(bank, known_ids=["t1"])
-    assert verdict["ok"] is False
-    assert "unreachable" in verdict["errors"][0]
-
-
-def test_gate_no_declaration_returns_empty(tmp_path) -> None:
-    assert cohorts_gate(tmp_path / "bank") == {}
+    rc, payload = _cohort_door(["--cohorts-yaml", str(bank / COHORTS_FILENAME)])
+    assert rc == 2 and "not found" in payload["error"]
 
 
 # --------------------------------------------------------------------------- #
@@ -167,8 +175,8 @@ def test_run_refuses_door_refusal_before_any_spawn(tmp_path, monkeypatch) -> Non
     root, bank, rev = _repo_with_bank(tmp_path, ["t1", "t2"])
     _write_decl(bank, train=["t1"], validation=["t1"], qualification=[])
     _patch_repo_root(monkeypatch, root)
-    _stub_gate(monkeypatch, {"ok": False,
-                             "errors": ["task id 't1' is in both 'train' and 'validation'"]})
+    _stub_gate(monkeypatch, (0, {"ok": False,
+                             "errors": ["task id 't1' is in both 'train' and 'validation'"]}))
     res = runner.invoke(evals_app, ["run", "--bank", str(bank), "--yes"])
     assert res.exit_code == 2
     assert "cohort split refused" in res.stdout + (res.stderr or "")
@@ -181,7 +189,7 @@ def test_run_refuses_stale_bank_pin(tmp_path, monkeypatch) -> None:
     root, bank, rev = _repo_with_bank(tmp_path, ["t1"])
     _write_decl(bank, train=["t1"], validation=[], qualification=[])
     _patch_repo_root(monkeypatch, root)
-    _stub_gate(monkeypatch, {"ok": True, "bank_unchanged": False})
+    _stub_gate(monkeypatch, (0, {"ok": True, "bank_unchanged": False}))
     res = runner.invoke(evals_app, ["run", "--bank", str(bank), "--yes"])
     assert res.exit_code == 2
     assert "redeclare" in res.stdout + (res.stderr or "")
@@ -194,7 +202,7 @@ def test_run_with_valid_split_proceeds_and_announces(tmp_path, monkeypatch) -> N
     root, bank, rev = _repo_with_bank(tmp_path, ["t1", "t2"])
     _write_decl(bank, train=["t1"], validation=["t2"], qualification=[])
     _patch_repo_root(monkeypatch, root)
-    _stub_gate(monkeypatch, {"ok": True, "bank_unchanged": True})
+    _stub_gate(monkeypatch, (0, {"ok": True, "bank_unchanged": True}))
     res = runner.invoke(evals_app, ["run", "--bank", str(bank), "--yes"])
     assert res.exit_code == 0
     assert "validated cohort split" in res.stdout
@@ -245,7 +253,8 @@ def test_export_maps_door_refusal_to_exit_2(tmp_path, monkeypatch) -> None:
     _patch_repo_root(monkeypatch, root)
     fake = _fake_binary(tmp_path, json.dumps(
         {"error": "task id 't1' is in both 'train' and 'validation'"}), exit_code=3)
-    monkeypatch.setattr(bank_mod, "_door_binary", lambda: fake)
+    monkeypatch.setattr("fno.rust_binary.find_dev_binary", lambda: fake)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: fake)
     out = tmp_path / "tuning.jsonl"
     res = runner.invoke(evals_app, ["export", "--bank", str(bank), "--out", str(out)])
     assert res.exit_code == 2
@@ -335,6 +344,7 @@ def test_qualify_maps_door_failure_to_exit_2(tmp_path, monkeypatch) -> None:
     _write_decl(bank, train=[], validation=[], qualification=["q1"], bank_rev=rev)
     _patch_repo_root(monkeypatch, root)
     fake = _fake_binary(tmp_path, "{}", exit_code=1)
-    monkeypatch.setattr(bank_mod, "_door_binary", lambda: fake)
+    monkeypatch.setattr("fno.rust_binary.find_dev_binary", lambda: fake)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: fake)
     res = runner.invoke(evals_app, ["qualify", "--bank", str(bank)])
     assert res.exit_code == 2

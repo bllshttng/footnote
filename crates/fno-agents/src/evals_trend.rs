@@ -499,7 +499,81 @@ fn compare_variants(rows: &[Row], variant: &str) -> Value {
     })
 }
 
+/// The summary document `evals_health_summary` reads: alarm, regressed set,
+/// tier pass rate, flake count, and the staleness fold (newest
+/// regression-tier timestamp vs the window). Staleness lives here so Python
+/// carries the fields instead of re-folding them (d-b6cc1a2a).
+fn summary_payload(history: &str, stale_days: i64, now: DateTime<Utc>) -> Value {
+    let rows = read_rows(history, Some("baseline"), None);
+    let (_, regressed) = trend_fold(&rows, stale_days, now);
+    let w = chrono::Duration::days(stale_days);
+    let recent_alarm: Vec<String> = stats_window(&rows, now - w, now)
+        .into_iter()
+        .filter(|s| s.tier == "regression" && s.pass_at_1() < 1.0)
+        .map(|s| s.task_id)
+        .collect();
+    let fold = report_fold(&rows, stale_days, now, None, None);
+    let reg = fold.get("tiers").and_then(|t| t.get("regression"));
+    let pass_rate = reg
+        .and_then(|t| t.get("pass_rate"))
+        .cloned()
+        .unwrap_or(json!(null));
+    let flake_count = fold
+        .get("flakes")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let reg_rows: Vec<&Row> = rows.iter().filter(|r| r.tier == "regression").collect();
+    let never_ran = reg_rows.is_empty();
+    let age_days =
+        reg_rows.iter().filter_map(|r| r.ts).max().map(|newest| {
+            ((now - newest).num_seconds() as f64 / 86_400.0 * 1000.0).round() / 1000.0
+        });
+    let stale = age_days.map_or(false, |age| age > stale_days as f64);
+    json!({
+        "regression_alarm": recent_alarm,
+        "regressed": regressed,
+        "regression_pass_rate": pass_rate,
+        "flake_count": flake_count,
+        "row_count": rows.len(),
+        "never_ran": never_ran,
+        "age_days": age_days,
+        "stale": stale,
+    })
+}
+
+fn print_summary(history: &str, stale_days: i64, now: DateTime<Utc>) -> i32 {
+    println!(
+        "{}",
+        serde_json::to_string(&summary_payload(history, stale_days, now)).unwrap_or_default()
+    );
+    0
+}
+
 pub fn run_evals_trend(args: &[String]) -> i32 {
+    if args.is_empty() {
+        // stdin summary: a JSON payload on stdin (the verb_call shape),
+        // `{"op": "summary", "history": "...", "stale_days": N}`; the flags
+        // below remain the human surface.
+        use std::io::Read;
+
+        let mut buf = String::new();
+        if std::io::stdin().read_to_string(&mut buf).is_ok() {
+            if let Ok(v) = serde_json::from_str::<Value>(&buf) {
+                if v.get("op").and_then(Value::as_str) == Some("summary") {
+                    let history = v
+                        .get("history")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let stale_days = v.get("stale_days").and_then(Value::as_i64).unwrap_or(7);
+                    return print_summary(&history, stale_days, Utc::now());
+                }
+            }
+        }
+        eprintln!("{USAGE}");
+        return EXIT_USAGE;
+    }
     let mut history = String::new();
     let mut mode = String::from("report");
     let mut stale_days: i64 = 7;
@@ -618,36 +692,7 @@ pub fn run_evals_trend(args: &[String]) -> i32 {
     let now = now.unwrap_or_else(Utc::now);
 
     if mode == "summary" {
-        let rows = read_rows(&history, Some("baseline"), None);
-        let (_, regressed) = trend_fold(&rows, stale_days, now);
-        let w = chrono::Duration::days(stale_days);
-        let recent_alarm: Vec<String> = stats_window(&rows, now - w, now)
-            .into_iter()
-            .filter(|s| s.tier == "regression" && s.pass_at_1() < 1.0)
-            .map(|s| s.task_id)
-            .collect();
-        let fold = report_fold(&rows, stale_days, now, None, None);
-        let reg = fold.get("tiers").and_then(|t| t.get("regression"));
-        let pass_rate = reg
-            .and_then(|t| t.get("pass_rate"))
-            .cloned()
-            .unwrap_or(json!(null));
-        let flake_count = fold
-            .get("flakes")
-            .and_then(Value::as_array)
-            .map(|a| a.len())
-            .unwrap_or(0);
-        println!(
-            "{}",
-            serde_json::to_string(&json!({
-                "regression_alarm": recent_alarm,
-                "regressed": regressed,
-                "regression_pass_rate": pass_rate,
-                "flake_count": flake_count,
-            }))
-            .unwrap_or_default()
-        );
-        return 0;
+        return print_summary(&history, stale_days, now);
     }
 
     if mode == "trend" {
