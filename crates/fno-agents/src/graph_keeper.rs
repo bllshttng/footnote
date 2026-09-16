@@ -1076,7 +1076,7 @@ fn cached_entries(
         // Still gate-held: a read mid-publish waits out the publish, exactly
         // as every other read does.
         let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-        return graph_store::read_defaulted(&state.graph, true).map(Arc::new);
+        return graph_store::read_defaulted_opts(&state.graph, true, true).map(Arc::new);
     }
     let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
     Ok(cached_entries_gated(state, strict)?.0)

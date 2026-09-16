@@ -130,7 +130,7 @@ fn parse_args(args: &[String]) -> Result<NoteArgs, String> {
 
 /// The main entry: parse, load, route, refuse-or-write, print the
 /// JSON receipt on stdout. Exit 2 usage, 1 missing graph/node, 3 the
-/// nobody-bound refusal (nothing written), 0 written.
+/// nobody-bound refusal (nothing written), 5 graph read failed, 0 written.
 pub fn run_note(args: &[String]) -> i32 {
     let parsed = match parse_args(args) {
         Ok(p) => p,
@@ -151,7 +151,7 @@ pub fn run_note(args: &[String]) -> i32 {
         Ok(e) => e,
         Err(e) => {
             eprintln!("fno-agents backlog-note: graph read failed: {e}");
-            return 1;
+            return 5;
         }
     };
     let entry = crate::graph_get::find_entry(&entries, &parsed.node);

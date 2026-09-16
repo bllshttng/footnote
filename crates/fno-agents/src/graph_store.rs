@@ -2502,7 +2502,7 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
         crate::backlog::Backend::Sqlite => {
             crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
         }
-        crate::backlog::Backend::Json => read_defaulted(path, false)?,
+        crate::backlog::Backend::Json => read_defaulted_opts(path, false, true)?,
     };
     apply_defaults(&mut rows, false);
     Ok(rows)
@@ -2574,15 +2574,21 @@ pub fn mutate_rows(
 /// contract). Applies defaults; junk rows are kept only when `keep_malformed`
 /// (load_graph's discovery caller needs them; ordinary reads filter).
 ///
-/// The soft read keeps `_read_json`'s corrupt side effect: the unreadable
-/// bytes are copied to a `.json.bak` sibling before the error surfaces, so
-/// the recovery the store's messages promise actually exists on disk.
+/// The strict read: an unreadable store is `Err`, never an empty answer, so
+/// a caller that misses on `Ok(vec![])` can only be reporting a genuinely
+/// absent node, never a read it could not make.
+///
+/// The soft read that degrades `MalformedRoot` to empty and copies the
+/// corrupt bytes to a `.json.bak` sibling first is the explicit
+/// `read_defaulted_opts(path, keep_malformed, true)` spelling.
 pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, StoreError> {
-    read_defaulted_opts(path, keep_malformed, true)
+    read_defaulted_opts(path, keep_malformed, false)
 }
 
-/// The strict variant takes `backup_on_corrupt = false`: read_graph_strict's
-/// contract is that diagnosis is read-only and never writes a .bak.
+/// `backup_on_corrupt = true` is the soft read, the deliberate exception:
+/// a root with no entries key reads EMPTY, and corrupt bytes are copied to a
+/// `.json.bak` before the error surfaces. `false` is strict and read-only:
+/// `MalformedRoot`/`Corrupt` surface untouched and nothing is written.
 pub fn read_defaulted_opts(
     path: &Path,
     keep_malformed: bool,
@@ -2593,8 +2599,7 @@ pub fn read_defaulted_opts(
         Ok(RawRead::MalformedRoot) => {
             if backup_on_corrupt {
                 // Soft read: a root with no entries key reads EMPTY, never an
-                // error -- the malformed-root signal is reachable only through
-                // the strict path, exactly as the Python soft reader answered.
+                // error, exactly as the Python soft reader answered.
                 Ok(vec![])
             } else {
                 Err(StoreError::MalformedRoot(path.display().to_string()))

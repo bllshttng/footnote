@@ -36,7 +36,7 @@ pub fn run(op: &str, payload: &Value) -> String {
     let entries = match graph_store::read_defaulted(&graph, false) {
         Ok(e) => e,
         Err(e) => {
-            return receipt("refused", 2, format!("graph read failed: {e}")).to_string();
+            return receipt("refused", 5, format!("graph read failed: {e}")).to_string();
         }
     };
     let entry = match find_entry(&entries, node) {
@@ -58,7 +58,8 @@ pub fn run(op: &str, payload: &Value) -> String {
 }
 
 /// One hold receipt: `outcome` + `exit_code` (0 done, 2 bad input, 3 state
-/// refusal, 1 write/readback failure) + `detail` on a refusal.
+/// refusal, 1 write/readback failure, 5 graph read failed) + `detail` on a
+/// refusal.
 fn receipt(outcome: &str, code: i32, detail: impl Into<String>) -> Value {
     json!({"outcome": outcome, "exit_code": code, "detail": detail.into()})
 }
@@ -532,6 +533,36 @@ mod tests {
         assert!(out.contains("hold release"), "{out}");
         let text = std::fs::read_to_string(&fx.plan).unwrap();
         assert_eq!(text.matches("dispatch_hold:").count(), 1);
+    }
+
+    /// A corrupt store carries its own code (5) and names the read failure;
+    /// an absent id on a well-formed store stays exit 2.
+    #[test]
+    fn corrupt_graph_refusal_is_its_own_code_not_absence() {
+        let dir = tempfile::tempdir().unwrap();
+        let corrupt = dir.path().join("graph.json");
+        std::fs::write(&corrupt, "{").unwrap();
+        let out = run(
+            "hold-set",
+            &json!({"op": "hold-set", "node": "t-0001", "reason": "r",
+                    "release_when": "w", "set_by": "s",
+                    "graph": corrupt.display().to_string()}),
+        );
+        let r: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(r["exit_code"], 5, "{out}");
+        assert!(out.contains("graph read failed"), "{out}");
+        assert!(!out.contains("no node resolves"), "{out}");
+
+        let fx = fixture(json!({}));
+        let out = run(
+            "hold-set",
+            &json!({"op": "hold-set", "node": "t-nope", "reason": "r",
+                    "release_when": "w", "set_by": "s",
+                    "graph": fx.graph.display().to_string()}),
+        );
+        let r: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(r["exit_code"], 2, "{out}");
+        assert!(out.contains("no node resolves to 't-nope'"), "{out}");
     }
 
     #[test]
