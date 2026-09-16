@@ -5060,9 +5060,10 @@ where
                     "crown_level": e.crown_level,
                     "crown_scope": e.crown_scope,
                     "crown_grantor": e.crown_grantor,
-                    // The parent edge the orphan check keys on (same key as
-                    // Python's serialize_entry); null is a real answer.
+                    // The parent edge the orphan check keys on; null is a real answer.
                     "spawned_by_session": e.spawned_by_session,
+                    // The served CHILD/PEER word; null before the first stamp.
+                    "lineage_kind": e.lineage_kind,
                     // How this session came to exist: "operator" for one a human
                     // started by hand, "spawn" for a footnote-created worker, null
                     // for a row nothing stamped. Emitted on BOTH serializers because
@@ -7604,7 +7605,6 @@ pub(crate) fn run_reconcile_sweep(
     })
 }
 
-/// The agent.rename route. state.rs owns the grammar and the transaction.
 /// `agent.watch`: the subscription face of the registry.
 ///
 /// `{"since": {"mtime_nanos", "len"} | null}` in; one answer out. The first

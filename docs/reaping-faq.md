@@ -164,7 +164,7 @@ The retirement basis names the marker that fired, in order: `planning finished o
 
 ### live descendant
 
-The line reads `kept {id} (live descendant: {child})`. A live registry row names this row as its parent (`gc_sweep.rs:2035-2049`). The parent stays until the child is gone, unless the parent's own harness reports `done`, `stopped` or `failed` (`gc_sweep.rs:2040`). A terminal parent has no running surface for its children to keep alive, so the lineage guard yields to it. Retire the child and the parent becomes eligible.
+The line reads `kept {id} (live descendant: {child})`. A live CHILD registry row names this row as its parent (`gc_sweep.rs:2035-2049`). A CHILD is a join worker (`jn-t-`, legacy `j-`) or a row a crowned session spawned. A handoff, such as a blueprint's target or an advance dispatch, is a PEER and never holds its spawner. The parent stays until the child is gone, unless the parent's own harness reports `done`, `stopped` or `failed` (`gc_sweep.rs:2040`). A terminal parent has no running surface for its children to keep alive, so the lineage guard yields to it. To wait on work inside your own feature, use a subagent, not a spawned row. Retire the child and the parent becomes eligible.
 
 ## The row is waiting on evidence
 
@@ -272,7 +272,7 @@ Every keep and hold reason from the sections above, one row each.
 | `kept {id} (open pr: {node} #<N>)` | Drive the PR to merge, or record a merge order. | Run `fno do pr status <N>`. |
 | `kept {id} (open do row on done node: {node})` | Wait. A real run settles it. Never close the node. | Run `fno backlog get <node>` and read `status`. |
 | `kept {id} (planning assignment not finished by this session: {node})` | Wait up to 20 quiet minutes, or rule with `fno agents reap --release <row>` once escalated. | The line names the node and the hold age. |
-| `kept {id} (live descendant: {child})` | Wait for the child row to go, unless the parent's roster state reads `done`, `stopped` or `failed`. | The same report carries the child line. |
+| `kept {id} (live descendant: {child})` | Wait for the live CHILD row to go, unless the parent's roster state reads `done`, `stopped` or `failed`. A handoff row (`sob-t-`, `ac-t-`) never holds its spawner. | The same report carries the child line. |
 | `kept {id} (active: transcript written {age}s ago)` | Wait past the grace window. A terminal harness state or a dead pid retires the row early, unless the row keeps for an open PR. | Run the dry run again. Read the new age. |
 | `kept {id} (probe unread: {detail})` | Wait for the next sweep. The probe usually answers then. A moved seq means a new turn - the keep is real. | Run the dry run again. Read the detail. |
 | `kept {id} (transcript unresolved: absence is not quiet)` | Diagnose one of the four causes above. | Run `fno agents list`. Rerun the dry run. Search the store roots. |

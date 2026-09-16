@@ -676,6 +676,7 @@ class AgentEntry:
     liveness: Optional[str] = None
     liveness_measured_at: Optional[str] = None
     harness_title: Optional[str] = None
+    lineage_kind: Optional[str] = None
 
     # v27: WHO chose `launch_account`, vocabulary from
     # spawn_flag_owners. None on "default", inherited, and unattributable

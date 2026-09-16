@@ -465,6 +465,10 @@ pub(crate) fn apply_reconcile_changes(
     // stored title is the diff baseline the next sweep compares against, so
     // a row the reconcile changes never skipped lost its rename.
     crate::row_truth::apply_title_changes(r, entries, titles);
+    // Stamp the derived CHILD/PEER word while the lock is held, so sideline
+    // readers that cannot link fno-agents read the edge kind as a served
+    // fact instead of re-deriving it.
+    crate::spawn_edge::stamp_lineage_kinds(r);
 }
 
 /// One tick's gate decision: due only past the cadence AND with the previous
@@ -629,6 +633,10 @@ mod tests {
             row.liveness_measured_at.as_deref(),
             Some("2026-09-10T12:00:00Z"),
             "the stamp IS written"
+        );
+        assert_eq!(
+            row.lineage_kind, None,
+            "a row with no spawn edge carries no kind"
         );
 
         // The full mode is still the lifecycle writer: the same change
@@ -891,5 +899,59 @@ mod tests {
             "a live interactive host never flips on an Err probe"
         );
         assert!(out.orphans.is_empty());
+    }
+
+    #[test]
+    fn the_sweep_stamps_lineage_kind_on_rows_with_a_spawn_edge() {
+        fn row(name: &str, sid: &str, spawned_by: Option<&str>) -> state::RegistryEntry {
+            let mut e = state::RegistryEntry::default();
+            e.name = name.into();
+            e.harness_session_id = Some(sid.into());
+            e.spawned_by_session = spawned_by.map(String::from);
+            e
+        }
+        let mut king = row("king-x-1", "s-king", None);
+        king.crown_level = Some(1);
+        let mut court = row("node-x-demo2-g2", "s-court", Some("s-king"));
+        court.status = AgentStatus::Busy;
+        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead"));
+        joiner.status = AgentStatus::Busy;
+        let mut handoff = row("sob-t-x-2-glm", "s-t", Some("s-lead"));
+        handoff.status = AgentStatus::Busy;
+        let plain = row("solo-x-2", "s-solo", None);
+        let lead = row("t-x-1-lead", "s-lead", None);
+        let entries = vec![
+            king.clone(),
+            court.clone(),
+            lead.clone(),
+            joiner.clone(),
+            handoff.clone(),
+            plain.clone(),
+        ];
+        let mut reg = state::Registry::default();
+        reg.entries = entries.clone();
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+
+        crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &[],
+            &titles,
+            &SweepMode::ServeOnly,
+            "2026-09-10T12:00:00Z",
+        );
+
+        let kind_of = |name: &str| {
+            reg.entries
+                .iter()
+                .find(|e| e.name == name)
+                .map(|e| e.lineage_kind.clone())
+        };
+        assert_eq!(kind_of("node-x-demo2-g2"), Some(Some("child".into())));
+        assert_eq!(kind_of("jn-t-x-1-1"), Some(Some("child".into())));
+        assert_eq!(kind_of("sob-t-x-2-glm"), Some(Some("peer".into())));
+        assert_eq!(kind_of("solo-x-2"), Some(None), "no edge, no word");
+        assert_eq!(kind_of("king-x-1"), Some(None), "no edge, no word");
     }
 }

@@ -80,10 +80,12 @@ def test_source_coverage_accounts_current_agent_entry(monkeypatch) -> None:
     # storage_only: 59 -> 60. v33 added lineage_reason (why no parent
     # session could be named), storage_only: 60 -> 61, and spawn_id +
     # spawn_provenance (the spawn door's attempt id and structured birth
-    # record), storage_only: 61 -> 63.
-    assert payload["declared_count"] == 63
-    assert payload["required_count"] == 44
-    assert payload["accounted_count"] == 63
+    # record), storage_only: 61 -> 63. v34 added lineage_kind (the served
+    # CHILD/PEER spawn-edge word), storage_only: 63 -> 64, and it joined
+    # the required list: 44 -> 45.
+    assert payload["declared_count"] == 64
+    assert payload["required_count"] == 45
+    assert payload["accounted_count"] == 64
     assert payload["known_gaps"] == {}
 
 

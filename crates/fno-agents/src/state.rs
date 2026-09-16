@@ -204,6 +204,26 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // empty directory. The field is additive-optional so older rows remain
 // readable, while the bump prevents an older writer from erasing it.
 // Accepted set widens to 1..=30.
+//
+// v31 adds `harness_args` - the fenced `--` tokens a codex thread spawn
+// carried, re-parsed onto thread/resume after a daemon restart.
+//
+// v32 adds `stop` - fno's own stop of a worker (the stop verb and the
+// terminal-stop sweep), so the harness `stopped` state it leaves behind is
+// never read as finished work by the retirement sweep.
+//
+// v33 adds `lineage_reason`, `spawn_id` and `spawn_provenance` - why a mint
+// with no parent session could not name one, the coordinator's spawn-attempt
+// id, and the validated birth record every new row carries; `spawned_by_*`
+// become generated compatibility fields derived from the origin at mint.
+//
+// v34 adds `lineage_kind` - the served CHILD/PEER word for the row's spawn
+// edge, derived by `spawn_edge::lineage_kind` and written only by the
+// liveness sweep, so readers that cannot link fno-agents (the sideline in
+// crate `fno`) render the edge without re-deriving it. Absent on rows with
+// no spawn edge. Additive-optional; a pre-v34 writer accepts the unknown
+// keys and erases them on its next read-modify-write. Accepted set widens
+// to 1..=34.
 // Rendered by build.rs from src/registry_schema.toml (the version's single
 // owner); see that file for the bump protocol.
 include!(concat!(env!("OUT_DIR"), "/registry_schema.rs"));
@@ -1076,6 +1096,12 @@ pub struct RegistryEntry {
     pub spawned_by_harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_cwd: Option<String>,
+    /// The served CHILD/PEER word for this row's spawn edge, derived by
+    /// `spawn_edge::lineage_kind` (schema v34). The liveness sweep writes
+    /// it and nothing else does; absent on rows with no spawn edge, so
+    /// readers that cannot call fno-agents can still render the edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_kind: Option<String>,
     /// Why a mint with no parent session could not name one (schema v33):
     /// a daemon mint reads the parent edge from the spawn REQUEST, so an
     /// edge-less request stamps its reason instead of a silent null, and an

@@ -231,6 +231,7 @@ pub mod spawn_axes;
 pub mod spawn_backends;
 pub mod spawn_context;
 pub mod spawn_contract;
+pub mod spawn_edge;
 pub mod spawn_gate;
 pub mod spawn_gate_lanes;
 pub mod spawn_gate_verb;

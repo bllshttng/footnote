@@ -242,13 +242,10 @@ fn default_true() -> bool {
 /// New variant, not additive; handshake stops the skew.
 ///
 /// v46 (pane focus): `ControlVerb::PaneFocus` + `ServerMsg::PaneFocused`
-/// - the CLI door onto the focus trunk the TUI already owns. New variants;
-/// handshake stops the skew.
+/// - the CLI door onto the focus trunk the TUI already owns. New variants.
 ///
-/// v50: `AgentRow.{spawned_by_session, harness_session_id}` - the
-/// lineage pair the sideline joins into a parent/child forest. Additive and
-/// `#[serde(default)]`, so an unbumped client would merely keep rendering
-/// flat; the bump names the skew so the handshake restarts an old server.
+/// v50: `AgentRow.{spawned_by_session, harness_session_id}`, the
+/// lineage pair; additive serde(default), the bump names the skew.
 ///
 /// v52: pane reads and sends carry the pane's captured identity and
 /// the registry identity used to address it. Fields stay additive-defaulted,
@@ -321,7 +318,9 @@ fn default_true() -> bool {
 /// v79: `Layout.missions` carries the active-mission headers; floor stays 58.
 /// v80: `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
 /// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
-pub const PROTO_VERSION: u32 = 81;
+/// v82: `AgentRow.lineage_kind` (serde default), the served CHILD/PEER word;
+/// the sideline nests only CHILD rows; floor stays 58.
+pub const PROTO_VERSION: u32 = 82;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -1232,6 +1231,9 @@ pub struct AgentRow {
     /// in the sideline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by_session: Option<String>,
+    /// (v82) Served CHILD/PEER word; `child` nests, `peer`/absent renders flat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_kind: Option<String>,
     /// (v49) The row's own harness session id (claude/codex uuid),
     /// the join key for `spawned_by_session`. Same value the registry row
     /// carries; `None` for a row the registry wrote without one.
@@ -4129,7 +4131,7 @@ mod tests {
         // re-assert the same literal, which caught nothing a single pin does
         // not and turned every bump into a three-file edit; they now assert
         // only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 81);
+        assert_eq!(PROTO_VERSION, 82);
         // v64 added `PanePlacement.portal` and `AgentRow.portal`.
         // Both are additive `#[serde(default)]` fields, so the floor does NOT
         // move with them - a v63 client still attaches. Pinned beside the
@@ -4424,6 +4426,7 @@ mod tests {
                         route: None,
                         reach: Reach::Locate,
                         spawned_by_session: None,
+                        lineage_kind: None,
                         harness_session_id: None,
                         squad: Some(1),
                         name: "peer".into(),
@@ -4478,6 +4481,7 @@ mod tests {
                         route: None,
                         reach: Reach::Locate,
                         spawned_by_session: None,
+                        lineage_kind: None,
                         harness_session_id: None,
                         squad: None,
                         name: "bg-watch".into(),

@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::proto::{AgentBadge, AnswerablePrompt, Reach};
+use crate::proto::{AgentBadge, AgentRow, AnswerablePrompt, Reach};
 use crate::transcript_tail::read_tail;
 
 // The tail reader lives in its own module (transcript_tail); the sideline
@@ -142,6 +142,9 @@ pub struct RegistryAgent {
     /// parent (a root, as far as the renderer can know). Distinct from
     /// `crown_level`, a fixed authority rank: lineage is who spawned whom.
     pub spawned_by_session: Option<String>,
+    /// The served CHILD/PEER word for this row's spawn edge, read from the
+    /// registry row. `None` (a pre-v32 row) renders flat like a peer.
+    pub lineage_kind: Option<String>,
     /// Whether this row's terminal-looking status is a POSITIVE
     /// falsification or an absence of evidence. `Alive` for an active
     /// non-terminal status (mirrors `exited == false`). Orphaned and failed
@@ -1976,6 +1979,11 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let lineage_kind = row
+            .get("lineage_kind")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let (badge, reason, answerable) = match inside_leg {
             Some(leg) if !leg.is_null() => {
                 let live = report_is_live(
@@ -2154,6 +2162,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
             crown_level,
             crown_scope,
             spawned_by_session,
+            lineage_kind,
             liveness,
             liveness_measured_at: measured_at,
             harness_title,
@@ -2373,6 +2382,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             crown_level: None,
             crown_scope: None,
             spawned_by_session: None,
+            lineage_kind: None,
             liveness: Liveness::Alive,
             liveness_measured_at: None,
             harness_title: None,
@@ -2434,6 +2444,8 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             crown_level: None,
             crown_scope: None,
             spawned_by_session: r.harness_session_id.clone(),
+            // A parked fork belongs to its own worker: a CHILD of it.
+            lineage_kind: Some("child".into()),
             liveness: Liveness::Alive,
             liveness_measured_at: None,
             harness_title: r.harness_title.clone(),
@@ -2450,6 +2462,16 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
 /// Rendering cap on lineage depth: a pathological chain must not push
 /// rows off-screen (same bounded-steps posture `crown_indent` held).
 pub const MAX_LINEAGE_DEPTH: usize = 8;
+
+/// The parent edge the sideline nests on: the row's `spawned_by_session`
+/// only when the edge is CHILD. A PEER handoff, or a pre-v32 row with no
+/// word, roots at depth 0 beside its spawner.
+pub fn lineage_parent(row: &AgentRow) -> Option<&str> {
+    match row.lineage_kind.as_deref() {
+        Some("child") => row.spawned_by_session.as_deref(),
+        _ => None,
+    }
+}
 
 /// Join rows into a lineage forest and lay it out for rendering.
 /// Returns `(order, depths)`: `order` is the render order as INPUT INDICES in
@@ -2721,6 +2743,7 @@ mod tests {
     use super::*;
 
     // Test families live in their own modules; this file is shrink-only.
+    mod lineage_kind_tests;
     mod liveness_rule_tests;
     mod parked_child_tests;
     mod thread_row_status_tests;
@@ -4338,6 +4361,7 @@ config_dir = "~/.claude-alt"
             route: None,
             route_provider_id: None,
             spawned_by_session: None,
+            lineage_kind: None,
             session_id: None,
             harness_session_id: None,
             predecessor_session_ids: Vec::new(),
