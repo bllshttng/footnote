@@ -442,6 +442,7 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
             .env("FNO_AGENTS_BIN", &mock)
             .env("MOCK_ROOT", &cwd)
             .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .unwrap();
         child
@@ -450,22 +451,56 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
             .unwrap()
             .write_all(payload.as_bytes())
             .unwrap();
-        child.wait().unwrap().code()
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        (output.status.code(), stdout)
+    };
+    // A block travels two ways: exit 2 with the reason on stderr, or the
+    // decision JSON on stdout with exit 0. Which one fires depends on the
+    // environment the test inherits (CLAUDECODE selects the JSON transport),
+    // so a block is asserted on either shape.
+    let blocked = |result: &(Option<i32>, String), reason: &str| {
+        result.0 == Some(2) || result.1.contains(reason)
     };
 
+    // Fire 1: loop-check answers DoneDelivery but its fixture deletes the live
+    // manifest first, so staging has no source and the block names it. No
+    // delivery write may run from a state that could not be staged.
     write_same_harness_pending(&cwd);
-    assert_eq!(fire(), Some(2));
+    let fire1 = fire();
+    assert!(blocked(
+        &fire1,
+        "generic delivery state could not be preserved"
+    ));
+    assert!(!cwd.join(".fno/finalize-count").exists());
+
+    // Fire 2: the manifest is gone, so the pending scan picks up the
+    // same-harness snapshot and the finalize retry engages. The first attempt
+    // fails and blocks; the emit exits before cleanup, so the snapshot
+    // survives for the next stop.
+    let fire2 = fire();
+    assert!(blocked(&fire2, "generic delivery finalization failed"));
+    assert_eq!(
+        fs::read_to_string(cwd.join(".fno/finalize-count"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
     let retry = git_path(
         &cwd,
-        "fno-delivery-finalize-pending-sess-delivery-retry.sess-delivery-retry.md",
+        "fno-delivery-finalize-pending-sess-delivery-retry.session-old.md",
     );
     assert!(
         retry.exists(),
         "missing retry snapshot at {}",
         retry.display()
     );
+
+    // Fire 3: the retry succeeds and the stop is allowed. The prefix scan must
+    // keep the same-harness snapshot over the other-session candidate.
     write_other_pending(&cwd);
-    assert_eq!(fire(), Some(0));
+    let fire3 = fire();
+    assert_eq!(fire3.0, Some(0));
     assert!(cwd.join(".fno/finalize-complete").exists());
     assert_eq!(
         fs::read_to_string(cwd.join(".fno/finalize-count"))
@@ -511,13 +546,26 @@ fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
         String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
     };
 
+    // Fire 1: loop-check answers DoneDelivery but its fixture deletes the live
+    // manifest first, so staging has no source and nothing is preserved. No
+    // delivery write may run from a state that could not be staged.
     write_same_harness_pending(&cwd);
+    assert!(fire().contains("generic delivery state could not be preserved"));
+    assert!(!cwd.join(".fno/finalize-count").exists());
+
+    // Fire 2: the manifest is gone, so the pending scan picks up the
+    // same-harness snapshot and the finalize retry engages. The first attempt
+    // fails and blocks the stop; the emit exits before cleanup, so the
+    // snapshot survives for the next stop.
     assert!(fire().contains("generic delivery finalization failed"));
     assert!(git_path(
         &cwd,
-        "fno-delivery-finalize-pending-sess-delivery-retry.sess-delivery-retry.md",
+        "fno-delivery-finalize-pending-sess-delivery-retry.session-old.md",
     )
     .exists());
+
+    // Fire 3: the retry succeeds and the stop is allowed. The prefix scan must
+    // keep the same-harness snapshot over the other-session candidate.
     write_other_pending(&cwd);
     assert_eq!(fire().trim(), "{}");
     assert!(cwd.join(".fno/finalize-complete").exists());
