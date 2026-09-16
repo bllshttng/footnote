@@ -689,7 +689,6 @@ mod tests {
         assert_eq!(changes[0].new_liveness, Some("dead"));
 
         // ServeOnly writes the pid-proven status and clears the pid.
->>>>>>> origin/main
         let mut reg = state::Registry::default();
         reg.entries = entries.clone();
         let titles: std::collections::HashMap<String, Option<String>> =
