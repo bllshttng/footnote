@@ -1240,8 +1240,11 @@ def run_execute_queue(
         try:
             entry = store.get(key)
             left = phase_seconds_left()
-            why = ("no-watermark" if not isinstance(entry, dict)
-                   else "merged" if entry.get("merge_dispatched") else "parked" if entry.get("parked")
+            if not isinstance(entry, dict):
+                emit("pr_watch_skipped", {"pr": pr, "reason": "no-watermark"})
+                counts["skipped"] += 1
+                continue
+            why = ("merged" if entry.get("merge_dispatched") else "parked" if entry.get("parked")
                    else "not-open" if entry.get("last_seen_state") == "NOT_OPEN"
                    else "execute-budget" if left is not None and left < max(_FIRE_FLOOR_S, slowest)
                    else None)
