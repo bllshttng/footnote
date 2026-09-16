@@ -172,8 +172,11 @@ def test_using_fno_reach_is_pinned_to_its_carriers() -> None:
     """AC7-HP: the reach label is only as true as the wiring that delivers it.
 
     using-fno is labeled `hook: claude, top-level codex` because codex's
-    SessionStart injects it through a two-hop chain. If either hop is cut, the
-    label lies and every reach subtotal with it.
+    SessionStart injects it through a three-hop chain: the hook entry runs
+    the context-run wrapper, the wrapper runs the codex-session-start group
+    from hooks/context-hooks.json, and that group's producer is the
+    session-start shim. If any hop is cut, the label lies and every reach
+    subtotal with it.
     """
     hooks_json = json.loads(
         (ROOT / "hooks" / "codex-hooks.json").read_text(encoding="utf-8")
@@ -184,8 +187,22 @@ def test_using_fno_reach_is_pinned_to_its_carriers() -> None:
         for hook in block.get("hooks", [])
     ]
     assert any(
-        command.endswith("hooks/session-start.sh") for command in commands
+        command.endswith("hooks/context-run.sh codex-session-start")
+        for command in commands
     ), commands
+    groups = json.loads(
+        (ROOT / "hooks" / "context-hooks.json").read_text(encoding="utf-8")
+    )
+    producers = [
+        producer
+        for group in groups.get("groups", {}).values()
+        if group.get("event") == "SessionStart"
+        for producer in group.get("producers", [])
+    ]
+    assert any(
+        str(producer.get("argv", [""])[0]).endswith("hooks/session-start.sh")
+        for producer in producers
+    ), producers
     wrapper = (ROOT / "hooks" / "session-start.sh").read_text(encoding="utf-8")
     assert "session-start-using-fno.sh" in wrapper
 
