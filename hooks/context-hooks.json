@@ -1,0 +1,53 @@
+{
+  "description": "One declaration of every fno context producer group. hooks/context-run.sh <group> runs a group; cli/src/fno/context_audit.py expands groups for the census.",
+  "groups": {
+    "claude-session-start": {
+      "harness": "claude",
+      "event": "SessionStart",
+      "producers": [
+        {"id": "using-fno", "argv": ["${PLUGIN_ROOT}/hooks/session-start-using-fno.sh"], "deliver": false},
+        {"id": "inject-project-vision", "argv": ["${PLUGIN_ROOT}/hooks/inject-project-vision.sh"]},
+        {"id": "setup-nudge-session-start", "argv": ["${PLUGIN_ROOT}/hooks/setup-nudge-session-start.sh"]},
+        {"id": "frontdoor-nudge-session-start", "argv": ["${PLUGIN_ROOT}/hooks/frontdoor-nudge-session-start.sh"]},
+        {"id": "inject-fno-agent-whoami", "argv": ["${PLUGIN_ROOT}/hooks/inject-fno-agent-whoami.sh"]},
+        {"id": "worktree-peers-session-start", "argv": ["${PLUGIN_ROOT}/hooks/worktree-peers-session-start.sh"]},
+        {"id": "cache-keepalive-inject", "argv": ["${PLUGIN_ROOT}/hooks/cache-keepalive-inject.sh"]},
+        {"id": "register-session-start", "argv": ["${PLUGIN_ROOT}/hooks/register-session-start.sh"]},
+        {"id": "inject-mail-drain-session-start", "argv": ["${PLUGIN_ROOT}/hooks/inject-mail-drain-session-start.sh"]},
+        {"id": "reconcile-session-start", "argv": ["${PLUGIN_ROOT}/hooks/reconcile-session-start.sh"]},
+        {"id": "attest-model", "argv": ["${PLUGIN_ROOT}/hooks/attest-model.sh"]},
+        {"id": "eval-sweep-session-start", "argv": ["${PLUGIN_ROOT}/hooks/eval-sweep-session-start.sh"]},
+        {"id": "groom-self-heal-session-start", "argv": ["${PLUGIN_ROOT}/hooks/groom-self-heal-session-start.sh"]},
+        {"id": "outstanding-session-start", "argv": ["${PLUGIN_ROOT}/hooks/outstanding-session-start.sh"]},
+        {"id": "spawn-seed-provenance-session-start", "argv": ["${PLUGIN_ROOT}/hooks/spawn-seed-provenance-session-start.sh"]},
+        {"id": "operator-capture-nudge", "argv": ["${PLUGIN_ROOT}/hooks/operator-capture-nudge.sh"]},
+        {"id": "inject-announce", "argv": ["${PLUGIN_ROOT}/hooks/inject-announce.sh", "start"]},
+        {"id": "target-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"], "sources": ["compact"]},
+        {"id": "king-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/king-postcompact-reinject.sh"], "sources": ["compact"]}
+      ]
+    },
+    "codex-session-start": {
+      "harness": "codex",
+      "event": "SessionStart",
+      "producers": [
+        {"id": "session-start-combined", "argv": ["${PLUGIN_ROOT}/hooks/session-start.sh"]}
+      ]
+    },
+    "codex-whoami": {
+      "harness": "codex",
+      "event": "SessionStart",
+      "producers": [
+        {"id": "inject-fno-agent-whoami", "argv": ["${PLUGIN_ROOT}/hooks/inject-fno-agent-whoami.sh"]}
+      ]
+    },
+    "codex-post-compact": {
+      "harness": "codex",
+      "event": "PostCompact",
+      "entry": "post_compact",
+      "producers": [
+        {"id": "target-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"]},
+        {"id": "king-postcompact-reinject", "argv": ["${PLUGIN_ROOT}/hooks/king-postcompact-reinject.sh"]}
+      ]
+    }
+  }
+}

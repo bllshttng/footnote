@@ -117,7 +117,7 @@ def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
             "hooks": [
                 {
                     "type": "command",
-                    "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/session-start.sh",
+                    "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-session-start",
                 },
                 {
                     "type": "command",
@@ -137,13 +137,14 @@ def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
             "hooks": [
                 {
                     "type": "command",
-                    "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id inject-fno-agent-whoami --expected inject-fno-agent-whoami -- ${PLUGIN_ROOT}/hooks/inject-fno-agent-whoami.sh",
+                    "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/context-run.sh codex-whoami",
                 }
             ],
         },
     ]
-    resolved = hooks[0]["hooks"][0]["command"].replace("${PLUGIN_ROOT}", str(REPO_ROOT))
-    assert str(REPO_ROOT / "hooks" / "session-start.sh") in resolved
+    producers = _declaration_groups()["codex-session-start"]["producers"]
+    assert producers[0]["id"] == "session-start-combined"
+    assert producers[0]["argv"][0] == "${PLUGIN_ROOT}/hooks/session-start.sh"
 
 
 def test_codex_hooks_use_supported_event_names_and_existing_commands() -> None:
@@ -267,23 +268,23 @@ def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> N
     so there is exactly one observation path for both harnesses."""
     helper = "helpers/worktree-live-peers.sh"
     carrier = "worktree-peers-session-start.sh"
-    claude_commands = [
-        hook["command"]
-        for registration in json.loads(HOOKS_JSON.read_text(encoding="utf-8"))[
-            "hooks"
-        ]["SessionStart"]
-        for hook in registration.get("hooks", [])
+    claude_producers = [
+        producer
+        for group in _declaration_groups().values()
+        if group.get("harness") == "claude"
+        for producer in group.get("producers", [])
     ]
-    assert sum(carrier in c for c in claude_commands) == 1
+    assert sum(
+        producer["argv"][0].endswith(carrier) for producer in claude_producers
+    ) == 1
 
-    codex_commands = [
-        hook["command"]
-        for registration in json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))[
-            "hooks"
-        ]["SessionStart"]
-        for hook in registration.get("hooks", [])
+    codex_startup = [
+        producer
+        for producer in _declaration_groups()["codex-session-start"]["producers"]
     ]
-    assert sum("hooks/session-start.sh" in c for c in codex_commands) == 1
+    assert sum(
+        producer["argv"][0].endswith("session-start.sh") for producer in codex_startup
+    ) == 1
     # The carrier owns the predicate; the Codex wrapper delegates to the carrier
     # and must not call the helper itself (one observation path, not two).
     carrier_src = (REPO_ROOT / "hooks" / carrier).read_text(encoding="utf-8")
@@ -359,14 +360,23 @@ def test_drain_hook_wired_into_claude_and_codex_sessionstart() -> None:
     block inside the wrapper never runs for claude. The receive side is only
     symmetric if inject-mail-drain-session-start.sh is ALSO in claude's array.
     """
-    claude = HOOKS_JSON.read_text(encoding="utf-8")
-    assert "inject-mail-drain-session-start.sh" in claude, (
-        "claude SessionStart is missing the mail-drain hook: a hand-started "
+    cmds = [
+        hook["command"]
+        for registration in json.loads(HOOKS_JSON.read_text(encoding="utf-8"))[
+            "hooks"
+        ]["SessionStart"]
+        for hook in registration.get("hooks", [])
+    ]
+    cmds += [
+        " ".join(producer["argv"])
+        for group in _declaration_groups().values()
+        if group.get("harness") == "claude"
+        for producer in group.get("producers", [])
+    ]
+    assert any("inject-mail-drain-session-start.sh" in c for c in cmds), (
+        "claude SessionStart is missing the mail-drain producer: a hand-started "
         "claude session addressed claude-<id> would never drain its mail"
     )
-    ss = json.loads(claude)["hooks"]["SessionStart"]
-    cmds = [h["command"] for entry in ss for h in entry.get("hooks", [])]
-    assert any("inject-mail-drain-session-start.sh" in c for c in cmds)
 
 
 def test_plan_location_guard_wired_into_claude_and_codex_pretooluse() -> None:
@@ -540,48 +550,10 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
         )
 
 
-def test_observer_expected_lists_match_their_group_source_ids() -> None:
-    """Per event group, set(--expected) must equal the group's --source-id set.
-
-    The observer blocks until one record exists per expected id, so a hook
-    registered without joining the sibling --expected lists leaves the group
-    waiting on an id it will never see, and a stale list reports a complete
-    census while a hook's delivered bytes go uncounted. The lists are
-    hand-maintained in four command lines across two manifests; this pins
-    them to the registration set so they cannot drift silently.
-    """
-    for path in (HOOKS_JSON, CODEX_HOOKS_JSON):
-        for event, entries in json.loads(path.read_text(encoding="utf-8"))[
-            "hooks"
-        ].items():
-            for entry in entries:
-                source_ids: list[str] = []
-                expected_lists: list[str] = []
-                for hook in entry.get("hooks", []):
-                    command = hook.get("command", "")
-                    source = re.search(r"--source-id (\S+)", command)
-                    expected = re.search(r"--expected (\S+)", command)
-                    if source:
-                        source_ids.append(source.group(1))
-                    if expected:
-                        expected_lists.append(expected.group(1))
-                if not source_ids:
-                    continue
-                # Every observer-wrapped command in the group must declare the
-                # list at all: a missing --expected would otherwise pass
-                # vacuously (nothing to compare) while the census drifts.
-                assert len(expected_lists) == len(source_ids), (
-                    f"{path.name} {event} matcher={entry.get('matcher', '')!r}: "
-                    f"{len(source_ids) - len(expected_lists)} observer command(s) "
-                    "carry --source-id without --expected"
-                )
-                registration = set(source_ids)
-                for expected in expected_lists:
-                    assert set(expected.split(",")) == registration, (
-                        f"{path.name} {event} matcher={entry.get('matcher', '')!r}: "
-                        f"--expected {expected!r} != registered source ids "
-                        f"{sorted(registration)}"
-                    )
+def _declaration_groups() -> dict:
+    return json.loads(
+        (REPO_ROOT / "hooks" / "context-hooks.json").read_text(encoding="utf-8")
+    )["groups"]
 
 
 def test_both_postcompact_reinject_hooks_are_registered_on_supported_harnesses() -> None:
@@ -589,23 +561,22 @@ def test_both_postcompact_reinject_hooks_are_registered_on_supported_harnesses()
         "target-postcompact-reinject",
         "king-postcompact-reinject",
     ]
-    cases = (
-        (HOOKS_JSON, "SessionStart", "compact"),
-        (CODEX_HOOKS_JSON, "PostCompact", ""),
+    groups = _declaration_groups()
+    claude_compact = [
+        producer["id"]
+        for producer in groups["claude-session-start"]["producers"]
+        if "compact" in (producer.get("sources") or [])
+    ]
+    assert claude_compact == expected_sources, (
+        f"claude compact-only producer set drifted: {claude_compact}"
     )
-    for path, event, matcher in cases:
-        entries = json.loads(path.read_text(encoding="utf-8"))["hooks"][event]
-        entry = next(item for item in entries if item.get("matcher", "") == matcher)
-        commands = [hook.get("command", "") for hook in entry["hooks"]]
-        source_ids = [
-            re.search(r"--source-id (\S+)", command).group(1)
-            for command in commands
-            if "context-observe-hook.sh" in command
-        ]
-        assert source_ids == expected_sources, (
-            f"{path.name} {event} matcher={matcher!r} reinject set drifted: "
-            f"{source_ids}"
-        )
+    codex_ids = [
+        producer["id"]
+        for producer in groups["codex-post-compact"]["producers"]
+    ]
+    assert codex_ids == expected_sources, (
+        f"codex PostCompact producer set drifted: {codex_ids}"
+    )
 
 
 def test_law_stage_inject_is_wired_on_both_harnesses() -> None:
@@ -636,3 +607,29 @@ def test_law_stage_inject_is_wired_on_both_harnesses() -> None:
         for hook in registration.get("hooks", [])
     ]
     assert sum(script in command for command in codex_prompts) == 1, codex_prompts
+
+
+def test_context_hooks_declaration() -> None:
+    """The runner declaration satisfies the contract the manifests relied on.
+
+    Every group a manifest names through context-run.sh exists; producer ids
+    are unique within a group; every argv[0] resolves to an executable script
+    under the repo (the exec-bit gate scans this file too)."""
+    groups = _declaration_groups()
+    named = set()
+    for path in (HOOKS_JSON, CODEX_HOOKS_JSON):
+        for match in re.finditer(
+            r"context-run\.sh\s+([\w-]+)", path.read_text(encoding="utf-8")
+        ):
+            named.add(match.group(1))
+    assert named <= set(groups), f"manifest names unknown groups: {sorted(named - set(groups))}"
+    for name, group in groups.items():
+        ids = [producer["id"] for producer in group["producers"]]
+        assert len(ids) == len(set(ids)), f"group {name} has duplicate producer ids"
+        for producer in group["producers"]:
+            argv0 = producer["argv"][0]
+            resolved = REPO_ROOT / argv0.replace("${PLUGIN_ROOT}/", "")
+            assert resolved.is_file(), f"group {name}: missing script {resolved}"
+            assert os.access(resolved, os.X_OK), (
+                f"group {name}: not executable {resolved}"
+            )

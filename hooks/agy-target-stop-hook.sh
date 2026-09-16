@@ -110,17 +110,9 @@ OTHER_WORKTREE_PRESENT=0
 SPACE_DIR=$(dirname "$(fno-agents state path events 2>/dev/null || true)")
 [[ -z "$SPACE_DIR" || "$SPACE_DIR" == "." ]] && SPACE_DIR="${REPO_ROOT}/.fno"
 
-resolve_agents_bin() {
-    if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
-        printf '%s' "$FNO_AGENTS_BIN"
-    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
-        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
-    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
-        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
-    elif command -v fno-agents >/dev/null 2>&1; then
-        command -v fno-agents
-    fi
-}
+# shellcheck source=lib/agents-bin.sh
+source "$PLUGIN_ROOT/hooks/lib/agents-bin.sh"
+resolve_agents_bin() { fno_agents_bin "$REPO_ROOT"; }
 
 BIN=""
 TARGET_RESOLVE_BROKEN=0

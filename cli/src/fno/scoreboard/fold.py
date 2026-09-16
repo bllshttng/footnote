@@ -1511,7 +1511,7 @@ def _event_matches(event: dict, delivery: dict, *, commit: str | None = None) ->
     return matched
 
 
-def _context_observation(events: Sequence[dict]) -> dict | None:
+def _context_snapshot_rows(events: Sequence[dict]) -> dict | None:
     for event in reversed(events):
         if event.get("type") != "context_snapshot":
             continue
@@ -1610,7 +1610,7 @@ def build_context_outcome_trace(
             )
         )
     ]
-    context = _context_observation(context_events)
+    context = _context_snapshot_rows(context_events)
     loop_checks = [event for event in matching if event.get("type") == "loop_check"]
     latest_loop = loop_checks[-1] if loop_checks else None
     loop_data = latest_loop["data"] if latest_loop else {}

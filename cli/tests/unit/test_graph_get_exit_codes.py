@@ -46,6 +46,20 @@ def test_ac2hp_cmd_get_clean_miss_is_exit_1_unchanged(scratch_graph):
     assert f"No node matching 'x-zzzz' (id/slug/bare-hex) in {scratch_graph}" in result.output
 
 
+def test_cmd_get_miss_names_served_store_db_under_sqlite_backend(scratch_graph, monkeypatch):
+    # The read answers through the keeper: on the sqlite backend the store is
+    # graph.db, so a miss must name it, not the exported json mirror.
+    import fno.graph.store as store_mod
+
+    _populated(scratch_graph)
+    monkeypatch.setattr(store_mod, "store_export_status", lambda path: {"backend": "sqlite"})
+    result = runner.invoke(app, ["backlog", "get", "--strict", "x-zzzz"])
+    assert result.exit_code == 1, result.output
+    db = scratch_graph.with_suffix(".db")
+    assert f"No node matching 'x-zzzz' (id/slug/bare-hex) in {db}" in result.output
+    assert str(scratch_graph) not in result.output
+
+
 def test_ac2hp_cmd_get_clean_miss_emits_no_new_warning(scratch_graph):
     _populated(scratch_graph)
     result = runner.invoke(app, ["backlog", "get", "--strict", "x-zzzz"])

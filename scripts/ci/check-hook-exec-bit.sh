@@ -14,7 +14,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-manifests=(hooks/hooks.json hooks/codex-hooks.json)
+manifests=(hooks/hooks.json hooks/codex-hooks.json hooks/context-hooks.json)
 referenced=$(python3 - "${manifests[@]}" <<'PY'
 import json, re, sys
 
