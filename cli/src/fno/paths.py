@@ -1272,8 +1272,11 @@ def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -
         name = name[: -len("-.md")] + ".md"
     name = name.lstrip("-")
     if node:
+        from fno.graph._constants import is_wellformed_node_id
         from fno.plan.identity import plan_filename_node_id
 
+        if not is_wellformed_node_id(node):
+            return name
         rendered_node = plan_filename_node_id(name)
         if rendered_node != node:
             raise ValueError(
