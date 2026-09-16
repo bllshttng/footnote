@@ -477,6 +477,7 @@ FIELD_META: dict[str, Meta] = {
     "auto_merge.merge_strategy": Meta("advanced", "Merge strategy: merge | squash | rebase."),
     "auto_merge.delete_branch_on_merge": Meta("advanced", "Delete the remote branch after a merge. Honored on every path: the executor merges (`fno do pr merge`, pr verify) delete it inline, and a merge GitHub's own auto-merge queue lands later is cleaned up by the PR watcher when it observes the merge."),
     "auto_merge.require_checks_pass": Meta("advanced", "Require CI green before auto-merge."),
+    "auto_merge.require_fresh_ci": Meta("advanced", "Require green pull_request checks to have run against the current base tip."),
     "auto_merge.conflict_resolution": Meta("never", "Conflict-resolution agent for auto-merge rebases."),
     "auto_merge.remediation": Meta("never", "Post-failure remediation policy for auto-merge."),
     # --- config.pr_watch.* ---
@@ -569,6 +570,26 @@ FIELD_META: dict[str, Meta] = {
         "Global worktree-isolation policy (never|harness-native|external); default harness-native. "
         "`never` launches code payloads in place (e.g. an Obsidian vault checkout). A per-project "
         "work.workspaces.<slug>.projects[].worktree key overrides it.",
+    ),
+    "worktree.auto_install": Meta(
+        "advanced",
+        "Run dependency install when a new worktree is set up (read by skills/speculate/scripts/worktree-setup.sh); "
+        "set false to skip it. Default true.",
+    ),
+    "worktree.setup_command": Meta(
+        "advanced",
+        "Explicit setup command run after a new worktree is created, whatever auto_install says "
+        "(read by skills/speculate/scripts/worktree-setup.sh). Default empty.",
+    ),
+    "worktree.skip_verification": Meta(
+        "advanced",
+        "Skip the post-setup verification step in a new worktree (read by "
+        "skills/speculate/scripts/worktree-setup.sh). Default false.",
+    ),
+    "worktree.test_command": Meta(
+        "advanced",
+        "Verification command for a new worktree (read by skills/speculate/scripts/worktree-setup.sh); "
+        "falls back to the script's own detection when empty. Default empty.",
     ),
     # --- config.routing.* (config-first routing inventory) ---
     "routing.models": Meta(

@@ -20,8 +20,9 @@
 //! through the same cascade `rm` walks, with the typed outcome recorded and
 //! a receipt staged when none exists yet (an earlier retirement's receipt
 //! is the record it already made; this pass's outcome is in the summary).
-//! A history deletion never happens: the transcript survives, resume still
-//! opens it.
+//! A history deletion never happens: the transcript survives the `rm`. The
+//! receipt carries the resume command, but a removed claude background
+//! session no longer resumes - the job state is gone with it.
 //!
 //! The scope (`agents.reap.roster_scope`) names the population that may
 //! retire, as an operator setting: `off` retires nothing, `provenanced`
@@ -241,7 +242,10 @@ pub(crate) fn run(
         // Built through the sanctioned constructor and then specialized -
         // the mint guard bars a default-based literal here, and the guard
         // is right that identity fields should be set on purpose.
-        let mut entry = RegistryEntry::new(row.session_id.clone(), crate::state::Lineage::none());
+        let mut entry = RegistryEntry::new(
+            row.session_id.clone(),
+            crate::state::Lineage::unproven("synthetic row for a read, never written"),
+        );
         entry.name = row.name.clone().unwrap_or_else(|| row.short_id.clone());
         entry.short_id = row.short_id.clone();
         entry.harness = Some("claude".into());
@@ -537,7 +541,7 @@ pub fn roster_reap(
         &|e| store.borrow_mut().matches(e),
         &crate::gc::probe_row_age,
         crate::daemon::now_epoch_secs(),
-        &crate::gc_native::apply_retire_surface,
+        &crate::gc_native::apply_active_surface_removal,
     )
 }
 

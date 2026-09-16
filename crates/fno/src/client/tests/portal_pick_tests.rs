@@ -38,6 +38,7 @@ fn portal_pick_view() -> View {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad,
         name: name.into(),

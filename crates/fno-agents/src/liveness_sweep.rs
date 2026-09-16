@@ -50,6 +50,10 @@ pub(crate) struct ReconcileChange {
     /// no evidence): leave the previous measurement standing, its age honest
     /// on the wire.
     pub(crate) new_liveness: Option<&'static str>,
+    /// Whether this change came from the row's OWN dead pid rather than a
+    /// probe inference. A process fact is writable by any sweep; a probe
+    /// inference stays on the operator-driven sweeps.
+    pub(crate) pid_proven: bool,
 }
 
 /// What a reconcile sweep did, for the `reconcile_done` event and tests.
@@ -148,6 +152,7 @@ where
                         _ => None,
                     }
                 },
+                pid_proven: false,
             });
             continue;
         }
@@ -224,6 +229,7 @@ where
                         _ => None,
                     }
                 },
+                pid_proven: false,
             });
             continue;
         }
@@ -232,55 +238,83 @@ where
         // so the wire can never claim an age or a word the sweep did not
         // itself just observe.
         let measured = probe(entry);
-        let new_status = match &measured {
-            Ok(true) => {
-                // Recovery needs BOTH signals. A store hit alone means "the
-                // session still exists" (= resumable), which for a store that
-                // never evicts is permanently true - opencode's session table
-                // keeps a row forever, so a dead pane would be resurrected to
-                // `live` on every sweep and discovery would hand out a
-                // recipient nobody drains. A row with no recorded pid keeps the
-                // old behavior (`pid_live` is true), so exec rows are untouched.
-                // Ask-bucket rows never reach this arm (they continue above),
-                // so an Orphaned zombie cannot recover here and
-                // oscillate: gc ages it from the terminal set instead.
-                if entry.status == AgentStatus::Orphaned && pid_live(entry) {
-                    out.recovered.push(entry.name.clone());
-                    out.updated.push(entry.name.clone());
-                    Some(AgentStatus::Live)
-                } else {
+        // The pid decides a pid'd pane or interactive row, whatever the store
+        // says. served_word already reads it that way, so a store hit that kept
+        // status `live` beside a served word of `dead` was a split brain, and
+        // the footprint reader resolved it in favour of the stale status - five
+        // rows read live with dead pids for two hours that way. `pid_live`
+        // compares the recorded start time, so a recycled pid cannot pass.
+        let pid_decides = entry.pid.is_some() && (entry.mux.is_some() || entry.is_interactive());
+        let pid_proven_dead = pid_decides && !pid_live(entry);
+        let new_status = if pid_proven_dead {
+            out.updated.push(entry.name.clone());
+            Some(AgentStatus::Exited)
+        } else {
+            match &measured {
+                Ok(true) => {
+                    // Recovery needs BOTH signals. A store hit alone means "the
+                    // session still exists" (= resumable), which for a store that
+                    // never evicts is permanently true - opencode's session table
+                    // keeps a row forever, so a dead pane would be resurrected to
+                    // `live` on every sweep and discovery would hand out a
+                    // recipient nobody drains. A row with no recorded pid keeps the
+                    // old behavior (`pid_live` is true), so exec rows are untouched.
+                    // Ask-bucket rows never reach this arm (they continue above),
+                    // so an Orphaned zombie cannot recover here and
+                    // oscillate: gc ages it from the terminal set instead.
+                    if entry.status == AgentStatus::Orphaned && pid_live(entry) {
+                        out.recovered.push(entry.name.clone());
+                        out.updated.push(entry.name.clone());
+                        Some(AgentStatus::Live)
+                    } else {
+                        None
+                    }
+                }
+                Ok(false) if entry.is_interactive() => {
+                    // host_mode=interactive (task 2.3 / US4): a daemon-managed
+                    // interactive host is always pid'd; its liveness is the PTY
+                    // process, not the session store, so a store miss must not orphan
+                    // it. The pid'd rows are decided by the hoist above (a dead pid
+                    // reaps to Exited there); what reaches here is a row whose
+                    // best-effort pid capture missed, deferring to store liveness.
                     None
                 }
-            }
-            Ok(false) if entry.is_interactive() => {
-                // host_mode=interactive (task 2.3 / US4): a daemon-managed
-                // interactive host is always pid'd; its liveness is the PTY
-                // process, not the session store, so a store miss must not orphan
-                // it. A dead worker reaps to Exited ("unexpected exit is exited,
-                // not orphaned"; Codex P2, PR #373).
-                if pid_live(entry) {
-                    None
-                } else {
-                    out.updated.push(entry.name.clone());
-                    Some(AgentStatus::Exited)
+                Ok(false) if entry.mux.is_some() => {
+                    // A mux-pane row is PTY-governed only with a captured pid. Mux
+                    // rows are written with the default exec host_mode but carry a mux
+                    // ref; without this arm, 1.1's backfilled codex id (or a claude
+                    // pane's minted id) would false-orphan a live pane on a store
+                    // miss. A pid'd pane is decided by the hoist above (live keeps,
+                    // dead reaps to Exited); a pid-less mux row (best-effort miss)
+                    // must NOT be preserved here or a maybe-dead pane stays immortal
+                    // -- it defers to store liveness (orphan) instead.
+                    if entry.pid.is_some() {
+                        None
+                    } else {
+                        let live_ish = matches!(
+                            entry.status,
+                            AgentStatus::Live
+                                | AgentStatus::Ready
+                                | AgentStatus::Idle
+                                | AgentStatus::Busy
+                                | AgentStatus::Spawning
+                        );
+                        if live_ish {
+                            out.orphans.push(entry.name.clone());
+                            out.updated.push(entry.name.clone());
+                            Some(AgentStatus::Orphaned)
+                        } else {
+                            None
+                        }
+                    }
                 }
-            }
-            Ok(false) if entry.mux.is_some() => {
-                // A mux-pane row is PTY-governed only with a captured pid. Mux
-                // rows are written with the default exec host_mode but carry a mux
-                // ref; without this arm, 1.1's backfilled codex id (or a claude
-                // pane's minted id) would false-orphan a live pane on a store
-                // miss. But pid_live maps None to true, so a pid-less mux row
-                // (_lookup_child_pid best-effort miss) must NOT be preserved here
-                // or a maybe-dead pane stays immortal -- it defers to store
-                // liveness (orphan) instead. A live pid keeps it Live; a dead pid
-                // reaps to Exited (Codex P1/P2, #603 r3/r4).
-                if entry.pid.is_some() && pid_live(entry) {
-                    None
-                } else if entry.pid.is_some() {
-                    out.updated.push(entry.name.clone());
-                    Some(AgentStatus::Exited)
-                } else {
+                Ok(false) => {
+                    // Only states that *should* have a live backend can go stale.
+                    // Restarting / Failed are intentionally excluded: the restart
+                    // supervisor owns those agents' lifecycle (backoff -> re-spawn
+                    // or permanent_dead), so reconcile must not race it by flipping
+                    // a mid-restart agent to orphaned. Terminal states (Exited /
+                    // PermanentDead) are likewise left alone.
                     let live_ish = matches!(
                         entry.status,
                         AgentStatus::Live
@@ -297,40 +331,18 @@ where
                         None
                     }
                 }
-            }
-            Ok(false) => {
-                // Only states that *should* have a live backend can go stale.
-                // Restarting / Failed are intentionally excluded: the restart
-                // supervisor owns those agents' lifecycle (backoff -> re-spawn
-                // or permanent_dead), so reconcile must not race it by flipping
-                // a mid-restart agent to orphaned. Terminal states (Exited /
-                // PermanentDead) are likewise left alone.
-                let live_ish = matches!(
-                    entry.status,
-                    AgentStatus::Live
-                        | AgentStatus::Ready
-                        | AgentStatus::Idle
-                        | AgentStatus::Busy
-                        | AgentStatus::Spawning
-                );
-                if live_ish {
-                    out.orphans.push(entry.name.clone());
-                    out.updated.push(entry.name.clone());
-                    Some(AgentStatus::Orphaned)
-                } else {
+                Err(e) => {
+                    out.inconsistent
+                        .push((entry.name.clone(), e.reason.clone()));
                     None
                 }
-            }
-            Err(e) => {
-                out.inconsistent
-                    .push((entry.name.clone(), e.reason.clone()));
-                None
             }
         };
         changes.push(ReconcileChange {
             name: entry.name.clone(),
             new_status,
             new_liveness: crate::liveness_sweep::served_word(entry, &measured, &mut pid_live),
+            pid_proven: pid_proven_dead,
         });
     }
     (changes, out)
@@ -390,21 +402,33 @@ pub(crate) fn apply_reconcile_change(
 }
 
 /// Which writes a sweep applies. [`SweepMode::Full`] is the startup pass and
-/// the `agent.reconcile` RPC, exactly as before. [`SweepMode::ServeOnly`] is
+/// the `agent.reconcile` RPC, operator-driven sweeps. [`SweepMode::ServeOnly`] is
 /// the daemon's 60s liveness tick: the SAME measurement and the SAME served
-/// word a full sweep would serve, but no lifecycle write - the orphan flip,
-/// the exit reap, and their stamps stay where they are today, on the
+/// word a full sweep would serve, and one lifecycle write - a status the row's
+/// OWN pid proved (a start-time mismatch proves the recorded worker dead), but
+/// never a probe inference (the orphan flip, the exit reap) - those stay on the
 /// operator-driven sweeps.
 pub(crate) enum SweepMode {
     Full,
     ServeOnly,
 }
 
+/// Whether this sweep mode writes `ch`'s planned status. Full writes every
+/// planned change; ServeOnly writes only a status the row's own pid proved.
+/// The status applier and the ordered exit teardown both read this, so the
+/// two can never disagree about which sweep wrote a lifecycle state.
+pub(crate) fn mode_writes_status(mode: &SweepMode, ch: &ReconcileChange) -> bool {
+    match mode {
+        SweepMode::Full => true,
+        SweepMode::ServeOnly => ch.pid_proven,
+    }
+}
+
 /// The one batched registry write both modes share: apply every planned
 /// change and the batch's title readings in one lock window. ServeOnly
-/// passes `None` for every status, so a row the plan would move to Exited
-/// or Orphaned keeps its status, pid, and exited_at, and only the served
-/// pair and the CHECKED stamp advance.
+/// writes a status only when the row's own pid proved it (`pid_proven`), so a
+/// row the plan moves on a probe inference keeps its status, pid, and
+/// exited_at, and only the served pair and the CHECKED stamp advance.
 pub(crate) fn apply_reconcile_changes(
     r: &mut state::Registry,
     entries: &[RegistryEntry],
@@ -429,9 +453,10 @@ pub(crate) fn apply_reconcile_changes(
             None => r.find_mut(&ch.name),
         };
         if let Some(e) = target {
-            let status = match mode {
-                SweepMode::Full => ch.new_status,
-                SweepMode::ServeOnly => None,
+            let status = if mode_writes_status(mode, ch) {
+                ch.new_status
+            } else {
+                None
             };
             apply_reconcile_change(e, status, ch.new_liveness, now);
         }
@@ -440,6 +465,10 @@ pub(crate) fn apply_reconcile_changes(
     // stored title is the diff baseline the next sweep compares against, so
     // a row the reconcile changes never skipped lost its rename.
     crate::row_truth::apply_title_changes(r, entries, titles);
+    // Stamp the derived CHILD/PEER word while the lock is held, so sideline
+    // readers that cannot link fno-agents read the edge kind as a served
+    // fact instead of re-deriving it.
+    crate::spawn_edge::stamp_lineage_kinds(r);
 }
 
 /// One tick's gate decision: due only past the cadence AND with the previous
@@ -576,6 +605,7 @@ mod tests {
             name: "planned-exit".into(),
             new_status: Some(AgentStatus::Exited),
             new_liveness: Some("dead"),
+            pid_proven: false,
         }];
         let titles: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
@@ -604,6 +634,10 @@ mod tests {
             Some("2026-09-10T12:00:00Z"),
             "the stamp IS written"
         );
+        assert_eq!(
+            row.lineage_kind, None,
+            "a row with no spawn edge carries no kind"
+        );
 
         // The full mode is still the lifecycle writer: the same change
         // applied Full reaps the row and clears its pid.
@@ -621,5 +655,303 @@ mod tests {
         assert_eq!(row.status, AgentStatus::Exited);
         assert_eq!(row.pid, None, "Exited clears the pid (Locked Decision #7)");
         assert_eq!(row.exited_at.as_deref(), Some("2026-09-10T12:00:00Z"));
+    }
+
+    #[test]
+    fn a_dead_pid_plans_exited_and_the_tick_may_write_it() {
+        // AC: a pid'd pane row whose pid is proven dead plans
+        // `Exited` with `pid_proven`, even when the store probe answers
+        // `Ok(true)` - the served word already read `dead`, and status now
+        // agrees with it. The 60s tick may write a pid-proven status.
+        let entries = vec![pane_entry("recycled-pane", Some(4243))];
+        let changes = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |e: &RegistryEntry| e.pid != Some(4243),
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Unknown,
+            true,
+        )
+        .0;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Exited),
+            "a proven-dead pid reaps to Exited despite the store hit"
+        );
+        assert!(
+            changes[0].pid_proven,
+            "the status came from the row's own dead pid"
+        );
+        assert_eq!(changes[0].new_liveness, Some("dead"));
+
+        // ServeOnly writes the pid-proven status and clears the pid.
+        let mut reg = state::Registry::default();
+        reg.entries = entries.clone();
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &changes,
+            &titles,
+            &SweepMode::ServeOnly,
+            "2026-09-10T12:00:00Z",
+        );
+        let row = reg.find_mut("recycled-pane").unwrap();
+        assert_eq!(
+            row.status,
+            AgentStatus::Exited,
+            "the tick writes a status the row's own pid proved"
+        );
+        assert_eq!(row.pid, None, "Exited clears the pid");
+    }
+
+    #[test]
+    fn serve_only_still_discards_a_probe_inferred_orphan_flip() {
+        // AC error case: a pid'd pane row with a LIVE pid whose
+        // store probe misses keeps `live` under ServeOnly - a store miss is
+        // an inference, and the tick still cannot retire a live pane on it.
+        let mut entry = pane_entry("live-pane", Some(4242));
+        entry.status = AgentStatus::Live;
+        let entries = vec![entry];
+        let changes = plan_reconcile(
+            &entries,
+            |_| Ok(false),
+            || false,
+            |e: &RegistryEntry| e.pid == Some(4242),
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Unknown,
+            true,
+        )
+        .0;
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].new_status, None);
+        assert!(!changes[0].pid_proven);
+
+        let mut reg = state::Registry::default();
+        reg.entries = entries.clone();
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+        crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &changes,
+            &titles,
+            &SweepMode::ServeOnly,
+            "2026-09-10T12:00:00Z",
+        );
+        let row = reg.find_mut("live-pane").unwrap();
+        assert_eq!(
+            row.status,
+            AgentStatus::Live,
+            "a store miss still cannot retire a live pane from the tick"
+        );
+        assert_eq!(row.pid, Some(4242));
+    }
+
+    #[test]
+    fn mode_writes_status_gates_the_exit_teardown_and_the_applier_alike() {
+        // The applier and the ordered exit teardown read the same predicate,
+        // so a pid-proven exit written by the tick also publishes its
+        // completion, and a probe-inferred exit never does.
+        let mk = |pid_proven: bool| crate::daemon::ReconcileChange {
+            name: "row".into(),
+            new_status: Some(AgentStatus::Exited),
+            new_liveness: Some("dead"),
+            pid_proven,
+        };
+        assert!(mode_writes_status(&SweepMode::Full, &mk(true)));
+        assert!(mode_writes_status(&SweepMode::Full, &mk(false)));
+        assert!(mode_writes_status(&SweepMode::ServeOnly, &mk(true)));
+        assert!(!mode_writes_status(&SweepMode::ServeOnly, &mk(false)));
+    }
+
+    #[test]
+    fn reconcile_reaps_a_dead_interactive_host_to_exited() {
+        // A genuinely dead interactive worker (store-miss AND pid no longer
+        // live) is reaped to Exited during reconcile, not left Live until a
+        // daemon restart. A live interactive host on the same store-miss
+        // stays Live, and a pid-less one is left alone: the real pid_live
+        // maps a missing pid to true ("a row with no pid is left alone"), so
+        // only a recorded dead pid proves death.
+        let mk = |name: &str, pid: Option<u32>| {
+            let mut e = pane_entry(name, pid);
+            // A PTY agent always has a non-empty short_id; an empty one turns
+            // a pid-less row into a one-shot ask, which is a different arm.
+            e.short_id = name.to_string();
+            e.mux = None;
+            e.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+            e
+        };
+        let entries = vec![
+            mk("dead-tui", Some(4241)),
+            mk("live-tui", Some(4242)),
+            mk("pidless-tui", None),
+        ];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(false), // all store-miss
+            || false,
+            |e| e.pid.map_or(true, |_| e.name == "live-tui"),
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Alive,
+            true,
+        );
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Exited),
+            "a dead interactive host is reaped to Exited during reconcile"
+        );
+        assert_eq!(
+            changes[1].new_status, None,
+            "a live interactive host is left untouched"
+        );
+        assert_eq!(
+            changes[2].new_status, None,
+            "a pid-less interactive host is left untouched (pid_live maps None to true)"
+        );
+        assert!(out.orphans.is_empty());
+        assert_eq!(out.updated, vec!["dead-tui".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_served_word_on_pane_rows_follows_the_pid_even_when_the_probe_errs() {
+        // A claude pane row carries a pid and NO session id, so the provider
+        // probe refuses it ("no session id in entry"). The served word
+        // follows the pid for pane rows whatever the probe said. The pid
+        // hoist sits ABOVE the probe match: a recorded dead pid is a process
+        // fact, so it reaps to Exited even on an Err probe (an Err says
+        // nothing about the process - it was exactly the status/served-word
+        // split brain the hoist retires). Rows the pid cannot decide keep
+        // the Err mapping: never flip on an inconclusive probe.
+        let mut interactive = pane_entry("interactive-live", Some(4244));
+        interactive.mux = None;
+        interactive.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+        let entries = vec![
+            pane_entry("live-pane", Some(4242)),
+            pane_entry("dead-pane", Some(4243)),
+            pane_entry("pidless-pane", None),
+            interactive,
+        ];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| {
+                Err(ReachabilityProbeError::new(
+                    "claude",
+                    "no session id in entry",
+                ))
+            },
+            || false,
+            |e| e.name == "live-pane" || e.name == "interactive-live",
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Alive,
+            true,
+        );
+        assert_eq!(
+            changes[0].new_liveness,
+            Some("alive"),
+            "a live pane pid serves alive even on an Err probe"
+        );
+        assert_eq!(
+            changes[1].new_liveness,
+            Some("dead"),
+            "a dead pane pid serves dead even on an Err probe"
+        );
+        assert_eq!(
+            changes[2].new_liveness,
+            Some("unmeasured"),
+            "a pid-less pane keeps today's Err mapping"
+        );
+        assert_eq!(
+            changes[3].new_liveness,
+            Some("alive"),
+            "an interactive host's served word follows its pid too"
+        );
+        assert_eq!(
+            changes[1].new_status,
+            Some(AgentStatus::Exited),
+            "a proven-dead pid reaps even on an Err probe"
+        );
+        assert!(
+            changes[1].pid_proven,
+            "the exit came from the row's own pid"
+        );
+        assert_eq!(
+            changes[0].new_status, None,
+            "a live pane never flips on an Err probe"
+        );
+        assert_eq!(
+            changes[2].new_status, None,
+            "a pid-less pane never flips on an Err probe"
+        );
+        assert_eq!(
+            changes[3].new_status, None,
+            "a live interactive host never flips on an Err probe"
+        );
+        assert!(out.orphans.is_empty());
+    }
+
+    #[test]
+    fn the_sweep_stamps_lineage_kind_on_rows_with_a_spawn_edge() {
+        fn row(name: &str, sid: &str, spawned_by: Option<&str>) -> state::RegistryEntry {
+            let mut e = state::RegistryEntry::default();
+            e.name = name.into();
+            e.harness_session_id = Some(sid.into());
+            e.spawned_by_session = spawned_by.map(String::from);
+            e
+        }
+        let mut king = row("king-x-1", "s-king", None);
+        king.crown_level = Some(1);
+        let mut court = row("node-x-demo2-g2", "s-court", Some("s-king"));
+        court.status = AgentStatus::Busy;
+        let mut joiner = row("jn-t-x-1-1", "s-j", Some("s-lead"));
+        joiner.status = AgentStatus::Busy;
+        let mut handoff = row("sob-t-x-2-glm", "s-t", Some("s-lead"));
+        handoff.status = AgentStatus::Busy;
+        let plain = row("solo-x-2", "s-solo", None);
+        let lead = row("t-x-1-lead", "s-lead", None);
+        let entries = vec![
+            king.clone(),
+            court.clone(),
+            lead.clone(),
+            joiner.clone(),
+            handoff.clone(),
+            plain.clone(),
+        ];
+        let mut reg = state::Registry::default();
+        reg.entries = entries.clone();
+        let titles: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
+
+        crate::liveness_sweep::apply_reconcile_changes(
+            &mut reg,
+            &entries,
+            &[],
+            &titles,
+            &SweepMode::ServeOnly,
+            "2026-09-10T12:00:00Z",
+        );
+
+        let kind_of = |name: &str| {
+            reg.entries
+                .iter()
+                .find(|e| e.name == name)
+                .map(|e| e.lineage_kind.clone())
+        };
+        assert_eq!(kind_of("node-x-demo2-g2"), Some(Some("child".into())));
+        assert_eq!(kind_of("jn-t-x-1-1"), Some(Some("child".into())));
+        assert_eq!(kind_of("sob-t-x-2-glm"), Some(Some("peer".into())));
+        assert_eq!(kind_of("solo-x-2"), Some(None), "no edge, no word");
+        assert_eq!(kind_of("king-x-1"), Some(None), "no edge, no word");
     }
 }

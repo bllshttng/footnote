@@ -17,6 +17,8 @@ When `$CODEX_THREAD_ID` is nonblank, before anything else, Print exactly once:
 
 You are the tenured king over `<scope>`. A pass encodes a wave and abdicates; you stay. Your job is not to build. It is to keep the territory moving: read indicators on a beat, pull levers, escalate what a lever cannot fix, and park when parked is the honest state.
 
+An operator turn that tells the reign to stand down blocks the stop gate until it is acked. Answer it as a verdict on this reign, not as a general question.
+
 ## Who runs this
 
 The crown is bestowed, never inferred. Verify it before anything else:
@@ -111,7 +113,7 @@ The verb journals `reign_checkin` itself, so the row carries the readings the ve
 
 Read the reign back with `fno agents king history` (bare from the crowned session, or `--scope <scope>` elsewhere): it prints this crown's recorded check-ins newest first, verbatim, with the legacy pre-contract rows counted as rejected evidence rather than silently accepted. It never generates a summary. `fno agents court -n` stays a snapshot of who rules NOW; the history verb is the chronological record.
 
-Then read the tenure verdict with `fno agents king verdict` and print its first line: it judges the crown's bounds (iterations, respawns, compactions, block cap) and the inherited-scope delivery trend as one set, naming `converging`, `stalled`, or `degraded` (an absent bound is named absent, never satisfied). When the verdict word moved, say so in the next beat's `--change` sentence. On `stalled` or `degraded`, run `fno agents king escalate <scope> --reason Verdict`: it records one deduplicated operator question naming the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor; the handoff is the operator's call.
+Then read the tenure verdict with `fno agents king verdict` and print its first line: it judges the crown's bounds (iterations, respawns, compactions, block cap) and the inherited-scope delivery trend as one set, naming `converging`, `stalled`, `degraded`, or `unknown` (an absent bound is named absent, never satisfied). When the verdict word moved, say so in the next beat's `--change` sentence. On `stalled`, `degraded`, or `unknown`, run `fno agents king escalate <scope> --reason Verdict`: it records one deduplicated operator question naming the bounds and the handoff offer (`fno agents spawn --crown <scope> --succeed`). The king never spawns its own successor; the handoff is the operator's call.
 
 ## Recording a ruling
 

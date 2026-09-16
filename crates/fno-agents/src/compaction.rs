@@ -18,7 +18,7 @@
 //! `Unknown { reason: "no-compaction-marker-for-harness" }`. The reader never
 //! infers `NotCompacting` from an absence.
 
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -244,16 +244,15 @@ fn past_ceiling_or_compacting(stamp: &CompactionStamp, now_epoch: i64) -> Compac
     }
 }
 
-/// The newest boundary in a transcript with no stamp to compare against.
-fn newest_boundary(transcript: &Path) -> Result<Option<String>, String> {
-    let raw =
-        std::fs::read_to_string(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
-    let mut newest: Option<(i64, String)> = None;
-    for line in raw.lines() {
+fn visit_boundaries(transcript: &Path, mut visit: impl FnMut(i64, &str)) -> Result<(), String> {
+    let file =
+        std::fs::File::open(transcript).map_err(|e| format!("transcript unreadable: {e}"))?;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|e| format!("transcript unreadable: {e}"))?;
         if !line.contains("compact_boundary") {
             continue;
         }
-        let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(&line) else {
             continue;
         };
         if row.get("subtype").and_then(|v| v.as_str()) != Some("compact_boundary") {
@@ -263,12 +262,35 @@ fn newest_boundary(transcript: &Path) -> Result<Option<String>, String> {
             continue;
         };
         if let Some(epoch) = rfc3339_to_epoch(ts) {
-            if newest.as_ref().is_none_or(|(e, _)| epoch > *e) {
-                newest = Some((epoch, ts.to_string()));
-            }
+            visit(epoch, ts);
         }
     }
+    Ok(())
+}
+
+/// The newest boundary in a transcript with no stamp to compare against.
+fn newest_boundary(transcript: &Path) -> Result<Option<String>, String> {
+    let mut newest: Option<(i64, String)> = None;
+    visit_boundaries(transcript, |epoch, ts| {
+        if newest.as_ref().is_none_or(|(last, _)| epoch > *last) {
+            newest = Some((epoch, ts.to_string()));
+        }
+    })?;
     Ok(newest.map(|(_, ts)| ts))
+}
+
+/// Count the compactions a transcript records at or after `since_epoch`.
+/// The Claude CLI writes `compact_boundary` itself, so this counts what a
+/// hook-fed journal row can miss. An empty or unparseable `since` counts every
+/// boundary, the same conservative direction `in_tenure` takes.
+pub fn count_boundaries_since(transcript: &Path, since_epoch: Option<i64>) -> Result<u64, String> {
+    let mut count = 0;
+    visit_boundaries(transcript, |epoch, _| {
+        if since_epoch.is_none_or(|since| epoch >= since) {
+            count += 1;
+        }
+    })?;
+    Ok(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +438,34 @@ mod tests {
 
         let state = compaction_state(&home, "claude", session, Some(&transcript), now + 600);
         assert!(matches!(state, CompactionState::NotCompacting { .. }));
+    }
+
+    #[test]
+    fn count_boundaries_since_streams_and_applies_the_inclusive_start() {
+        let home = tmp_home("count");
+        let transcript = home.root().join("t.jsonl");
+        let body = [
+            BOUNDARY_LINE.replace("2026-09-08T17:51:01.245Z", "2026-09-01T00:00:00Z"),
+            BOUNDARY_LINE.replace("2026-09-08T17:51:01.245Z", "2026-09-10T00:00:00Z"),
+            BOUNDARY_LINE.replace("2026-09-08T17:51:01.245Z", "2026-09-11T00:00:00Z"),
+            BOUNDARY_LINE.replace("2026-09-08T17:51:01.245Z", "2026-09-12T00:00:00Z"),
+        ]
+        .join("\n");
+        write_file(&transcript, &body);
+
+        assert_eq!(
+            count_boundaries_since(
+                &transcript,
+                Some(
+                    chrono::DateTime::parse_from_rfc3339("2026-09-10T00:00:00Z")
+                        .unwrap()
+                        .timestamp(),
+                )
+            )
+            .unwrap(),
+            3
+        );
+        assert_eq!(count_boundaries_since(&transcript, None).unwrap(), 4);
     }
 
     #[test]

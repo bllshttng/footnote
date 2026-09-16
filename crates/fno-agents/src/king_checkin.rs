@@ -20,8 +20,8 @@
 //!              [--board-state PATH] [--emit-path PATH] [--change TEXT]
 //!              [--no-emit] [--json]`
 //!
-//! rc 0 a completed beat (a failed row write warns, never fails the beat),
-//! 2 usage failure.
+//! rc 0 a completed beat, 3 when an asked-for row was not journalled or
+//! stdout could not be written, 2 usage failure.
 use crate::court_fold::court_fold;
 use crate::king_board::{read_board, BoardOpts};
 use crate::king_history::REIGN_CHECKIN;
@@ -1383,6 +1383,27 @@ pub(crate) fn emit_row(path: &Path, source: &str, data: &Map<String, Value>) -> 
     }
 }
 
+fn finish_checkin(
+    emit_requested: bool,
+    emitted: bool,
+    output_error: Option<std::io::Error>,
+) -> i32 {
+    if let Some(error) = output_error {
+        if error.kind() == std::io::ErrorKind::BrokenPipe && emitted {
+            return 0;
+        }
+        eprintln!("king-checkin: stdout write failed: {error}");
+        return 3;
+    }
+    if emit_requested && !emitted {
+        eprintln!(
+            "king-checkin: beat ran but no reign_checkin row was journalled; fno agents king history will not see it"
+        );
+        return 3;
+    }
+    0
+}
+
 /// The stop hook's half of the reign record: when this scope's newest
 /// check-in is older than two check-in intervals, journal one row from what
 /// the previous fire measured. It never decides anything.
@@ -1452,7 +1473,8 @@ pub(crate) fn hook_beat(
 ///              [--board-state PATH] [--emit-path PATH] [--change TEXT]
 ///              [--no-emit] [--json]`
 ///
-/// rc 0 a completed beat, 2 usage failure.
+/// rc 0 a completed beat, 3 when an asked-for row was not journalled or
+/// stdout could not be written, 2 usage failure.
 pub fn run_king_checkin(args: &[String]) -> i32 {
     let mut ctx = Ctx {
         scope: String::new(),
@@ -1582,7 +1604,7 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         false
     };
 
-    if as_json {
+    let output_error = if as_json {
         let payload = json!({
             "scope": ctx.scope,
             "ts": ts,
@@ -1607,18 +1629,27 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             }).collect::<Vec<_>>(),
             "lines": lines,
         });
-        println!(
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        writeln!(
+            out,
             "{}",
             serde_json::to_string_pretty(&payload).unwrap_or_default()
-        );
+        )
+        .err()
     } else {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
+        let mut error: Option<std::io::Error> = None;
         for line in &lines {
-            let _ = writeln!(out, "{line}");
+            if let Err(e) = writeln!(out, "{line}") {
+                error = Some(e);
+                break;
+            }
         }
-    }
-    0
+        error
+    };
+    finish_checkin(ctx.emit, emitted, output_error)
 }
 
 #[cfg(test)]
@@ -2167,6 +2198,40 @@ mod tests {
         assert_eq!(rows.lines().count(), 1);
         assert!(rows.contains("reign_checkin"));
         assert!(rows.contains("\"source\":\"loop\""), "rows: {rows}");
+    }
+
+    #[test]
+    fn requested_emit_without_a_row_is_a_failure() {
+        assert_eq!(finish_checkin(true, false, None), 3);
+    }
+
+    #[test]
+    fn no_emit_is_success_when_no_row_was_requested() {
+        assert_eq!(finish_checkin(false, false, None), 0);
+    }
+
+    #[test]
+    fn a_broken_pipe_after_a_journalled_beat_is_success() {
+        assert_eq!(
+            finish_checkin(
+                true,
+                true,
+                Some(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn a_broken_pipe_without_a_journalled_beat_still_fails() {
+        assert_eq!(
+            finish_checkin(
+                true,
+                false,
+                Some(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            ),
+            3
+        );
     }
 
     #[test]

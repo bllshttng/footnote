@@ -84,7 +84,12 @@ def test_ac1_hp_canonical_envelope_target_source(runner: CliRunner, tmp_path: Pa
 
 
 def test_ac1_hp_explicit_source_overrides_autodetect(runner: CliRunner, tmp_path: Path) -> None:
-    """AC1-HP: --source overrides auto-detection."""
+    """AC1-HP: --source overrides auto-detection.
+
+    reign_checkin declares [loop, daemon, hook], never target, so this also
+    proves the override reaches a source auto-detection could never produce
+    on its own (a state file is present, which would auto-detect 'target').
+    """
     state = _write_state(tmp_path)
     events = _events_path(tmp_path)
 
@@ -92,21 +97,25 @@ def test_ac1_hp_explicit_source_overrides_autodetect(runner: CliRunner, tmp_path
         event_cli,
         [
             "emit",
-            "--type", "child_promise",
-            "--data", json.dumps({"session_id": "ses-x", "nonce": "n" * 16}),
-            "--source", "megawalk",
+            "--type", "reign_checkin",
+            "--data", json.dumps({"scope": "x-a792", "change": "override test"}),
+            "--source", "daemon",
             "--state", str(state),
             "--events", str(events),
         ],
     )
 
-    assert result.exit_code == 0
+    assert result.exit_code == 0, result.stderr
     event = json.loads(events.read_text().splitlines()[0])
-    assert event["source"] == "megawalk"
+    assert event["source"] == "daemon"
 
 
-def test_ac1_hp_no_state_file_defaults_to_test(runner: CliRunner, tmp_path: Path) -> None:
-    """AC1-HP: missing state file -> default source is 'test' (no auto-attribution)."""
+def test_ac1_hp_no_state_file_and_no_source_is_refused(runner: CliRunner, tmp_path: Path) -> None:
+    """AC1-HP: missing state file and no --source -> refused, no row written.
+
+    The old behavior silently defaulted to 'test'; the fix requires the
+    caller to name a producer instead of guessing one.
+    """
     events = _events_path(tmp_path)
     nonexistent_state = tmp_path / ".fno" / "target-state.md"
     # parent dir is created by events.jsonl write, but state file itself must not exist
@@ -116,16 +125,16 @@ def test_ac1_hp_no_state_file_defaults_to_test(runner: CliRunner, tmp_path: Path
         event_cli,
         [
             "emit",
-            "--type", "child_promise",
-            "--data", json.dumps({"session_id": "ses-y", "nonce": "n" * 16}),
+            "--type", "reign_checkin",
+            "--data", json.dumps({"scope": "x-a792", "change": "no source"}),
             "--state", str(nonexistent_state),
             "--events", str(events),
         ],
     )
 
-    assert result.exit_code == 0
-    event = json.loads(events.read_text().splitlines()[0])
-    assert event["source"] == "test"
+    assert result.exit_code != 0
+    assert not events.exists()
+    assert "reign_checkin declares: daemon, hook, loop" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -568,6 +577,7 @@ def test_attestation_stamps_attester_and_witness_from_the_emitting_process(
         [
             "emit", "--type", "review_attestation",
             "--data", json.dumps(_attestation_data()),
+            "--source", "test",
             "--events", str(events),
         ],
     )
@@ -592,6 +602,7 @@ def test_attestation_env_only_witness_is_recorded_not_refused(
         [
             "emit", "--type", "review_attestation",
             "--data", json.dumps(_attestation_data()),
+            "--source", "test",
             "--events", str(events),
         ],
     )
@@ -681,6 +692,7 @@ def test_review_attestation_model_is_stamped_from_transcript(
         [
             "emit", "--type", "review_attestation",
             "--data", json.dumps(_attestation_data()),
+            "--source", "test",
             "--events", str(events),
         ],
     )
@@ -710,6 +722,7 @@ def test_review_attestation_unknown_model_drops_the_callers_claim(
         [
             "emit", "--type", "review_attestation",
             "--data", json.dumps(payload),
+            "--source", "test",
             "--events", str(events),
         ],
     )
@@ -852,6 +865,7 @@ def test_hand_emitted_review_coverage_reaches_both_logs(
             "emit",
             "--type", "review_coverage",
             "--data", json.dumps(_coverage_payload()),
+            "--source", "hook",
             "--events", str(worktree_log),
         ],
     )
@@ -885,6 +899,7 @@ def test_mirror_does_not_double_when_the_project_log_is_the_global_one(
             "emit",
             "--type", "review_coverage",
             "--data", json.dumps(_coverage_payload()),
+            "--source", "hook",
             "--global",
         ],
     )

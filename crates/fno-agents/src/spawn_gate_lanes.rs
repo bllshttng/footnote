@@ -29,6 +29,10 @@ use crate::AgentStatus;
 /// fallback_chain already applies to its own health reads).
 const PROVIDER_HEALTH_TTL_SECONDS: f64 = 60.0 * 60.0;
 
+// ponytail: fixed 5-hour hold matches the vendor window in the measured 429;
+// upgrade is parsing the window length from the excerpt.
+const UNKNOWN_RESET_HOLD_S: i64 = 5 * 3600;
+
 /// Pane-probe wall-clock budget: the shared mux subprocess bound
 /// (mux_spawn._MUX_SUBPROCESS_TIMEOUT_S).
 const PANE_PROBE_BUDGET: Duration = Duration::from_secs(30);
@@ -523,8 +527,9 @@ fn pane_state(row: &RegistryEntry) -> Result<Option<bool>, String> {
 }
 
 /// Provider-tagged headless reservations not represented by rows
-/// (`_provider_live_slot_claims`). A claim whose liveness cannot be proved is
-/// a refusal, never an uncount.
+/// (`_provider_live_slot_claims`). A Suspect reservation (dead pid inside its
+/// TTL) counts as live, as `live_worker_slot_claims` counts it. A corrupted
+/// one refuses.
 fn provider_live_slot_claims(
     provider: &str,
     counted_names: &[String],
@@ -583,10 +588,7 @@ fn provider_live_slot_claims(
             continue;
         }
         match state {
-            ClaimState::Suspect => {
-                return Err(format!("worker reservation {key} liveness is suspect"))
-            }
-            ClaimState::Live => count += 1,
+            ClaimState::Live | ClaimState::Suspect => count += 1,
             _ => {}
         }
     }
@@ -797,19 +799,44 @@ pub(crate) fn check_lane_quota_lock(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
+    let now_epoch = now as i64;
     let Some(lane) = snapshot.lanes.iter().find(|l| {
-        l.provider == provider
-            && l.state == "open"
-            && l.reset_epoch.map(|r| r as f64 > now).unwrap_or(false)
+        if l.provider != provider || l.state != "open" || l.reset_passed_epoch.is_some() {
+            return false;
+        }
+        if l.reset_epoch.map(|r| r as f64 > now).unwrap_or(false) {
+            return true;
+        }
+        l.reset_epoch.is_none()
+            && l.members
+                .iter()
+                .filter(|m| m.capped)
+                .filter_map(|m| m.newest_assistant.as_deref())
+                .filter_map(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|ts| ts.timestamp())
+                .max()
+                .is_some_and(|ts| now_epoch >= ts && now_epoch - ts < UNKNOWN_RESET_HOLD_S)
     }) else {
         return Ok(());
     };
-    let reset = lane.reset_epoch.unwrap_or_default() as f64;
-    let when = chrono_like_iso(reset);
-    warnings.push(format!(
-        "spawn-gate: provider lane {} is rate-limited until {when}; refusing; no worker launched",
-        lane.lane
-    ));
+    let reset_unknown = lane.reset_epoch.is_none();
+    if reset_unknown {
+        let target = lane
+            .missing_reset_timezone
+            .first()
+            .map(String::as_str)
+            .unwrap_or(&lane.account);
+        warnings.push(format!(
+            "spawn-gate: provider lane {} has an unknown reset; refusing; set reset_timezone on the [[accounts.records]] entry for {target}; no worker launched",
+            lane.lane
+        ));
+    } else {
+        let when = chrono_like_iso(lane.reset_epoch.unwrap() as f64);
+        warnings.push(format!(
+            "spawn-gate: provider lane {} is rate-limited until {when}; refusing; no worker launched",
+            lane.lane
+        ));
+    }
     Err(Refusal::with_receipt(
         EXIT_PROVIDER_CAP,
         serde_json::json!({
@@ -817,7 +844,9 @@ pub(crate) fn check_lane_quota_lock(
             "reason": "provider_quota_lock",
             "provider": provider,
             "lane": lane.lane,
-            "resets_at": reset,
+            "resets_at": lane.reset_epoch.map(|r| r as f64),
+            "reset_unknown": reset_unknown,
+            "missing_reset_timezone": lane.missing_reset_timezone,
         }),
     ))
 }
@@ -871,6 +900,17 @@ fn chrono_like_iso(epoch_s: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pid the OS does not report, so `is_live` reads the claim as a corpse.
+    fn dead_pid() -> u32 {
+        let mut candidate = 999_999u32;
+        while std::path::Path::new(&format!("/proc/{candidate}")).exists()
+            || unsafe { libc::kill(candidate as i32, 0) } == 0
+        {
+            candidate += 1;
+        }
+        candidate
+    }
 
     fn write_registry(path: &Path, entries: &[String]) {
         std::fs::write(
@@ -1218,10 +1258,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A provider-tagged suspect reservation refuses (fail closed), and a
-    /// reservation minted without the provider tag only warns.
+    /// A Suspect reservation counts as live, like `live_worker_slot_claims`
+    /// counts it, and a reservation minted without the provider tag only warns.
     #[test]
-    fn provider_slot_claims_refuse_on_suspect_and_warn_without_tag() {
+    fn provider_slot_claims_count_suspect_as_live_and_warn_without_tag() {
         let _guard = claims::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1263,6 +1303,22 @@ mod tests {
         warnings.clear();
         let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
         assert_eq!(n, 1, "a live zai-tagged claim counts");
+
+        // A Suspect reservation (dead pid inside its TTL) counts too, so one
+        // orphaned probe row cannot wedge the whole lane count behind an Err.
+        let suspect = claims_dir.join(format!("{}.lock", claims::encode_key("worker:suspect")));
+        std::fs::write(
+            &suspect,
+            format!("schema_version: {}\nkey: worker:suspect\nholder: h\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: {host}\nmetadata:\n  model_provider: zai\n", claims::SCHEMA_VERSION, now + 600_000, dead_pid()),
+        )
+        .unwrap();
+        assert!(matches!(
+            claims::status("worker:suspect", Some(&root)).0,
+            claims::ClaimState::Suspect
+        ));
+        warnings.clear();
+        let n = provider_live_slot_claims("zai", &[], &mut warnings).unwrap();
+        assert_eq!(n, 2, "a suspect zai-tagged claim counts as one slot");
 
         // Another provider's tag never counts for zai.
         let n = provider_live_slot_claims("codex", &[], &mut warnings).unwrap();
@@ -1450,6 +1506,78 @@ mod tests {
 
         warnings.clear();
         assert!(check_lane_quota_lock(&dir.join("absent"), "zai", &mut warnings).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lane_quota_lock_holds_recent_unknown_reset_but_not_old_or_returning_lane() {
+        let dir = std::env::temp_dir().join(format!("fno-lanes-unknown-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("provider-cap")).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let snapshot = |newest: i64, reset_passed_epoch: Option<i64>| {
+            serde_json::json!({
+                "lanes": [{
+                    "lane": "zai:default",
+                    "provider": "zai",
+                    "account": "default",
+                    "reset_epoch": null,
+                    "reset_passed_epoch": reset_passed_epoch,
+                    "missing_reset_timezone": ["default"],
+                    "state": "open",
+                    "members": [{
+                        "name": "w-1",
+                        "session_id": null,
+                        "harness": "claude",
+                        "provider": "zai",
+                        "account": "default",
+                        "node": null,
+                        "cwd": null,
+                        "capped": true,
+                        "cap_unknown": null,
+                        "newest_assistant": chrono::DateTime::from_timestamp(newest, 0).unwrap().to_rfc3339(),
+                        "held": null,
+                        "excerpt": "API Error: 429"
+                    }]
+                }],
+                "measured_at": "probe",
+                "measured_at_epoch": now
+            })
+        };
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            snapshot(now - 600, None).to_string(),
+        )
+        .unwrap();
+
+        let mut warnings = Vec::new();
+        let err = check_lane_quota_lock(&dir, "zai", &mut warnings).unwrap_err();
+        assert_eq!(err.exit_code, crate::spawn_gate::EXIT_PROVIDER_CAP);
+        assert_eq!(err.receipt.as_ref().unwrap()["reset_unknown"], true);
+        assert!(err.receipt.as_ref().unwrap()["resets_at"].is_null());
+        assert_eq!(
+            err.receipt.as_ref().unwrap()["missing_reset_timezone"],
+            serde_json::json!(["default"])
+        );
+        assert!(warnings[0].contains("set reset_timezone"));
+
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            snapshot(now - 6 * 3600, None).to_string(),
+        )
+        .unwrap();
+        warnings.clear();
+        assert!(check_lane_quota_lock(&dir, "zai", &mut warnings).is_ok());
+
+        std::fs::write(
+            dir.join("provider-cap").join("snapshot.json"),
+            snapshot(now - 600, Some(now - 60)).to_string(),
+        )
+        .unwrap();
+        warnings.clear();
+        assert!(check_lane_quota_lock(&dir, "zai", &mut warnings).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -80,6 +80,12 @@ impl Probes for FakeGitHub {
     fn merge_result(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
         ProbeOutcome::Clear
     }
+    fn ci_base(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
+        ProbeOutcome::Clear
+    }
+    fn require_fresh_ci(&self, _cwd: &Path) -> bool {
+        true
+    }
     fn checks_verdict(&self, _cwd: &Path, _pr: u64) -> String {
         "green".to_string()
     }

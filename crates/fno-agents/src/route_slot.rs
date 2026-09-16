@@ -14,19 +14,42 @@
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use std::sync::OnceLock;
 
-const SLOT_LANE_FIELDS: [&str; 9] = [
-    "provider",
-    "model",
-    "effort",
-    "substrate",
-    "permission_mode",
-    "route",
-    "account",
-    "pane_group",
-    "args",
-];
-const LANE_PASSTHROUGH_FIELDS: [&str; 4] = ["substrate", "permission_mode", "pane_group", "args"];
+const SLOT_LANES_TABLE: &str = include_str!("slot_lanes.toml");
+
+/// The inline slot-lane vocabulary, read once from the canonical table
+/// (`slot_lanes.toml`; `build.rs` projects the byte copy Python reads).
+/// Lane fields are closed: every field has resolver code behind it. Slot
+/// VERBS are the open surface instead (`SLOT_VERBS` plus profiles keys).
+struct LaneVocabulary {
+    fields: Vec<String>,
+    passthrough: Vec<String>,
+}
+
+fn lane_vocabulary() -> &'static LaneVocabulary {
+    static CELL: OnceLock<LaneVocabulary> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let raw: toml::Value =
+            toml::from_str(SLOT_LANES_TABLE).expect("slot_lanes.toml must parse");
+        let list = |key: &str| -> Vec<String> {
+            raw[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("slot_lanes.toml {key} must be a list"))
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .expect("lane vocabulary entries must be strings")
+                        .to_string()
+                })
+                .collect()
+        };
+        LaneVocabulary {
+            fields: list("fields"),
+            passthrough: list("passthrough"),
+        }
+    })
+}
 const ON_EXHAUSTED: [&str; 3] = ["queue", "degrade", "refuse"];
 const ON_LOW: [&str; 3] = ["allow", "prefer_healthy", "skip"];
 const ON_UNKNOWN: [&str; 2] = ["allow", "skip"];
@@ -123,9 +146,10 @@ fn fold(
                 plan.push((rung, name.to_string()));
             }
             Value::Object(table) => {
+                let lanes = lane_vocabulary();
                 let unknown: Vec<&String> = table
                     .keys()
-                    .filter(|k| !SLOT_LANE_FIELDS.contains(&k.as_str()))
+                    .filter(|k| !lanes.fields.iter().any(|f| f == *k))
                     .collect();
                 if let Some(first) = unknown.first() {
                     return Err(fault(&rung, format!("has unknown field '{first}'")));
@@ -159,7 +183,7 @@ fn fold(
                         .to_string()
                 };
                 let mut fields = Map::new();
-                for k in SLOT_LANE_FIELDS {
+                for k in lanes.fields.iter() {
                     let v = get(k);
                     if !v.is_empty() {
                         fields.insert(k.to_string(), Value::String(v));
@@ -175,9 +199,9 @@ fn fold(
                 }
                 let mut row = Map::new();
                 row.insert("name".into(), Value::String(rung.clone()));
-                for k in SLOT_LANE_FIELDS {
+                for k in lanes.fields.iter() {
                     let v = get(k);
-                    if !v.is_empty() && !LANE_PASSTHROUGH_FIELDS.contains(&k) {
+                    if !v.is_empty() && !lanes.passthrough.iter().any(|f| f == k) {
                         let key = if k == "provider" { "harness" } else { k };
                         row.insert(key.to_string(), Value::String(v));
                     }
@@ -2642,51 +2666,51 @@ pub(crate) fn audit_load_snapshot(
     let mut view_rows: BTreeMap<String, (String, String, String)> = BTreeMap::new(); // subject -> (decision, ts, decision_id)
     let mut retired: BTreeMap<String, ()> = BTreeMap::new();
     let mut candidates: Vec<(String, String, String, String)> = Vec::new(); // subject, decision, ts, decision_id
-    match std::fs::read_to_string(state_root.join("decisions.jsonl")) {
-        Ok(text) => {
-            for line in text.lines() {
-                let Ok(row) = serde_json::from_str::<Value>(line) else {
-                    continue;
-                };
-                let kind = row.get("type").and_then(Value::as_str).unwrap_or("");
-                let data = row.get("data").cloned().unwrap_or(json!({}));
-                if kind == "decision_retracted" {
-                    if let Some(target) = data.get("target_decision_id").and_then(Value::as_str) {
-                        if !target.is_empty() {
-                            retired.insert(target.to_string(), ());
-                        }
-                    }
-                    continue;
+                                                                            // Decisions read in-process through the typed API: the
+                                                                            // store owns the index, so this consumer never reads a file. Rows are
+                                                                            // flattened: data fields at the top level plus ts and _event_type.
+    let decision_rows: Vec<Value> = crate::backlog::api::decisions(
+        &crate::backlog::api::Store::new(&state_root.join("graph.json")),
+        None,
+        None,
+    )
+    .map_err(|error| error.0)?;
+    for row in decision_rows {
+        let kind = row.get("_event_type").and_then(Value::as_str).unwrap_or("");
+        if kind == "decision_retracted" {
+            if let Some(target) = row.get("target_decision_id").and_then(Value::as_str) {
+                if !target.is_empty() {
+                    retired.insert(target.to_string(), ());
                 }
-                let subject = data.get("subject").and_then(Value::as_str).unwrap_or("");
-                if !subject.starts_with("routing-view:") {
-                    continue;
-                }
-                // A ruling naming another in `supersedes` retires it, the
-                // same derivation the Python decisions reader applies.
-                if let Some(superseded) = data.get("supersedes").and_then(Value::as_str) {
-                    if !superseded.is_empty() {
-                        retired.insert(superseded.to_string(), ());
-                    }
-                }
-                candidates.push((
-                    subject.to_string(),
-                    data.get("decision")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    row.get("ts")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    data.get("decision_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                ));
+            }
+            continue;
+        }
+        let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
+        if !subject.starts_with("routing-view:") {
+            continue;
+        }
+        // A ruling naming another in `supersedes` retires it, the same
+        // derivation the Python decisions reader applies.
+        if let Some(superseded) = row.get("supersedes").and_then(Value::as_str) {
+            if !superseded.is_empty() {
+                retired.insert(superseded.to_string(), ());
             }
         }
-        Err(_) => {} // no index: no view records, the verifier names the boundary
+        candidates.push((
+            subject.to_string(),
+            row.get("decision")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            row.get("ts")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            row.get("decision_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        ));
     }
     for (subject, decision, ts, did) in candidates {
         if retired.contains_key(did.as_str()) {
@@ -4078,13 +4102,44 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::write(
-            state_root.join("decisions.jsonl"),
-            format!(
-                "{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view1\",\"subject\":\"routing-view:sid-1\",\"decision\":\"{{\\\"view\\\": \\\"claude-native\\\", \\\"fingerprint\\\": \\\"fp1\\\", \\\"session_id\\\": \\\"sid-1\\\"}}\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view2\",\"subject\":\"routing-view:sid-other\",\"decision\":\"x\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"decision_retracted\",\"data\":{{\"target_decision_id\":\"d-view2\"}}}}\n{{\"ts\":\"{fresh}\",\"type\":\"operator_decision\",\"data\":{{\"decision_id\":\"d-view3\",\"subject\":\"routing-view:sid-1\",\"decision\":\"older record\",\"supersedes\":\"d-view1\"}}}}\n"
-            ),
-        )
-        .unwrap();
+        // The store owns the decision index: seed the db
+        // the audit reads, not a file.
+        {
+            let connection = crate::backlog::open(&state_root.join("graph.json")).unwrap();
+            let view = format!("{{\"view\": \"claude-native\", \"fingerprint\": \"fp1\", \"session_id\": \"sid-1\"}}");
+            for (kind, id, subject) in [
+                ("operator_decision", "d-view1", "routing-view:sid-1"),
+                ("operator_decision", "d-view2", "routing-view:sid-other"),
+                ("operator_decision", "d-view3", "routing-view:sid-1"),
+            ] {
+                crate::backlog::decisions::record(
+                    &connection,
+                    &json!({
+                        "type": kind,
+                        "ts": fresh,
+                        "data": {
+                            "decision_id": id,
+                            "subject": subject,
+                            "decision": if id == "d-view1" { view.clone() } else { "older record".into() },
+                            "supersedes": if id == "d-view3" { "d-view1" } else { "" },
+                        },
+                    }),
+                )
+                .unwrap();
+            }
+            crate::backlog::decisions::retract(
+                &connection,
+                &json!({
+                    "type": "decision_retracted",
+                    "ts": fresh,
+                    "data": {
+                        "retraction_id": "r-view2",
+                        "target_decision_id": "d-view2"
+                    },
+                }),
+            )
+            .unwrap();
+        }
 
         let facts = json!({
             "fingerprint": "fp1",

@@ -266,6 +266,10 @@ const GLOBAL_ID_PREFIXES: &[&str] = &[
     "config-optout",
     "flight",
     "gate",
+    // `worker:<name>`, the spawn gate's provider-lane reservation: the gate
+    // mints it under global_claims_root() (gate_claims_root), so a root-less
+    // reader resolves the same file the gate wrote.
+    "worker",
     // `test:suite` (test_run.rs): a caller with no explicit `--claims-root`
     // and no FNO_CLAIMS_ROOT/HOME in its environment must not hard-fail the
     // claim lookup - it degrades to the machine-wide root like every other
@@ -287,10 +291,12 @@ pub const MERGE_GATING_OPTOUT_KEYS: &[&str] = &[
 /// the empty string, which is falsy there; resolving it here as a real path
 /// would silently fork the claims dir (the drive.rs empty-is-unset lesson).
 pub fn global_claims_root() -> Option<PathBuf> {
-    global_claims_root_from(
-        std::env::var_os("FNO_CLAIMS_ROOT"),
-        std::env::var_os("HOME"),
-    )
+    let claims_root = std::env::var_os("FNO_CLAIMS_ROOT").filter(|v| !v.is_empty());
+    crate::paths::refuse_undeclared_home_fallback(
+        claims_root.is_some() || crate::paths::test_root_declared(),
+        "FNO_CLAIMS_ROOT",
+    );
+    global_claims_root_from(claims_root, std::env::var_os("HOME"))
 }
 
 /// Testable core of [`global_claims_root`]: env values are explicit so the
@@ -1301,10 +1307,6 @@ fn clear_state_root_breadcrumb(granted_root: &str) {
 }
 
 fn create_via_link(parent: &Path, path: &Path, content: &str) -> std::io::Result<()> {
-    // pid + coarse clock alone can collide across threads in this process (same
-    // nanosecond bucket), and a colliding temp name makes the second thread's
-    // `create_new` fail AlreadyExists -> mis-mapped to a FALSE `AlreadyHeld`
-    // lock failure. A process-unique counter guarantees distinct temp names.
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = parent.join(format!(
         ".claim-tmp-{}-{}-{}",
@@ -1316,18 +1318,15 @@ fn create_via_link(parent: &Path, path: &Path, content: &str) -> std::io::Result
         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     {
-        let mut f = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&tmp)?;
-        // No fsync: once write returns, a same-fs reader sees the content via
-        // the page cache — all the hardlink publish needs (a lock file does
-        // not require crash durability).
-        f.write_all(content.as_bytes())?;
+        file.write_all(content.as_bytes())?;
     }
-    let res = std::fs::hard_link(&tmp, path);
+    let result = std::fs::hard_link(&tmp, path);
     let _ = std::fs::remove_file(&tmp);
-    res
+    result
 }
 
 /// Replace `path` with `content` via write-temp + rename (idempotent
@@ -1906,15 +1905,16 @@ pub(crate) fn stamp_command_env(
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CanonicalDisposition {
+// Public: the spawn door's stamp parser exposes it in its signature.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CanonicalDisposition {
     Absent,
     Invalid,
     NameOnly,
     Complete,
 }
 
-fn canonical_identity_from(
+pub(crate) fn canonical_identity_from(
     get: impl Fn(&str) -> Option<String>,
 ) -> (Option<String>, Option<String>, CanonicalDisposition) {
     let raw_name = get(FNO_HARNESS_NAME);
@@ -2980,60 +2980,15 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    mod support;
+
+    use support::*;
+
     fn opts_in(root: &TempDir) -> AcquireOpts {
         AcquireOpts {
             root: Some(root.path().to_path_buf()),
             events_dir: Some(root.path().to_path_buf()),
             ..Default::default()
-        }
-    }
-
-    /// Pin FNO_AGENTS_HOME for a test whose renew call consults the session
-    /// witness (renew classifies through the registry leg), so an
-    /// ambient session id never reads the operator's real registry. Callers
-    /// hold test_env_lock; restore with restore_agents_home.
-    fn pin_agents_home(td: &TempDir) -> Option<std::ffi::OsString> {
-        let home = td.path().join("agents-home");
-        std::fs::create_dir_all(&home).unwrap();
-        let saved = std::env::var_os("FNO_AGENTS_HOME");
-        std::env::set_var("FNO_AGENTS_HOME", &home);
-        saved
-    }
-
-    fn restore_agents_home(saved: Option<std::ffi::OsString>) {
-        match saved {
-            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
-            None => std::env::remove_var("FNO_AGENTS_HOME"),
-        }
-    }
-
-    /// Scrub the ambient harness markers so `acquire` stamps no session id and
-    /// the renewal verdict never consults the session witness: no registry
-    /// read, no transcript probe, no latency under a parallel test load. The
-    /// cargo test binary runs inside a live claude session, so the vendor
-    /// markers are set. Callers hold test_env_lock.
-    fn scrub_session_markers() -> Vec<(&'static str, Option<std::ffi::OsString>)> {
-        const VARS: [&str; 4] = [
-            "CLAUDE_CODE_SESSION_ID",
-            "CLAUDE_SESSION_ID",
-            "FNO_HARNESS_SESSION_ID",
-            "FNO_HARNESS_NAME",
-        ];
-        VARS.iter()
-            .map(|v| {
-                let saved = std::env::var_os(v);
-                std::env::remove_var(v);
-                (*v, saved)
-            })
-            .collect()
-    }
-
-    fn restore_session_markers(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
-        for (v, val) in saved {
-            match val {
-                Some(x) => std::env::set_var(v, x),
-                None => std::env::remove_var(v),
-            }
         }
     }
 
@@ -3202,29 +3157,6 @@ mod tests {
         assert_eq!(after.acquired_at, acquired_at, "acquired_at preserved");
         restore_session_markers(saved_markers);
         restore_agents_home(saved_home);
-    }
-
-    /// A pid the OS does not report, so `is_live` reads the claim as a corpse.
-    fn dead_pid() -> u32 {
-        let mut candidate = 999_999u32;
-        while std::path::Path::new(&format!("/proc/{candidate}")).exists()
-            || unsafe { libc::kill(candidate as i32, 0) } == 0
-        {
-            candidate += 1;
-        }
-        candidate
-    }
-
-    /// Point `FNO_BIN` at a stub answering `claim session-pid` with `pid`.
-    /// An empty `pid` reproduces the no-harness-ancestor degrade, which the
-    /// real verb signals with empty stdout and exit 0.
-    fn stub_session_pid(dir: &std::path::Path, pid: &str) -> PathBuf {
-        let script = dir.join("fno-stub");
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{pid}'\n")).unwrap();
-        let mut perms = std::fs::metadata(&script).unwrap().permissions();
-        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
-        std::fs::set_permissions(&script, perms).unwrap();
-        script
     }
 
     #[test]

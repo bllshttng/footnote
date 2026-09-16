@@ -11,6 +11,7 @@ docs/architecture/role-based-model-routing.md.
 from __future__ import annotations
 
 import dataclasses
+from functools import cache
 from typing import Any, Mapping, Optional, Sequence
 
 from fno.adapters.providers import benchmarks as bm
@@ -344,7 +345,16 @@ def _profile_fields(profile: Optional[object]) -> dict[str, Any]:
     return {
         **{k: str(getattr(profile, k, "") or "")
            for k in ("on_exhausted", "on_low", "on_unknown")},
-        "by_difficulty": by_diff if isinstance(by_diff, Mapping) else {},
+        "by_difficulty": (
+            {
+                k: (
+                    v.model_dump(exclude_unset=True)
+                    if callable(getattr(v, "model_dump", None)) else dict(v)
+                )
+                for k, v in by_diff.items()
+            }
+            if isinstance(by_diff, Mapping) else {}
+        ),
     }
 
 
@@ -370,10 +380,24 @@ def _declared_rows(settings: object) -> dict[str, Any]:
     }
 
 
+@cache
+def _slot_lane_fields() -> tuple[str, ...]:
+    """The inline lane fields from the ONE canonical slot_lanes table,
+    authored in the Rust tree, shipped here as generated package data.
+    ``args`` is kept apart: it is the native-bundle vector, never a ranked
+    field, and its own branch below copies it verbatim."""
+    import tomllib
+    from importlib.resources import files
+
+    table = tomllib.loads(
+        files("fno.agents").joinpath("slot_lanes.toml").read_text(encoding="utf-8")
+    )
+    return tuple(f for f in table["fields"] if f != "args")
+
+
 def _lanes_payload(lanes: Any) -> list[Any]:
     """Lane entries as JSON; profile lane objects serialize by the verb's own fields."""
-    fields = ("provider", "model", "effort", "substrate", "permission_mode",
-              "route", "account", "pane_group")
+    fields = _slot_lane_fields()
     out: list[Any] = []
     for lane in lanes or []:
         if isinstance(lane, Mapping):

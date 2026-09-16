@@ -678,7 +678,7 @@ fn family1_truth_batch_command(handles: &[String]) -> std::process::Command {
 pub fn family1_truth_probe_many(
     handles: &[String],
 ) -> std::collections::HashMap<String, TruthProbe> {
-    family1_truth_probe_many_checked(handles).unwrap_or_default()
+    family1_truth_probe_many_measured(handles).0
 }
 
 /// Whether the batch instrument completed for the handles it was handed
@@ -694,13 +694,9 @@ pub enum BatchOutcome {
 }
 
 /// The list seam's entry point: whatever the batch measured, PLUS
-/// whether it measured at all. [`family1_truth_probe_many_checked`] drops the
-/// map on a timeout, which is right for a caller that wants a verdict and
-/// wrong for the row projection, which must word a handle the instrument
-/// never reached differently from one it reached and found nothing for. The
-/// map is total for every handle it was handed either way: the
-/// unrepresentable handles ride their own probes even when the batch leg
-/// timed out, and those answers are real measurements.
+/// whether it measured at all. A timeout keeps answers from pages that did
+/// finish, which lets the row projection distinguish a measured handle from
+/// one the instrument never reached.
 pub fn family1_truth_probe_many_measured(
     handles: &[String],
 ) -> (std::collections::HashMap<String, TruthProbe>, BatchOutcome) {
@@ -712,9 +708,13 @@ pub fn family1_truth_probe_many_measured(
     // [a-z0-9-] and cannot produce one, but that guard sits on ONE of the
     // paths that write a row's name, and this seam is where the assumption
     // actually lives.
-    let (batchable, unrepresentable): (Vec<String>, Vec<String>) =
-        handles.iter().cloned().partition(|h| !h.contains(','));
-    let (mut probes, timed_out) = family1_truth_probe_batchable(&batchable);
+    let (batchable, unrepresentable): (Vec<String>, Vec<String>) = handles
+        .iter()
+        .cloned()
+        .partition(|h| is_truth_batchable_handle(h));
+    let (mut probes, timed_out) = truth_pages(&batchable, TRUTH_BATCH_PAGE, |page| {
+        family1_truth_probe_batchable(page)
+    });
     // A comma handle whose single probe did not answer is the same fact the
     // batchable leg's `timed_out` carries: the instrument never produced a
     // reading for that handle. Fold it into the page outcome, so the row words
@@ -733,6 +733,31 @@ pub fn family1_truth_probe_many_measured(
     (probes, outcome)
 }
 
+fn is_truth_batchable_handle(handle: &str) -> bool {
+    !handle.is_empty() && !handle.contains(',') && handle.trim() == handle
+}
+
+fn truth_pages<F>(
+    handles: &[String],
+    page: usize,
+    mut run: F,
+) -> (std::collections::HashMap<String, TruthProbe>, bool)
+where
+    F: FnMut(&[String]) -> (std::collections::HashMap<String, TruthProbe>, bool),
+{
+    let mut probes = std::collections::HashMap::new();
+    let mut timed_out = false;
+    if page == 0 {
+        return (probes, false);
+    }
+    for chunk in handles.chunks(page) {
+        let (answers, chunk_timed_out) = run(chunk);
+        probes.extend(answers);
+        timed_out |= chunk_timed_out;
+    }
+    (probes, timed_out)
+}
+
 /// The page outcome folds BOTH failure legs: the batchable probe's own
 /// timeout, and any comma handle the single-probe fallback could not answer.
 /// Either one means the instrument did not complete for the page, and a
@@ -743,26 +768,6 @@ fn page_outcome(batchable_timed_out: bool, fallback_unanswered: bool) -> BatchOu
         BatchOutcome::NotMeasured
     } else {
         BatchOutcome::Measured
-    }
-}
-
-/// [`family1_truth_probe_many`] with the batch's failure made honest: a run
-/// that outlived its bound is `Err` naming the timeout, not an empty map a
-/// caller could misread as "every handle answered nothing". Every other
-/// outcome is `Ok` - a batch that answered (even empty), a Cache/Join flight
-/// that decoded shared bytes, and the one-probe-per-handle fallback after a
-/// double crash (that fallback measured each handle itself, so it is a real
-/// answer by construction).
-pub fn family1_truth_probe_many_checked(
-    handles: &[String],
-) -> Result<std::collections::HashMap<String, TruthProbe>, String> {
-    let (probes, outcome) = family1_truth_probe_many_measured(handles);
-    match outcome {
-        BatchOutcome::Measured => Ok(probes),
-        BatchOutcome::NotMeasured => Err(format!(
-            "truth probe: batch of {} handles timed out",
-            handles.len()
-        )),
     }
 }
 
@@ -843,14 +848,13 @@ fn family1_truth_batch_latched(
 /// wedging a sweep for minutes; the daemon runs this in `spawn_blocking`, off
 /// the select arm, so a long batch cannot starve `accept()` the way the inline
 /// probes once did.
+const TRUTH_BATCH_PAGE: usize = 24;
+
 fn family1_truth_batch_timeout(handles: usize) -> Duration {
-    const BASE: Duration = Duration::from_secs(5);
-    // Measured on the 42-row live roster: the batch cost 15.9 s, about
-    // 370 ms a row once transcript tails dominate, and the previous 300 ms a
-    // row put the bound at 17.9 s, which ordinary contention tipped. A tipped
-    // batch falls back to per-row probes that time out too, and the whole page
-    // renders unanswered rows as `unknown`. 750 ms a row keeps this fleet under
-    // the ceiling with headroom.
+    const BASE: Duration = Duration::from_secs(20);
+    // Measured at load 394: one handle took 10.53 s and 34 handles took 22.55
+    // s. The fixed Python cold start needs funding before per-handle work is
+    // added, while the ceiling still bounds a pathological batch.
     const PER_HANDLE: Duration = Duration::from_millis(750);
     const CEILING: Duration = Duration::from_secs(60);
     std::cmp::min(BASE + PER_HANDLE * handles as u32, CEILING)
@@ -1678,6 +1682,38 @@ mod tests {
         .expect("the batch answered");
         assert_eq!(probes.len(), 1);
         assert!(!probes.contains_key("gone"));
+    }
+
+    #[test]
+    fn truth_pages_keeps_earlier_answers_when_a_later_page_times_out() {
+        let handles: Vec<String> = (0..30).map(|n| format!("h{n}")).collect();
+        let calls = std::cell::Cell::new(0);
+        let (probes, timed_out) = truth_pages(&handles, 24, |page| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                let probe = parse_truth_payload(&serde_json::json!({"state": "working"}))
+                    .expect("test probe is valid");
+                (
+                    page.iter().cloned().map(|h| (h, probe.clone())).collect(),
+                    false,
+                )
+            } else {
+                (std::collections::HashMap::new(), true)
+            }
+        });
+
+        assert_eq!(calls.get(), 2);
+        assert_eq!(probes.len(), 24);
+        assert!(handles[..24].iter().all(|h| probes.contains_key(h)));
+        assert!(timed_out);
+    }
+
+    #[test]
+    fn only_round_trippable_handles_enter_a_truth_batch() {
+        assert!(!is_truth_batchable_handle(""));
+        assert!(!is_truth_batchable_handle(" x"));
+        assert!(!is_truth_batchable_handle("a,b"));
+        assert!(is_truth_batchable_handle("abc-123"));
     }
 
     #[test]

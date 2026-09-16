@@ -2898,6 +2898,7 @@ class AutoMergeBlock(BaseModel):
     merge_strategy: str = "merge"
     delete_branch_on_merge: bool = True
     require_checks_pass: bool = True
+    require_fresh_ci: bool = True
     conflict_resolution: str = "opus"
     remediation: str = "attempt"
 
@@ -2919,7 +2920,9 @@ class AutoMergeBlock(BaseModel):
             v = v.strip()
         return v if v in ("none", "dispatch") else "none"
 
-    @field_validator("delete_branch_on_merge", "require_checks_pass", mode="before")
+    @field_validator(
+        "delete_branch_on_merge", "require_checks_pass", "require_fresh_ci", mode="before"
+    )
     @classmethod
     def _coerce_flag(cls, v: object) -> bool:
         return _coerce_affirmative(v, default=True)
@@ -3740,6 +3743,13 @@ class WorktreeBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     policy: Optional[str] = None
+    # The worktree.* leaves below are read ad-hoc by
+    # skills/speculate/scripts/worktree-setup.sh (wt_config), so the model
+    # carries them but never enforces their values.
+    auto_install: bool = True
+    setup_command: str = ""
+    skip_verification: bool = False
+    test_command: str = ""
 
 
 class ArtifactConfig(BaseModel):

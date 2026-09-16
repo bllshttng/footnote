@@ -1,8 +1,8 @@
-//! Retirement keeps what resume needs: the sweep stops a worker and the
-//! harness session outlives the row. The active-surface seam runs for real
-//! (a fake `claude` on PATH logs every argv it is asked for), so these tests
-//! witness the commands retirement actually issues - a staged outcome could
-//! never see an `rm` it never ran.
+//! Retirement removes what it retires: the sweep stops a worker and the
+//! same pass deletes the harness session. The active-surface seam runs for
+//! real (a fake `claude` on PATH logs every argv it is asked for), so these
+//! tests witness the commands retirement actually issues - a staged outcome
+//! could never see an `rm` it never ran.
 
 use super::*;
 use super::{quiet_transcript, stage_graph, staged_graph_home, uniform_ages};
@@ -218,7 +218,7 @@ fn production_sweep(home: &AgentsHome, quiet: std::path::PathBuf) -> GcSummary {
         &move |_| Some(vec![quiet.clone()]),
         &uniform_ages(2 * 3600),
         &move |e| gc_sweep::stop_row_process(&stop_home, e),
-        &crate::gc_native::apply_retire_surface,
+        &crate::gc_native::apply_active_surface_removal,
         &crate::gc_native::apply_mux_member_retirement,
         &crate::claude_roster::read_all_agents,
         &gc_sweep::production_tree_probe,
@@ -240,13 +240,13 @@ fn staged_active_surface(home: &AgentsHome, harness: &str, session: &str) -> Opt
         .map(str::to_string)
 }
 
-/// AC1-HP: retiring a claude thread row runs the confirmed stop and nothing
-/// else. No `rm` reaches the harness, the job dir survives, and the
-/// receipt's active-surface effect reads not-applicable. The production seam
-/// function runs for real - a staged outcome could never witness the `rm`
-/// this test exists to catch.
+/// AC1-HP: retiring a claude thread row stops the worker and removes the
+/// harness session: the confirmed stop runs before the `rm`, the job dir is
+/// gone, and the receipt's active-surface effect reads confirmed-removed.
+/// The production seam function runs for real - a staged outcome could never
+/// witness the `rm` this test exists to catch.
 #[test]
-fn retiring_a_claude_thread_row_keeps_the_harness_session() {
+fn retiring_a_claude_thread_row_removes_the_harness_session() {
     let _env = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -275,72 +275,78 @@ fn retiring_a_claude_thread_row_keeps_the_harness_session() {
     );
     let log = fake.argv_log();
     let lines: Vec<&str> = log.lines().collect();
+    let stop = lines
+        .iter()
+        .position(|l| *l == "stop abcd1234")
+        .expect("the confirmed stop ran");
+    let rm = lines
+        .iter()
+        .position(|l| *l == "rm abcd1234")
+        .expect("retirement removes the harness session");
+    assert!(stop < rm, "the stop precedes the rm: {log}");
     assert!(
-        lines.iter().any(|l| *l == "stop abcd1234"),
-        "the confirmed stop ran: {log}"
-    );
-    assert!(
-        !lines.iter().any(|l| l.starts_with("rm ")),
-        "retirement must not rm the harness session: {log}"
-    );
-    assert!(
-        fake.job_state("abcd1234").exists(),
-        "the job dir survives retirement"
+        !fake.job_state("abcd1234").exists(),
+        "the job dir is gone with the session"
     );
     assert_eq!(
         staged_active_surface(&home, "claude", "abcd1234-1111-2222-3333-444444444444").as_deref(),
-        Some("not-applicable"),
-        "the receipt names the session kept, not removed"
+        Some("confirmed-removed"),
+        "the receipt names the session removed"
     );
 }
 
-/// AC1-RM: the split is total. The retire surface keeps the session; the
-/// removal surface (`fno agents rm`'s cascade) is still the one door that
-/// runs `claude rm`.
+/// AC3-HP: the codex arm of the removal cascade edits the harness's own
+/// session index: the dropped row's line goes, every other session's line
+/// stays.
 #[test]
-fn rm_still_removes_what_retirement_keeps() {
+fn retiring_a_codex_row_removes_its_session_index_line() {
     let _env = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let (_dir, home) = staged_graph_home();
-    let fake = FakeClaude::install("abcd1234", "abcd1234-1111-2222-3333-444444444444");
-    let _swap = EnvSwap::to(&fake.bin_dir(), &fake.daemon_dir(), home.root(), None);
+    let codex_home = tempfile::tempdir().unwrap();
+    let old_codex_home = std::env::var_os("CODEX_HOME");
+    std::env::set_var("CODEX_HOME", codex_home.path());
+    let index = codex_home.path().join("session_index.jsonl");
+    std::fs::write(
+        &index,
+        "{\"session_id\":\"sess-codex-kept\",\"name\":\"kept\"}\n{\"session_id\":\"sess-codex-dropped\",\"name\":\"dropped\"}\n",
+    )
+    .unwrap();
+
     let mut e = state::RegistryEntry::default();
-    e.name = "worker-rm".into();
-    e.short_id = "abcd1234".into();
+    e.name = "worker-codex".into();
+    e.short_id = "codex99".into();
     e.origin = Some("spawn".into());
-    e.harness = Some("claude".into());
-    e.harness_session_id = Some("abcd1234-1111-2222-3333-444444444444".into());
+    e.harness = Some("codex".into());
+    e.harness_session_id = Some("sess-codex-dropped".into());
     e.created_at = "2026-09-01T00:00:00Z".into();
 
-    let kept = crate::gc_native::apply_retire_surface(&e);
+    let outcome = crate::gc_native::apply_active_surface_removal(&e);
     assert!(
-        matches!(kept, crate::daemon::CascadeOutcome::NotApplicable),
-        "{kept:?}"
+        matches!(outcome, crate::daemon::CascadeOutcome::Removed),
+        "{outcome:?}"
     );
-    let kept_log = fake.argv_log();
+    let after = std::fs::read_to_string(&index).unwrap();
     assert!(
-        !kept_log.lines().any(|l| l.starts_with("rm ")),
-        "the retire surface never rms: {kept_log}"
+        !after.contains("sess-codex-dropped"),
+        "the dropped session's line is gone: {after}"
     );
-
-    let removed = crate::gc_native::apply_active_surface_removal(&e);
     assert!(
-        matches!(removed, crate::daemon::CascadeOutcome::Removed),
-        "{removed:?}"
+        after.contains("sess-codex-kept"),
+        "the sibling session's line stays: {after}"
     );
-    let removed_log = fake.argv_log();
-    assert!(
-        removed_log.lines().any(|l| l == "rm abcd1234"),
-        "the removal surface still rms: {removed_log}"
-    );
+    match &old_codex_home {
+        Some(v) => std::env::set_var("CODEX_HOME", v),
+        None => std::env::remove_var("CODEX_HOME"),
+    }
 }
 
 /// AC1-EDGE: an `update_registry` write that drops rows with no receipt on
-/// disk stages both receipts naming the remover, and touches neither
-/// harness: no `claude rm`, and the codex session index is byte-identical.
+/// disk stages both receipts naming the remover, and removes both harness
+/// sessions: the fake `claude` logs the `rm`, and the codex session index
+/// loses only the dropped row's line.
 #[test]
-fn an_update_registry_drop_stages_receipts_and_keeps_both_harnesses() {
+fn an_update_registry_drop_stages_receipts_and_removes_both_harness_sessions() {
     let _env = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -353,10 +359,9 @@ fn an_update_registry_drop_stages_receipts_and_keeps_both_harnesses() {
     let index = codex_home.path().join("session_index.jsonl");
     std::fs::write(
         &index,
-        "{\"id\":\"sess-codex-kept\",\"name\":\"kept\"}\n{\"id\":\"sess-codex-dropped\",\"name\":\"dropped\"}\n",
+        "{\"session_id\":\"sess-codex-kept\",\"name\":\"kept\"}\n{\"session_id\":\"sess-codex-dropped\",\"name\":\"dropped\"}\n",
     )
     .unwrap();
-    let index_before = std::fs::read(&index).unwrap();
 
     crate::state::update_registry(&home.registry_json(), |r| {
         let mut claude_row = state::RegistryEntry::default();
@@ -394,6 +399,15 @@ fn an_update_registry_drop_stages_receipts_and_keeps_both_harnesses() {
             .is_some_and(|r| !r.is_empty()),
         "the receipt names the remover: {claude_receipt}"
     );
+    let claude_effects = claude_receipt["effects"]
+        .as_array()
+        .expect("effects recorded");
+    assert_eq!(
+        claude_effects.len(),
+        1,
+        "one active-surface effect on the claude receipt: {claude_receipt}"
+    );
+    assert_eq!(claude_effects[0]["op"], "active-surface");
     let codex_receipt: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(crate::receipt::reap_receipt_path_for(
             &home,
@@ -409,15 +423,28 @@ fn an_update_registry_drop_stages_receipts_and_keeps_both_harnesses() {
             .is_some_and(|r| !r.is_empty()),
         "the receipt names the remover: {codex_receipt}"
     );
+    let codex_effects = codex_receipt["effects"]
+        .as_array()
+        .expect("effects recorded");
+    assert_eq!(
+        codex_effects.len(),
+        1,
+        "one active-surface effect on the codex receipt: {codex_receipt}"
+    );
+    assert_eq!(codex_effects[0]["op"], "active-surface");
     let log = fake.argv_log();
     assert!(
-        !log.lines().any(|l| l.starts_with("rm ")),
-        "a registry write never rms the harness session: {log}"
+        log.lines().any(|l| l == "rm abcd1234"),
+        "the write door removes the claude session: {log}"
     );
-    assert_eq!(
-        std::fs::read(&index).unwrap(),
-        index_before,
-        "the codex session index is byte-identical"
+    let index_after = std::fs::read_to_string(&index).unwrap();
+    assert!(
+        !index_after.contains("sess-codex-dropped"),
+        "the codex index loses the dropped session: {index_after}"
+    );
+    assert!(
+        index_after.contains("sess-codex-kept"),
+        "the codex index keeps the sibling session: {index_after}"
     );
     match &old_codex_home {
         Some(v) => std::env::set_var("CODEX_HOME", v),
@@ -425,9 +452,8 @@ fn an_update_registry_drop_stages_receipts_and_keeps_both_harnesses() {
     }
 }
 
-/// AC1-PROC: the one cascade arm retirement keeps. A cursor-agent row with a
-/// live worker-server child still has that leaked process reaped, while its
-/// remote session state is untouched by definition. The reaped tree is
+/// AC1-PROC: a cursor-agent row's cascade reaps its leaked worker-server
+/// children. The reaped tree is
 /// detached (the spawner exits, the branch reparents): a process the test
 /// itself owns would sit as an unreaped zombie after the SIGTERM, and a
 /// zombie answers the reap's survival probe.
@@ -480,7 +506,7 @@ fn retiring_a_cursor_agent_row_still_reaps_its_worker_server() {
     e.pid_start_time = Some(owner_start);
     e.created_at = "2026-09-01T00:00:00Z".into();
 
-    let outcome = crate::gc_native::apply_retire_surface(&e);
+    let outcome = crate::gc_native::apply_active_surface_removal(&e);
     assert!(
         matches!(outcome, crate::daemon::CascadeOutcome::Removed),
         "the worker server was reaped: {outcome:?}"
@@ -500,10 +526,11 @@ fn retiring_a_cursor_agent_row_still_reaps_its_worker_server() {
 
 /// AC1-PLAN: the two planner retirement routes reach the same staging
 /// function, so the same seam change covers them: a planner on a superseded
-/// node and a halted planner both retire, and the fake `claude` logs no
-/// `rm` for either.
+/// node and a halted planner both retire, and the removal runs for the row
+/// the fake roster lists - the row it does not list reads already-absent
+/// and still retires.
 #[test]
-fn the_planner_routes_retire_without_rming_the_harness_session() {
+fn the_planner_routes_retire_and_rm_the_harness_session() {
     let _env = crate::claims::test_env_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -583,8 +610,8 @@ fn the_planner_routes_retire_without_rming_the_harness_session() {
     );
     let log = fake_a.argv_log();
     assert!(
-        !log.lines().any(|l| l.starts_with("rm ")),
-        "neither planner route rms the harness session: {log}"
+        log.lines().any(|l| l == "rm bpaaa111"),
+        "the listed planner's session is removed: {log}"
     );
     assert!(
         log.lines().any(|l| l == "stop bpaaa111"),
@@ -782,6 +809,11 @@ fn a_row_fno_stopped_keeps_for_open_work() {
         "no session-terminal basis: {:?}",
         summary.retired
     );
+    assert!(
+        !fake.argv_log().lines().any(|l| l.starts_with("rm ")),
+        "restored removal never reaches a kept open-work row: {}",
+        fake.argv_log()
+    );
 }
 
 /// AC3-HP, planner half: a planner fno stopped holds as PlanningUnclosed
@@ -869,4 +901,57 @@ fn a_row_the_harness_stopped_itself_still_releases() {
         "{:?}",
         summary.retired[0]
     );
+}
+
+/// The wiring tripwire: each retirement door's source must pass
+/// `apply_active_surface_removal` as its active-surface seam. These doors
+/// call a live truth probe or need git trees, so no unit test drives them
+/// end to end; this read is the one in-process check that fails, naming the
+/// file and door, when a door is swapped to a seam that removes nothing.
+#[test]
+fn every_retirement_door_wires_the_removal_cascade() {
+    let doors: &[(&str, &str, &str, &str)] = &[
+        (
+            "gc.rs",
+            "gc_sweep",
+            "pub fn gc_sweep(",
+            include_str!("../../../gc.rs"),
+        ),
+        (
+            "gc.rs",
+            "gc_sweep_release",
+            "pub fn gc_sweep_release(",
+            include_str!("../../../gc.rs"),
+        ),
+        (
+            "gc.rs",
+            "gc_sweep_dry_run",
+            "pub fn gc_sweep_dry_run(",
+            include_str!("../../../gc.rs"),
+        ),
+        (
+            "roster_reap.rs",
+            "roster_reap",
+            "pub fn roster_reap(",
+            include_str!("../../../roster_reap.rs"),
+        ),
+        (
+            "merge_reap.rs",
+            "consume_merge_cleanup_requests",
+            "pub(crate) fn consume_merge_cleanup_requests(",
+            include_str!("../../../merge_reap.rs"),
+        ),
+    ];
+    for (file, door, sig, src) in doors {
+        let start = src
+            .find(sig)
+            .unwrap_or_else(|| panic!("signature for {door} not found in {file}"));
+        let rest = &src[start..];
+        let end = rest.find("\npub").unwrap_or(rest.len());
+        let body = &rest[..end];
+        assert!(
+            body.contains("crate::gc_native::apply_active_surface_removal"),
+            "{file}: door {door} must wire the removal cascade (apply_active_surface_removal)"
+        );
+    }
 }

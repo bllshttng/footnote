@@ -48,8 +48,7 @@ agents spawn !--bounded-placement !--mux-session !--output-format !--recorded-pr
 annotate
 annotate list
 approvals
-autonomy provenance
-autonomy status
+autonomy
 backlog
 backlog advance !--continuation
 backlog done
@@ -69,6 +68,7 @@ config get
 config set
 context
 cost
+decide
 decide list
 decide reindex
 decide retract !--origin

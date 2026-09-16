@@ -118,7 +118,8 @@ fn concurrent_children(log_name: &str, handles_for: impl Fn(usize) -> Vec<String
     std::fs::read_to_string(&log).map_or(0, |s| s.lines().count())
 }
 
-/// A roster the size of the one that was actually measured.
+/// A roster just over one truth page, so the test also proves each page is
+/// shared independently by concurrent callers.
 ///
 /// The scale is the test. A one-handle set produces a short flight key, and a
 /// short key hid a real defect: the key used to BE the argv, so the daemon's
@@ -131,14 +132,14 @@ fn measured_roster() -> Vec<String> {
         .collect()
 }
 
-/// AC15: concurrent callers over the SAME handle set cost exactly one child,
+/// AC15: concurrent callers over the SAME handle set cost one child per page,
 /// at the handle count the fan-out was measured at.
 #[test]
-fn one_handle_set_costs_one_child_however_many_callers_arrive() {
+fn one_handle_set_costs_one_child_per_page_however_many_callers_arrive() {
     let children = concurrent_children("same.log", |_| measured_roster());
     assert_eq!(
-        children, 1,
-        "{CALLERS} callers over one 25-handle set spawned {children} children"
+        children, 2,
+        "{CALLERS} callers over two truth pages spawned {children} children"
     );
 }
 

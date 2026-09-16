@@ -38,7 +38,7 @@ fn root_declared(pin: Option<&str>) -> bool {
 }
 
 /// Whether this process declared a root, read from the environment.
-fn test_root_declared() -> bool {
+pub(crate) fn test_root_declared() -> bool {
     root_declared(std::env::var("FNO_TEST_HERMETIC").ok().as_deref())
 }
 
@@ -62,7 +62,7 @@ fn test_sandbox_claimed() -> bool {
 /// `declared` is an argument, not an environment read, so the receipt test
 /// constructs the case. Reproducing it by removing the pins process-globally
 /// raced every lock-free state-resolving test in the binary into this panic.
-fn refuse_undeclared_home_fallback(declared: bool, pin: &str) {
+pub(crate) fn refuse_undeclared_home_fallback(declared: bool, pin: &str) {
     if !cfg!(test) || declared {
         return;
     }
@@ -71,6 +71,22 @@ fn refuse_undeclared_home_fallback(declared: bool, pin: &str) {
          declared root. Set {pin} to a directory under std::env::temp_dir(), \
          or FNO_TEST_HERMETIC=0 to declare an ambient run on purpose."
     );
+}
+
+/// Pin `FNO_CLAIMS_ROOT` to `dir` for a test whose transitive reads resolve
+/// the global claims root: the test-side complement of
+/// [`refuse_undeclared_home_fallback`]. Set-if-unset, so a test that pins its
+/// own root still wins. Callers mutating env should hold `test_env_lock`.
+/// Claim writers create the claims dir on write, so none is made here.
+#[cfg(test)]
+pub(crate) fn pin_test_claims_root(dir: &std::path::Path) {
+    let unset = match std::env::var_os("FNO_CLAIMS_ROOT") {
+        None => true,
+        Some(v) => v.is_empty(),
+    };
+    if unset {
+        std::env::set_var("FNO_CLAIMS_ROOT", dir);
+    }
 }
 
 /// Refuse a declared root outside the temp dir when the process root is
@@ -1146,6 +1162,14 @@ mod tests {
     #[should_panic(expected = "FNO_SPACES_DIR")]
     fn an_undeclared_root_refuses_and_names_the_pin() {
         refuse_undeclared_home_fallback(false, "FNO_SPACES_DIR");
+    }
+
+    /// The claims pin reads the same receipt naming FNO_CLAIMS_ROOT, the pin
+    /// `global_claims_root` hands the guard on its `$HOME` arm.
+    #[test]
+    #[should_panic(expected = "FNO_CLAIMS_ROOT")]
+    fn an_undeclared_claims_root_refuses_and_names_its_pin() {
+        refuse_undeclared_home_fallback(false, "FNO_CLAIMS_ROOT");
     }
 
     /// A claimed sandbox that is not one is refused, not trusted. Nothing in

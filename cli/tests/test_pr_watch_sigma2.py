@@ -294,7 +294,7 @@ class TestCliTickIntegration:
         (repo_dir / ".git").mkdir()
 
         graph = {
-            "nodes": [
+            "entries": [
                 {
                     "id": "x-test1234",
                     "title": "test node",

@@ -329,6 +329,42 @@ def test_a_typod_leaf_inside_a_dict_keyed_block_is_still_caught(tmp_path: Path) 
     assert "agents.profiles.blueprint.modle" in result.output
 
 
+def test_route_slot_policy_leaves_and_worktree_auto_install_are_modeled(tmp_path: Path) -> None:
+    """The operator shape measured on 2026-09-16 (x-4455): worktree.auto_install,
+    the route-slot policy leaves on profiles, and a by_difficulty rung are all
+    real keys consumed outside this model (setup-worktree.sh, route_slot.rs),
+    so the walker must stay silent on every one of them."""
+    f = _write(
+        tmp_path / "config.toml",
+        'schema_version = 1\nstate_dir = "%s"\n'
+        "[worktree]\nauto_install = true\nsetup_command = \"uv sync\"\n"
+        "skip_verification = false\ntest_command = \"pytest -q\"\n"
+        '[agents.profiles.target]\nlanes = ["zai-flash"]\n'
+        'on_exhausted = "queue"\non_low = "prefer_healthy"\non_unknown = "skip"\n'
+        "[agents.profiles.target.by_difficulty.high]\n"
+        'lanes = ["claude-opus-5"]\non_exhausted = "queue"\n' % (tmp_path / ".fno"),
+    )
+    result = _doctor(f)
+    assert result.exit_code == 0, result.output
+    unknown = [ln for ln in result.output.splitlines() if "not a modeled config key" in ln]
+    assert unknown == [], unknown
+
+
+def test_route_slot_policy_leaves_default_to_unset() -> None:
+    """Empty string = unset, so the Rust reader keeps applying its own default."""
+    from fno.config.spawn_blocks import DifficultyLaneBlock, SpawnProfileBlock
+
+    profile = SpawnProfileBlock()
+    assert profile.on_exhausted == ""
+    assert profile.on_low == ""
+    assert profile.on_unknown == ""
+    assert profile.by_difficulty == {}
+    rung = DifficultyLaneBlock()
+    assert rung.lanes == []
+    # A non-mapping by_difficulty table degrades to none, never raises.
+    assert SpawnProfileBlock.model_validate({"by_difficulty": "banana"}).by_difficulty == {}
+
+
 def test_a_large_unknown_table_reports_once(tmp_path: Path) -> None:
     """A foreign tool's block sharing the config file is one finding, not many."""
     f = _write(

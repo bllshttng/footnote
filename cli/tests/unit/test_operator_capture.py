@@ -246,3 +246,40 @@ def test_queue_verbs_delegate_to_the_rust_reader(tmp_path, tmp_ledger, monkeypat
     assert "operator turn reader" in failed.output
 
 
+def test_operator_turn_list_marks_stand_down_rows(tmp_path, tmp_ledger, monkeypatch):
+    import fno.rust_binary as rb
+
+    monkeypatch.setattr(
+        rb,
+        "call_binary_json",
+        lambda verb, args=(): (
+            None,
+            {
+                "turns": [
+                    {"turn_id": "u-stand", "ts_epoch": 1.0, "excerpt": "overstayed", "stand_down": True},
+                    {"turn_id": "u-ordinary", "ts_epoch": 1.0, "excerpt": "keep going", "stand_down": False},
+                ]
+            },
+        ),
+    )
+    _pin(monkeypatch, tmp_path, [_user_row("overstayed", "u-stand")])
+
+    result = runner.invoke(app, ["inbox", "user", "list"])
+
+    assert result.exit_code == 0, result.output
+    lines = result.stdout.splitlines()
+    assert lines[0].endswith("[stand-down] overstayed")
+    assert lines[1].endswith("keep going")
+    assert "[stand-down]" not in lines[1]
+
+    monkeypatch.setattr(
+        rb,
+        "call_binary_json",
+        lambda verb, args=(): (
+            None,
+            {"turns": [{"turn_id": "u-legacy", "ts_epoch": 1.0, "excerpt": "old binary"}]},
+        ),
+    )
+    legacy = runner.invoke(app, ["inbox", "user", "list"])
+    assert legacy.exit_code == 0, legacy.output
+    assert "[stand-down]" not in legacy.stdout

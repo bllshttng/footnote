@@ -1746,28 +1746,8 @@ def reap_cmd(
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
     """Archive every provably-dead claim, naming the instrument that proved it.
-
-    Not an age cutoff - death is measured, never guessed from how old a file is.
-    Which measurement applies depends on what the claim's holder is:
-
-      * An EXPIRED TTL is a clock reading and proves death from any host.
-      * A dead PID proves death only on this machine, by machine_id.
-      * A dead one-shot `dispatch:` holder is provable death even inside its
-        TTL: nothing respawns under `spawn-cli:<pid>`.
-      * A SUSPECT `node:` claim is the one case a pid cannot settle, because a
-        session can be respawned under a new pid. It is reaped only on a
-        POSITIVE roster finding: the join ran, scanned at least one row, and no
-        row resolves to that node. A join that could not run yields unknown, and
-        unknown keeps the claim.
-      * A `node:` claim is also settled node-aware, before liveness is even
-        asked: a claim on a node the graph closed (done/superseded), or a claim
-        whose EXPIRED lease's holder is provably working a DIFFERENT node, is
-        positive abandonment and is reaped. An unexpired lease is never settled
-        away from a live holder.
-
-    Dry-run by default; `--apply` archives to `.expired/` and re-reads the store
-    to confirm each move before counting it `reaped` - an exit code alone is not
-    evidence. Exits 1 when any reapable file's move could not be confirmed.
+    Expiry and liveness are measured by the claim's holder shape. Dry-run is the
+    default; `--apply` archives and verifies every move before counting it.
     """
     optout_sink: list = []
     summary = _claims_core.reap_dead_claims(

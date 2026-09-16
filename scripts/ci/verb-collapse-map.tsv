@@ -4,7 +4,6 @@ agents announce	T1	agents announce	0
 agents ask	KEEP	agents ask	72	deliberate readability slack for a high-traffic distinct operation
 agents attach	T1	agents attach	13
 agents autonomy status	T1	agents autonomy status	9
-agents autonomy provenance	T1	agents autonomy provenance	0
 agents backlog-note	T1	agents backlog-note	0
 agents backlog-notes	T1	agents backlog-notes	0
 agents bash-census	T1	agents bash-census	0
@@ -299,6 +298,10 @@ config status-sinks	T1	config status-sinks	2
 config unset	T1	config unset	5
 context	KEEP	context	15	single-leaf group
 cost	KEEP	cost	7	single-leaf group
+decide decide-reindex	T1	decide decide-reindex	0
+decide list	KEEP	decide list	0	deprecated shim remains distinct during migration
+decide reindex	KEEP	decide reindex	0	deprecated shim remains distinct during migration
+decide retract	KEEP	decide retract	0	deprecated shim remains distinct during migration
 delivery	KEEP	delivery	7	single-leaf group
 do delivery evaluate	T1	do delivery evaluate	7
 do loops ls	T1	do loops ls	1

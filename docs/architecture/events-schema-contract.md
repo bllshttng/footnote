@@ -136,6 +136,7 @@ tolerated.
 | `active-backlog` | the daemon's active-backlog dispatch task |
 | `observer` | the skill-eval observer harness |
 | `skill_diff` | the skill-diff proposer loop |
+| `cli` | ad hoc emits from `fno` CLI-side code outside the main pipeline, e.g. the provider usage tracker's window-closing warning |
 
 Plus two **pattern** sources for per-agent Rust workers, matched by
 `envelope.properties.source.patterns` rather than the enum:
@@ -150,6 +151,8 @@ Adding a fixed-string source means editing the YAML manifest's
 source adds a regex to `source.patterns`. Both validators (Python
 `validate()` and `events-validate.sh`) accept a source that matches the
 enum OR any pattern; CI catches missed updates.
+
+Matching the enum or a pattern is only the first half of the rule. Every event type also declares its own `sources:` list in schema.yaml. Since 2026-09-16 `validate()` enforces that list too, unless the source matches a worker pattern (no type enumerates per-agent workers by name). When the envelope enum allows a source, a type's own declared list can still refuse it. A type with no `sources:` key stays undeclared, not unenforced by oversight, so it fails open instead of blocking a producer that predates the key. Add a new producer's source to the type's `sources:` list, not just the envelope enum. Otherwise the row validates at the envelope level and fails at the type level. `test` stays legal only where a type lists it. It is no longer a universal escape hatch for fixtures. With no target session and no `--source`, `fno doctor event emit` names the type's declared sources and exits nonzero instead of guessing a producer.
 
 ## Three event types you'll touch most
 
@@ -414,6 +417,14 @@ All three are wired into `cli-ci.yml` along with five bash test
 harnesses (`test-bash-validator`, `test-set-gate`,
 `test-target-ledger-set-gate`, `test-verify-child-promise`,
 `test-events-discipline`).
+
+## Data keys are open
+
+Event data is an open registry: `data.required` keys must be present and `data.forbidden` aliases are refused, but an undeclared key validates for every type. Extra keys are evidence, not series: trend and diff on the declared keys, and read one-off keys as the noise they are. The one closed exception is `protocol_family`, and it is closed at the envelope level, not inside event data.
+
+A typed builder can still refuse an unknown keyword. That refusal is a Python signature, not the contract. `phase_transition` rejects unknown kwargs because it is a keyword-only function. The schema and both validators accept the same key on the wire. The signature is a caller convenience. The `schema.yaml` entry is the rule.
+
+Provenance keys are reserved and writer-stamped from ambient identity at the mint. Journal rows that name the session that wrote them are a separate change. That change moves the events envelope across three writers and needs a hook-path cost measurement first.
 
 ## Adding a new event type
 

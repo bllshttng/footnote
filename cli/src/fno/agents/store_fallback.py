@@ -550,6 +550,7 @@ def adopt_store_hit(
             spawned_by_session=None,
             spawned_by_harness=None,
             spawned_by_cwd=None,
+            lineage_reason=None,
             name=_fallback_name(hit.session_id),
             cwd=hit.cwd,
             log_path=log_path,

@@ -86,7 +86,7 @@ emit_resolution() {
     local data
     data="$(printf '{"task":"%s","plan_path":"%s","resolved":"%s","tier":"%s","warn_fallback":%s}' \
         "$esc_task" "$esc_plan" "$esc_val" "$tier" "$warn_bool")"
-    if ! fno doctor event emit -t executor_resolved -d "$data" >/dev/null 2>&1; then
+    if ! fno doctor event emit -t executor_resolved -d "$data" --source target >/dev/null 2>&1; then
         echo "resolve-executor: note: executor_resolved emit failed (non-fatal)" >&2
     fi
 }
@@ -109,7 +109,7 @@ emit_task_started() {
     data="$(printf '{"title":"%s","executor":"%s"}' \
         "$(json_escape "$TASK_TITLE")" "$(json_escape "$resolved")")"
     if ! fno doctor event emit -t task_started -d "$data" \
-        --run "$TARGET_RUN" --node "$NODE_ID" --task "$TASK_ID" >/dev/null 2>&1; then
+        --run "$TARGET_RUN" --node "$NODE_ID" --task "$TASK_ID" --source target >/dev/null 2>&1; then
         echo "resolve-executor: note: task_started emit failed (non-fatal)" >&2
     fi
 }

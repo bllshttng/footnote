@@ -510,9 +510,9 @@ fn a_shared_worktree_prunes_once_when_both_rows_retire_together() {
     );
 }
 
-/// A parent row named as `spawned_by_session` by a live child is never
-/// retired, and no active-surface removal ever reaches it: `surface_removal`
-/// panics if the sweep calls it.
+/// A parent row named as `spawned_by_session` by a live CHILD child (a
+/// joiner-named row) is never retired, and no active-surface removal ever
+/// reaches it: `surface_removal` panics if the sweep calls it.
 #[test]
 fn a_parent_with_a_live_descendant_is_kept_and_never_touched() {
     let home = tmp_home("gc-lineage-live-child");
@@ -525,10 +525,11 @@ fn a_parent_with_a_live_descendant_is_kept_and_never_touched() {
         parent.harness_session_id = Some("sess-parent".into());
         parent.origin = Some("spawn".into());
         r.entries.push(parent);
-        let mut child = ask_row("row-child", None);
+        let mut child = ask_row("jn-t-row-child", None);
         child.short_id = "rowchild".into();
         child.harness_session_id = Some("sess-child".into());
         child.spawned_by_session = Some("sess-parent".into());
+        child.status = crate::AgentStatus::Busy;
         r.entries.push(child);
     })
     .unwrap();
@@ -3426,6 +3427,7 @@ pub(super) fn staged_graph_home() -> (tempfile::TempDir, AgentsHome) {
     let dir = tempfile::tempdir().unwrap();
     let home = AgentsHome::at(dir.path().join("agents"));
     home.ensure_root().unwrap();
+    crate::paths::pin_test_claims_root(dir.path());
     (dir, home)
 }
 
@@ -4797,7 +4799,12 @@ fn ac8_stage_stops_the_claude_thread_before_the_surface_removal() {
 #[path = "gc_receipts/blueprint_retirement.rs"]
 mod blueprint_retirement;
 
-/// The retirement-keeps-the-session families: the production active-surface
+/// The retirement-removes-the-session families: the production active-surface
 /// seam runs for real against a fake `claude` on PATH.
-#[path = "gc_receipts/retire_keeps_session.rs"]
-mod retire_keeps_session;
+#[path = "gc_receipts/retire_removes_session.rs"]
+mod retire_removes_session;
+
+/// The spawn-edge kind families (a PEER handoff never holds its spawner),
+/// split by the file budget; the fixtures above are the shared seams.
+#[path = "gc_receipts/lineage_kind.rs"]
+mod lineage_kind;

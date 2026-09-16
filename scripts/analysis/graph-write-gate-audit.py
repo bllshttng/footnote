@@ -28,8 +28,12 @@ def main() -> int:
     except (OSError, json.JSONDecodeError) as exc:
         print(f"graph write gate: unmeasured ({exc})")
         return 2
-    windows = [row.get("data", row) for row in rows if row.get("type") in (None, "graph_write_gate")]
-    windows = [row for row in windows if isinstance(row, dict)]
+    rows = [row.get("data", row) for row in rows if row.get("type") in (None, "graph_write_gate")]
+    # Per-mutation rows carry a `mutation` name and describe
+    # a zero-length window; they are not mergeable histogram windows, so the
+    # audit keeps them out of the window stats and counts them instead.
+    mutation_rows = [row for row in rows if isinstance(row, dict) and row.get("mutation")]
+    windows = [row for row in rows if isinstance(row, dict) and not row.get("mutation")]
     if not windows or any(float(row.get("completed_window_seconds", 0)) < 295 for row in windows):
         print("graph write gate: unmeasured (no complete five-minute windows)")
         return 2
@@ -58,7 +62,10 @@ def main() -> int:
             break
     sustained = max(float(row["mutation_count"]) * 60 / float(row["completed_window_seconds"]) for row in windows)
     passes = p95 == "inf" or float(p95) > 1000 or sustained > 60
-    print(f"graph write gate: p95_wait_ms={p95} sustained_mutations_per_minute={sustained:.2f} windows={len(windows)} port_bar_met={str(passes).lower()}")
+    print(
+        f"graph write gate: p95_wait_ms={p95} sustained_mutations_per_minute={sustained:.2f} "
+        f"windows={len(windows)} mutation_rows={len(mutation_rows)} port_bar_met={str(passes).lower()}"
+    )
     return 0 if passes else 1
 
 

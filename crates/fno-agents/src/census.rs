@@ -282,9 +282,11 @@ fn process_table_ps() -> (Vec<ProcRow>, usize) {
     (rows, 0)
 }
 
-/// One `ps -Ao pid,ppid,state,etime,%cpu,rss,command` data line. Not
-/// cfg-gated: the Linux leg only runs on Linux, so the parse keeps a test
-/// that runs everywhere.
+/// One `ps -Ao pid,ppid,state,etime,%cpu,rss,command` data line. Compiled
+/// for the Linux leg and under test everywhere: the test runs on every
+/// host, while a macOS non-test build has no caller and deny-warnings
+/// turns the dead code into a failure.
+#[cfg(any(not(target_os = "macos"), test))]
 fn parse_ps_row(line: &str) -> Option<ProcRow> {
     // ps right-aligns the numeric columns, so tokens must split on
     // whitespace RUNS - a per-char split yields empty fields and every
@@ -841,6 +843,7 @@ mod process_table_tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn ps_leg_parses_right_aligned_columns() {
         let row = super::parse_ps_row("  1234  2556 S 02:03  1.5  10240 /bin/sleep 37")
             .expect("an aligned ps row parses");

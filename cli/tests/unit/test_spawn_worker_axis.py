@@ -523,22 +523,111 @@ def test_retask_refused_before_clear_falls_through_to_one_cold_spawn(
     assert keys == {"dispatch:x-bbbb", "node:x-bbbb"}
 
 
-def test_retask_refused_after_clear_raises_and_spawns_nothing(monkeypatch, tmp_path):
-    """AC1-EDGE: a refusal after /clear leaves a blank renamed row; the arm
-    raises instead of cold-spawning over it."""
+def test_retask_refused_after_clear_reaps_and_falls_through_to_one_cold_spawn(
+    monkeypatch, tmp_path
+):
+    """AC1-EDGE: a cleared row is reaped before the cold spawn."""
     captured = _capture(monkeypatch, _bp_settings())
+    candidate = SimpleNamespace(
+        name="ac-bp-x-aaaa-slug",
+        substrate="thread",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        cwd=str(tmp_path),
+    )
     _reuse_seams(
         monkeypatch,
-        candidate=SimpleNamespace(name="ac-bp-x-aaaa-slug", substrate="thread"),
+        candidate=candidate,
         receipt_row={"status": "refused", "cleared": True, "reason": "rename_refused"},
+    )
+    reap_calls = []
+    monkeypatch.setattr(
+        advance,
+        "_reap_cleared_row",
+        lambda name, cwd: reap_calls.append((name, cwd)) or None,
+    )
+    ev = tmp_path / "events.jsonl"
+    advance._spawn_worker(
+        "x-bbbb", None, "slug", verb="blueprint", events_path=ev,
+        node=_node_row("x-bbbb", difficulty="medium"),
+    )
+    assert reap_calls == [(candidate.name, str(tmp_path))]
+    assert "cmd" in captured
+    data = _rows(ev, "dispatch_spawned")[0]["data"]
+    assert "rename_refused" in data["retask_fallthrough"]
+    assert "reaped cleared row" in data["retask_fallthrough"]
+    assert candidate.harness_session_id in data["retask_fallthrough"]
+
+
+def test_retask_refused_after_clear_reap_failure_raises_and_spawns_nothing(
+    monkeypatch, tmp_path
+):
+    """AC1-EDGE: a failed reap keeps the dispatch fail-closed."""
+    captured = _capture(monkeypatch, _bp_settings())
+    candidate = SimpleNamespace(
+        name="ac-bp-x-aaaa-slug",
+        substrate="thread",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        cwd=str(tmp_path),
+    )
+    _reuse_seams(
+        monkeypatch,
+        candidate=candidate,
+        receipt_row={"status": "refused", "cleared": True, "reason": "rename_refused"},
+    )
+    monkeypatch.setattr(
+        advance, "_reap_cleared_row", lambda _name, _cwd: "rm exit 1: teardown refused"
     )
     ev = tmp_path / "events.jsonl"
     with pytest.raises(advance.SpawnError) as exc:
-        advance._spawn_worker("x-bbbb", None, "slug", verb="blueprint", events_path=ev, node=_node_row("x-bbbb", difficulty="medium"))
-    assert "ac-bp-x-aaaa-slug" in str(exc.value)
-    assert "rename_refused" in str(exc.value)
+        advance._spawn_worker(
+            "x-bbbb", None, "slug", verb="blueprint", events_path=ev,
+            node=_node_row("x-bbbb", difficulty="medium"),
+        )
+    message = str(exc.value)
+    assert "ac-bp-x-aaaa-slug" in message
+    assert "rename_refused" in message
+    assert "rm exit 1: teardown refused" in message
+    assert candidate.harness_session_id in message
+    assert "fno agents rm ac-bp-x-aaaa-slug --force" in message
     assert "cmd" not in captured
     assert _rows(ev, "dispatch_spawned") == []
+
+
+def test_retask_refused_after_clear_reaps_renamed_registry_row(monkeypatch, tmp_path):
+    """AC1-EDGE: after rename, reap the registry name from the receipt."""
+    captured = _capture(monkeypatch, _bp_settings())
+    candidate = SimpleNamespace(
+        name="ac-bp-x-aaaa-slug",
+        substrate="thread",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        cwd=str(tmp_path),
+    )
+    _reuse_seams(
+        monkeypatch,
+        candidate=candidate,
+        receipt_row={
+            "status": "refused",
+            "cleared": True,
+            "reason": "switch_refused",
+            "registry_name": "ac-bp-x-bbbb-renamed",
+        },
+    )
+    reap_calls = []
+    monkeypatch.setattr(
+        advance,
+        "_reap_cleared_row",
+        lambda name, cwd: reap_calls.append((name, cwd)) or None,
+    )
+    ev = tmp_path / "events.jsonl"
+    advance._spawn_worker(
+        "x-bbbb", None, "slug", verb="blueprint", events_path=ev,
+        node=_node_row("x-bbbb", difficulty="medium"),
+    )
+    assert reap_calls == [("ac-bp-x-bbbb-renamed", str(tmp_path))]
+    assert "cmd" in captured
+    assert _rows(ev, "dispatch_spawned")[0]["data"]["retask_fallthrough"].startswith(
+        "ac-bp-x-bbbb-renamed:"
+    )
 
 
 def test_guard_refusal_skips_as_already_running_without_retask(monkeypatch, tmp_path):

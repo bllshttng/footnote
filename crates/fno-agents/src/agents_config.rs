@@ -57,7 +57,7 @@ fn global_config_path() -> Option<PathBuf> {
 /// Deduped when the canonical root IS the cwd, and dropped entirely by
 /// `FNO_NO_CANONICAL_CONFIG=1` (preflight's hermetic runner), exactly as Python
 /// does at `config/__init__.py`'s `_settings_yaml_locations`.
-fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
+pub(crate) fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
         let path = PathBuf::from(explicit);
         warn_once_if_yaml(&path);
@@ -1007,6 +1007,18 @@ pub fn auto_merge_strategy(cwd: &Path) -> String {
     })
     .filter(|v| matches!(v.as_str(), "merge" | "squash" | "rebase"))
     .unwrap_or_else(|| "merge".to_string())
+}
+
+/// Resolve `[auto_merge] require_fresh_ci` (default ON). A malformed or absent
+/// value falls back to the safe default so a config typo cannot reopen stale CI.
+pub fn auto_merge_require_fresh_ci(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("auto_merge")?
+            .as_table()?
+            .get("require_fresh_ci")?
+            .as_bool()
+    })
+    .unwrap_or(true)
 }
 
 /// The normalized raw scalar for a direct child of `agents:`, so each caller
@@ -2097,6 +2109,33 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("ams-bad", "[auto_merge]\nmerge_strategy = \"octopus\"\n");
         assert_eq!(auto_merge_strategy(&cwd), "merge");
+    }
+
+    #[test]
+    fn auto_merge_require_fresh_ci_defaults_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("amfci-absent", "schema_version = 1\n");
+        assert!(auto_merge_require_fresh_ci(&cwd));
+    }
+
+    #[test]
+    fn auto_merge_require_fresh_ci_honors_false() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("amfci-false", "[auto_merge]\nrequire_fresh_ci = false\n");
+        assert!(!auto_merge_require_fresh_ci(&cwd));
+    }
+
+    #[test]
+    fn auto_merge_require_fresh_ci_invalid_defaults_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings(
+            "amfci-invalid",
+            "[auto_merge]\nrequire_fresh_ci = \"not-a-bool\"\n",
+        );
+        assert!(auto_merge_require_fresh_ci(&cwd));
     }
 
     /// Build a main checkout + linked worktree, with `body` as the CANONICAL

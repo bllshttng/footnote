@@ -67,9 +67,10 @@ def _collect_event_types() -> list[str]:
     """Return the sorted list of Python-emitted event type names.
 
     Excludes event types that are Rust-only (sources exclusively 'daemon',
-    'subagent', or 'loop'). These are documented in events-schema.yaml for
-    validator coverage but are not emitted by the Python side; including
-    them would false-positive the parity check's collision detector.
+    'subagent', 'loop', 'pr-heal', or 'active-backlog'). These are documented
+    in events-schema.yaml for validator coverage but are not emitted by the
+    Python side; including them would false-positive the parity check's
+    collision detector.
     """
     from fno.events import SCHEMA  # noqa: PLC0415
 
@@ -79,8 +80,9 @@ def _collect_event_types() -> list[str]:
     # Rust-infrastructure sources: process identities used exclusively by the
     # Rust fno-agents supervisor. Event types whose ALL sources are within this
     # set were added to events-schema.yaml as documentation for Rust-emitted
-    # events and are never emitted by the Python fno pipeline.
-    rust_infra_sources = frozenset(["daemon", "subagent", "loop", "pr-heal"])
+    # events and are never emitted by the Python fno pipeline. 'active-backlog'
+    # is the daemon's own dispatch task (daemon.rs), not a Python producer.
+    rust_infra_sources = frozenset(["daemon", "subagent", "loop", "pr-heal", "active-backlog"])
 
     result = []
     for entry in SCHEMA.get("event_types", []):

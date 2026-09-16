@@ -110,7 +110,12 @@ pub(crate) struct VerdictInputs {
     pub scope: String,
     /// The parsed manifest, carried so the verdict verb never re-reads it.
     pub manifest: crate::loopcheck::KingManifest,
+    pub manifest_path: PathBuf,
+    pub harness: String,
+    pub now: chrono::DateTime<chrono::Utc>,
     pub window: String,
+    pub checkin_interval_secs: i64,
+    pub crown_age_secs: i64,
     pub compaction_ceiling: u64,
     pub inherited_undelivered: u64,
     pub filed_undelivered: u64,
@@ -263,6 +268,7 @@ pub(crate) fn resolve_verdict_inputs(
         .map_err(|e| format!("{}: unreadable manifest: {e}", manifest_path.display()))?;
     let manifest = crate::loopcheck::parse_king_manifest(&content)
         .ok_or_else(|| "king manifest has no frontmatter".to_string())?;
+    let harness = crate::loopcheck::scan_manifest_field(&content, "harness").unwrap_or_default();
     let crowned_at = manifest.created_at.clone().ok_or_else(|| {
         format!(
             "{}: no created_at; no measurable split.",
@@ -270,8 +276,19 @@ pub(crate) fn resolve_verdict_inputs(
         )
     })?;
 
+    let created_at = chrono::DateTime::parse_from_rfc3339(&crowned_at).map_err(|e| {
+        format!(
+            "{}: created_at is not RFC3339: {e}",
+            manifest_path.display()
+        )
+    })?;
+    let current = now();
+    let crown_age_secs = current
+        .signed_duration_since(created_at.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0);
     let window_secs = WINDOW_INTERVALS * interval;
-    let window_start = (now() - chrono::Duration::seconds(window_secs))
+    let window_start = (current - chrono::Duration::seconds(window_secs))
         .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, false);
 
     let entries = crate::graph_store::read_defaulted_opts(
@@ -290,7 +307,12 @@ pub(crate) fn resolve_verdict_inputs(
     Ok(VerdictInputs {
         scope,
         manifest,
+        manifest_path,
+        harness,
+        now: current,
         window: window_display(window_secs),
+        checkin_interval_secs: interval,
+        crown_age_secs,
         compaction_ceiling: ceiling as u64,
         inherited_undelivered,
         filed_undelivered,
@@ -567,6 +589,30 @@ mod tests {
         )
         .expect_err("no created_at means no measurable split");
         assert!(err.contains("no created_at"), "{err}");
+    }
+
+    #[test]
+    fn an_unparseable_created_at_refuses_the_age_read() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tmp("bad-created-at");
+        let path = dir.join("kings/x-root.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "---\nscope: x-root\nshape: pass\nfno_id: kd-test\ncreated_at: yesterday\n---\n",
+        )
+        .unwrap();
+        let err = resolve_verdict_inputs(
+            &dir,
+            Some("x-root"),
+            Some(&path),
+            &dir.join("registry.json"),
+            pinned_now,
+        )
+        .expect_err("an invalid created_at must not read as a young crown");
+        assert!(err.contains("created_at is not RFC3339"), "{err}");
     }
 
     #[test]

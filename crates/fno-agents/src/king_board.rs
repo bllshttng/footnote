@@ -606,7 +606,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                         .unwrap_or_else(|| h.clone())
                 })
                 .collect();
-            Some(s.spawn(move || crate::truth_probe::family1_truth_probe_many_checked(&tokens)))
+            Some(s.spawn(move || crate::truth_probe::family1_truth_probe_many_measured(&tokens)))
         };
         // The needs fold rides a thread too: in-process, but its
         // refused-worker leg batch probes the whole registry and measured
@@ -697,11 +697,19 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         ) = match t_truth {
             None => (HashMap::new(), None),
             Some(h) => match h.join() {
-                Ok(Ok(map)) => (map, None),
-                // A timed-out batch is UNREADABLE, not empty: an empty map
-                // read as "every holder answered nothing" is how live workers
-                // rendered stalled.
-                Ok(Err(e)) => (HashMap::new(), Some(e)),
+                Ok((map, crate::truth_probe::BatchOutcome::Measured)) => (map, None),
+                Ok((map, crate::truth_probe::BatchOutcome::NotMeasured)) if !map.is_empty() => {
+                    (map, None)
+                }
+                // An empty timed-out page is UNREADABLE. A non-empty partial
+                // page remains usable, and queues name its missing holders.
+                Ok((_, crate::truth_probe::BatchOutcome::NotMeasured)) => (
+                    HashMap::new(),
+                    Some(format!(
+                        "truth probe: batch of {} handles timed out",
+                        holders.len()
+                    )),
+                ),
                 Err(_) => (
                     HashMap::new(),
                     Some("truth probe: reader panicked".to_string()),
@@ -2131,6 +2139,7 @@ mod tests {
         // spawn_gate.LIVE_STATUSES vocabulary.
         let _guard = HOME_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
         let agents_home = dir.path().join(".fno").join("agents");
         std::env::set_var("FNO_AGENTS_HOME", &agents_home);
         let path = agents_home.join("registry.json");
@@ -2186,6 +2195,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", dir.path());
         std::env::set_var("FNO_AGENTS_HOME", dir.path().join(".fno").join("agents"));
+        crate::paths::pin_test_claims_root(dir.path());
         let payload = read_board(&BoardOpts {
             budget_ms: 20_000,
             ..Default::default()
@@ -2233,6 +2243,7 @@ mod tests {
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nscope: not-a-real-thing\n---\n").unwrap();
         std::env::set_var("HOME", dir.path());
+        crate::paths::pin_test_claims_root(dir.path());
         let payload = read_board(&BoardOpts {
             budget_ms: 20_000,
             state_path: Some(state),
@@ -2253,6 +2264,7 @@ mod tests {
         let state = dir.path().join("king.md");
         std::fs::write(&state, "---\nfno_id: k1\n---\n").unwrap();
         std::env::set_var("HOME", dir.path());
+        crate::paths::pin_test_claims_root(dir.path());
         let payload = read_board(&BoardOpts {
             budget_ms: 20_000,
             state_path: Some(state),

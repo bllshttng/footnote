@@ -9,6 +9,7 @@
 pub mod api;
 pub mod commands;
 pub mod comments;
+pub mod decisions;
 pub mod encounters;
 pub mod model;
 pub mod node_state;
@@ -46,6 +47,8 @@ pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("encounters", "backlog/encounters.rs"),
     ("pull_requests", "backlog/pull_requests.rs"),
     ("sessions", "backlog/sessions.rs"),
+    ("decisions", "backlog/decisions.rs"),
+    ("node_decisions", "backlog/decisions.rs"),
 ];
 
 fn now_ms() -> u128 {
@@ -118,7 +121,13 @@ pub fn set_backend(graph: &Path, backend: Backend) -> Result<(), String> {
     Ok(())
 }
 
-fn open(graph: &Path) -> Result<Connection, String> {
+/// A connection for a WRITE path: identical to [`open`], kept as a distinct
+/// name so the table-ownership scan can tell read-only opens from writes.
+pub(crate) fn write_connection(graph: &Path) -> Result<Connection, String> {
+    open(graph)
+}
+
+pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
     let path = database_path(graph);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -145,6 +154,8 @@ fn open(graph: &Path) -> Result<Connection, String> {
     pull_requests::ensure_table(&connection)?;
     relations::ensure_table(&connection)?;
     import_if_needed(&mut connection, graph)?;
+    decisions::ensure_table(&connection)?;
+    decisions::import_if_needed(&mut connection, graph)?;
     Ok(connection)
 }
 
@@ -344,7 +355,7 @@ fn stamp_version_fields(connection: &Connection, version: &str) -> Result<(), St
 /// mutation counter by one. The lazy import does NOT take this path (a
 /// backfill is not a user-visible write; AC15 counts one bump per
 /// mutation), so it stamps fields only.
-fn stamp_version(connection: &Connection, version: &str) -> Result<(), String> {
+pub(crate) fn stamp_version(connection: &Connection, version: &str) -> Result<(), String> {
     stamp_version_fields(connection, version)?;
     bump_api_version(connection)?;
     Ok(())
@@ -392,7 +403,7 @@ pub fn api_version(graph: &Path) -> Result<i64, String> {
     }
 }
 
-fn stamp_meta(connection: &Connection, key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn stamp_meta(connection: &Connection, key: &str, value: &str) -> Result<(), String> {
     connection
         .execute(
             "INSERT INTO graph_meta(key, value) VALUES(?1, ?2)
@@ -460,6 +471,149 @@ pub fn authoritative_sync(
     Ok(version)
 }
 
+/// The single-row mutation path: under the sqlite backend,
+/// one `BEGIN IMMEDIATE` transaction reads the CURRENT authoritative rows,
+/// applies the mutation, writes only the changed nodes' aggregates, runs the
+/// single-row status recompute, and stamps a fresh content version. The
+/// immediate transaction takes the write lock up front, so the read is never
+/// a stale snapshot: a concurrent writer either landed before our lock or
+/// waits behind it, and both rows persist. A busy timeout retries the whole
+/// cycle instead of surfacing as a refusal.
+pub fn mutate_single_row(
+    graph: &Path,
+    mutation: &str,
+    mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
+) -> Result<bool, String> {
+    const ATTEMPTS: usize = 3;
+    let started = std::time::Instant::now();
+    let mut retries = 0u32;
+    for attempt in 0..ATTEMPTS {
+        match mutate_single_row_once(graph, mutation, &mut apply) {
+            Ok(outcome) => {
+                if outcome {
+                    emit_gate_event(mutation, started.elapsed().as_millis(), retries);
+                }
+                return Ok(outcome);
+            }
+            Err(error) => {
+                let busy = error.contains("locked") || error.contains("busy");
+                if busy && attempt + 1 < ATTEMPTS {
+                    retries += 1;
+                    std::thread::sleep(Duration::from_millis(100 * (attempt as u64 + 1)));
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+    unreachable!("retry loop returns on every branch")
+}
+
+fn mutate_single_row_once(
+    graph: &Path,
+    mutation: &str,
+    apply: &mut dyn FnMut(&mut Vec<Value>) -> Result<bool, String>,
+) -> Result<bool, String> {
+    let _ = mutation;
+    let mut connection = open(graph)?;
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    // The rows INSIDE the write transaction are the authoritative state:
+    // never a cutover snapshot, never the JSON export.
+    let rows = export_rows(&transaction)?;
+    let mut working = rows.clone();
+    if !apply(&mut working)? {
+        // Domain refusal: the transaction drops here, nothing is written.
+        return Ok(false);
+    }
+    // The publish-seam invariants the whole-graph path ran on every publish
+    // hold here too: no empty presence field, a slug on every row, and a
+    // touched_at stamp when a row's curation fields moved.
+    for row in working.iter() {
+        let Some(obj) = row.as_object() else {
+            continue;
+        };
+        let id = crate::graph_store::entry_id(row).unwrap_or("<no id>");
+        for field in crate::graph_store::PRESENCE_TEXT_FIELDS {
+            if let Some(serde_json::Value::String(text)) = obj.get(*field) {
+                if text.trim().is_empty() {
+                    return Err(format!(
+                        "refusing to persist an empty '{field}' on entry '{id}': \
+                         pass real content, or remove the key to clear it"
+                    ));
+                }
+            }
+        }
+    }
+    crate::graph_store::ensure_slugs(&mut working);
+    let now_iso = crate::graph_store::now_isoformat();
+    for row in working.iter_mut() {
+        let (Some(id), true) = (
+            crate::graph_store::entry_id(row).map(str::to_string),
+            row.is_object(),
+        ) else {
+            continue;
+        };
+        let Some(before) = rows
+            .iter()
+            .find(|r| crate::graph_store::entry_id(r) == Some(id.as_str()))
+        else {
+            continue; // absent from the pre-image: new node, created_at carries it
+        };
+        // curation_key reads the curation fields only, so a stamped
+        // touched_at can never cancel its own trigger.
+        if crate::graph_store::curation_key(row) != crate::graph_store::curation_key(before) {
+            row.as_object_mut().unwrap().insert(
+                "touched_at".to_string(),
+                serde_json::Value::String(now_iso.clone()),
+            );
+        }
+    }
+    write_changed(&transaction, &rows, &working)?;
+    nodes::recompute_status(&transaction)?;
+    let rows_after = export_rows(&transaction)?;
+    let version = content_version(&rows_after);
+    stamp_version(&transaction, &version)?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+/// The `graph_write_gate` row the single-row path emits after each landed
+/// mutation. It carries the required window fields as honest point values
+/// (a zero-length window covering the write) plus the `mutation` name, so
+/// AC24 is measurable and the port-bar audit can tell these rows from the
+/// keeper's five-minute windows.
+pub(crate) fn emit_gate_event(mutation: &str, wait_ms: u128, retries: u32) {
+    let now = now_ms() as i64;
+    // Best-effort: an undeclared state root (a hermetic test with no pins)
+    // skips the emission instead of failing the mutation that earned it.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(space) = crate::paths::space_dir_opt(&cwd) else {
+        return;
+    };
+    let path = space.join("events.jsonl");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    let emitter = crate::events::EventEmitter::new(path, "backlog");
+    let _ = emitter.emit(
+        "graph_write_gate",
+        &serde_json::json!({
+            "keeper_pid": std::process::id(),
+            "window_started_ms": now,
+            "window_finished_ms": now,
+            "completed_window_seconds": 0,
+            "wait_ms_bounds": [wait_ms as i64],
+            "wait_ms_counts": [1],
+            "mutation_count": 1,
+            "bytes_written": 0,
+            "retry_count": retries,
+            "mutation": mutation,
+        }),
+    );
+}
+
 /// Save one node's whole row set through the owning modules. The caller
 /// owns the transaction; only this node's rows are touched.
 fn save_aggregate(connection: &Connection, node: &Node) -> Result<(), String> {
@@ -506,7 +660,7 @@ fn delete_aggregate(connection: &Connection, id: &str) -> Result<(), String> {
 ///
 /// Returns the number of ids acted on (saved or deleted), so a test can
 /// count what a sync moved.
-fn write_changed(
+pub(crate) fn write_changed(
     connection: &Connection,
     before: &[Value],
     after: &[Value],
@@ -601,7 +755,7 @@ pub fn export_rows(connection: &Connection) -> Result<Vec<Value>, String> {
     Ok(entries)
 }
 
-fn meta(connection: &Connection, key: &str) -> Result<Option<String>, String> {
+pub(crate) fn meta(connection: &Connection, key: &str) -> Result<Option<String>, String> {
     connection
         .query_row(
             "SELECT value FROM graph_meta WHERE key = ?1",
@@ -1698,5 +1852,158 @@ mod tests {
             )
             .unwrap();
         assert_eq!(schema, SCHEMA_VERSION);
+    }
+
+    // -- single-row mutations --------------------------------------------
+
+    /// Pins both state roots the emit path resolves, so a test's gate event
+    /// lands in the redirected space journal and never the operator's home.
+    fn declare_test_roots(spaces: &std::path::Path) {
+        std::env::set_var("FNO_SPACES_DIR", spaces);
+        std::env::set_var(crate::paths::HOME_ENV, spaces.join("agents-home"));
+    }
+
+    fn seeded_sqlite_fixture() -> (TempDir, PathBuf) {
+        let (dir, graph) = fixture("graph.json");
+        std::fs::write(
+            &graph,
+            r#"{"entries": [
+                {"id": "ab-one", "slug": "ab-one", "title": "One", "type": "feature",
+                 "status": "idea", "priority": "p2", "domain": "code"},
+                {"id": "ab-two", "slug": "ab-two", "title": "Two", "type": "feature",
+                 "status": "ready", "priority": "p2", "domain": "code"}
+            ]}"#,
+        )
+        .unwrap();
+        open(&graph).unwrap();
+        set_backend(&graph, Backend::Sqlite).unwrap();
+        (dir, graph)
+    }
+
+    #[test]
+    fn single_row_mutation_writes_only_target_rows_and_names_the_mutation() {
+        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let spaces = tempfile::TempDir::new().unwrap();
+        declare_test_roots(spaces.path());
+        let (_dir, graph) = seeded_sqlite_fixture();
+        let before = export_rows(&open(&graph).unwrap()).unwrap();
+        let ok = mutate_single_row(&graph, "comment_create", |rows| {
+            for row in rows.iter_mut() {
+                if entry_id_from(row) == Some("ab-one") {
+                    row.as_object_mut()
+                        .unwrap()
+                        .insert("progress_notes".into(), serde_json::json!([{"body": "hi"}]));
+                }
+            }
+            Ok(true)
+        })
+        .unwrap();
+        assert!(ok);
+        let after = export_rows(&open(&graph).unwrap()).unwrap();
+        for (was, now) in before.iter().zip(after.iter()) {
+            if entry_id_from(now) != Some("ab-one") {
+                assert_eq!(
+                    crate::graph_store::to_python_json(was),
+                    crate::graph_store::to_python_json(now),
+                    "a non-target row moved"
+                );
+            }
+        }
+        let target = after
+            .iter()
+            .find(|row| entry_id_from(row) == Some("ab-one"))
+            .unwrap();
+        assert!(target.get("progress_notes").is_some(), "target row moved");
+        // Positive marker: the gate event names the mutation in the space journal.
+        let journal = crate::paths::events_path(&std::env::current_dir().unwrap());
+        let text = std::fs::read_to_string(journal).unwrap();
+        assert!(text.contains("graph_write_gate") && text.contains("comment_create"));
+    }
+
+    #[test]
+    fn single_row_concurrent_writes_both_persist_with_positive_readback() {
+        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let spaces = tempfile::TempDir::new().unwrap();
+        declare_test_roots(spaces.path());
+        let (_dir, graph) = seeded_sqlite_fixture();
+        let graph_for_thread = graph.clone();
+        let slow = std::thread::spawn(move || {
+            mutate_single_row(&graph_for_thread, "comment_create", |rows| {
+                // Hold the write transaction open so the other writer must
+                // wait on BEGIN IMMEDIATE, landing after this commit.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                for row in rows.iter_mut() {
+                    if entry_id_from(row) == Some("ab-one") {
+                        row.as_object_mut().unwrap().insert(
+                            "progress_notes".into(),
+                            serde_json::json!([{"body": "from-slow"}]),
+                        );
+                    }
+                }
+                Ok(true)
+            })
+            .unwrap()
+        });
+        let ok_fast = mutate_single_row(&graph, "node_update", |rows| {
+            for row in rows.iter_mut() {
+                if entry_id_from(row) == Some("ab-two") {
+                    row.as_object_mut()
+                        .unwrap()
+                        .insert("title".into(), serde_json::json!("Renamed"));
+                }
+            }
+            Ok(true)
+        })
+        .unwrap();
+        assert!(ok_fast);
+        assert!(slow.join().unwrap());
+        let rows = export_rows(&open(&graph).unwrap()).unwrap();
+        // Positive readback: each concurrent write is read back BY VALUE.
+        let one = rows
+            .iter()
+            .find(|r| entry_id_from(r) == Some("ab-one"))
+            .unwrap();
+        let two = rows
+            .iter()
+            .find(|r| entry_id_from(r) == Some("ab-two"))
+            .unwrap();
+        assert_eq!(
+            one.get("progress_notes").unwrap()[0].get("body").unwrap(),
+            "from-slow"
+        );
+        assert_eq!(two.get("title").unwrap(), "Renamed");
+    }
+
+    #[test]
+    fn single_row_write_uses_current_db_state_not_stale_json() {
+        let _env_lock = crate::claims::test_env_lock().lock().unwrap();
+        let spaces = tempfile::TempDir::new().unwrap();
+        declare_test_roots(spaces.path());
+        let (_dir, graph) = seeded_sqlite_fixture();
+        // A post-flip node lands in the db only; the stale JSON never learns
+        // of it. The single-row path must still see and mutate it.
+        mutate_single_row(&graph, "node_create", |rows| {
+            rows.push(serde_json::json!({
+                "id": "ab-flip", "slug": "ab-flip", "title": "Flip", "type": "feature",
+                "status": "idea", "priority": "p2", "domain": "code"
+            }));
+            Ok(true)
+        })
+        .unwrap();
+        let stale = std::fs::read_to_string(&graph).unwrap();
+        assert!(!stale.contains("ab-flip"), "json leg moved under sqlite");
+        let ok = mutate_single_row(&graph, "comment_create", |rows| {
+            assert!(
+                rows.iter().any(|row| entry_id_from(row) == Some("ab-flip")),
+                "the authoritative read missed the db-only node"
+            );
+            Ok(true)
+        })
+        .unwrap();
+        assert!(ok);
+    }
+
+    fn entry_id_from(row: &Value) -> Option<&str> {
+        row.get("id").and_then(Value::as_str)
     }
 }

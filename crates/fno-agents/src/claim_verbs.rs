@@ -12,9 +12,7 @@
 use serde_json::Value;
 #[cfg(test)]
 use std::fs;
-#[cfg(test)]
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// `fno-agents claim <acquire|release|status|list> <key> [flags]` — a thin front
 /// over [`crate::claims`], the native lockfile-protocol implementation.
@@ -44,6 +42,12 @@ pub fn run_claim(args: &[String]) -> i32 {
     }
     if op == "release-stopped" {
         return run_release_stopped(&args[1..]);
+    }
+    if op == "reap" {
+        return run_claim_reap(&args[1..]);
+    }
+    if op == "export-lockfiles" {
+        return run_claim_export_lockfiles(&args[1..]);
     }
     if op == "long-holds" {
         return crate::claims::run_claim_long_holds(&args[1..]);
@@ -120,28 +124,46 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim acquire requires --holder");
                 return 2;
             };
-            match crate::claims::acquire(&key, &holder, opts) {
-                crate::claims::AcquireOutcome::Acquired(rec) => {
-                    let mut out = serde_json::to_value(&rec)
-                        .unwrap_or_else(|_| Value::Object(Default::default()));
-                    if let Value::Object(m) = &mut out {
-                        m.insert("outcome".into(), Value::String("acquired".into()));
+            if opts.root.is_some() {
+                return match crate::claims::acquire(&key, &holder, opts) {
+                    crate::claims::AcquireOutcome::Acquired(record) => {
+                        let mut payload = serde_json::to_value(&record)
+                            .unwrap_or_else(|_| Value::Object(Default::default()));
+                        if let Value::Object(map) = &mut payload {
+                            map.insert("outcome".into(), Value::String("acquired".into()));
+                        }
+                        println!("{payload}");
+                        0
                     }
-                    println!("{out}");
-                    0
-                }
-                crate::claims::AcquireOutcome::HeldByOther { holder, pid, host } => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "outcome": "held_by_other",
-                            "holder": holder, "pid": pid, "host": host,
-                        })
-                    );
+                    crate::claims::AcquireOutcome::HeldByOther { holder, pid, host } => {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "outcome": "held_by_other", "holder": holder,
+                                "pid": pid, "host": host,
+                            })
+                        );
+                        1
+                    }
+                    crate::claims::AcquireOutcome::Error(error) => {
+                        eprintln!("fno-agents: claim acquire failed: {error}");
+                        2
+                    }
+                };
+            }
+            match crate::claim_store::acquire_db(&key, &holder, &opts) {
+                Ok(payload)
+                    if payload.get("outcome").and_then(Value::as_str) == Some("held_by_other") =>
+                {
+                    println!("{payload}");
                     1
                 }
-                crate::claims::AcquireOutcome::Error(e) => {
-                    eprintln!("fno-agents: claim acquire failed: {e}");
+                Ok(payload) => {
+                    println!("{payload}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("fno-agents: claim acquire failed: {error}");
                     2
                 }
             }
@@ -151,37 +173,226 @@ pub fn run_claim(args: &[String]) -> i32 {
                 eprintln!("fno-agents: claim release requires --holder");
                 return 2;
             };
-            match crate::claims::release(
+            if opts.root.is_some() {
+                return match crate::claims::release(
+                    &key,
+                    &holder,
+                    opts.root.as_deref(),
+                    opts.events_dir.as_deref(),
+                ) {
+                    Ok(()) => {
+                        println!("{}", serde_json::json!({"outcome": "released", "key": key}));
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("fno-agents: claim release failed: {error}");
+                        2
+                    }
+                };
+            }
+            match crate::claim_store::release_db(
                 &key,
                 &holder,
                 opts.root.as_deref(),
                 opts.events_dir.as_deref(),
             ) {
-                Ok(()) => {
-                    println!("{}", serde_json::json!({"outcome": "released", "key": key}));
+                Ok(payload) => {
+                    println!("{payload}");
                     0
                 }
-                Err(e) => {
-                    eprintln!("fno-agents: claim release failed: {e}");
+                Err(error) => {
+                    eprintln!("fno-agents: claim release failed: {error}");
+                    2
+                }
+            }
+        }
+        "renew" => {
+            let Some(holder) = holder else {
+                eprintln!("fno-agents: claim renew requires --holder");
+                return 2;
+            };
+            let Some(ttl_ms) = opts.ttl_ms else {
+                eprintln!("fno-agents: claim renew requires --ttl-ms");
+                return 2;
+            };
+            if opts.root.is_some() {
+                return match crate::claims::renew(&key, &holder, ttl_ms, opts.root.as_deref()) {
+                    Ok(true) => {
+                        let (_, record) = crate::claims::status(&key, opts.root.as_deref());
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "outcome": "renewed", "refreshed": true, "claim": record,
+                            })
+                        );
+                        0
+                    }
+                    Ok(false) => {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "outcome": "unchanged", "refreshed": false, "key": key,
+                            })
+                        );
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("fno-agents: claim renew failed: {error}");
+                        2
+                    }
+                };
+            }
+            match crate::claim_store::renew_db(
+                &key,
+                &holder,
+                ttl_ms,
+                opts.root.as_deref(),
+                opts.events_dir.as_deref(),
+            ) {
+                Ok(payload) => {
+                    println!("{payload}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("fno-agents: claim renew failed: {error}");
+                    2
+                }
+            }
+        }
+        "force-release" => {
+            let Some(reason) = opts.reason.as_deref() else {
+                eprintln!("fno-agents: claim force-release requires --reason");
+                return 2;
+            };
+            if opts.root.is_some() {
+                return match crate::claim_store::force_release(&key, reason, opts.root.as_deref()) {
+                    Ok(payload) => {
+                        println!("{payload}");
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("fno-agents: claim force-release failed: {error}");
+                        2
+                    }
+                };
+            }
+            match crate::claim_store::force_release_db(
+                &key,
+                reason,
+                opts.root.as_deref(),
+                opts.events_dir.as_deref(),
+            ) {
+                Ok(payload) => {
+                    println!("{payload}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("fno-agents: claim force-release failed: {error}");
                     2
                 }
             }
         }
         "status" => {
-            let (state, rec) = crate::claims::status(&key, opts.root.as_deref());
-            // Mirror the `fno agents claim status -J` dict shape so the compat
-            // matrix can diff the two implementations field-by-field.
-            let output = rec
-                .map(|record| claim_status_value(&record))
-                .unwrap_or_else(|| serde_json::json!({"key": key, "state": state.as_str()}));
-            println!("{output}");
-            0
+            if opts.root.is_some() {
+                let (state, record) = crate::claims::status(&key, opts.root.as_deref());
+                let payload = record
+                    .map(|record| claim_status_value(&record))
+                    .unwrap_or_else(|| serde_json::json!({"key": key, "state": state.as_str()}));
+                println!("{payload}");
+                return 0;
+            }
+            match crate::claim_store::status_db(&key, opts.root.as_deref()) {
+                Ok(payload) => {
+                    println!("{payload}");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("fno-agents: claim status failed: {error}");
+                    1
+                }
+            }
         }
         other => {
             eprintln!(
-                "fno-agents: unknown claim operation: {other} (use acquire|release|status|list|sweep)"
+                "fno-agents: unknown claim operation: {other} (use acquire|release|renew|status|list|sweep|reap)"
             );
             2
+        }
+    }
+}
+
+fn run_claim_reap(args: &[String]) -> i32 {
+    let mut root: Option<PathBuf> = None;
+    let mut apply = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--root" => match it.next() {
+                Some(value) => root = Some(PathBuf::from(value)),
+                None => {
+                    eprintln!("fno-agents: claim reap: --root requires a value");
+                    return 2;
+                }
+            },
+            "--apply" => apply = true,
+            "--json" | "-J" => {}
+            other => {
+                eprintln!("fno-agents: claim reap: unknown flag {other}");
+                return 2;
+            }
+        }
+    }
+    if root.is_some() {
+        return match crate::claim_store::reap(root.as_deref(), apply) {
+            Ok(payload) => {
+                println!("{payload}");
+                0
+            }
+            Err(error) => {
+                eprintln!("fno-agents: claim reap failed: {error}");
+                1
+            }
+        };
+    }
+    match crate::claim_store::reap_db(root.as_deref(), apply) {
+        Ok(payload) => {
+            println!("{payload}");
+            0
+        }
+        Err(error) => {
+            eprintln!("fno-agents: claim reap failed: {error}");
+            1
+        }
+    }
+}
+
+fn run_claim_export_lockfiles(args: &[String]) -> i32 {
+    let mut root: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--root" => match it.next() {
+                Some(value) => root = Some(PathBuf::from(value)),
+                None => {
+                    eprintln!("fno-agents: claim export-lockfiles: --root requires a value");
+                    return 2;
+                }
+            },
+            "--json" | "-J" => {}
+            other => {
+                eprintln!("fno-agents: claim export-lockfiles: unknown flag {other}");
+                return 2;
+            }
+        }
+    }
+    match crate::claim_store::export_lockfiles(root.as_deref()) {
+        Ok(payload) => {
+            println!("{payload}");
+            0
+        }
+        Err(error) => {
+            eprintln!("fno-agents: claim export-lockfiles failed: {error}");
+            1
         }
     }
 }
@@ -218,27 +429,31 @@ fn run_claim_list(args: &[String]) -> i32 {
             }
         }
     }
-    let local_root = root.or_else(|| std::env::current_dir().ok());
-    let rows = match crate::claims::list(prefix.as_deref(), local_root.as_deref(), include_stale) {
-        Ok(rows) => rows,
-        Err(e) => {
-            eprintln!("fno-agents: claim list: {e}");
-            return 1;
-        }
-    };
-    let (witness, witness_answer) = session_witness_primed_for(rows.iter());
-    let witness: crate::claims::SessionWitness = &witness;
-    let session_index = std::cell::RefCell::new(None);
-    let rows: Vec<Value> = rows
-        .iter()
-        .map(|rec| {
-            claim_status_value_with_witness(rec, Some(witness), &witness_answer, &session_index)
-        })
-        .collect();
-    println!("{}", Value::Array(rows));
+    if root.is_some() {
+        let rows = match crate::claims::list(prefix.as_deref(), root.as_deref(), include_stale) {
+            Ok(rows) => rows,
+            Err(error) => {
+                eprintln!("fno-agents: claim list: {error}");
+                return 1;
+            }
+        };
+        let payload: Vec<Value> = rows.iter().map(claim_status_value).collect();
+        println!("{}", Value::Array(payload));
+        return 0;
+    }
+    let payload =
+        match crate::claim_store::list_db(prefix.as_deref(), include_stale, root.as_deref()) {
+            Ok(payload) => payload,
+            Err(e) => {
+                eprintln!("fno-agents: claim list: {e}");
+                return 1;
+            }
+        };
+    println!("{payload}");
     0
 }
 
+#[allow(dead_code)]
 fn claim_status_value(rec: &crate::claims::ClaimRecord) -> Value {
     let (witness, witness_answer) = default_session_witness();
     let witness: crate::claims::SessionWitness = &witness;
@@ -258,7 +473,7 @@ fn run_release_stopped(args: &[String]) -> i32 {
     let mut name: Option<String> = None;
     let mut session: Option<String> = None;
     let mut dirs: Vec<PathBuf> = Vec::new();
-    let mut events_dir: Option<PathBuf> = None;
+    let mut _events_dir: Option<PathBuf> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -284,7 +499,7 @@ fn run_release_stopped(args: &[String]) -> i32 {
                 }
             },
             "--events-dir" => match it.next() {
-                Some(v) => events_dir = Some(PathBuf::from(v)),
+                Some(v) => _events_dir = Some(PathBuf::from(v)),
                 None => {
                     eprintln!("fno-agents: claim release-stopped: --events-dir requires a value");
                     return 2;
@@ -304,16 +519,11 @@ fn run_release_stopped(args: &[String]) -> i32 {
         eprintln!("fno-agents: claim release-stopped requires at least one --claims-dir");
         return 2;
     }
-    let target = crate::claims::StoppedHolder {
-        harness_session_id: session.or_else(|| {
-            crate::claims::session_for_name(
-                &crate::paths::AgentsHome::from_env().registry_json(),
-                &name,
-            )
-        }),
-        name,
-    };
-    match crate::claims::release_for_stopped_session(&target, &dirs, events_dir.as_deref()) {
+    let root = dirs
+        .first()
+        .and_then(|dir| dir.parent())
+        .and_then(Path::parent);
+    match crate::claim_store::release_stopped(&name, session.as_deref(), root) {
         Ok(receipt) => {
             println!(
                 "{}",
@@ -328,6 +538,7 @@ fn run_release_stopped(args: &[String]) -> i32 {
     }
 }
 
+#[allow(dead_code)]
 fn claim_status_value_with_witness(
     rec: &crate::claims::ClaimRecord,
     witness: Option<crate::claims::SessionWitness<'_>>,
@@ -371,6 +582,13 @@ fn claim_status_value_with_witness(
     out.insert(
         "expires_at".into(),
         rec.expires_at.map(Value::from).unwrap_or(Value::Null),
+    );
+    out.insert(
+        "expired".into(),
+        Value::Bool(
+            rec.expires_at
+                .is_some_and(|expires_at| crate::claims::now_ms() >= expires_at),
+        ),
     );
     if let Some(reason) = &rec.reason {
         out.insert("reason".into(), Value::String(reason.clone()));
@@ -653,7 +871,8 @@ pub(crate) fn session_witness_primed_for<'a>(
             .collect()
     };
     let memo = std::cell::RefCell::new(std::collections::HashMap::new());
-    if let Ok(map) = crate::truth_probe::family1_truth_probe_many_checked(&wire) {
+    let (map, _) = crate::truth_probe::family1_truth_probe_many_measured(&wire);
+    {
         let registry_known = index.borrow().as_ref().is_some_and(|r| r.known);
         for (session, probe) in &map {
             let answer = session_liveness_from_observations(
@@ -1208,6 +1427,7 @@ mod tests {
         )
         .unwrap();
         std::env::set_var("FNO_AGENTS_HOME", td.path());
+        crate::paths::pin_test_claims_root(td.path());
         f();
         std::env::remove_var("FNO_AGENTS_HOME");
     }

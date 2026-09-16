@@ -346,7 +346,10 @@ def test_context_snapshot_builder_is_session_bound_and_canonical() -> None:
 @pytest.mark.parametrize(
     ("mutation", "message"),
     [
-        (lambda event: event.update(source="target"), "source must be hook or test"),
+        (
+            lambda event: event.update(source="target"),
+            r"context_snapshot does not allow source 'target'",
+        ),
         (
             lambda event: event["data"].update(session_id=" "),
             "session_id cannot be empty",
@@ -861,3 +864,42 @@ def test_reign_checkin_forbidden_alias_beside_canonical_keys_is_refused() -> Non
     )
     with pytest.raises(ValidationError, match="forbids data field: crown_scope"):
         validate(event)
+
+
+def test_reign_checkin_declared_sources_reject_a_hand_emit_stamped_test() -> None:
+    event = _reign_checkin({"scope": "x-a792", "change": "hand row"})
+    event["source"] = "test"
+    with pytest.raises(
+        ValidationError,
+        match=r"event type reign_checkin does not allow source 'test' "
+        r"\(declared: \['daemon', 'hook', 'loop'\]\)",
+    ):
+        validate(event)
+
+
+def test_worker_pattern_source_outranks_a_narrower_per_type_list() -> None:
+    event = {
+        "ts": "2026-09-16T12:00:00Z",
+        "type": "agent_spawned",
+        "source": "worker:wkA",
+        "data": {},
+    }
+    assert validate(event) is None
+
+
+def test_every_declared_source_is_a_legal_envelope_source() -> None:
+    """A type's sources: list must draw only from values the envelope
+    itself allows, or the per-type check in validate() could refuse
+    every producer of that source unconditionally."""
+    import fno.events as events_mod
+
+    events_mod._require_schema()
+    envelope_sources = set(events_mod.ALLOWED_SOURCES)
+    assert events_mod.EVENT_TYPES is not None
+    violations = [
+        (name, source)
+        for name, spec in events_mod.EVENT_TYPES.items()
+        for source in (spec.get("sources") or [])
+        if source not in envelope_sources
+    ]
+    assert violations == []

@@ -11,7 +11,7 @@
 //! Keeper -> client: `Response(json)`, `IdentifyReply(json)`.
 //!
 //! Requests are one-shot JSON: `{"id": n, "method": ..., "params": {...}}`.
-//! Methods: `read`, `read_strict`, `begin`, `commit`, `commit_rows`, `op`, `read_archive`.
+//! Methods: `read`, `read_strict`, `begin`, `commit`, `commit_rows`, `op`, `write_status`, `read_archive`.
 //! Responses: `{"id": n, "ok": true, "result": ...}` or
 //! `{"id": n, "ok": false, "error": {"kind": ..., "message": ...}}`.
 //!
@@ -243,6 +243,20 @@ struct CachedGraph {
     entries: Arc<Vec<Value>>,
 }
 
+const WRITE_LEDGER_CAPACITY: usize = 64;
+const WRITE_LEDGER_TTL: Duration = Duration::from_secs(600);
+
+enum WriteLedgerState {
+    InFlight,
+    Done(Value),
+}
+
+struct WriteLedgerEntry {
+    request_id: String,
+    recorded_at: std::time::Instant,
+    state: WriteLedgerState,
+}
+
 /// The keeper's shared state. Writes exclude here; reads hold shared guards,
 /// so concurrent reads overlap and every read still waits out an in-flight
 /// publish rather than observing one.
@@ -268,6 +282,7 @@ struct StoreState {
     /// after evidence).
     file_opens: AtomicU64,
     snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
+    write_ledger: Mutex<std::collections::VecDeque<WriteLedgerEntry>>,
     gate_metrics: Mutex<GateMetrics>,
     /// The instant of the last successful publish. The render trigger reads
     /// it to debounce: the pass runs once the store has been quiet for the
@@ -782,6 +797,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         cache: RwLock::new(None),
         file_opens: AtomicU64::new(0),
         snapshots: Mutex::new(std::collections::VecDeque::new()),
+        write_ledger: Mutex::new(std::collections::VecDeque::new()),
         gate_metrics: Mutex::new(GateMetrics::new()),
         last_write: Mutex::new(None),
         render_in_flight: std::sync::atomic::AtomicBool::new(false),
@@ -1060,7 +1076,7 @@ fn cached_entries(
         // Still gate-held: a read mid-publish waits out the publish, exactly
         // as every other read does.
         let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-        return graph_store::read_defaulted(&state.graph, true).map(Arc::new);
+        return graph_store::read_defaulted_opts(&state.graph, true, true).map(Arc::new);
     }
     let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
     Ok(cached_entries_gated(state, strict)?.0)
@@ -1252,8 +1268,24 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
     let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(Value::Null);
+    let request_id = if is_write_method(method) {
+        params
+            .get("request_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    } else {
+        None
+    };
+    if let Some(request_id) = request_id.as_deref() {
+        record_write_started(state, request_id);
+    }
     if method == "commit_rows" {
-        return handle_commit_rows_reply(id, state, &params);
+        let reply = handle_commit_rows_reply(id, state, &params);
+        if let Some(request_id) = request_id.as_deref() {
+            record_write_done(state, request_id, &reply);
+        }
+        return reply;
     }
     let result = match method {
         "read" => handle_read(state, &params),
@@ -1262,6 +1294,7 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
         "plan_refs" => handle_plan_refs(state),
         "begin" => handle_begin(state),
         "commit" => handle_commit(state, &params),
+        "write_status" => handle_write_status(state, &params),
         "export_now" => handle_export_now(state),
         "export_status" => handle_export_status(state),
         "set_backend" => handle_set_backend(state, &params),
@@ -1326,10 +1359,98 @@ fn handle_request(state: &StoreState, payload: &[u8]) -> Value {
             "unknown store method {other:?}"
         ))),
     };
-    match result {
+    let reply = match result {
         Ok(v) => json!({"id": id, "ok": true, "result": v}),
         Err(e) => err_reply(id, store_err_kind(&e), e.to_string()),
+    };
+    if let Some(request_id) = request_id.as_deref() {
+        record_write_done(state, request_id, &reply);
     }
+    reply
+}
+
+fn is_write_method(method: &str) -> bool {
+    matches!(method, "commit" | "commit_rows" | "op" | "api")
+}
+
+fn prune_write_ledger(
+    ledger: &mut std::collections::VecDeque<WriteLedgerEntry>,
+    now: std::time::Instant,
+) {
+    ledger.retain(|entry| now.duration_since(entry.recorded_at) <= WRITE_LEDGER_TTL);
+}
+
+fn record_write_started(state: &StoreState, request_id: &str) {
+    let now = std::time::Instant::now();
+    let mut ledger = state
+        .write_ledger
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    prune_write_ledger(&mut ledger, now);
+    ledger.retain(|entry| entry.request_id != request_id);
+    ledger.push_back(WriteLedgerEntry {
+        request_id: request_id.to_owned(),
+        recorded_at: now,
+        state: WriteLedgerState::InFlight,
+    });
+    while ledger.len() > WRITE_LEDGER_CAPACITY {
+        ledger.pop_front();
+    }
+}
+
+fn elide_write_entries(reply: &Value) -> Value {
+    let mut reply = reply.clone();
+    let Some(result) = reply.get_mut("result").and_then(Value::as_object_mut) else {
+        return reply;
+    };
+    if result.get("entries").map(Value::is_array).unwrap_or(false) {
+        result.insert("entries".to_owned(), Value::Null);
+        result.insert("entries_elided".to_owned(), Value::Bool(true));
+    }
+    if let Some(outcome) = result.get_mut("outcome").and_then(Value::as_object_mut) {
+        if outcome.get("entries").map(Value::is_array).unwrap_or(false) {
+            outcome.insert("entries".to_owned(), Value::Null);
+            outcome.insert("entries_elided".to_owned(), Value::Bool(true));
+        }
+    }
+    reply
+}
+
+fn record_write_done(state: &StoreState, request_id: &str, reply: &Value) {
+    let now = std::time::Instant::now();
+    let mut ledger = state
+        .write_ledger
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    prune_write_ledger(&mut ledger, now);
+    if let Some(entry) = ledger
+        .iter_mut()
+        .find(|entry| entry.request_id == request_id)
+    {
+        entry.recorded_at = now;
+        entry.state = WriteLedgerState::Done(elide_write_entries(reply));
+    }
+}
+
+fn handle_write_status(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
+    let request_id = params
+        .get("request_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| StoreError::Invalid("write_status needs request_id".into()))?;
+    let now = std::time::Instant::now();
+    let mut ledger = state
+        .write_ledger
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    prune_write_ledger(&mut ledger, now);
+    let Some(entry) = ledger.iter().find(|entry| entry.request_id == request_id) else {
+        return Ok(json!({"state": "unknown"}));
+    };
+    Ok(match &entry.state {
+        WriteLedgerState::InFlight => json!({"state": "in_flight"}),
+        WriteLedgerState::Done(reply) => json!({"state": "done", "reply": reply}),
+    })
 }
 
 /// The dispatch admission decision over client-shipped rows or the graph
@@ -3126,6 +3247,30 @@ fn api_mutation(
                 "version": payload.version,
             }))
         }
+        "decision_record" => {
+            let event: Value = input_of(params, "event")?;
+            let payload = api::decision_record(store, event)?;
+            Ok(json!({
+                "success": payload.success,
+                "event": payload.node,
+                "version": payload.version,
+            }))
+        }
+        "decision_retract" => {
+            let event: Value = input_of(params, "event")?;
+            let payload = api::decision_retract(store, event)?;
+            Ok(json!({
+                "success": payload.success,
+                "event": payload.node,
+                "version": payload.version,
+            }))
+        }
+        "decisions" => {
+            let node = params.get("node").and_then(Value::as_str);
+            let decision_id = params.get("decision_id").and_then(Value::as_str);
+            let rows = api::decisions(store, node, decision_id)?;
+            Ok(json!({ "rows": rows }))
+        }
         "node_batch_update" => {
             let ids: Vec<String> = input_of(params, "ids")?;
             let input: api::NodeUpdateInput = input_of(params, "input")?;
@@ -3346,6 +3491,7 @@ mod tests {
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+            write_ledger: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             last_write: Mutex::new(None),
             render_in_flight: std::sync::atomic::AtomicBool::new(false),
@@ -3412,6 +3558,92 @@ mod tests {
     }
 
     #[test]
+    fn write_status_reports_done_with_elided_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, r#"{"entries":[]}"#).unwrap();
+        let state = row_commit_state(graph.clone());
+        let begin = handle_begin(&state).unwrap();
+        let row = json!({"id": "x-written", "title": "written"});
+        let mut params = row_commit_params(&begin, row);
+        params["request_id"] = json!("r1");
+        let request = json!({"id": 1, "method": "commit_rows", "params": params});
+
+        let reply = handle_request(&state, &serde_json::to_vec(&request).unwrap());
+        assert_eq!(reply["ok"], json!(true));
+        let status = handle_request(
+            &state,
+            &serde_json::to_vec(&json!({
+                "id": 2,
+                "method": "write_status",
+                "params": {"request_id": "r1"}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(status["ok"], json!(true));
+        assert_eq!(status["result"]["state"], json!("done"));
+        assert_eq!(status["result"]["reply"]["ok"], json!(true));
+        assert_eq!(status["result"]["reply"]["result"]["entries"], Value::Null);
+        assert_eq!(
+            status["result"]["reply"]["result"]["entries_elided"],
+            json!(true)
+        );
+        let rows = graph_store::read_defaulted(&graph, false).unwrap();
+        assert_eq!(rows[0]["id"], json!("x-written"));
+    }
+
+    #[test]
+    fn write_status_reports_unknown_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, r#"{"entries":[]}"#).unwrap();
+        let state = row_commit_state(graph);
+        let status = handle_request(
+            &state,
+            &serde_json::to_vec(&json!({
+                "id": 1,
+                "method": "write_status",
+                "params": {"request_id": "nope"}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(status["ok"], json!(true));
+        assert_eq!(status["result"], json!({"state": "unknown"}));
+    }
+
+    #[test]
+    fn write_status_reports_in_flight_while_commit_waits_on_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, r#"{"entries":[]}"#).unwrap();
+        let state = std::sync::Arc::new(row_commit_state(graph));
+        let begin = handle_begin(&state).unwrap();
+        let row = json!({"id": "x-waiting", "title": "waiting"});
+        let mut params = row_commit_params(&begin, row);
+        params["request_id"] = json!("r-wait");
+        let request = json!({"id": 1, "method": "commit_rows", "params": params});
+        let gate = state.gate.write().unwrap();
+        let worker_state = std::sync::Arc::clone(&state);
+        let worker = std::thread::spawn(move || {
+            handle_request(&worker_state, &serde_json::to_vec(&request).unwrap())
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        let status = handle_request(
+            &state,
+            &serde_json::to_vec(&json!({
+                "id": 2,
+                "method": "write_status",
+                "params": {"request_id": "r-wait"}
+            }))
+            .unwrap(),
+        );
+        assert_eq!(status["ok"], json!(true));
+        assert_eq!(status["result"]["state"], json!("in_flight"));
+        drop(gate);
+        assert_eq!(worker.join().unwrap()["ok"], json!(true));
+    }
+
+    #[test]
     fn flipgate_soak_canonical_keeper_without_events_records_samples() {
         // AC12-HP: a canonical keeper with no --events journal still
         // records the parity sample in graph_meta.
@@ -3440,6 +3672,7 @@ mod tests {
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+            write_ledger: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             last_write: Mutex::new(None),
             render_in_flight: std::sync::atomic::AtomicBool::new(false),
@@ -3907,6 +4140,7 @@ mod tests {
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+            write_ledger: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             last_write: Mutex::new(None),
             render_in_flight: std::sync::atomic::AtomicBool::new(false),
@@ -4101,6 +4335,7 @@ mod tests {
             cache: RwLock::new(None),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
+            write_ledger: Mutex::new(std::collections::VecDeque::new()),
             gate_metrics: Mutex::new(GateMetrics::new()),
             last_write: Mutex::new(None),
             render_in_flight: std::sync::atomic::AtomicBool::new(false),

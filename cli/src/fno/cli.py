@@ -307,6 +307,7 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "carveout": set(),
     "claim": {"release"},
     "config": {"accounts", "get", "set"},
+    "decide": {"list", "reindex", "retract"},
     "do": set(),
     "doctor": set(),
     "evals": set(),

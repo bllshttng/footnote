@@ -64,7 +64,7 @@ def test_unset_and_gate_classes_stay_in_main(tmp_path: Path) -> None:
     append_event(
         _build(
             "review_coverage",
-            "test",
+            "hook",
             {"pr": 1, "coverage": "covered", "verdicts": [], "head_sha": "abc"},
         ),
         events_path=main,

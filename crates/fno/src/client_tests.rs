@@ -404,6 +404,7 @@ fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> Age
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: "worker".into(),
@@ -942,6 +943,7 @@ pub(super) fn focus_agent(pane: u64) -> AgentRow {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: "worker".into(),
@@ -2931,6 +2933,7 @@ fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> 
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(squad),
         name: name.into(),
@@ -3606,6 +3609,7 @@ fn view_with_dead_interleaved() -> View {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: name.into(),
@@ -3804,6 +3808,7 @@ fn section_header_is_clickable_but_never_selector_selectable() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(99), // no such squad -> orphan -> `~ elsewhere`
         name: "stray".into(),
@@ -4076,6 +4081,7 @@ fn elsewhere_section_live_only_hides_exited_orphans() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(99), // no such squad -> orphan
         name: name.into(),
@@ -4141,6 +4147,7 @@ fn section_header_caret_tracks_all_three_states() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(99),
         name: name.into(),
@@ -4265,6 +4272,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: "worker".into(),
@@ -4306,6 +4314,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         route: None,
         reach: Reach::Drive,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: None,
         name: "bg-claude".into(),
@@ -4346,6 +4355,7 @@ fn chrome_hit_agent_rows_focus_or_hint() {
         route: None,
         reach: Reach::Follow,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: None,
         name: "bg-other".into(),
@@ -4430,6 +4440,7 @@ fn chrome_hit_bottom_chrome_row_is_swallowed() {
             route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
+            lineage_kind: None,
             harness_session_id: None,
             squad: Some(1),
             name: format!("a{i}"),
@@ -4991,6 +5002,7 @@ fn row_menu_entries_gate_by_agent_state() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: None,
         name: name.into(),
@@ -5992,6 +6004,7 @@ async fn row_menu_disambiguates_same_named_agents() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: name.into(),
@@ -7845,6 +7858,7 @@ fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: name.into(),
@@ -8904,6 +8918,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
+                lineage_kind: None,
                 harness_session_id: None,
                 squad: Some(1),
                 name: "peer".into(),
@@ -8942,6 +8957,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
+                lineage_kind: None,
                 harness_session_id: None,
                 squad: Some(1),
                 name: "dead".into(),
@@ -8980,6 +8996,7 @@ fn client_compose_agent_rows_render_under_squads_with_badges() {
                 route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
+                lineage_kind: None,
                 harness_session_id: None,
                 squad: None,
                 name: "bg-watch".into(),
@@ -9096,6 +9113,7 @@ fn squad_header_rollup_counts_in_every_view_state() {
             route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
+            lineage_kind: None,
             harness_session_id: None,
             squad: Some(squad),
             name: name.into(),
@@ -9537,6 +9555,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
+                lineage_kind: None,
                 harness_session_id: None,
                 squad: None,
                 name: "z-exited".into(),
@@ -9575,6 +9594,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
+                lineage_kind: None,
                 harness_session_id: None,
                 squad: None,
                 name: "z-external".into(),
@@ -9613,6 +9633,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
+                lineage_kind: None,
                 harness_session_id: None,
                 squad: None,
                 name: "z-fnolive".into(),
@@ -9654,6 +9675,7 @@ fn external_live_row_is_dim_and_distinct_from_exited_and_fno_live() {
                 route: None,
                 reach: Reach::Locate,
                 spawned_by_session: None,
+                lineage_kind: None,
                 harness_session_id: None,
                 squad: None,
                 name: "z-extblocked".into(),
@@ -10175,6 +10197,7 @@ fn unified_rows_view() -> View {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad,
         name: name.into(),
@@ -10913,6 +10936,7 @@ fn peek_overlay_renders_loading_transcript_and_answerable() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: None,
         name: "w".into(),
@@ -11364,6 +11388,7 @@ async fn selector_x_on_a_tombstone_sends_dismiss() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: "cc-deadbeef".into(),
@@ -11424,6 +11449,7 @@ pub(super) fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRo
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: name.into(),
@@ -12474,6 +12500,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
+            lineage_kind: None,
             harness_session_id: None,
             squad: Some(1),
             name: "build".into(),
@@ -12512,6 +12539,7 @@ fn nav_rows_agent_label_carries_tab_ordinal() {
             route: None,
             reach: Reach::Locate,
             spawned_by_session: None,
+            lineage_kind: None,
             harness_session_id: None,
             squad: Some(1),
             name: "watcher".into(),
@@ -12589,6 +12617,7 @@ fn squad_rollup_bare_pane_folds_to_idle() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: name.into(),
@@ -12771,6 +12800,7 @@ async fn nav_goto_teleports_cross_squad_then_focuses() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(2),
         name: "stuck".into(),
@@ -13241,6 +13271,7 @@ fn nav_rows_lists_plain_panes_and_dedups_agent_panes() {
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: "worker".into(),
@@ -13418,6 +13449,7 @@ fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow
         route: None,
         reach: Reach::Locate,
         spawned_by_session: None,
+        lineage_kind: None,
         harness_session_id: None,
         squad: Some(1),
         name: name.into(),
@@ -13714,21 +13746,6 @@ fn missing_sort_values_stay_after_known_values_in_both_directions() {
             assert_eq!(descending.last().unwrap(), "age");
         }
     }
-}
-
-#[test]
-fn extended_sort_keeps_lineage_subtrees_together() {
-    let mut v = wide_view(vec![
-        lineage_row("zeta", 4, None),
-        lineage_row("alpha", 5, Some("sid-zeta")),
-        lineage_row("aardvark", 6, None),
-    ]);
-    set_density(&mut v, Density::Extended);
-    v.agent_sort = AgentSort::Squad;
-    let names = agent_order(&v);
-    assert_eq!(names, ["aardvark", "zeta", "alpha"]);
-    assert_eq!(rendered_depth(&v, "zeta"), 0);
-    assert_eq!(rendered_depth(&v, "alpha"), 1);
 }
 
 #[test]
@@ -14053,24 +14070,6 @@ fn extended_preserves_section_hierarchy_and_sorts_within_groups() {
     assert!(rows[backlog..]
         .iter()
         .any(|r| matches!(r, DisplayRow::Card(c) if c.id == "x-ready")));
-}
-
-#[test]
-fn extended_table_preserves_lineage_depth_in_rendered_agent_names() {
-    let mut v = wide_view(vec![
-        lineage_row("parent", 4, None),
-        lineage_row("child", 5, Some("sid-parent")),
-    ]);
-    set_density(&mut v, Density::Extended);
-    let rendered = frame_text(&v.compose());
-    let child_line = rendered
-        .lines()
-        .find(|line| line.contains("child"))
-        .unwrap();
-    assert!(
-        child_line.contains("  child"),
-        "child keeps lineage indent: {child_line:?}"
-    );
 }
 
 #[test]
@@ -14448,15 +14447,6 @@ fn crowned_row(name: &str, pane: u64, level: Option<u32>, scope: Option<&str>) -
     r
 }
 
-/// A crowned_row carrying a lineage edge: `parent` names another row's
-/// harness_session_id (None = a root). The row's own id is "sid-<name>".
-fn lineage_row(name: &str, pane: u64, parent: Option<&str>) -> AgentRow {
-    let mut r = crowned_row(name, pane, None, None);
-    r.harness_session_id = Some(format!("sid-{name}"));
-    r.spawned_by_session = parent.map(str::to_string);
-    r
-}
-
 /// The rendered order of agent-row names (post lineage layout).
 fn agent_order(v: &View) -> Vec<String> {
     v.display_rows()
@@ -14466,35 +14456,6 @@ fn agent_order(v: &View) -> Vec<String> {
             _ => None,
         })
         .collect()
-}
-
-#[test]
-fn lineage_child_sorts_beneath_its_parent_within_squad() {
-    let v = view_with_agents(vec![
-        lineage_row("worker-a", 2, Some("sid-king")),
-        lineage_row("king", 3, None),
-        lineage_row("worker-b", 4, Some("sid-king")),
-    ]);
-    // Pre-order: the parent first, its children beneath it keeping input
-    // order among siblings. Authority rank (crown_level) no longer moves a
-    // row; lineage does.
-    assert_eq!(agent_order(&v), vec!["king", "worker-a", "worker-b"]);
-}
-
-#[test]
-fn lineage_grandchild_renders_between_parent_and_later_sibling() {
-    let v = view_with_agents(vec![
-        lineage_row("king", 2, None),
-        lineage_row("child-a", 3, Some("sid-king")),
-        lineage_row("child-b", 4, Some("sid-king")),
-        lineage_row("grandchild", 5, Some("sid-child-a")),
-    ]);
-    // Pre-order nests the grandchild under ITS parent, ahead of the
-    // parent's later sibling.
-    assert_eq!(
-        agent_order(&v),
-        vec!["king", "child-a", "grandchild", "child-b"]
-    );
 }
 
 #[test]
@@ -14530,80 +14491,6 @@ fn rendered_depth(v: &View, name: &str) -> usize {
         })
         .map(|i| depths[i])
         .unwrap_or(0)
-}
-
-#[test]
-fn lineage_indent_is_depth_within_squad() {
-    let v = view_with_agents(vec![
-        lineage_row("king", 2, None),
-        lineage_row("dir", 3, Some("sid-king")),
-        lineage_row("ic", 4, Some("sid-dir")),
-    ]);
-    let steps = |name: &str| rendered_depth(&v, name);
-    assert_eq!(steps("king"), 0);
-    assert_eq!(steps("dir"), 1);
-    assert_eq!(steps("ic"), 2);
-
-    // A parent and a stranger leaf: the leaf is a ROOT (absent parent),
-    // never nested under a row it has no edge to.
-    let v2 = view_with_agents(vec![
-        lineage_row("king", 2, None),
-        lineage_row("stranger", 3, None),
-    ]);
-    let steps2 = |name: &str| rendered_depth(&v2, name);
-    assert_eq!(steps2("king"), 0);
-    assert_eq!(steps2("stranger"), 0);
-}
-
-#[test]
-fn lineage_indent_ignores_exited_parent_hidden_by_liveonly() {
-    // The indent must reference only rows that render: an exited parent
-    // dropped by a LiveOnly squad is ABSENT from the set, so its child
-    // roots rather than indenting under a phantom.
-    let mut parent = lineage_row("parent", 2, None);
-    parent.exited = true;
-    let child = lineage_row("child", 3, Some("sid-parent"));
-    let mut v = view_with_agents(vec![parent, child]);
-    let indent = |v: &View, name: &str| rendered_depth(v, name);
-    // Expanded: the exited parent still renders, so the child indents.
-    assert_eq!(indent(&v, "child"), 1);
-    // LiveOnly hides the exited parent -> absent from the rendered set ->
-    // the child is a root.
-    v.cycle_squad(1);
-    assert_eq!(v.squad_view(1), SectionView::LiveOnly);
-    assert_eq!(
-        indent(&v, "child"),
-        0,
-        "no phantom indent under a hidden parent"
-    );
-}
-
-#[test]
-fn lineage_nests_within_elsewhere_and_roots_strangers() {
-    // `~ elsewhere` now carries the same lineage join as the squads: an
-    // orphan spawned by another orphan nests beneath it, while an unrelated
-    // orphan stays flat (absent parent = root, never nested under a
-    // stranger).
-    let mut parent = lineage_row("orphan-parent", 2, None);
-    parent.squad = None;
-    let mut child = lineage_row("orphan-child", 3, Some("sid-orphan-parent"));
-    child.squad = None;
-    let mut stranger = lineage_row("orphan-stranger", 4, None);
-    stranger.squad = None;
-    // `~ elsewhere` defaults to Collapsed; open it so the nesting this
-    // test asserts actually renders (the depth vec only covers rows that
-    // paint - that is the point of the compose-pass design).
-    let mut v = view_with_agents(vec![parent, child, stranger]);
-    v.section_view
-        .insert(SectionKey::Elsewhere, SectionView::Expanded);
-    let indent = |name: &str| rendered_depth(&v, name);
-    assert_eq!(indent("orphan-parent"), 0);
-    assert_eq!(indent("orphan-child"), 1, "a child nests under its parent");
-    assert_eq!(
-        indent("orphan-stranger"),
-        0,
-        "no edge to either row: a root, not nested under a stranger"
-    );
 }
 
 #[test]
@@ -18257,3 +18144,6 @@ mod lifecycle_dispatch_tests;
 
 #[path = "client/tests/confirm_tests.rs"]
 mod confirm_tests;
+
+#[path = "client_tests/lineage_paint_tests.rs"]
+mod lineage_paint_tests;

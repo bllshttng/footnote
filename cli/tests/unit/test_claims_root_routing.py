@@ -56,3 +56,9 @@ def test_gate_key_routes_to_the_global_root() -> None:
     from fno.claims.io import claims_root_for, global_claims_root
 
     assert claims_root_for("gate:spawn") == global_claims_root()
+
+
+def test_worker_key_routes_to_the_global_root() -> None:
+    from fno.claims.io import claims_root_for, global_claims_root
+
+    assert claims_root_for("worker:probe-lane-lock") == global_claims_root()

@@ -124,7 +124,8 @@ pub const CANONICAL_FIELD_ORDER: &[&str] = &[
 pub const CHILD_SUMMARY_FIELDS: &[&str] = &["id", "title", "project", "status"];
 
 /// Fields whose change marks a node as human-curated "just now".
-const CURATION_FIELDS: &[&str] = &["status", "priority", "rank", "parent", "blocked_by", "size"];
+pub(crate) const CURATION_FIELDS: &[&str] =
+    &["status", "priority", "rank", "parent", "blocked_by", "size"];
 
 /// Legacy `priority` vocabulary -> current (constants.PRIORITY_MIGRATION).
 const PRIORITY_MIGRATION: &[(&str, &str)] = &[("high", "p1"), ("medium", "p2"), ("low", "p3")];
@@ -992,7 +993,7 @@ pub fn apply_readiness_overlay(entries: &mut [Value]) {
 
 /// The lock TTL, read from TASK_LOCK_TTL_HOURS at first use (statuses:
 /// LOCK_TTL_HOURS env read).
-fn lock_ttl_hours() -> f64 {
+pub(crate) fn lock_ttl_hours() -> f64 {
     static TTL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *TTL.get_or_init(|| {
         std::env::var("TASK_LOCK_TTL_HOURS")
@@ -1040,7 +1041,7 @@ pub fn lock_timestamp_quality(entry: &Value) -> &'static str {
 /// far above any legitimate do window (was live at 2.5 hours) and far
 /// above the seventeen-minute spawn-handover window that made look
 /// identical to a strand, so youth is never misread as strandedness.
-fn do_ttl_hours() -> f64 {
+pub(crate) fn do_ttl_hours() -> f64 {
     static TTL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
     *TTL.get_or_init(|| {
         std::env::var("TASK_DO_TTL_HOURS")
@@ -1885,7 +1886,7 @@ pub fn ensure_slugs(entries: &mut [Value]) -> usize {
 // Curation key + touched_at stamping
 // ---------------------------------------------------------------------------
 
-fn curation_key(entry: &Value) -> Value {
+pub(crate) fn curation_key(entry: &Value) -> Value {
     let mut parts = Vec::with_capacity(CURATION_FIELDS.len());
     for f in CURATION_FIELDS {
         match entry.get(*f) {
@@ -2502,7 +2503,7 @@ pub fn read_rows(path: &Path) -> Result<Vec<Value>, StoreError> {
         crate::backlog::Backend::Sqlite => {
             crate::backlog::read_entries(path).map_err(StoreError::Sqlite)?
         }
-        crate::backlog::Backend::Json => read_defaulted(path, false)?,
+        crate::backlog::Backend::Json => read_defaulted_opts(path, false, true)?,
     };
     apply_defaults(&mut rows, false);
     Ok(rows)
@@ -2574,15 +2575,21 @@ pub fn mutate_rows(
 /// contract). Applies defaults; junk rows are kept only when `keep_malformed`
 /// (load_graph's discovery caller needs them; ordinary reads filter).
 ///
-/// The soft read keeps `_read_json`'s corrupt side effect: the unreadable
-/// bytes are copied to a `.json.bak` sibling before the error surfaces, so
-/// the recovery the store's messages promise actually exists on disk.
+/// The strict read: an unreadable store is `Err`, never an empty answer, so
+/// a caller that misses on `Ok(vec![])` can only be reporting a genuinely
+/// absent node, never a read it could not make.
+///
+/// The soft read that degrades `MalformedRoot` to empty and copies the
+/// corrupt bytes to a `.json.bak` sibling first is the explicit
+/// `read_defaulted_opts(path, keep_malformed, true)` spelling.
 pub fn read_defaulted(path: &Path, keep_malformed: bool) -> Result<Vec<Value>, StoreError> {
-    read_defaulted_opts(path, keep_malformed, true)
+    read_defaulted_opts(path, keep_malformed, false)
 }
 
-/// The strict variant takes `backup_on_corrupt = false`: read_graph_strict's
-/// contract is that diagnosis is read-only and never writes a .bak.
+/// `backup_on_corrupt = true` is the soft read, the deliberate exception:
+/// a root with no entries key reads EMPTY, and corrupt bytes are copied to a
+/// `.json.bak` before the error surfaces. `false` is strict and read-only:
+/// `MalformedRoot`/`Corrupt` surface untouched and nothing is written.
 pub fn read_defaulted_opts(
     path: &Path,
     keep_malformed: bool,
@@ -2593,8 +2600,7 @@ pub fn read_defaulted_opts(
         Ok(RawRead::MalformedRoot) => {
             if backup_on_corrupt {
                 // Soft read: a root with no entries key reads EMPTY, never an
-                // error -- the malformed-root signal is reachable only through
-                // the strict path, exactly as the Python soft reader answered.
+                // error, exactly as the Python soft reader answered.
                 Ok(vec![])
             } else {
                 Err(StoreError::MalformedRoot(path.display().to_string()))

@@ -955,3 +955,21 @@ def _no_live_evidence_gate(monkeypatch):
     from fno import decide
 
     monkeypatch.setattr(decide, "_evidence_gate", _passthrough)
+
+
+def checkout_fno_agents_binary():
+    """This checkout's own fno-agents binary: $FNO_AGENTS_BIN, else the cargo
+    dev build under crates/fno-agents/target. resolve_binary() would prefer a
+    stale installed binary on PATH, which cannot test this tree. The same pick
+    producer-equivalence makes; a test needing the binary at import time
+    (module-level skipif) keeps its own copy there."""
+    env = os.environ.get("FNO_AGENTS_BIN", "")
+    if env:
+        p = Path(env)
+        return p if p.exists() else None
+    repo_root = Path(__file__).resolve().parents[2]
+    for profile in ("debug", "release"):
+        p = repo_root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
+        if p.exists():
+            return p
+    return None

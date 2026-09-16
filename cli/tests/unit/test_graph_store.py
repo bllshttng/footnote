@@ -1430,3 +1430,85 @@ def test_recv_exact_refuses_silent_close_midframe():
         _recv_exact(stream, 16_044_243)
     assert exc.value.state == STATE_SILENT
     assert exc.value.detail == "keeper closed the connection mid-frame"
+
+
+def test_sent_write_resolves_done_and_restores_elided_entries(monkeypatch):
+    from fno.graph import store as store_mod
+
+    client = store_mod._Keeper(Path("/tmp/graph.store.sock"))
+    replies = iter([
+        {
+            "state": "done",
+            "reply": {
+                "ok": True,
+                "result": {"entries": None, "entries_elided": True},
+            },
+        },
+        {"entries": [{"id": "x-written", "title": "written"}]},
+    ])
+    monkeypatch.setattr(store_mod._Keeper, "request", lambda self, method, params: next(replies))
+
+    result = client._resolve_write(
+        "r1", "commit_rows", store_mod.StoreUnavailable(store_mod.STATE_SILENT, "timed out")
+    )
+
+    assert result["entries"] == [{"id": "x-written", "title": "written"}]
+
+
+def test_sent_write_against_stale_keeper_is_unconfirmed(monkeypatch):
+    from fno.graph import store as store_mod
+
+    client = store_mod._Keeper(Path("/tmp/graph.store.sock"))
+    monkeypatch.setattr(
+        store_mod._Keeper,
+        "request",
+        lambda self, method, params: (_ for _ in ()).throw(
+            RuntimeError('store error (invalid): unknown store method "write_status"')
+        ),
+    )
+
+    with pytest.raises(store_mod.WriteUnconfirmed) as exc:
+        client._resolve_write(
+            "r1", "commit_rows", store_mod.StoreUnavailable(store_mod.STATE_SILENT, "timed out")
+        )
+    assert exc.value.state == store_mod.STATE_UNCONFIRMED
+    assert "commit_rows was sent" in str(exc.value)
+
+
+def test_unconfirmed_commit_names_changed_ids_before_retrying(tmp_path, monkeypatch):
+    from fno.graph import store as store_mod
+
+    class UnconfirmedClient:
+        path = tmp_path / "graph.json"
+
+        def request(self, method, params):
+            if method == "begin":
+                return {"version": "v1", "base_digests": {}, "entries": []}
+            if method == "commit_rows":
+                raise store_mod.WriteUnconfirmed(store_mod.STATE_UNCONFIRMED, "outcome unknown")
+            raise AssertionError(f"unexpected method {method}")
+
+    monkeypatch.setattr(store_mod, "_client_for", lambda _path: UnconfirmedClient())
+    with pytest.raises(store_mod.WriteUnconfirmed) as exc:
+        store_mod.commit_rows_via_store(
+            UnconfirmedClient.path,
+            lambda entries: entries + [{"id": "x-minted", "title": "minted"}],
+        )
+    assert exc.value.ids == ["x-minted"]
+    assert "x-minted" in str(exc.value)
+    assert "fno backlog get" in str(exc.value)
+
+
+def test_write_connect_failure_says_write_was_not_sent(monkeypatch):
+    from fno.graph import store as store_mod
+
+    client = store_mod._Keeper(Path("/tmp/graph.store.sock"))
+
+    def no_listener():
+        raise store_mod.StoreUnavailable(store_mod.STATE_NO_LISTENER, "nothing is listening")
+
+    monkeypatch.setattr(client, "_connect", no_listener)
+    with pytest.raises(store_mod.StoreUnavailable) as exc:
+        client.request("commit_rows", {})
+    assert not isinstance(exc.value, store_mod.WriteUnconfirmed)
+    assert "the write was not sent" in str(exc.value)

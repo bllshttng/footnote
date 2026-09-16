@@ -68,6 +68,23 @@ class SpawnDefaultsBlock(BaseModel):
         return {k: val for k, val in v.items() if isinstance(val, dict)}
 
 
+class DifficultyLaneBlock(BaseModel):
+    """One difficulty rung of ``profiles.<verb>.by_difficulty``.
+
+    Mirrors exactly what the Rust route-slot reader accepts inside an entry
+    (crates/fno-agents/src/route_slot.rs:903: lanes plus the three policy
+    leaves, nothing else). Any change to either side must move both.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    # Kept raw for the same reason as SpawnProfileBlock.lanes.
+    lanes: Any = Field(default_factory=list)
+    on_exhausted: str = ""
+    on_low: str = ""
+    on_unknown: str = ""
+
+
 class SpawnProfileBlock(SpawnDefaultsBlock):
     """Per-verb overlay plus its strict ordered delivery-lane vocabulary."""
 
@@ -75,3 +92,22 @@ class SpawnProfileBlock(SpawnDefaultsBlock):
     # Kept raw so a malformed routing list cannot fail every config read; the
     # spawn seam validates and refuses before launching anything.
     lanes: Any = Field(default_factory=list)
+    # Lane-capacity policy leaves, read by the Rust route-slot reader
+    # (crates/fno-agents/src/route_slot.rs ON_EXHAUSTED/ON_LOW/ON_UNKNOWN:
+    # queue|degrade|refuse, allow|prefer_healthy|skip, allow|skip). Empty =
+    # unset: the reader applies its own default, the same stance as
+    # model/effort above.
+    on_exhausted: str = ""
+    on_low: str = ""
+    on_unknown: str = ""
+    # Per-difficulty lane overrides; the seam checks keys are low|medium|high.
+    by_difficulty: dict[str, DifficultyLaneBlock] = Field(default_factory=dict)
+
+    @field_validator("by_difficulty", mode="before")
+    @classmethod
+    def _coerce_by_difficulty(cls, v: object) -> object:
+        """A non-mapping table, or a non-mapping rung, degrades to none,
+        mirroring ``_coerce_harness_overlays``."""
+        if not isinstance(v, dict):
+            return {}
+        return {k: val for k, val in v.items() if isinstance(val, dict)}

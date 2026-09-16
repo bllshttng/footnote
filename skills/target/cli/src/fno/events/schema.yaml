@@ -14,6 +14,11 @@
 #   4. CI parity test (test_validator_parity.py) runs both validators
 #      against the corpus; both must give the same verdict on every record.
 #
+# Data keys are OPEN: data.required must be present, data.forbidden is
+#   refused, and an undeclared key validates for every type. Extra keys
+#   are evidence, not series; trend and diff on declared keys. A builder
+#   function's keyword-only signature is a convenience, not the contract.
+#
 # Removing an event type:
 #   Add a `deprecated: <UTC ISO8601>` marker to the entry rather than
 #   deleting it outright. test_no_undocumented_deletions enforces the marker
@@ -34,10 +39,14 @@ envelope:
     source:
       type: string
       # single unified envelope. 'active-backlog' added (real emitter at
-      # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
-      # pattern sources, validated by both the Python and bash validators via the
-      # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal]
+      # daemon.rs). 'cli' added: provider_window_closing declared it in its
+      # own sources: list, but it was never in this enum, so every real emit
+      # (adapters/providers/cli.py:538) silently failed inside its own
+      # broad try/except and no row ever landed. Per-agent worker sources
+      # (worker:<id>, stream-worker:<id>) are pattern sources, validated by
+      # both the Python and bash validators via the `patterns` list below
+      # (previously only the parity-script layer checked them).
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, python, agents, observer, skill_diff, active-backlog, approvals, bash, config, pr-heal, cli]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -64,8 +73,8 @@ event_types:
 
   - name: graph_write_gate
     retention: durable
-    description: "Five-minute mergeable histogram for graph keeper write-gate contention."
-    sources: [daemon]
+    description: "Five-minute mergeable histogram for graph keeper write-gate contention. The single-row path emits one row per landed mutation with the same required fields as point values plus the `mutation` name; the audit keeps those rows out of the window merge."
+    sources: [daemon, backlog]
     data:
       required: [keeper_pid, window_started_ms, window_finished_ms, completed_window_seconds, wait_ms_bounds, wait_ms_counts, mutation_count, bytes_written, retry_count]
       properties:
@@ -78,6 +87,7 @@ event_types:
         mutation_count: { type: integer }
         bytes_written: { type: integer }
         retry_count: { type: integer }
+        mutation: { type: string, description: "The api mutation name; present on the single-row path's per-write rows." }
     consumers: [scripts/analysis/graph-write-gate-audit.py]
 
   - name: graph_export_failed
@@ -1685,7 +1695,11 @@ event_types:
 
   - name: session_satisfied
     description: "Signals that a target session's work is complete; alternative to <promise> tag emission. The stop hook scans for these and may auto-release the Stop hook when a fresh event matches the current session and the three-factor gates are still satisfied. Data.source is the constrained subsystem that produced the signal (check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated); envelope source is the producer identity."
-    sources: [target, megawalk, fno-loop, hook]
+    # 'backlog' added: cli/src/fno/graph/_reconcile.py's
+    # emit_session_satisfied_for_record stamps envelope source "backlog" for
+    # the post-merge reconcile path (trigger=pr_merge), a real live producer
+    # the earlier declaration missed.
+    sources: [target, megawalk, fno-loop, hook, backlog]
     data:
       required: [source, reason, session_id, gate_state_hash]
       properties:
@@ -2757,7 +2771,10 @@ event_types:
 
   - name: retire_holds
     description: "One row per daemon retire tick that HELD rows : every held id with its reason, detail, age and escalation flag, so a fleet question reads one event stream instead of parsing bucket counts. Zero holds writes nothing."
-    sources: [daemon]
+    # The live writer (loop_runtime.rs Journal::append) hardcodes envelope
+    # source "loop" for every kind it appends, including this one, even
+    # though the scheduler that ran the tick names itself "daemon" in data.
+    sources: [daemon, loop]
     data:
       required: [scheduler, holds]
       properties:
@@ -2917,6 +2934,29 @@ event_types:
         short_id:
           type: string
         archived_to:
+          type: string
+
+  - name: agent_spawn_accepted
+    retention: durable
+    description: "The spawn coordinator accepted a validated spawn request and allocated its spawn_id; recorded BEFORE any backend launch. An accepted record is not a live worker: the birth settles with agent_spawned or agent_spawn_failed, correlated by spawn_id."
+    sources: [daemon]
+    data:
+      required: [spawn_id, name]
+      properties:
+        spawn_id:
+          type: string
+          description: "The coordinator-allocated spawn-attempt id; correlates accepted, birth and receipt."
+        name:
+          type: string
+        origin:
+          type: object
+          description: "The validated SpawnOrigin (session parent or named non-session source)."
+        owner:
+          type: object
+          description: "The validated SpawnOwner (session, mission, crown, operator or test run)."
+        substrate:
+          type: string
+        harness:
           type: string
 
   - name: agent_spawn_failed
@@ -5557,8 +5597,8 @@ event_types:
           description: "The historical session's real session_id - no new ID scheme is minted for corpus items."
         dimension:
           type: string
-          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged, persona, surface_fit, uncovered_case, deletable, duplication]
-          description: "Which rubric dimension this finding scores. structural_validity was RETIRED 2026-09-12 : the failure-modes heading it graded is no longer refused, so it is kept in this enum only so historical events validate, and it is never emitted again. collision_free/shipped_outcome are the blueprint code dimensions (fold.BLUEPRINT_DIMENSIONS); persona/surface_fit/uncovered_case/deletable/duplication are the blueprint judge dimensions (fold.JUDGE_DIMENSIONS, model-graded, never replayable); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (sweep-only)."
+          enum: [structural_validity, collision_free, shipped_outcome, finding_precision, first_try_green, converged, persona, surface_fit, uncovered_case, deletable, duplication, epic_fit, mission_fit, customer_fit, code_truth]
+          description: "Which rubric dimension this finding scores. structural_validity was RETIRED 2026-09-12 : the failure-modes heading it graded is no longer refused, so it is kept in this enum only so historical events validate, and it is never emitted again. collision_free/shipped_outcome are the blueprint code dimensions (fold.BLUEPRINT_DIMENSIONS); persona/surface_fit/uncovered_case/deletable/duplication are the five question dimensions and epic_fit/mission_fit/customer_fit/code_truth the four source dimensions of the blueprint judge (JUDGE_DIMENSIONS in crates/fno-agents/src/blueprint_judge.rs, model-graded, never replayable); finding_precision is the review dimension (sweep-only, per Review Amendment A2); shipped_outcome/first_try_green/converged are the PR-anchored target dimensions (sweep-only)."
         verdict:
           type: string
           enum: [pass, degraded, fail]
@@ -5808,7 +5848,7 @@ event_types:
 
   - name: active_backlog_task_crashed
     description: "The active-backlog dispatch task panicked/exited unexpectedly; the daemon logged it and continues."
-    sources: [daemon]
+    sources: [daemon, active-backlog]
     data:
       required: []
       properties:
