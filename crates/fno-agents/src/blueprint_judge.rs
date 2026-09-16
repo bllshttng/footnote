@@ -1079,8 +1079,15 @@ mod tests {
         let spawn = move |_name: &str, _: &str, _: &Path, _: u64, _: &str| {
             Ok((0, reply.to_string(), String::new()))
         };
-        let (verdict, reason) =
-            judge_plan("a plan", "", "epic_fit", dir.path(), &lenses, Some(bundle), &spawn);
+        let (verdict, reason) = judge_plan(
+            "a plan",
+            "",
+            "epic_fit",
+            dir.path(),
+            &lenses,
+            Some(bundle),
+            &spawn,
+        );
         assert_eq!(verdict.as_deref(), Some("fail"));
         assert!(reason.contains("the epic already covers this"));
     }
@@ -1097,8 +1104,15 @@ mod tests {
         let spawn = move |_name: &str, _: &str, _: &Path, _: u64, _: &str| {
             Ok((0, reply.to_string(), String::new()))
         };
-        let (verdict, reason) =
-            judge_plan("a plan", "", "epic_fit", dir.path(), &lenses, Some(bundle), &spawn);
+        let (verdict, reason) = judge_plan(
+            "a plan",
+            "",
+            "epic_fit",
+            dir.path(),
+            &lenses,
+            Some(bundle),
+            &spawn,
+        );
         assert_eq!(verdict, None);
         assert!(reason.starts_with("unverified evidence: "));
     }
@@ -1107,15 +1121,16 @@ mod tests {
     fn code_truth_resolves_and_reports_missing() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n").unwrap();
-        let plan = format!(
-            "cites `a.rs:5` and `ghost.rs:3` and `a.rs:99`\n"
-        );
+        let plan = format!("cites `a.rs:5` and `ghost.rs:3` and `a.rs:99`\n");
         let bundle = code_bundle(&plan, dir.path()).expect("citations resolved");
         assert!(bundle.contains("4\tl4"), "context line above: {bundle}");
         assert!(bundle.contains("5\tl5"));
         assert!(bundle.contains("6\tl6"));
         assert!(bundle.contains("MISSING ghost.rs"), "{bundle}");
-        assert!(bundle.contains("OUT OF RANGE a.rs:99 (8 lines)"), "{bundle}");
+        assert!(
+            bundle.contains("OUT OF RANGE a.rs:99 (8 lines)"),
+            "{bundle}"
+        );
     }
 
     #[test]
@@ -1133,7 +1148,10 @@ mod tests {
         assert!(bundle.contains("## Siblings"), "{bundle}");
         assert!(bundle.contains("x-b done Node B"), "{bundle}");
         assert!(!bundle.contains("Node A"), "self excluded: {bundle}");
-        assert!(!bundle.contains("Node C"), "other-parent excluded: {bundle}");
+        assert!(
+            !bundle.contains("Node C"),
+            "other-parent excluded: {bundle}"
+        );
         // a node without a parent has no epic source
         assert_eq!(epic_bundle(Some("x-e1"), &entries, dir.path()), None);
     }
@@ -1143,8 +1161,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".fno");
         std::fs::create_dir_all(&cfg).unwrap();
-        std::fs::write(cfg.join("config.toml"), "[project]\nvision = \"Keep one monorepo and one brand.\"\n").unwrap();
-        let bundle = mission_bundle(None, &[], dir.path()).expect("config vision counts as a source");
-        assert!(bundle.contains("Keep one monorepo and one brand."), "{bundle}");
+        std::fs::write(
+            cfg.join("config.toml"),
+            "[project]\nvision = \"Keep one monorepo and one brand.\"\n",
+        )
+        .unwrap();
+        let bundle =
+            mission_bundle(None, &[], dir.path()).expect("config vision counts as a source");
+        assert!(
+            bundle.contains("Keep one monorepo and one brand."),
+            "{bundle}"
+        );
     }
 }
