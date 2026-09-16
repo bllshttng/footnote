@@ -94,6 +94,7 @@ pub mod component_update;
 pub mod court_fold;
 pub mod cursor_agent;
 pub mod daemon;
+pub mod decision_index;
 pub mod delivery_completion;
 pub mod digest;
 pub mod disposition_gate;
