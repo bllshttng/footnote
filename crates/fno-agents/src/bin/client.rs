@@ -272,7 +272,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::naming::run_name_parse();
     }
     if matches!(verb, "name-codes") {
-        return fno_agents::naming::run_name_codes();
+        return fno_agents::naming::run_name_codes(&args[1..]);
     }
 
     // `review-summary` is the display-line author for a pre-push reviewed PR:

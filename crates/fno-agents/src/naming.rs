@@ -415,7 +415,8 @@ fn node_shape() -> &'static Regex {
 
 /// Parse `[<source>-]<verb>-<identity>`, else None. Positional grammar: the
 /// first token is a source only when the second is a verb, so a node prefix
-/// colliding with a code cannot misread. Pre-cutover names are not canonical.
+/// colliding with a code cannot misread. Pre-cutover `target-`/`think-`
+/// names resolve through the legacy read window.
 pub fn parse_dispatch_agent_name(name: Option<&str>) -> Option<Parsed> {
     let name = name?;
     if name.is_empty() {
@@ -433,6 +434,10 @@ pub fn parse_dispatch_agent_name(name: Option<&str>) -> Option<Parsed> {
     } else if dispatch_verbs().contains(tokens[0]) {
         source = None;
         verb = tokens[0];
+        rest = &tokens[1..];
+    } else if tokens[0] == "target" || tokens[0] == "think" {
+        source = None;
+        verb = if tokens[0] == "target" { "t" } else { "th" };
         rest = &tokens[1..];
     } else {
         return None;
@@ -603,9 +608,56 @@ pub fn run_name_parse() -> i32 {
     0
 }
 
+/// The CI provenance audit's invariants on one row list: expected count, site
+/// uniqueness, the two `ab` rows, and vocabulary membership. Empty means the
+/// inventory is sound. Byte-matches the retired Python audit's problem texts.
+fn provenance_problems(
+    rows: &[(String, String, String)],
+    sources: &HashSet<String>,
+    verbs: &HashSet<String>,
+) -> Vec<String> {
+    let mut problems: Vec<String> = Vec::new();
+    if rows.len() != 17 {
+        problems.push(format!("expected 17 coded paths, found {}", rows.len()));
+    }
+    let sites: HashSet<&String> = rows.iter().map(|(s, _, _)| s).collect();
+    if sites.len() != rows.len() {
+        problems.push("duplicate site labels in the inventory".to_string());
+    }
+    if rows.iter().filter(|(_, s, _)| s == "ab").count() != 2 {
+        problems.push("both active-backlog rows must carry ab".to_string());
+    }
+    for (site, source, verb) in rows {
+        if !sources.contains(source) {
+            problems.push(format!("{site}: unknown source {source:?}"));
+        }
+        if !verbs.contains(verb) && verb != "resolved" {
+            problems.push(format!("{site}: unknown verb {verb:?}"));
+        }
+    }
+    problems
+}
+
 /// `fno-agents name-codes --json`: the vocabulary tables for thin readers.
-pub fn run_name_codes() -> i32 {
+/// `--check` runs the CI provenance audit: rows, problems, marker, exit 1 on
+/// any defect.
+pub fn run_name_codes(args: &[String]) -> i32 {
     let c = codes();
+    if args.iter().any(|a| a == "--check") {
+        let problems = provenance_problems(&c.provenance, &c.sources, &c.verbs);
+        for (site, source, verb) in &c.provenance {
+            println!("{site}\t{source}\t{verb}");
+        }
+        for problem in &problems {
+            eprintln!("error: {problem}");
+        }
+        if !problems.is_empty() {
+            return 1;
+        }
+        // The marker CI greps; the retired Python audit printed the same bytes.
+        println!("dispatch provenance: 17/17 coded");
+        return 0;
+    }
     let json = serde_json::json!({
         "sources": c.sources.iter().collect::<Vec<_>>(),
         "verbs": c.verbs.iter().collect::<Vec<_>>(),
@@ -776,8 +828,22 @@ mod tests {
         let p = parse_dispatch_agent_name(Some("ro-t-session-abcd1234")).unwrap();
         assert!(p.node.is_none());
         assert_eq!(p.tail, "session-abcd1234");
-        // Pre-cutover names are not canonical.
-        assert!(parse_dispatch_agent_name(Some("target-x-aaaa-1")).is_none());
+        // Pre-cutover names resolve through the legacy read window.
+        let legacy = parse_dispatch_agent_name(Some("target-x-aaaa-1")).unwrap();
+        assert_eq!(legacy.source.as_deref(), None);
+        assert_eq!(
+            (
+                legacy.verb.as_str(),
+                legacy.node.as_deref(),
+                legacy.tail.as_str()
+            ),
+            ("t", Some("x-aaaa"), "1")
+        );
+        let legacy = parse_dispatch_agent_name(Some("think-x-aaaa-retro")).unwrap();
+        assert_eq!(
+            (legacy.verb.as_str(), legacy.node.as_deref()),
+            ("th", Some("x-aaaa"))
+        );
         assert!(parse_dispatch_agent_name(Some("j-x-cccc-2")).is_none());
     }
 
@@ -848,6 +914,20 @@ mod tests {
         assert!(provenance_rows().len() >= 17);
         let disc = slug_component(Some("Path Consolidation: Wave 0"), SLUG_CAP);
         assert_eq!(disc, "path-consolidation-wave-0");
+    }
+
+    #[test]
+    fn name_codes_check_refuses_an_unknown_source() {
+        // A doctored row list exercises the audit's negative path without
+        // breaking the real inventory: an unknown source names the site.
+        let rows = vec![("x-site".to_string(), "zz".to_string(), "t".to_string())];
+        let problems = provenance_problems(&rows, dispatch_sources(), dispatch_verbs());
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("x-site: unknown source \"zz\"")),
+            "expected the unknown-source problem, got {problems:?}"
+        );
     }
 
     #[test]
