@@ -1500,8 +1500,36 @@ fn settle_blocker_detail(graph: &GraphRead, node: &str) -> String {
     }
 }
 
-/// The one retirement pass. Every I/O seam (`read_graph`, `store_matches`,
-/// `age_many`, `stop_confirmed`, `tree_probe`, `prune_tree`) is injected so a
+/// An adopted row keeps only while there is a session to own it. Two
+/// positive markers say a row is a registry corpse, and only they let the
+/// origin gate skip the row: a recorded pid that answered ESRCH, or a
+/// claude row provably absent from a KNOWN roster snapshot (the same
+/// predicate the `rm` live gate applies, so "what counts as absent" cannot
+/// diverge between the two call sites). An unknown snapshot, a partial
+/// list, a missing pid that answers nothing: each keeps the row - absence
+/// alone never authorizes a reap. The snapshot is a subprocess read, so
+/// the roster leg fires only for a row quiet past the grace: a fresh
+/// adopted row cannot pass a later gate anyway, and keeps without the
+/// read, exactly as before.
+fn origin_corpse(
+    e: &state::RegistryEntry,
+    quiet_past_grace: bool,
+    agents_memo: &std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>>,
+    agents_read: &dyn Fn() -> crate::claude_roster::ClaudeAgentsSnapshot,
+) -> bool {
+    if e.pid.is_some_and(crate::daemon::pid_is_gone) {
+        return true;
+    }
+    if quiet_past_grace && e.harness_name() == "claude" {
+        let mut memo = agents_memo.borrow_mut();
+        let snapshot = memo.get_or_insert_with(|| agents_read());
+        return crate::daemon::roster_death::claude_row_provably_absent(
+            Some(snapshot),
+            crate::daemon::roster_death::claude_row_id(e).as_deref(),
+        );
+    }
+    false
+}
 /// test stages the world; production wiring is [`crate::gc::gc_sweep`] /
 /// [`crate::gc::gc_sweep_dry_run`]. `agents_read` is the same kind of seam
 /// for the `claude agents --json --all` snapshot: read at most once per
@@ -1619,11 +1647,20 @@ pub(crate) fn run_with_release(
     // One batched age read for the whole sweep: the seam answers
     // every candidate through one single-flighted read, keyed by row handle.
     // A row the seam does not answer reads None, and None is never quiet.
+    // A non-spawn row is staged too so a proven corpse can fall through to
+    // the normal pipeline: spawned rows always, plus the two corpse legs'
+    // populations (a row whose pid answers, and claude rows whose quiet
+    // fact the pass-2 origin gate reads). The roster snapshot itself stays
+    // lazy - the subprocess read fires in pass 2, quiet rows only.
     let age_entries: Vec<&state::RegistryEntry> = registry
         .entries
         .iter()
         .filter(|e| {
-            e.origin.as_deref() == Some("spawn") && e.crown_level.is_none() && graph.is_some()
+            e.crown_level.is_none()
+                && graph.is_some()
+                && (e.origin.as_deref() == Some("spawn")
+                    || e.pid.is_some_and(crate::daemon::pid_is_gone)
+                    || e.harness_name() == "claude")
         })
         .collect();
     let ages = age_many(&age_entries);
@@ -1650,7 +1687,10 @@ pub(crate) fn run_with_release(
     let mut staged: Vec<Option<(ProvenanceVerdict, Option<i64>)>> =
         Vec::with_capacity(registry.entries.len());
     for e in &registry.entries {
-        let eligible = e.origin.as_deref() == Some("spawn") && e.crown_level.is_none();
+        let eligible = e.crown_level.is_none()
+            && (e.origin.as_deref() == Some("spawn")
+                || e.pid.is_some_and(crate::daemon::pid_is_gone)
+                || e.harness_name() == "claude");
         if !eligible {
             staged.push(None);
             continue;
@@ -1676,6 +1716,11 @@ pub(crate) fn run_with_release(
     // so the open-PR keep can ask whether the PEER drives the PR.
     let mut live_peer: HashMap<String, (String, String, String)> = HashMap::new();
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
+        // A corpse is never a live successor: only a spawned row's own
+        // liveness can supersede a peer on the same node.
+        if e.origin.as_deref() != Some("spawn") {
+            continue;
+        }
         let Some((verdict, age)) = staged_row else {
             continue;
         };
@@ -1717,12 +1762,20 @@ pub(crate) fn run_with_release(
         // The origin gate runs BEFORE the graph read so a row fno never
         // spawned is named by its own gate whatever the graph's state - the
         // policy's own order (gc_decide checks origin first), not shadowed by
-        // kept_graph_unreadable.
-        if e.origin.as_deref() != Some("spawn") {
-            summary
-                .kept_not_spawn
-                .push((id, e.origin.clone().unwrap_or_default()));
-            continue;
+        // kept_graph_unreadable. One exit: a proven corpse has no session
+        // left to own it, so it falls through to the normal pipeline and is
+        // judged like any other row. The roster leg waits for a row quiet
+        // past the grace, so the subprocess read never fires for a row that
+        // could not pass a later gate anyway.
+        let is_spawn = e.origin.as_deref() == Some("spawn");
+        if !is_spawn {
+            let quiet = matches!(staged_row, Some((_, Some(a))) if *a > grace_secs);
+            if !origin_corpse(e, quiet, &agents_memo, agents_read) {
+                summary
+                    .kept_not_spawn
+                    .push((id, e.origin.clone().unwrap_or_default()));
+                continue;
+            }
         }
         let Some(graph) = &graph else {
             summary.kept_graph_unreadable.push(id);
@@ -2038,6 +2091,7 @@ pub(crate) fn run_with_release(
             open_pr,
             peer_drives_pr,
             pr_settled,
+            origin_corpse: !is_spawn,
         };
         let (mut action, mut reason) = gc_decide(&row, grace_secs);
         // d-81c6da7e: a release matched to the planning hold answers the

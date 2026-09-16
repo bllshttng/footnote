@@ -129,6 +129,11 @@ pub struct GcRow {
     /// session has nothing left to drive, so the row releases like any
     /// other finished work and falls to the grace gate.
     pub pr_settled: bool,
+    /// An adopted row that is provably a registry corpse: a claude row
+    /// absent from a KNOWN roster snapshot, or a recorded pid that answered
+    /// ESRCH. The origin gate skips such a row, so it is judged like any
+    /// other row; every downstream gate still applies.
+    pub origin_corpse: bool,
 }
 
 impl GcRow {
@@ -282,8 +287,10 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
     // Only a row fno itself spawned retires. An `adopted` row (a session the
     // operator took over) or a row with no origin recorded is someone else's
     // fact about a session, and done-plus-quiet does not make it fno's to
-    // remove.
-    if row.origin.as_deref() != Some("spawn") {
+    // remove - unless the row is provably a registry corpse, in which case
+    // there is no session left to own it and the row is judged like any
+    // other: every downstream gate still applies.
+    if row.origin.as_deref() != Some("spawn") && !row.origin_corpse {
         let origin = row.origin.clone().unwrap_or_default();
         return (GcAction::Keep, Some(KeepReason::NotSpawn { origin }));
     }
@@ -1108,7 +1115,15 @@ mod tests {
     }
 
     fn wait_for_retire_row(path: &std::path::Path) -> usize {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        wait_for_retire_row_within(path, 5)
+    }
+
+    /// The longer bound for registries whose rows the age seam must probe
+    /// through a real subprocess: an adopted claude row in a sandbox has no
+    /// transcript store, so the probe runs out its whole timeout before the
+    /// sweep classifies and the tick lands.
+    fn wait_for_retire_row_within(path: &std::path::Path, secs: u64) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(secs);
         loop {
             let n = count_retire_rows(path);
             if n >= 1 {
@@ -1282,7 +1297,10 @@ mod tests {
                 Duration::from_secs(300),
                 tab_sweep,
             );
-            wait_for_retire_row(&home.events_jsonl());
+            // The production seams probe staged rows through real
+            // subprocesses; in a sandbox without a transcript store those
+            // probes run out their whole timeout before the tick lands.
+            wait_for_retire_row_within(&home.events_jsonl(), 30);
             std::fs::read_to_string(home.events_jsonl())
                 .unwrap()
                 .lines()
@@ -1957,6 +1975,7 @@ mod tests {
             open_pr: None,
             peer_drives_pr: false,
             pr_settled: false,
+            origin_corpse: false,
         }
     }
 
@@ -2899,6 +2918,24 @@ mod tests {
         );
     }
 
+    /// An adopted row that is provably a corpse is judged like any other:
+    /// the origin gate skips it, and a done-and-quiet adopted row retires
+    /// through the same gates a spawn row takes. A live adopted row keeps
+    /// under the unchanged not-a-spawn reason.
+    #[test]
+    fn an_adopted_corpse_is_judged_like_any_other_row() {
+        let mut corpse = retiring();
+        corpse.origin = Some("adopted".into());
+        corpse.origin_corpse = true;
+        assert_eq!(gc_decide(&corpse, GRACE), (GcAction::Retire, None));
+        let mut live = retiring();
+        live.origin = Some("adopted".into());
+        assert!(matches!(
+            gc_decide(&live, GRACE),
+            (GcAction::Keep, Some(KeepReason::NotSpawn { .. }))
+        ));
+    }
+
     /// Change 8: a provably dead pid (ESRCH) overrides transcript recency,
     /// but never transcript UNRESOLVED - absence is not quiet even for a
     /// dead pid, because a dead pid says nothing about the transcript.
@@ -2962,6 +2999,7 @@ mod tests {
             open_pr: None,
             peer_drives_pr: false,
             pr_settled: false,
+            origin_corpse: false,
         };
         assert_eq!(gc_decide(&row, 60).0, GcAction::Keep);
     }
@@ -2994,6 +3032,7 @@ mod tests {
             open_pr: Some((node.into(), pr)),
             peer_drives_pr: false,
             pr_settled: false,
+            origin_corpse: false,
         }
     }
 

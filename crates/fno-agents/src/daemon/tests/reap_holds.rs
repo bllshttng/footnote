@@ -1110,3 +1110,155 @@ fn the_sweep_asks_the_pr_once_the_row_is_quiet() {
     );
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+// ── an adopted row keeps only while there is a session to own it ────────
+
+/// The high path: an adopted claude row absent from a KNOWN roster
+/// snapshot, named on a done-and-merged node, quiet past the grace, retires
+/// through the normal pipeline - `kept_not_spawn` does not name it.
+#[test]
+fn an_adopted_corpse_absent_from_a_known_roster_retires() {
+    let home = tmp_home("gc-corpse-hp");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = claude_worker_row("ac-row", "acrow000");
+        row.origin = Some("adopted".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+
+    let mut graph = graph_read(
+        &[("acrow000-1111-2222-3333-444444444444", "NM", "done")],
+        &[],
+    )
+    .unwrap();
+    graph
+        .pr_state
+        .insert("NM".into(), (Some("merged".into()), 0, 0));
+    // A KNOWN snapshot listing nothing: absence from it is positive death
+    // evidence, the same predicate the rm live gate applies.
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![]);
+
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        false,
+        Some(graph),
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| true,
+    );
+
+    assert_eq!(
+        summary.retired.len(),
+        1,
+        "retired: {:?}, kept_not_spawn: {:?}",
+        summary.retired,
+        summary.kept_not_spawn
+    );
+    assert_eq!(summary.retired[0].0, "acrow000");
+    assert!(
+        summary.kept_not_spawn.is_empty(),
+        "{:?}",
+        summary.kept_not_spawn
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// The failed read: the same corpse row with a snapshot that reads unknown
+/// keeps under `not a spawn row` - an unread instrument is never absence.
+#[test]
+fn an_adopted_row_with_an_unknown_snapshot_keeps() {
+    let home = tmp_home("gc-corpse-unknown");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut row = claude_worker_row("au-row", "aurow000");
+        row.origin = Some("adopted".into());
+        r.entries.push(row);
+    })
+    .unwrap();
+
+    let graph = graph_read(
+        &[("aurow000-1111-2222-3333-444444444444", "NM", "done")],
+        &[],
+    );
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        true,
+        graph,
+        &|_| Some(vec![quiet.clone()]),
+        no_agents(),
+        &|_| true,
+    );
+
+    assert_eq!(summary.retired, vec![], "{:?}", summary.retired);
+    assert_eq!(
+        summary.kept_not_spawn,
+        vec![("aurow000".to_string(), "adopted".to_string())],
+        "{:?}",
+        summary.kept_not_spawn
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// Presence in a known snapshot keeps, whatever the node reads; and a codex
+/// row (no claude roster, no pid) with no death marker keeps too - the
+/// corpse predicate has exactly two legs and nothing else satisfies it.
+#[test]
+fn an_adopted_row_with_a_live_roster_row_or_no_probe_keeps() {
+    let home = tmp_home("gc-corpse-live");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let transcripts = tempfile::tempdir().unwrap();
+    let quiet = quiet_transcript(transcripts.path(), "quiet.jsonl", 7200);
+    state::update_registry(&home.registry_json(), |r| {
+        let mut present = claude_worker_row("pr-row", "prrow000");
+        present.origin = Some("adopted".into());
+        r.entries.push(present);
+        let mut codex = ask_row("cx-row", None);
+        codex.short_id = "cxrow000".into();
+        codex.harness = Some("codex".into());
+        codex.harness_session_id = Some("sess-cx".into());
+        codex.origin = Some("adopted".into());
+        r.entries.push(codex);
+    })
+    .unwrap();
+
+    let graph = graph_read(
+        &[
+            ("prrow000-1111-2222-3333-444444444444", "NM", "done"),
+            ("sess-cx", "NM", "done"),
+        ],
+        &[],
+    );
+    let agents = crate::claude_roster::ClaudeAgentsSnapshot::known(vec![
+        crate::claude_roster::ClaudeAgentRow::new("prrow000", Some("idle")),
+    ]);
+    let summary = evidence_sweep(
+        &home,
+        &emitter,
+        900,
+        true,
+        graph,
+        &|_| Some(vec![quiet.clone()]),
+        agents,
+        &|_| true,
+    );
+
+    assert_eq!(summary.retired, vec![], "{:?}", summary.retired);
+    let kept: Vec<&str> = summary
+        .kept_not_spawn
+        .iter()
+        .map(|(id, _)| id.as_str())
+        .collect();
+    assert_eq!(kept.len(), 2, "{:?}", summary.kept_not_spawn);
+    assert!(kept.contains(&"prrow000"), "{:?}", summary.kept_not_spawn);
+    assert!(kept.contains(&"cxrow000"), "{:?}", summary.kept_not_spawn);
+    std::fs::remove_dir_all(home.root()).ok();
+}
