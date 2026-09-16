@@ -447,7 +447,7 @@ pub fn shadow_sync(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    let _report = write_changed(&transaction, before, after)?;
+    let _report = write_changed(&transaction, before, after, false)?;
     stamp_version(&transaction, json_version)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(database_path(graph))
@@ -464,7 +464,7 @@ pub fn authoritative_sync(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    let report = write_changed(&transaction, before, after)?;
+    let report = write_changed(&transaction, before, after, true)?;
     let version = content_version(after);
     stamp_version(&transaction, &version)?;
     transaction.commit().map_err(|error| error.to_string())?;
@@ -611,7 +611,7 @@ fn mutate_single_row_once(
             );
         }
     }
-    write_changed(&transaction, &rows, &working)?;
+    write_changed(&transaction, &rows, &working, true)?;
     nodes::recompute_status(&transaction)?;
     let rows_after = export_rows(&transaction)?;
     let version = content_version(&rows_after);
@@ -704,6 +704,7 @@ pub(crate) fn write_changed(
     connection: &Connection,
     before: &[Value],
     after: &[Value],
+    strict: bool,
 ) -> Result<WriteReport, String> {
     fn by_id(rows: &[Value]) -> std::collections::BTreeMap<String, &Value> {
         rows.iter()
@@ -750,8 +751,13 @@ pub(crate) fn write_changed(
         }
         match new {
             Some(body) => {
-                let mut node = Node::from_json(body)
-                    .map_err(|error| format!("row {id} is unrepresentable: {error}"))?;
+                let mut node = match Node::from_json(body) {
+                    Ok(node) => node,
+                    Err(error) if strict => {
+                        return Err(format!("row {id} is unrepresentable: {error}"));
+                    }
+                    Err(_) => continue,
+                };
                 node.ordinal = ordinals.get(id.as_str()).copied().unwrap_or(0);
                 save_aggregate(connection, &node)?;
                 report.present_ids.push(id);
@@ -1690,7 +1696,7 @@ mod tests {
             .unwrap()
             .insert("completion_note".to_string(), Value::Null);
         let connection = open(&graph).unwrap();
-        let written = write_changed(&connection, &before_with_null, &after).unwrap();
+        let written = write_changed(&connection, &before_with_null, &after, true).unwrap();
         assert_eq!(
             written.present_ids.len(),
             1,
@@ -1714,6 +1720,34 @@ mod tests {
 
         assert!(error.contains("ab-one"), "error names the dropped row: {error}");
         assert!(error.contains("status"), "error names the parse failure: {error}");
+    }
+
+    #[test]
+    fn shadow_sync_skips_an_unrepresentable_row_without_refusing_the_publish() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after[0]["status"] = Value::String("not-a-status".into());
+
+        shadow_sync(&graph, &before, &after, "sha256:next").unwrap();
+
+        let connection = open(&graph).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "sha256:next");
+        let status: String = connection
+            .query_row("SELECT status FROM nodes WHERE id = 'ab-one'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "idea");
     }
 
     #[test]
