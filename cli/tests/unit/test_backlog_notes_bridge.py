@@ -45,42 +45,22 @@ def test_notes_missing_binary_exits_2_naming_the_remedy(monkeypatch):
     assert "fno doctor update --rust" in result.output
 
 
-def test_note_receipt_echo_survives_a_closed_pipe(monkeypatch):
+def test_note_receipt_echo_survives_a_really_closed_stdout():
+    """A genuinely closed pipe (read end gone, write end sitting on fd 1)
+    must not raise out of the receipt echo: the note has landed by then."""
     import os as os_module
-
-    import typer
+    import sys
 
     from fno.graph import note_cli
 
-    calls = {}
-
-    def _echo_broken(line):
-        raise BrokenPipeError()
-
-    def _fake_dup2(src, dst):
-        calls["dup2"] = (src, dst)
-
-    monkeypatch.setattr(typer, "echo", _echo_broken)
-    monkeypatch.setattr(os_module, "dup2", _fake_dup2)
-
-    note_cli._echo_receipt("noted x-1: hi")
-    assert "dup2" in calls
-
-
-def test_note_receipt_echo_tolerates_a_failed_devnull_swap(monkeypatch):
-    import os as os_module
-
-    import typer
-
-    from fno.graph import note_cli
-
-    def _echo_broken(line):
-        raise BrokenPipeError()
-
-    def _open_fails(*args, **kwargs):
-        raise OSError()
-
-    monkeypatch.setattr(typer, "echo", _echo_broken)
-    monkeypatch.setattr(os_module, "open", _open_fails)
-
-    note_cli._echo_receipt("noted x-1: hi")
+    read_fd, write_fd = os_module.pipe()
+    os_module.close(read_fd)
+    saved = os_module.dup(1)
+    os_module.dup2(write_fd, 1)
+    os_module.close(write_fd)
+    try:
+        note_cli._echo_receipt("noted x-1: the receipt that survived")
+    finally:
+        os_module.dup2(saved, 1)
+        os_module.close(saved)
+    sys.stdout.flush()
