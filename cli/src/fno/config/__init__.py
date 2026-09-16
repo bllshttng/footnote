@@ -3740,6 +3740,8 @@ class WorktreeBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     policy: Optional[str] = None
+    # Read by setup-worktree.sh (wt_config "auto_install"); true skips nothing.
+    auto_install: bool = True
 
 
 class ArtifactConfig(BaseModel):

@@ -570,6 +570,11 @@ FIELD_META: dict[str, Meta] = {
         "`never` launches code payloads in place (e.g. an Obsidian vault checkout). A per-project "
         "work.workspaces.<slug>.projects[].worktree key overrides it.",
     ),
+    "worktree.auto_install": Meta(
+        "advanced",
+        "Run dependency install when a new worktree is set up (scripts/setup/setup-worktree.sh); "
+        "set false to skip it. Default true.",
+    ),
     # --- config.routing.* (config-first routing inventory) ---
     "routing.models": Meta(
         "never", "The routing inventory: {name, harness, model, route, account, band, effort, cost_per_mtok_in, context} rows. A row OVERRIDES the built-in of the same name per field; a new name EXTENDS the set. Declare none and the grid records no-inventory-declared; the fallback only keeps tier requests answerable. `fno_routing_sample/routing_sample.toml` ships as a labelled sample.",
