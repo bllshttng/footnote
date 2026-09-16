@@ -120,8 +120,8 @@ pub fn run_flight_acquire(args: &[String]) -> i32 {
         // An explicit --pid names the calling process, which holds the lease
         // for its whole run: stamp holder-process so the classifier reads the
         // pid's verdict and a live writing session never heals an expired
-        // lease (the x-20e5 bug shape). Without --pid the pid is this
-        // short-lived binary and the stamp would lie.
+        // lease. Without --pid the pid is this short-lived binary and the
+        // stamp would lie.
         pid_provenance: pid.map(|_| claims::HOLDER_PROCESS.to_string()),
         root: root.clone(),
         events_dir,
