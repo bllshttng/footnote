@@ -6,7 +6,9 @@ bridge keeps the recipient walk, evidence checks, identity, and transport.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -114,15 +116,30 @@ def cmd_note(
             "revision": receipt.get("revision"),
             "routed": receipt.get("routed"),
         }
-        typer.echo(json.dumps(note, separators=(",", ":")))
+        _echo_receipt(json.dumps(note, separators=(",", ":")))
     else:
-        typer.echo(f"noted {receipt.get('node_id') or task_id}: {text}")
+        _echo_receipt(f"noted {receipt.get('node_id') or task_id}: {text}")
     warn_if_note_is_long(text)
     # Terminal-routed notes delivered too: the write went to history, but the
     # bound readers are still the people to tell.
     if not isinstance(readers, NoteReaders):
         return
     raise typer.Exit(code=deliver(readers, text, json_output=json_output))
+
+
+def _echo_receipt(line: str) -> None:
+    """Print the note receipt, tolerating a reader that closed the pipe.
+    The store write has landed by the time this runs; a display failure
+    must not turn a landed note into a reported failure."""
+    try:
+        typer.echo(line)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except OSError:
+            pass
 
 
 def _receipt(stdout: str) -> Optional[dict]:

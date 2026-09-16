@@ -18,6 +18,7 @@ pub mod note_history;
 pub mod note_migrate;
 pub mod patch;
 pub mod pull_requests;
+pub mod receipt;
 pub mod relations;
 pub mod sessions;
 
