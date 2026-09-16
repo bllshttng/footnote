@@ -1108,6 +1108,7 @@ mod tests {
         ));
         let home = AgentsHome::at(&dir);
         home.ensure_root().unwrap();
+        crate::paths::pin_test_claims_root(&dir.join("claims-root"));
         (dir, home)
     }
 
@@ -1482,6 +1483,7 @@ mod tests {
         // (home.root().parent()/graph.json) answers dir/graph.json.
         let home = AgentsHome::at(dir.path().join("agents"));
         home.ensure_root().unwrap();
+        crate::paths::pin_test_claims_root(dir.path());
         std::fs::write(
             dir.path().join("graph.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -1744,6 +1746,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let home = AgentsHome::at(root.path().join("agents"));
         home.ensure_root().unwrap();
+        crate::paths::pin_test_claims_root(root.path());
         let cwd = root.path().join("repo");
         std::fs::create_dir_all(cwd.join(".fno")).unwrap();
         std::fs::write(

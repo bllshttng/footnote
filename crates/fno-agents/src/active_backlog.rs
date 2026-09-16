@@ -3074,6 +3074,7 @@ mod tests {
         // booted) is kept for BOOT_GRACE_TICKS reconcile passes, then counted as
         // a crash. Uses a unique fake node id (naturally Free at the global root).
         let tmp = tempfile::TempDir::new().unwrap();
+        crate::paths::pin_test_claims_root(tmp.path());
         let record = tmp.path().join("fno-calls.txt");
         let fno = stub_fno(&tmp.path().join("bin"), &record);
         let cfg = test_cfg(tmp.path(), fno, 3);
@@ -3113,6 +3114,7 @@ mod tests {
         // decided on the spot. Only a dispatch still ref-less after the grace is
         // a dead dispatch.
         let tmp = tempfile::TempDir::new().unwrap();
+        crate::paths::pin_test_claims_root(tmp.path());
         let record = tmp.path().join("fno-calls.txt");
         let fno = stub_fno_get(
             &tmp.path().join("bin"),

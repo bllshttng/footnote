@@ -2155,6 +2155,7 @@ mod tests {
         // identity, not the spelling, decides. The healthy textual match
         // short-circuits before any syscall in the common case.
         let dir = temp_dir();
+        crate::paths::pin_test_claims_root(&dir);
         let home = dir.join("home");
         let expected = home
             .join("Library")
