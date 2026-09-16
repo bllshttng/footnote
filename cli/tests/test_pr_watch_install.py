@@ -820,6 +820,8 @@ def _patch_heal_claims(monkeypatch, *, held=False, probe=None, probe_raises=Fals
         return sf.Flight(key=key, holder="pr-watch-heal:other", held=held)
 
     monkeypatch.setattr(sf, "acquire_flight", _acquire)
+    # The fake's release must not reach the real binary and claims root.
+    monkeypatch.setattr(sf.Flight, "release", lambda self: None)
     return acquired
 
 

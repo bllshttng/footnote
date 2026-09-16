@@ -202,7 +202,7 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     exits when the budget trips or an opted-in parent dies. The thread stops
     once the claim file is gone; os._exit is safe because graph writes commit
     server-side and reconcile is idempotent."""
-    root = claims_root_for(flight.key) or Path.home()
+    root = flight.root or claims_root_for(flight.key) or Path.home()
     stack_path = root / ".fno" / "flight" / f"stack-{os.getpid()}.txt"
     fh = None
     try:
@@ -214,7 +214,7 @@ def _arm_flight_watchdog(flight: "Flight", verb: str) -> Optional[IO[str]]:
     budget_s = float(r) if (r := os.environ.get("FNO_FLIGHT_BUDGET_S", "")).replace(".", "", 1).isdigit() else _FLIGHT_BUDGET_DEFAULT_S
     parent_pid = int(p) if (p := os.environ.get("FNO_DIE_WITH_PARENT", "")).isdigit() else None
     start = time.monotonic()
-    claim_file = claim_path(flight.key, root=claims_root_for(flight.key))
+    claim_file = claim_path(flight.key, root=flight.root or claims_root_for(flight.key))
 
     def _watch() -> None:
         while claim_file.exists():
