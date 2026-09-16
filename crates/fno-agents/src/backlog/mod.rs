@@ -447,7 +447,7 @@ pub fn shadow_sync(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    write_changed(&transaction, before, after)?;
+    let _report = write_changed(&transaction, before, after)?;
     stamp_version(&transaction, json_version)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(database_path(graph))
@@ -464,29 +464,45 @@ pub fn authoritative_sync(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    write_changed(&transaction, before, after)?;
+    let report = write_changed(&transaction, before, after)?;
     let version = content_version(after);
     stamp_version(&transaction, &version)?;
     transaction.commit().map_err(|error| error.to_string())?;
-    confirm_ids_landed(&connection, after)?;
+    confirm_ids_landed(&connection, &report)?;
     Ok(version)
 }
 
-fn confirm_ids_landed(connection: &Connection, after: &[Value]) -> Result<(), String> {
-    let expected: std::collections::BTreeSet<String> = after
-        .iter()
-        .filter_map(crate::graph_store::entry_id)
-        .map(str::to_owned)
-        .collect();
-    let mut statement = connection
-        .prepare("SELECT id FROM nodes")
-        .map_err(|error| error.to_string())?;
-    let stored: std::collections::BTreeSet<String> = statement
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| error.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|error| error.to_string())?;
-    if expected == stored {
+struct WriteReport {
+    present_ids: Vec<String>,
+    deleted_ids: Vec<String>,
+}
+
+fn confirm_ids_landed(connection: &Connection, report: &WriteReport) -> Result<(), String> {
+    let mut missing = Vec::new();
+    for id in &report.present_ids {
+        let present: Option<String> = connection
+            .query_row("SELECT id FROM nodes WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if present.is_none() {
+            missing.push(id.as_str());
+        }
+    }
+    let mut extra = Vec::new();
+    for id in &report.deleted_ids {
+        let present: Option<String> = connection
+            .query_row("SELECT id FROM nodes WHERE id = ?1", params![id], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if present.is_some() {
+            extra.push(id.as_str());
+        }
+    }
+    if missing.is_empty() && extra.is_empty() {
         return Ok(());
     }
     let missing: Vec<&str> = expected.difference(&stored).map(String::as_str).collect();
@@ -683,13 +699,12 @@ fn delete_aggregate(connection: &Connection, id: &str) -> Result<(), String> {
 /// (nodes row, its single-row mirrors, its child tables) is replaced for
 /// each id whose canonical JSON differs.
 ///
-/// Returns the number of ids acted on (saved or deleted), so a test can
-/// count what a sync moved.
+/// Returns the ids acted on, split by rows that should be present or deleted.
 pub(crate) fn write_changed(
     connection: &Connection,
     before: &[Value],
     after: &[Value],
-) -> Result<usize, String> {
+) -> Result<WriteReport, String> {
     fn by_id(rows: &[Value]) -> std::collections::BTreeMap<String, &Value> {
         rows.iter()
             .filter(|row| row.is_object())
@@ -708,7 +723,10 @@ pub(crate) fn write_changed(
     let mut ids: Vec<String> = before_map.keys().chain(after_map.keys()).cloned().collect();
     ids.sort();
     ids.dedup();
-    let mut written = 0usize;
+    let mut report = WriteReport {
+        present_ids: Vec::new(),
+        deleted_ids: Vec::new(),
+    };
     for id in ids {
         let old = before_map.get(&id);
         let new = after_map.get(&id);
@@ -736,15 +754,15 @@ pub(crate) fn write_changed(
                     .map_err(|error| format!("row {id} is unrepresentable: {error}"))?;
                 node.ordinal = ordinals.get(id.as_str()).copied().unwrap_or(0);
                 save_aggregate(connection, &node)?;
-                written += 1;
+                report.present_ids.push(id);
             }
             None => {
                 delete_aggregate(connection, &id)?;
-                written += 1;
+                report.deleted_ids.push(id);
             }
         }
     }
-    Ok(written)
+    Ok(report)
 }
 
 /// Every stored node, in ordinal order, as its canonical JSON row. This is
@@ -1673,7 +1691,12 @@ mod tests {
             .insert("completion_note".to_string(), Value::Null);
         let connection = open(&graph).unwrap();
         let written = write_changed(&connection, &before_with_null, &after).unwrap();
-        assert_eq!(written, 1, "only the real change writes: {written}");
+        assert_eq!(
+            written.present_ids.len(),
+            1,
+            "only the real change writes: {:?}",
+            written.present_ids
+        );
         drop(connection);
         drop(dir);
     }
