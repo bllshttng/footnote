@@ -152,22 +152,7 @@ source adds a regex to `source.patterns`. Both validators (Python
 `validate()` and `events-validate.sh`) accept a source that matches the
 enum OR any pattern; CI catches missed updates.
 
-Matching the enum or a pattern is only the first half of the rule.
-Every event type also declares its own `sources:` list in schema.yaml,
-and since 2026-09-16 `validate()` enforces it: a source outside a
-type's declared list is refused even when it is a legal envelope
-value, unless it matches a worker pattern (no type enumerates
-per-agent workers by name). A type with no `sources:` key is
-undeclared, not unenforced by oversight, so it fails open rather than
-blocking a producer that predates the key. When you add a new
-producer for an existing type, add its source to that type's
-`sources:` list rather than relying on the envelope enum alone; a
-value only in the enum will validate at the envelope level and then
-be refused at the type level. `test` stays legal only where a type
-lists it - it is not a universal escape hatch for fixtures anymore,
-and `fno doctor event emit` refuses to default to it silently: with no
-target session and no `--source`, it names the type's declared list
-and exits nonzero instead of guessing a producer.
+Matching the enum or a pattern is only the first half of the rule. Every event type also declares its own `sources:` list in schema.yaml. Since 2026-09-16 `validate()` enforces that list too, unless the source matches a worker pattern (no type enumerates per-agent workers by name). A source outside a type's declared list is refused, even when the envelope enum allows it. A type with no `sources:` key stays undeclared, not unenforced by oversight, so it fails open instead of blocking a producer that predates the key. Add a new producer's source to the type's `sources:` list, not just the envelope enum, or the row validates at the envelope level and fails at the type level. `test` stays legal only where a type lists it. It is no longer a universal escape hatch for fixtures. With no target session and no `--source`, `fno doctor event emit` names the type's declared sources and exits nonzero instead of guessing a producer.
 
 ## Three event types you'll touch most
 
