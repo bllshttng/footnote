@@ -25,9 +25,10 @@
 # same rule as production code - it may not grow either.
 #
 # The Python tree under cli/src/fno is shrink-only as a TREE, net: Python is
-# the compatibility shell, Rust is the product. Net growth above the allowance
-# is refused, so a bug fix never has to port a verb to land, while a feature -
-# larger than the allowance - does. The remedy is to port the verb to crates/,
+# the compatibility shell, Rust is the product. New code lands in crates/, and
+# a Python edit is a port or a deletion; plans meet that rule at blueprint time
+# in validate-plan.sh. This tally is the push-time backstop: net growth above
+# the allowance is refused. The remedy is to port the verb to crates/,
 # land the feature in Rust, or refactor the growth away: per-harness DATA
 # belongs in the capability contract, long prose belongs in docs/, and
 # duplicate blocks belong behind one loop. An operator can grant a one-PR
@@ -88,21 +89,6 @@ case "$PY_ALLOWANCE" in '' | *[!0-9]*)
     echo "check-file-budget: PY_TREE_ALLOWANCE must be a number, got '$PY_ALLOWANCE'" >&2
     exit 2 ;;
 esac
-# AGENTS.md restates this allowance on the SessionStart surface, because the
-# number decides a language before any gate runs. A restatement that drifts is
-# the failure that restatement exists to prevent, so the owner asserts it.
-# Two anchors: a repo whose AGENTS.md names this gate clearly opted to
-# restate; and the pitfalls corpus pins THIS repo's own surface even if the
-# whole bullet is deleted (the corpus outlives any one bullet). Skipped under
-# an env override (that value is caller configuration, not the stated rule)
-# and in repos that ship this script with neither anchor.
-if [[ -z "${PY_TREE_ALLOWANCE:-}" && -f AGENTS.md ]] \
-        && { grep -q 'check-file-budget\.sh' AGENTS.md || grep -q '## Pitfalls corpus' AGENTS.md; } \
-        && ! grep -qF "net +$PY_ALLOWANCE" AGENTS.md; then
-    echo "check-file-budget: AGENTS.md no longer quotes the tree allowance (net +$PY_ALLOWANCE)." >&2
-    echo "       The file-budget bullet must state the number an agent reads before choosing a language." >&2
-    exit 2
-fi
 REMOTE="${PR_REMOTE:-origin}"
 BASE_REF="${PR_BASE_REF:-main}"
 EXC_LABEL="${FILE_BUDGET_EXCEPTION_LABEL:-}"
