@@ -1270,7 +1270,17 @@ def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -
     name = _re.sub(r"-{2,}", "-", name)
     if name.endswith("-.md"):
         name = name[: -len("-.md")] + ".md"
-    return name.lstrip("-")
+    name = name.lstrip("-")
+    if node:
+        from fno.plan.identity import plan_filename_node_id
+
+        rendered_node = plan_filename_node_id(name)
+        if rendered_node != node:
+            rendered = rendered_node or "no node id"
+            raise ValueError(
+                f"plan filename {name!r} names {rendered}, but requested node {node!r}"
+            )
+    return name
 
 
 def plan_doc_path(
