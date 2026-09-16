@@ -11,6 +11,7 @@ import pytest
 
 from fno.pr.closure import (
     bind_created_pr,
+    BranchResolutionError,
     ClosureQueryError,
     bind_closure_claims,
     contained_descendant_ids,
@@ -18,6 +19,7 @@ from fno.pr.closure import (
     parse_closure_trailer,
     render_closure_trailer,
     render_pr_closure_trailer,
+    resolve_branch_node_id,
 )
 
 
@@ -42,6 +44,62 @@ def test_bind_created_pr_maps_one_real_branch_node_and_owner():
     assert entries[0]["pr_url"] == "https://github.com/o/r/pull/1038"
     assert entries[0]["locked_by"] == "worker-session"
     assert entries[0]["session_id"] == "worker-session"
+
+
+# --- resolve_branch_node_id (the --from-branch producer, x-5625) -----------
+
+
+def _git_runner(stdout: str = "", returncode: int = 0, stderr: str = ""):
+    def _run(cmd, **kwargs):
+        return SimpleNamespace(stdout=stdout, returncode=returncode, stderr=stderr)
+
+    return _run
+
+
+def test_resolve_branch_node_id_returns_the_one_real_node():
+    assert (
+        resolve_branch_node_id(
+            frozenset({"x-1111"}), runner=_git_runner(stdout="feature/x-1111-cache")
+        )
+        == "x-1111"
+    )
+
+
+def test_resolve_branch_node_id_refuses_a_non_node_branch():
+    with pytest.raises(BranchResolutionError, match="main"):
+        resolve_branch_node_id(
+            frozenset({"x-1111"}), runner=_git_runner(stdout="main")
+        )
+
+
+def test_resolve_branch_node_id_loud_when_no_candidate_is_real():
+    # The branch names x-2222 but the graph does not carry it: refusing loudly
+    # is the whole point - silent empty is how trailer-less PR 2080 shipped.
+    with pytest.raises(BranchResolutionError, match="0 real node"):
+        resolve_branch_node_id(
+            frozenset({"x-1111"}), runner=_git_runner(stdout="feature/x-2222-x")
+        )
+
+
+def test_resolve_branch_node_id_refuses_ambiguous_branches():
+    with pytest.raises(BranchResolutionError, match="2 real node"):
+        resolve_branch_node_id(
+            frozenset({"x-1111", "x-2222"}),
+            runner=_git_runner(stdout="batch/x-1111-x-2222"),
+        )
+
+
+def test_resolve_branch_node_id_refuses_detached_head():
+    with pytest.raises(BranchResolutionError, match="detached"):
+        resolve_branch_node_id(frozenset({"x-1111"}), runner=_git_runner(stdout=""))
+
+
+def test_resolve_branch_node_id_refuses_git_failure():
+    with pytest.raises(BranchResolutionError, match="lookup failed"):
+        resolve_branch_node_id(
+            frozenset({"x-1111"}),
+            runner=_git_runner(returncode=128, stderr="fatal: not a git repository"),
+        )
 
 
 def test_bind_created_pr_is_idempotent():

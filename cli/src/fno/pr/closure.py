@@ -171,6 +171,68 @@ def known_node_ids() -> frozenset[str]:
         return frozenset()
 
 
+class BranchResolutionError(Exception):
+    """Bare-verb branch resolution could not find exactly one real node; the message names why."""
+
+
+def _read_current_branch(
+    *,
+    cwd: Optional[str] = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> str:
+    """The checked-out branch name; "" when HEAD is detached.
+
+    The one branch read both consuming producers share (the bare-verb
+    resolver and the created-PR binder), so the two can never drift.
+    """
+    try:
+        proc = runner(
+            ["git", "branch", "--show-current"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BranchResolutionError(f"branch lookup failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise BranchResolutionError(
+            f"branch lookup failed: {(proc.stderr or '').strip()}"
+        )
+    return (proc.stdout or "").strip()
+
+
+def resolve_branch_node_id(
+    known_ids: frozenset[str],
+    *,
+    cwd: Optional[str] = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> str:
+    """The one real graph node the current branch names - the bare verb's producer.
+
+    A branch-derived candidate is a guess verified against the graph, the same
+    rule ``bind_created_pr`` applies at bind time: exactly one well-formed
+    segment must name a node ``known_ids`` carries. Zero (a non-node branch)
+    and more than one (ambiguous) both refuse: the caller is about to MINT a
+    closure claim, and one wrong id voids the whole binding at merge. Unlike
+    ``known_node_ids`` the failure here is loud - the caller reads the
+    exception, never an empty set - because silent empty is how a trailer-less
+    PR ships and reds CI an hour later.
+    """
+    head_ref = _read_current_branch(cwd=cwd, runner=runner)
+    if not head_ref:
+        raise BranchResolutionError("current branch is unknown (detached HEAD?)")
+    real = [nid for nid in branch_node_ids(head_ref) if nid in known_ids]
+    if len(real) != 1:
+        named = f" ({', '.join(real)})" if real else ""
+        raise BranchResolutionError(
+            f"branch '{head_ref}' names {len(real)} real node(s){named}; "
+            "bare resolution needs exactly one - pass the node explicitly instead"
+        )
+    return real[0]
+
+
 def ensure_closure_trailer(
     body: str,
     head_ref: str,
@@ -470,17 +532,9 @@ def bind_created_pr_from_branch(
     authoritative = node_id.strip() if isinstance(node_id, str) and node_id.strip() else None
     if head_ref is None and authoritative is None:
         try:
-            proc = runner(
-                ["git", "branch", "--show-current"],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=5,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            return ClosureBindResult(outcome="refused", refusal=f"branch lookup failed: {exc}")
-        head_ref = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+            head_ref = _read_current_branch(cwd=cwd, runner=runner)
+        except BranchResolutionError as exc:
+            return ClosureBindResult(outcome="refused", refusal=str(exc))
     head_ref = head_ref or ""
     if not head_ref and authoritative is None:
         return ClosureBindResult(outcome="refused", refusal="current branch is unknown")
