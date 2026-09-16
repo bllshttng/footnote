@@ -309,3 +309,207 @@ fn consecutive_alone_does_not_enable_graduation() {
 fn usage_error_exits_2() {
     assert_eq!(run_evals_trend(&[]), 2);
 }
+
+// --- attempt-aware denominators + the planned view -------------------------
+
+fn modern_row_json(task_id: &str, tier: &str, passed: bool, ts: &str, attempt: usize) -> String {
+    json!({
+        "ts": ts, "task_id": task_id, "tier": tier, "pass": passed,
+        "attempt_index": attempt,
+        "obs": {"fixture_prepared": true, "worker_required": false,
+                 "grader_ran": true, "grader_passed": passed},
+    })
+    .to_string()
+}
+
+fn infra_row_json(task_id: &str, tier: &str, ts: &str) -> String {
+    json!({
+        "ts": ts, "task_id": task_id, "tier": tier, "pass": false,
+        "obs": {"fixture_prepared": false, "worker_required": true},
+    })
+    .to_string()
+}
+
+#[test]
+fn report_infra_attempt_never_dilutes_the_pass_rate() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            modern_row_json("t", "regression", true, &ts_rfc(1.0, now), 0),
+            infra_row_json("t", "regression", &ts_rfc(1.1, now)),
+        ],
+    );
+    let rows = read_rows(&h, Some("baseline"), None);
+    let report = report_fold(&rows, 7, now, None, None);
+    let t = &report["tasks"][0];
+    assert_eq!(t["runs"], 2);
+    assert_eq!(t["grades"], 1);
+    assert_eq!(t["passes"], 1);
+    assert_eq!(t["pass_at_1"], serde_json::json!(1.0)); // not 0.5
+    assert_eq!(t["attempts"]["infrastructure"], 1);
+    assert_eq!(t["legacy_fold"], false);
+    assert!(report["regression_alarm"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn report_all_legacy_segment_keeps_the_boolean_fold() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            row_json("old", "regression", true, &ts_rfc(2.0, now)),
+            row_json("old", "regression", false, &ts_rfc(1.0, now)),
+        ],
+    );
+    let rows = read_rows(&h, Some("baseline"), None);
+    let report = report_fold(&rows, 7, now, None, None);
+    let t = &report["tasks"][0];
+    assert_eq!(t["runs"], 2);
+    assert_eq!(t["grades"], 0);
+    assert_eq!(t["passes"], 1);
+    assert_eq!(t["pass_at_1"], serde_json::json!(0.5));
+    assert_eq!(t["legacy_fold"], true);
+    // The old boolean fold still fires the regression alarm.
+    assert_eq!(report["regression_alarm"], serde_json::json!(["old"]));
+}
+
+#[test]
+fn report_planned_view_exposes_missing_attempts() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            modern_row_json("t", "regression", true, &ts_rfc(1.0, now), 0),
+            // planned q2 never ran
+        ],
+    );
+    let rows = read_rows(&h, Some("baseline"), None);
+    let mut planned = BTreeMap::new();
+    planned.insert("t".to_string(), 2usize);
+    planned.insert("q2".to_string(), 1usize);
+    let report = report_fold(&rows, 7, now, None, Some(&planned));
+    let tasks = report["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 1); // a rowless planned task stays visible only via --planned
+    let t = &tasks[0];
+    assert_eq!(t["expected_attempts"], 2);
+    assert_eq!(t["missing_attempts"], 1);
+    assert_eq!(t["completion"], serde_json::json!(0.5));
+}
+
+#[test]
+fn planned_bad_json_is_usage() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[row_json("t", "regression", true, &ts_rfc(1.0, now))],
+    );
+    let out = run_evals_trend(&[
+        "--history".into(),
+        h,
+        "--mode".into(),
+        "report".into(),
+        "--planned".into(),
+        "{not json".into(),
+        "--now".into(),
+        now.to_rfc3339(),
+    ]);
+    assert_eq!(out, 2);
+}
+
+#[test]
+fn read_rows_skips_corrupt_lines() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let good = row_json("a", "regression", true, &ts_rfc(1.0, now));
+    let h = write_history(&tmp, &[good]);
+    // An interrupted append leaves a truncated JSON fragment with no newline.
+    {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(&h).unwrap();
+        write!(f, "{{\"task_id\": \"b\", \"pa").unwrap();
+    }
+    let rows = read_rows(&h, Some("baseline"), None);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the truncated fragment is skipped, not fatal"
+    );
+    assert_eq!(rows[0].task_id, "a");
+}
+
+#[test]
+fn summary_carries_the_staleness_fields() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            row_json("r", "regression", true, &ts_rfc(1.0, now)),
+            row_json("c", "capability", true, &ts_rfc(0.5, now)),
+        ],
+    );
+    let v = summary_payload(&h, 7, now);
+    assert_eq!(v["row_count"], json!(2));
+    assert_eq!(v["never_ran"], json!(false));
+    let age = v["age_days"].as_f64().unwrap();
+    assert!(
+        (age - 1.0).abs() < 0.001,
+        "newest regression ts is 1 day old, got {age}"
+    );
+    assert_eq!(v["stale"], json!(false));
+}
+
+#[test]
+fn summary_stale_when_newest_regression_exceeds_the_window() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[row_json("r", "regression", true, &ts_rfc(9.0, now))],
+    );
+    let v = summary_payload(&h, 7, now);
+    assert_eq!(v["stale"], json!(true));
+    assert_eq!(v["never_ran"], json!(false));
+}
+
+#[test]
+fn summary_never_ran_when_no_regression_rows() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[row_json("c", "capability", true, &ts_rfc(0.1, now))],
+    );
+    let v = summary_payload(&h, 7, now);
+    assert_eq!(v["never_ran"], json!(true));
+    assert_eq!(v["stale"], json!(false));
+    assert_eq!(v["age_days"], json!(null));
+    assert_eq!(v["row_count"], json!(1));
+}
+
+#[test]
+fn summary_row_count_counts_baseline_rows_only() {
+    let now = now_pinned();
+    let tmp = TempDir::new().unwrap();
+    let h = write_history(
+        &tmp,
+        &[
+            row_json("r", "regression", true, &ts_rfc(1.0, now)),
+            format!(
+                "{{\"task_id\":\"r\",\"tier\":\"regression\",\"pass\":true,\"ts\":\"{}\",\"variant\":\"v1\"}}",
+                ts_rfc(0.5, now)
+            ),
+        ],
+    );
+    let v = summary_payload(&h, 7, now);
+    assert_eq!(
+        v["row_count"],
+        json!(1),
+        "v1 rows stay out of the baseline fold"
+    );
+}

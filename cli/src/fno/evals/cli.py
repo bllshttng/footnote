@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Callable, NoReturn, Optional
 
 import typer
 
@@ -136,6 +136,35 @@ def run_command(
     except Exception:  # noqa: BLE001
         repo_root = Path.cwd()
 
+    # A declared cohort split is validated BEFORE any worker call - one
+    # native door call: membership, overlap, duplicates, bank rev.
+    import json
+
+    from fno.evals.bank import COHORTS_FILENAME, _cohort_door
+
+    cohorts_yaml = bank_dir / COHORTS_FILENAME
+    if cohorts_yaml.exists():
+        rc, gate = _cohort_door([
+            "--cohorts-yaml", str(cohorts_yaml),
+            "--known-ids", json.dumps([t.id for t in tasks]),
+            "--repo", str(repo_root),
+        ])
+        if gate.get("error"):
+            typer.echo(f"Error: cohort split refused: {gate['error']}", err=True)
+            raise typer.Exit(code=2)
+        if rc != 0 or gate.get("ok") is not True:
+            for err in gate.get("errors") or [f"native cohort door failed ({rc})"]:
+                typer.echo(f"Error: cohort split refused: {err}", err=True)
+            raise typer.Exit(code=2)
+        if gate.get("bank_unchanged") is False:
+            typer.echo(
+                "Error: cohort split is pinned to a bank rev the bank has changed since; "
+                "redeclare cohorts.yaml against the current bank.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        typer.echo(f"validated cohort split against {gate.get('bank_unchanged') and 'the current bank' or 'its pin'}")
+
     swept = sweep_orphans(repo_root)
     if swept:
         typer.echo(f"swept {swept} orphaned eval worktree(s) from a prior run")
@@ -177,6 +206,13 @@ def report_command(ctx: typer.Context) -> None:
     _forward_evals_native(ctx.args, "report")
 
 
+_AGENTS_BIN_HINT = (
+    "fno doctor evals: the fno-agents binary was not found. It ships in the "
+    "`pip install fno` wheel and with the plugin; reinstall fno or run "
+    "`fno doctor update --rust`, or set FNO_AGENTS_BIN to its path."
+)
+
+
 def _forward_evals_native(extra: list[str], mode: str) -> None:
     """Resolve the history default and stale window, run the native fold,
     propagate its exit code (4 = alarm/regressed). Missing binary exits 2."""
@@ -189,12 +225,7 @@ def _forward_evals_native(extra: list[str], mode: str) -> None:
 
     binary = resolve_binary()
     if binary is None:
-        typer.echo(
-            "fno doctor evals: the fno-agents binary was not found. It ships in the "
-            "`pip install fno` wheel and with the plugin; reinstall fno or run "
-            "`fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
-            err=True,
-        )
+        typer.echo(_AGENTS_BIN_HINT, err=True)
         raise typer.Exit(code=2)
     try:
         stale_days = int(load_settings().evals.stale_days)
@@ -237,12 +268,7 @@ def macro_command(ctx: typer.Context) -> None:
     args = list(ctx.args)
     binary = resolve_binary()
     if binary is None:
-        typer.echo(
-            "fno doctor evals macro: the fno-agents binary was not found. It ships in the "
-            "`pip install fno` wheel and with the plugin; reinstall fno or run "
-            "`fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
-            err=True,
-        )
+        typer.echo(_AGENTS_BIN_HINT.replace("evals:", "evals macro:"), err=True)
         raise typer.Exit(code=2)
 
     argv = [str(binary), "evals-macro", *args]
@@ -258,6 +284,123 @@ def macro_command(ctx: typer.Context) -> None:
     if result.stderr:
         typer.echo(result.stderr, nl=False, err=True)
     raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+def _argv_opt(args: list[str], name: str) -> Optional[str]:
+    """Read one ``--name value`` / ``--name=value`` token from a raw argv tail
+    (the forwarder shape: transport leaves declare no typer.Options)."""
+    for i, a in enumerate(args):
+        if a == name and i + 1 < len(args):
+            return args[i + 1]
+        if a.startswith(name + "="):
+            return a[len(name) + 1:]
+    return None
+
+
+def _cohort_setup(args: list[str], on_missing: Callable[[Path], NoReturn]) -> list[str]:
+    """Shared export/qualify plumbing: resolve the bank dir, hand an
+    undeclared split to *on_missing*, and assemble the native door argv
+    (declared split, bank-current known ids, rows source)."""
+    import json as _json
+
+    from fno.evals.bank import COHORTS_FILENAME, BankError, discover_bank
+    from fno.paths import evals_history, resolve_canonical_repo_root
+
+    bank = Path(v) if (v := _argv_opt(args, "--bank")) else None
+    history = Path(v) if (v := _argv_opt(args, "--history")) else None
+    bank_dir = _resolve_bank_dir(bank)
+    if not (bank_dir / COHORTS_FILENAME).exists():
+        on_missing(bank_dir)
+    try:
+        tasks = discover_bank(bank_dir)
+    except BankError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=2)
+    try:
+        repo_root = resolve_canonical_repo_root()
+    except Exception:  # noqa: BLE001
+        repo_root = Path.cwd()
+    tail = [
+        "--cohorts-yaml", str(bank_dir / COHORTS_FILENAME),
+        "--known-ids", _json.dumps([t.id for t in tasks]),
+        "--repo", str(repo_root),
+        "--rows", str(history or evals_history()),
+    ]
+    out_val = _argv_opt(args, "--out")
+    if out_val:
+        tail += ["--out", out_val]
+    return tail
+
+
+@evals_app.command(
+    "export",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def export_command(ctx: typer.Context) -> None:
+    """Export train-cohort history for prompt tuning: ONLY train rows, so
+    held-out trajectories never enter a tuning view. The fold is native
+    (fno-agents evals-attempt --export-train).
+    Exit 0 exported / 1 no declared split / 2 refused or setup error."""
+    from fno.evals.bank import _cohort_door
+
+    argv = list(ctx.args)
+    out_val = _argv_opt(argv, "--out")
+    if not out_val:
+        typer.echo("Error: export requires --out FILE", err=True)
+        raise typer.Exit(code=2)
+
+    def _no_split(bank_dir: Path) -> NoReturn:
+        typer.echo(
+            f"Error: no declared cohort split in {bank_dir} (cohorts.yaml): a tuning "
+            f"export must never be cut from an undeclared bank.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    rc, payload = _cohort_door(["--export-train", *_cohort_setup(argv, _no_split)])
+    if payload.get("error"):
+        typer.echo(f"Error: {payload['error']}", err=True)
+        raise typer.Exit(code=2)
+    if rc != 0:
+        typer.echo(f"Error: export door failed ({rc})", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(
+        f"exported {payload.get('exported', 0)} train row(s) across "
+        f"{payload.get('train_tasks', 0)} declared task(s) -> {out_val}"
+    )
+
+
+@evals_app.command(
+    "qualify",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+def qualify_command(ctx: typer.Context) -> None:
+    """Aggregate held-out qualification results: counts and coverage only,
+    never a held-out prompt or trace. The fold is native (evals-attempt
+    --aggregate). Reports {"qualified": false, "reason": ...} (exit 0) when
+    the split is absent, refused, stale, or empty. Exit 2 = setup error."""
+    import json as _json
+
+    from fno.evals.bank import _cohort_door
+
+    argv = list(ctx.args)
+
+    def _unqualified(reason: str) -> NoReturn:
+        typer.echo(_json.dumps({"qualified": False, "reason": reason}, ensure_ascii=False))
+        raise typer.Exit(code=0)
+
+    def _no_split(bank_dir: Path) -> NoReturn:
+        _unqualified("no declared cohort split (cohorts.yaml)")
+
+    rc, payload = _cohort_door(["--aggregate", *_cohort_setup(argv, _no_split)])
+    if payload.get("error"):
+        typer.echo(f"Error: {payload['error']}", err=True)
+        raise typer.Exit(code=2)
+    if rc != 0:
+        typer.echo(f"Error: qualify door failed ({rc})", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(_json.dumps(payload, ensure_ascii=False))
+    raise typer.Exit(code=0)
 
 
 @evals_app.command("graduate")

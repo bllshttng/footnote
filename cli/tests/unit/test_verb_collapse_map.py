@@ -231,8 +231,11 @@ def test_map_covers_current_surface_once():
     # action, so the verdict rides `king-history --verdict` and the dashed
     # leaf is gone again): counted from the merged file, 626 -> 627. The
     # target stop hook's build-dir read then allocated `config build-dir`:
-    # 627 -> 628.
-    assert len(mapped) == 628, (
+    # 627 -> 628. The eval cohort leaves then allocated `doctor evals export`
+    # / `evals export` and `doctor evals qualify` / `evals qualify`, the four
+    # argv-form transport leaves (refs 0: the flag surface never grows):
+    # 628 -> 632.
+    assert len(mapped) == 632, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

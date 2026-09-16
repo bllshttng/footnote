@@ -276,7 +276,7 @@ def _run_evals_arm_phase(settings: Any, *, seconds_left_fn) -> None:
             "--fno-bin", _resolve_fno_binary(),
             "--schedule-days", str(days),
             "--stale-days", str(int(getattr(evals_cfg, "stale_days", 7) or 7)),
-            "--summary-json", json.dumps(evals_health_summary(evals_history(), native_reads=False)),
+            "--summary-json", json.dumps(evals_health_summary(evals_history())),
         ]
         proc = subprocess.run(argv, capture_output=True, text=True, check=False,
                               timeout=max(1.0, seconds_left_fn() or 30.0))

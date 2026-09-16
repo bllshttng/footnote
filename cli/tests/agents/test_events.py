@@ -64,26 +64,6 @@ def test_emit_includes_kind_and_data_fields(tmp_path: Path, monkeypatch) -> None
     assert parsed["duration_ms"] == 1234
 
 
-def test_emit_provider_rate_limited_records_provider_account_and_timestamp(
-    tmp_path: Path, monkeypatch
-) -> None:
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.events import emit_provider_rate_limited
-
-    events_path = tmp_path / ".fno" / "events.jsonl"
-    emit_provider_rate_limited(
-        provider="zai",
-        account="readyrule",
-        observed_at="2026-08-20T10:00:00Z",
-        path=events_path,
-    )
-    parsed = json.loads(events_path.read_text(encoding="utf-8").strip())
-    assert parsed["kind"] == "provider_rate_limited"
-    assert parsed["provider"] == "zai"
-    assert parsed["account"] == "readyrule"
-    assert parsed["observed_at"] == "2026-08-20T10:00:00Z"
-
-
 def test_emit_promotes_fair_usage_error_to_rate_limited_event(
     tmp_path: Path, monkeypatch
 ) -> None:

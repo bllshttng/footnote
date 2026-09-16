@@ -34,6 +34,19 @@ from fno.worktree_stranded import (
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+@pytest.fixture(autouse=True)
+def _reset_unpushed_cache(monkeypatch):
+    """The unpushed-probe cache is module-global: a failed fetch in one test
+    (a probe on a non-repo, a timed-out fetch) memoizes stale into every
+    later probe in the same worker, so which test poisons which is decided
+    by the xdist partition, not the file order. Pin both flags per test;
+    teardown restores whatever a production call set mid-test."""
+    import fno.worktree_stranded as _ws
+
+    monkeypatch.setattr(_ws, "_remote_refs_fresh", False)
+    monkeypatch.setattr(_ws, "_remote_refs_stale", False)
+
+
 def _base_kwargs(**overrides) -> dict:
     kwargs = dict(
         path="/wt/x-abcd",

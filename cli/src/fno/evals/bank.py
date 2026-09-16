@@ -29,7 +29,7 @@ from __future__ import annotations
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 
@@ -219,6 +219,37 @@ def resolve_lane(name: str, *, settings: object = None):
     return row
 
 
+COHORTS_FILENAME = "cohorts.yaml"
+
+
+def _cohort_door(tail: list[str]) -> tuple[int, dict[str, Any]]:
+    """One evals-attempt flag-mode door call: (returncode, last-line JSON).
+    An unreachable binary or an unreadable answer returns (2, {"error": ...})
+    so every caller refuses closed."""
+    import json
+    import subprocess
+
+    from fno.rust_binary import find_dev_binary, resolve_binary
+
+    binary = find_dev_binary() or resolve_binary()
+    if binary is None:
+        return 2, {"error": "fno-agents binary not found; the cohort door cannot run."}
+    try:
+        proc = subprocess.run(
+            [str(binary), "evals-attempt", *tail],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except Exception as exc:  # noqa: BLE001 - a failed door read refuses
+        return 2, {"error": f"native cohort door failed: {exc}"}
+    try:
+        payload = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return proc.returncode or 2, {"error": "native cohort door returned unreadable output"}
+    if not isinstance(payload, dict):
+        return proc.returncode or 2, {"error": "native cohort door returned an unexpected shape"}
+    return proc.returncode, payload
+
+
 def discover_bank(bank_dir: Path) -> list[TaskSpec]:
     """Load every ``*.yaml`` under *bank_dir*, sorted by id.
 
@@ -229,6 +260,8 @@ def discover_bank(bank_dir: Path) -> list[TaskSpec]:
     _require(bank_dir.is_dir(), f"bank directory not found: {bank_dir}")
     tasks: dict[str, TaskSpec] = {}
     for yaml_path in sorted(bank_dir.glob("*.yaml")):
+        if yaml_path.name == COHORTS_FILENAME:
+            continue  # the cohort declaration is not a task
         task = load_task(yaml_path)
         if task.id in tasks:
             raise BankError(
