@@ -9,23 +9,25 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `ANTHROPIC_API_KEY` | py | Anthropic API key; presence enables bare-key auth for the LLM lane. |
 | `ANTHROPIC_BASE_URL` | py+rs | Overrides the Anthropic API base URL. |
 | `ANTHROPIC_MODEL` | py | Overrides the default Anthropic model. |
+| `CARGO_BUILD_BUILD_DIR` | rs | unclear: crates/fno-agents/src/hook/stop.rs:519 |
 | `CARGO_HOME` | py+rs | Cargo install root; the default is ~/.cargo. |
 | `CENSUS_DEFERRED_FILE` | py | unclear: cli/src/fno/test_cmd.py:2250 |
 | `CENSUS_KILL_BOUND_S` | py | unclear: cli/src/fno/test_cmd.py:2297 |
 | `CI` | py+rs | unclear: cli/src/fno/llm.py:40 |
+| `CLAUDECODE` | rs | unclear: crates/fno-agents/src/hook/stop.rs:440 |
 | `CLAUDECODE_SESSION_ID` | py | unclear: cli/src/fno/adapters/hermes.py:141 |
 | `CLAUDE_CLI` | rs | unclear: crates/fno-agents/src/loop_dispatch.rs:186 |
 | `CLAUDE_CODE_SESSION_ID` | py+rs | unclear: cli/src/fno/carveout/core.py:202 |
 | `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP` | rs | unclear: crates/fno-agents/src/loopcheck.rs:9010 |
 | `CLAUDE_CONFIG_DIR` | py+rs | Overrides the Claude config directory for managed provider lookups. |
 | `CLAUDE_EFFORT` | py | unclear: cli/src/fno/graph/cli.py:903 |
-| `CLAUDE_PLUGIN_ROOT` | py | unclear: cli/src/fno/doctor.py:3465 |
+| `CLAUDE_PLUGIN_ROOT` | py+rs | unclear: cli/src/fno/doctor.py:3465 |
 | `CLAUDE_SESSION_ID` | rs | unclear: crates/fno-agents/src/claims.rs:3690 |
 | `CLI` | rs | unclear: crates/fno-agents/src/loop_dispatch.rs:198 |
 | `CODEX_HOME` | py+rs | unclear: cli/src/fno/adapters/providers/managed.py:211 |
 | `CODEX_PLUGIN_ROOT` | py | unclear: cli/src/fno/agent/state.py:143 |
-| `CODEX_SESSION_ID` | py | unclear: cli/src/fno/adapters/hermes.py:142 |
-| `CODEX_THREAD_ID` | py | The codex thread id: codex sets it per thread in child tool env (the root session keeps CODEX_SESSION_ID), never in its own process env. The rollout witness matches it against a daemon row at this cwd to complete a name_only pane's own identity. |
+| `CODEX_SESSION_ID` | py+rs | unclear: cli/src/fno/adapters/hermes.py:142 |
+| `CODEX_THREAD_ID` | py+rs | The codex thread id: codex sets it per thread in child tool env (the root session keeps CODEX_SESSION_ID), never in its own process env. The rollout witness matches it against a daemon row at this cwd to complete a name_only pane's own identity. |
 | `COLORTERM` | rs | unclear: crates/fno/src/mux_cli.rs:1508 |
 | `CRON_JOB` | py | unclear: cli/src/fno/agents/context.py:94 |
 | `DATABASE_URL` | py | unclear: cli/src/fno/codemap_cli/db-schema.py:208 |
@@ -88,7 +90,8 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_GH_BUDGET_POINTS_PER_MIN` | rs | Overrides the fleet GitHub request budget cap in points per 60s window (default 450). |
 | `FNO_GLOBAL_SETTINGS_PATH` | py+rs | unclear: cli/src/fno/adapters/providers/loader.py:48 |
 | `FNO_GRAPH_JSON` | rs | unclear: crates/fno/src/backlog_view.rs:47 |
-| `FNO_HARNESS` | py | unclear: cli/src/fno/king/state.py:268 |
+| `FNO_GUARD_TRACE` | rs | unclear: crates/fno-agents/src/hook/king_guard.rs:25 |
+| `FNO_HARNESS` | py+rs | unclear: cli/src/fno/king/state.py:268 |
 | `FNO_HEALTH_HISTORY` | py | unclear: cli/src/fno/graph/triage.py:2038 |
 | `FNO_HOME` | py+rs | unclear: cli/src/fno/paths.py:1723 |
 | `FNO_IDLE_EXIT_GRACE_MS` | rs | unclear: crates/fno/src/server.rs:14324 |
@@ -134,6 +137,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_PANE_STATS_EMIT` | rs | unclear: crates/fno/src/server.rs:10563 |
 | `FNO_PI_MODEL` | py+rs | unclear: cli/src/fno/agents/harnesses/pi.py:127 |
 | `FNO_PI_PROVIDER` | py+rs | unclear: cli/src/fno/agents/harnesses/pi.py:122 |
+| `FNO_PLATFORM` | rs | unclear: crates/fno-agents/src/hook/king_guard.rs:400 |
 | `FNO_PROCESS_ADMISSION` | rs | unclear: crates/fno/src/bootstrap.rs:1721 |
 | `FNO_PROCESS_ADMISSION_MAX` | py+rs | unclear: cli/src/fno/agents/mux_spawn.py:1914 |
 | `FNO_PR_STATUS_CACHE_DIR` | py+rs | unclear: cli/src/fno/pr/_cache.py:92 |
@@ -187,6 +191,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `GEMINI_SANDBOX` | rs | unclear: crates/fno-agents/src/gemini_ask.rs:103 |
 | `GITHUB_ACTIONS` | py | unclear: cli/src/fno/test_cmd.py:1859 |
 | `GITHUB_EVENT_BEFORE` | py | unclear: cli/src/fno/lint_cli.py:622 |
+| `GLOBAL_EVENTS_PATH` | rs | unclear: crates/fno-agents/src/hook/stop.rs:462 |
 | `HERMES_SESSION_ID` | py | unclear: cli/src/fno/adapters/hermes.py:143 |
 | `HOME` | py+rs | The user's home directory. |
 | `INVOCATION_ID` | py | unclear: cli/src/fno/agents/context.py:94 |
