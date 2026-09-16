@@ -90,6 +90,17 @@ fn bench() -> &'static Bench {
     BENCH.get_or_init(build_bench)
 }
 
+/// Leak a pre_setup command list. The specs are `&'static`, and the acquire
+/// lines carry the run's pid, so they are minted per test invocation.
+fn leaked_setup(cmds: Vec<String>) -> &'static [&'static str] {
+    Box::leak(
+        cmds.into_iter()
+            .map(|s| Box::leak(s.into_boxed_str()) as &'static str)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    )
+}
+
 fn build_bench() -> Bench {
     let root = repo_root();
     let real = release_binary().expect(
@@ -118,33 +129,49 @@ fn build_bench() -> Bench {
     };
     git(&["init", "-q", "-b", "main"]);
     git(&["commit", "--allow-empty", "-qm", "Fixture"]);
+    // The mocked PR pins this sha as headRefOid: head_is_shipped's equality
+    // arm needs the PR head to BE the fixture repo's HEAD, and the
+    // mismatch arm would demand an origin base the fixture repo has no
+    // remote for.
+    let head_sha = String::from_utf8_lossy(
+        &Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .expect("git rev-parse")
+            .stdout,
+    )
+    .trim()
+    .to_string();
 
     let space = base.join("state");
     let spaces = base.join("spaces");
     let events = space.join("events.jsonl");
     let global = space.join("global.jsonl");
     let config = base.join("config.toml");
-    write(
-        &config,
-        &format!(
-            "state_dir = {:?}\nplans_dir = {:?}\n[paths]\nspaces_dir = {:?}\n[king]\nimplementation_guard = \"refuse\"\n[review]\nrequired_bots = []\nreviewers = []\nself_review_required = false\n",
-            space,
-            space.join("plans"),
-            spaces
-        ),
+    let config_body = format!(
+        "state_dir = {:?}\nplans_dir = {:?}\n[paths]\nspaces_dir = {:?}\n[king]\nimplementation_guard = \"refuse\"\n[review]\nrequired_bots = []\nreviewers = []\nself_review_required = false\nposture = \"no_review\"\n",
+        space,
+        space.join("plans"),
+        spaces
     );
+    write(&config, &config_body);
+    // The decision verb resolves its settings from the ambient global slot
+    // (stop.rs spawns it outside FNO_AGENTS_BIN, so no explicit --settings
+    // arrives): mirror the bench config to <HOME>/.fno/config.toml.
+    write(&base.join(".fno").join("config.toml"), &config_body);
 
     // Registry: 200 filler rows (the measured baseline's density) plus the
     // fixture rows the king/court paths resolve.
     let mut rows = Vec::new();
     for i in 0..200 {
         rows.push(
-            json!({"name": format!("fixture-{i}"), "cwd": repo.display().to_string(), "log_path": "", "harness": "claude", "harness_session_id": format!("session-{i}"), "status": "live"}),
+            json!({"name": format!("fixture-{i}"), "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": format!("session-{i}"), "status": "live"}),
         );
     }
-    rows.push(json!({"name": "fixture-king", "cwd": repo.display().to_string(), "log_path": "", "harness": "claude", "harness_session_id": KING_SID, "status": "live", "crown_level": 2, "crown_scope": "latency-fixture"}));
-    rows.push(json!({"name": "fixture-target", "cwd": repo.display().to_string(), "log_path": "", "harness": "claude", "harness_session_id": TARGET_SID, "status": "live"}));
-    rows.push(json!({"name": "fixture-watch", "cwd": repo.display().to_string(), "log_path": "", "harness": "claude", "harness_session_id": WATCH_SID, "status": "live"}));
+    rows.push(json!({"name": "fixture-king", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": KING_SID, "status": "live", "crown_level": 2, "crown_scope": "latency-fixture"}));
+    rows.push(json!({"name": "fixture-target", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": TARGET_SID, "status": "live"}));
+    rows.push(json!({"name": "fixture-watch", "cwd": repo.display().to_string(), "created_at": "2026-09-15T19:00:00Z", "log_path": "", "harness": "claude", "harness_session_id": WATCH_SID, "status": "live"}));
     write(
         &space.join("agents/registry.json"),
         &json!({"schema_version": 26, "agents": rows}).to_string(),
@@ -165,7 +192,7 @@ fn build_bench() -> Bench {
     executable(
         &gh,
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\ncase \"$1 $2\" in\n  \"--version \") echo 'gh version fixture';;\n  \"api rate_limit\") echo '{{\"resources\":{{\"graphql\":{{\"remaining\":5000,\"reset\":1999999999,\"limit\":5000}}}}}}';;\n  \"api repos\") echo '[]';;\n  \"pr view\") echo '{{\"state\":\"OPEN\",\"number\":7,\"headRefName\":\"main\"}}';;\n  \"pr checks\") echo 'all checks passed'; exit 0;;\n  *) echo '{{}}';;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {:?}\ncase \"$1 $2\" in\n  \"--version \") echo 'gh version fixture';;\n  \"api rate_limit\") echo '{{\"resources\":{{\"graphql\":{{\"remaining\":5000,\"reset\":1999999999,\"limit\":5000}}}}}}';;\n  \"api repos\") echo '[]';;\n  \"pr view\") echo '{{\"state\":\"OPEN\",\"number\":7,\"headRefName\":\"feature/fixture\",\"headRefOid\":\"{head_sha}\",\"mergeable\":\"MERGEABLE\",\"baseRefName\":\"main\",\"author\":{{\"login\":\"fixture-author\"}}}}';;\n  \"pr checks\") echo '[{{\"name\":\"ci\",\"state\":\"SUCCESS\",\"bucket\":\"pass\",\"startedAt\":\"2026-09-15T19:00:00Z\",\"workflow\":\"ci\"}}]'; exit 0;;\n  *) echo '{{}}';;\nesac\n",
             gh_calls
         ),
     );
@@ -209,15 +236,19 @@ fn build_bench() -> Bench {
             executable(
                 &shim_dir.join(name),
                 &format!(
-                    "#!/bin/sh\nprintf '%s\\n' \"$1\" >> {:?}\nexit 127\n",
+                    "#!/bin/sh\nprintf '%s\\n' '{name}' >> {:?}\nexit 127\n",
                     exec_log
                 ),
             );
         } else {
+            // Log the shim's own name: the audited unit is the PROGRAM, and a
+            // flag-first command (`git -C x worktree list`) would otherwise
+            // record git's subcommands as exec names, diverging from the
+            // strace leg's basename semantics.
             executable(
                 &shim_dir.join(name),
                 &format!(
-                    "#!/bin/sh\nprintf '%s\\n' \"$1\" >> {:?}\nexec {:?} \"$@\"\n",
+                    "#!/bin/sh\nprintf '%s\\n' '{name}' >> {:?}\nexec {:?} \"$@\"\n",
                     exec_log, real_path
                 ),
             );
@@ -446,8 +477,14 @@ struct FixtureSpec<'a> {
     /// The manifest this fixture needs written under the space (keyed, so a
     /// re-run after a terminal-consuming fixture rewrites it).
     manifest: &'a str,
-    /// Extra setup run once before sampling (claim acquire for the watch lease).
-    pre_setup: Option<&'static str>,
+    /// Extra setup commands run in order before sampling (the claim
+    /// acquires: the watch lease, the live self-review opt-out).
+    pre_setup: &'static [&'static str],
+    /// Extra env merged into pre_setup AND every sample. The session-identity
+    /// fires (watching, promise) need the harness session marker their
+    /// identity walk reads; sample_once strips ambient CLAUDE_*/FNO_* vars
+    /// the fixture does not pin, so a marker only exists when pinned here.
+    extra_env: &'static [(&'static str, &'static str)],
     /// p90 budget in ms (Linux-gated).
     budget_p90_ms: f64,
     /// Per-sample ceiling in ms (Linux-gated).
@@ -495,22 +532,24 @@ fn run_fixture(name: &str, script: &str, spec: &FixtureSpec<'_>, verify: impl Fn
     let hook = b.root.join(script);
     assert!(hook.is_file(), "hook script missing: {}", hook.display());
 
-    // Fixture state: the manifest rides FNO_FIXTURE_STATE (the shim pins
-    // ownership resolution to it); written fresh so a terminal-consuming
-    // fixture always starts owned.
-    let manifest_path = b.base.join("state").join(format!("{name}-state.md"));
-    write(&manifest_path, spec.manifest);
-    let mut env = b.env.clone();
-    if !spec.manifest.is_empty() {
-        env.insert(
-            "FNO_FIXTURE_STATE".into(),
-            manifest_path.display().to_string(),
-        );
+    // Fixture state: the native stop resolves ownership by reading
+    // `<worktree>/.fno/target-state.md` directly, so the manifest lives at the
+    // real path; written (or cleared) fresh so a terminal-consuming fixture
+    // always starts from the intended ownership state.
+    let manifest_path = b.repo.join(".fno").join("target-state.md");
+    if spec.manifest.is_empty() {
+        let _ = fs::remove_file(&manifest_path);
+    } else {
+        write(&manifest_path, spec.manifest);
     }
-    if let Some(setup) = spec.pre_setup {
+    let mut env = b.env.clone();
+    for (k, v) in spec.extra_env {
+        env.insert((*k).to_string(), (*v).to_string());
+    }
+    for setup in spec.pre_setup {
         let out = Command::new(&b.env["FNO_AGENTS_BIN"])
             .args(setup.split_whitespace())
-            .envs(&b.env)
+            .envs(&env)
             .current_dir(&b.repo)
             .output()
             .expect("pre_setup");
@@ -645,11 +684,15 @@ fn latency_stop_visitor_claude() {
         &FixtureSpec {
             payload: stop_payload(VISITOR_SID, Some("Work continues.")),
             manifest: "", // no manifest on this path at all
-            pre_setup: None,
+            pre_setup: &[],
+            extra_env: &[],
             budget_p90_ms: 25.0,
             ceiling_ms: 100.0,
             allowed_execs: &["bash", "fno-agents", "git"],
-            max_git: Some(2),
+            // Inventory, measured: 3x worktree list --porcelain (discovery,
+            // isolated-read check, retry pass) + 1x rev-parse --git-path
+            // (delivery-pending scan) + 1x final worktree list.
+            max_git: Some(5),
         },
         |code, stdout, stderr| {
             assert_eq!(code, 0, "visitor exit: {stderr}");
@@ -672,11 +715,13 @@ fn latency_stop_visitor_no_message() {
         &FixtureSpec {
             payload: stop_payload(VISITOR_SID, None),
             manifest: "",
-            pre_setup: None,
+            pre_setup: &[],
+            extra_env: &[],
             budget_p90_ms: 1000.0,
             ceiling_ms: 2500.0,
             allowed_execs: &["bash", "fno-agents", "git", "fno", "python3", "python"],
-            max_git: Some(2),
+            // Same inventory as the with-message visitor above.
+            max_git: Some(5),
         },
         |code, stdout, stderr| {
             assert_eq!(code, 0, "visitor exit: {stderr}");
@@ -699,7 +744,8 @@ fn latency_stop_target_working() {
         &FixtureSpec {
             payload: stop_payload(TARGET_SID, Some("Work continues.")),
             manifest: &manifest,
-            pre_setup: None,
+            pre_setup: &[],
+            extra_env: &[],
             budget_p90_ms: 100.0,
             ceiling_ms: 250.0,
             allowed_execs: &["bash", "fno-agents", "git"],
@@ -733,20 +779,35 @@ fn latency_stop_target_watching() {
                 Some("<watching reason=\"ci\" pr=\"7\" timeout=\"30m\">"),
             ),
             manifest: &manifest,
-            pre_setup: Some("claim acquire node:latency-watch --holder latency-fixture"),
+            // The claim must renew at the lease gate: pin its pid to THIS
+            // test process (alive across every fire) and give the lease a
+            // TTL to extend. A bare acquire writes a pid-liveness claim on
+            // the transient acquiring process, which reads dead by fire
+            // time and falls the gate through to the GitHub reads this
+            // fixture exists to prove away.
+            pre_setup: leaked_setup(vec![format!(
+                "claim acquire node:latency-watch --holder latency-fixture --pid {} --ttl-ms 3600000",
+                std::process::id()
+            )]),
+            // The identity walk reads the ambient session marker, not the
+            // manifest's harness line: without it the fire is "harness
+            // unknown", which cannot idle.
+            extra_env: &[("CLAUDE_CODE_SESSION_ID", WATCH_SID)],
             budget_p90_ms: 100.0,
             ceiling_ms: 250.0,
             allowed_execs: &["bash", "fno-agents", "git"],
             max_git: None,
         },
         |_code, stdout, stderr| {
-            let v: Value = serde_json::from_str(stdout)
-                .unwrap_or_else(|e| panic!("{stdout:?} not JSON: {e} ({stderr})"));
-            // Lease-only idle: allow (no block), and the message names the
-            // unverified-idle contract.
-            assert_eq!(
-                v["decision"], "allow",
-                "watching fire must idle: {stdout} {stderr}"
+            // Lease-only idle: the wrapper allows with an empty payload and
+            // names the unverified-idle contract on stderr.
+            assert!(
+                stdout.trim().is_empty(),
+                "watching idle must allow, not block: {stdout} {stderr}"
+            );
+            assert!(
+                stderr.contains("watching: idling until the watcher fires"),
+                "watching diagnostic absent: {stderr}"
             );
         },
     );
@@ -769,7 +830,24 @@ fn latency_stop_target_promise_green() {
                 Some("<promise>MISSION COMPLETE: fixture</promise>"),
             ),
             manifest: &manifest,
-            pre_setup: Some("claim acquire node:latency-promise --holder latency-fixture"),
+            // Two live-pinned claims: the node claim, and the
+            // config-optout claim that makes `self_review_required = false`
+            // stick (the config escape hatch binds only while that global
+            // claim is LIVE; a dead transient acquire pid re-arms the
+            // attestation demand).
+            pre_setup: leaked_setup(vec![
+                format!(
+                    "claim acquire node:latency-promise --holder latency-fixture --pid {} --ttl-ms 3600000",
+                    std::process::id()
+                ),
+                format!(
+                    "claim acquire config-optout:review.self_review_required --holder latency-fixture --pid {} --ttl-ms 3600000",
+                    std::process::id()
+                ),
+            ]),
+            // Same identity pin as the watching fixture: the self-review
+            // disarm binds the live claim to the firing session.
+            extra_env: &[("CLAUDE_CODE_SESSION_ID", TARGET_SID)],
             budget_p90_ms: 1000.0,
             ceiling_ms: 2500.0,
             allowed_execs: &[
@@ -787,7 +865,10 @@ fn latency_stop_target_promise_green() {
         |code, _stdout, stderr| {
             assert_eq!(code, 0, "terminal allow exits 0: {stderr}");
             let b = bench();
-            let events = fs::read_to_string(&b.events).unwrap_or_default();
+            // The fire journals to the HOME-resolved project log
+            // (<HOME>/.fno/events.jsonl), not the --events read path.
+            let events = fs::read_to_string(b.base.join(".fno").join("events.jsonl"))
+                .unwrap_or_default();
             assert!(
                 events.contains("DonePRGreen"),
                 "no DonePRGreen termination row: {events}"
@@ -810,7 +891,8 @@ fn latency_stop_king_terminal_repeat() {
         &FixtureSpec {
             payload: stop_payload(KING_SID, Some("Work continues.")),
             manifest: &manifest,
-            pre_setup: None,
+            pre_setup: &[],
+            extra_env: &[],
             budget_p90_ms: 100.0,
             ceiling_ms: 250.0,
             allowed_execs: &["bash", "fno-agents", "git"],
@@ -846,7 +928,8 @@ fn latency_guard_bash_no_write() {
         &FixtureSpec {
             payload: guard_payload(KING_SID, "Bash", json!({"command": "git status --short"})),
             manifest: &manifest,
-            pre_setup: None,
+            pre_setup: &[],
+            extra_env: &[],
             budget_p90_ms: 25.0,
             ceiling_ms: 100.0,
             allowed_execs: &["bash", "fno-agents", "git"],
@@ -877,7 +960,8 @@ fn latency_guard_uncrowned_edit() {
                 json!({"file_path": "src/example.rs", "old_string": "a", "new_string": "b"}),
             ),
             manifest: "",
-            pre_setup: None,
+            pre_setup: &[],
+            extra_env: &[],
             budget_p90_ms: 25.0,
             ceiling_ms: 100.0,
             allowed_execs: &["bash", "fno-agents", "git"],
@@ -907,7 +991,8 @@ fn latency_guard_court_edit_deny() {
                 json!({"file_path": "src/example.rs", "old_string": "a", "new_string": "b"}),
             ),
             manifest: &manifest,
-            pre_setup: None,
+            pre_setup: &[],
+            extra_env: &[],
             budget_p90_ms: 50.0,
             ceiling_ms: 150.0,
             allowed_execs: &[
@@ -956,7 +1041,8 @@ fn latency_guard_court_plan_allow() {
                 json!({"file_path": plan_file.display().to_string(), "content": "plan"}),
             ),
             manifest: &manifest,
-            pre_setup: None,
+            pre_setup: &[],
+            extra_env: &[],
             budget_p90_ms: 50.0,
             ceiling_ms: 150.0,
             allowed_execs: &[
