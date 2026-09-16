@@ -49,6 +49,27 @@ pub fn run_spawn_gate(_args: &[String]) -> i32 {
 }
 
 fn gate_answer(payload: &Value) -> Value {
+    // The verb is the one cross-process transport into the gate, and its own
+    // pid is dead once it has answered: a reservation held by it reads Suspect
+    // for the whole worker TTL and wedges the provider lane (2026-09-15).
+    // The native arms build GateInput in-process, where the
+    // std::process::id() default is correct, so the refusal lives here and
+    // not in run_gate.
+    let Some(holder_pid) = payload.get("holder_pid").and_then(Value::as_u64) else {
+        eprintln!(
+            "spawn-gate: refused: a gate payload needs holder_pid, the pid that holds and releases the admitted keys"
+        );
+        return json!({
+            "status": "refused",
+            "exit_code": spawn_gate::EXIT_GATE_UNAVAILABLE,
+            "receipt": {
+                "status": "refused",
+                "reason": "holder_pid_required",
+                "remedy": "send holder_pid: the pid of the process that holds the admitted keys and releases them",
+            },
+            "event": {},
+        });
+    };
     let config_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = crate::paths::AgentsHome::from_env();
     let flags = GateFlags {
@@ -68,10 +89,7 @@ fn gate_answer(payload: &Value) -> Value {
         route_provider: opt_str_of(payload, "route_provider"),
         account: opt_str_of(payload, "account"),
         caller_session: opt_str_of(payload, "caller_session"),
-        holder_pid: payload
-            .get("holder_pid")
-            .and_then(Value::as_u64)
-            .map(|p| p as u32),
+        holder_pid: Some(holder_pid as u32),
     };
     match spawn_gate::run_gate(&config_cwd, &home.registry_json(), input) {
         Ok(mut guard) => {
@@ -939,5 +957,65 @@ mod tests {
             None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC1-HP: a gate payload with no `holder_pid` is refused before the gate
+    /// runs, so the verb mints no reservation whose holder pid (the verb's
+    /// own, dead once it has answered) dooms the row to Suspect for the whole
+    /// worker TTL - the 2026-09-15 zai lane wedge.
+    #[test]
+    fn gate_refuses_a_payload_without_holder_pid() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-verb-nopid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = dir.join("agents-home");
+        std::fs::create_dir_all(home.join("provider-cap")).unwrap();
+        std::env::set_var(crate::paths::HOME_ENV, &home);
+        std::env::set_var("FNO_CLAIMS_ROOT", dir.join("claims-root"));
+        std::fs::create_dir_all(dir.join("claims-root").join(".fno").join("claims")).unwrap();
+        let prior_config = std::env::var_os("FNO_CONFIG");
+        std::env::set_var("FNO_CONFIG", dir.join(".fno").join("config.toml"));
+        let prior_payload = std::env::var_os("FNO_TEST_FOOTPRINT_PAYLOAD");
+        std::env::set_var(
+            "FNO_TEST_FOOTPRINT_PAYLOAD",
+            r#"{"admission":{"verdict":"admit","axis":"fleet_cpu_share","reason":"fixture","bound":"exact","ceiling":0.5}}"#,
+        );
+
+        let answer = gate_answer(&json!({
+            "mode": "gate",
+            "name": "probe-no-pid",
+            "substrate": "headless",
+            "route_provider": "zai",
+            "account": "",
+            "no_wait": true
+        }));
+
+        let claims_dir = dir.join("claims-root").join(".fno").join("claims");
+        let leftovers: Vec<_> = std::fs::read_dir(&claims_dir).unwrap().flatten().collect();
+        std::env::remove_var(crate::paths::HOME_ENV);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+        match prior_config {
+            Some(value) => std::env::set_var("FNO_CONFIG", value),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        match prior_payload {
+            Some(value) => std::env::set_var("FNO_TEST_FOOTPRINT_PAYLOAD", value),
+            None => std::env::remove_var("FNO_TEST_FOOTPRINT_PAYLOAD"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(answer["status"], "refused");
+        assert_eq!(answer["receipt"]["reason"], "holder_pid_required");
+        assert_eq!(
+            answer["exit_code"],
+            spawn_gate::EXIT_GATE_UNAVAILABLE,
+            "{answer}"
+        );
+        assert!(
+            leftovers.is_empty(),
+            "the claims dir holds {:?} after a pid-less refusal",
+            leftovers.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
     }
 }
