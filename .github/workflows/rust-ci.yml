@@ -30,6 +30,7 @@ on:
       - cli/src/fno/agents/merge_posture.toml
       - cli/src/fno/graph/page_reload.js
       - cli/src/fno/agents/spawn_phase.toml
+      - cli/src/fno/agents/slot_lanes.toml
       - crates/fno-agents/src/events_limits.toml
       - docs/harnesses/capability-matrix.md
       - cli/src/fno/agents/registry_schema.toml
