@@ -208,16 +208,22 @@ fn canonical_members_with_aliases(scope: &str, cwd: &Path) -> String {
     crate::territory::canonical_scope(&members.join(","))
 }
 
-/// `king.checkin_interval` and `king.compaction_ceiling` through the layered
-/// config lookup, with Python's defaults. An unparseable interval IS the
-/// default (the Pydantic validator's behavior); a non-integer or negative
-/// ceiling is a named refusal, never zero. Zero itself is a legitimate
-/// ceiling: it declares that no compaction is ever acceptable.
-fn read_config(cwd: &Path) -> Result<(i64, i64), String> {
-    let interval = match crate::agents_config::config_lookup(cwd, &["king", "checkin_interval"]) {
+/// `king.checkin_interval` through the layered config lookup, with Python's
+/// default. An unparseable interval IS the default (the Pydantic validator's
+/// behavior). Shared by the verdict window and the hook beat's due check.
+pub(crate) fn checkin_interval_secs(cwd: &Path) -> i64 {
+    match crate::agents_config::config_lookup(cwd, &["king", "checkin_interval"]) {
         Some(v) => crate::territory::parse_duration_to_seconds(&v).unwrap_or(DEFAULT_CHECKIN_SECS),
         None => DEFAULT_CHECKIN_SECS,
-    };
+    }
+}
+
+/// `king.checkin_interval` and `king.compaction_ceiling` through the layered
+/// config lookup, with Python's defaults. A non-integer or negative ceiling
+/// is a named refusal, never zero. Zero itself is a legitimate ceiling: it
+/// declares that no compaction is ever acceptable.
+fn read_config(cwd: &Path) -> Result<(i64, i64), String> {
+    let interval = checkin_interval_secs(cwd);
     let ceiling = match crate::agents_config::config_lookup(cwd, &["king", "compaction_ceiling"]) {
         Some(v) => match v.as_integer() {
             Some(n) if n >= 0 => n,

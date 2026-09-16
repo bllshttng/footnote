@@ -17,7 +17,8 @@
 //!
 //! `king-checkin --scope SCOPE --events-path PATH [--events-path ...]
 //!              --graph PATH --handoffs-dir PATH [--faqs-dir PATH]
-//!              [--board-state PATH] [--emit-path PATH] [--no-emit] [--json]`
+//!              [--board-state PATH] [--emit-path PATH] [--change TEXT]
+//!              [--no-emit] [--json]`
 //!
 //! rc 0 a completed beat (a failed row write warns, never fails the beat),
 //! 2 usage failure.
@@ -857,9 +858,12 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
 fn previous_row(ctx: &Ctx) -> (Option<Value>, String) {
     match crate::king_history::scan(&ctx.events_paths, &ctx.scope) {
         Ok(payload) => {
+            // Only the verb's own rows carry NUMERIC_DIFF_KEYS, so the diff
+            // baseline is the newest `loop` row; a hook row or a hand row
+            // must never baseline the diff.
             let first = payload["events"]
                 .as_array()
-                .and_then(|e| e.first())
+                .and_then(|e| e.iter().find(|r| s_str(r, "source") == Some("loop")))
                 .cloned();
             (first, String::new())
         }
@@ -924,6 +928,20 @@ fn derive_change(
         return "first canonical beat for this scope".into();
     }
     "no change".into()
+}
+
+/// The row's change: the king's sentence when one was given, else the
+/// derived diff. The derivation always lands under `diff`, so a
+/// model-worded row still carries the machine's measurement.
+fn finish_change(derived: String, model: Option<&str>, data: &mut Map<String, Value>) -> String {
+    let change = model
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| derived.clone());
+    data.insert("diff".into(), json!(derived));
+    data.insert("change".into(), json!(change.clone()));
+    change
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,24 +1339,28 @@ fn frontmatter_scope(text: &str) -> Option<&str> {
 const FAQ_PROMPT: &str = "fno agents king faq add --question \"...\" --answer \"...\" \
 --specimen \"<node or PR>, <date>\" --exit \"<the change that retires this>\"";
 
-fn emit_row(ctx: &Ctx, data: &Map<String, Value>) -> bool {
-    let Some(path) = ctx.emit_path.as_ref() else {
-        eprintln!("king-checkin: WARNING: no emit path, so the beat was not journalled");
-        return false;
-    };
+/// The one `reign_checkin` writer. `source` is the emitting half (`loop` for
+/// the verb's own beat, `hook` for the stop hook's missed-beat row); the
+/// append runs through the capped, rotation-safe `EventEmitter`, so the row
+/// never bypasses the payload cap or the ingest-before-rotate guard.
+pub(crate) fn emit_row(path: &Path, source: &str, data: &Map<String, Value>) -> bool {
     // The store stamps a reign row's scope only when it is a canonical crown
     // scope; emitting one that is not would be unfindable by --scope forever
     // (the 2026-09-14 rendered-board corruption), so the one writer refuses.
-    let scope_canonical = !ctx.scope.is_empty()
-        && crate::territory::canonical_scope(&ctx.scope) == ctx.scope
-        && !ctx
-            .scope
+    let Some(scope) = data.get("scope").and_then(|v| v.as_str()) else {
+        eprintln!(
+            "king-checkin: WARNING: reign_checkin row not emitted: data carries no scope string"
+        );
+        return false;
+    };
+    let scope_canonical = !scope.is_empty()
+        && crate::territory::canonical_scope(scope) == scope
+        && !scope
             .split(',')
             .any(|m| m.is_empty() || m.chars().any(char::is_whitespace));
     if !scope_canonical {
         eprintln!(
-            "king-checkin: WARNING: reign_checkin row not emitted: scope {:?} is not a canonical crown scope",
-            ctx.scope
+            "king-checkin: WARNING: reign_checkin row not emitted: scope {scope:?} is not a canonical crown scope"
         );
         return false;
     }
@@ -1349,19 +1371,7 @@ fn emit_row(ctx: &Ctx, data: &Map<String, Value>) -> bool {
         eprintln!("king-checkin: WARNING: reign_checkin row not emitted: a forbidden alias key is present");
         return false;
     }
-    let row = json!({"ts": iso_now(), "type": REIGN_CHECKIN, "source": "loop", "data": data});
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let written = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .and_then(|mut f| {
-            writeln!(f, "{row}")?;
-            f.flush()
-        });
-    match written {
+    match crate::events::EventEmitter::new(path, source).emit_fields(REIGN_CHECKIN, data.clone()) {
         Ok(()) => true,
         Err(e) => {
             // One write, one truth: a failed row is warned, never retried.
@@ -1373,12 +1383,74 @@ fn emit_row(ctx: &Ctx, data: &Map<String, Value>) -> bool {
     }
 }
 
+/// The stop hook's half of the reign record: when this scope's newest
+/// check-in is older than two check-in intervals, journal one row from what
+/// the previous fire measured. It never decides anything.
+pub(crate) fn hook_beat(
+    events_path: &Path,
+    cwd: &Path,
+    scope: &str,
+    session_id: &str,
+    history: &crate::loop_king::KingFireHistory,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if scope.is_empty() {
+        return false;
+    }
+    let payload = match crate::king_history::scan(&[events_path.to_path_buf()], scope) {
+        Ok(p) => p,
+        // A blind due check must never write: a scan that cannot read the
+        // journal is no evidence a beat was missed.
+        Err(e) => {
+            eprintln!("king-checkin: WARNING: hook beat skipped: {e}");
+            return false;
+        }
+    };
+    let newest = payload["events"].as_array().and_then(|e| e.first());
+    let due = newest
+        .and_then(|r| s_str(r, "ts"))
+        .and_then(|t| t.parse::<chrono::DateTime<chrono::Utc>>().ok())
+        .map(|ts| {
+            now - ts
+                >= chrono::Duration::seconds(
+                    2 * crate::king_verdict_inputs::checkin_interval_secs(cwd),
+                )
+        })
+        .unwrap_or(true);
+    if !due {
+        return false;
+    }
+    // ponytail: two stops inside one second can both see the beat due and
+    // write two rows; a cross-process lock costs more than a doubled row.
+    let since = newest.and_then(|r| s_str(r, "ts")).unwrap_or("on record");
+    let undelivered = history
+        .last_undelivered
+        .map(|u| u.to_string())
+        .unwrap_or_else(|| "unread".into());
+    let data = json!({
+        "scope": scope,
+        "session_id": session_id,
+        "fires": history.total,
+        "dry": history.dry,
+        "last_actionable": history.last_ids.len(),
+        "last_undelivered": history.last_undelivered,
+        "change": format!(
+            "missed beat: no check-in since {since}; last fire actionable {}, undelivered {undelivered}, dry {} of {} fires",
+            history.last_ids.len(),
+            history.dry,
+            history.total
+        ),
+    });
+    emit_row(events_path, "hook", data.as_object().unwrap())
+}
+
 // ---------------------------------------------------------------------------
 // entry
 
 /// `king-checkin --scope SCOPE --events-path PATH [--events-path ...]
 ///              --graph PATH --handoffs-dir PATH [--faqs-dir PATH]
-///              [--board-state PATH] [--emit-path PATH] [--no-emit] [--json]`
+///              [--board-state PATH] [--emit-path PATH] [--change TEXT]
+///              [--no-emit] [--json]`
 ///
 /// rc 0 a completed beat, 2 usage failure.
 pub fn run_king_checkin(args: &[String]) -> i32 {
@@ -1395,11 +1467,15 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         emit: true,
     };
     let mut as_json = false;
+    let mut model_change: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         let flag = |name: &str| args[i] == name && i + 1 < args.len();
         if flag("--scope") {
             ctx.scope = args[i + 1].clone();
+            i += 2;
+        } else if flag("--change") {
+            model_change = Some(args[i + 1].clone());
             i += 2;
         } else if flag("--events-path") {
             ctx.events_paths.push(PathBuf::from(&args[i + 1]));
@@ -1437,7 +1513,7 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
                 "fno-agents king-checkin: --scope SCOPE --events-path PATH \
                  [--events-path ...] --graph PATH --handoffs-dir PATH \
                  [--faqs-dir PATH] [--board-state PATH] [--emit-path PATH] \
-                 [--no-emit] [--json]"
+                 [--change TEXT] [--no-emit] [--json]"
             );
             return 2;
         }
@@ -1459,9 +1535,9 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let data = build_data(&readings, &ctx.scope);
     let (previous, previous_error) = previous_row(&ctx);
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
-    let change = derive_change(previous_data, &data, &previous_error);
+    let derived = derive_change(previous_data, &data, &previous_error);
     let mut data = data;
-    data.insert("change".into(), json!(change));
+    let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
     let mut lines = render_lines(
         &ctx.scope,
         &readings,
@@ -1470,6 +1546,9 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
         &previous_error,
         &change,
     );
+    if model_change.as_deref().map(|t| !t.trim().is_empty()) == Some(true) {
+        lines.push(format!("diff: {derived}"));
+    }
 
     let readers_failed: Vec<String> = data
         .get("readers_failed")
@@ -1492,7 +1571,13 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     }
 
     let emitted = if ctx.emit {
-        emit_row(&ctx, &data)
+        match ctx.emit_path.as_ref() {
+            Some(path) => emit_row(path, "loop", &data),
+            None => {
+                eprintln!("king-checkin: WARNING: no emit path, so the beat was not journalled");
+                false
+            }
+        }
     } else {
         false
     };
@@ -1504,6 +1589,7 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
             "coverage": data.get("coverage").cloned().unwrap_or(json!(0)),
             "readers_failed": readers_failed,
             "change": change,
+            "diff": derived,
             "previous_ts": previous.as_ref().and_then(|p| s_str(p, "ts")),
             "previous_error": previous_error,
             "emitted": emitted,
@@ -2072,10 +2158,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, path) = emit_ctx(&dir, "x-bbbb");
         let data = json!({"scope": "x-bbbb", "change": "beat"});
-        assert!(emit_row(&ctx, data.as_object().unwrap()));
+        assert!(emit_row(
+            ctx.emit_path.as_ref().unwrap(),
+            "loop",
+            data.as_object().unwrap()
+        ));
         let rows = std::fs::read_to_string(&path).unwrap();
         assert_eq!(rows.lines().count(), 1);
         assert!(rows.contains("reign_checkin"));
+        assert!(rows.contains("\"source\":\"loop\""), "rows: {rows}");
     }
 
     #[test]
@@ -2083,10 +2174,165 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (ctx, path) = emit_ctx(&dir, "x-cccc ready no build, idea");
         let data = json!({"scope": "x-cccc ready no build, idea", "change": "beat"});
-        assert!(!emit_row(&ctx, data.as_object().unwrap()));
+        assert!(!emit_row(
+            ctx.emit_path.as_ref().unwrap(),
+            "loop",
+            data.as_object().unwrap()
+        ));
         assert!(
             !path.exists() || std::fs::read_to_string(&path).unwrap().trim().is_empty(),
             "the corrupted-scope row must not reach the journal"
         );
+    }
+
+    #[test]
+    fn emit_row_writes_through_the_capped_emitter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let data = json!({"scope": "x-bbbb", "change": "beat"});
+        assert!(emit_row(&path, "loop", data.as_object().unwrap()));
+        let rows = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(rows.lines().count(), 1);
+        assert!(rows.contains("\"source\":\"loop\""), "rows: {rows}");
+
+        // An oversized payload journals the meta-event, never a raw row.
+        let huge = json!({"scope": "x-bbbb", "change": "x".repeat(70_000)});
+        assert!(emit_row(&path, "loop", huge.as_object().unwrap()));
+        let rows = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(rows.lines().count(), 2, "rows: {rows}");
+        assert!(rows.contains("event_payload_too_large"), "rows: {rows}");
+        assert!(
+            rows.contains("\"intended_kind\":\"reign_checkin\""),
+            "rows: {rows}"
+        );
+    }
+
+    #[test]
+    fn model_change_fills_change_and_derivation_moves_to_diff() {
+        let mut data = Map::new();
+        let change = finish_change(
+            "moved: open_prs 9 -> 7".into(),
+            Some("dispatched two workers"),
+            &mut data,
+        );
+        assert_eq!(change, "dispatched two workers");
+        assert_eq!(data.get("change"), Some(&json!("dispatched two workers")));
+        assert_eq!(data.get("diff"), Some(&json!("moved: open_prs 9 -> 7")));
+
+        // A blank sentence reads as none: the derived text fills both keys.
+        let mut data = Map::new();
+        let change = finish_change("no change".into(), Some("   "), &mut data);
+        assert_eq!(change, "no change");
+        assert_eq!(data.get("change"), Some(&json!("no change")));
+        assert_eq!(data.get("diff"), Some(&json!("no change")));
+    }
+
+    #[test]
+    fn previous_row_skips_hook_and_hand_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let rows = [
+            json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin", "source": "loop",
+                   "data": {"scope": "x-bbbb", "change": "beat", "open_prs": 9}}),
+            json!({"ts": "2026-09-15T10:05:00Z", "type": "reign_checkin", "source": "hook",
+                   "data": {"scope": "x-bbbb", "change": "missed beat", "open_prs": 8}}),
+            json!({"ts": "2026-09-15T10:10:00Z", "type": "reign_checkin", "source": "test",
+                   "data": {"scope": "x-bbbb", "change": "hand row", "open_prs": 7}}),
+        ];
+        let path = journal(dir.path(), &rows);
+        let ctx = Ctx {
+            scope: "x-bbbb".into(),
+            level: Some(1),
+            events_paths: vec![path],
+            graph: PathBuf::from("nope.json"),
+            cwd: dir.path().to_path_buf(),
+            handoffs_dir: dir.path().to_path_buf(),
+            faqs_dir: None,
+            board_state: None,
+            emit_path: None,
+            emit: false,
+        };
+        let (previous, err) = previous_row(&ctx);
+        assert!(err.is_empty(), "err: {err}");
+        let previous = previous.expect("the newest loop row is the baseline");
+        assert_eq!(s_str(&previous, "source"), Some("loop"));
+        assert_eq!(previous["data"]["open_prs"], 9);
+    }
+
+    #[test]
+    fn hook_beat_writes_one_row_per_missed_beat() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = journal(
+            dir.path(),
+            &[
+                json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin",
+                     "source": "loop", "data": {"scope": "x-bbbb", "change": "beat"}}),
+            ],
+        );
+        let history = crate::loop_king::KingFireHistory {
+            total: 3,
+            dry: 1,
+            last_ids: vec!["undispatched:x-1".into()],
+            last_undelivered: Some(4),
+        };
+        let base = "2026-09-15T10:00:00Z"
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .unwrap();
+        let at = |mins: i64| base + chrono::Duration::minutes(mins);
+        // 59 minutes old: under two intervals, nothing writes.
+        assert!(!hook_beat(
+            &path,
+            dir.path(),
+            "x-bbbb",
+            "sess",
+            &history,
+            at(59)
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+        // 61 minutes old: the beat is due, one hook row.
+        assert!(hook_beat(
+            &path,
+            dir.path(),
+            "x-bbbb",
+            "sess",
+            &history,
+            at(61)
+        ));
+        let rows = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(rows.lines().count(), 2, "rows: {rows}");
+        assert!(rows.contains("\"source\":\"hook\""), "rows: {rows}");
+        let written: Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
+        assert_eq!(written["data"]["scope"], "x-bbbb");
+        assert!(!written["data"]["change"].as_str().unwrap().is_empty());
+        // The fresh row resets the clock: the next stop writes nothing.
+        assert!(!hook_beat(
+            &path,
+            dir.path(),
+            "x-bbbb",
+            "sess",
+            &history,
+            at(62)
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+    }
+
+    #[test]
+    fn hook_beat_never_writes_for_a_blank_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        let history = crate::loop_king::KingFireHistory {
+            total: 0,
+            dry: 0,
+            last_ids: vec![],
+            last_undelivered: None,
+        };
+        assert!(!hook_beat(
+            &path,
+            dir.path(),
+            "",
+            "sess",
+            &history,
+            chrono::Utc::now()
+        ));
+        assert!(!path.exists());
     }
 }
