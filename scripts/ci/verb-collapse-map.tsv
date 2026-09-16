@@ -298,6 +298,10 @@ config status-sinks	T1	config status-sinks	2
 config unset	T1	config unset	5
 context	KEEP	context	15	single-leaf group
 cost	KEEP	cost	7	single-leaf group
+decide decide-reindex	T1	decide decide-reindex	0
+decide list	KEEP	decide list	0	deprecated shim remains distinct during migration
+decide reindex	KEEP	decide reindex	0	deprecated shim remains distinct during migration
+decide retract	KEEP	decide retract	0	deprecated shim remains distinct during migration
 delivery	KEEP	delivery	7	single-leaf group
 do delivery evaluate	T1	do delivery evaluate	7
 do loops ls	T1	do loops ls	1

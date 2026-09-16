@@ -69,8 +69,8 @@ event_types:
 
   - name: graph_write_gate
     retention: durable
-    description: "Five-minute mergeable histogram for graph keeper write-gate contention."
-    sources: [daemon]
+    description: "Five-minute mergeable histogram for graph keeper write-gate contention. The single-row path emits one row per landed mutation with the same required fields as point values plus the `mutation` name; the audit keeps those rows out of the window merge."
+    sources: [daemon, backlog]
     data:
       required: [keeper_pid, window_started_ms, window_finished_ms, completed_window_seconds, wait_ms_bounds, wait_ms_counts, mutation_count, bytes_written, retry_count]
       properties:
@@ -83,6 +83,7 @@ event_types:
         mutation_count: { type: integer }
         bytes_written: { type: integer }
         retry_count: { type: integer }
+        mutation: { type: string, description: "The api mutation name; present on the single-row path's per-write rows." }
     consumers: [scripts/analysis/graph-write-gate-audit.py]
 
   - name: graph_export_failed

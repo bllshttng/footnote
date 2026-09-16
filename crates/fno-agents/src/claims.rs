@@ -1301,10 +1301,6 @@ fn clear_state_root_breadcrumb(granted_root: &str) {
 }
 
 fn create_via_link(parent: &Path, path: &Path, content: &str) -> std::io::Result<()> {
-    // pid + coarse clock alone can collide across threads in this process (same
-    // nanosecond bucket), and a colliding temp name makes the second thread's
-    // `create_new` fail AlreadyExists -> mis-mapped to a FALSE `AlreadyHeld`
-    // lock failure. A process-unique counter guarantees distinct temp names.
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = parent.join(format!(
         ".claim-tmp-{}-{}-{}",
@@ -1316,18 +1312,15 @@ fn create_via_link(parent: &Path, path: &Path, content: &str) -> std::io::Result
         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     {
-        let mut f = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&tmp)?;
-        // No fsync: once write returns, a same-fs reader sees the content via
-        // the page cache — all the hardlink publish needs (a lock file does
-        // not require crash durability).
-        f.write_all(content.as_bytes())?;
+        file.write_all(content.as_bytes())?;
     }
-    let res = std::fs::hard_link(&tmp, path);
+    let result = std::fs::hard_link(&tmp, path);
     let _ = std::fs::remove_file(&tmp);
-    res
+    result
 }
 
 /// Replace `path` with `content` via write-temp + rename (idempotent

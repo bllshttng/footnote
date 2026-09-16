@@ -11,15 +11,15 @@ Seven operations on top of io + staleness:
     force_release_claim - administrative override, always succeeds.
     reap_dead_claims  - archive every provably-dead claim (GC).
 
-Every state-changing verb appends an audit event to ``.fno/events.jsonl``
-through the typed builders in :mod:`fno.claims.events`. Audit-trail
-writes are best-effort: the YAML lock file write is authoritative.
+Every state-changing verb appends typed audit events; lockfile writes are authoritative.
 """
 
 from __future__ import annotations
 
 import os
 import socket
+from subprocess import PIPE as _SUBPROCESS_PIPE
+from subprocess import Popen as _SubprocessPopen
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
 
@@ -99,7 +99,7 @@ class ClaimValidationError(ValueError):
 
 
 class ClaimContended(Exception):
-    """acquire_claim/refresh_claim gave up after ACQUIRE_MAX_ATTEMPTS
+    """acquire_claim/refresh_claim gave up after the native retry budget
     contention retries on the same key's recovery mutex.
 
     A distinct type from ClaimHeldByOther (a live claim is held by someone
@@ -314,7 +314,7 @@ def _make_claim(
     )
 
 
-def acquire_claim(
+def _legacy_acquire_claim(
     key: str,
     holder: str,
     *,
@@ -349,9 +349,8 @@ def acquire_claim(
 
     ``_attempt`` is internal bookkeeping only (never pass it): each
     contention/race branch recurses through ``_retry()``, which counts
-    attempts and raises ``ClaimContended`` after ``ACQUIRE_MAX_ATTEMPTS``
-    rather than recursing unbounded, mirroring Rust's bounded
-    ``ACQUIRE_MAX_ATTEMPTS`` for-loop (crates/fno-agents/src/claims.rs).
+    attempts and raises ``ClaimContended`` after the native retry budget
+    rather than recursing unbounded, mirroring the Rust claim loop.
     """
     _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
     path = claim_path(key, root=root)
@@ -361,14 +360,11 @@ def acquire_claim(
     acquired_lock = False
 
     def _retry() -> Claim:
-        # Every contention/race branch below re-dispatches by recursing with
-        # the exact same arguments - one definition instead of the same
-        # 9-line call restated at each of the seven sites that need it.
-        if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
+        if _attempt + 1 >= _PY_LEGACY_RETRY_LIMIT:
             raise ClaimContended(
-                f"acquire_claim gave up after {ACQUIRE_MAX_ATTEMPTS} contention retries on {key!r}"
+                f"acquire_claim gave up after {_PY_LEGACY_RETRY_LIMIT} contention retries on {key!r}"
             )
-        return acquire_claim(
+        return _legacy_acquire_claim(
             key,
             holder,
             reason=reason,
@@ -385,15 +381,6 @@ def acquire_claim(
         )
 
     def _release_and_retry() -> Claim:
-        # `return _retry()` evaluates the recursive acquire_claim() call
-        # BEFORE this frame's own `finally` runs (Python evaluates a
-        # return expression, then unwinds through finally). Recursing while
-        # `acquired_lock` is still True would have the recursive call poll
-        # for the SAME per-key recovery mutex this frame is still sitting
-        # on if it lands back in a mutex-taking branch - self-contention
-        # that only resolves via ACQUIRE_MAX_ATTEMPTS exhaustion instead of
-        # the near-instant re-dispatch (e.g. ClaimHeldByOther) it should.
-        # Release first, from whichever branch currently holds it.
         nonlocal acquired_lock
         if acquired_lock:
             release_dir_mutex(recovery_lock, recovery_token)
@@ -1059,10 +1046,8 @@ RECOVERY_LOCK_SUFFIX = ".recovery.d"
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02
 _RECOVERY_LOCK_MAX_WAIT_S = 5.0
 
-# Mirrors Rust's ACQUIRE_MAX_ATTEMPTS (crates/fno-agents/src/claims.rs):
-# acquire_claim/refresh_claim recurse on contention instead of Rust's bounded
-# for-loop, so an attempt counter caps the recursion depth the same way.
-ACQUIRE_MAX_ATTEMPTS = 5
+# Retained only by the legacy implementations while old imports drain.
+_PY_LEGACY_RETRY_LIMIT = 5
 
 
 def _claim_verdict(claim: Claim, *, root: Optional[Path] = None) -> dict[str, Any]:
@@ -1122,7 +1107,7 @@ def _atomic_replace(path: Path, content: str) -> None:
         raise
 
 
-def release_claim(
+def _legacy_release_claim(
     key: str,
     holder: str,
     *,
@@ -1244,50 +1229,7 @@ def _registry_session_pid(session_id: str) -> Optional[int]:
 def _reanchor_pid_for(
     existing: Claim, *, root: Optional[Path] = None, verdict: Optional[dict[str, Any]] = None
 ) -> Optional[int]:
-    """The durable pid a renewal should re-anchor EXISTING to, or None.
-
-    Mirrors ``renew`` in ``crates/fno-agents/src/claims.rs``. Renewal used to
-    preserve the recorded pid, and that is what made SUSPECT mean two things: a
-    respawned worker renewing under a new pid left a claim byte-identical to a
-    dead worker's, so nothing on disk separated a live session from a corpse and
-    every reader that must not steal from the first was forced to protect the
-    second.
-
-    Returns None - meaning leave the anchor alone - in four cases, each for its
-    own reason:
-
-      * The recorded pid is still LIVE. There is nothing to repair, and
-        rewriting it would let any process holding the same holder string take
-        over a running session's anchor.
-      * The claim is off-machine. We cannot read another box's pid table, so a
-        dead-looking pid there is unverified.
-      * The claim carries a session id but the registry row keyed by it has no
-        live pid (or there is no row). There is no session-keyed anchor.
-      * No harness ancestor resolves. There is no better anchor to write, and a
-        transient pid is a worse one: ``fno-agents loop-check`` exits about a
-        second after it renews, so anchoring to the renewer would re-file the
-        corpse under a fresh number and fix nothing.
-
-    PID-reuse detection survives because the anchor moves WITH the pid:
-    ``_rebound_claim`` holds ``acquired_at`` on renewal, so a later recycle of
-    the anchor pid still reads ``create_time > acquired_at``.
-
-    THE TRUST BOUNDARY, stated rather than implied. The renewer is authenticated
-    by its holder string and nothing else, and `fno agents claim status` publishes that
-    string. So a different session on this machine that refreshes under a
-    published holder re-anchors the claim to ITS ancestor, and the claim then
-    reads LIVE until that session ends instead of SUSPECT.
-
-    That is the same credential `release_claim` and `refresh_claim` have always
-    accepted. The session id in the record narrows it to the acquiring
-    session: the registry row keyed by that id is the verifiable identity the
-    record was missing.
-    """
-    # An EXPIRED claim is already reclaimable, and re-anchoring one resurrects it
-    # as LIVE - taking a slot a peer is entitled to and racing whatever recovery
-    # was mid-flight. `renew_locked` in `crates/fno-agents/src/claims.rs`, which
-    # this mirrors, has always refused there; without the same refusal here the
-    # two implementations of one operation answered differently.
+    """Return a safer live-session pid anchor for a renewed claim, if one exists."""
     verdict = verdict or _claim_verdict(existing, root=root)
     if existing.pid_unavailable or verdict.get("expired") is True:
         return None
@@ -1342,7 +1284,7 @@ def _reanchor_pid_for(
     return anchor
 
 
-def refresh_claim(
+def _legacy_refresh_claim(
     key: str,
     holder: str,
     *,
@@ -1350,25 +1292,7 @@ def refresh_claim(
     root: Optional[Path] = None,
     _attempt: int = 0,
 ) -> Optional[Claim]:
-    """Extend a TTL claim's expires_at.
-
-    Returns the new Claim on success. Returns None for PID-liveness claims
-    (no expires_at). An expired TTL claim raises :class:`ClaimValidationError`:
-    it is reclaimable and must never be resurrected over concurrent recovery,
-    and a distinct non-success keeps callers from misreporting it as the
-    legitimate PID-liveness no-op.
-
-    ``_attempt`` is internal bookkeeping only (never pass it): on mutex
-    contention this recurses, bounded at ``ACQUIRE_MAX_ATTEMPTS`` (raises
-    ``ClaimContended`` past that), mirroring ``acquire_claim``.
-
-    Raises:
-        HolderMismatch: existing claim is held by someone else.
-        ClaimGoneAway: claim was released between read and rewrite.
-        ClaimValidationError: claim expired before the locked rewrite.
-        ClaimCorrupted: existing file fails parse/schema validation.
-        ClaimContended: mutex contention exhausted ACQUIRE_MAX_ATTEMPTS retries.
-    """
+    """Extend a TTL claim, or return None for PID-liveness claims."""
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
     if ttl_ms is not None and not (MIN_TTL_MS <= ttl_ms <= MAX_TTL_MS):
@@ -1394,12 +1318,14 @@ def refresh_claim(
             recovery_lock, _RECOVERY_LOCK_MAX_WAIT_S, poll_s=_RECOVERY_LOCK_POLL_INTERVAL_S
         )
         if token is None:
-            if _attempt + 1 >= ACQUIRE_MAX_ATTEMPTS:
+            if _attempt + 1 >= _PY_LEGACY_RETRY_LIMIT:
                 raise ClaimContended(
-                    f"refresh_claim gave up after {ACQUIRE_MAX_ATTEMPTS} "
+                    f"refresh_claim gave up after {_PY_LEGACY_RETRY_LIMIT} "
                     f"contention retries on {key!r}"
                 )
-            return refresh_claim(key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt + 1)
+            return _legacy_refresh_claim(
+                key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt + 1
+            )
         recovery_token = token
         acquired_lock = True
 
@@ -1452,7 +1378,7 @@ def refresh_claim(
             release_dir_mutex(recovery_lock, recovery_token)
 
 
-def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
+def _legacy_claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
     """Inspect a single key. Never raises; returns a structured dict.
 
     Keys in the returned dict:
@@ -1589,7 +1515,7 @@ def _list_claims_impl(
     return out, {**counts, "total": sum(counts.values())}, states_by_key
 
 
-def list_claims(
+def _legacy_list_claims(
     *,
     prefix: Optional[str] = None,
     include_stale: bool = False,
@@ -1610,7 +1536,7 @@ def list_claims(
     return rows
 
 
-def list_claims_with_counts(
+def _legacy_list_claims_with_counts(
     *,
     prefix: Optional[str] = None,
     include_stale: bool = False,
@@ -1638,7 +1564,7 @@ class ForceReleaseOutcome(NamedTuple):
     previous_holder: Optional[str]
 
 
-def force_release_claim(
+def _legacy_force_release_claim(
     key: str,
     reason: str,
     *,
@@ -1795,7 +1721,7 @@ def _default_reap_roots() -> list[Path]:
     return _dedup_roots([global_claims_root(), None])
 
 
-def reap_dead_claims(
+def _legacy_reap_dead_claims(
     *,
     roots: Optional[list[Optional[Path]]] = None,
     apply: bool = False,
@@ -1803,85 +1729,7 @@ def reap_dead_claims(
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
     optout_sink: Optional[list[Claim]] = None,
 ) -> dict[str, Any]:
-    """Archive every provably-dead claim across one or more claims roots.
-
-    The only mutation missing from the claim lifecycle. Acquire,
-    release, refresh, and force-release all exist; nothing prunes a claim
-    whose holder died without releasing, so a dead session leaks its
-    lockfile forever. This walks every ``.lock`` file in the swept roots,
-    classifies it with the native ``classify_for_sweep`` decision (the
-    single liveness authority), and archives the provably-dead ones to
-    ``.expired/``.
-
-    ``roots``, when given, is a list of repo-root arguments passed through
-    to :func:`fno.claims.io.claims_dir` exactly as ``--root`` does for
-    every other claim verb (``None`` means the canonical repo root). When
-    omitted, both default roots are swept in one run (AC2) - sweeping only
-    one is the guard-on-one-of-N-paths trap: 574 of the claims measured on
-    2026-08-14 lived in the root a single-root sweep would have missed.
-
-    With ``apply=False`` (the default), nothing is written; reapable files
-    are counted under ``would_reap`` from the same lock-free classification
-    ``apply=True`` uses before it ever takes the per-key recovery mutex - a
-    dry run never probes that mutex (deliberately: it is cheap, lock-free
-    triage by design), so a claim it counts under ``would_reap`` can still
-    land under ``contended`` in a LATER real apply run if something else
-    holds that key's mutex at that later instant. That gap is no different
-    from any other race between a preview and a separate later action; it is
-    not a promise this call predicts contention outcomes, only that the
-    classification itself (dead vs. live vs. suspect) matches.
-
-    With ``apply=True``, each reapable file is archived and then the store
-    is RE-READ to confirm the move: the source path must be gone and the
-    ``.expired/`` destination must exist. Only that re-read increments
-    ``reaped`` - never the absence of an exception, because ``fno agents
-    rm`` was observed tonight to exit 0 having moved nothing. A file whose
-    source path is still present after the archive call is counted under
-    ``reap_failed`` with its path, and the caller (the ``reap`` CLI verb)
-    exits non-zero when that list is non-empty.
-
-    ``abandonment_probe`` is the SECOND instrument, and it is optional so that
-    omitting it is byte-for-byte today's behavior. A ``node:`` claim reading
-    SUSPECT (dead pid, unexpired TTL) is the one case a pid cannot settle: the
-    holder is a session, and a session can be respawned under a new pid. The
-    probe answers "is a live worker actually on this node" from the roster, and
-    is called ONLY for a ``node:`` key that classified SUSPECT - never to
-    override a live claim, and never for a key family with no roster to consult.
-
-    SUSPECT is also where an expired claim whose prover-proven pid is shared
-    across distinct holders lands : the sweep derives
-    PID-exclusivity from the records it scans, and a pid answering for more
-    than one holder corroborates neither the lease nor the holder's death, so
-    the probe - not the daemon both holders point at - decides reap vs keep.
-
-    Its three answers are deliberately not a bool:
-
-      ``True``  proven abandoned; reap it.
-      ``False`` a live worker is on the node; keep it (``kept_suspect_alive``).
-      ``None``  the probe could not run; keep it (``kept_suspect_unprobed``).
-
-    ``None`` KEEPS. Reaping because a probe returned nothing is the exact
-    inversion of this fix: an instrument that did not run must never be read as
-    a finding, and archiving a live worker's claim is disaster from the
-    other side.
-
-    Returns a summary dict: ``scanned``, ``reaped``, ``would_reap``,
-    ``kept_live``, ``kept_suspect``, ``kept_suspect_alive``,
-    ``kept_suspect_unprobed``, ``kept_unclassified``, ``unclassified_dirs``,
-    ``kept_suspect_unprobed_by``, ``kept_offhost``, ``corrupted``,
-    ``vanished``, ``contended``, ``reap_failed`` (list of ``(path,
-    reason)``), ``apply``, ``roots``. A ``claim_reap_swept`` event fires on every
-    ``apply=True`` call, including a zero-reap run - a leg that never ran
-    must not look the same as one that ran and found nothing. A dry run
-    fires no event: the "nothing is written" promise above covers the
-    event log too, so `fno backlog reconcile --dry-run`'s own preview
-    contract is not silently broken by the reap it previews.
-
-    ``optout_sink``, when given, collects every archived ``config-optout:``
-    claim so the caller can restore the human-facing config file; the reaper
-    itself stays config-free. A caller that passes no sink skips the restore,
-    which read-time revocation still covers.
-    """
+    """Archive claims proven dead; unknown or degraded evidence remains protected."""
     use_dirs = _default_reap_roots() if roots is None else _dedup_roots(roots)
     native_verdicts: dict[str, dict[str, Any]] = {}
     for cdir in use_dirs:
@@ -2247,3 +2095,307 @@ def _clear_lock_mirror_for_reaped(
 def _dedup_roots(roots: list[Optional[Path]]) -> list[Path]:
     """Resolve + dedup an explicit ``--root`` list, returning the claims dirs."""
     return [cdir for _, cdir in dedup_claims_roots(roots)]
+
+
+def _native_claim(operation: str, key: str, flags: list[str]) -> dict[str, Any]:
+    """Run one native claim operation and decode its JSON reply."""
+    import json
+    from fno.rust_binary import resolve_binary
+    binary = resolve_binary()
+    if binary is None:
+        raise ClaimVerdictUnavailable(
+            "fno-agents claim unavailable: set FNO_AGENTS_BIN or reinstall fno"
+        )
+    command = [str(binary), "claim", operation]
+    if key:
+        command.append(key)
+    command.extend(flags)
+    command.append("--json")
+    try:
+        result = _SubprocessPopen(command, stdout=_SUBPROCESS_PIPE,
+                                  stderr=_SUBPROCESS_PIPE, text=True)
+        stdout, stderr = result.communicate()
+    except OSError as exc:
+        raise ClaimVerdictUnavailable(f"fno-agents claim could not run: {exc}") from exc
+    try:
+        payload = json.loads(stdout) if stdout.strip() else {}
+    except json.JSONDecodeError as exc:
+        raise ClaimVerdictError(f"fno-agents claim returned invalid JSON: {exc}") from exc
+    if result.returncode == 1 and payload.get("outcome") == "held_by_other":
+        raise ClaimHeldByOther(
+            str(payload.get("holder") or "unknown"),
+            payload.get("pid"),
+            str(payload.get("host") or "unknown"),
+            key,
+        )
+    if result.returncode != 0:
+        detail = stderr.strip() or stdout.strip() or f"exit {result.returncode}"
+        raise ClaimVerdictError(f"fno-agents claim {operation} failed: {detail}")
+    if isinstance(payload, list) and operation == "list":
+        return {"rows": payload}
+    if not isinstance(payload, dict):
+        raise ClaimVerdictError("fno-agents claim returned a non-object JSON value")
+    return payload
+def _native_root_flags(root: Optional[Path]) -> list[str]:
+    return ["--root", str(root)] if root is not None else []
+
+def _native_claim_model(payload: dict[str, Any]) -> Claim:
+    body = payload.get("claim", payload)
+    if not isinstance(body, dict):
+        raise ClaimVerdictError("fno-agents claim returned no claim object")
+    return Claim.model_validate(body)
+
+
+def _python_claim_runtime() -> bool:
+    return os.environ.get("FNO_AGENTS_RUNTIME", "").strip().lower() == "python"
+
+
+def _configured_claim_root() -> Optional[Path]:
+    value = os.environ.get("FNO_CLAIMS_ROOT", "").strip()
+    return Path(value) if value else None
+
+def _legacy_claim_call(key: str, root: Optional[Path]) -> bool:
+    return root is not None or _python_claim_runtime() or (bool(key) and claims_root_for(key) is None)
+
+
+def _legacy_sweep_roots_if_present() -> Optional[list[Optional[Path]]]:
+    roots: list[Optional[Path]] = [global_claims_root(), None, Path.cwd()]
+    try:
+        present = any(
+            any(path.is_file() and path.name.endswith(".lock") for path in directory.iterdir())
+            for _raw, directory in dedup_claims_roots(roots)
+        )
+    except OSError:
+        present = False
+    return roots if present else None
+
+
+_LEGACY_ACQUIRE_CLAIM = _legacy_acquire_claim
+_LEGACY_RELEASE_CLAIM = _legacy_release_claim
+_LEGACY_REFRESH_CLAIM = _legacy_refresh_claim
+_LEGACY_CLAIM_STATUS = _legacy_claim_status
+_LEGACY_LIST_CLAIMS = _legacy_list_claims
+_LEGACY_LIST_CLAIMS_WITH_COUNTS = _legacy_list_claims_with_counts
+_LEGACY_FORCE_RELEASE_CLAIM = _legacy_force_release_claim
+_LEGACY_REAP_DEAD_CLAIMS = _legacy_reap_dead_claims
+
+
+def acquire_claim(
+    key: str,
+    holder: str,
+    *,
+    reason: Optional[str] = None,
+    ttl_ms: Optional[int] = None,
+    metadata: Optional[dict[str, Any]] = None,
+    pid: Optional[int] = None,
+    pid_unavailable: bool = False,
+    host: Optional[str] = None,
+    harness: Optional[str] = None,
+    pid_provenance: Optional[str] = None,
+    harness_session_id: Optional[str] = None,
+    root: Optional[Path] = None,
+    _attempt: int = 0,
+) -> Claim:
+    if _legacy_claim_call(key, root):
+        return _LEGACY_ACQUIRE_CLAIM(key, holder, reason=reason, ttl_ms=ttl_ms, metadata=metadata, pid=pid, pid_unavailable=pid_unavailable, host=host, harness=harness, pid_provenance=pid_provenance, harness_session_id=harness_session_id, root=root, _attempt=_attempt)  # noqa: E501
+    del host, harness, pid_provenance, harness_session_id, _attempt
+    _validate_inputs(key, holder, ttl_ms, pid=pid, pid_unavailable=pid_unavailable)
+    native_root = root or _configured_claim_root()
+    flags = ["--holder", holder]
+    if ttl_ms is not None:
+        flags.extend(("--ttl-ms", str(ttl_ms)))
+    if reason is not None:
+        flags.extend(("--reason", reason))
+    if metadata is not None:
+        import json
+
+        flags.extend(("--metadata", json.dumps(metadata, separators=(",", ":"))))
+    if not pid_unavailable:
+        flags.extend(("--pid", str(pid if pid is not None else os.getpid())))
+    if pid_unavailable:
+        flags.append("--pid-unavailable")
+    flags.extend(_native_root_flags(native_root))
+    return _native_claim_model(_native_claim("acquire", key, flags))
+
+
+def release_claim(
+    key: str,
+    holder: str,
+    *,
+    strict: bool = False,
+    root: Optional[Path] = None,
+    sync_graph_mirror: bool = True,
+) -> Optional[Claim]:
+    if _legacy_claim_call(key, root):
+        return _LEGACY_RELEASE_CLAIM(
+            key,
+            holder,
+            strict=strict,
+            root=root,
+            sync_graph_mirror=sync_graph_mirror,
+        )
+    del sync_graph_mirror
+    if not key or not holder:
+        raise ClaimValidationError("key and holder must be non-empty")
+    native_root = root or _configured_claim_root()
+    prior_payload = _native_claim("status", key, _native_root_flags(native_root))
+    prior = None
+    if prior_payload.get("state") not in {None, "free"} and prior_payload.get("holder"):
+        prior = Claim.model_validate(prior_payload)
+        if prior.holder != holder and strict:
+            raise HolderMismatch(holder, prior.holder, key)
+    _native_claim("release", key, ["--holder", holder, *_native_root_flags(native_root)])
+    return prior if prior is not None and prior.holder == holder else None
+
+
+def refresh_claim(
+    key: str,
+    holder: str,
+    *,
+    ttl_ms: Optional[int] = None,
+    root: Optional[Path] = None,
+    _attempt: int = 0,
+) -> Optional[Claim]:
+    if _legacy_claim_call(key, root):
+        return _LEGACY_REFRESH_CLAIM(
+            key, holder, ttl_ms=ttl_ms, root=root, _attempt=_attempt
+        )
+    del _attempt
+    if ttl_ms is not None and ttl_ms <= 0:
+        raise ClaimValidationError("ttl_ms must be positive")
+    native_root = root or _configured_claim_root()
+    flags = _native_root_flags(native_root)
+    if ttl_ms is None:
+        status = _native_claim("status", key, flags)
+        state = status.get("state")
+        if state == "free":
+            raise ClaimGoneAway(str(claim_path(key, root=root)))
+        if state == "corrupted":
+            raise ClaimCorrupted(str(status.get("error") or key))
+        if state == "stale":
+            raise ClaimValidationError(f"claim {key!r} expired and cannot be refreshed")
+        if status.get("expires_at") is None:
+            return None
+        ttl_ms = MIN_TTL_MS
+    payload = _native_claim(
+        "renew",
+        key,
+        ["--holder", holder, "--ttl-ms", str(ttl_ms), *flags],
+    )
+    if payload.get("refreshed") is False or payload.get("outcome") == "unchanged":
+        return None
+    return _native_claim_model(payload)
+
+
+def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
+    if _legacy_claim_call(key, root):
+        return _LEGACY_CLAIM_STATUS(key, root=root)
+    if not key:
+        raise ClaimValidationError("key must be non-empty")
+    return _native_claim("status", key, _native_root_flags(root or _configured_claim_root()))
+
+
+def list_claims(
+    *,
+    prefix: Optional[str] = None,
+    include_stale: bool = False,
+    root: Optional[Path] = None,
+) -> list[dict[str, Any]]:
+    if root is not None or _python_claim_runtime():
+        return _LEGACY_LIST_CLAIMS(
+            prefix=prefix, include_stale=include_stale, root=root
+        )
+    flags = _native_root_flags(root or _configured_claim_root())
+    if prefix is not None:
+        flags.extend(("--prefix", prefix))
+    if include_stale:
+        flags.append("--include-stale")
+    payload = _native_claim("list", "", flags)
+    return payload.get("rows", []) if isinstance(payload.get("rows"), list) else []
+
+
+def list_claims_with_counts(
+    *,
+    prefix: Optional[str] = None,
+    include_stale: bool = False,
+    root: Optional[Path] = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, str]]:
+    if root is not None or _python_claim_runtime():
+        return _LEGACY_LIST_CLAIMS_WITH_COUNTS(
+            prefix=prefix, include_stale=include_stale, root=root
+        )
+    rows = list_claims(prefix=prefix, include_stale=True, root=root)
+    counts = {state: 0 for state in ("live", "suspect", "stale", "corrupted", "free")}
+    states: dict[str, str] = {}
+    for row in rows:
+        state = str(row.get("state") or "corrupted")
+        counts[state] = counts.get(state, 0) + 1
+        if isinstance(row.get("key"), str):
+            states[row["key"]] = state
+    if not include_stale:
+        rows = [row for row in rows if row.get("state") in {"live", "suspect"}]
+    counts["total"] = sum(counts.values())
+    return rows, counts, states
+
+
+def force_release_claim(
+    key: str,
+    reason: str,
+    *,
+    root: Optional[Path] = None,
+    holding_recovery_lock: bool = False,
+) -> ForceReleaseOutcome:
+    if _legacy_claim_call(key, root):
+        return _LEGACY_FORCE_RELEASE_CLAIM(
+            key,
+            reason,
+            root=root,
+            holding_recovery_lock=holding_recovery_lock,
+        )
+    del holding_recovery_lock
+    if not key:
+        raise ClaimValidationError("key must be non-empty")
+    if not reason:
+        raise ClaimValidationError("reason must be non-empty for force-release")
+    payload = _native_claim(
+        "force-release", key,
+        ["--reason", reason, *_native_root_flags(root or _configured_claim_root())],
+    )
+    return ForceReleaseOutcome(
+        path=Path(str(payload.get("path") or "")),
+        archived=bool(payload.get("archived")),
+        previous_holder=payload.get("previous_holder"),
+    )
+
+
+def reap_dead_claims(
+    *,
+    roots: Optional[list[Optional[Path]]] = None,
+    apply: bool = False,
+    abandonment_probe: Optional[Callable[..., Optional[bool]]] = None,
+    node_settlement: Optional[Callable[..., Optional[bool]]] = None,
+    optout_sink: Optional[list[Claim]] = None,
+) -> dict[str, Any]:
+    if roots is not None or _python_claim_runtime():
+        return _LEGACY_REAP_DEAD_CLAIMS(
+            roots=roots,
+            apply=apply,
+            abandonment_probe=abandonment_probe,
+            node_settlement=node_settlement,
+            optout_sink=optout_sink,
+        )
+    legacy_roots = _legacy_sweep_roots_if_present()
+    if legacy_roots is not None:
+        return _LEGACY_REAP_DEAD_CLAIMS(
+            roots=None,
+            apply=apply,
+            abandonment_probe=abandonment_probe,
+            node_settlement=node_settlement,
+            optout_sink=optout_sink,
+        )
+    del abandonment_probe, node_settlement, optout_sink
+    flags: list[str] = ["--apply"] if apply else []
+    native_root = _configured_claim_root()
+    if native_root is not None:
+        flags.extend(("--root", str(native_root)))
+    return _native_claim("reap", "", flags)

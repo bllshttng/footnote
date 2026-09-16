@@ -2553,6 +2553,12 @@ def _law_law(monkeypatch, scoped="none", standing="none"):
 WAIVE_HEAD = "f" * 40
 
 
+@pytest.fixture(autouse=True)
+def _sandbox_decision_graph(tmp_path, monkeypatch):
+    """Keep this module's graph-backed decision reads beside its JSONL index."""
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / ".decision-index" / "graph.json")
+
+
 def test_law_authority_reads_the_real_index_three_ways(tmp_path):
     """The seam is the engine's law-lane live read, not a second deciding
     list: none, single (affirmative value only), damaged -> unknown. Seeded

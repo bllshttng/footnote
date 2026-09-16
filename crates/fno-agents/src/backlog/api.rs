@@ -484,10 +484,63 @@ pub fn version(store: &Store) -> Result<i64, ApiError> {
 /// `graph_store::mutate_rows` (the one optimistic cycle every whole-graph
 /// writer shares). `Ok(false)` from `apply` is a domain refusal: nothing is
 /// written and the counter stays put, which is AC15's failed-mutation arm.
+pub fn decisions(
+    store: &Store,
+    node: Option<&str>,
+    decision_id: Option<&str>,
+) -> Result<Vec<Value>, ApiError> {
+    let connection = crate::backlog::open(&store.graph)?;
+    let rows = match node {
+        Some(node_id) => crate::backlog::decisions::node_decisions(&connection, node_id)?,
+        None => {
+            let mut rows = crate::backlog::decisions::read_rows(&connection)?.0;
+            if let Some(decision_id) = decision_id {
+                rows.retain(|row| {
+                    row.get("decision_id").and_then(Value::as_str) == Some(decision_id)
+                });
+            }
+            rows
+        }
+    };
+    Ok(rows)
+}
+
+pub fn decision_record(store: &Store, event: Value) -> Result<Payload<Value>, ApiError> {
+    let mut connection = crate::backlog::open(&store.graph)?;
+    crate::backlog::decisions::record_connected(&mut connection, &event, "decision_record")
+        .map_err(ApiError)?;
+    Ok(Payload {
+        success: true,
+        node: Some(event),
+        version: fresh_version(store),
+    })
+}
+
+pub fn decision_retract(store: &Store, event: Value) -> Result<Payload<Value>, ApiError> {
+    let mut connection = crate::backlog::write_connection(&store.graph)?;
+    crate::backlog::decisions::record_connected(&mut connection, &event, "decision_retract")
+        .map_err(ApiError)?;
+    Ok(Payload {
+        success: true,
+        node: Some(event),
+        version: fresh_version(store),
+    })
+}
+
 fn mutate(
     store: &Store,
+    mutation: &str,
     mut apply: impl FnMut(&mut Vec<Value>) -> Result<bool, String>,
 ) -> Result<bool, ApiError> {
+    if crate::backlog::backend(&store.graph) == crate::backlog::Backend::Sqlite {
+        // Single-row path: the immediate transaction reads
+        // the current authoritative rows, writes only the changed node's
+        // aggregates, and the gate event names this mutation (AC24).
+        return crate::backlog::mutate_single_row(&store.graph, mutation, |rows| apply(rows))
+            .map_err(ApiError);
+    }
+    // The json leg keeps the whole-graph cycle: it serves the rollback arm
+    // until the JSON retirement wave.
     let landed =
         crate::graph_store::mutate_rows(&store.graph, MUTATE_TIMEOUT, None, None, |rows| {
             apply(rows).map_err(crate::graph_store::StoreError::Invalid)
@@ -549,7 +602,7 @@ pub fn node_create(store: &Store, input: NodeCreateInput) -> Result<Payload<Node
     }
     let id = row["id"].as_str().unwrap_or_default().to_string();
     let mut created: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "node_create", |rows| {
         if rows
             .iter()
             .any(|row| crate::graph_store::entry_id(row) == Some(id.as_str()))
@@ -580,7 +633,7 @@ pub fn node_update(
         return refusal(store);
     }
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "node_update", |rows| {
         // The status arm goes through the patch door: status is derived, so
         // the planner changes the facts and validates the readback. A
         // refusal (a done node, a plan-less ready, an owned transition)
@@ -628,7 +681,7 @@ pub fn node_batch_update(
     }
     let wanted: std::collections::BTreeSet<&str> = ids.iter().map(String::as_str).collect();
     let mut updated: Vec<Node> = Vec::new();
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "node_batch_update", |rows| {
         // Same door as the single update: every wanted id's status moves
         // through the planner, and one refusal refuses the batch.
         if let Some(word) = &input.status {
@@ -677,7 +730,12 @@ pub fn node_unarchive(store: &Store, id: &str) -> Result<Payload<Node>, ApiError
 
 fn stamp_archived(store: &Store, id: &str, archived: bool) -> Result<Payload<Node>, ApiError> {
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let name = if archived {
+        "node_archive"
+    } else {
+        "node_unarchive"
+    };
+    let ok = mutate(store, name, |rows| {
         for row in rows.iter_mut() {
             if crate::graph_store::entry_id(row) != Some(id) {
                 continue;
@@ -710,7 +768,7 @@ fn stamp_archived(store: &Store, id: &str, archived: bool) -> Result<Payload<Nod
 pub fn node_delete(store: &Store, id: &str) -> Result<Payload<Node>, ApiError> {
     let mut deleted: Option<Node> = None;
     let mut kept: Vec<Value> = Vec::new();
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "node_delete", |rows| {
         for row in rows.drain(..) {
             if crate::graph_store::entry_id(&row) == Some(id) {
                 deleted = Node::from_json(&row).ok();
@@ -740,7 +798,12 @@ fn edge_list(
     add: bool,
 ) -> Result<Payload<Node>, ApiError> {
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let name = if add {
+        "relation_create"
+    } else {
+        "relation_delete"
+    };
+    let ok = mutate(store, name, |rows| {
         for row in rows.iter_mut() {
             if crate::graph_store::entry_id(row) != Some(node_id) {
                 continue;
@@ -803,7 +866,8 @@ fn label_mutation(
     add: bool,
 ) -> Result<Payload<Node>, ApiError> {
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let gate_mutation = if add { "label_add" } else { "label_remove" };
+    let ok = mutate(store, gate_mutation, |rows| {
         for row in rows.iter_mut() {
             if crate::graph_store::entry_id(row) != Some(id) {
                 continue;
@@ -850,7 +914,7 @@ pub fn comment_create(
     input: CommentCreateInput,
 ) -> Result<Payload<Node>, ApiError> {
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "comment_create", |rows| {
         for row in rows.iter_mut() {
             if crate::graph_store::entry_id(row) != Some(id) {
                 continue;
@@ -900,7 +964,7 @@ pub fn pull_request_attach(
         extras: serde_json::Map::new(),
     };
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "pull_request_attach", |rows| {
         for row in rows.iter_mut() {
             if crate::graph_store::entry_id(row) != Some(id) {
                 continue;
@@ -939,7 +1003,7 @@ pub fn session_append(
     row: SessionRecord,
 ) -> Result<Payload<Node>, ApiError> {
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "session_append", |rows| {
         for row_json in rows.iter_mut() {
             if crate::graph_store::entry_id(row_json) != Some(id) {
                 continue;
@@ -985,7 +1049,7 @@ pub fn session_end(
             && harness.map_or(true, |want| rec_harness == Some(want))
     };
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "session_end", |rows| {
         for row in rows.iter_mut() {
             if crate::graph_store::entry_id(row) != Some(id) {
                 continue;
@@ -1046,7 +1110,7 @@ pub fn encounter_create(
     input: EncounterInput,
 ) -> Result<Payload<Node>, ApiError> {
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "encounter_create", |rows| {
         for row in rows.iter_mut() {
             if crate::graph_store::entry_id(row) != Some(id) {
                 continue;
@@ -1092,7 +1156,7 @@ pub fn dispatch_set(
     d: Option<Dispatch>,
 ) -> Result<Payload<Node>, ApiError> {
     let mut updated: Option<Node> = None;
-    let ok = mutate(store, |rows| {
+    let ok = mutate(store, "dispatch_set", |rows| {
         for row in rows.iter_mut() {
             if crate::graph_store::entry_id(row) != Some(id) {
                 continue;

@@ -225,8 +225,7 @@ def _record(
 
     # Validated here, on the write path, and deliberately NOT in schema.yaml:
     # rows already on disk carry invented `crown-l2-<node>` spellings, and a
-    # schema enum would make `fno backlog decide-reindex` reject them and drop recall
-    # for real rulings.
+    # schema enum would reject them and drop recall for real rulings.
     if authority is not None and authority not in AUTHORITY_SOURCES:
         typer.echo(
             f"decide: --authority '{authority}' is not one of "
@@ -306,8 +305,8 @@ def _record(
         # mints a second id for one ruling.
         typer.echo(
             f"decide: recorded {exc.decision_id} to the project journal, but the "
-            f"recall index write failed: {exc}. Run `fno backlog decide-reindex` to "
-            f"recover it. Do NOT re-run decide; that records it twice.",
+            f"recall store write failed: {exc}. Run `fno backlog decide-reindex` "
+            "to recover it. Do NOT re-run decide; that records it twice.",
             err=True,
         )
         raise typer.Exit(1)
@@ -488,7 +487,7 @@ def _retract(
     except IndexWriteError as exc:
         typer.echo(
             f"backlog decide-retract: durable retraction for {exc.decision_id} "
-            f"was written, but the recall index append failed: {exc}. Run "
+            f"was written, but the recall store append failed: {exc}. Run "
             "`fno backlog decide-reindex`; do not retry the retraction.",
             err=True,
         )
@@ -601,6 +600,45 @@ def backlog_decisions(
         legacy_flag="--subject",
     )
     _list_decisions(subject, limit, lane, state, review_list, output, output_format, as_json)
+
+
+@shim_app.command("decide-reindex", hidden=True)
+def decide_reindex_cmd() -> None:
+    """Backfill the pre-wave-12 JSONL decision index."""
+    from fno.decide import reindex
+
+    try:
+        typer.echo(json.dumps(reindex(), separators=(",", ":")))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"backlog decide-reindex: failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+
+backlog_decide_reindex = decide_reindex_cmd
+
+
+@shim_app.command("reindex", hidden=True)
+def reindex_compat_cmd() -> None:
+    from fno import paths
+    from fno.decide import reindex
+
+    try:
+        counts = reindex()
+    except Exception as exc:  # noqa: BLE001 - recovery must name its refusal
+        typer.echo(
+            f"backlog decide-reindex: failed on the index at {paths.decisions_jsonl()}: {exc}",
+            err=True,
+        )
+        raise typer.Exit(1)
+    note = f"reindex: +{counts['added']} decisions ({counts['already']} already indexed)"
+    if counts.get("unusable"):
+        note += f", {counts['unusable']} row(s) the schema will not accept"
+    if counts.get("invalid"):
+        note += f", {counts['invalid']} rows could not be written"
+    typer.echo(note, err=True)
+    typer.echo(str(counts.get("total", 0)))
+    if counts.get("invalid"):
+        raise typer.Exit(1)
 
 
 def _resolve_output_format(path: str, requested: Optional[str]) -> str:
@@ -875,14 +913,12 @@ def _list_decisions(
         # Exit 0: a read that answered "none" is a successful read. Only a read
         # that could not run is a failure.
         #
-        # But an install that predates the index has NO index, and every
-        # decision it holds lives in the graph projection this reader no longer
-        # consults. "None recorded" would then be the absence-reads-as-success
-        # shape this verb exists to police, on its own upgrade path. So the
-        # empty answer names the backfill whenever the index is missing.
-        from fno.decide import _index_path
-
-        if (lane is not None or state is not None) and _index_path().exists():
+        # A lane or lifecycle filter can empty the answer while the store
+        # itself holds decisions; the empty answer then says what it filtered
+        # away rather than implying nothing is recorded. The store cannot be
+        # a missing file any more, so the only source of an empty answer here
+        # is the filter itself.
+        if lane is not None or state is not None:
             # A lane or lifecycle filter emptied the answer, not the store.
             # Saying nothing is indexed under this subject would be false, and
             # the reader acts on it.
@@ -924,10 +960,13 @@ def _list_decisions(
                 )
                 return
 
+        from fno import paths
+
         hint = (
-            "" if _index_path().exists()
-            else " (no index yet on this machine - run `fno backlog decide-reindex` to "
-            "backfill what is already on disk)"
+            ""
+            if Path(paths.decisions_jsonl()).exists()
+            else " (no index yet on this machine - run `fno backlog "
+            "decide-reindex` to backfill what is already on disk)"
         )
         # NEVER "no decisions recorded". That is a claim about the world, and
         # only a claim about the QUERY is true here. Say what is not indexed,
@@ -1039,56 +1078,3 @@ def _list_decisions(
             f"'{label}': {listed}",
             err=True,
         )
-
-
-def _reindex() -> None:
-    """Backfill the recall index from the graph projections and the journals.
-
-    A decision recorded before the index existed is durable but unreadable
-    until this runs. Idempotent by decision id, so running it twice is free.
-    """
-    from fno.decide import reindex
-
-    from fno.decide import _index_path
-
-    try:
-        counts = reindex()
-    except Exception as exc:  # noqa: BLE001 - a partial backfill must not read as done
-        typer.echo(
-            f"backlog decide-reindex: failed on the index at {_index_path()}: {exc}", err=True
-        )
-        raise typer.Exit(1)
-
-    note = f"reindex: +{counts['added']} decisions ({counts['already']} already indexed)"
-    if counts.get("repaired"):
-        note += f", {counts['repaired']} damaged row(s) moved aside"
-    if counts.get("unusable"):
-        note += f", {counts['unusable']} row(s) the schema will not accept"
-    if counts.get("invalid"):
-        note += f", {counts['invalid']} rows could not be written"
-    typer.echo(note, err=True)
-    # stdout carries the value: the number of decisions now recoverable.
-    typer.echo(counts["total"])
-
-    # Exit 1 on ANY write failure, not only on a total one. The counter cannot
-    # tell an unusable legacy row from a store that went unwritable partway
-    # through, and a caller gating on the exit code (`fno backlog decide-reindex && ...`,
-    # or an agent following the recovery an IndexWriteError named) must not read
-    # success while decisions stay unrecoverable. Fail safe on the ambiguity.
-    if counts.get("invalid"):
-        typer.echo(
-            f"backlog decide-reindex: {counts['invalid']} row(s) could not be written, "
-            f"so the backfill is incomplete. Check that {_index_path()} is "
-            f"writable, then run it again.",
-            err=True,
-        )
-        raise typer.Exit(1)
-
-
-@shim_app.command("reindex")
-def reindex_cmd() -> None:
-    _reindex()
-
-
-def backlog_decide_reindex() -> None:
-    _reindex()

@@ -506,6 +506,8 @@ def record_decision(
     second id for one ruling, and `fno backlog decide-reindex` is the recovery.
     """
     from fno.events import append_event, operator_decision
+    from fno import paths
+    from fno.graph import api as graph_api
     from fno.outstanding.core import events_path
     from fno.decide.graduation import normalize_graduation
 
@@ -617,32 +619,41 @@ def record_decision(
         source=source,
     )
     append_event(event, events_path=events_path(events_root))
+    try:
+        append_event(event, events_path=paths.decisions_jsonl())
+    except Exception as exc:  # noqa: BLE001 - the event id names recovery
+        raise IndexWriteError(decision_id, exc) from exc
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:
-        append_event(event, events_path=_index_path())
-    except Exception as exc:  # noqa: BLE001 - re-raised with what the caller must know
-        raise IndexWriteError(decision_id, exc) from exc
-    try:
-        node_id = _project(event)
-    except (Exception, SystemExit) as exc:  # noqa: BLE001
-        # The projection is the node VIEW, the third of three writes. Both
-        # durable stores already hold the decision, so failing the command here
-        # would report a lost capture and invite the retry that mints a second
-        # id. SystemExit is caught on purpose: locked_mutate_graph exits the
-        # process on a corrupt graph, and SystemExit is not an Exception.
-        print(
-            f"decide: recorded {decision_id}, but the graph projection failed: "
-            f"{exc}. The decision is durable and recoverable with "
-            f"`fno backlog decisions`; the subject node just does not show it.",
-            file=sys.stderr,
-        )
+        graph_api.decision_record(event, path=paths.graph_json())
+    except (Exception, SystemExit):  # noqa: BLE001 - graph is a projection
+        # The project journal and compatibility index already hold the ruling.
+        # A corrupt or unavailable graph must degrade to that durable capture,
+        # matching the old JSONL-to-node projection path below.
+        _graph_entries()
         node_id = None
+    else:
+        try:
+            node_id = _project(event)
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            # The projection is the node VIEW, the third of three writes. Both
+            # durable stores already hold the decision, so failing the command here
+            # would report a lost capture and invite the retry that mints a second
+            # id. SystemExit is caught on purpose: locked_mutate_graph exits the
+            # process on a corrupt graph, and SystemExit is not an Exception.
+            print(
+                f"decide: recorded {decision_id}, but the graph projection failed: "
+                f"{exc}. The decision is durable and recoverable with "
+                f"`fno backlog decisions`; the subject node just does not show it.",
+                file=sys.stderr,
+            )
+            node_id = None
     return {"decision_id": decision_id, "event": event, "node_id": node_id}
 
 
 def _decision_row_by_id(decision_id: str) -> dict[str, Any] | None:
-    rows, _ = _read_index(_index_path())
+    rows, _ = _read_index()
     local_matches = [
         row
         for row in rows
@@ -679,6 +690,8 @@ def retract_decision(
         raise RefusedAuthorityError(provenance.decided_by, origin)
 
     from fno.events import append_event, decision_retracted
+    from fno import paths
+    from fno.graph import api as graph_api
     from fno.outstanding.core import events_path
 
     event = decision_retracted(
@@ -696,7 +709,11 @@ def retract_decision(
     events_root = resolve_carveout_root()
     append_event(event, events_path=events_path(events_root))
     try:
-        append_event(event, events_path=_index_path())
+        append_event(event, events_path=paths.decisions_jsonl())
+    except Exception as exc:  # noqa: BLE001 - the event id names recovery
+        raise IndexWriteError(str(target["decision_id"]), exc) from exc
+    try:
+        graph_api.decision_retract(event, path=paths.graph_json())
     except Exception as exc:  # noqa: BLE001 - durable event must not be retried blindly
         raise IndexWriteError(str(target["decision_id"]), exc) from exc
     return {"decision_id": str(target["decision_id"]), "event": event}
@@ -775,89 +792,57 @@ def _project(event: dict[str, Any]) -> str | None:
     return matched[0] if matched else None
 
 
-def _index_path() -> Path:
-    """The machine-wide decision index. Read through ``fno.paths`` every call
-    so a redirected state dir (a hermetic test, a ``state_dir`` override) is
-    the file both the writer and the reader see."""
+def _read_index(path: "Path | None" = None, *, warn: bool = True) -> "tuple[list[dict], int]":
+    """Read graph.db decisions, falling back to the legacy JSONL index."""
     from fno import paths
+    from fno.graph import api as graph_api
 
-    return paths.decisions_jsonl()
+    if path is not None:
+        return _read_legacy_index(Path(path), warn=warn)
+    try:
+        db_rows = graph_api.decisions(path=paths.graph_json())
+    except Exception:
+        db_rows = []
+    legacy_rows, damaged = _read_legacy_index(paths.decisions_jsonl(), warn=warn)
+    if not db_rows:
+        return legacy_rows, damaged
+    def row_key(row: dict) -> tuple[str, str]:
+        return (
+            str(row.get("_event_type") or DECISION_EVENT),
+            str(row.get("decision_id") or row.get("retraction_id")
+                or row.get("target_decision_id") or ""),
+        )
+    known = {row_key(row) for row in db_rows}
+    merged = [*db_rows, *(row for row in legacy_rows if row_key(row) not in known)]
+    return merged, damaged
 
 
-def _read_index(path: Path, *, warn: bool = True) -> "tuple[list[dict], int]":
-    """Flatten the index into decision rows plus a damaged-row count.
-
-    A MISSING index reads as zero decisions - the common case before the first
-    write. An index that exists and cannot be read raises: an unreadable store
-    answering "no decisions" is the absence-as-success failure this verb exists
-    to prevent.
-
-    ``warn=False`` silences the damaged-row notice for the reader that is about
-    to REPAIR them, so a backfill does not tell the operator to run the command
-    they are already running.
-    """
-    # os.stat, not path.exists(): exists() answers False for a dangling symlink
-    # and for a PermissionError on an ancestor, so it turns an UNREACHABLE index
-    # into "no decisions" - the absence-as-success failure named above.
+def _read_legacy_index(path: "Path", *, warn: bool = True) -> "tuple[list[dict], int]":
+    """Read the pre-wave-12 JSONL index for compatibility and migration."""
     try:
         path.stat()
     except FileNotFoundError:
         try:
             path.lstat()
         except OSError:
-            return [], 0  # nothing there: the case before the first write
-        raise  # a symlink whose target is gone is UNREACHABLE, not absent
-
-    rows: "list[dict]" = []
+            return [], 0
+        raise
+    rows: list[dict] = []
     damaged = 0
-    # errors="replace", not strict: a crash can split a multi-byte character
-    # mid-append, and a strict read raises on the whole file. That takes every
-    # good row with it AND breaks reindex, the recovery this warning names.
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            if not line.strip():
-                continue
-            # This file holds decisions and nothing else, so a line that is not
-            # one is damage. No substring prefilter here, deliberately: a torn
-            # append can end before the type string ever appears, and a
-            # prefilter would drop exactly that line without counting it.
-            try:
-                rec = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                damaged += 1
-                continue
-            data = rec.get("data") if isinstance(rec, dict) else None
-            if not isinstance(rec, dict) or rec.get("type") not in DECISION_EVENT_TYPES:
-                damaged += 1
-                continue
-            if not isinstance(data, dict):
-                damaged += 1
-                continue
-            if rec.get("type") == DECISION_EVENT and not data.get("decision_id"):
-                damaged += 1
-                continue
-            if rec.get("type") == RETRACTION_EVENT and not data.get("target_decision_id"):
-                damaged += 1
-                continue
-            row = dict(data)
-            row["ts"] = rec.get("ts")
-            row["_event_type"] = rec.get("type")
-            rows.append(row)
-
+    for line in _read_lines(path):
+        if not _is_index_line(line):
+            damaged += 1
+            continue
+        event = json.loads(line)
+        data = event["data"]
+        row = dict(data)
+        row["ts"] = event.get("ts")
+        row["_event_type"] = event.get("type")
+        rows.append(row)
     if damaged and warn:
-        # One bad row must not cost the others, so the row is skipped. But it
-        # is never skipped SILENTLY: a truncated append would otherwise make an
-        # unreadable record and an empty one look the same, which is the
-        # absence-as-success failure this index exists to prevent.
-        #
-        # The text names the sidecar rather than promising recovery. reindex
-        # re-folds the journals, so a row whose source journal is gone (a
-        # deleted repo, another machine) is NOT recovered; it is moved aside
-        # where a human can still read it.
         print(
             f"decide: {damaged} damaged row(s) in {path} were skipped. "
-            f"`fno backlog decide-reindex` re-folds the journals and moves the rest to "
-            f"{path.name}.corrupt.",
+            "Run `fno backlog decide-reindex` to recover them.",
             file=sys.stderr,
         )
     return rows, damaged
@@ -1154,7 +1139,7 @@ def near_miss_subjects(
     if not want:
         return []
     matches = _subject_matcher(subject, entries=entries)
-    rows, _ = _read_index(_index_path(), warn=False)
+    rows, _ = _read_index(warn=False)
     seen: "dict[str, set[str]]" = {}
     for row in rows:
         recorded = str(row.get("subject") or "")
@@ -1203,7 +1188,7 @@ def list_decisions(
             "state must be live, retired, expired, superseded, retracted, "
             "unscoped, or all"
         )
-    rows, damaged = _read_index(_index_path())
+    rows, damaged = _read_index()
     from fno.decide.graduation import registered_retirement
 
     decisions: list[dict[str, Any]] = [
@@ -1559,135 +1544,88 @@ def _journal_events(paths: "list[Path]") -> "list[dict]":
     return events
 
 
-def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
-    """Make the index a superset of every decision already on this machine.
-
-    Without this the fix helps no record that already exists. Idempotent by
-    ``decision_id``, so a second run adds nothing.
-
-    Journals are folded BEFORE projections and win a tie: the journal holds the
-    event as written, while a projection row is derived and can be lossier -
-    the oldest one on this machine dropped ``subject``, which is the one field
-    a recall query reads. Projections still run, because they are machine-wide
-    and reach decisions no journal here can see.
-    """
+def reindex(sources: "list[Path] | None" = None) -> dict[str, int]:
+    """Backfill the compatibility JSONL index without minting new ids."""
+    from fno import paths
     from fno.events import append_event, validate
 
-    index = _index_path()
-    repaired = _compact_index(index)
-    known = {
-        (
-            row.get("_event_type") or DECISION_EVENT,
-            str(
-                row.get("decision_id")
-                or row.get("retraction_id")
-                or row.get("target_decision_id")
-                or ""
-            ),
-        )
-        for row in _read_index(index, warn=False)[0]
-    }
-    preexisting = set(known)
-    counted: "set[tuple[str, str]]" = set()
-    already = 0
-    invalid = 0
-    unusable = 0
-    added = 0
+    if sources is None:
+        _graph_entries(required=True)
 
-    paths = list(sources) if sources is not None else _default_journals()
-    if len(paths) > 1:
-        # 83 project roots is a slow enough fold that a silent terminal reads
-        # as a wedged one.
-        print(f"reindex: folding {len(paths)} journal(s)...", file=sys.stderr)
-    for event in _journal_events(paths) + _projection_events():
-        event_type = str(event.get("type") or "")
-        did = str(
-            event["data"].get("decision_id")
-            or event["data"].get("retraction_id")
-            or event["data"].get("target_decision_id")
-            or ""
-        )
-        key = (event_type, did)
-        if not did or event_type not in DECISION_EVENT_TYPES:
+    index = Path(paths.decisions_jsonl())
+    repaired = _compact_index(index)
+    existing, _ = _read_legacy_index(index, warn=False)
+    prior_keys = {
+        (str(row.get("_event_type") or DECISION_EVENT),
+         str(row.get("decision_id") or row.get("retraction_id")
+             or row.get("target_decision_id") or ""))
+        for row in existing
+    }
+    known = set(prior_keys)
+    counted: set[tuple[str, str]] = set()
+    already = added = invalid = unusable = 0
+    events = _journal_events(list(sources) if sources is not None else _default_journals())
+    try:
+        events += _projection_events()
+    except Exception:
+        pass
+    for event in events:
+        data = event.get("data") if isinstance(event, dict) else None
+        event_type = str(event.get("type") or "") if isinstance(event, dict) else ""
+        if event_type not in DECISION_EVENT_TYPES or not isinstance(data, dict):
             continue
+        event_id = str(data.get("decision_id") or data.get("retraction_id")
+                       or data.get("target_decision_id") or "")
+        if not event_id:
+            continue
+        key = (event_type, event_id)
         if key in known:
-            # Counted once per DECISION, not once per sighting, and only
-            # against what the index already held. A journal row and its own
-            # projection are one decision seen twice in one run, not a record
-            # that was "already indexed", and not two of them either.
-            if key in preexisting and key not in counted:
+            if key in prior_keys and key not in counted:
                 counted.add(key)
                 already += 1
             continue
         try:
-            # Validate FIRST, so a row the schema will never accept is told
-            # apart from a store that will not take a write. Retrying the
-            # former forever wedges the recovery verb; retrying the latter is
-            # exactly what the operator should do.
             validate(event)
-        except Exception:  # noqa: BLE001 - permanent: this row can never land
+        except Exception:
             unusable += 1
             continue
         try:
             append_event(event, events_path=index)
-        except Exception:  # noqa: BLE001 - transient: the store refused a write
+        except Exception:
             invalid += 1
             continue
         known.add(key)
         added += 1
-
-    return {
-        "added": added,
-        "already": already,
-        "invalid": invalid,
-        "unusable": unusable,
-        "repaired": repaired,
-        "total": len(known),
-    }
+    return {"added": added, "already": already, "repaired": repaired,
+            "invalid": invalid, "unusable": unusable, "total": len(known)}
 
 
 def _compact_index(path: Path) -> int:
-    """Rewrite the index without its damaged rows. Returns how many were dropped.
-
-    Without this the recovery the warning names cannot succeed: the index is
-    never rotated, so a torn line stays forever and every read reprints the
-    same notice. Runs BEFORE the fold, so a decision lost with the damaged row
-    is re-appended from the journals in the same command.
-
-    Nothing is destroyed. The dropped lines are appended to a
-    ``decisions.jsonl.corrupt`` sidecar first, because a decision whose source
-    journal is gone (a deleted repo, another machine) has no other copy left.
-
-    Under the same mkdir mutex ``append_event`` uses, so a concurrent write
-    cannot land between the read and the replace.
-    """
     raw = _read_lines(path)
-    if all(_is_index_line(line) for line in raw):
+    if not any(not _is_index_line(line) for line in raw):
         return 0
-
     from fno.mutex import acquire_dir_mutex, release_dir_mutex
 
     resolved = path.resolve()
-    lock_dir = resolved.parent / (resolved.name + ".lock.d")
-    token = acquire_dir_mutex(lock_dir, 30)
+    lock = resolved.parent / (resolved.name + ".lock.d")
+    token = acquire_dir_mutex(lock, 30)
     if token is None:
-        raise TimeoutError(f"decisions.jsonl lock timeout: {lock_dir}")
+        raise TimeoutError(f"decisions.jsonl lock timeout: {lock}")
     try:
-        # Re-read under the lock: a writer may have appended since the check.
         raw = _read_lines(resolved)
         good = [line for line in raw if _is_index_line(line)]
         dropped = [line for line in raw if not _is_index_line(line)]
         if dropped:
             with resolved.with_suffix(resolved.suffix + ".corrupt").open(
                 "a", encoding="utf-8"
-            ) as fh:
-                fh.write("".join(line + "\n" for line in dropped))
+            ) as corrupt:
+                corrupt.write("".join(line + "\n" for line in dropped))
         tmp = resolved.with_suffix(resolved.suffix + ".compact")
         tmp.write_text("".join(line + "\n" for line in good), encoding="utf-8")
         tmp.replace(resolved)
+        return len(dropped)
     finally:
-        release_dir_mutex(lock_dir, token)
-    return len(raw) - len(good)
+        release_dir_mutex(lock, token)
 
 
 def _read_lines(path: Path) -> "list[str]":

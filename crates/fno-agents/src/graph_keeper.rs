@@ -3247,6 +3247,30 @@ fn api_mutation(
                 "version": payload.version,
             }))
         }
+        "decision_record" => {
+            let event: Value = input_of(params, "event")?;
+            let payload = api::decision_record(store, event)?;
+            Ok(json!({
+                "success": payload.success,
+                "event": payload.node,
+                "version": payload.version,
+            }))
+        }
+        "decision_retract" => {
+            let event: Value = input_of(params, "event")?;
+            let payload = api::decision_retract(store, event)?;
+            Ok(json!({
+                "success": payload.success,
+                "event": payload.node,
+                "version": payload.version,
+            }))
+        }
+        "decisions" => {
+            let node = params.get("node").and_then(Value::as_str);
+            let decision_id = params.get("decision_id").and_then(Value::as_str);
+            let rows = api::decisions(store, node, decision_id)?;
+            Ok(json!({ "rows": rows }))
+        }
         "node_batch_update" => {
             let ids: Vec<String> = input_of(params, "ids")?;
             let input: api::NodeUpdateInput = input_of(params, "input")?;
