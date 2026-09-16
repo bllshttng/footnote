@@ -2189,14 +2189,14 @@ mod tests {
     fn emit_row_writes_through_the_capped_emitter() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("events.jsonl");
-        let data = json!({"scope": "x-a792", "change": "beat"});
+        let data = json!({"scope": "x-bbbb", "change": "beat"});
         assert!(emit_row(&path, "loop", data.as_object().unwrap()));
         let rows = std::fs::read_to_string(&path).unwrap();
         assert_eq!(rows.lines().count(), 1);
         assert!(rows.contains("\"source\":\"loop\""), "rows: {rows}");
 
         // An oversized payload journals the meta-event, never a raw row.
-        let huge = json!({"scope": "x-a792", "change": "x".repeat(70_000)});
+        let huge = json!({"scope": "x-bbbb", "change": "x".repeat(70_000)});
         assert!(emit_row(&path, "loop", huge.as_object().unwrap()));
         let rows = std::fs::read_to_string(&path).unwrap();
         assert_eq!(rows.lines().count(), 2, "rows: {rows}");
@@ -2232,15 +2232,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rows = [
             json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin", "source": "loop",
-                   "data": {"scope": "x-a792", "change": "beat", "open_prs": 9}}),
+                   "data": {"scope": "x-bbbb", "change": "beat", "open_prs": 9}}),
             json!({"ts": "2026-09-15T10:05:00Z", "type": "reign_checkin", "source": "hook",
-                   "data": {"scope": "x-a792", "change": "missed beat", "open_prs": 8}}),
+                   "data": {"scope": "x-bbbb", "change": "missed beat", "open_prs": 8}}),
             json!({"ts": "2026-09-15T10:10:00Z", "type": "reign_checkin", "source": "test",
-                   "data": {"scope": "x-a792", "change": "hand row", "open_prs": 7}}),
+                   "data": {"scope": "x-bbbb", "change": "hand row", "open_prs": 7}}),
         ];
         let path = journal(dir.path(), &rows);
         let ctx = Ctx {
-            scope: "x-a792".into(),
+            scope: "x-bbbb".into(),
             level: Some(1),
             events_paths: vec![path],
             graph: PathBuf::from("nope.json"),
@@ -2265,7 +2265,7 @@ mod tests {
             dir.path(),
             &[
                 json!({"ts": "2026-09-15T10:00:00Z", "type": "reign_checkin",
-                     "source": "loop", "data": {"scope": "x-a792", "change": "beat"}}),
+                     "source": "loop", "data": {"scope": "x-bbbb", "change": "beat"}}),
             ],
         );
         let history = crate::loop_king::KingFireHistory {
@@ -2282,7 +2282,7 @@ mod tests {
         assert!(!hook_beat(
             &path,
             dir.path(),
-            "x-a792",
+            "x-bbbb",
             "sess",
             &history,
             at(59)
@@ -2292,7 +2292,7 @@ mod tests {
         assert!(hook_beat(
             &path,
             dir.path(),
-            "x-a792",
+            "x-bbbb",
             "sess",
             &history,
             at(61)
@@ -2301,13 +2301,13 @@ mod tests {
         assert_eq!(rows.lines().count(), 2, "rows: {rows}");
         assert!(rows.contains("\"source\":\"hook\""), "rows: {rows}");
         let written: Value = serde_json::from_str(rows.lines().last().unwrap()).unwrap();
-        assert_eq!(written["data"]["scope"], "x-a792");
+        assert_eq!(written["data"]["scope"], "x-bbbb");
         assert!(!written["data"]["change"].as_str().unwrap().is_empty());
         // The fresh row resets the clock: the next stop writes nothing.
         assert!(!hook_beat(
             &path,
             dir.path(),
-            "x-a792",
+            "x-bbbb",
             "sess",
             &history,
             at(62)
