@@ -141,7 +141,7 @@ Start the row's Action cell with one of three words:
 
 - `Port` - the behavior moves to `crates/`. The same table names the `crates/` row it lands in.
 - `Delete` - the row removes Python and adds none.
-- `Grant d-XXXXXXXX` - the operator ruled that this change may extend Python. The id must read `LIVE` in `fno backlog decisions <id>`.
+- `Grant d-XXXXXXXX` - the operator ruled that this change can extend Python. The id must read `LIVE` in `fno backlog decisions <id>`.
 
 Any other action, such as `Modify` or `Create`, plans new Python. Move that change to `crates/` before you write the plan. A path cited only in prose writes nothing, so it does not trigger the gate.
 
