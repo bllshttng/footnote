@@ -2260,6 +2260,7 @@ fn arm_auto_merge(cwd: &Path, approved: bool, source: Option<&str>) -> (bool, Op
             // the same event journal the owner does.
             covered_head: None,
             decide_only: false,
+            authority: None,
         },
     );
     match outcome {
