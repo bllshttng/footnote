@@ -763,4 +763,133 @@ mod tests {
         assert!(mode_writes_status(&SweepMode::ServeOnly, &mk(true)));
         assert!(!mode_writes_status(&SweepMode::ServeOnly, &mk(false)));
     }
+
+    #[test]
+    fn reconcile_reaps_a_dead_interactive_host_to_exited() {
+        // A genuinely dead interactive worker (store-miss AND pid no longer
+        // live) is reaped to Exited during reconcile, not left Live until a
+        // daemon restart. A live interactive host on the same store-miss
+        // stays Live, and a pid-less one is left alone: the real pid_live
+        // maps a missing pid to true ("a row with no pid is left alone"), so
+        // only a recorded dead pid proves death.
+        let mk = |name: &str, pid: Option<u32>| {
+            let mut e = pane_entry(name, pid);
+            // A PTY agent always has a non-empty short_id; an empty one turns
+            // a pid-less row into a one-shot ask, which is a different arm.
+            e.short_id = name.to_string();
+            e.mux = None;
+            e.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+            e
+        };
+        let entries = vec![
+            mk("dead-tui", Some(4241)),
+            mk("live-tui", Some(4242)),
+            mk("pidless-tui", None),
+        ];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(false), // all store-miss
+            || false,
+            |e| e.pid.map_or(true, |_| e.name == "live-tui"),
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Alive,
+            true,
+        );
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Exited),
+            "a dead interactive host is reaped to Exited during reconcile"
+        );
+        assert_eq!(
+            changes[1].new_status, None,
+            "a live interactive host is left untouched"
+        );
+        assert_eq!(
+            changes[2].new_status, None,
+            "a pid-less interactive host is left untouched (pid_live maps None to true)"
+        );
+        assert!(out.orphans.is_empty());
+        assert_eq!(out.updated, vec!["dead-tui".to_string()]);
+    }
+
+    #[test]
+    fn reconcile_served_word_on_pane_rows_follows_the_pid_even_when_the_probe_errs() {
+        // A claude pane row carries a pid and NO session id, so the provider
+        // probe refuses it ("no session id in entry"). The served word
+        // follows the pid for pane rows whatever the probe said. The pid
+        // hoist sits ABOVE the probe match: a recorded dead pid is a process
+        // fact, so it reaps to Exited even on an Err probe (an Err says
+        // nothing about the process - it was exactly the status/served-word
+        // split brain the hoist retires). Rows the pid cannot decide keep
+        // the Err mapping: never flip on an inconclusive probe.
+        let mut interactive = pane_entry("interactive-live", Some(4244));
+        interactive.mux = None;
+        interactive.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
+        let entries = vec![
+            pane_entry("live-pane", Some(4242)),
+            pane_entry("dead-pane", Some(4243)),
+            pane_entry("pidless-pane", None),
+            interactive,
+        ];
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| {
+                Err(ReachabilityProbeError::new(
+                    "claude",
+                    "no session id in entry",
+                ))
+            },
+            || false,
+            |e| e.name == "live-pane" || e.name == "interactive-live",
+            |_| false,
+            |_| false,
+            |_| false,
+            |_| RowLiveness::Alive,
+            true,
+        );
+        assert_eq!(
+            changes[0].new_liveness,
+            Some("alive"),
+            "a live pane pid serves alive even on an Err probe"
+        );
+        assert_eq!(
+            changes[1].new_liveness,
+            Some("dead"),
+            "a dead pane pid serves dead even on an Err probe"
+        );
+        assert_eq!(
+            changes[2].new_liveness,
+            Some("unmeasured"),
+            "a pid-less pane keeps today's Err mapping"
+        );
+        assert_eq!(
+            changes[3].new_liveness,
+            Some("alive"),
+            "an interactive host's served word follows its pid too"
+        );
+        assert_eq!(
+            changes[1].new_status,
+            Some(AgentStatus::Exited),
+            "a proven-dead pid reaps even on an Err probe"
+        );
+        assert!(
+            changes[1].pid_proven,
+            "the exit came from the row's own pid"
+        );
+        assert_eq!(
+            changes[0].new_status, None,
+            "a live pane never flips on an Err probe"
+        );
+        assert_eq!(
+            changes[2].new_status, None,
+            "a pid-less pane never flips on an Err probe"
+        );
+        assert_eq!(
+            changes[3].new_status, None,
+            "a live interactive host never flips on an Err probe"
+        );
+        assert!(out.orphans.is_empty());
+    }
 }
