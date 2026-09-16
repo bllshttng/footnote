@@ -1276,9 +1276,9 @@ def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -
 
         rendered_node = plan_filename_node_id(name)
         if rendered_node != node:
-            rendered = rendered_node or "no node id"
             raise ValueError(
-                f"plan filename {name!r} names {rendered}, but requested node {node!r}"
+                f"plan filename {name!r} names {rendered_node or 'no node id'}, "
+                f"but requested node {node!r}"
             )
     return name
 

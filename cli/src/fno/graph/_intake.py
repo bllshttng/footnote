@@ -1292,24 +1292,30 @@ def _prepare_intake(
 
 
 def _refuse_filename_claim_mismatch(plan_path: str, cli_claim: str | None) -> None:
-    """Refuse a node-bearing filename that disagrees with its claim.
+    """Refuse a node-bearing filename whose identity disagrees across
+    its most-visible filename, frontmatter, and CLI claim.
 
-    A plan is one delivery unit, so its most-visible identity must agree across
+    A plan is one delivery unit, so its identity must agree across
     the filename, declarative frontmatter, and strict CLI override. Ignore
     id-less filenames and malformed frontmatter values; the existing claim
     resolver owns those cases.
     """
     from fno.plan.identity import plan_filename_node_id
 
-    filename_node = plan_filename_node_id(plan_path)
-    if filename_node is None:
-        return
-
     declared = {
         claim
         for claim in plan_claims(plan_path)
         if is_wellformed_node_id(claim)
     }
+    from fno.graph._constants import LEGACY_PREFIX, node_id_prefix
+
+    prefixes = {LEGACY_PREFIX, node_id_prefix(), *(c.split("-", 1)[0] for c in declared)}
+    if cli_claim and is_wellformed_node_id(cli_claim):
+        prefixes.add(cli_claim.split("-", 1)[0])
+    filename_node = plan_filename_node_id(plan_path, prefixes=prefixes)
+    if filename_node is None:
+        return
+
     if len(declared) == 1:
         frontmatter_node = next(iter(declared))
         if filename_node != frontmatter_node:
