@@ -29,12 +29,12 @@ use serde_json::{json, Map, Value};
 use std::os::unix::fs::MetadataExt; // ino() for the bound-socket ownership check
 
 mod blocking_bound;
-pub(crate) mod worktree_sweep;
 mod rm_codex_rollback;
 mod rm_refusal_detail;
 mod rm_teardown;
 pub(crate) mod roster_death;
 mod stop_refusal_detail;
+pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::roster_death::claude_row_provably_absent;
@@ -584,7 +584,6 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
-
 /// How long between stale-question reconciles. Stale rows are measured in
 /// hundreds of hours, so the interval bounds discovery lag, not freshness:
 /// a row that crosses the wake ceiling waits at most one interval before a
@@ -704,7 +703,6 @@ pub fn stale_sweep(
     let _ = std::fs::write(&stamp, now.to_string());
     outcome
 }
-
 
 pub(crate) use crate::gc_inventory::index_tree;
 // the pane kill and its absence vocabulary moved to pane_stop.rs
