@@ -282,8 +282,9 @@ fn process_table_ps() -> (Vec<ProcRow>, usize) {
     (rows, 0)
 }
 
-/// One `ps -Ao pid,ppid,state,etime,%cpu,rss,command` data line.
-#[cfg(not(target_os = "macos"))]
+/// One `ps -Ao pid,ppid,state,etime,%cpu,rss,command` data line. The parser is
+/// available to its Linux leg and to the cross-platform unit test.
+#[cfg(any(not(target_os = "macos"), test))]
 fn parse_ps_row(line: &str) -> Option<ProcRow> {
     // ps right-aligns the numeric columns, so tokens must split on
     // whitespace RUNS - a per-char split yields empty fields and every
