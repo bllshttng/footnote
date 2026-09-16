@@ -46,6 +46,30 @@ fn king_manifest_with_budget(dir: &Path, fno_id: &str, budget: u64) -> PathBuf {
     path
 }
 
+fn king_manifest_with_session(dir: &Path, fno_id: &str, session_id: &str) -> PathBuf {
+    let path = king_manifest(dir, fno_id);
+    let content = fs::read_to_string(&path).unwrap();
+    fs::write(
+        &path,
+        content.replacen(
+            "harness: claude",
+            &format!("harness: claude\nharness_session_id: {session_id}"),
+            1,
+        ),
+    )
+    .unwrap();
+    path
+}
+
+fn write_stand_down_transcript(cwd: &Path) {
+    fs::write(
+        cwd.join("transcript.jsonl"),
+        r#"{"type":"user","uuid":"turn-stand-down","timestamp":"2026-09-06T21:00:00.000Z","message":{"role":"user","content":"Perhaps our reign has overstayed its welcome"}}
+"#,
+    )
+    .unwrap();
+}
+
 /// A board the fixture serves. The canned payloads died with the subprocess
 /// board read (x-25b8: the stop gate reads the collector in process), so a
 /// spec now names the graph the fixture writes: the rows of the spec's
@@ -261,6 +285,7 @@ fn king_spawn_with(
         .env("FNO_CLAIMS_ROOT", home)
         .env("FNO_HOME", home)
         .env("FNO_AGENTS_HOME", home.join("agents"))
+        .env("FNO_OPERATOR_CAPTURE_DIR", home.join(".fno/operator-capture"))
         // The board resolves its fno-py shellout FNO_PY-first, ahead of PATH
         // (scrape::fno_py), so a machine with the wheel installed under the uv
         // tools bin runs the REAL CLI against the real machine-wide question
@@ -416,6 +441,84 @@ fn king_nowork_is_the_clean_terminal_for_an_empty_board() {
         "the event must carry the king session id so the journal reader matches it"
     );
     assert_eq!(row["data"]["driver"], "king");
+}
+
+#[test]
+fn an_unacked_stand_down_turn_blocks_a_clean_board() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let state = king_manifest_with_session(cwd, "k-stand-down", "s-stand");
+    let events = cwd.join("events.jsonl");
+    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+    king_prepare_fixture(cwd, bin_dir.path(), &fno);
+    write_stand_down_transcript(cwd);
+
+    let (code, d) = king_spawn(&state, cwd, &events, bin_dir.path());
+
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "block", "decision: {d}");
+    assert_eq!(d["termination_reason"], serde_json::Value::Null);
+    let reason = d["reason"].as_str().unwrap();
+    assert!(reason.contains("turn-stand-down"), "reason: {reason}");
+    assert!(
+        reason.contains("fno inbox operator ack"),
+        "reason: {reason}"
+    );
+}
+
+#[test]
+fn an_acked_stand_down_turn_allows_a_clean_board_to_finish() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let state = king_manifest_with_session(cwd, "k-stand-down-acked", "s-stand");
+    let events = cwd.join("events.jsonl");
+    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+    king_prepare_fixture(cwd, bin_dir.path(), &fno);
+    write_stand_down_transcript(cwd);
+    let capture_dir = bin_dir.path().join(".fno/operator-capture");
+    fs::create_dir_all(&capture_dir).unwrap();
+    fs::write(
+        capture_dir.join("s-stand.jsonl"),
+        "{\"turn_id\":\"turn-stand-down\",\"outcome\":\"nothing\"}\n",
+    )
+    .unwrap();
+
+    let (code, d) = king_spawn(&state, cwd, &events, bin_dir.path());
+
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "allow", "decision: {d}");
+    assert_eq!(d["termination_reason"], "NoWork");
+}
+
+#[test]
+fn an_unacked_stand_down_turn_reaches_noprogress_backstop() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let bin_dir = TempDir::new().unwrap();
+    let state = king_manifest_with_session(cwd, "k-stand-down-dry", "s-stand");
+    let events = cwd.join("events.jsonl");
+    let fno = king_board_bin(bin_dir.path(), BOARD_CLEAN, 0);
+    king_prepare_fixture(cwd, bin_dir.path(), &fno);
+    write_stand_down_transcript(cwd);
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-stand-down-dry"}),
+    );
+    king_event(
+        &events,
+        "king_loop_check",
+        serde_json::json!({"session_id": "k-stand-down-dry"}),
+    );
+
+    let (code, d) = king_spawn(&state, cwd, &events, bin_dir.path());
+
+    assert_eq!(code, 0);
+    assert_eq!(d["decision"], "allow", "decision: {d}");
+    assert_eq!(d["termination_reason"], "NoProgress");
+    assert!(d["reason"].as_str().unwrap().contains("turn-stand-down"));
 }
 
 #[test]

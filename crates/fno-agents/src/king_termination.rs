@@ -2,7 +2,111 @@
 
 use crate::loopcheck::TerminationReason;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Default)]
+pub(crate) struct KingManifest {
+    pub(crate) fno_id: String,
+    pub(crate) scope: String,
+    pub(crate) created_at: Option<String>,
+    /// The crowned session the manifest names; `loop_reign`'s split read keys
+    /// on it. Empty on manifests written before identity fields existed.
+    pub(crate) harness_session_id: Option<String>,
+    /// `pass` | `court`; absent reads as `pass`, never a third shape.
+    pub(crate) shape: String,
+    pub(crate) max_iterations: u64,
+    pub(crate) respawn_count: u64,
+    pub(crate) respawn_ceiling: u64,
+}
+
+pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
+    let mut out = KingManifest {
+        max_iterations: 40,
+        respawn_ceiling: 4,
+        ..Default::default()
+    };
+    let mut saw_frontmatter = false;
+    for line in content.lines() {
+        if line.trim() == "---" {
+            if saw_frontmatter {
+                break;
+            }
+            saw_frontmatter = true;
+            continue;
+        }
+        let Some((key, raw)) = line.split_once(':') else {
+            continue;
+        };
+        let value = raw.trim().trim_matches('"').to_string();
+        match key.trim() {
+            "fno_id" => out.fno_id = value,
+            "scope" => out.scope = value,
+            "created_at" => out.created_at = Some(value),
+            "harness_session_id" => out.harness_session_id = Some(value),
+            "shape" => out.shape = value,
+            "budget_max_iterations" => {
+                if let Ok(n) = value.parse::<u64>() {
+                    out.max_iterations = n;
+                }
+            }
+            "respawn_count" => {
+                if let Ok(n) = value.parse::<u64>() {
+                    out.respawn_count = n;
+                }
+            }
+            "respawn_ceiling" => {
+                if let Ok(n) = value.parse::<u64>() {
+                    out.respawn_ceiling = n;
+                }
+            }
+            _ => {}
+        }
+    }
+    if saw_frontmatter && !out.fno_id.is_empty() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+pub(crate) struct StandDownGate {
+    pub(crate) reading: String,
+    pub(crate) message: String,
+}
+
+pub(crate) fn stand_down_gate(
+    manifest: &KingManifest,
+    transcript: &Path,
+    cwd: &Path,
+) -> Option<StandDownGate> {
+    let session = manifest
+        .harness_session_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())?;
+    let capture_dir = std::env::var_os("FNO_OPERATOR_CAPTURE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::agents_config::state_dir(cwd).map(|dir| dir.join("operator-capture")))?;
+    let pending = match crate::operator_turns::pending_stand_down(
+        session,
+        transcript,
+        &capture_dir,
+        chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+    ) {
+        Ok(turns) => turns,
+        Err(error) => {
+            eprintln!("loop-check: stand-down gate skipped: {error}");
+            return None;
+        }
+    };
+    let (turn_id, excerpt) = pending.first()?;
+    Some(StandDownGate {
+        reading: format!("operator stand-down turn {turn_id} unacked"),
+        message: format!(
+            "operator stand-down turn {turn_id} is unacked: \"{excerpt}\". Answer it as a verdict on this reign, then run fno inbox operator ack {turn_id} --outcome <nothing|law:<id>|node:<id>> --why \"<your verdict>\""
+        ),
+    })
+}
 
 pub(crate) struct KingBoard {
     pub(crate) actionable: i64,

@@ -11408,71 +11408,7 @@ fn build_block_reason(
 // It is deliberately self-contained. The target arm below is untouched, which
 // is also what the plan's engine_edit kill criterion exists to enforce.
 
-/// Parsed shape of the king manifest. Only the fields this arm reads.
-#[derive(Debug, Default)]
-pub(crate) struct KingManifest {
-    pub(crate) fno_id: String,
-    pub(crate) scope: String,
-    pub(crate) created_at: Option<String>,
-    /// The crowned session the manifest names; `loop_reign`'s split read keys
-    /// on it. Empty on manifests written before identity fields existed.
-    pub(crate) harness_session_id: Option<String>,
-    /// `pass` | `court`; absent reads as `pass`, never a third shape.
-    pub(crate) shape: String,
-    pub(crate) max_iterations: u64,
-    pub(crate) respawn_count: u64,
-    pub(crate) respawn_ceiling: u64,
-}
-
-pub(crate) fn parse_king_manifest(content: &str) -> Option<KingManifest> {
-    let mut out = KingManifest {
-        max_iterations: 40,
-        respawn_ceiling: 4,
-        ..Default::default()
-    };
-    let mut saw_frontmatter = false;
-    for line in content.lines() {
-        if line.trim() == "---" {
-            if saw_frontmatter {
-                break;
-            }
-            saw_frontmatter = true;
-            continue;
-        }
-        let Some((key, raw)) = line.split_once(':') else {
-            continue;
-        };
-        let value = raw.trim().trim_matches('"').to_string();
-        match key.trim() {
-            "fno_id" => out.fno_id = value,
-            "scope" => out.scope = value,
-            "created_at" => out.created_at = Some(value),
-            "harness_session_id" => out.harness_session_id = Some(value),
-            "shape" => out.shape = value,
-            "budget_max_iterations" => {
-                if let Ok(n) = value.parse::<u64>() {
-                    out.max_iterations = n;
-                }
-            }
-            "respawn_count" => {
-                if let Ok(n) = value.parse::<u64>() {
-                    out.respawn_count = n;
-                }
-            }
-            "respawn_ceiling" => {
-                if let Ok(n) = value.parse::<u64>() {
-                    out.respawn_ceiling = n;
-                }
-            }
-            _ => {}
-        }
-    }
-    if saw_frontmatter && !out.fno_id.is_empty() {
-        Some(out)
-    } else {
-        None
-    }
-}
+pub(crate) use crate::king_termination::{parse_king_manifest, KingManifest};
 
 fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     // A missing manifest is the only safe silent allow, exactly as on the
@@ -11588,6 +11524,12 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         emit("king_loop_check", king_quiet_body(&session_id, actionable));
         (0, king_output("block", None, message, actionable, dry + 1))
     };
+
+    if let Some(gate) =
+        crate::king_termination::stand_down_gate(&manifest, &parsed.transcript_path, &parsed.cwd)
+    {
+        return blind_block(&gate.reading, &gate.message, 0, dry);
+    }
 
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
         Ok(b) => b,
