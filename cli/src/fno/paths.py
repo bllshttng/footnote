@@ -1255,8 +1255,11 @@ def plans_content_dir(project_root: Optional[Path] = None) -> Path:
     return plans_dir(root)
 
 
+_NODE_PREFIX = r"[a-z]" + r"[a-z0-9]{0,7}"
+_NODE_HEX = r"[0-9a-f]{4,8}"
+_NODE_ID_RE = re.compile(_NODE_PREFIX + "-" + _NODE_HEX)
 _PLAN_NODE_RE = re.compile(
-    r"-(?P<prefix>[a-z][a-z0-9]{0,7})-(?P<hex>[0-9a-f]{4,8})\.md$"
+    "-(?P<prefix>" + _NODE_PREFIX + ")-(?P<hex>" + _NODE_HEX + r")\.md$"
 )
 
 
@@ -1287,7 +1290,7 @@ def plan_doc_filename(slug: str, node: str = "", now: Optional[object] = None) -
     if name.endswith("-.md"):
         name = name[: -len("-.md")] + ".md"
     name = name.lstrip("-")
-    if node and re.fullmatch(r"[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}", node):
+    if node and _NODE_ID_RE.fullmatch(node):
         rendered_node = plan_filename_node_id(name, prefixes={node.split("-", 1)[0]})
         if rendered_node != node:
             raise ValueError(
