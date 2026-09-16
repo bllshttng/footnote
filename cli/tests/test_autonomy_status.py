@@ -253,32 +253,15 @@ def test_format_table_renders_source_verb_columns() -> None:
     assert "ab" in table and "ungated" in table
 
 
-def _checkout_binary():
-    """This checkout's own fno-agents (the same pick producer-equivalence
-    makes): $FNO_AGENTS_BIN, else the cargo dev build. resolve_binary() would
-    prefer a stale installed binary on PATH, which cannot test this tree."""
-    import os
-    from pathlib import Path
-
-    env = os.environ.get("FNO_AGENTS_BIN", "")
-    if env:
-        p = Path(env)
-        return p if p.exists() else None
-    repo_root = Path(__file__).resolve().parents[2]
-    for profile in ("debug", "release"):
-        p = repo_root / "crates" / "fno-agents" / "target" / profile / "fno-agents"
-        if p.exists():
-            return p
-    return None
-
-
 def test_name_codes_check_prints_rows_and_marker() -> None:
     """The provenance audit moved into the binary (PR 1813): the CI check
     runs `fno-agents name-codes --check`, so the test drives the same verb
     and asserts the same invariants the Python audit held."""
     import subprocess
 
-    binary = _checkout_binary()
+    from tests.conftest import checkout_fno_agents_binary
+
+    binary = checkout_fno_agents_binary()
     if binary is None:
         pytest.skip("no fno-agents binary built in this checkout")
     proc = subprocess.run(
