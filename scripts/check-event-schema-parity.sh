@@ -348,6 +348,10 @@ collisions = python_types & rust_kinds
 # is owned by tick_ledger.rs; Rust daemon arms and the Python arms (until they
 # port) both emit it at the same scheduled-tick boundary.
 dual_owner_kinds = {
+    # graph_write_gate: the keeper emits the five-minute window rows (Rust)
+    # and the single-row mutation path emits the per-write rows (Rust) with
+    # the Python schema declaring both sources.
+    "graph_write_gate",
     "registry_row_removed",
     "registry_rows_lost",
     "agent_removed",
