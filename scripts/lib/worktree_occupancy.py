@@ -82,7 +82,39 @@ def _snapshot_orphan(row: dict, home: str) -> bool:
     return argv[2].startswith(home_prefix) or argv[2].startswith(f"source {_SNAPSHOT_TOKEN}")
 
 
-def _direct_verdict(pid: int, row: dict, *, keeper_verdicts, job_of_pid, job_state, home) -> Optional[Hit]:
+def _login_shell(row: dict) -> bool:
+    """R6 shape: a login shell (`-/bin/zsh -l`, `zsh --login`, ...)."""
+    argv = _argv(row)
+    if not argv:
+        return False
+    if argv[0].rsplit("/", 1)[-1].lstrip("-") not in _SHELL_NAMES:
+        return False
+    if argv[0].startswith("-"):
+        return True
+    return any(a in ("-l", "--login") for a in argv[1:])
+
+
+def _tty_idle_reader(now: float) -> Callable[[int], Optional[float]]:
+    """Idle seconds on a pid's tty: now minus the newest atime/mtime."""
+
+    def read(pid: int) -> Optional[float]:
+        try:
+            import psutil
+
+            tty = psutil.Process(pid).terminal()
+            if not tty:
+                return None
+            st = os.stat(tty)
+            return max(0.0, now - max(st.st_atime, st.st_mtime))
+        except Exception:  # noqa: BLE001 - an unreadable tty keeps the tree
+            return None
+
+    return read
+
+
+def _direct_verdict(
+    pid: int, row: dict, *, keeper_verdicts, job_of_pid, job_state, home, procs, tty_idle
+) -> Optional[Hit]:
     """R1/R2/R3 over one row. None means no rule names this process."""
     argv = _argv(row)
     if argv and argv[0].rsplit("/", 1)[-1] == KEEPER_BIN_NAME:
@@ -130,6 +162,34 @@ def _direct_verdict(pid: int, row: dict, *, keeper_verdicts, job_of_pid, job_sta
     if int(row.get("ppid") or 0) == 1 and _snapshot_orphan(row, home):
         return Hit(pid, INERT, TERMINATE, reason="claude tool shell, owning session exited", cmd=cmd)
 
+    # R6: an idle login shell pins nothing. The shell keeps running - verdict
+    # inert, action keep, so archive-worktree.sh (which signals only
+    # `terminate` rows) never closes a terminal tab; the shell only loses its
+    # cwd. Fail closed: unreadable tty, active tty, or any child all hold.
+    if _login_shell(row) and tty_idle is not None and procs is not None:
+        if not any(isinstance(r.get("ppid"), int) and r.get("ppid") == pid for r in procs.values()):
+            idle_s = tty_idle(pid)
+            tty_name = ""
+            try:
+                import psutil
+
+                tty_name = str(psutil.Process(pid).terminal() or "").rsplit("/", 1)[-1]
+            except Exception:  # noqa: BLE001
+                tty_name = ""
+            if idle_s is None:
+                return Hit(pid, HOLDS, KEEP, reason="login shell: tty unreadable", cmd=cmd)
+            hours = int(idle_s // 3600)
+            if idle_s < 86_400:
+                return Hit(
+                    pid, HOLDS, KEEP,
+                    reason=f"login shell, tty {tty_name or '-'} active {hours}h ago", cmd=cmd,
+                )
+            return Hit(
+                pid, INERT, KEEP,
+                reason=f"idle login shell, tty {tty_name or '-'} quiet {hours}h; left running",
+                cmd=cmd,
+            )
+
     return None
 
 
@@ -142,10 +202,11 @@ def classify(
     job_state: Optional[Callable[[str], Optional[Tuple[str, Optional[float]]]]],
     home: str,
     now: float,
+    tty_idle: Optional[Callable[[int], Optional[float]]] = None,
 ) -> List[Hit]:
     """Classify each pid, first match wins: R0 no ps row, R1 keeper, R2 claude
-    bg session, R3 orphaned tool shell, R4 descendant of any of these, R5
-    unclassified holds."""
+    bg session, R3 orphaned tool shell, R4 descendant of any of these, R6
+    idle login shell, R5 unclassified holds."""
     del now  # reserved: rules read age through job_state, not the wall clock
     hits: List[Hit] = []
     for pid in pids:
@@ -154,7 +215,8 @@ def classify(
             hits.append(Hit(pid, HOLDS, KEEP, reason="no ps row"))
             continue
         direct = _direct_verdict(
-            pid, row, keeper_verdicts=keeper_verdicts, job_of_pid=job_of_pid, job_state=job_state, home=home
+            pid, row, keeper_verdicts=keeper_verdicts, job_of_pid=job_of_pid, job_state=job_state, home=home,
+            procs=procs, tty_idle=tty_idle,
         )
         if direct is None:
             direct = _descendant_verdict(
@@ -164,6 +226,7 @@ def classify(
                 job_of_pid=job_of_pid,
                 job_state=job_state,
                 home=home,
+                tty_idle=tty_idle,
             )
         if direct is None:
             hits.append(Hit(pid, HOLDS, KEEP, reason=f"unclassified: {_argv0(row)}", cmd=_cmd(row)))
@@ -172,7 +235,7 @@ def classify(
     return hits
 
 
-def _descendant_verdict(row, procs, *, keeper_verdicts, job_of_pid, job_state, home) -> Optional[Hit]:
+def _descendant_verdict(row, procs, *, keeper_verdicts, job_of_pid, job_state, home, tty_idle=None) -> Optional[Hit]:
     """R4: inherit the first classified ancestor's verdict and action."""
     pid = row.get("pid")
     cur = row.get("ppid")
@@ -182,7 +245,8 @@ def _descendant_verdict(row, procs, *, keeper_verdicts, job_of_pid, job_state, h
         if ancestor is None:
             return None
         hit = _direct_verdict(
-            cur, ancestor, keeper_verdicts=keeper_verdicts, job_of_pid=job_of_pid, job_state=job_state, home=home
+            cur, ancestor, keeper_verdicts=keeper_verdicts, job_of_pid=job_of_pid, job_state=job_state, home=home,
+            procs=procs, tty_idle=tty_idle,
         )
         if hit is not None:
             return Hit(
@@ -287,6 +351,7 @@ def main(argv: List[str]) -> int:
             job_state=_job_state_reader(home, now),
             home=home,
             now=now,
+            tty_idle=_tty_idle_reader(now),
         )
         del worktree  # the enumeration is cwd-based; the tree names the hits
     except Exception:  # noqa: BLE001 - a broken classifier must read as broken

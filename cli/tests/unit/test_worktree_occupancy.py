@@ -22,7 +22,7 @@ def row(pid, ppid, argv, **extra):
     return d
 
 
-def run(pids, procs, keeper_verdicts=None, job_of_pid=None, job_state=None, home=HOME):
+def run(pids, procs, keeper_verdicts=None, job_of_pid=None, job_state=None, home=HOME, tty_idle=None):
     return classify(
         pids,
         procs=procs,
@@ -31,6 +31,7 @@ def run(pids, procs, keeper_verdicts=None, job_of_pid=None, job_state=None, home
         job_state=job_state,
         home=home,
         now=1_000_000.0,
+        tty_idle=tty_idle,
     )
 
 
@@ -213,3 +214,53 @@ def test_ppid_walk_ignores_nonpositive_and_self(pid):
     procs = {30: row(30, pid, SPARE_ARGV)}
     hits = by_pid(run([30], procs))
     assert (hits[30].verdict, hits[30].action) == ("holds", "keep")
+
+
+LOGIN_SHELL = ["-/bin/zsh", "-l"]
+
+
+class TestIdleLoginShell:
+    """R6: a login shell whose tty has been silent 24h+ no longer pins a clean,
+    merged tree. The shell keeps running: inert keep, never terminate."""
+
+    def test_idle_login_shell_with_no_child_is_inert_keep(self):
+        """AC17-HP: `-/bin/zsh -l`, no child, tty quiet 145000s (40h)."""
+        hits = by_pid(run([40], {40: row(40, 1, LOGIN_SHELL)}, tty_idle=lambda pid: 145_000.0))
+        h = hits[40]
+        assert (h.verdict, h.action) == (INERT, "keep")
+        assert "quiet 40h" in h.reason
+        assert h.reason.startswith("idle login shell")
+
+    def test_login_shell_with_a_child_holds(self):
+        """AC18-ERR: a child (here: a cat rooted in the shell) falls through to
+        the unclassified hold."""
+        procs = {41: row(41, 1, LOGIN_SHELL), 42: row(42, 41, ["/bin/cat"])}
+        hits = by_pid(run([41, 42], procs, tty_idle=lambda pid: 145_000.0))
+        assert (hits[41].verdict, hits[41].action) == ("holds", "keep")
+        assert (hits[42].verdict, hits[42].action) == ("holds", "keep")
+
+    def test_active_login_shell_holds(self):
+        hits = by_pid(run([43], {43: row(43, 1, LOGIN_SHELL)}, tty_idle=lambda pid: 3_600.0))
+        assert (hits[43].verdict, hits[43].action) == ("holds", "keep")
+        assert "active 1h ago" in hits[43].reason
+
+    def test_unreadable_tty_holds(self):
+        hits = by_pid(run([44], {44: row(44, 1, LOGIN_SHELL)}, tty_idle=lambda pid: None))
+        assert (hits[44].verdict, hits[44].action) == ("holds", "keep")
+        assert hits[44].reason == "login shell: tty unreadable"
+
+    def test_no_tty_reader_holds_fail_closed(self):
+        hits = by_pid(run([45], {45: row(45, 1, LOGIN_SHELL)}))
+        assert (hits[45].verdict, hits[45].action) == ("holds", "keep")
+
+    def test_non_login_shell_is_not_classified_by_r6(self):
+        # A plain (non-login) shell with no tty reader never reaches R6.
+        hits = by_pid(run([46], {46: row(46, 1, ["/bin/zsh"])}, tty_idle=lambda pid: 145_000.0))
+        assert hits[46].reason.startswith("unclassified:")
+
+    def test_login_flag_without_leading_dash_shell(self):
+        # `zsh --login` spells a login shell just as `-/bin/zsh` does.
+        hits = by_pid(
+            run([47], {47: row(47, 1, ["/bin/zsh", "--login"])}, tty_idle=lambda pid: 145_000.0)
+        )
+        assert (hits[47].verdict, hits[47].action) == (INERT, "keep")
