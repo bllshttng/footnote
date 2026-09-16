@@ -53,6 +53,14 @@ fn watching_ignored_codex_harness_is_audible() {
         "the actionable PR blocker must remain: {}",
         d.message
     );
+    // A harness that cannot self-wake can never honor the arm-and-tag hint,
+    // so the composed message must not prescribe it (the codex re-arm loop
+    // the module doc names).
+    assert!(
+        !d.message.contains("Arm a harness-tracked watcher"),
+        "the refused ritual must not be prescribed in the same message: {}",
+        d.message
+    );
 }
 
 // A session whose init found the node already claimed records no claim key,

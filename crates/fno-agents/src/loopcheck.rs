@@ -9394,8 +9394,12 @@ pub(crate) fn decide_with_payload(
                 let block_reason = match &watching_refusal {
                     // A permanent refusal already said no watcher can help, so
                     // the arm hint the classifier appended would contradict it
-                    // inside one message: cut the hint, keep the blocker.
-                    Some((text, _)) if watch_lease::refusal_is_permanent(text) => {
+                    // inside one message. A harness that cannot self-wake is
+                    // permanent the same way: its hint can never be honored.
+                    // Cut the hint, keep the blocker.
+                    Some((text, kind))
+                        if watch_lease::refusal_is_permanent(text) || *kind == "harness" =>
+                    {
                         format!("{text}; {}", watch_lease::without_arm_hint(&block_reason))
                     }
                     Some((text, _)) => format!("{text}; {block_reason}"),
