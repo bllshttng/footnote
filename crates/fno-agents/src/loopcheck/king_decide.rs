@@ -105,17 +105,6 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         chrono::Utc::now(),
     );
 
-    // The hook's half of the reign record: a beat the model skipped still
-    // lands a row. Sits after the cancel-sentinel check, so a cancelled crown
-    // writes none. The return value is ignored, so no decision changes.
-    crate::king_checkin::hook_beat(
-        &project_events,
-        &parsed.cwd,
-        &manifest.scope,
-        &session_id,
-        &history,
-        chrono::Utc::now(),
-    );
 
     // A reign that already ended does not read the board again :
     // the journal's newest king termination row for this session, when newer
@@ -177,7 +166,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let (reading, term_json) = crate::king_term::current_reading(&manifest);
     let emit_term = |body| crate::king_term::emit_journal(&emit, &term_json, body);
     // Shared spine of both blind-board blocks: bounded, quiet emit, block.
-    // The reading is what the branch measured (x-ff27), never a guess.
+    // The reading is what the branch measured, never a guess.
     let blind_block = |reading: &str, message: &str, actionable: i64, dry: u64| -> (i32, String) {
         if let Some(b) = bounded(dry, message) {
             return terminate(b.reason, &b.message, 0, b.fires, &[reading.to_owned()]);
@@ -268,7 +257,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             )
         };
         if undelivered == 0 {
-            // x-c911: a floor count cannot see blind queues; refuse to certify.
+            //: a floor count cannot see blind queues; refuse to certify.
             if board.unreadable_sources {
                 return blind_block(
                     &crate::king_escalation::reading_sources_unreadable(),
@@ -318,7 +307,7 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let waiting = format!("{} rows still actionable", board.actionable);
     if let Some(b) = bounded(dry, &waiting) {
         // An actionable floor with no readable rows is the partially-blind
-        // board: it names its reading, never an empty set (x-ff27).
+        // board: it names its reading, never an empty set.
         let stalled = if board.actionable_ids.is_empty() {
             vec![crate::king_escalation::reading_board_unreadable()]
         } else {

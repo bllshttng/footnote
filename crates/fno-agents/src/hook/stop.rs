@@ -129,13 +129,8 @@ fn run_owned(
         );
     }
 
-    // ── x-3227: done_probes inherit the session cargo build-dir env ───────────
-    if driver == "target" && std::env::var_os("CARGO_BUILD_BUILD_DIR").is_none() {
-        let v = cargo_build_dir_value(&owner_cwd);
-        if v.ends_with("/{workspace-path-hash}") {
-            std::env::set_var("CARGO_BUILD_BUILD_DIR", v);
-        }
-    }
+    // ── done_probes inherit the session cargo build-dir env ───────────
+    export_session_build_dir(driver, &owner_cwd);
 
     // ── The pending-delivery retry decision, without calling decide ───────────
     if state_is_pending {
@@ -240,7 +235,7 @@ fn translate(
     let counter = space.join(format!(".loop-check-unavail-{}", fire.hook_harness_id));
     let _ = std::fs::remove_file(&counter);
 
-    // One control-plane arm row for this fire (x-1b88).
+    // One control-plane arm row for this fire.
     emit_tick(hook_cwd, decision, &termination_reason, driver);
 
     // ── Block ─────────────────────────────────────────────────────────────────
@@ -461,7 +456,7 @@ fn emit_block_for_harness(reason: &str) -> i32 {
     2
 }
 
-/// One control-plane arm row for this fire (x-1b88).
+/// One control-plane arm row for this fire.
 fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str) {
     let project_events = events_path(cwd);
     let global_events = std::env::var_os("GLOBAL_EVENTS_PATH")
@@ -483,7 +478,7 @@ fn emit_tick(cwd: &Path, decision: &str, reason: &str, driver: &str) {
     crate::loopcheck::emit_to_both(&project_events, &global_events, "control_plane_tick", data);
 }
 
-/// x-3227: the CARGO_BUILD_BUILD_DIR value, ported from
+///: the CARGO_BUILD_BUILD_DIR value, ported from
 /// `cli/src/fno/paths.py cargo_build_dir_value`: config
 /// `paths.cargo_targets_base`, else `<state_dir>/cargo-build`, then
 /// `/{workspace-path-hash}` - cargo expands the template itself.
@@ -514,6 +509,19 @@ fn shellexpand_home(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+/// The bash hook exported this for its loop-check child; the native handler IS
+/// that process, so it sets the env in place and every done_probe it spawns
+/// inherits it. A session preset wins, and a value that does not carry the
+/// cargo template is never exported (it cannot be a build-dir answer).
+fn export_session_build_dir(driver: &str, owner_cwd: &Path) {
+    if driver == "target" && std::env::var_os("CARGO_BUILD_BUILD_DIR").is_none() {
+        let v = cargo_build_dir_value(owner_cwd);
+        if v.ends_with("/{workspace-path-hash}") {
+            std::env::set_var("CARGO_BUILD_BUILD_DIR", v);
+        }
+    }
 }
 
 // ── Salvaged ownership (stop_gate.rs, WIP c562f97276) ────────────────────────
@@ -1104,6 +1112,51 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let v = cargo_build_dir_value(&dir);
         assert!(v.ends_with("/{workspace-path-hash}"), "{v}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The shell contract, native now: an unset env is resolved from
+    /// config and set in place; a session preset survives untouched. The env
+    /// pin holds the same lock the other env-pinning suites hold.
+    #[test]
+    fn export_session_build_dir_sets_unset_and_honors_preset() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var_os("CARGO_BUILD_BUILD_DIR");
+        let dir = std::env::temp_dir().join(format!("stop-gate-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::env::remove_var("CARGO_BUILD_BUILD_DIR");
+        export_session_build_dir("target", &dir);
+        let set = std::env::var_os("CARGO_BUILD_BUILD_DIR");
+        assert!(
+            set.as_deref()
+                .map(|v| v.to_string_lossy().ends_with("/{workspace-path-hash}"))
+                == Some(true),
+            "unset + driver target must resolve and export: {set:?}"
+        );
+
+        std::env::set_var("CARGO_BUILD_BUILD_DIR", "/tmp/session-own-base/hash");
+        export_session_build_dir("target", &dir);
+        assert_eq!(
+            std::env::var_os("CARGO_BUILD_BUILD_DIR").as_deref(),
+            Some(std::ffi::OsStr::new("/tmp/session-own-base/hash")),
+            "a session preset must survive untouched"
+        );
+
+        std::env::remove_var("CARGO_BUILD_BUILD_DIR");
+        export_session_build_dir("other", &dir);
+        assert_eq!(
+            std::env::var_os("CARGO_BUILD_BUILD_DIR"),
+            None,
+            "non-target drivers get no build-dir export"
+        );
+
+        match saved {
+            Some(v) => std::env::set_var("CARGO_BUILD_BUILD_DIR", v),
+            None => std::env::remove_var("CARGO_BUILD_BUILD_DIR"),
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 }

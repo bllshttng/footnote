@@ -109,6 +109,7 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "NO_COLOR",
     # State-path overrides. Each one relocates a store a test then reads.
     "EVENTS_FILE",
+    "GLOBAL_EVENTS_PATH",  # the native stop hook's global journal override
     # Relocates uv's tools dir, which scrape::fno_py stats for the wheel's
     # fno-py console script. Scrubbed, the resolver reads the default
     # ~/.local/share/uv layout instead of a developer's XDG customization.

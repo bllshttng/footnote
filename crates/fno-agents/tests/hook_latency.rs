@@ -39,7 +39,6 @@ struct Bench {
     global: PathBuf,
     exec_log: PathBuf,
     gh_calls: PathBuf,
-    transcripts: BTreeMap<String, PathBuf>,
 }
 
 static BENCH: OnceLock<Bench> = OnceLock::new();
@@ -248,20 +247,12 @@ fn build_bench() -> Bench {
     env.insert("FNO_HARNESS".into(), "claude".into());
 
     // Transcripts for every session the Stop fixtures name.
-    let mut transcripts = BTreeMap::new();
-    for (name, sid) in [
-        ("visitor", VISITOR_SID),
-        ("visitor_nomsg", VISITOR_SID),
-        ("target", TARGET_SID),
-        ("watch", WATCH_SID),
-        ("promise", TARGET_SID),
-    ] {
+    for sid in [VISITOR_SID, TARGET_SID, WATCH_SID] {
         let p = base.join(format!("{sid}.jsonl"));
         write(
             &p,
             "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Work continues.\"}]}}\n",
         );
-        transcripts.insert(format!("{name}:{sid}"), p);
     }
 
     // Per-fixture manifests ride FNO_FIXTURE_STATE per sample (see run_fixture).
@@ -281,7 +272,6 @@ fn build_bench() -> Bench {
         global,
         exec_log,
         gh_calls,
-        transcripts,
     }
 }
 
@@ -551,7 +541,6 @@ fn run_fixture(name: &str, script: &str, spec: &FixtureSpec<'_>, verify: impl Fn
 
     let mut samples: Vec<f64> = Vec::new();
     let n = sample_count();
-    let mut last = (0, String::new(), String::new());
     for i in 0..(n + 10) {
         write(&b.events, "");
         write(&b.global, "");
@@ -564,7 +553,6 @@ fn run_fixture(name: &str, script: &str, spec: &FixtureSpec<'_>, verify: impl Fn
             &b.repo,
             trace_path.as_deref(),
         );
-        last = (code, stdout.clone(), stderr.clone());
         if i < 10 {
             continue; // warmup, recorded nowhere
         }
@@ -717,7 +705,7 @@ fn latency_stop_target_working() {
             allowed_execs: &["bash", "fno-agents", "git"],
             max_git: None,
         },
-        |code, stdout, stderr| {
+        |_code, stdout, stderr| {
             let v: Value = serde_json::from_str(stdout)
                 .unwrap_or_else(|e| panic!("{stdout:?} not JSON: {e} ({stderr})"));
             assert_eq!(
@@ -751,7 +739,7 @@ fn latency_stop_target_watching() {
             allowed_execs: &["bash", "fno-agents", "git"],
             max_git: None,
         },
-        |code, stdout, stderr| {
+        |_code, stdout, stderr| {
             let v: Value = serde_json::from_str(stdout)
                 .unwrap_or_else(|e| panic!("{stdout:?} not JSON: {e} ({stderr})"));
             // Lease-only idle: allow (no block), and the message names the

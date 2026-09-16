@@ -163,7 +163,7 @@ fn main() {
     if args.first().map(String::as_str) == Some("context-run") {
         std::process::exit(fno_agents::context_run::run_context_run(&args[1..]));
     }
-    // `hook` (x-09d2): the per-turn hooks as native entries. Transport, not a
+    // `hook`: the per-turn hooks as native entries. Transport, not a
     // client verb - dispatched here so the runtime never builds for a fire
     // that answers in microseconds, and the verb-surface ratchet never sees
     // it (shrink law d-fe66560a).

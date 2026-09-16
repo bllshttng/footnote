@@ -1,4 +1,4 @@
-//! P2 loop-boundary announcement nudge (ab-098967b4).
+//! P2 loop-boundary announcement nudge.
 //!
 //! When the loop-check verb returns a `block` decision (the loop-yield
 //! boundary), it enriches the decision `message` with the session's unread
