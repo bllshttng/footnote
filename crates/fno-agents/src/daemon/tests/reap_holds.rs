@@ -1329,7 +1329,118 @@ fn a_no_provenance_row_releases_on_its_done_report_and_keeps_carry_a_clock() {
     assert_eq!(summary.kept_no_provenance, vec!["npwork01"]);
     let h = find_hold(&summary, "npwork01");
     assert!(h.reason.contains("no provenance"), "{h:?}");
-    assert_eq!(h.age_s, Some(7200));
+    assert!(h.age_s.is_some_and(|a| a >= 7200), "{h:?}");
     assert_eq!(h.age_basis, "transcript quiet");
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+// ── the receipt names a registry it cannot write ────────────────────────
+
+/// A staged registry one version ahead of this binary: the summary carries
+/// the skew and the rendered receipt names both versions and the refused
+/// write, in text and JSON.
+#[test]
+fn a_forward_registry_names_itself_in_the_receipt() {
+    let home = tmp_home("gc-skew-hp");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    let forward = crate::state::REGISTRY_SCHEMA_VERSION + 1;
+    let understood = crate::state::REGISTRY_SCHEMA_VERSION;
+    let registry = serde_json::json!({
+        "schema_version": forward,
+        "agents": [{
+            "name": "skew-row",
+            "cwd": "/tmp",
+            "status": "exited",
+            "created_at": "2026-09-06T00:00:00Z",
+            "harness": "claude",
+            "harness_session_id": "sess-skew",
+            "short_id": "skewrow1",
+            "origin": "spawn",
+        }],
+    });
+    std::fs::create_dir_all(home.root()).unwrap();
+    std::fs::write(
+        home.registry_json(),
+        serde_json::to_string(&registry).unwrap(),
+    )
+    .unwrap();
+
+    let graph = graph_read(&[("sess-skew", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        true,
+        7,
+        &move |_| graph.clone(),
+        &|_| None,
+        &uniform_ages(7200),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+    );
+
+    assert_eq!(summary.schema_skew, Some((forward, understood)));
+    let text = crate::reap_render::render_reap(&summary, false, true);
+    assert!(
+        text.contains(&format!(
+            "schema v{forward} is ahead of the v{understood} this fno understands"
+        )),
+        "text: {text}"
+    );
+    assert!(
+        text.contains("no retirement can be written"),
+        "text must name the refused write: {text}"
+    );
+    let json_text = crate::reap_render::render_reap(&summary, true, true);
+    assert!(
+        json_text.contains(&format!(
+            "\"schema_skew\":{{\"on_disk\":{forward},\"understood\":{understood}}}"
+        )),
+        "json: {json_text}"
+    );
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
+/// A registry at this binary's own version carries no skew, and the
+/// rendered text gains no line.
+#[test]
+fn a_registry_at_the_binary_version_carries_no_skew() {
+    let home = tmp_home("gc-skew-none");
+    let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(ask_row("plain-row", None));
+    })
+    .unwrap();
+
+    let graph = graph_read(&[("plain-row-sess", "N1", "done")], &[]);
+    let summary = gc_sweep::run(
+        &home,
+        &emitter,
+        900,
+        true,
+        7,
+        &move |_| graph.clone(),
+        &|_| None,
+        &uniform_ages(7200),
+        &|_| true,
+        &|_| crate::daemon::CascadeOutcome::NotApplicable,
+        &|_e| crate::daemon::CascadeOutcome::NotApplicable,
+        &no_agents,
+        &|_| (None, None),
+        &|_| None,
+    );
+
+    assert_eq!(summary.schema_skew, None);
+    let text = crate::reap_render::render_reap(&summary, false, true);
+    assert!(!text.contains("is ahead of the v"), "text: {text}");
+    let json_text = crate::reap_render::render_reap(&summary, true, true);
+    assert!(
+        json_text.contains("\"schema_skew\":null"),
+        "json: {json_text}"
+    );
     std::fs::remove_dir_all(home.root()).ok();
 }

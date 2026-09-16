@@ -175,6 +175,11 @@ pub struct GcSummary {
     /// The registry file could not be read this pass. Never a retirement on
     /// a failed read; the tick names this instead of a quiet no_rows.
     pub registry_unreadable: bool,
+    /// Set when the on-disk registry is AHEAD of this binary: reads drop
+    /// unknown fields and every write is refused, so no row can retire this
+    /// pass whatever the policy decided. `None` when the versions agree.
+    /// `(on-disk version, understood version)`.
+    pub schema_skew: Option<(u32, u32)>,
     /// One per held row: its clock. The text buckets above stay
     /// exactly as they were; `holds` is the read-side projection that gives
     /// a keep an age, a basis, and an escalation flag. It is a projection
@@ -1616,6 +1621,14 @@ pub(crate) fn run_with_release(
         // failed sweep, not a quiet no_rows.
         summary.registry_unreadable = true;
     }
+    // A forward registry reads as the subset this binary understands and
+    // refuses every write, so a receipt that says `retired 0` would read as
+    // "nothing was reapable" when the truth is "nothing could be written".
+    // The skew rides the summary either way; `registry_unreadable` already
+    // names the read-failed case, and `Default::default()` carries the
+    // binary's own version, so a failed read never invents a skew here.
+    summary.schema_skew = (registry.schema_version > state::REGISTRY_SCHEMA_VERSION)
+        .then(|| (registry.schema_version, state::REGISTRY_SCHEMA_VERSION));
     if registry.entries.is_empty() {
         return summary; // empty registry -> nothing to sweep
     }
