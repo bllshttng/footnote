@@ -65,3 +65,23 @@ def test_update_receipt_names_the_resolved_id(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Updated ab-00000001" in result.output
     assert "Updated ab-0000" not in result.output.splitlines()
+
+
+def test_update_readback_uses_resolved_id_when_prefix_becomes_ambiguous(tmp_path, monkeypatch):
+    _graph(
+        tmp_path,
+        monkeypatch,
+        [{"id": "ab-00000001", "title": "old", "domain": "code", "project": "p"}],
+    )
+    monkeypatch.setattr(
+        "fno.graph.load.load_graph",
+        lambda path=None: [
+            {"id": "ab-00000001", "title": "new"},
+            {"id": "ab-00000002", "title": "other"},
+        ],
+    )
+
+    result = runner.invoke(app, ["backlog", "update", "ab-0000", "--title", "new"])
+
+    assert result.exit_code == 0, result.output
+    assert "Updated ab-00000001" in result.output

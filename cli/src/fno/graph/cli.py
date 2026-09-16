@@ -3474,6 +3474,7 @@ def cmd_update(
         derived_add_pr_url = _resolve_or_refuse(int(add_pr), "--add-pr-url")
 
     projected_node: list = [None]
+    resolved_id: list[Optional[str]] = [None]
     reparent_old_parent: list = [None]
     ship_stamp_node: list = [None]
 
@@ -3507,6 +3508,7 @@ def cmd_update(
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
+        resolved_id[0] = node["id"]
 
         if related is not None:
             from fno.graph.store import set_related
@@ -3842,7 +3844,7 @@ def cmd_update(
     commit_rows_via_store(_graph_path(), mutator)
     _dispatch_overrides.emit(brief_warning_box[0])
 
-    stored_node = confirm_updated_row(_graph_path(), task_id)
+    stored_node = confirm_updated_row(_graph_path(), resolved_id[0] or task_id)
     if locked_by is not None:
         from fno.backlog.requeue import verify_lock_stamp_receipt
 
