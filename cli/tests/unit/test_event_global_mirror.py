@@ -54,12 +54,12 @@ def _configure(tmp_path: Path, monkeypatch, state_dir: str) -> Path:
     return paths_mod.global_events_json()
 
 
-def _emit(project: Path, type_: str, data: str = "{}"):
+def _emit(project: Path, type_: str, data: str = "{}", source: str = "test"):
     project.parent.mkdir(parents=True, exist_ok=True)
     return runner.invoke(
         events_app,
         ["emit", "--type", type_, "--data", data,
-         "--events", str(project), "--source", "test"],
+         "--events", str(project), "--source", source],
     )
 
 
@@ -118,7 +118,7 @@ def test_an_ordinary_event_stays_project_local(tmp_path, monkeypatch):
     """
     global_log = _configure(tmp_path, monkeypatch, str(tmp_path / "state"))
     project = tmp_path / "project" / ".fno" / "events.jsonl"
-    result = _emit(project, "daemon_started")
+    result = _emit(project, "daemon_started", source="daemon")
     assert result.exit_code == 0, result.output
     assert _types(project) == ["daemon_started"]
     assert _types(global_log) == []
@@ -224,5 +224,5 @@ def test_an_ordinary_event_skips_the_bot_review_mirror(tmp_path, monkeypatch):
         raise AssertionError("publish_review_call fired on a non-attestation event")
 
     monkeypatch.setattr(pub, "publish_review_call", spy)
-    result = _emit(project, "daemon_started")
+    result = _emit(project, "daemon_started", source="daemon")
     assert result.exit_code == 0, result.output
