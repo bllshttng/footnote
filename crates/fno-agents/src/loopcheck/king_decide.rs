@@ -93,6 +93,17 @@ pub(super) fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     }
 
     let history = crate::loop_king::king_fire_history(&project_events, &session_id);
+    // The hook's half of the reign record: a beat the model skipped still
+    // lands a row. Sits after the cancel-sentinel check, so a cancelled crown
+    // writes none. The return value is ignored, so no decision changes.
+    crate::king_checkin::hook_beat(
+        &project_events,
+        &parsed.cwd,
+        &manifest.scope,
+        &session_id,
+        &history,
+        chrono::Utc::now(),
+    );
 
     // The hook's half of the reign record: a beat the model skipped still
     // lands a row. Sits after the cancel-sentinel check, so a cancelled crown

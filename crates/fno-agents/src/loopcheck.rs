@@ -24,7 +24,7 @@ use crate::{
 use crate::acceptance_evidence::{evaluate_done_probes, ProbeGate, PROBE_TIMEOUT};
 use crate::bounded_spawn::{kill_process_group, killpg};
 pub use crate::disposition_gate::{blockers_withhold, DispositionBlocker};
-use crate::king_termination::{bound_breached, king_quiet_body};
+use crate::king_termination::{bound_breached, king_output, king_quiet_body};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10691,27 +10691,6 @@ fn build_block_reason(
 // is also what the plan's engine_edit kill criterion exists to enforce.
 
 pub(crate) use crate::king_termination::{parse_king_manifest, KingManifest};
-
-fn king_output(
-    decision: &str,
-    reason: Option<TerminationReason>,
-    message: &str,
-    actionable: i64,
-    fires: u64,
-) -> String {
-    serde_json::json!({
-        "driver": "king",
-        "decision": decision,
-        "termination_reason": reason,
-        // `reason` carries the human-readable why, distinct from the enum
-        // above: a stop hook reader wants the top actionable row, not a tag.
-        "reason": message,
-        "message": message,
-        "actionable": actionable,
-        "fires": fires,
-    })
-    .to_string()
-}
 
 // ── public entry points ───────────────────────────────────────────────────────
 
