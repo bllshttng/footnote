@@ -48,6 +48,7 @@ CHECKS: dict[str, str] = {
     "graph-parity": "graph_parity",
     "preamble-budget": "preamble_budget",
     "internal-refs": "internal_refs",
+    "plan-filenames": "plan_filenames",
 }
 
 
@@ -208,6 +209,42 @@ def _repo_root() -> Path:
     from fno.paths import resolve_repo_root
 
     return resolve_repo_root()
+
+
+def plan_filenames() -> None:
+    """Report node-bearing plan filenames that disagree with one claim."""
+    from fno.graph._constants import is_wellformed_node_id
+    from fno.graph._intake import plan_claims
+    from fno.paths import plans_content_dir
+    from fno.plan.identity import plan_filename_node_id
+
+    plans_dir = plans_content_dir()
+    if not plans_dir.is_dir():
+        typer.echo(f"plan-filenames: plans dir not found: {plans_dir}", err=True)
+        raise typer.Exit(code=1)
+
+    mismatches: list[tuple[Path, str, str]] = []
+    for path in sorted(plans_dir.rglob("*.md")):
+        filename_node = plan_filename_node_id(path)
+        if filename_node is None:
+            continue
+        claims = {
+            claim for claim in plan_claims(str(path)) if is_wellformed_node_id(claim)
+        }
+        if len(claims) == 1:
+            claim_node = next(iter(claims))
+            if filename_node != claim_node:
+                mismatches.append((path, filename_node, claim_node))
+
+    if mismatches:
+        typer.echo("plan-filenames: mismatches:")
+        for path, filename_node, claim_node in mismatches:
+            typer.echo(
+                f"  {path}: filename names {filename_node}, claims {claim_node}"
+            )
+        typer.echo(f"plan-filenames: {len(mismatches)} mismatch(es)")
+        raise typer.Exit(code=1)
+    typer.echo("plan-filenames: ok")
 
 
 def graph_parity(
