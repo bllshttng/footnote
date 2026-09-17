@@ -299,3 +299,4 @@ rooted-writers.sh
 # an fno wrapper would invert the dependency; the bash scripts are the entry
 # points. Pure library + standalone CLI of its own; no fno verb wraps it.
 skill_discovery.py
+cargo-build-dir.sh
