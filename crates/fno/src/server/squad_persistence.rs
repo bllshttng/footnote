@@ -3,6 +3,52 @@
 use super::*;
 
 impl Core {
+    /// The live squad that holds stored identity `(name, key)`, skipping
+    /// `except`. An unnamed squad with no key yet holds the key its origins
+    /// derive, because its first persist adopts exactly that key.
+    pub(super) fn live_holder_of(&self, name: &str, key: &str, except: Option<u64>) -> Option<u64> {
+        if name.is_empty() && key.is_empty() {
+            return None;
+        }
+        self.session
+            .squads
+            .iter()
+            .filter(|sq| Some(sq.id) != except)
+            .filter(|sq| match sq.name.as_deref().filter(|n| !n.is_empty()) {
+                Some(live) => live == name,
+                None if !name.is_empty() => false,
+                None if sq.key.is_empty() => {
+                    !sq.origins.is_empty() && crate::squad_store::origin_key(&sq.origins) == key
+                }
+                None => sq.key == key,
+            })
+            .map(|sq| sq.id)
+            .min()
+    }
+
+    /// True when another live squad shares `sid`'s stored identity. Neither
+    /// live member list is known to be complete, so the write is skipped and
+    /// the fault is noticed once per identity per server life.
+    pub(super) fn shared_identity_write_skipped(
+        &mut self,
+        sid: u64,
+        name: &str,
+        key: &str,
+    ) -> bool {
+        if self.live_holder_of(name, key, Some(sid)).is_none() {
+            return false;
+        }
+        let id = if name.is_empty() { key } else { name };
+        if self.shared_identity_notified.insert(id.to_string()) {
+            let text = format!(
+                "squad {id}: two live workspaces share one stored identity; member write skipped"
+            );
+            eprintln!("fno mux: {text}");
+            self.notice_all(text);
+        }
+        true
+    }
+
     pub(super) fn persist_template_specs(&mut self, sid: u64) {
         let Some(sq) = self.session.squad(sid) else {
             return;
@@ -41,6 +87,11 @@ impl Core {
         origins: &[String],
         members: &[crate::squad_store::StoredMember],
     ) {
+        if let Some(sid) = self.live_holder_of(name, key, None) {
+            if self.shared_identity_write_skipped(sid, name, key) {
+                return;
+            }
+        }
         let result = crate::squad_store::upsert_with_generations(
             Some(&self.store_generations),
             name,

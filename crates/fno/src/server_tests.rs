@@ -8986,6 +8986,7 @@ fn empty_core() -> Core {
         pending_template_restores: Vec::new(),
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
+        shared_identity_notified: HashSet::new(),
         restored: false,
         restore_pending: false,
         store_generations: HashMap::new(),
