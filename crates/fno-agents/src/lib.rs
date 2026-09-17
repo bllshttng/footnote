@@ -205,6 +205,7 @@ pub mod reap_render;
 pub mod receipt;
 pub mod reclaim;
 pub mod reentry;
+pub mod refusal_rate;
 pub mod registry_json;
 pub mod rename;
 pub mod restart_run;
