@@ -3415,9 +3415,8 @@ fn session_lineage_pane_ls_reports_thread_and_current_beside_each_other() {
 
 #[test]
 fn rename_squad_blank_clears_origin_squad_and_refuses_origin_less() {
-    // AC1-EDGE + AC1-ERR (server half): a blank rename clears an origin-
-    // backed squad to its derived label, but an origin-less (NewSquad)
-    // squad has no derivable label, so the blank is refused (name kept).
+    // A blank rename clears an origin-backed squad to its derived label. An
+    // origin-less squad has no derivable label, so the blank is refused.
     let mut core = empty_core();
     core.session
         .add_squad(1, vec!["/x".into()], Some("work".into()), leaf_tab(5, 1));
