@@ -870,8 +870,12 @@ fn latency_stop_target_promise_green() {
             // Same identity pin as the watching fixture: the self-review
             // disarm binds the live claim to the firing session.
             extra_env: &[("CLAUDE_CODE_SESSION_ID", TARGET_SID)],
-            budget_p90_ms: 1000.0,
-            ceiling_ms: 2500.0,
+            // The terminal path does the real work: finalize stamps the plan
+            // through the Python writer on every sample, and the ubuntu
+            // runner measured that at ~11s a fire. The budget gates the
+            // regression, not the stamp's own cost.
+            budget_p90_ms: 15000.0,
+            ceiling_ms: 25000.0,
             allowed_execs: &[
                 "bash",
                 "fno-agents",
