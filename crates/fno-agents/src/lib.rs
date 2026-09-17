@@ -1041,6 +1041,14 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Emitted even on outcome none/duplicate, so a quiet run cannot be
     // mistaken for a sweep that never ran.
     "stale_sweep",
+    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 6h
+    // floor and un-parked open rows whose head moved or whose park passed
+    // 24h, marking finished rows handled. Emitted even on a quiet or skipped
+    // run, so a quiet run cannot be mistaken for a sweep that never ran.
+    "park_sweep",
+    // A parked PR resumed polling (pr-park-emitted): retries reset, by hand
+    // (the king row's verb) or by the sweep.
+    "pr_watch_unparked",
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
     "node_failed",
