@@ -1938,3 +1938,67 @@ def test_detect_abandoned_do_rows_carries_the_prover_verdict():
     )
     assert rows[0].verdict == "held"
     assert rows[0].reason == "transcript active"
+
+
+def _hours_after_start(hours):
+    from datetime import datetime, timezone
+
+    return datetime(2026, 9, 9, 15, 46, 29, tzinfo=timezone.utc).timestamp() + hours * 3600
+
+
+def test_detect_abandoned_do_rows_reaps_a_row_idle_past_the_bound():
+    """A live UNKNOWN roster worker no longer holds a 40h row nobody works."""
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-idle1")],
+        live_claimed=set(), live_worked={"x-idle1": ["worker-u (unmeasurable)"]},
+        prover=_active_prover, now_s=_hours_after_start(40), quiet_after_s=24 * 3600,
+        engaged_on={},
+    )
+    assert [(r.verdict, r.reason) for r in rows] == [
+        ("gone", "row idle 40h, no reachable worker on the node")
+    ]
+
+
+def test_detect_abandoned_do_rows_holds_a_reachable_worker_on_the_node():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-idle2")],
+        live_claimed=set(), live_worked={},
+        prover=_gone_prover, now_s=_hours_after_start(40), quiet_after_s=24 * 3600,
+        engaged_on={"x-idle2": ["worker-a"]},
+    )
+    assert [(r.verdict, r.reason) for r in rows] == [
+        ("held", "reachable worker on node worker-a")
+    ]
+
+
+def test_detect_abandoned_do_rows_idle_row_still_held_by_a_live_claim():
+    rows = m.detect_abandoned_do_rows(
+        [_do_node("x-idle3")],
+        live_claimed={"x-idle3"}, live_worked={},
+        prover=_gone_prover, now_s=_hours_after_start(40), quiet_after_s=24 * 3600,
+        engaged_on={"x-idle3": ["worker-a"]},
+    )
+    assert [(r.verdict, r.reason) for r in rows] == [("held", "live claim")]
+
+
+def test_detect_abandoned_do_rows_owner_note_resets_the_idle_clock():
+    """A note the row's own session wrote 1h ago keeps the idle arm quiet;
+    a note from another session does not."""
+    from datetime import datetime, timezone
+
+    note_at = datetime.fromtimestamp(_hours_after_start(39), tz=timezone.utc).isoformat()
+    node = _do_node("x-idle4", progress_notes=[
+        {"ts": note_at, "text": "still on it", "source_session_id": _CLAUDE_SID},
+    ])
+    rows = m.detect_abandoned_do_rows(
+        [node], live_claimed=set(), live_worked={},
+        prover=_active_prover, now_s=_hours_after_start(40), quiet_after_s=24 * 3600,
+    )
+    assert [(r.verdict, r.reason) for r in rows] == [("held", "transcript active")]
+
+    node["progress_notes"][0]["source_session_id"] = "someone-else"
+    rows = m.detect_abandoned_do_rows(
+        [node], live_claimed=set(), live_worked={},
+        prover=_active_prover, now_s=_hours_after_start(40), quiet_after_s=24 * 3600,
+    )
+    assert rows[0].verdict == "gone"

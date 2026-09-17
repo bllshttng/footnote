@@ -2115,12 +2115,28 @@ def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
         return False, "transcript unreadable"
 
 
+def do_row_idle_s(entry, row, now_s) -> Optional[float]:
+    """Seconds since the row started or its own session last noted the node; None is unmeasured."""
+    stamps = [_parse_ts(row.get("started_at"))] + [
+        _parse_ts(n.get("ts")) for n in entry.get("progress_notes") or []
+        if isinstance(n, dict) and n.get("source_session_id") == row.get("session_id")
+    ]
+    stamps = [s for s in stamps if s is not None]
+    return now_s - max(stamps).timestamp() if stamps else None
+
+
 def detect_abandoned_do_rows(
-    entries, *, live_claimed, live_worked, prover, now_s, quiet_after_s
+    entries, *, live_claimed, live_worked, prover, now_s, quiet_after_s,
+    engaged_on: Optional[dict] = None,
 ):
-    """Stamp every non-terminal, unclaimed open-do-row node gone or held; vetoes outrank the prover."""
+    """Stamp every non-terminal, unclaimed open-do-row node gone or held.
+
+    A live session proves only that the session lives, so a row idle past the
+    bound is gone unless a claim or a REACHABLE worker on THIS node holds it.
+    """
     from fno.graph.statuses import TERMINAL_RUNGS, is_open_do_row
 
+    engaged_on = engaged_on or {}
     out: list[AbandonedDoRow] = []
     for e in entries:
         nid = e.get("id") if isinstance(e, dict) else None
@@ -2131,15 +2147,20 @@ def detect_abandoned_do_rows(
             if not is_open_do_row(row):
                 continue
             harness, sid = row.get("harness"), row.get("session_id")
-            if nid in live_claimed or live_worked.get(nid):
-                why = ("live claim" if nid in live_claimed
-                       else f"live roster worker {', '.join(live_worked[nid])}")
-                out.append(AbandonedDoRow(nid, harness, sid, "held", why))
+            idle = do_row_idle_s(e, row, now_s)
+            if nid in live_claimed:
+                verdict, why = "held", "live claim"
+            elif engaged_on.get(nid):
+                verdict, why = "held", f"reachable worker on node {', '.join(engaged_on[nid])}"
+            elif idle is not None and idle > quiet_after_s:
+                verdict, why = "gone", f"row idle {int(idle // 3600)}h, no reachable worker on the node"
+            elif live_worked.get(nid):
+                verdict, why = "held", f"live roster worker {', '.join(live_worked[nid])}"
             else:
-                gone, reason = prover(harness, sid, e.get("cwd"),
-                                      quiet_after_s=quiet_after_s, now_s=now_s)
-                out.append(AbandonedDoRow(nid, harness, sid,
-                                          "gone" if gone else "held", reason))
+                gone, why = prover(harness, sid, e.get("cwd"),
+                                   quiet_after_s=quiet_after_s, now_s=now_s)
+                verdict = "gone" if gone else "held"
+            out.append(AbandonedDoRow(nid, harness, sid, verdict, why))
     return out
 
 
@@ -2151,13 +2172,24 @@ def abandoned_leg(entries, claimed, graph_path, apply):
     except Exception:
         hours = 24
     try:
-        from fno.graph.statuses import live_worked_node_ids
+        from fno.claims.roster import classify_workers, read_roster
+        from fno.graph.statuses import is_open_do_row, live_worked_node_ids
+
+        reading = read_roster(require_live_probe=False)
+        # Raises on an unconsulted roster, so a degraded read reaps nothing.
+        live_worked = live_worked_node_ids(strict=True, entries=entries, reading=reading)
+        engaged_on = {}
+        for e in entries:
+            nid = e.get("id") if isinstance(e, dict) else None
+            if isinstance(nid, str) and any(is_open_do_row(r) for r in e.get("sessions") or []):
+                names = [w.get("name") for w in classify_workers(reading.workers_on(nid))[0]]
+                if names:
+                    engaged_on[nid] = names
         rows = detect_abandoned_do_rows(
-            entries, live_claimed=claimed,
-            live_worked=live_worked_node_ids(strict=True, entries=entries),
+            entries, live_claimed=claimed, live_worked=live_worked,
             prover=do_row_session_gone,
             now_s=datetime.now(timezone.utc).timestamp(),
-            quiet_after_s=hours * 3600,
+            quiet_after_s=hours * 3600, engaged_on=engaged_on,
         )
     except Exception as exc:  # noqa: BLE001 - one leg must not kill the sweep
         return [], f"abandoned-do-row leg skipped: {exc}"
