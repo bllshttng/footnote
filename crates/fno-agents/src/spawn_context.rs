@@ -581,13 +581,17 @@ pub fn session_identity_ambient(start_pid: u32) -> (Option<u32>, Option<&'static
         .unwrap_or_default()
         .trim()
         .to_lowercase();
+    // One census table serves whichever halves the stamps leave undecided:
+    // this runs on the renew path inside the per-claim recovery mutex, where
+    // the old subprocess needed a wall-clock bound.
+    let table = ancestry_table();
     let harness = match env_pid.filter(|_| harness_static(&stamp).is_some()) {
         Some(_) => harness_static(&stamp),
-        None => resolve_session_harness_from_table(&ancestry_table(), start_pid),
+        None => resolve_session_harness_from_table(&table, start_pid),
     };
     let pid = match env_pid {
         Some(pid) => Some(pid),
-        None => session_identity_from_table(&ancestry_table(), start_pid).map(|(pid, _)| pid),
+        None => session_identity_from_table(&table, start_pid).map(|(pid, _)| pid),
     };
     (pid, harness)
 }
