@@ -656,6 +656,13 @@ mod tests {
             crate::review_summary::summary_line(&text, "feature/x", "abc1234").as_deref(),
             Some("Reviewed at abc1234: 1 rounds, 0 findings disposed."),
         );
+        // The round counter the review_coverage row carries: 0 on the live
+        // file alone, 1 on the generation-complete text.
+        let live_only = std::fs::read_to_string(&live).unwrap();
+        let rounds =
+            |t: &str| crate::loopcheck::rounds_since_last_pass(t, "feature/x", "abc1234", None);
+        assert_eq!(rounds(&live_only), 0);
+        assert_eq!(rounds(&text), 1);
     }
 
     #[test]

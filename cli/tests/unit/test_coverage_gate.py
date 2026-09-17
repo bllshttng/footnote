@@ -44,3 +44,51 @@ def test_repo_state_root_cache_is_keyed_by_cwd(monkeypatch):
     assert _merge._repo_state_dir("/two") == "/two/repo/.fno"
     assert _merge._repo_state_dir("/one") == "/one/repo/.fno"
     assert calls == ["/one", "/two"]
+
+
+def test_attestation_chain_reads_a_row_that_rotated_out(monkeypatch, tmp_path: Path):
+    """The Python half of the Rust rotated-fixture test: a review round that
+    left the live journal still counts, read from the store."""
+    import json
+    import subprocess
+
+    import pytest
+
+    from tests.conftest import checkout_fno_agents_binary
+
+    binary = checkout_fno_agents_binary()
+    if binary is None:
+        pytest.skip("fno-agents binary not built (cargo build -p fno-agents); set FNO_AGENTS_BIN")
+
+    live = tmp_path / "events.jsonl"
+    row = {
+        "ts": "2026-09-15T08:26:07Z",
+        "type": "review_attestation",
+        "source": "test",
+        "data": {"reviewer": "code-review", "branch": "feature/x", "head_sha": "abc1234", "verdict": "pass"},
+    }
+    live.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    # Rotation's own order: the Rust ingest into the store, then the rename.
+    subprocess.run(
+        [str(binary), "king-history", "--scope", "x-aaaa", "--events-path", str(live), "--json"],
+        check=True,
+        capture_output=True,
+    )
+    live.rename(tmp_path / "events.jsonl.1")
+    live.write_text("", encoding="utf-8")
+    assert "abc1234" not in live.read_text(encoding="utf-8")
+    assert "abc1234" in (tmp_path / "events.jsonl.1").read_text(encoding="utf-8")
+
+    from fno.pr import _coverage_gate, _reviews
+
+    monkeypatch.setattr(_reviews, "_coverage_logs", lambda cwd, project_events: (live, None, None))
+    chain = _coverage_gate.attestation_chain(None, "feature/x", "abc1234")
+    assert [e["head_sha"] for e in chain] == ["abc1234"]
+
+
+def test_journal_lines_without_a_store_is_the_live_file(tmp_path: Path):
+    from fno.pr._reviews import journal_lines
+
+    live = tmp_path / "events.jsonl"
+    live.write_text('{"type":"review_coverage"}\nnot json\n', encoding="utf-8")
+    assert list(journal_lines(live, ("review_coverage",))) == ['{"type":"review_coverage"}\n', "not json\n"]
