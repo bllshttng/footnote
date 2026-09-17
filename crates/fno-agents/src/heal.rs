@@ -22,7 +22,7 @@
 //!   reported and left alone -- fixing it here would put main's problem in
 //!   someone else's diff.
 
-use crate::pr_push::{any_pending, job_id, READ_TIMEOUT};
+use crate::pr_push::{job_id, READ_TIMEOUT};
 use regex::Regex;
 use serde_json::Value;
 
@@ -1505,7 +1505,7 @@ fn run_one(a: &Args, pr: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pr_push::rest_bucket;
+    use crate::pr_push::{any_pending, rest_bucket};
     use serde_json::json;
     use std::path::Path;
 
