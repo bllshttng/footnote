@@ -1,8 +1,153 @@
-//! x-f188 change 7: the update menu/modal restart surface (kept out of the
-//! over-budget client_tests.rs; each shrink is banked).
+//! The update menu/modal restart and release-upgrade surface (kept out of
+//! the over-budget client_tests.rs; each shrink is banked).
 
+use super::tests::view_with_agents;
 use super::*;
-use crate::client::update_menu::{RunningRow, UpdateReadiness};
+use crate::client::release_check::{Channel, ReleaseOutcome};
+use crate::client::update_menu::{RunningRow, UpdateOutcome, UpdateProbe, UpdateReadiness};
+
+fn degraded_release_probe(release: ReleaseOutcome, running: Vec<RunningRow>) -> UpdateProbe {
+    let running_stale = running.len();
+    UpdateProbe {
+        readiness: UpdateOutcome::Ok(UpdateReadiness {
+            update_ready: false,
+            installed_rev: None,
+            source_rev: None,
+            changelog: vec![],
+            guidance: "update check degraded (source checkout not resolvable)".into(),
+            degraded: Some("source checkout not resolvable".into()),
+            running,
+            running_stale,
+            source_pin: None,
+        }),
+        release,
+    }
+}
+
+fn entry_labels(popup: &AuxPopup) -> Vec<String> {
+    popup
+        .popup
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            PopupRow::Entry { label, .. } => Some(label.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn newer_uv() -> ReleaseOutcome {
+    ReleaseOutcome::Newer {
+        channel: Channel::Uv,
+        installed: "0.3.1".into(),
+        latest: "0.3.2".into(),
+    }
+}
+
+/// A release install with a degraded source check still learns a newer
+/// release exists, and the modal's upgrade entry maps to its action.
+#[test]
+fn release_newer_shows_menu_row_and_modal_upgrade_entry() {
+    let probe = degraded_release_probe(newer_uv(), vec![]);
+    let menu = build_sideline_menu(Anchor::Center, Some(&probe));
+    assert_eq!(entry_labels(&menu)[0], "release 0.3.2 available");
+    assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
+
+    let modal = build_update_modal(Some(&probe));
+    let labels = entry_labels(&modal);
+    let i = labels
+        .iter()
+        .position(|l| l == "upgrade now: uv tool upgrade fno")
+        .expect("upgrade entry");
+    assert_eq!(modal.actions[i], AuxAction::UpgradeRelease(Channel::Uv));
+}
+
+/// With stale running rows too, actions follow entry order.
+#[test]
+fn release_newer_with_stale_rows_orders_upgrade_before_restart() {
+    let stale = |name: &str| RunningRow {
+        component: "daemon".into(),
+        name: Some(name.into()),
+        verdict: "stale".into(),
+        on_restart: "restarts".into(),
+        survives: "panes".into(),
+    };
+    let probe = degraded_release_probe(newer_uv(), vec![stale("a"), stale("b")]);
+    let modal = build_update_modal(Some(&probe));
+    assert_eq!(
+        modal.actions,
+        vec![
+            AuxAction::UpgradeRelease(Channel::Uv),
+            AuxAction::RestartAgents
+        ]
+    );
+    assert_eq!(
+        entry_labels(&modal),
+        vec![
+            "upgrade now: uv tool upgrade fno",
+            "restart now (keeps panes)"
+        ]
+    );
+}
+
+/// A failed release check is named, never read as current.
+#[test]
+fn release_degraded_and_current_render_one_header_and_no_action() {
+    for (release, want) in [
+        (
+            ReleaseOutcome::Degraded("uv tool list --outdated: exit 2".into()),
+            "release check failed: uv tool list --outdated: exit 2",
+        ),
+        (
+            ReleaseOutcome::Current {
+                channel: Channel::Brew,
+            },
+            "release: current (brew)",
+        ),
+    ] {
+        let modal = build_update_modal(Some(&degraded_release_probe(release, vec![])));
+        assert!(
+            modal
+                .popup
+                .rows
+                .iter()
+                .any(|r| matches!(r, PopupRow::Header(h) if h == want)),
+            "{want}"
+        );
+        assert!(modal.actions.is_empty());
+    }
+}
+
+/// A tap queues the upgrade once; a second tap says one is running; the
+/// verdict lands as a notice and re-arms the probe.
+#[tokio::test]
+async fn upgrade_tap_queues_once_and_verdict_rearms_probe() {
+    let mut v = view_with_agents(vec![]);
+    let mut buf = Vec::new();
+    execute_aux_action(&mut v, AuxAction::UpgradeRelease(Channel::Uv), &mut buf)
+        .await
+        .unwrap();
+    assert_eq!(v.update_verb_want, Some(UpdateVerb::Upgrade(Channel::Uv)));
+    v.update_verb_want = None;
+    v.update_verb_inflight = true;
+    execute_aux_action(&mut v, AuxAction::RestartAgents, &mut buf)
+        .await
+        .unwrap();
+    assert_eq!(v.update_verb_want, None);
+    assert!(v
+        .notice
+        .as_ref()
+        .is_some_and(|(n, _)| n == "an update action is already running"));
+
+    v.update_probe_want = false;
+    v.land_update_verdict("upgrade ok: Updated fno v0.3.1 -> v0.3.2".into());
+    assert!(!v.update_verb_inflight);
+    assert!(v.update_probe_want);
+    assert!(v
+        .notice
+        .as_ref()
+        .is_some_and(|(n, _)| n.starts_with("upgrade ok:")));
+}
 
 /// x-f188 AC7-HP: two stale components and no update pending -> the menu
 /// shows the restart row and the modal names each component with what
@@ -42,7 +187,7 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         running_stale: 2,
         source_pin: None,
     });
-    let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+    let menu = build_sideline_menu(Anchor::Center, Some(&outcome.clone().into()));
     let labels: Vec<&str> = menu
         .popup
         .rows
@@ -53,11 +198,11 @@ fn update_modal_names_stale_processes_and_offers_restart() {
         })
         .collect();
     assert!(
-        labels.iter().any(|l| *l == "restart: 2 stale, panes kept"),
+        labels.contains(&"restart: 2 stale, panes kept"),
         "the menu names the stale count: {labels:?}"
     );
 
-    let modal = build_update_modal(Some(&outcome));
+    let modal = build_update_modal(Some(&outcome.clone().into()));
     let text: Vec<String> = modal
         .popup
         .rows
@@ -120,7 +265,7 @@ fn update_payload_without_running_key_parses_and_offers_no_restart() {
     assert_eq!(parsed.running_stale, 0);
 
     let outcome = UpdateOutcome::Ok(parsed);
-    let modal = build_update_modal(Some(&outcome));
+    let modal = build_update_modal(Some(&outcome.clone().into()));
     assert!(
         !modal.actions.contains(&AuxAction::RestartAgents),
         "no restart action without stale rows"
@@ -141,7 +286,7 @@ fn sideline_menu_omits_update_row_when_not_ready() {
         running_stale: 0,
         source_pin: None,
     });
-    let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+    let menu = build_sideline_menu(Anchor::Center, Some(&outcome.clone().into()));
     assert!(!menu.actions.contains(&AuxAction::OpenUpdate));
 }
 
@@ -154,7 +299,7 @@ fn sideline_menu_handles_missing_and_degraded_probe() {
     assert!(none_menu.actions.contains(&AuxAction::OpenKeybinds));
 
     let degraded = UpdateOutcome::Degraded("update --check: exit 1".into());
-    let degraded_menu = build_sideline_menu(Anchor::Center, Some(&degraded));
+    let degraded_menu = build_sideline_menu(Anchor::Center, Some(&degraded.into()));
     let labels: Vec<&str> = degraded_menu
         .popup
         .rows
@@ -186,7 +331,7 @@ fn sideline_menu_shows_row_for_ok_but_internally_degraded_probe() {
         running_stale: 0,
         source_pin: None,
     });
-    let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+    let menu = build_sideline_menu(Anchor::Center, Some(&outcome.clone().into()));
     let labels: Vec<&str> = menu
         .popup
         .rows
@@ -217,7 +362,7 @@ fn sideline_menu_names_source_behind_origin() {
     });
     let parsed: UpdateReadiness = serde_json::from_value(payload).expect("parses");
     let outcome = UpdateOutcome::Ok(parsed);
-    let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+    let menu = build_sideline_menu(Anchor::Center, Some(&outcome.clone().into()));
     let labels: Vec<&str> = menu
         .popup
         .rows
@@ -249,7 +394,7 @@ fn sideline_menu_without_source_pin_keeps_rows() {
             payload["source_pin"] = pin.clone();
         }
         let parsed: UpdateReadiness = serde_json::from_value(payload).expect("parses");
-        let menu = build_sideline_menu(Anchor::Center, Some(&UpdateOutcome::Ok(parsed)));
+        let menu = build_sideline_menu(Anchor::Center, Some(&UpdateOutcome::Ok(parsed).into()));
         assert!(
             !menu.actions.contains(&AuxAction::OpenUpdate),
             "no behind row for pin {pin:?}"
@@ -272,7 +417,7 @@ fn sideline_menu_shows_update_row_above_keybinds_when_ready() {
         running_stale: 0,
         source_pin: None,
     });
-    let menu = build_sideline_menu(Anchor::Center, Some(&outcome));
+    let menu = build_sideline_menu(Anchor::Center, Some(&outcome.clone().into()));
     let labels: Vec<&str> = menu
         .popup
         .rows
@@ -303,7 +448,7 @@ fn update_modal_renders_version_pair_changelog_and_guidance() {
         running_stale: 0,
         source_pin: None,
     });
-    let modal = build_update_modal(Some(&outcome));
+    let modal = build_update_modal(Some(&outcome.clone().into()));
     let headers: Vec<&str> = modal
         .popup
         .rows

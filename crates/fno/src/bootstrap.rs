@@ -419,7 +419,7 @@ fn locate_failure_message(
 /// Locate a usable `uv`: prefer one on PATH, else the well-known install dirs
 /// Astral's installer uses. Returns the command to invoke (`uv` when on PATH,
 /// otherwise an absolute path).
-fn find_uv() -> Option<PathBuf> {
+pub(crate) fn find_uv() -> Option<PathBuf> {
     let mut command = bootstrap_command("uv");
     command
         .arg("--version")

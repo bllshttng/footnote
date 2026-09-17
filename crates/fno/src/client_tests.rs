@@ -8718,8 +8718,8 @@ async fn peek_footer_esc_close_click_closes_and_the_rest_falls_through() {
 /// AC6-EDGE: a degraded probe renders the reason, never an empty body.
 #[test]
 fn update_modal_renders_degraded_reason_never_empty() {
-    let degraded = UpdateOutcome::Degraded("update --check: timed out".into());
-    let modal = build_update_modal(Some(&degraded));
+    let degraded = update_menu::UpdateOutcome::Degraded("update --check: timed out".into());
+    let modal = build_update_modal(Some(&degraded.into()));
     assert!(!modal.popup.rows.is_empty());
     let headers: Vec<&str> = modal
         .popup

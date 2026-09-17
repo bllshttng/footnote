@@ -4,6 +4,7 @@
 //! over-budget file shrinks; everything here reaches the client's private
 //! items through `super::*`.
 
+use super::release_check::{probe_release, run_upgrade_verb, Channel, ReleaseOutcome};
 use super::*;
 
 /// The client's view of `fno doctor update --check`'s payload - only
@@ -63,6 +64,29 @@ pub(crate) enum UpdateOutcome {
     Degraded(String),
 }
 
+/// Both off-loop answers the menu reads: the source-checkout readiness and
+/// the published-release check. They land together from one probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpdateProbe {
+    pub(crate) readiness: UpdateOutcome,
+    pub(crate) release: ReleaseOutcome,
+}
+
+impl From<UpdateOutcome> for UpdateProbe {
+    fn from(readiness: UpdateOutcome) -> Self {
+        UpdateProbe {
+            readiness,
+            release: ReleaseOutcome::NotApplicable,
+        }
+    }
+}
+
+/// Run the readiness check and the release check together, off the UI loop.
+pub(crate) async fn probe_update() -> UpdateProbe {
+    let (readiness, release) = tokio::join!(probe_update_readiness(), probe_release());
+    UpdateProbe { readiness, release }
+}
+
 /// Well above the Connections read timeout (1.5s): `--check` shells out to
 /// `mux ls` (5s), `agents list` (15s), and `git log` (5s) SEQUENTIALLY on the
 /// Python side, so its own worst-case latency alone is ~25s. This never
@@ -112,7 +136,9 @@ pub(crate) async fn probe_update_readiness() -> UpdateOutcome {
 /// intentionally absent - there is no config-reload machinery to route it to
 /// (a net-new capability, not a re-route), so the menu advertises only what
 /// actually works.
-pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
+pub(crate) fn build_sideline_menu(anchor: Anchor, probe: Option<&UpdateProbe>) -> AuxPopup {
+    let update = probe.map(|p| &p.readiness);
+    let release = probe.map(|p| &p.release);
     let entry = |glyph: &str, label: &str| PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
@@ -140,6 +166,14 @@ pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>
                 "⬆",
                 &format!("source {} behind origin", behind.unwrap_or_default()),
             ));
+            actions.push(AuxAction::OpenUpdate);
+        }
+        // A published release newer than a uv or brew install. Ranks
+        // below a source update: a source install never reads Newer.
+        _ if matches!(release, Some(ReleaseOutcome::Newer { .. })) => {
+            if let Some(ReleaseOutcome::Newer { latest, .. }) = release {
+                rows.push(entry("⬆", &format!("release {latest} available")));
+            }
             actions.push(AuxAction::OpenUpdate);
         }
         // change 7: stale long-lived processes are their own reason
@@ -187,8 +221,45 @@ pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>
 /// guidance line's place. Never an empty body (AC5-HP/AC6-EDGE): `outcome`
 /// is only `None` if this is somehow opened before any probe ever ran, which
 /// `build_sideline_menu` never offers as a way in.
-pub(crate) fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
+pub(crate) fn build_update_modal(probe: Option<&UpdateProbe>) -> AuxPopup {
+    let outcome = probe.map(|p| &p.readiness);
     let mut rows = vec![PopupRow::Header("update".into()), PopupRow::Rule];
+    let mut actions = Vec::new();
+    match probe.map(|p| &p.release) {
+        Some(ReleaseOutcome::Newer {
+            channel,
+            installed,
+            latest,
+        }) => {
+            rows.push(PopupRow::Header(format!(
+                "release {installed} -> {latest} ({})",
+                channel.name()
+            )));
+            rows.push(PopupRow::Header(
+                "upgrades the fno wheel; restart afterwards to run it".into(),
+            ));
+            rows.push(PopupRow::Entry {
+                glyph: "⬆".into(),
+                label: format!("upgrade now: {}", channel.upgrade_command()),
+                hint: String::new(),
+                enabled: true,
+            });
+            rows.push(PopupRow::Rule);
+            actions.push(AuxAction::UpgradeRelease(*channel));
+        }
+        Some(ReleaseOutcome::Degraded(reason)) => {
+            rows.push(PopupRow::Header(format!("release check failed: {reason}")));
+            rows.push(PopupRow::Rule);
+        }
+        Some(ReleaseOutcome::Current { channel }) => {
+            rows.push(PopupRow::Header(format!(
+                "release: current ({})",
+                channel.name()
+            )));
+            rows.push(PopupRow::Rule);
+        }
+        Some(ReleaseOutcome::NotApplicable) | None => {}
+    }
     match outcome {
         Some(UpdateOutcome::Ok(r)) => {
             let installed = r.installed_rev.as_deref().unwrap_or("unknown");
@@ -240,7 +311,6 @@ pub(crate) fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
             rows.push(PopupRow::Header("update check has not run yet".into()));
         }
     }
-    let mut actions = Vec::new();
     if matches!(
         outcome,
         Some(UpdateOutcome::Ok(r)) if r.running.iter().any(|row| row.verdict == "stale")
@@ -252,6 +322,30 @@ pub(crate) fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
             .title("update")
             .footer("esc close"),
         actions,
+    }
+}
+
+/// A queued update-modal verb. One runs at a time; its verdict is the notice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateVerb {
+    RestartAgents,
+    Upgrade(Channel),
+}
+
+impl View {
+    /// The verb's verdict lands as a notice, and a re-probe arms so the next
+    /// menu shows the post-upgrade state.
+    pub(crate) fn land_update_verdict(&mut self, verdict: String) {
+        self.update_verb_inflight = false;
+        self.set_notice(verdict);
+        self.update_probe_want = true;
+    }
+}
+
+pub(crate) async fn run_update_verb(verb: UpdateVerb) -> String {
+    match verb {
+        UpdateVerb::RestartAgents => run_restart_verb().await,
+        UpdateVerb::Upgrade(channel) => run_upgrade_verb(channel).await,
     }
 }
 
