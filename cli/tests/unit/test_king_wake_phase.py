@@ -1621,3 +1621,21 @@ def test_arm_writes_the_row_model_pin_onto_the_manifest(tmp_path, monkeypatch):
     )
     assert path is not None
     assert parse_manifest(path)["model"] == "glm-5.3-flash[1m]"
+
+
+def test_a_refused_spawn_says_so_in_the_feed(tmp_path):
+    # The refusal must not be wake-log-only: the trigger still spent a bill,
+    # so the activity feed carries the same king_wake_refused row the other
+    # refusal paths emit.
+    rec, summary, _manifest = _run(
+        tmp_path,
+        truth=lambda h: {"state": "done"},
+        unread=lambda address: [object()] if address == "king-x" else [],
+        extra={"dispatch_fn": None},
+    )
+
+    refusals = [e for e in rec.events if e[0] == "king_wake_refused"]
+    assert refusals and refusals[0][1]["refusal"] == "manifest-carries-no-model-pin"
+    assert summary["refused"] == [
+        {"scope": "epic-x", "refusal": "manifest-carries-no-model-pin"}
+    ]
