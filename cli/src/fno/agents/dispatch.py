@@ -1837,10 +1837,9 @@ def _claude_create_path(
         # a king reviving its own exited session must not be blocked by the
         # corpse it is about to overwrite.
         if crown_level is not None and crown_scope:
+            assert crown_plan is not None  # set by the pre-launch call above
             entries, crown_outcome, crown_cleared = settle_spawn_crown(
-                entries,
-                scope=crown_scope,
-                plan=crown_plan,
+                entries, scope=crown_scope, plan=crown_plan,
                 exclude_name=name if revive else None,
             )
             if crown_outcome == "succeeded":
