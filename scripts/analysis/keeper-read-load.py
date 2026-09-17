@@ -102,13 +102,15 @@ def method_payload(method):
 
 
 def read_exact(client, n):
-    buf = b""
-    while len(buf) < n:
-        chunk = client.recv(min(65536, n - len(buf)))
+    buf = bytearray(n)
+    view = memoryview(buf)
+    got = 0
+    while got < n:
+        chunk = client.recv_into(view[got:], min(262144, n - got))
         if not chunk:
             raise ConnectionError("keeper hung up mid-frame")
-        buf += chunk
-    return buf
+        got += chunk
+    return bytes(buf)
 
 
 def one_client(sock_path, payload, count):

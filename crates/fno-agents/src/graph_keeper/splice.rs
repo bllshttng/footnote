@@ -15,8 +15,9 @@ use super::TAG_RESPONSE;
 use super::{canonical_row_digests, read_graph_gated, remember_snapshot, GraphRead, StoreState};
 
 /// The full-graph read replies spliced from the cache's serialized views.
-/// `read` and `begin` are the two replies whose bodies are one cached byte
-/// run.
+/// `read`, `begin` and api `rows` are the replies whose bodies are one
+/// cached byte run; a rows reply built as a Value would deep-copy the whole
+/// tree per request (measured 934 MB idle).
 pub(super) enum SplicedReply {
     Read {
         id: u64,
@@ -27,6 +28,11 @@ pub(super) enum SplicedReply {
         version: String,
         digests: Arc<Vec<u8>>,
         entries: Arc<Vec<u8>>,
+    },
+    Rows {
+        id: u64,
+        rows: Arc<Vec<u8>>,
+        version: i64,
     },
 }
 
@@ -89,6 +95,14 @@ impl SplicedReply {
                 ],
                 Cow::Borrowed(&b"}}"[..]),
             ),
+            SplicedReply::Rows { id, rows, version } => (
+                format!(r#"{{"id":{id},"ok":true,"result":{{"rows":"#).into_bytes(),
+                vec![
+                    SplicePiece::Shared(Arc::clone(rows)),
+                    SplicePiece::Inline(format!(r#","version":{version}"#).into_bytes()),
+                ],
+                Cow::Borrowed(&b"}}"[..]),
+            ),
         }
     }
 
@@ -126,8 +140,8 @@ impl SplicedReply {
     }
 }
 
-/// The splice attempt for one request frame: `read` (never keep_malformed)
-/// and `begin` on a cacheable read. Anything else - another method, a
+/// The splice attempt for one request frame: `read` (never keep_malformed),
+/// `begin`, and the api `rows` op. Anything else - another method, a
 /// request that is not JSON, an uncached (Fresh) read, a store error -
 /// returns None and the caller falls through to handle_request, so error
 /// shapes and odd methods keep their exact reply. A spliced `begin` still
@@ -136,6 +150,7 @@ pub(super) fn splice_reply(state: &StoreState, payload: &[u8]) -> Option<Spliced
     let req: Value = serde_json::from_slice(payload).ok()?;
     let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
     let method = req.get("method").and_then(Value::as_str)?;
+    let mut rows_op = false;
     match method {
         "read" => {
             if req
@@ -151,6 +166,19 @@ pub(super) fn splice_reply(state: &StoreState, payload: &[u8]) -> Option<Spliced
             }
         }
         "begin" => {}
+        "api" => {
+            // Only the plain rows op: it is the one api reply whose body is
+            // the whole cached byte run.
+            if req
+                .get("params")
+                .map(|p| p.get("op").and_then(Value::as_str) == Some("rows"))
+                .unwrap_or(false)
+            {
+                rows_op = true;
+            } else {
+                return None;
+            }
+        }
         _ => return None,
     }
     let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
@@ -163,6 +191,16 @@ pub(super) fn splice_reply(state: &StoreState, payload: &[u8]) -> Option<Spliced
                 .clone();
             if entries.is_empty() {
                 return None;
+            }
+            if rows_op {
+                let version =
+                    crate::backlog::api::version(&crate::backlog::api::Store::new(&state.graph))
+                        .ok()?;
+                return Some(SplicedReply::Rows {
+                    id,
+                    rows: entries,
+                    version,
+                });
             }
             if method == "read" {
                 return Some(SplicedReply::Read { id, entries });

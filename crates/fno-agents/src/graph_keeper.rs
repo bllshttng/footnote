@@ -261,7 +261,8 @@ struct CachedGraph {
     entries_json: std::sync::OnceLock<Arc<Vec<u8>>>,
     /// canonical_row_digests(&*entries) serialized, filled once per version.
     base_digests_json: std::sync::OnceLock<Arc<Vec<u8>>>,
-    /// api::rows_in over the defaulted entries, filled once per version.
+    /// The api rows view: shares the entries Arc (a second Value tree
+    /// measured 1191 MB idle), filled once per version.
     api_rows: std::sync::OnceLock<Arc<Vec<Value>>>,
 }
 
@@ -3285,14 +3286,18 @@ fn handle_api(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
             GraphRead::Cached(graph) => graph
                 .api_rows
                 .get_or_init(|| {
-                    Arc::new(crate::backlog::api::rows_in(
-                        &crate::backlog::api::defaulted((*graph.entries).clone()),
-                    ))
+                    // Shared with the entries, never a second Value tree:
+                    // materializing rows_in over the defaulted entries
+                    // measured 1191 MB idle on the sandbox keeper (two full
+                    // trees). Every row the sqlite backend serves and every
+                    // fixture row is already a to_json product, so the
+                    // round-trip is an identity on them; a raw file-shaped
+                    // json row now ships in the file's key order, which
+                    // JSON consumers never observe.
+                    Arc::clone(&graph.entries)
                 })
                 .clone(),
-            GraphRead::Fresh(entries, _) => Arc::new(crate::backlog::api::rows_in(
-                &crate::backlog::api::defaulted((*entries).clone()),
-            )),
+            GraphRead::Fresh(entries, _) => entries,
         };
         return api_read_op(&store, op, params, &rows);
     }
@@ -4339,14 +4344,19 @@ mod tests {
     fn assert_splice_frame_byte_equal(state: &StoreState) {
         // AC6-HP: the spliced frame equals encode(TAG_RESPONSE,
         // to_vec(handle_request(...))) for the same request.
-        for method in ["read", "begin"] {
-            let payload = serde_json::to_vec(&json!({"id": 7, "method": method})).unwrap();
+        let payloads = [
+            json!({"id": 7, "method": "read"}),
+            json!({"id": 7, "method": "begin"}),
+            json!({"id": 7, "method": "api", "params": {"op": "rows"}}),
+        ];
+        for payload in payloads {
+            let bytes = serde_json::to_vec(&payload).unwrap();
             let via_handle = encode(
                 TAG_RESPONSE,
-                &serde_json::to_vec(&handle_request(state, &payload)).unwrap(),
+                &serde_json::to_vec(&handle_request(state, &bytes)).unwrap(),
             );
-            let spliced = splice_reply(state, &payload).expect("read/begin must splice");
-            assert_eq!(spliced.frame(), via_handle, "{method} frame bytes");
+            let spliced = splice_reply(state, &bytes).expect("read/begin/rows must splice");
+            assert_eq!(spliced.frame(), via_handle, "{payload} frame bytes");
         }
     }
 
