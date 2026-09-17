@@ -2117,12 +2117,12 @@ def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
 
 def do_row_idle_s(entry, row, now_s) -> Optional[int]:
     """Seconds since the row started or its own session last noted the node; None is unmeasured."""
-    stamps = [_parse_ts(row.get("started_at"))] + [
-        _parse_ts(n.get("ts")) for n in entry.get("progress_notes") or []
+    raw = [row.get("started_at")] + [
+        n.get("ts") for n in entry.get("progress_notes") or []
         if isinstance(n, dict) and n.get("source_session_id") == row.get("session_id")
     ]
-    stamps = [s for s in stamps if s is not None]
-    return int(now_s - max(stamps).timestamp()) if stamps else None
+    stamps = [s.timestamp() for s in map(_parse_ts, raw) if s is not None]
+    return int(now_s - max(stamps)) if stamps else None
 
 
 def detect_abandoned_do_rows(
