@@ -234,13 +234,30 @@ impl FileIdent {
     }
 }
 
-/// One cached graph snapshot: the identity its bytes were validated against,
-/// the content digest those bytes hash to (begin's tx token), and the parsed
-/// entries shared with every concurrent reader via one `Arc`.
+/// The cache key both backends validate against: the json file's stat
+/// identity, or the sqlite graph_meta version. Every sqlite write stamps a
+/// new version inside its own transaction, so a version-equal hit is the
+/// same rows.
+#[derive(Clone, PartialEq)]
+enum CacheKey {
+    File(FileIdent),
+    Db(String),
+}
+
+/// One cached graph snapshot: the key its rows were validated against, the
+/// version token (begin's tx token), the parsed entries shared with every
+/// concurrent reader via one `Arc`, and the lazily serialized views the
+/// reply paths splice instead of re-copying the tree.
 struct CachedGraph {
-    ident: FileIdent,
+    key: CacheKey,
     version: String,
     entries: Arc<Vec<Value>>,
+    /// serde_json::to_vec(&*entries), filled once per version.
+    entries_json: std::sync::OnceLock<Arc<Vec<u8>>>,
+    /// canonical_row_digests(&*entries) serialized, filled once per version.
+    base_digests_json: std::sync::OnceLock<Arc<Vec<u8>>>,
+    /// api::rows_in over the defaulted entries, filled once per version.
+    api_rows: std::sync::OnceLock<Arc<Vec<Value>>>,
 }
 
 const WRITE_LEDGER_CAPACITY: usize = 64;
@@ -273,15 +290,19 @@ struct StoreState {
     /// dropped its guard before exit and a later request died mid-frame with
     /// its client reading a hangup for a write that answered ok).
     inflight: RwLock<()>,
-    /// The parsed graph, validated by file identity on every hit. Seeded by
-    /// the write path (commit/op) rather than invalidated, so a mutating
-    /// fleet still hits. Never held for a corrupt/malformed/empty graph.
-    cache: RwLock<Option<CachedGraph>>,
-    /// Every cache-miss parse is one real file open; the counter is the
-    /// cache's honest receipt (AC4's positive marker, and the PR's before/
-    /// after evidence).
+    /// The parsed graph, validated by cache key on every hit. Seeded by the
+    /// write path (commit/op) rather than invalidated, so a mutating fleet
+    /// still hits. Never held for a corrupt/malformed/empty graph.
+    cache: RwLock<Option<Arc<CachedGraph>>>,
+    /// The single-flight fill: one cache miss parses (or exports) while the
+    /// rest re-check and hit, so a burst of concurrent cold readers costs
+    /// one copy, not one copy per reader.
+    fill: Mutex<()>,
+    /// Every cache-miss parse is one real file open (or db export); the
+    /// counter is the cache's honest receipt (AC4's positive marker, and
+    /// the PR's before/after evidence).
     file_opens: AtomicU64,
-    snapshots: Mutex<std::collections::VecDeque<(String, Vec<Value>)>>,
+    snapshots: Mutex<std::collections::VecDeque<(String, Arc<Vec<Value>>)>>,
     write_ledger: Mutex<std::collections::VecDeque<WriteLedgerEntry>>,
     gate_metrics: Mutex<GateMetrics>,
     /// The instant of the last successful publish. The render trigger reads
@@ -795,6 +816,7 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         gate: RwLock::new(()),
         inflight: RwLock::new(()),
         cache: RwLock::new(None),
+        fill: Mutex::new(()),
         file_opens: AtomicU64::new(0),
         snapshots: Mutex::new(std::collections::VecDeque::new()),
         write_ledger: Mutex::new(std::collections::VecDeque::new()),
@@ -1017,49 +1039,143 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
 /// commit conflict. Filled only by a clean, non-empty parse whose file did
 /// not move between the two stats, and the stored version digests exactly
 /// the bytes parsed.
+/// The gate-held read outcome: `Cached` carries the stored snapshot (its
+/// serialized views are available), `Fresh` carries values read past the
+/// cache because this instant is not one to pin (no identity, a file that
+/// moved mid-read, an empty list). Both describe ONE gate-held window.
+enum GraphRead {
+    Cached(Arc<CachedGraph>),
+    Fresh(Arc<Vec<Value>>, String),
+}
+
+fn sqlite_unreadable(state: &StoreState, error: String) -> StoreError {
+    StoreError::Unreadable(
+        crate::backlog::database_path(&state.graph)
+            .display()
+            .to_string(),
+        error,
+    )
+}
+
+/// The one cache both backends read through. The gate is held by the caller;
+/// the fill lock makes a miss single-flight, so a burst of concurrent cold
+/// readers costs one parse, not one parse per reader (the measured json-arm
+/// miss storm: 12 concurrent cold misses left 3055 MB RSS idle).
+///
+/// Cache hit: key-validated. Miss: one filler parses (or exports) while the
+/// rest re-check under the fill lock and hit.
+///
+/// json: identity pre-check, parse, post-check; only a file that did not
+/// move between the two stats and a non-empty parse is stored.
+/// sqlite: `graph_meta.version` pre-read, export, version re-read; only a
+/// version that did not move between the two reads and a non-empty list is
+/// stored. Every node write stamps the version inside its transaction, so a
+/// version-equal hit is the same rows. The PRE version is the one returned
+/// with the entries: a foreign writer landing mid-read pairs stale entries
+/// with a version they do not match, which degrades to a begin conflict
+/// exactly as the version-before-entries order always has.
+fn read_graph_gated(state: &StoreState, strict: bool) -> Result<GraphRead, StoreError> {
+    match state.backend() {
+        Backend::Json => {
+            let pre_ident = FileIdent::of(&state.graph);
+            let Some(pre_ident) = pre_ident else {
+                // No identity, no trust: a stat failure invalidates and the
+                // read answers fresh, exactly as an unreadable stat read
+                // today.
+                *state.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
+                let version = graph_store::file_content_version(&state.graph);
+                let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
+                return Ok(GraphRead::Fresh(Arc::new(entries), version));
+            };
+            if let Some(hit) = cached_hit(state, &CacheKey::File(pre_ident.clone())) {
+                return Ok(GraphRead::Cached(hit));
+            }
+            let _fill = state.fill.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(hit) = cached_hit(state, &CacheKey::File(pre_ident.clone())) {
+                return Ok(GraphRead::Cached(hit));
+            }
+            // Digest first, parse second: with the gate held, a keeper-side
+            // write cannot interleave, and a FOREIGN one (gc_sweep on the
+            // file) moves the post-parse identity, which the fill check
+            // below refuses.
+            let version = graph_store::file_content_version(&state.graph);
+            state.file_opens.fetch_add(1, Ordering::SeqCst);
+            let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
+            let entries = Arc::new(entries);
+            // Re-stat after the parse: cache only when the bytes parsed are
+            // the bytes the digest describes. A file replaced mid-read is a
+            // consistent instant but the wrong instant to pin, so it is not
+            // cached.
+            if let Some(post_ident) = FileIdent::of(&state.graph) {
+                if post_ident == pre_ident && !entries.is_empty() {
+                    let graph = Arc::new(CachedGraph {
+                        key: CacheKey::File(post_ident),
+                        version: version.clone(),
+                        entries: Arc::clone(&entries),
+                        entries_json: std::sync::OnceLock::new(),
+                        base_digests_json: std::sync::OnceLock::new(),
+                        api_rows: std::sync::OnceLock::new(),
+                    });
+                    *state.cache.write().unwrap_or_else(|e| e.into_inner()) =
+                        Some(Arc::clone(&graph));
+                    return Ok(GraphRead::Cached(graph));
+                }
+            }
+            Ok(GraphRead::Fresh(entries, version))
+        }
+        Backend::Sqlite => {
+            let pre = crate::backlog::version(&state.graph)
+                .map_err(|error| sqlite_unreadable(state, error))?;
+            if let Some(hit) = cached_hit(state, &CacheKey::Db(pre.clone())) {
+                return Ok(GraphRead::Cached(hit));
+            }
+            let _fill = state.fill.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(hit) = cached_hit(state, &CacheKey::Db(pre.clone())) {
+                return Ok(GraphRead::Cached(hit));
+            }
+            state.file_opens.fetch_add(1, Ordering::SeqCst);
+            let entries = crate::backlog::read_entries(&state.graph)
+                .map_err(|error| sqlite_unreadable(state, error))?;
+            let entries = Arc::new(entries);
+            let post = crate::backlog::version(&state.graph)
+                .map_err(|error| sqlite_unreadable(state, error))?;
+            if post == pre && !entries.is_empty() {
+                let graph = Arc::new(CachedGraph {
+                    key: CacheKey::Db(pre.clone()),
+                    version: pre.clone(),
+                    entries: Arc::clone(&entries),
+                    entries_json: std::sync::OnceLock::new(),
+                    base_digests_json: std::sync::OnceLock::new(),
+                    api_rows: std::sync::OnceLock::new(),
+                });
+                *state.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&graph));
+                return Ok(GraphRead::Cached(graph));
+            }
+            Ok(GraphRead::Fresh(entries, pre))
+        }
+    }
+}
+
+/// The key-validated hit, if the cache holds one for this key right now.
+fn cached_hit(state: &StoreState, key: &CacheKey) -> Option<Arc<CachedGraph>> {
+    let cache = state.cache.read().unwrap_or_else(|e| e.into_inner());
+    let cached = cache.as_ref()?;
+    if &cached.key == key {
+        return Some(Arc::clone(cached));
+    }
+    None
+}
+
+/// The entries + version pair every handler consumes, either arm of
+/// read_graph_gated flattened.
 fn cached_entries_gated(
     state: &StoreState,
     strict: bool,
 ) -> Result<(Arc<Vec<Value>>, String), StoreError> {
-    let pre_ident = FileIdent::of(&state.graph);
-    let Some(pre_ident) = pre_ident else {
-        // No identity, no trust: a stat failure invalidates and the read
-        // answers fresh, exactly as an unreadable stat read today.
-        *state.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
-        let version = graph_store::file_content_version(&state.graph);
-        let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
-        return Ok((Arc::new(entries), version));
-    };
-    if let Some(cached) = state
-        .cache
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-    {
-        if cached.ident == pre_ident {
-            return Ok((Arc::clone(&cached.entries), cached.version.clone()));
-        }
-    }
-    // Digest first, parse second: with the gate held, a keeper-side write
-    // cannot interleave, and a FOREIGN one (gc_sweep on the file) moves the
-    // post-parse identity, which the fill check below refuses.
-    let version = graph_store::file_content_version(&state.graph);
-    state.file_opens.fetch_add(1, Ordering::SeqCst);
-    let entries = graph_store::read_defaulted_opts(&state.graph, false, !strict)?;
-    let entries = Arc::new(entries);
-    // Re-stat after the parse: cache only when the bytes parsed are the bytes
-    // the digest describes. A file replaced mid-read is a consistent instant
-    // but the wrong instant to pin, so it is not cached.
-    if let Some(post_ident) = FileIdent::of(&state.graph) {
-        if post_ident == pre_ident && !entries.is_empty() {
-            *state.cache.write().unwrap_or_else(|e| e.into_inner()) = Some(CachedGraph {
-                ident: post_ident,
-                version: version.clone(),
-                entries: Arc::clone(&entries),
-            });
-        }
-    }
-    Ok((entries, version))
+    Ok(match read_graph_gated(state, strict)? {
+        GraphRead::Cached(graph) => (Arc::clone(&graph.entries), graph.version.clone()),
+        GraphRead::Fresh(entries, version) => (entries, version),
+    })
 }
 
 /// The owned-graph entries without the digest, for readers that do not run a
@@ -1109,15 +1225,31 @@ fn seed_cache(state: &StoreState, mut entries: Vec<Value>, published_version: &s
         !entries.is_empty() && graph_store::file_content_version(&state.graph) == published_version;
     match (ident, verified) {
         (Some(ident), true) => {
-            *cache = Some(CachedGraph {
-                ident,
+            *cache = Some(Arc::new(CachedGraph {
+                key: CacheKey::File(ident),
                 version: published_version.to_string(),
                 entries: Arc::new(entries),
-            });
+                entries_json: std::sync::OnceLock::new(),
+                base_digests_json: std::sync::OnceLock::new(),
+                api_rows: std::sync::OnceLock::new(),
+            }));
         }
         // An empty graph, an unreadable stat, or a file that no longer holds
         // this publish caches nothing: the fresh-parse path owns those.
         _ => *cache = None,
+    }
+}
+
+/// The write path's cache half per backend: json seeds from the published
+/// entries (the verified seed above); a sqlite publish drops the cache and
+/// the next read refills once. The sqlite write itself stamped a new
+/// graph_meta version inside its transaction, so the key check alone would
+/// already miss - the explicit drop is the cheap belt.
+fn refresh_cache_after_publish(state: &StoreState, outcome: &graph_store::MutateOutcome) {
+    if state.backend() == Backend::Json {
+        seed_cache(state, outcome.entries.clone(), &outcome.version);
+    } else {
+        *state.cache.write().unwrap_or_else(|e| e.into_inner()) = None;
     }
 }
 
@@ -1726,17 +1858,10 @@ fn handle_read_file(state: &StoreState) -> Result<Value, StoreError> {
 fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     // One gate-held window for entries and digest both (cached_snapshot): a
     // commit publishing mid-begin waits, so a retrying writer's version never
-    // names a file its entries did not come from.
-    let (version, entries) = match state.backend() {
-        Backend::Json => cached_snapshot(state)?,
-        Backend::Sqlite => {
-            let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-            (
-                state_version(state)?,
-                Arc::new(read_state(state, false, true)?),
-            )
-        }
-    };
+    // names a file its entries did not come from. Both backends through the
+    // cache: on sqlite the returned version is the pre-read graph_meta
+    // version, so an interleave degrades to a commit conflict.
+    let (version, entries) = cached_snapshot(state)?;
     remember_snapshot(state, &version, &entries);
     Ok(json!({
         "version": version,
@@ -1745,7 +1870,7 @@ fn handle_begin(state: &StoreState) -> Result<Value, StoreError> {
     }))
 }
 
-fn remember_snapshot(state: &StoreState, version: &str, entries: &[Value]) {
+fn remember_snapshot(state: &StoreState, version: &str, entries: &Arc<Vec<Value>>) {
     let mut snapshots = state
         .snapshots
         .lock()
@@ -1753,20 +1878,20 @@ fn remember_snapshot(state: &StoreState, version: &str, entries: &[Value]) {
     if snapshots.iter().any(|(stored, _)| stored == version) {
         return;
     }
-    snapshots.push_back((version.to_string(), entries.to_vec()));
+    snapshots.push_back((version.to_string(), Arc::clone(entries)));
     while snapshots.len() > 2 {
         snapshots.pop_front();
     }
 }
 
-fn stored_snapshot(state: &StoreState, version: &str) -> Option<Vec<Value>> {
+fn stored_snapshot(state: &StoreState, version: &str) -> Option<Arc<Vec<Value>>> {
     state
         .snapshots
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .iter()
         .find(|(stored, _)| stored == version)
-        .map(|(_, entries)| entries.clone())
+        .map(|(_, entries)| Arc::clone(entries))
 }
 
 fn handle_export_now(state: &StoreState) -> Result<Value, StoreError> {
@@ -1893,10 +2018,8 @@ fn handle_commit(state: &StoreState, params: &Value) -> Result<Value, StoreError
         state.lock_timeout,
     );
     let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
-    if state.backend() == Backend::Json {
-        if let Ok(value) = &outcome {
-            seed_cache(state, value.entries.clone(), &value.version);
-        }
+    if let Ok(value) = &outcome {
+        refresh_cache_after_publish(state, value);
     }
     drop(gate);
     record_gate(
@@ -2085,10 +2208,8 @@ fn handle_commit_rows(state: &StoreState, params: &Value) -> Result<Value, Commi
         state.lock_timeout,
     );
     let bytes = outcome.as_ref().ok().map(outcome_bytes).unwrap_or(0);
-    if state.backend() == Backend::Json {
-        if let Ok(value) = &outcome {
-            seed_cache(state, value.entries.clone(), &value.version);
-        }
+    if let Ok(value) = &outcome {
+        refresh_cache_after_publish(state, value);
     }
     drop(gate);
     record_gate(
@@ -3133,9 +3254,7 @@ fn handle_op(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
             }
             Err(err) => return Err(err),
         };
-        if state.backend() == Backend::Json {
-            seed_cache(state, outcome.entries.clone(), &outcome.version);
-        }
+        refresh_cache_after_publish(state, &outcome);
         return Ok(json!({
             "op": op_result,
             "outcome": outcome_json(&outcome),
@@ -3489,6 +3608,7 @@ mod tests {
             gate: RwLock::new(()),
             inflight: RwLock::new(()),
             cache: RwLock::new(None),
+            fill: Mutex::new(()),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             write_ledger: Mutex::new(std::collections::VecDeque::new()),
@@ -3670,6 +3790,7 @@ mod tests {
             gate: RwLock::new(()),
             inflight: RwLock::new(()),
             cache: RwLock::new(None),
+            fill: Mutex::new(()),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             write_ledger: Mutex::new(std::collections::VecDeque::new()),
@@ -4138,6 +4259,7 @@ mod tests {
             gate: RwLock::new(()),
             inflight: RwLock::new(()),
             cache: RwLock::new(None),
+            fill: Mutex::new(()),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             write_ledger: Mutex::new(std::collections::VecDeque::new()),
@@ -4333,6 +4455,7 @@ mod tests {
             gate: RwLock::new(()),
             inflight: RwLock::new(()),
             cache: RwLock::new(None),
+            fill: Mutex::new(()),
             file_opens: AtomicU64::new(0),
             snapshots: Mutex::new(std::collections::VecDeque::new()),
             write_ledger: Mutex::new(std::collections::VecDeque::new()),
