@@ -75,6 +75,27 @@ fn write(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
 }
 
+/// A live TTL claim lockfile, written directly: the fixture must provide the
+/// exact bytes the native reader reads, and the CLI writers moved to the
+/// graph store, which this reader does not see.
+fn write_live_claim(root: &Path, key: &str, holder: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    write(
+        &root
+            .join(".fno")
+            .join("claims")
+            .join(format!("{}.lock", fno_agents::claims::encode_key(key))),
+        &format!(
+            "schema_version: 1\nkey: {key}\nholder: {holder}\nacquired_at: {now}\nexpires_at: {}\npid: {}\nhost: fixture-host\n",
+            now + 3_600_000,
+            std::process::id() as i32
+        ),
+    );
+}
+
 fn executable(path: &Path, body: &str) {
     write(path, body);
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -88,17 +109,6 @@ const VISITOR_SID: &str = "00000000-0000-4000-8000-000000visitsid";
 
 fn bench() -> &'static Bench {
     BENCH.get_or_init(build_bench)
-}
-
-/// Leak a pre_setup command list. The specs are `&'static`, and the acquire
-/// lines carry the run's pid, so they are minted per test invocation.
-fn leaked_setup(cmds: Vec<String>) -> &'static [&'static str] {
-    Box::leak(
-        cmds.into_iter()
-            .map(|s| Box::leak(s.into_boxed_str()) as &'static str)
-            .collect::<Vec<_>>()
-            .into_boxed_slice(),
-    )
 }
 
 fn build_bench() -> Bench {
@@ -150,7 +160,7 @@ fn build_bench() -> Bench {
     let global = space.join("global.jsonl");
     let config = base.join("config.toml");
     let config_body = format!(
-        "state_dir = {:?}\nplans_dir = {:?}\n[paths]\nspaces_dir = {:?}\n[king]\nimplementation_guard = \"refuse\"\n[review]\nrequired_bots = []\nreviewers = []\nself_review_required = false\nposture = \"no_review\"\n",
+        "state_dir = {:?}\nplans_dir = {:?}\n[paths]\nspaces_dir = {:?}\n[king]\nimplementation_guard = \"refuse\"\n[review]\nrequired_bots = []\nreviewers = []\nposture = \"no_review\"\n",
         space,
         space.join("plans"),
         spaces
@@ -160,6 +170,31 @@ fn build_bench() -> Bench {
     // (stop.rs spawns it outside FNO_AGENTS_BIN, so no explicit --settings
     // arrives): mirror the bench config to <HOME>/.fno/config.toml.
     write(&base.join(".fno").join("config.toml"), &config_body);
+    // The self-review floor is unconditional on a code payload, so the
+    // promise fire can only terminate when the journal carries a head-pinned
+    // code-review pass at the mocked PR head.
+    let attestation = json!({
+        "ts": "2026-09-15T19:00:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review",
+            "verdict": "pass",
+            "head_sha": head_sha,
+            "branch": "main"
+        }
+    });
+    write(
+        &spaces
+            .join(
+                fs::canonicalize(&repo)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('/', "-"),
+            )
+            .join("events.jsonl"),
+        &format!("{attestation}\n"),
+    );
 
     // Registry: 200 filler rows (the measured baseline's density) plus the
     // fixture rows the king/court paths resolve.
@@ -483,10 +518,10 @@ struct FixtureSpec<'a> {
     /// The manifest this fixture needs written under the space (keyed, so a
     /// re-run after a terminal-consuming fixture rewrites it).
     manifest: &'a str,
-    /// Extra setup commands run in order before sampling (the claim
-    /// acquires: the watch lease, the live self-review opt-out).
-    pre_setup: &'static [&'static str],
-    /// Extra env merged into pre_setup AND every sample. The session-identity
+    /// Live TTL claims the fixture writes directly (key, holder): the
+    /// lockfile bytes the native reader reads, pinned to this process's pid.
+    claims: &'static [(&'static str, &'static str)],
+    /// Extra env merged into every sample. The session-identity
     /// fires (watching, promise) need the harness session marker their
     /// identity walk reads; sample_once strips ambient CLAUDE_*/FNO_* vars
     /// the fixture does not pin, so a marker only exists when pinned here.
@@ -552,18 +587,8 @@ fn run_fixture(name: &str, script: &str, spec: &FixtureSpec<'_>, verify: impl Fn
     for (k, v) in spec.extra_env {
         env.insert((*k).to_string(), (*v).to_string());
     }
-    for setup in spec.pre_setup {
-        let out = Command::new(&b.env["FNO_AGENTS_BIN"])
-            .args(setup.split_whitespace())
-            .envs(&env)
-            .current_dir(&b.repo)
-            .output()
-            .expect("pre_setup");
-        assert!(
-            out.status.success(),
-            "{name}: pre_setup {setup} failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+    for (key, holder) in spec.claims {
+        write_live_claim(Path::new(&b.env["FNO_CLAIMS_ROOT"]), key, holder);
     }
 
     // Exec capture: strace on Linux; the PATH shim dir on macOS.
@@ -690,7 +715,7 @@ fn latency_stop_visitor_claude() {
         &FixtureSpec {
             payload: stop_payload(VISITOR_SID, Some("Work continues.")),
             manifest: "", // no manifest on this path at all
-            pre_setup: &[],
+            claims: &[],
             extra_env: &[],
             budget_p90_ms: 300.0,
             ceiling_ms: 600.0,
@@ -721,7 +746,7 @@ fn latency_stop_visitor_no_message() {
         &FixtureSpec {
             payload: stop_payload(VISITOR_SID, None),
             manifest: "",
-            pre_setup: &[],
+            claims: &[],
             extra_env: &[],
             budget_p90_ms: 1000.0,
             ceiling_ms: 2500.0,
@@ -750,7 +775,7 @@ fn latency_stop_target_working() {
         &FixtureSpec {
             payload: stop_payload(TARGET_SID, Some("Work continues.")),
             manifest: &manifest,
-            pre_setup: &[],
+            claims: &[],
             extra_env: &[],
             // Budgets are CI-measured floors, not aspirations: amended
             // 2026-09-16 to twice the worst observed ubuntu-latest p90
@@ -795,10 +820,7 @@ fn latency_stop_target_watching() {
             // the transient acquiring process, which reads dead by fire
             // time and falls the gate through to the GitHub reads this
             // fixture exists to prove away.
-            pre_setup: leaked_setup(vec![format!(
-                "claim acquire node:latency-watch --holder latency-fixture --pid {} --ttl-ms 3600000",
-                std::process::id()
-            )]),
+            claims: &[("node:latency-watch", "latency-fixture")],
             // The identity walk reads the ambient session marker, not the
             // manifest's harness line: without it the fire is "harness
             // unknown", which cannot idle.
@@ -840,21 +862,11 @@ fn latency_stop_target_promise_green() {
                 Some("<promise>MISSION COMPLETE: fixture</promise>"),
             ),
             manifest: &manifest,
-            // Two live-pinned claims: the node claim, and the
-            // config-optout claim that makes `self_review_required = false`
-            // stick (the config escape hatch binds only while that global
-            // claim is LIVE; a dead transient acquire pid re-arms the
-            // attestation demand).
-            pre_setup: leaked_setup(vec![
-                format!(
-                    "claim acquire node:latency-promise --holder latency-fixture --pid {} --ttl-ms 3600000",
-                    std::process::id()
-                ),
-                format!(
-                    "claim acquire config-optout:review.self_review_required --holder latency-fixture --pid {} --ttl-ms 3600000",
-                    std::process::id()
-                ),
-            ]),
+            // One live-pinned node claim; the review gate itself is
+            // answered by the journal attestation the bench carries: the
+            // self-review floor is unconditional now, and the config escape
+            // hatch no longer clears it.
+            claims: &[("node:latency-promise", "latency-fixture")],
             // Same identity pin as the watching fixture: the self-review
             // disarm binds the live claim to the firing session.
             extra_env: &[("CLAUDE_CODE_SESSION_ID", TARGET_SID)],
@@ -877,8 +889,8 @@ fn latency_stop_target_promise_green() {
             let b = bench();
             // The fire journals to the HOME-resolved project log
             // (<HOME>/.fno/events.jsonl), not the --events read path.
-            let events = fs::read_to_string(b.base.join(".fno").join("events.jsonl"))
-                .unwrap_or_default();
+            let events =
+                fs::read_to_string(b.base.join(".fno").join("events.jsonl")).unwrap_or_default();
             assert!(
                 events.contains("DonePRGreen"),
                 "no DonePRGreen termination row: {events}"
@@ -901,7 +913,7 @@ fn latency_stop_king_terminal_repeat() {
         &FixtureSpec {
             payload: stop_payload(KING_SID, Some("Work continues.")),
             manifest: &manifest,
-            pre_setup: &[],
+            claims: &[],
             extra_env: &[],
             budget_p90_ms: 300.0,
             ceiling_ms: 600.0,
@@ -938,7 +950,7 @@ fn latency_guard_bash_no_write() {
         &FixtureSpec {
             payload: guard_payload(KING_SID, "Bash", json!({"command": "git status --short"})),
             manifest: &manifest,
-            pre_setup: &[],
+            claims: &[],
             extra_env: &[],
             budget_p90_ms: 100.0,
             ceiling_ms: 200.0,
@@ -970,7 +982,7 @@ fn latency_guard_uncrowned_edit() {
                 json!({"file_path": "src/example.rs", "old_string": "a", "new_string": "b"}),
             ),
             manifest: "",
-            pre_setup: &[],
+            claims: &[],
             extra_env: &[],
             budget_p90_ms: 100.0,
             ceiling_ms: 200.0,
@@ -1001,7 +1013,7 @@ fn latency_guard_court_edit_deny() {
                 json!({"file_path": "src/example.rs", "old_string": "a", "new_string": "b"}),
             ),
             manifest: &manifest,
-            pre_setup: &[],
+            claims: &[],
             extra_env: &[],
             budget_p90_ms: 300.0,
             ceiling_ms: 600.0,
@@ -1051,7 +1063,7 @@ fn latency_guard_court_plan_allow() {
                 json!({"file_path": plan_file.display().to_string(), "content": "plan"}),
             ),
             manifest: &manifest,
-            pre_setup: &[],
+            claims: &[],
             extra_env: &[],
             budget_p90_ms: 300.0,
             ceiling_ms: 600.0,
