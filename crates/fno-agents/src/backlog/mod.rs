@@ -464,11 +464,11 @@ pub fn authoritative_sync(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    let report = write_changed(&transaction, before, after, true)?;
+    let _report = write_changed(&transaction, before, after, true)?;
     let version = content_version(after);
     stamp_version(&transaction, &version)?;
     transaction.commit().map_err(|error| error.to_string())?;
-    confirm_ids_landed(&connection, &report)?;
+    confirm_ids_landed(&connection, after)?;
     Ok(version)
 }
 
@@ -477,19 +477,19 @@ pub(crate) struct WriteReport {
     deleted_ids: Vec<String>,
 }
 
-fn confirm_ids_landed(connection: &Connection, report: &WriteReport) -> Result<(), String> {
+fn confirm_ids_landed(connection: &Connection, after: &[Value]) -> Result<(), String> {
     const SQLITE_BIND_BATCH: usize = 900;
-    let ids: Vec<&str> = report
-        .present_ids
+    let expected: std::collections::BTreeSet<String> = after
         .iter()
-        .chain(report.deleted_ids.iter())
-        .map(String::as_str)
+        .filter_map(crate::graph_store::entry_id)
+        .map(str::to_owned)
         .collect();
-    if ids.is_empty() {
-        return Ok(());
-    }
+    let stored_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
 
     let mut stored = std::collections::BTreeSet::new();
+    let ids: Vec<&str> = expected.iter().map(String::as_str).collect();
     for batch in ids.chunks(SQLITE_BIND_BATCH) {
         let placeholders = std::iter::repeat_n("?", batch.len())
             .collect::<Vec<_>>()
@@ -507,23 +507,17 @@ fn confirm_ids_landed(connection: &Connection, report: &WriteReport) -> Result<(
             stored.insert(row.map_err(|error| error.to_string())?);
         }
     }
-    let missing: Vec<&str> = report
-        .present_ids
+    let missing: Vec<&str> = expected
         .iter()
         .map(String::as_str)
         .filter(|id| !stored.contains(*id))
         .collect();
-    let extra: Vec<&str> = report
-        .deleted_ids
-        .iter()
-        .map(String::as_str)
-        .filter(|id| stored.contains(*id))
-        .collect();
-    if missing.is_empty() && extra.is_empty() {
+    if stored_count == expected.len() as i64 && missing.is_empty() {
         return Ok(());
     }
     Err(format!(
-        "publish read-back mismatch: missing ids {missing:?}; extra ids {extra:?}"
+        "publish read-back mismatch: expected {} ids, stored {stored_count}; missing ids {missing:?}",
+        expected.len()
     ))
 }
 
@@ -1791,12 +1785,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let graph = two_node_graph(&dir);
         let connection = open(&graph).unwrap();
-        let report = WriteReport {
-            present_ids: (0..1001).map(|i| format!("id-{i}")).collect(),
-            deleted_ids: Vec::new(),
-        };
+        let after: Vec<Value> = (0..1001)
+            .map(|i| serde_json::json!({"id": format!("id-{i}")}))
+            .collect();
 
-        let error = confirm_ids_landed(&connection, &report).unwrap_err();
+        let error = confirm_ids_landed(&connection, &after).unwrap_err();
 
         assert!(error.contains("id-0"));
     }
@@ -1842,6 +1835,23 @@ mod tests {
             .collect();
 
         assert_eq!(stored, expected);
+    }
+
+    #[test]
+    fn authoritative_publish_rejects_a_missing_unchanged_row() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let connection = open(&graph).unwrap();
+        delete_aggregate(&connection, "ab-two").unwrap();
+        drop(connection);
+        let mut after = before.clone();
+        after[0]["title"] = Value::String("One renamed".into());
+
+        let error = authoritative_sync(&graph, &before, &after).unwrap_err();
+
+        assert!(error.contains("ab-two"));
     }
 
     #[test]
