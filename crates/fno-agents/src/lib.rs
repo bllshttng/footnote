@@ -183,6 +183,7 @@ pub mod node_origin;
 pub mod node_route;
 pub mod node_seed;
 pub mod nudge;
+pub mod occupancy_login;
 pub mod opencode_ask;
 pub mod opencode_serve;
 pub mod operator_notice;
