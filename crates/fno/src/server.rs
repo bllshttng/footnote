@@ -63,6 +63,7 @@ use crate::vt::BlockJumpOutcome;
 use crate::vt::{self, frame_text, Modes};
 
 mod agent_actions;
+mod agent_launch;
 mod agent_rows_join;
 mod keeper_adopt;
 pub(crate) mod lifecycle_target;
@@ -643,11 +644,28 @@ pub(crate) enum CoreMsg {
         account: Option<String>,
     },
     /// The off-loop dispatch task's outcome, routed back so the notice is sent
-    /// from the core loop (which owns `clients`). `notice` empty = say nothing
-    /// (the launched pane speaks for itself via the layout push).
+    /// from the core loop (which owns `clients`). `notice` phrases carry over
+    /// from the retired porcelain (see `dispatch_launch::dispatch_notice`).
     DispatchResult {
         id: u64,
         notice: String,
+    },
+    /// (v83, ) One sideline launcher request from client `id`. The
+    /// handler validates pre-birth, dedups by request id, and runs exactly
+    /// one canonical spawn off-loop; progress returns as
+    /// [`CoreMsg::AgentLaunchUpdate`]. Gated on passive observers like
+    /// DispatchNext.
+    AgentLaunch {
+        id: u64,
+        request: crate::proto::AgentLaunchRequest,
+    },
+    /// The off-loop launcher task's terminal update, routed back so it is
+    /// sent from the core loop (which owns `clients`). Trusted origin (a
+    /// server task, not a client), so it is NOT in the passive gate - the
+    /// same shape as DispatchResult/PeekResult.
+    AgentLaunchUpdate {
+        id: u64,
+        update: crate::proto::AgentLaunchUpdate,
     },
     /// (v29) The off-loop peek task's transcript, routed back so the
     /// `PeekBody` is sent from the core loop (which owns `clients`) to the
@@ -1952,6 +1970,10 @@ pub(crate) struct Core {
     /// layout push, and a per-push journal scan would read the whole file
     /// every second.
     journal: crate::spawn_journal::JournalCache,
+    /// (v83, ) The sideline launcher's attempt memory: one request id
+    /// = one spawn attempt, with bounded replay for duplicate submissions
+    /// and reopened popups.
+    launch_desk: agent_launch::LaunchDesk,
     /// (US4) Latest cwd -> git-branch map from the off-loop reader,
     /// joined into each agent row's `subline` at layout time. A cwd absent from
     /// the map has no resolvable branch (non-git dir, unreadable HEAD); the
@@ -2689,68 +2711,6 @@ pub(crate) fn config_get(key: &str) -> Option<String> {
     };
     let _ = std::fs::remove_file(&out_path);
     value
-}
-
-async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&str>) -> String {
-    // Selection + spawn crosses subprocesses and a mux socket round-trip, so the
-    // budget is seconds, not the digest's 800ms; a hung dispatch still fails
-    // open to a notice rather than wedging.
-    let dispatch_timeout = crate::dispatch_launch::dispatch_timeout();
-    let deadline = tokio::time::Instant::now() + dispatch_timeout;
-    let fno = fno_bin().display().to_string();
-
-    // Steps 1-2 (change 3): resolve the node identity. A targeted node
-    // (a clicked work-queue card) pins its id and reads through
-    // `fno backlog get`; without it the board's own order picks (`fno backlog
-    // next`, `null` or empty output on an empty bench).
-    let picked = if let Some(pinned) = node {
-        let argv = [fno.as_str(), "backlog", "get", pinned];
-        let answer =
-            match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout, deadline).await
-            {
-                Some((true, out, _)) => crate::dispatch_launch::node_identity(&out)
-                    .ok_or_else(|| "grab work failed: the node record carries no id".to_string()),
-                _ => Err("grab work failed: the node read produced no answer".to_string()),
-            };
-        answer
-    } else {
-        let argv = [fno.as_str(), "backlog", "next"];
-        let answer =
-            match crate::dispatch_launch::run_fno_captured(&argv, dispatch_timeout, deadline).await
-            {
-                Some((true, out, _)) => crate::dispatch_launch::node_identity(&out),
-                _ => None,
-            };
-        answer.ok_or_else(|| "no ready work".to_string())
-    };
-    let (node_id, slug, parent) = match picked {
-        Ok(identity) => identity,
-        Err(notice) => return notice,
-    };
-
-    // Step 3: the door launches. The argv builder is pure and unit-pinned; no
-    // --harness/--model/--route and no message ride, so the grid picks the
-    // lane and the door renders the seed.
-    let argv = crate::dispatch_launch::dispatch_spawn_argv(
-        &fno,
-        &node_id,
-        session,
-        account,
-        parent.as_deref(),
-    );
-    let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
-    // Step 4: the outcome maps to the operator's one-liner. Both streams are
-    // captured - the door's refusal receipt lives on stderr.
-    match crate::dispatch_launch::run_fno_captured(&borrowed, dispatch_timeout, deadline).await {
-        None => "grab work: timed out".to_string(),
-        Some((exit_ok, out, err)) => crate::dispatch_launch::dispatch_notice(
-            exit_ok,
-            &out,
-            &err,
-            &node_id,
-            slug.as_deref().unwrap_or(""),
-        ),
-    }
 }
 
 /// Sanitize peek-overlay free-text mail: strip control chars, trim,
@@ -8547,22 +8507,6 @@ impl Core {
         }
     }
 
-    /// "Grab work" (prefix+g): dispatch the next ready backlog node into
-    /// a new pane. Board selection is `fno backlog next`; the launch is the door
-    /// (`fno agents spawn`), shelled OFF the core loop in a detached
-    /// task so a slow backlog read never stalls a pane. The launched pane
-    /// appears through the existing registry reader; the outcome (dispatched /
-    /// no-work / refusal / failure) routes back as `DispatchResult` for a
-    /// one-line notice.
-    fn dispatch_next(&self, id: u64, node: Option<String>, account: Option<String>) {
-        let session = self.session_name.clone();
-        let core_tx = self.self_tx.clone();
-        tokio::spawn(async move {
-            let notice = run_dispatch_one(&session, node.as_deref(), account.as_deref()).await;
-            let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
-        });
-    }
-
     /// Resolve a gesture's re-entry plan OFF the core loop and
     /// re-dispatch the gesture when the verdict lands. `request` names the
     /// gesture to re-enter (the attach id + its placement, or the resume
@@ -12430,8 +12374,10 @@ impl Core {
             // DispatchNext spawns a real worker pane; a passive
             // web-bridge observer must never start work (Invariant).
             // DispatchResult is NOT gated here - it originates from the trusted
-            // off-loop task, not a client.
-            | CoreMsg::DispatchNext { id, .. } => Some(*id),
+            // off-loop task, not a client. AgentLaunch (v83) spawns a real
+            // worker the same way, so it gates identically.
+            | CoreMsg::DispatchNext { id, .. }
+            | CoreMsg::AgentLaunch { id, .. } => Some(*id),
             _ => None,
         };
         if let Some(id) = mutating_sender {
@@ -12567,6 +12513,14 @@ impl Core {
                 if !notice.is_empty() {
                     self.notice(id, notice);
                 }
+                Flow::Continue
+            }
+            CoreMsg::AgentLaunch { id, request } => {
+                self.agent_launch(id, request);
+                Flow::Continue
+            }
+            CoreMsg::AgentLaunchUpdate { id, update } => {
+                self.agent_launch_update(id, update);
                 Flow::Continue
             }
             // A gesture's canonical re-entry verdict landed. A
@@ -13676,6 +13630,7 @@ async fn serve(
         agents: Vec::new(),
         agents_read_ok: false,
         journal: crate::spawn_journal::JournalCache::load(),
+        launch_desk: Default::default(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
@@ -15167,6 +15122,15 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
             Ok(ClientMsg::DispatchNext { account }) => {
                 if core_tx
                     .send(CoreMsg::DispatchNext { id, account })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMsg::AgentLaunch(request)) => {
+                if core_tx
+                    .send(CoreMsg::AgentLaunch { id, request })
                     .await
                     .is_err()
                 {

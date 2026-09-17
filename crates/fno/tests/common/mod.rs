@@ -787,6 +787,8 @@ pub struct FakeClient {
     pub link_hovers: Vec<(u64, u64, Vec<(u16, u16)>)>,
     /// Every absorbed message's kind, chronologically.
     pub order: Vec<Absorbed>,
+    /// Launcher progress updates, newest last.
+    pub launch_updates: Vec<fno::proto::AgentLaunchUpdate>,
     /// Bytes read off the socket that do not yet form a whole message.
     ///
     /// The stream carries length-prefixed frames and the socket has a short read
@@ -831,6 +833,7 @@ impl FakeClient {
             search_results: Vec::new(),
             link_hovers: Vec::new(),
             order: Vec::new(),
+            launch_updates: Vec::new(),
             carry: Vec::new(),
         }
     }
@@ -838,6 +841,13 @@ impl FakeClient {
     pub fn input(&mut self, bytes: &[u8]) {
         let mut w = self.stream.try_clone().unwrap();
         write_msg_sync(&mut w, &ClientMsg::Input(bytes.to_vec())).unwrap();
+    }
+
+    /// Send any typed message (the launcher suites use this for
+    /// `ClientMsg::AgentLaunch`).
+    pub fn raw(&mut self, msg: &ClientMsg) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(&mut w, msg).unwrap();
     }
 
     pub fn cmd(&mut self, cmd: Command) {
@@ -989,6 +999,8 @@ impl FakeClient {
             ServerMsg::PeekBody { .. } => {}
             // (v78) Server stats: one-shot control reply, never an attached client.
             ServerMsg::ServerStats { .. } => {}
+            // (v83) Launcher progress: recorded for the launcher suites.
+            ServerMsg::AgentLaunch(u) => self.launch_updates.push(u),
         }
     }
 
