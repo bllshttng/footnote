@@ -964,6 +964,10 @@ pub fn mux_prune_args(dry_run: bool, include_used_shells: bool) -> Vec<&'static 
 /// - one sweep body, reused, not reimplemented. Fail-closed: a spawn
 /// failure, a non-zero exit, or an unparsable receipt is `Unread`, never a
 /// measured zero.
+///
+/// The daemon arm passes the DEFAULT prune flags only: an orphaned worker
+/// tab closes on the retire cadence (Locked Decision 6); a human's spent
+/// shells stay opt-in via the manual verb.
 pub fn mux_tab_sweep(dry_run: bool, include_used_shells: bool) -> crate::reap_render::MuxSweep {
     let mut cmd = std::process::Command::new(crate::scrape::fno_bin());
     cmd.args(mux_prune_args(dry_run, include_used_shells));
@@ -990,6 +994,16 @@ pub fn mux_tab_sweep(dry_run: bool, include_used_shells: bool) -> crate::reap_re
     }
 }
 
+/// The production roster sweep the retire arm runs: the real enumeration
+/// and removal, `dry_run` false, at the scope the caller resolved.
+pub fn production_roster_sweep(
+    home: &AgentsHome,
+    grace_secs: i64,
+    scope: crate::agents_config::RosterScope,
+) -> crate::roster_reap::RosterReapSummary {
+    crate::roster_reap::roster_reap(home, grace_secs, scope, false)
+}
+
 pub fn maybe_retirement_sweep(
     last_sweep: &mut Instant,
     in_flight: &Arc<AtomicBool>,
@@ -999,6 +1013,11 @@ pub fn maybe_retirement_sweep(
     events: PathBuf,
     interval: Duration,
     tab_sweep: fn() -> crate::reap_render::MuxSweep,
+    roster_sweep: fn(
+        &AgentsHome,
+        i64,
+        crate::agents_config::RosterScope,
+    ) -> crate::roster_reap::RosterReapSummary,
 ) {
     if last_sweep.elapsed() < interval || in_flight.swap(true, Ordering::SeqCst) {
         return;
@@ -1018,9 +1037,16 @@ pub fn maybe_retirement_sweep(
         // verb run never nudges; its dry run only prints the plan.
         crate::pr_nudge::run_ladder(&home, &emitter, &summary.open_pr_rows, grace_secs);
         unowned_sweeps(&home, &emitter, &grace_cwd);
+        // The roster sweep runs AFTER the registry sweep: a row the registry
+        // sweep retires this pass is already gone from the registry the
+        // roster sweep loads. A session the roster sweep removes becomes a
+        // corpse for the NEXT registry pass, through `origin_corpse`.
+        let scope = crate::agents_config::roster_scope(&grace_cwd);
+        let roster = roster_sweep(&home, grace_secs, scope);
+        let scope_off = scope == crate::agents_config::RosterScope::Off;
         // The mux surface is one of the stores a reap must clear: the
         // default-flag prune closes an orphaned worker's tab on the retire
-        // cadence (Locked Decision 6), so the operator never runs the manual
+        // cadence, so the operator never runs the manual
         // reap verb just to clear tabs.
         let mux = tab_sweep();
         let mux_detail = match &mux {
@@ -1029,10 +1055,29 @@ pub fn maybe_retirement_sweep(
             }
             other => format!("mux={}", other.state()),
         };
-        let detail = format!("{mux_detail} held={}", summary.holds.len());
+        let roster_detail = if scope_off {
+            "off".to_string()
+        } else if roster.instrument_unread {
+            "unreadable".to_string()
+        } else {
+            format!(
+                "retired {} kept {} refused {}",
+                roster.retired.len(),
+                roster.kept.len(),
+                roster.refused.len()
+            )
+        };
+        let detail = format!(
+            "roster={roster_detail} {mux_detail} held={}",
+            summary.holds.len()
+        );
+        // `acted` counts BOTH sweeps' retirements: the registry sweep's and
+        // the roster sweep's. A tick that retired only roster sessions reads
+        // acted>0, never a held zero.
+        let acted = summary.retired.len() + roster.retired.len();
         // A zero-acted tick says which zero it was: a sweep that could not
         // read its registry, nothing classified, or work judged and held.
-        let skip_reason = if summary.retired.is_empty() {
+        let skip_reason = if acted == 0 {
             Some(if summary.registry_unreadable {
                 "registry_unreadable"
             } else if summary.kept_total() == 0 {
@@ -1057,7 +1102,7 @@ pub fn maybe_retirement_sweep(
             &journal,
             "retire",
             "daemon",
-            summary.retired.len() as u64,
+            acted as u64,
             skip_reason,
             Some(&detail),
             interval.as_secs(),
@@ -1091,6 +1136,17 @@ pub fn maybe_retirement_sweep(
 mod tests {
     fn no_agents() -> crate::claude_roster::ClaudeAgentsSnapshot {
         crate::claude_roster::ClaudeAgentsSnapshot::unknown("test: no snapshot staged")
+    }
+
+    /// The roster-seam stub every retire-arm test passes: the arm wiring is
+    /// under test, never the sweep body, and no unit test shells out to the
+    /// live claude roster.
+    fn noop_roster_sweep(
+        _home: &AgentsHome,
+        _grace_secs: i64,
+        _scope: crate::agents_config::RosterScope,
+    ) -> crate::roster_reap::RosterReapSummary {
+        crate::roster_reap::RosterReapSummary::default()
     }
 
     use super::*;
@@ -1176,6 +1232,7 @@ mod tests {
                 home.events_jsonl(),
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
+                noop_roster_sweep,
             );
             // A second tick inside the window is refused by the elapsed
             // check: no second run can start until the window closes.
@@ -1188,6 +1245,7 @@ mod tests {
                 home.events_jsonl(),
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
+                noop_roster_sweep,
             );
             let rows = wait_for_retire_row(&home.events_jsonl());
             assert_eq!(rows, 1, "two ticks in one window must yield one sweep");
@@ -1236,6 +1294,7 @@ mod tests {
                 home.events_jsonl(),
                 interval,
                 || crate::reap_render::MuxSweep::Skipped,
+                noop_roster_sweep,
             );
             wait_for_retire_row(&home.events_jsonl());
             let row = std::fs::read_to_string(home.events_jsonl())
@@ -1284,12 +1343,18 @@ mod tests {
     }
 
     /// One retirement pass against a temp home, through the real spawn
-    /// path, returning the tick row it landed. The tab sweep arrives as a
-    /// seam, so no test reaches the shared mux.
+    /// path, returning the tick row it landed. The tab and roster sweeps
+    /// arrive as seams, so no test reaches the shared mux or the live
+    /// claude roster.
     fn run_retire_pass_and_read_tick(
         dir: &std::path::Path,
         home: &AgentsHome,
         tab_sweep: fn() -> crate::reap_render::MuxSweep,
+        roster_sweep: fn(
+            &AgentsHome,
+            i64,
+            crate::agents_config::RosterScope,
+        ) -> crate::roster_reap::RosterReapSummary,
     ) -> serde_json::Value {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1308,6 +1373,7 @@ mod tests {
                 home.events_jsonl(),
                 Duration::from_secs(300),
                 tab_sweep,
+                roster_sweep,
             );
             // The production seams probe staged rows through real
             // subprocesses; in a sandbox without a transcript store those
@@ -1331,8 +1397,10 @@ mod tests {
         // AC5-HP: the tab sweep rides the retire pass and the tick's detail
         // carries its receipt; the default argv carries no used-shells flag.
         let (dir, home) = retirement_sweep_tmp_home("mux-ran");
-        let row =
-            run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Ran {
+        let row = run_retire_pass_and_read_tick(
+            &dir,
+            &home,
+            || crate::reap_render::MuxSweep::Ran {
                 receipt: crate::reap_render::PruneReceipt {
                     closed: 2,
                     would_close: 0,
@@ -1340,7 +1408,9 @@ mod tests {
                     sessions_unreachable: Vec::new(),
                     notice: None,
                 },
-            });
+            },
+            noop_roster_sweep,
+        );
         assert_eq!(row["data"]["acted"], 0);
         assert_eq!(row["data"]["skip_reason"], "no_rows");
         assert!(
@@ -1363,11 +1433,15 @@ mod tests {
         // AC5-UNREAD: a tab sweep that cannot be read never eats the tick;
         // the detail says mux=unread.
         let (dir, home) = retirement_sweep_tmp_home("mux-unread");
-        let row =
-            run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Unread {
+        let row = run_retire_pass_and_read_tick(
+            &dir,
+            &home,
+            || crate::reap_render::MuxSweep::Unread {
                 exit_code: Some(1),
                 stderr_first: "boom".to_string(),
-            });
+            },
+            noop_roster_sweep,
+        );
         assert_eq!(
             row["data"]["skip_reason"], "no_rows",
             "an empty registry with an unread mux still classified no row"
@@ -1378,6 +1452,157 @@ mod tests {
                 .unwrap()
                 .contains("mux=unread"),
             "the tick must name the unread sweep: {:?}",
+            row["data"]["detail"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Where the recording stub reads and writes the scope the arm passed.
+    static ROSTER_SEEN_SCOPE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(255);
+
+    /// A roster seam that records the scope the arm resolved, so the test
+    /// reads back what the arm handed the sweep.
+    fn recording_roster_sweep(
+        _home: &AgentsHome,
+        _grace_secs: i64,
+        scope: crate::agents_config::RosterScope,
+    ) -> crate::roster_reap::RosterReapSummary {
+        use crate::agents_config::RosterScope as S;
+        ROSTER_SEEN_SCOPE.store(
+            match scope {
+                S::Off => 0,
+                S::Provenanced => 1,
+                S::All => 2,
+            },
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        crate::roster_reap::RosterReapSummary::default()
+    }
+
+    /// A roster seam whose only keeps read `roster unreadable`, the
+    /// enumeration-failed shape the arm must name on the tick.
+    fn unreadable_roster_sweep(
+        _home: &AgentsHome,
+        _grace_secs: i64,
+        _scope: crate::agents_config::RosterScope,
+    ) -> crate::roster_reap::RosterReapSummary {
+        crate::roster_reap::RosterReapSummary {
+            instrument_unread: true,
+            kept: vec![crate::roster_reap::RosterJudgement {
+                short_id: String::new(),
+                node: None,
+                reason: "roster unreadable: test stub".to_string(),
+                retired: false,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// AC7-HP: the retire arm runs the roster sweep after the registry
+    /// sweep, hands it the resolved scope, and the tick detail carries the
+    /// roster counts beside the mux line.
+    #[test]
+    fn the_retire_arm_runs_the_roster_sweep_after_the_registry_sweep() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("FNO_CONFIG");
+        std::env::remove_var("FNO_CONFIG");
+        let (dir, home) = retirement_sweep_tmp_home("roster-arm");
+        std::fs::create_dir_all(dir.join(".fno")).unwrap();
+        std::fs::write(
+            dir.join(".fno/config.toml"),
+            "[agents.reap]\nroster_scope = \"provenanced\"\n",
+        )
+        .unwrap();
+        let row = run_retire_pass_and_read_tick(
+            &dir,
+            &home,
+            || crate::reap_render::MuxSweep::Skipped,
+            recording_roster_sweep,
+        );
+        assert_eq!(
+            ROSTER_SEEN_SCOPE.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the arm passes the resolved scope (provenanced here)"
+        );
+        assert!(
+            row["data"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("roster=retired 0 kept 0 refused 0"),
+            "{:?}",
+            row["data"]["detail"]
+        );
+        match &old {
+            Some(h) => std::env::set_var("FNO_CONFIG", h),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC8-ERR: with `agents.reap.roster_scope = "off"` the arm resolves the
+    /// off scope, hands it to the sweep, and the tick reads `roster=off`.
+    #[test]
+    fn roster_scope_off_writes_roster_off() {
+        let _env = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let old = std::env::var_os("FNO_CONFIG");
+        std::env::remove_var("FNO_CONFIG");
+        let (dir, home) = retirement_sweep_tmp_home("roster-off");
+        std::fs::create_dir_all(dir.join(".fno")).unwrap();
+        std::fs::write(
+            dir.join(".fno/config.toml"),
+            "[agents.reap]\nroster_scope = \"off\"\n",
+        )
+        .unwrap();
+        let row = run_retire_pass_and_read_tick(
+            &dir,
+            &home,
+            || crate::reap_render::MuxSweep::Skipped,
+            recording_roster_sweep,
+        );
+        assert_eq!(
+            ROSTER_SEEN_SCOPE.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the arm passes the off scope through to the seam"
+        );
+        assert!(
+            row["data"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("roster=off"),
+            "{:?}",
+            row["data"]["detail"]
+        );
+        match &old {
+            Some(h) => std::env::set_var("FNO_CONFIG", h),
+            None => std::env::remove_var("FNO_CONFIG"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AC9-EDGE: a roster sweep whose enumeration failed removes nothing,
+    /// leaves the registry sweep's verdict unchanged, and the tick reads
+    /// `roster=unreadable`.
+    #[test]
+    fn an_unreadable_roster_removes_nothing() {
+        let (dir, home) = retirement_sweep_tmp_home("roster-unreadable");
+        let row = run_retire_pass_and_read_tick(
+            &dir,
+            &home,
+            || crate::reap_render::MuxSweep::Skipped,
+            unreadable_roster_sweep,
+        );
+        assert_eq!(row["data"]["acted"], 0);
+        assert_eq!(row["data"]["skip_reason"], "no_rows");
+        assert!(
+            row["data"]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("roster=unreadable"),
+            "{:?}",
             row["data"]["detail"]
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -1408,8 +1633,12 @@ mod tests {
             serde_json::to_string(&registry).unwrap(),
         )
         .unwrap();
-        let row =
-            run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Skipped);
+        let row = run_retire_pass_and_read_tick(
+            &dir,
+            &home,
+            || crate::reap_render::MuxSweep::Skipped,
+            noop_roster_sweep,
+        );
         assert_eq!(row["data"]["acted"], 0);
         assert_eq!(
             row["data"]["skip_reason"], "held",
@@ -1435,8 +1664,12 @@ mod tests {
         let (dir, home) = retirement_sweep_tmp_home("registry-unreadable");
         std::fs::create_dir_all(home.root()).unwrap();
         std::fs::write(home.registry_json(), "{not json").unwrap();
-        let row =
-            run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Skipped);
+        let row = run_retire_pass_and_read_tick(
+            &dir,
+            &home,
+            || crate::reap_render::MuxSweep::Skipped,
+            noop_roster_sweep,
+        );
         assert_eq!(row["data"]["acted"], 0);
         assert_eq!(row["data"]["skip_reason"], "registry_unreadable");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1531,6 +1764,7 @@ mod tests {
                 home.events_jsonl(),
                 Duration::from_secs(300),
                 || crate::reap_render::MuxSweep::Skipped,
+                noop_roster_sweep,
             );
             // The production age probe pays a real subprocess on this
             // fixture (two probes, seconds apiece under load), so the tick
@@ -1582,7 +1816,12 @@ mod tests {
             serde_json::to_string(&registry).unwrap(),
         )
         .unwrap();
-        run_retire_pass_and_read_tick(&dir, &home, || crate::reap_render::MuxSweep::Skipped);
+        run_retire_pass_and_read_tick(
+            &dir,
+            &home,
+            || crate::reap_render::MuxSweep::Skipped,
+            noop_roster_sweep,
+        );
         let count = std::fs::read_to_string(home.events_jsonl())
             .unwrap()
             .lines()

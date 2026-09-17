@@ -500,9 +500,10 @@ pub fn reap_receipt_retain_days(cwd: &Path) -> u64 {
 /// Which rows the roster-side sweep may retire. `Provenanced` is
 /// today's behavior: only rows whose provenance resolves and whose work is
 /// done. `All` widens to resolved rows with open work. `Off` retires nothing.
-/// The one rule no value can cross: a row that resolves to no fno node is
-/// never retirable, so an operator's hand-started session is safe by
-/// construction, not by default value.
+/// The one rule no value can cross: an unowned session retires only on an
+/// fno-ownership marker (a sessions[] row fno wrote, or a reap receipt an
+/// earlier retirement staged), so a session with no marker at all is
+/// unreachable by construction, not by default value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RosterScope {
     Off,

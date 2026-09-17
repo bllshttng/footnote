@@ -1,6 +1,6 @@
 # Reaping FAQ: why is this row still here?
 
-A reaping sweep judged a session row and kept it. This page names the keep reason and tells you what to do. It covers the three sweep programs, every keep reason, and the checks that tell them apart.
+A reaping sweep judged a session row and kept it. This page names the keep reason and tells you what to do. It covers the four sweep programs, every keep reason, and the checks that tell them apart.
 
 Run `fno agents reap --dry-run` and find your row handle in the report. The dry run classifies every row, names one reason per row, and writes nothing. It stops no process, prunes no tree, and writes no receipt.
 
@@ -8,7 +8,7 @@ Measured on this machine on 2026-09-10 with the dry run: 1 `would retire` line, 
 
 ## Is this page for you?
 
-A reaping sweep kept a session row and you want to know why, or you want a row gone and reap refuses. This page owns the keep reasons, the three sweep programs, and the checks that tell them apart. Misreading it makes you force a delete the machine will re-judge on the next sweep, or kill a worker whose row was telling the truth.
+A reaping sweep kept a session row and you want to know why, or you want a row gone and reap refuses. This page owns the keep reasons, the four sweep programs, and the checks that tell them apart. Misreading it makes you force a delete the machine will re-judge on the next sweep, or kill a worker whose row was telling the truth.
 
 Not for: the worktree removal contract (which trees prune on merge and which never do). That is answered at [The row retired and its tree stayed](#the-row-retired-and-its-tree-stayed) and owned by [../.claude/rules/worktrees.md](../.claude/rules/worktrees.md).
 
@@ -37,19 +37,20 @@ A tick with zero holds writes no `retire_holds` row, so silence is the zero-read
 Three keeps used to hold finished rows with no way out. Each now reads a live reason, and each keeps refusing a specific wrong answer.
 
 - An open-PR hold asks GitHub once the row is quiet past the grace. A closed or merged PR releases the row. An open PR keeps it, and so does an unread answer, under `pr state contradicts`. A fresh row is never read and never released by this arm.
-- An adopted row keeps while its harness record says the session exists. A recorded pid that answers ESRCH releases it to the ordinary gates. So does a claude row missing from a known `claude agents` read. An unknown or partial roster read keeps the row: a failed instrument is never absence.
+- An adopted row keeps while its harness record says the session exists. A recorded pid that answers ESRCH releases it to the ordinary gates. So does a claude row missing from a known `claude agents` read. An unknown or partial roster read keeps the row: a failed instrument is never absence. The registry keep is not the whole story. An adopted, uncrowned row does not shield its listed session from the roster sweep.
 - When its inside-leg report reads done and fno never stopped it, a no-node row releases once its transcript goes quiet. A row still working, blocked, or stopped by fno keeps. The keep now carries a clock, so `fno agents reap --release` reaches it.
 
 Quiet is only ever the second conjunct. Every release rests on a positive marker: GitHub answering, a roster read answering, a dead pid, the worker's own done report. Silence alone releases nothing.
 
-## Three programs answer to the word reap
+## Four programs answer to the word reap
 
-Three programs share the word reap. A reader who watches one and concludes the others are broken has mixed them up. This exact confusion cost a real session. The arms readout showed `acted=0 skip=held` while the manual verb retired 3 rows in the same minute.
+Four programs share the word reap. A reader who watches one and concludes the others are broken has mixed them up. This exact confusion cost a real session. The arms readout showed `acted=0 skip=held` while the manual verb retired 3 rows in the same minute.
 
 | Program | Entry point | Trigger | Tick name |
 |---|---|---|---|
 | The manual verb | `fno agents reap` | a person types it | none |
 | The registry sweep arm | the daemon idle tick | interval `agents.retire_interval_s`, default grace/3 | `retire` |
+| The roster sweep arm | the daemon retire arm, after the registry sweep | the same retire interval, at scope `agents.reap.roster_scope` | `retire` |
 | The merge-request arm | the daemon, after a merge | a recorded merge cleanup request | `reap` |
 
 The manual verb and the registry arm run the same sweep body (`client.rs:2576`, `gc.rs:490`). The registry arm runs one sweep at a time behind a one-in-flight gate (`gc.rs:954`). A slow sweep holds the next request, so the effective cadence is not the interval. Run `fno-agents status` to read the arms table.
@@ -58,7 +59,7 @@ The merge-request arm is a different program (`merge_reap.rs:709-815`). It loops
 
 The mux sideline sweep rides the manual verb (`client.rs:2794-2798`), which runs `mux_tab_sweep` (the tab-only prune through `fno mux workspace prune`). The daemon's retire arm runs the same sweep on the tab-only shape (`gc.rs:976`). A worker's tab closes with its row. Pass `--no-mux` to skip the manual verb's sweep.
 
-A fourth tool answers to a related name. `fno-agents roster-reap` removes claude rows that fno never registered. Nothing schedules it. A person types it. It is a dry run by default, and `--apply` acts (`client.rs:2814-2838`).
+A fourth tool answers to a related name. `fno-agents roster-reap` removes claude rows that fno never registered. The daemon's retire arm now schedules it. It runs after the registry sweep at the configured `agents.reap.roster_scope`, with `dry_run` false. A claude session no fno row owns is judged on the retire cadence. The manual verb stays a dry run by default, and `--apply` acts (`client.rs:2814-2838`). The scheduled pass retires only on an ownership marker. The marker is a `sessions[]` row fno wrote, or a reap receipt an earlier retirement staged. Weak provenance - a name pattern or a transcript mention - keeps.
 
 ## A dry run and a real run answer different questions
 

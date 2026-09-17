@@ -349,7 +349,7 @@ harness = {}
 retain_days = 7
 
 [agents.reap]
-# Which rows the roster sweep may retire: off retires nothing, provenanced (the default) only rows whose provenance resolves to fno and whose work is done, all widens to rows fno itself spawned (sessions or registry provenance) with open work. A row that resolves to no fno node is never retirable at any value, including all, so a session the operator started by hand is safe by construction. A present value that cannot be honored degrades in place to the default and is named by fno config doctor.
+# Which rows the roster sweep may retire: off retires nothing and reads roster=off on the tick, provenanced (the default) only rows whose provenance resolves to fno and whose work is done, all widens to rows fno itself spawned (sessions or registry provenance) with open work. The daemon's retire arm runs the sweep after the registry sweep, so off stops the scheduled pass; the manual verb keeps its own default. An unowned session retires only on an ownership marker: a sessions[] row fno wrote, or a reap receipt an earlier retirement staged for the same session. A present value that cannot be honored degrades in place to the default and is named by fno config doctor.
 roster_scope = "provenanced"
 
 [agents.state_reap]
