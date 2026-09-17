@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-/// The thirteen readings of the check-in body, in print order.
-const READING_NAMES: [&str; 13] = [
+/// The fourteen readings of the check-in body, in print order.
+const READING_NAMES: [&str; 14] = [
     "user_notes",
     "board",
     "escalations",
@@ -2098,7 +2098,7 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(13)));
+        assert_eq!(data.get("coverage"), Some(&json!(14)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
     }
 
@@ -2194,7 +2194,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 12 of 13 readings ok")));
+            .any(|l| l.starts_with("coverage: 13 of 14 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -2222,7 +2222,7 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
         );
-        readings[12] = Reading::took(
+        readings[13] = Reading::took(
             "parked",
             json!({"open": 2, "rows": [
                 {"key": "owner/repo#101", "node": "x-aa",
@@ -2250,7 +2250,7 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 1, "oldest_worker_seen": "30s w1"}),
         );
-        readings[12] = Reading::took("parked", json!({"open": 0, "rows": []}));
+        readings[13] = Reading::took("parked", json!({"open": 0, "rows": []}));
         let data = build_data(&readings, "x-bbbb");
         let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
         assert!(
@@ -2393,7 +2393,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 12 of 13 readings ok")));
+            .any(|l| l.starts_with("coverage: 13 of 14 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
