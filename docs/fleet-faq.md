@@ -463,29 +463,6 @@ The same read reported both branches as 32 commits behind `main`. That is the no
 
 *Graduates to:* a list whose rows name their base, or a list that follows a stack to its root.
 
-## My heir spawned with `--succeed` and holds no crown
-
-The sitting king must run that spawn from its own session. From an operator terminal, `--crown <scope> --succeed` cannot hand the crown over.
-
-A crowned spawn finds its caller with `calling_agent_row()` at `cli/src/fno/agents/dispatch.py:2528`. If that caller is the live holder of the scope, `settle_spawn_crown` at `cli/src/fno/agents/crown.py:673` treats the spawn as succession. A shell with no agent identity has no caller row. So the sitting king reads as a second live holder, and the outcome is `declined`. The spawn still launches the heir, with no crown.
-
-The only warning is one stderr line. The thread path prints it at `dispatch.py:1888` and the pane path at `mux_spawn.py:4883`:
-
-```
-spawn: crown declined (scope 'fno' already held by a live row); spawned uncrowned. The worker launched without a crown.
-```
-
-Specimen: an outgoing king gave the operator its own `--crown fno --succeed` spawn command, and the operator ran it in a terminal. The journal holds an `agent_spawned` row for the heir with `spawned_by_session: null`. It holds no `agent_crowned` row and no `agent_crown_vacated` row. The heir read `crown_scope: null` and stopped at its crown check, and the old king still held the scope.
-
-Recover in this order, because the crown verb refuses while a live row holds the scope:
-
-1. The sitting king runs `fno agents king done`.
-2. An attended shell runs `fno agents crown <heir> --scope <scope>`. A human can grant any scope, so the stamp lands on the empty scope.
-
-To prevent it, give the spawn command to the sitting king to run, not to the operator.
-
-*Graduates to:* a crowned spawn from a shell with no caller row that transfers the crown or refuses before launch. A human can grant any scope, so the transfer is safe. The authorization check at `dispatch.py:2524` already refuses before launch. Neither outcome launches an uncrowned heir.
-
 ## Retired
 
 Closed gaps, newest first. Each line names the PR that closed it, so a reader can see the machinery absorb the list.

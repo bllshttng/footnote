@@ -79,8 +79,8 @@ from fno.agents.registry import (
 from fno.agents.crown import (
     calling_agent_row,
     crown_validation_error,
-    grant_error,
     journal_spawn_crown,
+    plan_spawn_crown,
     settle_spawn_crown,
 )
 
@@ -3413,19 +3413,17 @@ def dispatch_spawn_pane(
     crown_problem = crown_validation_error(crown_level, crown_scope)
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
+    crown_plan: Optional[dict] = None
     if crown_level is not None:
-        # Same authorization rule as the bg seam: a grant must be a strict subset
-        # of what the grantor holds. Both paths check, because either is a door.
-        succession_caller = calling_agent_row()
-        succession_caller_name = getattr(succession_caller, "name", None)
-        grant_problem = grant_error(
-            crown_scope or "",
-            succession_caller,
-            allow_terminal_recovery=True,
-            allow_succession=succession,
+        # Same authorization + occupancy rule as the bg seam: a grant must be
+        # a strict subset of what the grantor holds, and a live holder blocks
+        # an heir from launching uncrowned. Both doors check, because either
+        # is a door.
+        crown_refusal, crown_plan = plan_spawn_crown(
+            crown_scope or "", calling_agent_row(), succession,
         )
-        if grant_problem is not None:
-            raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
+        if crown_refusal is not None:
+            raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
 
     conflict = pane_placement_conflict(
         pane, workspace=squad, split=split, at=at, tab=tab, tab_id=tab_id,
@@ -4517,8 +4515,7 @@ def dispatch_spawn_pane(
                 rows, crown_outcome, crown_cleared = settle_spawn_crown(
                     rows,
                     scope=crown_scope,
-                    succession=succession,
-                    succession_caller_name=succession_caller_name,
+                    plan=crown_plan,
                 )
                 if crown_outcome == "succeeded":
                     crown_succeeded = True
@@ -4674,9 +4671,12 @@ def dispatch_spawn_pane(
                     file=sys.stderr,
                 )
             if crown_succeeded and _declined_scope:
+                vacated_names = {row.name for row, cause in crown_cleared if cause == "succession"}
+                vacated = sorted(vacated_names)
+                noted = getattr(calling_agent_row(), "name", None) in vacated
                 print(
-                    f"spawn: crown over {_declined_scope!r} transferred from this "
-                    f"session to {name} (succession). You no longer hold it.",
+                    f"spawn: crown over {_declined_scope!r} transferred from {', '.join(vacated)} "
+                    f"to {name} (succession)." + (" You no longer hold it." if noted else ""),
                     file=sys.stderr,
                 )
             if _declined_scope and king_loop_armed is False:
