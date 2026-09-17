@@ -238,6 +238,20 @@ def test_an_attended_expiry_of_one_set_member_refuses(court, monkeypatch) -> Non
     assert not [e for e in _vacates() if e.get("kind") == "agent_crown_vacated"]
 
 
+def test_an_attended_expiry_names_a_damaged_registry(court, monkeypatch) -> None:
+    from fno.agents.registry import _registry_path
+
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    path = _registry_path(None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{not json", encoding="utf-8")
+
+    result = _done("--scope", "x-4d9b")
+
+    assert result.exit_code == 1
+    assert "crown expire failed" in result.output
+
+
 def test_an_attended_expiry_of_a_reordered_set_vacates_it(court, monkeypatch) -> None:
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
     _seat("king-set", "set-session", scope="x-119e,x-4d9b")

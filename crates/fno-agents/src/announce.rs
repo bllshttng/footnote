@@ -238,10 +238,20 @@ fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Which crown answers to `scope`: one rule shared with the walk, blank
-/// answers false. `project:<p>` rides the same rule.
-fn crown_answers(held: Option<&str>, requested: &str, projects: &HashMap<String, String>) -> bool {
+/// answers false. `project:<p>` rides the same rule. An unreadable project
+/// map answers equality only: without it a portfolio reads as an epic set
+/// and would answer for each of its projects.
+fn crown_answers(
+    held: Option<&str>,
+    requested: &str,
+    projects: Option<&HashMap<String, String>>,
+) -> bool {
     held.is_some_and(|h| {
-        !h.is_empty() && crate::loop_king::crown_answers_to(h, requested, projects)
+        !h.is_empty()
+            && match projects {
+                Some(map) => crate::loop_king::crown_answers_to(h, requested, map),
+                None => crate::loop_king::same_territory(h, requested, &HashMap::new()),
+            }
     })
 }
 
@@ -260,7 +270,7 @@ fn matches_scope_now(
     scope: &str,
     session_id: &str,
     registry: &[Value],
-    projects: &HashMap<String, String>,
+    projects: Option<&HashMap<String, String>>,
 ) -> bool {
     if scope == "all" {
         return true;
@@ -286,7 +296,7 @@ fn matches_scope_now(
 fn resolve_audience(
     scope: &str,
     registry: &[Value],
-    projects: &HashMap<String, String>,
+    projects: Option<&HashMap<String, String>>,
 ) -> Vec<String> {
     let mut pairs: Vec<(String, String)> = Vec::new(); // (key, name)
     for row in registry {
@@ -444,9 +454,8 @@ pub(crate) fn run_announce_send(args: &[String], paths: &AnnouncePaths) -> i32 {
     }
 
     let projects =
-        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default())
-            .unwrap_or_default();
-    let audience = resolve_audience(&parsed.scope, &registry, &projects);
+        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
+    let audience = resolve_audience(&parsed.scope, &registry, projects.as_ref());
 
     // One scan serves both the rate limit (decision 8) and the supersede
     // list (decision 7): a newer announcement with the same subject+scope
@@ -719,8 +728,7 @@ pub(crate) fn read_render(
     }
     let registry = crate::client_verbs::load_registry_entries(&paths.registry)?;
     let projects =
-        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default())
-            .unwrap_or_default();
+        crate::king_board::scope::project_map(&std::env::current_dir().unwrap_or_default()).ok();
     let mut seen = load_cursor(&paths.state_root, session_id);
 
     let mut fresh: Vec<&Value> = Vec::new();
@@ -745,7 +753,7 @@ pub(crate) fn read_render(
             .and_then(|meta| row_str(meta, "scope"))
             .unwrap_or("all");
         let mine = in_audience(&audience, session_id)
-            || matches_scope_now(scope, session_id, &registry, &projects);
+            || matches_scope_now(scope, session_id, &registry, projects.as_ref());
         if !mine {
             continue;
         }
@@ -1149,10 +1157,13 @@ mod tests {
             .collect();
 
         assert_eq!(
-            resolve_audience("x-4d9b", &registry, &projects),
+            resolve_audience("x-4d9b", &registry, Some(&projects)),
             vec![identity_key("sess-set")]
         );
-        assert!(resolve_audience("alpha", &registry, &projects).is_empty());
+        assert!(resolve_audience("alpha", &registry, Some(&projects)).is_empty());
+        // An unreadable project map fails closed to equality.
+        assert!(resolve_audience("x-4d9b", &registry, None).is_empty());
+        assert!(resolve_audience("alpha", &registry, None).is_empty());
     }
 
     fn agent_row(name: &str, session: &str, extra: Value) -> Value {
@@ -1195,7 +1206,7 @@ mod tests {
             return (2, format!("refused: {}", parsed.from));
         }
         let projects = HashMap::new();
-        let audience = resolve_audience(&parsed.scope, &registry_rows, &projects);
+        let audience = resolve_audience(&parsed.scope, &registry_rows, Some(&projects));
         let now = chrono::Utc::now();
         let recent = read_bus_segments(&paths.bus_live)
             .iter()
@@ -1612,7 +1623,7 @@ mod tests {
         if parsed.sender_kind != "operator" && !crown_holder(&registry_rows, &parsed.from) {
             return (2, "refused".into());
         }
-        let audience = resolve_audience(&parsed.scope, &registry_rows, &HashMap::new());
+        let audience = resolve_audience(&parsed.scope, &registry_rows, Some(&HashMap::new()));
         let id = new_msg_id();
         let mut obj = Map::new();
         obj.insert("v".into(), json!(ENVELOPE_VERSION));
