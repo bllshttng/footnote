@@ -377,12 +377,7 @@ It does not deliver relief from the re-review treadmill, and the measurement say
 Of the 22 head-to-head transitions observed across PRs 824-831, **2 carry forward**.
 The other 20 are genuine code change, measured against each PR's true base.
 
-An earlier pass measured 63% and was wrong.
-Merged PRs' three-dot diff against the current `origin/main` is empty, and the hash of the empty string equals itself.
-Twelve transitions were matching an absence against an absence.
-So a carry requires a positive match between two SUCCESSFULLY COMPUTED identities.
-An empty code diff yields no identity at all.
-`freshness_two_absent_identities_never_match` is the standing guard.
+An earlier pass measured 63% and was wrong. Merged PRs' three-dot diff against the current `origin/main` is empty, and the hash of the empty string equals itself. Twelve transitions were matching an absence against an absence. So a carry requires a positive match between two SUCCESSFULLY COMPUTED identities. An empty three-dot diff yields no identity at all. `freshness_two_absent_identities_never_match` is the standing guard.
 
 What the rule does deliver is rebase-invariance.
 It fires at the mandatory pre-merge rebase, where losing an attestation costs most.
@@ -392,8 +387,8 @@ It is not "five re-reviews become one".
 **An unused-import removal still costs a full re-review.**
 `fix(tracker): drop unused json import (ruff F401)` changes a `.py` file.
 That is code under any classifier that does not parse Python, and an AST dependency for one commit shape is not worth it.
-A documentation-only PR never carries an attestation either.
-With no code in the diff there is no identity to match, which is the fail-closed direction.
+
+If a documentation-only PR's own diff is readable and non-empty, the PR has an empty code identity. That identity carries a docs-only advance or a rebase. A move between a docs-only diff and a code-bearing diff never carries, in either direction. A merged PR's three-dot diff is empty, so it still yields no identity, and the 2-of-22 guard above holds.
 
 **`carried_docs_only` inherits `is_documentation_path`, and that classifier calls every `.md` file documentation.** In this repo `skills/*/SKILL.md`, `agents/*.md`, and `AGENTS.md` are behavior, not prose. So a skill rewritten after a review carries the earlier verdict forward as fresh coverage. This is deliberate for now, because it matches the existing payload classifier. A `.md`-only PR already skips review gating entirely, so the carry rule is not what introduced the gap. Narrowing it is a real behavior change and has to move in lockstep with the Python mirror in `_merge._is_documentation_path`.
 
