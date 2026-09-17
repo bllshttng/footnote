@@ -547,11 +547,14 @@ def term_cmd(
     Undeclared reads a 96h default. The write lives in Rust; this shell
     keeps the caller ladder (Python self-stamp).
     """
+    import re
     import subprocess
 
     from fno._subprocess_util import propagate_returncode
 
-    argv, own = _own_crown_argv("reign-term", scope)
+    if not re.fullmatch(r"span:[0-9]+[smhd]|compactions:[0-9]+", spec.strip()):
+        _refuse(f"king: bad term spec {spec!r}; legal forms: span:<N>[smhd], compactions:<N>")
+    argv, own = _own_crown_argv("reign-shape", scope)
     argv += ["--term", spec]
     if reason.strip():
         argv += ["--reason", reason]

@@ -8,8 +8,8 @@ use crate::loopcheck::KingManifest;
 use chrono::{DateTime, Utc};
 use std::path::Path;
 
-/// eval: ideal handoff ~100h in, end of window 12
-/// (`internal/fno/evals/kings/king-a792-control-...md` part 4, reform R2).
+/// A wide-margin default under an eval's measured ideal handoff point, so an
+/// undeclared reign still lands a receipt well inside a healthy window.
 pub const DEFAULT_TERM: &str = "span:96h";
 
 const LEGAL_FORMS: &str = "legal forms: span:<N>[smhd], compactions:<N>";
@@ -46,16 +46,14 @@ pub fn parse_spec(raw: &str) -> Result<TermSpec, String> {
 }
 
 fn parse_duration_secs(rest: &str) -> Option<u64> {
-    if rest.len() < 2 {
-        return None;
-    }
-    let (num, unit) = rest.split_at(rest.len() - 1);
+    let unit = rest.chars().last()?;
+    let num = &rest[..rest.len() - unit.len_utf8()];
     let n: u64 = num.parse().ok()?;
     let mult = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86400,
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
         _ => return None,
     };
     Some(n * mult)
@@ -195,13 +193,20 @@ pub(crate) fn journal_payload(reading: &TermReading) -> serde_json::Value {
     })
 }
 
-/// The Stop-hook gate's reading id and message for a `Reached` or
-/// `Unreadable` term - `None` on `Within`, the caller's signal to fall
-/// through unchanged.
-pub(crate) fn gate_reading_and_message(
+/// Ahead of every early return in `king_decide`, including `open_question`:
+/// a `Reached`/`Unreadable` term is never wired shut by an open question
+/// (the defect this feature closes). `None` on `Within` (fall through).
+pub(crate) fn gate<F: Fn(&str, &str, i64, u64) -> (i32, String)>(
     reading: &TermReading,
     scope: &str,
-) -> Option<(String, String)> {
+    dry: u64,
+    blind_block: F,
+) -> Option<(i32, String)> {
+    let (reading_id, message) = gate_reading_and_message(reading, scope)?;
+    Some(blind_block(&reading_id, &message, 0, dry))
+}
+
+fn gate_reading_and_message(reading: &TermReading, scope: &str) -> Option<(String, String)> {
     let scope = if scope.is_empty() { "<scope>" } else { scope };
     let handoff = format!(
         "Hand off: fno agents spawn --crown {scope} --succeed. Or extend with a written \
@@ -224,6 +229,42 @@ pub(crate) fn gate_reading_and_message(
             format!("reign term unreadable ({}): {why}. {handoff}", reading.spec),
         )),
     }
+}
+
+/// The Stop-hook gate's one-shot per-fire read: resolves a `compactions:`
+/// term's transcript only when the spec needs it (an undeclared or `span:`
+/// term never touches disk), then reads the term and its journal payload.
+pub(crate) fn current_reading(m: &KingManifest) -> (TermReading, serde_json::Value) {
+    let transcript = if m
+        .term
+        .as_deref()
+        .is_some_and(|s| s.trim().starts_with("compactions:"))
+    {
+        m.harness_session_id.as_deref().and_then(|sid| {
+            crate::claude_drive::find_transcript_in(
+                &crate::claude_drive::claude_projects_dir(),
+                sid,
+            )
+        })
+    } else {
+        None
+    };
+    let reading = self::reading(m, Utc::now(), transcript.as_deref());
+    let payload = journal_payload(&reading);
+    (reading, payload)
+}
+
+/// Emits a `king_loop_check` journal row with the term payload inserted, so
+/// every emit site carries the reading whether or not the gate fired.
+pub(crate) fn emit_journal(
+    emit: &impl Fn(&str, serde_json::Value),
+    term_json: &serde_json::Value,
+    mut body: serde_json::Value,
+) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("term".to_string(), term_json.clone());
+    }
+    emit("king_loop_check", body);
 }
 
 #[cfg(test)]

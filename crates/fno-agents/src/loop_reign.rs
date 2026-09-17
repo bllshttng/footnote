@@ -456,10 +456,16 @@ pub fn set_manifest_fields(
     fields: &[(&str, &str)],
     expect_session: Option<&str>,
 ) -> Result<(), String> {
+    if let Some((key, _)) = fields.iter().find(|(_, v)| v.contains('\n')) {
+        return Err(format!(
+            "refusing to write {key:?}: its value contains a newline, which the hand-rolled \
+             frontmatter cannot quote safely."
+        ));
+    }
     let path = manifest_path(root, scope)?;
     if !path.is_file() {
         return Err(format!(
-            "no manifest at {}; declare a shape only on a crown you have armed with \
+            "no manifest at {}; declare a field only on a crown you have armed with \
              `fno agents king init --scope`.",
             path.display()
         ));
@@ -484,7 +490,7 @@ pub fn set_manifest_fields(
         if let (Some(expect), Some(named)) = (expect_session, manifest_session.as_deref()) {
             if named != expect {
                 return Err(format!(
-                    "refusing to reshape {scope:?}: the manifest names session {named}, not \
+                    "refusing to rewrite {scope:?}: the manifest names session {named}, not \
                      {expect}. Re-read with `fno agents court` before touching anything."
                 ));
             }
