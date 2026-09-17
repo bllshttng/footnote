@@ -339,6 +339,7 @@ fn unpark_where(
             _ => Map::new(),
         };
         let mut touched = 0usize;
+        let mut unparked_prs = Vec::new();
         for (key, entry) in data.iter_mut() {
             let is_parked = entry
                 .get("parked")
@@ -352,16 +353,21 @@ fn unpark_where(
             entry["retries"] = json!(0);
             touched += 1;
             if let Some(pr) = split_key(key).map(|(_, n)| n) {
+                unparked_prs.push(pr);
+            }
+        }
+        if touched > 0 {
+            atomic_write(path, &Value::Object(data).to_string())?;
+            changed += touched;
+            // The event follows the durable write: a failed store write must
+            // not leave a journal row claiming an unpark that never landed.
+            for pr in unparked_prs {
                 let mut fields = Map::new();
                 fields.insert("pr".to_string(), json!(pr));
                 fields.insert("by".to_string(), json!(by));
                 let _ = EventEmitter::new(&paths.events, "pr-park")
                     .emit_fields("pr_watch_unparked", fields);
             }
-        }
-        if touched > 0 {
-            atomic_write(path, &Value::Object(data).to_string())?;
-            changed += touched;
         }
     }
     Ok(changed)

@@ -7,37 +7,45 @@ fn write(path: &Path, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
+/// An RFC3339 UTC stamp `hours` before now. Age-gated fixtures must ride the
+/// clock: a literal date crosses the 24h park bound a day after it is written
+/// and flips the sweep under the test.
+fn iso_hours_ago(hours: u64) -> String {
+    let t = now_secs().saturating_sub(hours * 3600);
+    let (year, month, day, hour, min, sec) = crate::events::civil_from_unix(t);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
+}
+
 /// The fixture store: one open-PR park, one finished delivery park, one
 /// foreign park. Three buckets, one of each.
 fn fixture(paths: &Paths) {
-    write(
-        &paths.state,
-        r#"{
+    let fresh = iso_hours_ago(2);
+    let state_text = r#"{
   "owner/repo#101": {
     "last_seen_state": "OPEN",
     "retries": 3,
     "parked": "retries-exhausted",
-    "last_polled_at": "2026-09-16T15:30:00+00:00"
+    "last_polled_at": "{fresh}"
   },
   "other/repo#55": {
     "last_seen_state": "OPEN",
     "retries": 3,
     "parked": "max-age",
-    "last_polled_at": "2026-09-16T15:30:00+00:00"
+    "last_polled_at": "{fresh}"
   }
-}"#,
-    );
-    write(
-        &paths.delivery,
-        r#"{
+}"#
+    .replace("{fresh}", &fresh);
+    write(&paths.state, &state_text);
+    let delivery_text = r#"{
   "owner/repo#42": {
     "last_seen_state": "MERGED",
     "retries": 3,
     "parked": "retries-exhausted",
-    "last_polled_at": "2026-09-16T15:30:00+00:00"
+    "last_polled_at": "{fresh}"
   }
-}"#,
-    );
+}"#
+    .replace("{fresh}", &fresh);
+    write(&paths.delivery, &delivery_text);
     // The open row's failure detail, as the merge phase recorded it.
     write(
         &paths.events,

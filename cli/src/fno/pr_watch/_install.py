@@ -1003,6 +1003,15 @@ def _parked_block(events_path: Optional[Path], state_path: Optional[Path]) -> No
     ]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except Exception:
+        typer.echo("Parked PRs:   (pr-park action unreadable)")
+        return
+    # A nonzero exit is a failed read, not an empty store: reporting "none"
+    # here would dress a broken action up as a clean board.
+    if proc.returncode != 0:
+        typer.echo("Parked PRs:   (pr-park action unreadable)")
+        return
+    try:
         rows = json.loads(proc.stdout or "{}").get("rows", [])
     except Exception:
         typer.echo("Parked PRs:   (pr-park action unreadable)")
