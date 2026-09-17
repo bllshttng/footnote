@@ -2521,6 +2521,12 @@ fn update_registry_stamps_a_transition_into_exited() {
         .as_deref()
         .expect("exited_at stamped");
     assert!(rfc3339_like_to_secs(stamp).is_some(), "stamp={stamp}");
+    // A follow-up ask revives the row; the old stamp must not survive it.
+    update_registry(&path, |r| {
+        r.find_mut("stops").unwrap().status = AgentStatus::Live;
+    })
+    .unwrap();
+    assert_eq!(load_registry(&path).unwrap().entries[0].exited_at, None);
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -1743,7 +1743,9 @@ where
             return RowLiveness::Alive;
         }
     }
-    let exit_proven = entry.exited_at.is_some() || entry.status == crate::AgentStatus::Exited;
+    // A drive-eligible row is not exit-proven by a stamp a revive left behind.
+    let exit_proven = entry.status == crate::AgentStatus::Exited
+        || (entry.exited_at.is_some() && !entry.status.is_drive_eligible());
     if let Some(handle) = crate::daemon::row_truth_handle(entry).filter(|_| !exit_proven) {
         if matches!(
             truth_fn(&handle).as_deref(),
