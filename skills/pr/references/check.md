@@ -333,7 +333,7 @@ git commit -m "fix(review): address feedback"
 fno do pr push
 ```
 
-While CI is still running on the previous head, the push is refused with exit 2 and names the running check: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 3 names a refusal to fix (a conflict needs `fno do pr rebase`); exit 1 means preflight is red and the updates should not ship.
+The push is refused with exit 2 while CI still runs on the previous head. It names the running check: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 3 names a refusal to fix, and a conflict needs `fno do pr rebase`. Exit 1 means preflight is red, do not ship the updates.
 
 ### 8. Reply Per-Thread, Then Post the Consolidated Summary
 

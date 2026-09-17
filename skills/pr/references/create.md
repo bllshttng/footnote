@@ -136,7 +136,7 @@ Proceed to push (user has chosen not to have CI).
 fno do pr push
 ```
 
-Handle the verb's refusals like any other refusal here: exit 3 names the thing to fix (protected branch, dirty tree, a conflict that needs `fno do pr rebase`), fix and re-run; exit 2 means a CI run is in flight, wait with `fno do pr wait <n> --until settled` and re-run; exit 1 means preflight is red and the PR should not be opened yet.
+Handle the verb's refusals like any other refusal here. Exit 3 names the thing to fix: a protected branch, a dirty tree, or a conflict that needs `fno do pr rebase`. Fix it and re-run. Exit 2 means a CI run is in flight: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 1 means preflight is red. Do not open the PR yet.
 
 ### 4. Generate PR Description from Commits
 

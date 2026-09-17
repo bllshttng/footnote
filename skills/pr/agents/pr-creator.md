@@ -145,7 +145,7 @@ Proceed to push (user has chosen not to have CI).
 fno do pr push
 ```
 
-Refusals: exit 3 fix what it names and re-run; exit 2 wait with `fno do pr wait <n> --until settled`, then re-run; exit 1 preflight red, do not open the PR yet.
+Refusals: exit 3 names what to fix, fix it and re-run. Exit 2 means a CI run is in flight: wait with `fno do pr wait <n> --until settled`, then re-run. Exit 1 means preflight is red, do not open the PR yet.
 
 ### 4. Generate PR Description from Commits
 
