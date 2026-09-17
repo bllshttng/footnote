@@ -478,30 +478,42 @@ struct WriteReport {
 }
 
 fn confirm_ids_landed(connection: &Connection, report: &WriteReport) -> Result<(), String> {
-    let mut missing = Vec::new();
-    for id in &report.present_ids {
-        let present: Option<String> = connection
-            .query_row("SELECT id FROM nodes WHERE id = ?1", params![id], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|error| error.to_string())?;
-        if present.is_none() {
-            missing.push(id.as_str());
-        }
+    let ids: Vec<&str> = report
+        .present_ids
+        .iter()
+        .chain(report.deleted_ids.iter())
+        .map(String::as_str)
+        .collect();
+    if ids.is_empty() {
+        return Ok(());
     }
-    let mut extra = Vec::new();
-    for id in &report.deleted_ids {
-        let present: Option<String> = connection
-            .query_row("SELECT id FROM nodes WHERE id = ?1", params![id], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|error| error.to_string())?;
-        if present.is_some() {
-            extra.push(id.as_str());
-        }
-    }
+
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let query = format!("SELECT id FROM nodes WHERE id IN ({placeholders})");
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| error.to_string())?;
+    let stored: std::collections::BTreeSet<String> = statement
+        .query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())?;
+    let missing: Vec<&str> = report
+        .present_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !stored.contains(*id))
+        .collect();
+    let extra: Vec<&str> = report
+        .deleted_ids
+        .iter()
+        .map(String::as_str)
+        .filter(|id| stored.contains(*id))
+        .collect();
     if missing.is_empty() && extra.is_empty() {
         return Ok(());
     }
