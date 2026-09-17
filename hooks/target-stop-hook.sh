@@ -136,6 +136,20 @@ resolve_manifest_state() {
     return "$worst"
 }
 
+# The worktree that owns a resolved manifest. A space-slice manifest sits
+# outside every checkout, so its `owner_cwd:` stamp is the answer; the parent
+# of `.fno/` is only right for a legacy checkout manifest.
+manifest_owner_cwd() {
+    local state="$1" owner
+    owner=$(sed -n 's/^owner_cwd:[[:space:]]*//p' "$state" 2>/dev/null \
+        | head -1 | tr -d "\"'" | sed 's/[[:space:]]*$//')
+    if [[ -n "$owner" && -d "$owner" ]]; then
+        (cd "$owner" && pwd -P)
+        return
+    fi
+    (cd "$(dirname "$state")/.." 2>/dev/null && pwd -P)
+}
+
 # ── 2. State file: the active-session discriminator ───────────────────────────
 # No state file -> no target session here -> nothing to gate. This is the ONLY
 # safe silent allow, and it gates every error path below: with a state file
@@ -208,7 +222,7 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
         fi
         RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
-            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+            RESOLVED_CWD=$(manifest_owner_cwd "$RESOLVED_STATE") || true
         fi
         if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"
@@ -229,7 +243,7 @@ else
         RESOLVED_STATE=$(resolve_manifest_state "$BIN" "${RESOLVE_IDS[@]}") || RESOLVE_RC=$?
         RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
-            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+            RESOLVED_CWD=$(manifest_owner_cwd "$RESOLVED_STATE") || true
         fi
         if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"

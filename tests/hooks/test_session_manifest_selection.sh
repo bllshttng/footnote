@@ -414,5 +414,39 @@ else
 fi
 mv "$TMP/b/.fno/target-state.md.bak" "$TMP/b/.fno/target-state.md"
 
+# A space-slice manifest lives outside every checkout. Its parent directory is
+# not a worktree, so the hook must take the owner from the `owner_cwd:` stamp.
+mkdir -p "$TMP/spaces/repo/worktrees/a"
+SLICE_STATE="$TMP/spaces/repo/worktrees/a/target-state.md"
+cp "$TMP/a/.fno/target-state.md" "$SLICE_STATE"
+rm -f "$TMP/state-record" "$TMP/cwd-record"
+SLICE_RC=0
+(
+    cd "$TMP/b" || exit 1
+    env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= SELECTED_STATE="$SLICE_STATE" \
+        RESOLVER_RC=0 STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
+        bash "$TARGET_HOOK" <<< "{\"transcript_path\":\"$TMP/session-a.jsonl\"}"
+) >/dev/null 2>/dev/null || SLICE_RC=$?
+if [[ "$(cat "$TMP/state-record" 2>/dev/null)" == "$SLICE_STATE" \
+    && "$(cat "$TMP/cwd-record" 2>/dev/null)" == "$EXPECTED_A" ]]; then
+    pass "target shim takes the owner cwd from a space-slice manifest"
+else
+    fail "target shim missed the slice owner (rc=$SLICE_RC cwd=$(cat "$TMP/cwd-record" 2>/dev/null))"
+fi
+
+rm -f "$TMP/state-record" "$TMP/cwd-record"
+AGY_SLICE_OUT=$(
+    cd "$TMP/b" || exit 1
+    env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= SELECTED_STATE="$SLICE_STATE" \
+        RESOLVER_RC=0 STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
+        bash "$AGY_HOOK" <<< "{\"conversationId\":\"session-a\",\"transcriptPath\":\"$TMP/session-a.jsonl\",\"workspacePaths\":[\"$TMP/b\"],\"fullyIdle\":true}"
+) 2>/dev/null
+if [[ "$(cat "$TMP/state-record" 2>/dev/null)" == "$SLICE_STATE" \
+    && "$(cat "$TMP/cwd-record" 2>/dev/null)" == "$EXPECTED_A" ]]; then
+    pass "agy shim takes the owner cwd from a space-slice manifest"
+else
+    fail "agy shim missed the slice owner (stdout=$AGY_SLICE_OUT cwd=$(cat "$TMP/cwd-record" 2>/dev/null))"
+fi
+
 printf '[session-manifest] Results: %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
