@@ -64,6 +64,18 @@ fn send_launch(client: &mut FakeClient, scratch: &Scratch, request_id: u64, mess
     }));
 }
 
+/// Wait for ANY terminal state, not one specific variant: a wait pinned to
+/// `Refused` turns a server that answered `Unknown` into a bare 15s timeout,
+/// which diagnoses nothing. The caller then matches the state it required.
+fn wait_terminal(client: &mut FakeClient, what: &str) {
+    client.wait(15, what, |c| {
+        c.launch_updates
+            .iter()
+            .any(|u| !matches!(u.state, fno::proto::LaunchState::Starting))
+            .then_some(())
+    });
+}
+
 #[test]
 fn launcher_journey_argv_stdin_and_birth_decode() {
     let scratch = Scratch::new("launcher-journey");
@@ -149,12 +161,7 @@ fn launcher_journey_refusal_and_unknown_are_named() {
     let _server = spawn_server(&sock, &[("FNO_BIN", door.to_string_lossy().as_ref())]);
     let mut client = attach_and_launch(&scratch, &sock);
     send_launch(&mut client, &scratch, 1, "hi");
-    client.wait(15, "refused terminal state", |c| {
-        c.launch_updates
-            .iter()
-            .any(|u| matches!(u.state, fno::proto::LaunchState::Refused { .. }))
-            .then_some(())
-    });
+    wait_terminal(&mut client, "launch terminal state (expected Refused)");
     match &client.launch_updates.last().unwrap().state {
         fno::proto::LaunchState::Refused { reason } => {
             assert!(reason.contains("no free lane"), "reason: {reason}");
@@ -169,12 +176,7 @@ fn launcher_journey_refusal_and_unknown_are_named() {
     let mut client2 = FakeClient::attach(&sock2, 24, 80, &scratch.home_cwd());
     client2.wait(5, "attach layout", |c| c.layout.as_ref().map(|_| ()));
     send_launch(&mut client2, &scratch, 1, "hi");
-    client2.wait(15, "unknown terminal state", |c| {
-        c.launch_updates
-            .iter()
-            .any(|u| matches!(u.state, fno::proto::LaunchState::Unknown { .. }))
-            .then_some(())
-    });
+    wait_terminal(&mut client2, "launch terminal state (expected Unknown)");
     match &client2.launch_updates.last().unwrap().state {
         fno::proto::LaunchState::Unknown { reason } => {
             assert!(reason.contains("no readable receipt"), "reason: {reason}");
