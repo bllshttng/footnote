@@ -13,7 +13,7 @@ use common::{spawn_server, FakeClient, Scratch};
 
 use std::path::PathBuf;
 
-use fno::proto::{AgentLaunchRequest, ClientMsg, ServerMsg};
+use fno::proto::{AgentLaunchRequest, ClientMsg};
 
 fn fake_door(dir: &PathBuf, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
