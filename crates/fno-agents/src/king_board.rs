@@ -112,6 +112,35 @@ fn worked_node_ids(read: &SourceRead) -> HashSet<String> {
         .collect()
 }
 
+/// Split held nodes out of the ready feed: an open question whose `blocks`
+/// names a node keeps it off the board's ready list and under the `held`
+/// source with the question id (x-55ae). Pure so the split is testable; the
+/// held map is `needs::held_nodes` over the question journals. A ready feed
+/// that never answered passes through untouched - the split never reads an
+/// unreadable source as held-free.
+fn partition_held(
+    ready: SourceRead,
+    held: &std::collections::BTreeMap<String, String>,
+) -> (SourceRead, Vec<Value>) {
+    if held.is_empty() || !ready.is_ok() {
+        return (ready, Vec::new());
+    }
+    let (mut kept, mut held_rows) = (Vec::new(), Vec::new());
+    for mut row in ready.rows() {
+        let id = row.get("id").and_then(Value::as_str).unwrap_or("");
+        match held.get(id) {
+            Some(qid) => {
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("question_id".to_string(), json!(qid));
+                }
+                held_rows.push(row);
+            }
+            None => kept.push(row),
+        }
+    }
+    (SourceRead::ok(Value::Array(kept)), held_rows)
+}
+
 // ---------------------------------------------------------------------------
 // SourceRead: one source's answer, or the reason there is no answer
 // ---------------------------------------------------------------------------
@@ -478,6 +507,11 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // slices were derived above in the reference's order.
     let entries_ref = entries.as_deref();
     let cwd_for_threads = cwd.clone();
+    // Held nodes: ONE fold over the question journals (x-55ae), computed once
+    // and read by the ready partition below. Fail-open: an unreadable journal
+    // is an empty map, the same posture the question scans elsewhere take.
+    let held_map =
+        crate::needs::held_nodes(&crate::needs::question_journals(&home_dot_fno(), &cwd));
     let (
         prs,
         pr_nodes,
@@ -679,6 +713,21 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 .join()
                 .unwrap_or(SourceRead::err("ready: reader panicked")),
         };
+        // An open question whose blocks names the node holds it out of ready
+        // (x-55ae); the held rows land under a `held` source beside `ready`.
+        let (ready, held_rows) = partition_held(ready, &held_map);
+        if !held_rows.is_empty() {
+            sources.insert(
+                "held".to_string(),
+                json!({
+                    "ok": true,
+                    "truncated": false,
+                    "error": "",
+                    "count": held_rows.len(),
+                    "rows": held_rows,
+                }),
+            );
+        }
         let outstanding = match t_outstanding {
             None => SourceRead::err(budget.spent_error()),
             Some(h) => h
@@ -1159,6 +1208,54 @@ mod tests {
 
     fn ok_read(payload: Value) -> SourceRead {
         SourceRead::ok(payload)
+    }
+
+    #[test]
+    fn held_partition_moves_the_row_and_names_the_question() {
+        // x-55ae acceptance: a ready node an open question blocks is absent
+        // from ready and present under held with the question id.
+        let ready = ok_read(json!([
+            {"id": "x-free", "priority": "p1", "title": "free"},
+            {"id": "x-hold", "priority": "p1", "title": "held one"}
+        ]));
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-hold".to_string(), "q-1".to_string())]
+                .into_iter()
+                .collect();
+        let (ready, held_rows) = partition_held(ready, &held);
+        let ids: Vec<String> = ready
+            .rows()
+            .iter()
+            .filter_map(|r| r.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(ids, vec!["x-free".to_string()]);
+        assert_eq!(held_rows.len(), 1);
+        assert_eq!(held_rows[0]["id"], json!("x-hold"));
+        assert_eq!(held_rows[0]["question_id"], json!("q-1"));
+    }
+
+    #[test]
+    fn held_partition_passes_through_when_nothing_is_held() {
+        let ready = ok_read(json!([{"id": "x-free"}]));
+        let held: std::collections::BTreeMap<String, String> = Default::default();
+        let (ready, held_rows) = partition_held(ready, &held);
+        assert_eq!(ready.rows().len(), 1);
+        assert!(held_rows.is_empty());
+    }
+
+    #[test]
+    fn held_partition_never_reads_an_unreadable_ready_as_held_free() {
+        // A failed ready read must stay a failed read: the split never
+        // manufactures an ok-empty feed out of an error.
+        let ready = SourceRead::err("ready: reader panicked");
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-hold".to_string(), "q-1".to_string())]
+                .into_iter()
+                .collect();
+        let (ready, held_rows) = partition_held(ready, &held);
+        assert!(!ready.is_ok());
+        assert!(held_rows.is_empty());
     }
 
     fn inputs_with(ready: Value, claims: Value, claimed_nodes: Value) -> BoardInputs {
