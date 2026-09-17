@@ -2099,6 +2099,39 @@ pub fn unattested_reviewers_scan(
     head_sha: &str,
     rounds_exhausted: bool,
 ) -> (Vec<UnattestedReviewer>, usize) {
+    // no evidence file -> gate unmet (fail closed)
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        let unsatisfied = reviewers
+            .iter()
+            .map(|r| UnattestedReviewer {
+                name: r.trim_start_matches('/').to_string(),
+                superseded_head: None,
+                failed_at_head: false,
+            })
+            .collect();
+        return (unsatisfied, 0);
+    };
+    unattested_reviewers_scan_text(
+        &content,
+        reviewers,
+        freshness,
+        head_branch,
+        head_sha,
+        rounds_exhausted,
+    )
+}
+
+/// The text-taking body of [`unattested_reviewers_scan`], split so the
+/// producer can feed the merged project-plus-global attestation text without
+/// a temp file.
+pub fn unattested_reviewers_scan_text(
+    content: &str,
+    reviewers: &[String],
+    freshness: &dyn Fn(&str) -> Freshness,
+    head_branch: &str,
+    head_sha: &str,
+    rounds_exhausted: bool,
+) -> (Vec<UnattestedReviewer>, usize) {
     let unsatisfied_all = || -> Vec<UnattestedReviewer> {
         reviewers
             .iter()
@@ -2112,10 +2145,6 @@ pub fn unattested_reviewers_scan(
     if reviewers.is_empty() {
         return (Vec::new(), 0);
     }
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        // no evidence file -> gate unmet (fail closed)
-        return (unsatisfied_all(), 0);
-    };
     let mut malformed = 0usize;
     // Single pass (gemini review): record the LATEST verdict per reviewer at the
     // current head. events.jsonl is append-ordered, so a later attestation
@@ -2513,7 +2542,23 @@ fn read_pr_info(
     // consumer below (the classify_coverage local axis, the emitted
     // review_coverage row). Fail-closed inside: any git failure answers
     // not-tiled and today's single-attestation rule stands alone.
-    let events_text_for_tiling = std::fs::read_to_string(events_path).unwrap_or_default();
+    // The local attestation axis reads the project log PLUS the global
+    // journal's slug-scoped attestations: a review fork emits into its own
+    // checkout's project log and mirrors to the global journal, and when the
+    // fork's checkout dies the mirror alone survives (measured on PR 2137:
+    // three attestations for one head, zero copies in any surviving project
+    // log). Mirrors of rows the project log still holds are deduped, so a
+    // round is never counted twice. An unreadable journal degrades to
+    // project-only, today's behavior.
+    let project_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    let global_text = std::fs::read_to_string(global_events_path).unwrap_or_default();
+    let extra_global = missing_global_attestations(&global_text, &project_text, repo_slug);
+    let events_text = if extra_global.is_empty() {
+        project_text
+    } else {
+        format!("{project_text}\n{extra_global}")
+    };
+    let events_text_for_tiling = &events_text;
     let mut tiling = compute_range_tiling(
         git_bin,
         cwd,
@@ -2619,8 +2664,8 @@ fn read_pr_info(
     let login_skipped = no_external || !login_gate_active;
     // One scan feeds both the gate and its explanation, so the two cannot
     // disagree the way the decision and the message did on PR #618.
-    let (unattested, malformed_attestations) = unattested_reviewers_scan(
-        events_path,
+    let (unattested, malformed_attestations) = unattested_reviewers_scan_text(
+        &events_text,
         reviewers,
         &freshness,
         &head_branch,
@@ -2628,11 +2673,8 @@ fn read_pr_info(
         tiling.rounds_exhausted,
     );
     let reviewers_ok = unattested.is_empty();
-    // Coverage reads the same events.jsonl as the attestation scan (its local
-    // axis) plus the GitHub review arrays (its github_app axis). Read once;
-    // a missing file is empty (the local axis then contributes nothing, which
-    // is correct - no evidence of a local review).
-    let events_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    // Coverage reads the same merged journal text as the attestation scan
+    // (its local axis) plus the GitHub review arrays (its github_app axis).
     // Authorship carry-forward: when this process resolved no manifest
     // session, the previous coverage row's recorded author FOR THIS PR (the
     // scan filters on the number; the events file is project-wide) stands
@@ -2745,8 +2787,8 @@ fn read_pr_info(
                                 let (re_coverage, re_blockers) = classify_with(&tiling);
                                 coverage = re_coverage;
                                 blockers = re_blockers;
-                                let (re_unattested, _re_malformed) = unattested_reviewers_scan(
-                                    events_path,
+                                let (re_unattested, _re_malformed) = unattested_reviewers_scan_text(
+                                    &events_text,
                                     reviewers,
                                     &freshness,
                                     &head_branch,
@@ -6069,6 +6111,82 @@ fn local_refused_verdicts(events_text: &str, head_sha: &str) -> Vec<ReviewerVerd
             required: true,
             passed: false,
         });
+    }
+    out
+}
+
+/// One global-journal `review_attestation` line's identity: the tuple that
+/// makes a mirror the SAME evidence as a project-log row, not a second
+/// review round. A mirror adds `data.repo` and re-stamps `ts`; everything
+/// that makes the attestation what it is, is in the tuple.
+fn attestation_identity(val: &Value) -> Option<(String, String, String, String)> {
+    Some((
+        val.pointer("/data/reviewer")?
+            .as_str()?
+            .trim_start_matches('/')
+            .to_string(),
+        val.pointer("/data/head_sha")?.as_str()?.to_string(),
+        val.pointer("/data/verdict")?
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        val.pointer("/data/attester_session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+    ))
+}
+
+/// The global journal's `review_attestation` lines that this repo's project
+/// log does not already hold. The local attestation axis reads the cwd
+/// project log; a review fork emits into its own checkout's log AND mirrors
+/// to the global journal, and when the fork's checkout is deleted the mirror
+/// alone survives (measured on PR 2137: three attestations for one head,
+/// zero copies in any surviving project log). Without this merge a producer
+/// recomputing after the deletion grades zero local attestations and forces
+/// the exact re-review the branch-scoped re-emits were meant to prevent.
+///
+/// Scoping is the same rule the Python replay path applies
+/// (`cli/src/fno/pr/_reviews.py`, project unscoped + global scoped by the
+/// full `host/owner/repo` identity): a global row is admitted only when
+/// `data.repo` names THIS repo, and a row with no `repo` is never admitted -
+/// unscoped evidence cannot prove which checkout it came from. Dedup keys on
+/// the attestation's identity, so a mirrored copy of a row the project log
+/// still holds never counts a second review round.
+fn missing_global_attestations(global_text: &str, project_text: &str, repo_slug: &str) -> String {
+    if repo_slug.is_empty() {
+        return String::new();
+    }
+    let mut seen: std::collections::HashSet<(String, String, String, String)> =
+        std::collections::HashSet::new();
+    for line in project_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        if let Some(k) = attestation_identity(&val) {
+            seen.insert(k);
+        }
+    }
+    let mut out = String::new();
+    for line in global_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        if val.pointer("/data/repo").and_then(|v| v.as_str()) != Some(repo_slug) {
+            continue;
+        }
+        if let Some(k) = attestation_identity(&val) {
+            if seen.insert(k) {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
     }
     out
 }
@@ -12901,6 +13019,90 @@ mod tests {
             rounds_since_last_pass(&events, "feature/x", "bbbbbbbbbb", Some(&reviews_b)),
             2
         );
+    }
+
+    // ── the fork log died, the mirror survived (global-journal merge) ──
+
+    /// A mirrored attestation: what `emit_to_both` leaves in the global
+    /// journal after the project-log copy died with a deleted review
+    /// checkout. Measured on PR 2137: three attestations for one head, zero
+    /// copies in any surviving project log.
+    fn global_attest_line(ts: &str, head: &str, branch: &str, repo: &str) -> String {
+        format!(
+            "{{\"ts\":\"{ts}\",\"type\":\"review_attestation\",\"source\":\"subagent\",\"data\":{{\"reviewer\":\"code-review\",\"head_sha\":\"{head}\",\"verdict\":\"pass\",\"branch\":\"{branch}\",\"attester_session_id\":\"fork-session\",\"repo\":\"{repo}\"}}}}"
+        )
+    }
+
+    #[test]
+    fn global_journal_rows_reach_the_scan_when_the_project_log_holds_none() {
+        let global = format!(
+            "{}\n",
+            global_attest_line(
+                "2026-09-17T17:11:47Z",
+                "954ee57fed",
+                "feature/x-facb",
+                "github.com/bllshttng/footnote"
+            )
+        );
+        let merged = missing_global_attestations(&global, "", "github.com/bllshttng/footnote");
+        let (passes, _) = local_latest_attestations(&merged, "feature/x-facb", "954ee57fed");
+        assert_eq!(passes.len(), 1, "the surviving mirror must grade");
+        assert_eq!(passes[0].branch, "feature/x-facb");
+        assert!(passes[0].is_pass);
+    }
+
+    #[test]
+    fn global_journal_rows_are_repo_scoped_and_deduped_against_the_project_log() {
+        let mine = global_attest_line("t1", "aaaaaaaaaa", "feature/x", "github.com/o/r");
+        let foreign = global_attest_line("t2", "bbbbbbbbbb", "other/branch", "github.com/o/other");
+        let unscoped = "{\"type\":\"review_attestation\",\"data\":{\"reviewer\":\"code-review\",\"head_sha\":\"cccccccccc\",\"verdict\":\"pass\"}}";
+        let global = format!("{mine}\n{foreign}\n{unscoped}\n");
+        // A repo-less global row is unscoped evidence: never admitted.
+        // A foreign-repo row describes another checkout's work: never admitted.
+        let merged = missing_global_attestations(&global, "", "github.com/o/r");
+        assert_eq!(merged, format!("{mine}\n"));
+        // The project log already holds the same attestation identity: the
+        // mirror must not double it.
+        let merged = missing_global_attestations(&global, &format!("{mine}\n"), "github.com/o/r");
+        assert_eq!(merged, String::new());
+        // No repo identity resolved: the global arm contributes nothing.
+        assert_eq!(missing_global_attestations(&global, "", ""), String::new());
+    }
+
+    #[test]
+    fn coverage_grades_a_gone_fork_pass_from_the_global_journal_alone() {
+        let global = format!(
+            "{}\n",
+            global_attest_line(
+                "2026-09-17T17:11:47Z",
+                "954ee57fed",
+                "feature/x-facb",
+                "github.com/bllshttng/footnote"
+            )
+        );
+        let merged = missing_global_attestations(&global, "", "github.com/bllshttng/footnote");
+        let coverage = classify_coverage_tiled(
+            &[],
+            &[],
+            &merged,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x-facb",
+            "954ee57fed",
+            None,
+            None,
+            false,
+        );
+        assert!(matches!(coverage.coverage, Coverage::Covered(n) if n > 0));
+        let local: Vec<_> = coverage
+            .verdicts
+            .iter()
+            .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+            .collect();
+        assert_eq!(local.len(), 1);
+        assert_eq!(local[0].scope, Some(AttestationScope::AttestedBranch));
     }
 
     // ── both producers go through the one predicate (/) ───────
