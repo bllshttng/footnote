@@ -2042,3 +2042,137 @@ fn restore_reconstructs_a_separate_unnamed_lane_as_its_own_squad() {
         core.reap_pane(pid);
     }
 }
+
+fn shared_identity_worker(name: &str) -> crate::squad_store::StoredMember {
+    crate::squad_store::StoredMember {
+        attach_id: format!("a-{name}"),
+        tombstone: false,
+        tombstone_reason: None,
+        detached: false,
+        tab_name: None,
+        cwd: None,
+        worker: Some(name.into()),
+        harness: Some("codex".into()),
+        harness_session_id: Some(format!("{name}-session")),
+        pane_id: None,
+    }
+}
+
+/// Seeds one stored unnamed squad holding three old workers on the key
+/// derived from `<scratch>/repo`. Returns the scratch, the origin and the key.
+fn seed_three_old_workers(scratch: &str) -> (StoreScratch, String, String) {
+    let s = StoreScratch::new(scratch);
+    let origin = s.dir.join("repo");
+    std::fs::create_dir_all(&origin).unwrap();
+    let origin = origin.to_string_lossy().into_owned();
+    let key = crate::squad_store::origin_key(std::slice::from_ref(&origin));
+    let old: Vec<_> = ["t-old-one", "t-old-two", "t-old-three"]
+        .iter()
+        .map(|n| shared_identity_worker(n))
+        .collect();
+    crate::squad_store::upsert("", &key, std::slice::from_ref(&origin), &old).unwrap();
+    (s, origin, key)
+}
+
+fn stored_workers(key: &str) -> Vec<String> {
+    crate::squad_store::load()
+        .squads
+        .into_iter()
+        .find(|sq| sq.key == key)
+        .map(|sq| sq.members.iter().filter_map(|m| m.worker.clone()).collect())
+        .unwrap_or_default()
+}
+
+fn add_lane(core: &mut Core, sid: u64, origin: &str, members: &[&str]) {
+    core.session.add_squad(
+        sid,
+        vec![origin.to_string()],
+        None,
+        Tab {
+            name: None,
+            id: sid,
+            root: Node::Leaf(sid),
+            focus: sid,
+        },
+    );
+    core.next_squad_id = core.next_squad_id.max(sid + 1);
+    core.squad_members.insert(
+        sid,
+        members.iter().map(|n| shared_identity_worker(n)).collect(),
+    );
+}
+
+#[test]
+fn restore_folds_a_stored_lane_into_the_live_squad_holding_its_key() {
+    let (_s, origin, key) = seed_three_old_workers("fold-into-live-holder");
+    let mut core = empty_core();
+    core.shells = vec!["/bin/cat".into()];
+    let _known = KnownWorkersGuard;
+    set_known_workers(&["t-old-one", "t-old-two", "t-old-three", "t-new"]);
+    add_lane(&mut core, 1, &origin, &["t-new"]);
+    core.pre_restore_squads.insert(1);
+    core.persist_squad(1);
+    core.restore_squads(24, 80, 999);
+    let holders: Vec<u64> = core
+        .session
+        .squads
+        .iter()
+        .filter(|sq| sq.key == key)
+        .map(|sq| sq.id)
+        .collect();
+    core.persist_squad(1);
+    let after = stored_workers(&key);
+    let pids: Vec<u64> = core.panes.keys().copied().collect();
+    for pid in pids {
+        core.reap_pane(pid);
+    }
+    assert_eq!(holders, vec![1], "one live squad holds the stored key");
+    for w in ["t-old-one", "t-old-two", "t-old-three", "t-new"] {
+        assert!(after.iter().any(|a| a == w), "{w} kept: {after:?}");
+    }
+}
+
+#[test]
+fn pre_restore_lane_write_is_refused_by_the_generation_cas() {
+    let (_s, origin, key) = seed_three_old_workers("pre-restore-cas");
+    let mut core = empty_core();
+    add_lane(&mut core, 1, &origin, &["t-new"]);
+    core.pre_restore_squads.insert(1);
+    core.persist_squad(1);
+    assert_eq!(
+        stored_workers(&key),
+        vec!["t-old-one", "t-old-two", "t-old-three"]
+    );
+}
+
+#[test]
+fn two_live_holders_of_one_identity_never_shrink_the_stored_row() {
+    let (_s, origin, key) = seed_three_old_workers("two-live-holders");
+    let mut core = empty_core();
+    core.restored = true;
+    core.store_generations = crate::squad_store::load().generations;
+    add_lane(&mut core, 1, &origin, &["t-new"]);
+    add_lane(&mut core, 2, &origin, &["t-other"]);
+    if let Some(sq) = core.session.squad_mut(2) {
+        sq.key = key.clone();
+    }
+    core.persist_squad(1);
+    core.persist_squad(2);
+    let ctx = (
+        1,
+        String::new(),
+        key.clone(),
+        vec![origin.clone()],
+        "a-t-new".into(),
+    );
+    core.reconcile_member_close(Some(ctx), true);
+    assert_eq!(
+        stored_workers(&key),
+        vec!["t-old-one", "t-old-two", "t-old-three"]
+    );
+    assert_eq!(
+        core.shared_identity_notified,
+        HashSet::from([key.clone()]),
+        "one notice names the shared key"
+    );
+}

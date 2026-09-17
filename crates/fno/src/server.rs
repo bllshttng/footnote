@@ -2154,10 +2154,10 @@ pub(crate) struct Core {
     /// every external action and the startup reconcile. The durable truth is
     /// `squads.json`'s `external_lifecycle`; this is the render snapshot.
     external_lifecycle: Vec<crate::squad_store::ExternalLifecycle>,
-    /// Latch for the one-shot "persistence degraded" notice (AC3-ERR):
-    /// a store-write failure notices every client exactly once, then stays
-    /// silent so a full disk never spams a bell per keystroke.
+    /// One-shot notice latches: persistence degraded (a full disk never spams
+    /// a bell per keystroke), and each stored identity two live squads share.
     persist_degraded_notified: bool,
+    shared_identity_notified: HashSet<String>,
     /// First-attach restore fires once per server lifetime; this gates
     /// it so a second client attach does not re-materialize the persisted
     /// squads.
@@ -6720,16 +6720,15 @@ impl Core {
                 s.key = key.clone();
             }
         }
-        // A fresh server may need one bootstrap shell before its first client
-        // attach triggers restore. Do not let that empty shell overwrite an
-        // existing same-origin squad that contains keeper-backed members.
-        if !self.restored
-            && self.pre_restore_squads.contains(&sid)
-            && self.squad_members.get(&sid).is_some_and(Vec::is_empty)
-            && crate::squad_store::load()
-                .squads
-                .iter()
-                .any(|stored| stored.name == name && stored.key == key && stored.origins == origins)
+        // A pre-restore bootstrap shell must not overwrite an existing
+        // same-origin squad that contains keeper-backed members.
+        if self.shared_identity_write_skipped(sid, &name, &key)
+            || !self.restored
+                && self.pre_restore_squads.contains(&sid)
+                && self.squad_members.get(&sid).is_some_and(Vec::is_empty)
+                && crate::squad_store::load().squads.iter().any(|stored| {
+                    stored.name == name && stored.key == key && stored.origins == origins
+                })
         {
             return None;
         }
@@ -7708,15 +7707,17 @@ impl Core {
             // a deferred template restore removes it once real template tabs land.
             let mut fallback_tid: Option<TabId> = None;
             // An empty stored name is the unnamed sentinel (a home squad / lane);
-            // it restores unnamed. A restored unnamed lane whose origins match the
-            // freshly-minted home squad IS home (restore runs after attach() minted
-            // it): merge its member tabs into home_sid rather than duplicating.
+            // it restores unnamed. A restored unnamed lane folds into the home
+            // squad when origins match, else into the live squad already holding
+            // its key: one live squad per stored identity.
             let restore_name = (!ps.name.is_empty()).then(|| ps.name.clone());
-            let home_match = restore_name.is_none()
-                && self
-                    .session
-                    .squad(home_sid)
-                    .is_some_and(|h| h.origins == ps.origins);
+            let fold_sid = match restore_name {
+                Some(_) => None,
+                None if (self.session.squad(home_sid)).is_some_and(|h| h.origins == ps.origins) => {
+                    Some(home_sid)
+                }
+                None => self.live_holder_of("", &ps.key, None),
+            };
             // The persisted durable identity, adopted onto the rebuilt squad so a
             // later persist reuses its store entry instead of minting a new one.
             let restore_key = ps.key.clone();
@@ -8114,11 +8115,8 @@ impl Core {
                 // re-captured both, so every server life left one more shell
                 // tree in the store (the measured 12). The first such tree
                 // consumes the claim: the fresh tab stands in for it.
-                let mut fresh_home_shell_claim = home_match
-                    && self
-                        .session
-                        .squad(home_sid)
-                        .is_some_and(|h| !h.tabs.is_empty());
+                let mut fresh_home_shell_claim = fold_sid == Some(home_sid)
+                    && (self.session.squad(home_sid)).is_some_and(|h| !h.tabs.is_empty());
                 for st in &ps.tab_trees {
                     // Prune done leaves BEFORE any pane minting: a
                     // slot binding a done member's leaf is removed, one-child
@@ -8263,7 +8261,7 @@ impl Core {
             // failed): open one shell at origins[0] (else $HOME). Skipped for a
             // home-merge lane - home_sid already has its own shell tab, so an
             // all-dead lane merges only its tombstone members (no extra shell).
-            if tabs.is_empty() && !home_match {
+            if tabs.is_empty() && fold_sid.is_none() {
                 match self.spawn_pane(rows, cols, &cwd0) {
                     Ok(pid) => {
                         let tid = self.session.mint_tab_id();
@@ -8285,13 +8283,13 @@ impl Core {
             }
             // Register the squad with its first tab, push the rest, so
             // agent_rows reconciles the panes and member_ctx resolves them. A
-            // home-merge lane folds its tabs + members INTO the freshly-minted
-            // home squad rather than adding a duplicate.
-            let sid = if home_match {
+            // folded lane merges its tabs + members INTO the live squad
+            // holding its identity rather than adding a duplicate.
+            let sid = if let Some(home_sid) = fold_sid {
                 for tab in tabs {
                     self.session
                         .squad_mut(home_sid)
-                        .expect("home squad live")
+                        .expect("fold squad live")
                         .tabs
                         .push(tab);
                 }
@@ -11630,11 +11628,8 @@ impl Core {
                 match self.session.squad(squad) {
                     Some(sq) => {
                         let clean = sanitize_name(&name, MAX_SQUAD_NAME);
-                        // Blank-after-sanitize CLEARS back to the derived label
-                        // (the RenameTab precedent) - EXCEPT an origin-less
-                        // squad, whose derived label would be empty: there a
-                        // blank is refused (nothing to fall back to).
-                        if clean.is_empty() && sq.origins.is_empty() {
+                        // Blank-after-sanitize CLEARS back to the derived label.
+                        if clean.is_empty() && self.clear_name_refused(squad, &sq.origins) {
                             self.notice(client_id, "name required");
                             return Flow::Continue;
                         }
@@ -13664,6 +13659,7 @@ async fn serve(
         pending_template_restores: Vec::new(),
         external_lifecycle: Vec::new(),
         persist_degraded_notified: false,
+        shared_identity_notified: HashSet::new(),
         restored: false,
         restore_pending: false,
         store_generations: HashMap::new(),
