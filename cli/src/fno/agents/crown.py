@@ -588,13 +588,27 @@ def crown_scope_matches(held: Optional[str], requested: Optional[str]) -> bool:
     return _same_territory(held, requested)
 
 
+def crown_answers_to(held: Optional[str], requested: Optional[str]) -> bool:
+    """Does a live crown over ``held`` answer when ``requested`` is addressed?
+
+    Territory equality, plus one widening: a rung-2 epic set answers for any
+    subset of its members. Not ``scope_contains``: a project or portfolio crown
+    never answers for a narrower scope, because its court may hold that crown.
+    """
+    if crown_scope_matches(held, requested):
+        return True
+    asked = _canonical_members(requested)
+    return bool(asked) and _derived_level(held) == 2 and asked <= _canonical_members(held)
+
+
 def resolve_to_king(scope: str, *, registry_path=None) -> list[str]:
     """Every live row holding crown ``scope`` right now, by name, sorted.
 
     Read at send time, never off a handle a peer learned while that handle was
     crowned; a pointer written at abdication goes stale the second time the crown
     moves. Empty is vacant, one is the holder, more is the split crown
-    ``fno agents court`` already reports."""
+    ``fno agents court`` already reports. A rung-2 epic set answers for each
+    of its members."""
     from fno.agents.registry import TERMINAL_STATUSES, load_registry
 
     rows = load_registry(path=registry_path) if registry_path else load_registry()
@@ -603,7 +617,7 @@ def resolve_to_king(scope: str, *, registry_path=None) -> list[str]:
             row.name
             for row in rows
             if getattr(row, "crown_level", None) is not None
-            and crown_scope_matches(getattr(row, "crown_scope", None), scope)
+            and crown_answers_to(getattr(row, "crown_scope", None), scope)
             and getattr(row, "status", None) not in TERMINAL_STATUSES
         }
     )
