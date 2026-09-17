@@ -1560,8 +1560,18 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
     if !facts.any_enabled() {
         return Ok(Vec::new());
     }
+    let held = held_for(config_cwd, registry_path);
     let territories = territory::resolve_territories(config_cwd, registry_path).map_err(|e| e.0)?;
-    Ok(drain_targets_json(&facts, &territories).0)
+    Ok(drain_targets_json(&facts, &territories, &held).0)
+}
+
+/// The held map for one config cwd: one fold over the question journals,
+/// failing open to an empty map (a missing journal holds nothing).
+fn held_for(cwd: &Path, registry_path: &Path) -> std::collections::BTreeMap<String, String> {
+    match registry_path.parent().and_then(Path::parent) {
+        Some(fno_dir) => crate::needs::held_nodes(&crate::needs::question_journals(fno_dir, cwd)),
+        None => Default::default(),
+    }
 }
 
 /// Target rows for one resolved territory set, plus the drop counts the
@@ -1571,13 +1581,15 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
 fn drain_targets_json(
     facts: &territory::ActiveBacklogFacts,
     territories: &[territory::Territory],
-) -> (Vec<Value>, usize, usize) {
+    held: &std::collections::BTreeMap<String, String>,
+) -> (Vec<Value>, usize, usize, Vec<(String, String)>) {
     let Some(interval) = facts.interval_seconds else {
-        return (Vec::new(), 0, 0);
+        return (Vec::new(), 0, 0, Vec::new());
     };
     let mut targets = Vec::new();
     let mut disabled = 0;
     let mut missing_path = 0;
+    let mut held_drops: Vec<(String, String)> = Vec::new();
     for territory in territories {
         let root_project = territory.project.clone();
         if !facts.is_enabled_for(Some(&root_project)) {
@@ -1596,6 +1608,21 @@ fn drain_targets_json(
         } else {
             None
         };
+        // A held mission stops the whole territory: the drain must not spawn
+        // into an epic a question is blocking (x-55ae). Other held members
+        // drop from the member list; the receipt names the question.
+        if mission.as_deref().is_some_and(|m| held.contains_key(m)) {
+            if let Some(qid) = mission.as_deref().and_then(|m| held.get(m)) {
+                held_drops.push((territory.key.clone(), qid.clone()));
+            }
+            continue;
+        }
+        let members: Vec<String> = territory
+            .members
+            .iter()
+            .filter(|m| !held.contains_key(m.as_str()))
+            .cloned()
+            .collect();
         targets.push(json!({
             "project": territory.project,
             "cwd": territory.cwd,
@@ -1605,7 +1632,7 @@ fn drain_targets_json(
             "scope": territory.key,
             "rung": territory.rung,
             "kingless": territory.kingless,
-            "members": territory.members,
+            "members": members,
             "max_concurrent": facts.max_concurrent,
         }));
     }
@@ -1617,7 +1644,7 @@ fn drain_targets_json(
             .unwrap_or("")
             .cmp(b["scope"].as_str().unwrap_or(""))
     });
-    (targets, disabled, missing_path)
+    (targets, disabled, missing_path, held_drops)
 }
 
 /// [`resolve_targets`] plus what the supervisor's tick row needs to say WHY
@@ -1629,6 +1656,7 @@ fn drain_targets_json(
 /// empty list read as "nothing enabled".
 pub fn resolve_targets_report(config_cwd: &Path, registry_path: &Path) -> DrainResolve {
     let facts = territory::active_backlog_facts(config_cwd);
+    let held = held_for(config_cwd, registry_path);
     let territories = territory::resolve_territories(config_cwd, registry_path);
     let missions = territories.as_ref().map_or(0, |t| t.len() as u64);
     let mut skip_reason: Option<String> = None;
@@ -1648,13 +1676,21 @@ pub fn resolve_targets_report(config_cwd: &Path, registry_path: &Path) -> DrainR
             if skip_reason.is_none() && territories.is_empty() {
                 skip_reason = Some("no_missions".to_string());
             }
-            let (rows, disabled, missing_path) = drain_targets_json(&facts, &territories);
+            let (rows, disabled, missing_path, held_drops) =
+                drain_targets_json(&facts, &territories, &held);
             match rows
                 .into_iter()
                 .map(|t| serde_json::from_value::<ResolvedTarget>(t))
                 .collect::<Result<Vec<_>, _>>()
             {
                 Ok(targets) => {
+                    if targets.is_empty() && skip_reason.is_none() {
+                        // Every live target held: name the question, not a
+                        // generic empty receipt (x-55ae).
+                        if let Some((_, qid)) = held_drops.first() {
+                            skip_reason = Some(format!("held:{qid}"));
+                        }
+                    }
                     if targets.is_empty() && skip_reason.is_none() {
                         skip_reason = Some(if disabled >= missing_path {
                             "project_disabled".to_string()
@@ -2267,6 +2303,71 @@ async fn mission_drain_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::territory::{ActiveBacklogFacts, Territory};
+
+    fn held_facts() -> territory::ActiveBacklogFacts {
+        territory::ActiveBacklogFacts {
+            enabled: Ok(true),
+            interval_seconds: Some(60),
+            failure_limit: 3,
+            max_concurrent: 2,
+        }
+    }
+
+    fn held_territory(members: Vec<String>) -> Territory {
+        Territory {
+            key: "x-e".to_string(),
+            rung: 2,
+            kingless: true,
+            members,
+            project: "alpha".to_string(),
+            cwd: "/tmp/alpha".to_string(),
+        }
+    }
+
+    #[test]
+    fn drain_drops_a_held_mission_and_names_the_question() {
+        let facts = held_facts();
+        let territories = vec![held_territory(vec!["x-e".to_string(), "x-e2".to_string()])];
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-e".to_string(), "q-1".to_string())]
+                .into_iter()
+                .collect();
+        let (rows, disabled, missing_path, held_drops) =
+            drain_targets_json(&facts, &territories, &held);
+        assert_eq!(disabled, 0);
+        assert_eq!(missing_path, 0);
+        assert!(
+            rows.is_empty(),
+            "held mission: territory absent from targets"
+        );
+        assert_eq!(held_drops, vec![("x-e".to_string(), "q-1".to_string())]);
+    }
+
+    #[test]
+    fn drain_drops_only_the_held_member_from_a_live_territory() {
+        let facts = held_facts();
+        let territories = vec![held_territory(vec!["x-e".to_string(), "x-e2".to_string()])];
+        let held: std::collections::BTreeMap<String, String> =
+            [("x-e2".to_string(), "q-2".to_string())]
+                .into_iter()
+                .collect();
+        let (rows, _, _, held_drops) = drain_targets_json(&facts, &territories, &held);
+        assert_eq!(rows.len(), 1, "territory survives");
+        assert_eq!(rows[0]["members"], serde_json::json!(["x-e"]));
+        assert!(held_drops.is_empty());
+    }
+
+    #[test]
+    fn drain_keeps_everything_when_nothing_is_held() {
+        let facts = held_facts();
+        let territories = vec![held_territory(vec!["x-e".to_string(), "x-e2".to_string()])];
+        let held: std::collections::BTreeMap<String, String> = Default::default();
+        let (rows, _, _, held_drops) = drain_targets_json(&facts, &territories, &held);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["members"], serde_json::json!(["x-e", "x-e2"]));
+        assert!(held_drops.is_empty());
+    }
 
     #[test]
     fn loose_member_argv_names_the_project_door() {
