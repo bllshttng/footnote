@@ -367,7 +367,7 @@ def neutralise(
     # Cargo intermediates are pinned into the sandbox like HOME: the scrubbed
     # var would otherwise let cargo resolve its own default, and the tracked
     # .cargo/config.toml template lands that default in the REAL
-    # ~/.cargo/build, which grew ~30 GiB/day of test orphans (x-19f1). Every
+    # ~/.cargo/build, which grew ~30 GiB/day of test orphans. Every
     # tree (pytest, shell, cargo) routes through this function, so all three
     # build into the sandbox; pytest_sessionfinish removes it, and reclaim's
     # stale_test_scratch lane reaps what a crashed session leaves.

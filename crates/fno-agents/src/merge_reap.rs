@@ -324,7 +324,7 @@ fn tree_unreachable_from_origin_main(worktree: &str) -> bool {
 fn remove_tree(worktree: &str, repo_root: &str) -> bool {
     // Reclaim the build hash dir in-process while the workspace manifest can
     // still answer: the daemon carries no cargo on its PATH, so the old bash
-    // shell-out deleted nothing on any merge (x-19f1). The same flock guard
+    // shell-out deleted nothing on any merge. The same flock guard
     // and base checks as the sweep apply; the sweep reaps whatever an
     // unreadable resolution leaves behind.
     let _ = crate::cargo_build_dirs::remove_for(std::path::Path::new(worktree));

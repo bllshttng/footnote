@@ -2,7 +2,7 @@
 //! Report-only until a merge-minted cleanup order stands, then applying.
 //! Moved out of daemon.rs (shrink-only file) with its tests; the event
 //! carries `enumerated` and `judged` alongside the judged-bucket counts so a
-//! truncated read cannot be told from a partial sweep (x-19f1).
+//! truncated read cannot be told from a partial sweep.
 use crate::events::EventEmitter;
 use crate::paths::AgentsHome;
 use serde_json::{json, Value};
@@ -242,7 +242,7 @@ mod tests {
     }
 
     /// The real summary line, copied from this machine's output.
-    const REAL_SUMMARY: &str = "would-archive      feature/x-3e17   /some/wt\n\
+    const REAL_SUMMARY: &str = "would-archive      feature/sample-branch   /some/wt\n\
     Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-session, 1 processes, 0 salvage-failed, 0 needs-confirmation, 1 app-owned, 1 permanent), 0 failed  [dry-run: no changes made; pass --apply to execute]\n";
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
     fn sweep_summary_parses_the_apply_mode_line() {
         // The apply pass says "archived", not "would archive"; the eligible
         // count must read from whichever verb the line carries.
-        let line = "archived         feature/x-3e17   /some/wt\n\
+        let line = "archived         feature/sample-branch   /some/wt\n\
         Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
         let r = parse_worktree_sweep(line).expect("parses");
         assert_eq!(r.eligible, 3);
