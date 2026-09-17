@@ -47,6 +47,14 @@ READ_ALLOWLIST = (
     "crates/fno-agents/src/feed.rs",  # the activity feed's read-only lifecycle derivation
     "crates/fno-agents/src/scratch.rs",  # the sweep's read-only node-status lookup feeding the file/fold decision
     "crates/fno-agents/src/route_slot.rs",  # the routing audit's read-only decision projection
+    # Not readers: the backend machinery and its names. mod.rs labels the
+    # json leg inside the import/export divergence check; note_history.rs
+    # defaults the journal's derived file name; note_migrate.rs help text
+    # names the default store path.
+    "crates/fno-agents/src/backlog/mod.rs",
+    "crates/fno-agents/src/backlog/note_history.rs",
+    "crates/fno-agents/src/backlog/note_migrate.rs",
+    "crates/fno-agents/src/king_board/scope.rs",  # the scope's default store-path builder (graph_json_path), never a read
 )
 
 # Known-positive controls (task 4.2 / AC9): verbs the census must FIND in the
@@ -285,9 +293,23 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
 
     # Rust modality: direct graph.json opens outside the allowlist, in
     # PRODUCTION sources (test fixtures legitimately point FNO_GRAPH_JSON at
-    # fixture files; that is not a consumer).
+    # fixture files; that is not a consumer). The walk descends into nested
+    # module dirs (src/backlog/, src/daemon/tests/): a flat src/*.rs glob
+    # never saw them, which is how the json-leg readers hid.
     rust_root = REPO_ROOT / "crates"
-    for path in sorted(rust_root.rglob("src/*.rs")):
+    for path in sorted(rust_root.rglob("*.rs")):
+        rel_parts = path.relative_to(rust_root).parts
+        # Production sources only: target/ is build output; a tests/ or
+        # *_tests/ segment is a unit-test dir; a tests.rs file is a
+        # `#[cfg(test)] mod tests;` pulled in by its parent (fixtures point
+        # at fixture stores by design, and none of it is a consumer).
+        if (
+            "src" not in rel_parts
+            or "target" in rel_parts
+            or path.name == "tests.rs"
+            or any(p == "tests" or p.endswith("_tests") for p in rel_parts)
+        ):
+            continue
         rel = str(path)
         try:
             text = path.read_text(encoding="utf-8")
@@ -298,6 +320,11 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
             if rel not in rust_allow:
                 problems.append(
                     f"unclassified rust consumer: {rel}:{i + 1}: {line.strip()[:80]}"
+                )
+        if path.name not in ("graph_store.rs", "graph_keeper.rs"):
+            for i, line in rust_json_leg_reader_sites(text):
+                problems.append(
+                    f"json-leg reader outside the switch: {rel}:{i + 1}: {line.strip()[:80]}"
                 )
     return total, problems
 
@@ -316,6 +343,34 @@ def rust_graph_json_sites(text):
     pending_cfg_test = False
     in_test_module = False
     pattern = re.compile(r'"?graph\.json"?')
+    for i, line in enumerate(text.splitlines()):
+        stripped = line.strip()
+        if in_test_module:
+            continue
+        if pattern.search(line) and not stripped.startswith("//"):
+            sites.append((i, line))
+        if re.fullmatch(r"#\[cfg\(test\)\]", stripped):
+            pending_cfg_test = True
+        elif pending_cfg_test and re.match(r"mod\s+\w+", stripped):
+            in_test_module = True
+        elif stripped:
+            pending_cfg_test = False
+    return sites
+
+
+def rust_json_leg_reader_sites(text):
+    """Line sites of `read_defaulted`/`read_defaulted_opts` calls in one file.
+
+    Same production cutoff as rust_graph_json_sites: a `#[cfg(test)]` module
+    is a fixture. The caller exempts graph_store.rs (the backend switch the
+    readers must call) and graph_keeper.rs (the json leg itself); a call in
+    any other production file reads the file leg this node retired, and the
+    only reason it ever answered was the sqlite-to-json mirror.
+    """
+    sites = []
+    pending_cfg_test = False
+    in_test_module = False
+    pattern = re.compile(r"\bread_defaulted(?:_opts)?\s*\(")
     for i, line in enumerate(text.splitlines()):
         stripped = line.strip()
         if in_test_module:
@@ -383,13 +438,32 @@ def self_test() -> int:
     if rust_graph_json_sites(rust_fixt):
         failures.append("rust census control: cfg(test) fixture was not skipped")
 
+    # Json-leg reader detector: a production read_defaulted call in a nested
+    # module file outside the switch and the leg must be named, and the same
+    # call inside a cfg(test) module must not be.
+    reader_prod = "fn f() {\n    let rows = read_defaulted(&g, false);\n}\n"
+    reader_fixt = (
+        "fn helper() {}\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    fn f() {\n"
+        "        let rows = read_defaulted(&g, false);\n"
+        "    }\n"
+        "}\n"
+    )
+    if len(rust_json_leg_reader_sites(reader_prod)) != 1:
+        failures.append("json-leg reader control: production read_defaulted not detected")
+    if rust_json_leg_reader_sites(reader_fixt):
+        failures.append("json-leg reader control: cfg(test) read_defaulted was not skipped")
+
     if failures:
         for f in failures:
             print(f"tracker-consumers: SELF-TEST FAILURE: {f}", file=sys.stderr)
         return 1
     print(
         "tracker-consumers: self-test detected the injected unmarked verb, "
-        "the injected forbidden reader, and the runtime refusal"
+        "the injected forbidden reader, the runtime refusal, and the "
+        "json-leg reader"
     )
     print(SELF_TEST_OK_MARKER)
     return 0

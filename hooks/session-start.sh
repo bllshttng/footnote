@@ -412,9 +412,9 @@ if command -v fno >/dev/null 2>&1; then
     # its own watermark makes a double invocation a no-op regardless.
     gsh_helper="${SCRIPT_DIR}/groom-self-heal-session-start.sh"
     [[ -f "$gsh_helper" ]] && ( bash "$gsh_helper" >/dev/null 2>&1 & ) 2>/dev/null || true
-    # Graph->doc mirror sweep: bare `plan sync` self-gates on graph.json mtime
-    # (one stat, cheap on no change), so no shell watermark; backgrounded + output
-    # discarded so it can never corrupt this hook's JSON.
+    # Graph->doc mirror sweep: bare `plan sync` self-gates on the store
+    # version (one version probe, cheap on no change), so no shell watermark;
+    # backgrounded + output discarded so it can never corrupt this hook's JSON.
     ( fno do plan sync >/dev/null 2>&1 & ) 2>/dev/null || true
 fi
 

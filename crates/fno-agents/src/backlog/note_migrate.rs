@@ -625,7 +625,7 @@ flags:
   --node <id>              node for history (a positional token also works)
   --offset N --limit N     page the history read (default limit 50)
   --json                   machine output; history emits {{total, offset, records}}
-  --graph <path>           graph file to read (default ~/.fno/graph.json)
+  --graph <path>           store to read (default ~/.fno/graph.json)
   -h, --help               this text"
     );
 }
