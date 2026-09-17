@@ -17,11 +17,13 @@ pub enum PauseState {
         who: String,
         paused_at: u64,
         expires_at: Option<u64>,
+        reason: Option<String>,
     },
     Expired {
         who: String,
         paused_at: u64,
         expires_at: u64,
+        reason: Option<String>,
     },
     Corrupt {
         path: PathBuf,
@@ -41,23 +43,27 @@ impl PauseState {
                 who,
                 paused_at,
                 expires_at,
+                reason,
             } => json!({
                 "paused": true,
                 "state": "paused",
                 "who": who,
                 "paused_at": paused_at,
                 "expires_at": expires_at,
+                "reason": reason,
             }),
             Self::Expired {
                 who,
                 paused_at,
                 expires_at,
+                reason,
             } => json!({
                 "paused": false,
                 "state": "expired",
                 "who": who,
                 "paused_at": paused_at,
                 "expires_at": expires_at,
+                "reason": reason,
             }),
             Self::Corrupt { path, error } => json!({
                 "paused": true,
@@ -77,7 +83,14 @@ impl PauseState {
 
     pub fn message(&self) -> String {
         match self {
-            Self::Paused { who, .. } => format!("loops paused by {who}"),
+            Self::Paused {
+                who, reason: None, ..
+            } => format!("loops paused by {who}"),
+            Self::Paused {
+                who,
+                reason: Some(reason),
+                ..
+            } => format!("loops paused by {who}: {reason}"),
             Self::Corrupt { path, .. } => {
                 format!("loops pause sentinel corrupt at {}", path.display())
             }
@@ -253,12 +266,20 @@ fn read_state_at(path: &Path, now: u64) -> PauseState {
             }
         },
     };
+    // Absent on a sentinel written before this field existed - stays valid,
+    // never corrupt, so an older writer's sentinel keeps classifying.
+    let reason = match object.get("reason") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return corrupt(path, "sentinel field 'reason' must be a string or null"),
+    };
     if let Some(expires_at) = expires_at {
         if expires_at <= now {
             return PauseState::Expired {
                 who: who.to_string(),
                 paused_at,
                 expires_at,
+                reason,
             };
         }
     }
@@ -266,6 +287,7 @@ fn read_state_at(path: &Path, now: u64) -> PauseState {
         who: who.to_string(),
         paused_at,
         expires_at,
+        reason,
     }
 }
 
@@ -287,11 +309,12 @@ pub fn pause_message() -> Option<String> {
     state.is_paused().then(|| state.message())
 }
 
-fn write_pause(who: &str, ttl_ms: Option<u64>) -> Result<PauseState, String> {
+fn write_pause(who: &str, ttl_ms: Option<u64>, reason: Option<&str>) -> Result<PauseState, String> {
     let path = sentinel_path();
     let paused_at = now_ms();
     let expires_at = ttl_ms.map(|ttl| paused_at.saturating_add(ttl));
-    let body = json!({"who": who, "paused_at": paused_at, "expires_at": expires_at});
+    let body =
+        json!({"who": who, "paused_at": paused_at, "expires_at": expires_at, "reason": reason});
     std::fs::create_dir_all(path.parent().unwrap_or_else(|| Path::new(".")))
         .map_err(|error| error.to_string())?;
     let tmp = path.with_file_name(format!("{SENTINEL_NAME}.tmp"));
@@ -308,6 +331,7 @@ fn write_pause(who: &str, ttl_ms: Option<u64>) -> Result<PauseState, String> {
         who: who.to_string(),
         paused_at,
         expires_at,
+        reason: reason.map(str::to_string),
     })
 }
 
@@ -319,9 +343,44 @@ fn resume_pause() -> Result<bool, String> {
     }
 }
 
-fn parse_pause_options(args: &[String]) -> Result<(String, Option<u64>), String> {
+struct PauseOptions {
+    who: String,
+    ttl_ms: Option<u64>,
+    reason: Option<String>,
+}
+
+/// Parse a `--ttl` duration like `30m`, `2h`, `1d`, `45s` into milliseconds.
+/// Ports `_parse_ttl_ms` from `cli/src/fno/loops.py`.
+fn parse_ttl(value: &str) -> Result<u64, String> {
+    let trimmed = value.trim();
+    let mut chars = trimmed.chars();
+    let Some(unit) = chars.next_back() else {
+        return Err(format!("invalid --ttl: {value:?}"));
+    };
+    let digits = chars.as_str().trim_end();
+    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("invalid --ttl: {value:?}"));
+    }
+    let mult: u64 = match unit.to_ascii_lowercase() {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        _ => return Err(format!("invalid --ttl: {value:?}")),
+    };
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| format!("invalid --ttl: {value:?}"))?;
+    if n == 0 {
+        return Err(format!("TTL must be > 0: {value:?}"));
+    }
+    Ok(n * mult * 1000)
+}
+
+fn parse_pause_options(args: &[String]) -> Result<PauseOptions, String> {
     let mut who = "operator".to_string();
     let mut ttl_ms = None;
+    let mut reason = None;
     let mut i = 0;
     while i < args.len() {
         if args[i] == "--who" {
@@ -347,50 +406,169 @@ fn parse_pause_options(args: &[String]) -> Result<(String, Option<u64>), String>
                     .parse::<u64>()
                     .map_err(|_| format!("invalid --ttl-ms: {inline}"))?,
             );
+        } else if args[i] == "--ttl" {
+            let Some(next) = args.get(i + 1) else {
+                return Err("--ttl requires a value".to_string());
+            };
+            ttl_ms = Some(parse_ttl(next)?);
+            i += 1;
+        } else if let Some(inline) = args[i].strip_prefix("--ttl=") {
+            ttl_ms = Some(parse_ttl(inline)?);
+        } else if args[i] == "--reason" {
+            let Some(next) = args.get(i + 1) else {
+                return Err("--reason requires a value".to_string());
+            };
+            reason = Some(next.clone());
+            i += 1;
+        } else if let Some(inline) = args[i].strip_prefix("--reason=") {
+            reason = Some(inline.to_string());
         } else if args[i] != "--json" {
             return Err(format!("unknown argument: {}", args[i]));
         }
         i += 1;
     }
-    Ok((who, ttl_ms))
+    Ok(PauseOptions {
+        who,
+        ttl_ms,
+        reason,
+    })
 }
 
-pub fn run_loops(args: &[String]) -> i32 {
+/// One `fno agents mail hold` call, bounded to 10s. The binary comes from
+/// `FNO_LOOPS_MAIL_BIN` (default `fno`) so a test can point it at a stub
+/// without editing PATH, which parallel tests share.
+enum MailLeg {
+    Ok(String),
+    NoIdentity,
+    Failed(String),
+}
+
+fn run_mail_hold(extra: &[&str]) -> MailLeg {
+    let binary = std::env::var("FNO_LOOPS_MAIL_BIN").unwrap_or_else(|_| "fno".to_string());
+    let mut cmd = std::process::Command::new(&binary);
+    cmd.args(["agents", "mail", "hold"]).args(extra);
+    match crate::bounded_cmd::output_with_timeout_result(cmd, 10) {
+        Ok(output) => match output.status.code() {
+            Some(0) => MailLeg::Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            Some(3) => MailLeg::NoIdentity,
+            _ => {
+                let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                detail.truncate(200);
+                MailLeg::Failed(detail)
+            }
+        },
+        Err(error) => {
+            let mut detail = error.to_string();
+            detail.truncate(200);
+            MailLeg::Failed(detail)
+        }
+    }
+}
+
+const NO_IDENTITY_DETAIL: &str = "no session identity - no mail to hold";
+
+/// Compute the `(action, output)` pair with no I/O beyond the sentinel file
+/// and the `fno agents mail hold` child. `Err(code)` is a bad-arguments or
+/// unknown-action early exit that never reaches the sentinel.
+fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
     let Some(action) = args.first().map(String::as_str) else {
         eprintln!("fno-agents loops: expected paused, pause-all, resume-all, or status");
-        return 2;
+        return Err(2);
     };
     let rest = &args[1..];
-    let json_out = rest.iter().any(|arg| arg == "--json");
     let output = match action {
         // `paused` answers the combined dispatch verdict (manual OR
         // fleet); `status` stays about the manual sentinel only.
         "paused" => paused_json(),
         "status" => read_state().json(),
         "pause-all" => {
-            let (who, ttl) = match parse_pause_options(rest) {
+            let options = match parse_pause_options(rest) {
                 Ok(options) => options,
                 Err(error) => {
                     eprintln!("fno-agents loops pause-all: {error}");
-                    return 2;
+                    return Err(2);
                 }
             };
-            match write_pause(&who, ttl) {
+            match write_pause(&options.who, options.ttl_ms, options.reason.as_deref()) {
                 Ok(state) => {
-                    json!({"paused": true, "state": "paused", "who": state.who(), "expires_at": state.json()["expires_at"]})
+                    let (mail_state, mail_detail) = match options.ttl_ms {
+                        Some(ttl_ms) => {
+                            let minutes = ((ttl_ms + 59_999) / 60_000).max(1);
+                            match run_mail_hold(&["--for", &minutes.to_string()]) {
+                                MailLeg::Ok(detail) => ("held", detail),
+                                MailLeg::NoIdentity => ("skipped", NO_IDENTITY_DETAIL.to_string()),
+                                MailLeg::Failed(detail) => ("failed", detail),
+                            }
+                        }
+                        None => (
+                            "skipped",
+                            "pass --ttl so the mail hold lifts by itself".to_string(),
+                        ),
+                    };
+                    json!({
+                        "paused": true,
+                        "state": "paused",
+                        "who": state.who(),
+                        "reason": options.reason,
+                        "expires_at": state.json()["expires_at"],
+                        "silenced": [
+                            {"leg": "loops", "state": "paused"},
+                            {"leg": "mail", "state": mail_state, "detail": mail_detail},
+                        ],
+                    })
                 }
                 Err(error) => json!({"error": error}),
             }
         }
         "resume-all" => match resume_pause() {
-            Ok(resumed) => json!({"resumed": resumed, "state": "clear", "paused": false}),
+            Ok(resumed) => {
+                let (mail_state, mail_detail) = match run_mail_hold(&["--off"]) {
+                    MailLeg::Ok(detail) => ("lifted", detail),
+                    MailLeg::NoIdentity => ("skipped", NO_IDENTITY_DETAIL.to_string()),
+                    MailLeg::Failed(detail) => ("failed", detail),
+                };
+                json!({
+                    "resumed": resumed,
+                    "state": "clear",
+                    "paused": false,
+                    "lifted": [
+                        {"leg": "loops", "state": "resumed"},
+                        {"leg": "mail", "state": mail_state, "detail": mail_detail},
+                    ],
+                })
+            }
             Err(error) => json!({"error": error}),
         },
         _ => {
             eprintln!("fno-agents loops: unknown action {action}");
-            return 2;
+            return Err(2);
         }
     };
+    Ok((action.to_string(), output))
+}
+
+/// Test-friendly variant that returns `(exit_code, output)` without printing.
+pub fn run_loops_capture(args: &[String]) -> (i32, Value) {
+    match decide_loops(args) {
+        Ok((_, output)) if output.get("error").is_some() => (1, output),
+        Ok((_, output)) => (0, output),
+        Err(code) => (code, json!({"error": "bad arguments"})),
+    }
+}
+
+/// Entry point called from `bin/client.rs` direct dispatch. Prints to
+/// stdout, returns exit code.
+pub fn run_loops(args: &[String]) -> i32 {
+    let json_out = args
+        .get(1..)
+        .unwrap_or(&[])
+        .iter()
+        .any(|arg| arg == "--json");
+    let (action, output) = match decide_loops(args) {
+        Ok(pair) => pair,
+        Err(code) => return code,
+    };
+    let action = action.as_str();
     if output.get("error").is_some() {
         eprintln!("fno-agents loops {action}: {}", output["error"]);
         return 1;
@@ -399,15 +577,49 @@ pub fn run_loops(args: &[String]) -> i32 {
         println!("{output}");
     } else {
         match action {
-            "pause-all" => println!("paused by {}", output["who"].as_str().unwrap_or("operator")),
-            "resume-all" => println!(
-                "{}",
-                if output["resumed"].as_bool().unwrap_or(false) {
-                    "resumed"
+            "pause-all" => {
+                let who = output["who"].as_str().unwrap_or("operator");
+                let reason = output["reason"].as_str();
+                let expires = output["expires_at"].as_u64();
+                let loops_line = match (reason, expires) {
+                    (Some(r), Some(e)) => format!("loops: paused by {who} ({r}), expires {e}"),
+                    (Some(r), None) => format!("loops: paused by {who} ({r})"),
+                    (None, Some(e)) => format!("loops: paused by {who}, expires {e}"),
+                    (None, None) => format!("loops: paused by {who}"),
+                };
+                let mail_leg = output["silenced"]
+                    .as_array()
+                    .and_then(|legs| legs.iter().find(|l| l["leg"] == "mail"));
+                let mail_state = mail_leg
+                    .and_then(|l| l["state"].as_str())
+                    .unwrap_or("skipped");
+                let mail_detail = mail_leg.and_then(|l| l["detail"].as_str()).unwrap_or("");
+                let mail_word = if mail_state == "failed" {
+                    "NOT held"
                 } else {
-                    "not paused"
+                    mail_state
+                };
+                let mail_line = format!("mail: {mail_word} - {mail_detail}");
+                if mail_state == "failed" {
+                    println!("{mail_line}");
+                    println!("{loops_line}");
+                } else {
+                    println!("{loops_line}");
+                    println!("{mail_line}");
                 }
-            ),
+            }
+            "resume-all" => {
+                let resumed = output["resumed"].as_bool().unwrap_or(false);
+                println!("loops: {}", if resumed { "resumed" } else { "not paused" });
+                if let Some(mail_leg) = output["lifted"]
+                    .as_array()
+                    .and_then(|legs| legs.iter().find(|l| l["leg"] == "mail"))
+                {
+                    let state = mail_leg["state"].as_str().unwrap_or("skipped");
+                    let detail = mail_leg["detail"].as_str().unwrap_or("");
+                    println!("mail: {state} - {detail}");
+                }
+            }
             _ => println!("{output}"),
         }
     }
@@ -475,6 +687,7 @@ mod tests {
             who: "op".into(),
             paused_at: 1,
             expires_at: None,
+            reason: None,
         };
         let clear_record = crate::fleet_incident::IncidentRecord {
             version: crate::fleet_incident::STATE_VERSION,
@@ -502,6 +715,7 @@ mod tests {
             who: "op".into(),
             paused_at: 1,
             expires_at: None,
+            reason: None,
         };
         let combined = combine(
             &paused,
