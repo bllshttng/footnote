@@ -1302,10 +1302,10 @@ mod tests {
     fn a_bug_node_gets_the_cause_pack_and_never_the_product_pack() {
         let dims = dimensions_for("bug");
         for name in CAUSE_DIMENSIONS {
-            assert!(dims.contains(name), "bug pack misses {name}");
+            assert!(dims.contains(&name), "bug pack misses {name}");
         }
         for name in SHARED_DIMENSIONS {
-            assert!(dims.contains(name), "bug pack misses shared {name}");
+            assert!(dims.contains(&name), "bug pack misses shared {name}");
         }
         assert!(!dims.contains(&"persona"));
         assert!(!dims.contains(&"customer_fit"));
@@ -1317,10 +1317,10 @@ mod tests {
         for kind in ["", "feature", "epic", "roadmap", "mystery"] {
             let dims = dimensions_for(kind);
             for name in PRODUCT_DIMENSIONS {
-                assert!(dims.contains(name), "{kind} pack misses {name}");
+                assert!(dims.contains(&name), "{kind} pack misses {name}");
             }
             for name in SHARED_DIMENSIONS {
-                assert!(dims.contains(name), "{kind} pack misses shared {name}");
+                assert!(dims.contains(&name), "{kind} pack misses shared {name}");
             }
             assert!(
                 !dims.iter().any(|d| CAUSE_DIMENSIONS.contains(d)),
@@ -1375,9 +1375,16 @@ mod tests {
         assert_eq!(kind, "bug");
         assert_eq!(rows.len(), 10, "{rows:?}");
         assert!(rows.iter().all(|r| r["dimension"] != "persona"));
+        // epic_fit/mission_fit/code_truth have no source in this fixture: a
+        // source gap spawns nobody, so 7 of the 10 rows spawn.
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 10, "one spawn per row: {seen:?}");
+        assert_eq!(seen.len(), 7, "source-gap rows spawn nothing: {seen:?}");
         assert!(!seen.iter().any(|n| n.ends_with("persona")));
+        for dim in ["epic_fit", "mission_fit", "code_truth"] {
+            let row = rows.iter().find(|r| r["dimension"] == dim).unwrap();
+            assert!(row["verdict"].is_null(), "{row}");
+            assert_eq!(row["reason"], format!("no {dim} source"));
+        }
     }
 
     #[test]
@@ -1425,7 +1432,17 @@ mod tests {
             .iter()
             .filter(|r| r["dimension"] != "persona")
             .collect();
-        assert!(others.iter().all(|r| r["verdict"] == "pass"));
+        // A row is a pass or a named gap (this fixture carries no PRODUCT.md
+        // and no epic/vision/citations, so the source readers gap out).
+        for r in others {
+            let verdict = r["verdict"].as_str();
+            assert!(
+                verdict == Some("pass")
+                    || (verdict.is_none()
+                        && r["reason"].as_str().is_some_and(|s| s.ends_with(" source"))),
+                "{r}"
+            );
+        }
     }
 
     #[test]
