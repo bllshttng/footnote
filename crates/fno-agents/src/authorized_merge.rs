@@ -298,7 +298,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
     // A merged or closed PR has no would-merge left. Every guard below protects
     // what WOULD merge, so answering "unreviewed" here sends a caller hunting a
     // defect that is blocking nothing.
-    if facts.state == "MERGED" || facts.state == "CLOSED" {
+    if is_terminal_state(&facts.state) {
         return Err(Outcome::Held {
             reason: format!(
                 "PR {} is already {}; nothing to merge",
@@ -388,9 +388,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                         Err(_) => {
                             if let Some(reason) = stale {
                                 return Err(Outcome::Held {
-                                    reason: format!(
-                                        "{reason}; remedy: fno do pr rebase {n}, then fno do pr wait {n} --until settled, then retry"
-                                    ),
+                                    reason: format!("{reason}; {}", stale_remedy(n)),
                                 });
                             }
                         }
@@ -401,8 +399,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                 if m != n {
                                     let stale_holder = match probes.pr_facts(cwd, Some(m)) {
                                         Ok(holder_facts) => {
-                                            holder_facts.state == "MERGED"
-                                                || holder_facts.state == "CLOSED"
+                                            is_terminal_state(&holder_facts.state)
                                                 || probes.checks_verdict(cwd, m) == "red"
                                         }
                                         // Unreadable holder PR keeps the slot;
@@ -438,9 +435,8 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                         // the TTL and starve the queue.
                                         return Err(Outcome::Held {
                                             reason: format!(
-                                                "{reason}; PR {n} holds the merge slot; remedy: \
-                                                 fno do pr rebase {n}, then fno do pr wait {n} \
-                                                 --until settled, then retry"
+                                                "{reason}; PR {n} holds the merge slot; {}",
+                                                stale_remedy(n)
                                             ),
                                         });
                                     }
@@ -452,19 +448,17 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                                 return Err(Outcome::Held {
                                                     reason: format!(
                                                         "{reason}; PR {n} now holds the merge \
-                                                         slot for {ttl}m; remedy: fno do pr \
-                                                         rebase {n}, then fno do pr wait {n} \
-                                                         --until settled, then retry",
-                                                        ttl = MERGE_SLOT_TTL_MINUTES
+                                                         slot for {ttl}m; {remedy}",
+                                                        ttl = MERGE_SLOT_TTL_MINUTES,
+                                                        remedy = stale_remedy(n)
                                                     ),
                                                 });
                                             }
                                             Err(_) => {
                                                 return Err(Outcome::Held {
                                                     reason: format!(
-                                                        "{reason}; remedy: fno do pr rebase {n}, \
-                                                         then fno do pr wait {n} --until settled, \
-                                                         then retry"
+                                                        "{reason}; {}",
+                                                        stale_remedy(n)
                                                     ),
                                                 });
                                             }
@@ -538,18 +532,17 @@ pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
         },
         Ok(authorized) => {
             let outcome = effect(probes, request, &authorized);
-            // A PR that never held the slot releases nothing (holder-matched).
-            // A durable `Failed` (branch protection, a conflict) will not
-            // resolve itself the way a pending check would, so it frees the
-            // slot exactly like a landed merge rather than starving the
-            // queue for the rest of the 60m lease.
-            if matches!(outcome, Outcome::Merged { .. } | Outcome::Failed { .. }) {
-                probes.release_slot(
-                    request.cwd.as_path(),
-                    &authorized.facts.base_ref,
-                    authorized.facts.number,
-                );
-            }
+            // decide() only reaches effect() once the slot's protective job
+            // (keep this PR's rebased CI from restaling while it waits) is
+            // already done, so every terminal effect() outcome - landed,
+            // durably Failed, HeadChanged, or Unknown - releases it here
+            // rather than starving the queue for the rest of the lease. A PR
+            // that never held the slot releases nothing (holder-matched).
+            probes.release_slot(
+                request.cwd.as_path(),
+                &authorized.facts.base_ref,
+                authorized.facts.number,
+            );
             outcome
         }
         Err(outcome) => outcome,
@@ -980,6 +973,17 @@ impl Probes for RealProbes {
         combined.push_str(&String::from_utf8_lossy(&out.stderr));
         Ok((out.status.success(), combined))
     }
+}
+
+/// A merged or closed PR has no would-merge left, for the PR under decision
+/// and for a merge-slot holder alike.
+fn is_terminal_state(state: &str) -> bool {
+    state == "MERGED" || state == "CLOSED"
+}
+
+/// The `ci_base_stale` remedy, shared by every `Held` reason that ends in it.
+fn stale_remedy(n: u64) -> String {
+    format!("remedy: fno do pr rebase {n}, then fno do pr wait {n} --until settled, then retry")
 }
 
 /// The merge-slot claim key for a base branch. Not a global-id prefix: the
@@ -1684,9 +1688,11 @@ mod tests {
 
     #[test]
     fn a_holder_whose_merge_attempt_fails_releases_its_own_slot() {
-        // A durable Failed effect (not mergeable, required review pending)
-        // will not resolve itself the way a pending check would, so it must
-        // not starve the queue for the rest of the 60m lease.
+        // run() releases unconditionally once effect() has run (Merged,
+        // Failed, HeadChanged, or Unknown alike): the slot's protective job
+        // is done the moment decide() clears, so nothing after that should
+        // starve the queue for the rest of the 60m lease. Failed exercises
+        // it here; the release call itself no longer branches on outcome.
         let fake = Fake {
             slot: RefCell::new(Some(7)),
             gh_ok: false,
