@@ -8,7 +8,7 @@ Three facts fix the design, all measured against the harness internals:
 
 - fno already has a better goal than the native `/goal` for kings. The in-session king arm reads BOARD truth. It blocks exit while actionable rows exist, exits `NoWork` on a clean board, and escalates every `NoProgress`. The native `/goal` evaluator reads only the transcript.
 - The king can inject native commands itself. `fno agents mail send '<command>' --to-self --raw` types the command verbatim, as from the operator. So the reign arms its own `/loop` and `/goal` at start, without waiting for a ritual.
-- `/loop 30m` fires unconditionally and keeps the process from idling out. That is what a tenured king needs. A Monitor fires only on change, which is what the one watcher needs.
+- `/loop 4h` fires as a heartbeat and keeps the process from idling out. A Monitor fires only on change, which is what the one watcher needs.
 
 ## The one arm, and the demand reads
 
@@ -70,4 +70,4 @@ Codex exposes none of `/goal`, `/loop`, or Monitor. A codex reign has no self-in
 
 ## Config keys
 
-`config.king` carries the injected texts, so an OSS user edits one place. `king.checkin_interval` defaults to `30m`. `king.checkin_text` and `king.goal_text` carry the prompts. The skill prints the defaults verbatim. A fresh install runs with no config.
+`config.king` carries the injected texts, so an OSS user edits one place. `king.checkin_interval` defaults to `4h`. The verdict window is three intervals and the hook missed-beat row is two intervals, so the defaults read 12h and 8h. `king.checkin_text` and `king.goal_text` carry the prompts. The skill prints the defaults verbatim. A fresh install runs with no config.

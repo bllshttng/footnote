@@ -13,7 +13,9 @@ KING_CHECKIN_TEXT = (
     "reign check-in. Run fno agents king checkin: it gathers the check-in "
     "readings, prints them, diffs the last beat, and journals reign_checkin. "
     "Then act on the printout per the reign skill. When nothing changed and "
-    "coverage is full, print 'no change' and stop."
+    "coverage is full, print 'no change' and stop. This beat is a heartbeat. "
+    "The heartbeat confirms that the settled-PR monitor still runs. If it does "
+    "not, the heartbeat re-arms it."
 )
 KING_GOAL_TEXT = (
     "reign goal. When every node in the crown scope reads done or "
@@ -49,9 +51,8 @@ class KingBlock(BaseModel):
     # silences it. An unknown value degrades to `refuse`, the deliberate
     # default.
     implementation_guard: str = "refuse"
-    # The reign skill carries these defaults verbatim; the keys are the one
-    # place an operator edits them.
-    checkin_interval: str = "30m"
+    # The monitor and stop hook are the beat; the cron proves they are alive.
+    checkin_interval: str = "4h"
     checkin_text: str = KING_CHECKIN_TEXT
     goal_text: str = KING_GOAL_TEXT
     # The verdict's compaction bound; default 3 because one crown
@@ -61,14 +62,14 @@ class KingBlock(BaseModel):
     @field_validator("checkin_interval", mode="before")
     @classmethod
     def _coerce_checkin_interval(cls, v: object) -> str:
-        """Fail-safe to 30m on anything but ``<digits>[smhd]``.
+        """Fail-safe to 4h on anything but ``<digits>[smhd]``.
 
         A bad value degrades, never raises: the interval arms a self-injected
         /loop, and a typo there must not kill a reign at config load.
         """
         if isinstance(v, str) and re.fullmatch(r"\d+[smhd]?", v.strip()):
             return v.strip()
-        return "30m"
+        return "4h"
 
     @field_validator("implementation_guard", mode="before")
     @classmethod
