@@ -53,7 +53,11 @@ def _emit_cancel_signal(path: Path, scope: str) -> None:
 
 @king_app.command("init")
 def init_cmd(
-    scope: str = typer.Option(..., "--scope", help="What this king was crowned over."),
+    scope_values: list[str] = typer.Option(
+        ...,
+        "--scope",
+        help="What this king was crowned over. Repeat for a set of epics.",
+    ),
     harness_session_id: str = typer.Option(
         "", "--harness-session-id", help="The king's own harness session id."
     ),
@@ -111,6 +115,7 @@ def init_cmd(
     # normalization.
     from fno.agents.crown import _canonical_members, canonical_scope, split_scope
 
+    scope = canonical_scope(scope_values)
     members = split_scope(scope)
     if not members:
         typer.echo(
@@ -264,13 +269,20 @@ def done_cmd(
     from fno.agents.crown import (
         AGENT_UNREGISTERED,
         REGISTRY_UNREADABLE,
+        _canonical_members,
         calling_agent_row,
+        canonical_scope,
+        crown_answers_to,
         emit_crown_vacated,
     )
     from fno.agents.registry import TERMINAL_STATUSES as _TERMINAL_ROW_STATUSES
-    from fno.agents.registry import update_registry
+    from fno.agents.registry import load_registry, update_registry
     from fno.king.state import king_manifest_path, parse_manifest, remove_king_manifest
 
+    if scope.strip():
+        # Rows store the canonical form, so the compares below must not
+        # depend on member order or aliases.
+        scope = canonical_scope(list(_canonical_members(scope)))
     caller = calling_agent_row()
     if caller is REGISTRY_UNREADABLE or caller is AGENT_UNREGISTERED:
         typer.echo(
@@ -290,6 +302,20 @@ def done_cmd(
                 err=True,
             )
             raise typer.Exit(2)
+        # One member of a set crown is not a crown: vacating nothing and
+        # clearing no manifest would still print a false expiry receipt.
+        live = [row for row in load_registry() if row.status not in _TERMINAL_ROW_STATUSES]
+        if not any(row.crown_scope == scope for row in live):
+            for row in live:
+                if crown_answers_to(row.crown_scope, scope):
+                    typer.echo(
+                        f"king: refusing to expire {scope!r}: it is one member of "
+                        f"{row.name}'s crown over {row.crown_scope!r}. Expire the "
+                        f"whole crown with --scope {row.crown_scope}, or narrow it "
+                        f"with fno agents crown {row.name} --scope <the remaining epics>.",
+                        err=True,
+                    )
+                    raise typer.Exit(2)
         # A named scope may still have a LIVE king; expiring only the manifest
         # would disarm its stop-hook floor while the row reads crowned. The
         # vacate closure below resolves the holder under the lock; no live

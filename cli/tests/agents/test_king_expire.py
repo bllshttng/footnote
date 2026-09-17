@@ -222,6 +222,34 @@ def test_an_attended_human_expires_a_named_scope(court, monkeypatch) -> None:
     assert not manifest.exists()
 
 
+def test_an_attended_expiry_of_one_set_member_refuses(court, monkeypatch) -> None:
+    """A member is not the crown: vacating nothing while printing an expiry
+    receipt is the false receipt this refusal closes."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("king-set", "set-session", scope="x-119e,x-4d9b")
+    manifest = _manifest(court, scope="x-119e,x-4d9b", session="set-session")
+
+    result = _done("--scope", "x-4d9b")
+
+    assert result.exit_code == 2
+    assert "x-119e,x-4d9b" in result.output and "king-set" in result.output
+    assert _row("king-set").crown_scope == "x-119e,x-4d9b"
+    assert manifest.exists()
+    assert not [e for e in _vacates() if e.get("kind") == "agent_crown_vacated"]
+
+
+def test_an_attended_expiry_of_a_reordered_set_vacates_it(court, monkeypatch) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    _seat("king-set", "set-session", scope="x-119e,x-4d9b")
+    manifest = _manifest(court, scope="x-119e,x-4d9b", session="set-session")
+
+    result = _done("--scope", "x-4d9b,x-119e")
+
+    assert result.exit_code == 0, result.output
+    assert _row("king-set").crown_scope is None
+    assert not manifest.exists()
+
+
 def test_an_agent_with_no_crown_has_nothing_to_expire(court) -> None:
     _seat("plain-worker", CALLER_SESSION, scope=None)
 

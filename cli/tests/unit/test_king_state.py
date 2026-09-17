@@ -473,7 +473,7 @@ def test_an_unparseable_window_is_refused():
 # --- the two refusals that make a crown real -------------------------------
 
 
-def _init(monkeypatch, tmp_path, *, enabled=True, harness_id="sess-1"):
+def _init(monkeypatch, tmp_path, *, enabled=True, harness_id="sess-1", scopes=("drain",)):
     """Run `fno agents king init` in tmp_path and return (exit_code, stderr)."""
     import fno.king.state as state
     from typer.testing import CliRunner
@@ -485,7 +485,8 @@ def _init(monkeypatch, tmp_path, *, enabled=True, harness_id="sess-1"):
     (tmp_path / ".fno").mkdir(exist_ok=True)
     result = CliRunner().invoke(
         king_app,
-        ["init", "--scope", "drain", "--harness-session-id", harness_id],
+        ["init", *[arg for scope in scopes for arg in ("--scope", scope)],
+         "--harness-session-id", harness_id],
     )
     return result.exit_code, result.output
 
@@ -528,3 +529,13 @@ def test_an_enabled_named_king_is_crowned(monkeypatch, tmp_path):
     manifest = state.king_manifest_path("drain")
     assert manifest.exists()
     assert "harness_session_id: sess-1" in manifest.read_text()
+
+
+def test_a_repeated_scope_crowns_one_epic_set(monkeypatch, tmp_path):
+    code, out = _init(monkeypatch, tmp_path, scopes=("x-4d9b", "x-119e"))
+
+    assert code == 0, out
+    import fno.king.state as state
+
+    assert state.king_manifest_path("x-119e,x-4d9b").exists()
+    assert "scope:  x-119e,x-4d9b" in out
