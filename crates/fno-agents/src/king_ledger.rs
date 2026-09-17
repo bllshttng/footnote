@@ -921,14 +921,13 @@ pub fn run_reign_ledger(args: &[String]) -> i32 {
             return 1;
         }
     };
-    let entries: Vec<Value> =
-        match crate::graph_store::read_defaulted_opts(&graph_path, false, false) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("fno-agents reign-ledger: graph unreadable: {e}");
-                return 1;
-            }
-        };
+    let entries: Vec<Value> = match crate::graph_store::read_rows(&graph_path) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("fno-agents reign-ledger: graph unreadable: {e}");
+            return 1;
+        }
+    };
     let reload = reload_secs(crate::agents_config::config_lookup(
         &std::env::current_dir().unwrap_or_default(),
         &["backlog", "page_reload_s"],

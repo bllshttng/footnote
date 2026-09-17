@@ -16,8 +16,8 @@ use crate::backlog::model::Priority;
 use crate::backlog_ready;
 use crate::graph_get::{default_graph_path, field_eq};
 use crate::graph_store::{
-    self, entry_id, now_isoformat, read_defaulted, recompute_statuses_with_plan_rungs, MutateInput,
-    StoreError, DEFAULT_LOCK_TIMEOUT, TERMINAL_RUNGS,
+    self, entry_id, now_isoformat, recompute_statuses_with_plan_rungs, MutateInput, StoreError,
+    DEFAULT_LOCK_TIMEOUT, TERMINAL_RUNGS,
 };
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -833,7 +833,7 @@ pub fn apply_with_timeout(
     for attempt in 0..ATTEMPTS {
         let version =
             graph_store::base_version(graph).map_err(|e| PatchRefusal::error(e.to_string()))?;
-        let rows = read_defaulted(graph, false)
+        let rows = graph_store::read_rows(graph)
             .map_err(|e| PatchRefusal::error(format!("graph read failed: {e}")))?;
         let planned = plan(rows, req)?;
         if planned.changes.is_empty() {
@@ -1144,7 +1144,7 @@ pub fn run_update(args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_store::CANONICAL_FIELD_ORDER;
+    use crate::graph_store::{read_defaulted, CANONICAL_FIELD_ORDER};
     use std::io::Write;
 
     #[test]

@@ -33,7 +33,7 @@ pub fn run(op: &str, payload: &Value) -> String {
         .and_then(Value::as_str)
         .map(PathBuf::from)
         .unwrap_or_else(default_graph_path);
-    let entries = match graph_store::read_defaulted(&graph, false) {
+    let entries = match graph_store::read_rows(&graph) {
         Ok(e) => e,
         Err(e) => {
             return receipt("refused", 5, format!("graph read failed: {e}")).to_string();
