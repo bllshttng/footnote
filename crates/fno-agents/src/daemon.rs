@@ -8333,10 +8333,9 @@ fn fill_random(buf: &mut [u8]) {
 /// The interval-gated maintenance sweeps (stale questions, park records),
 /// split out for the file budget; each is stamp-gated and pause-aware.
 pub(crate) mod sweeps;
-pub(crate) use sweeps::{
-    park_sweep, parse_stale_sweep, stale_sweep, StaleSweepReport, PARK_SWEEP_INTERVAL_SECS,
-    STALE_SWEEP_INTERVAL_SECS,
-};
+pub(crate) use sweeps::{park_sweep, stale_sweep};
+#[cfg(test)]
+pub(crate) use sweeps::{parse_stale_sweep, PARK_SWEEP_INTERVAL_SECS, STALE_SWEEP_INTERVAL_SECS};
 
 #[cfg(test)]
 #[path = "daemon_tests.rs"]
