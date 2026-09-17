@@ -692,9 +692,8 @@ pub fn stale_sweep(
     // untouched, so a due sweep stays due - because the idle tick reaches
     // this arm every ~5s and an unpaced row would grow events.jsonl by
     // ~17k rows/day for the length of the incident. On clear the next due tick
-    // runs normally. Serve-only liveness is NOT behind this gate - its call
-    // site sits before this arm and stays eligible while dispatch polls hold
-    // (AC3-LIVENESS).
+    // runs normally. Serve-only liveness is NOT behind this gate - its call site
+    // sits before this arm and stays eligible while dispatch polls hold (AC3).
     let pause = crate::loops_pause::dispatch_pause();
     if pause.is_paused() {
         let skip_stamp = home.root().join("stale-escalate.skipstamp");
