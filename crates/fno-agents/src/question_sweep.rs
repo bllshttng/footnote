@@ -112,18 +112,21 @@ pub fn question_sweep_in(
                     "source": "daemon",
                     "data": {
                         "question_id": qid,
-                        "answer": "node closed; nothing left to answer",
+                        // Empty answer, deliberately: a non-empty answer arms
+                        // the unrecorded-decision gate against the asking
+                        // session for a decision nobody made.
+                        "answer": "",
                         "reason": "node-closed",
                         "closed_by": "question-sweep",
                     },
                 }),
             );
         }
+        let _ = emitter.emit(
+            "question_sweep",
+            &json!({"closed": ids.len(), "outcome": "closed", "ids": ids}),
+        );
     }
-    let _ = emitter.emit(
-        "question_sweep",
-        &json!({"closed": ids.len(), "outcome": "closed", "ids": ids}),
-    );
     let _ = std::fs::write(&stamp, now.to_string());
     if ids.is_empty() {
         0
