@@ -9562,17 +9562,13 @@ fn focus_only_push_layout_preserves_pending_pane_frames() {
 /// prunes the client, breaking every later `Command::FocusPane` (no
 /// client view to act on).
 fn seen_test_core() -> (Core, u64, u64, u64, mpsc::Receiver<ServerMsg>) {
-    // attach() below runs a once-per-server restore_squads() ->
-    // squad_store::load(), which defaults to the real $HOME/.fno/squads.json.
-    // A dev box with a live store imports its squads here (an extra $HOME
-    // pane, a squad-id collision), making squad/row-count asserts pass on a
-    // fresh-home CI runner but fail locally. Point the store at a per-thread
-    // path that does not exist, so load() reads it as an empty store and
-    // restore is a no-op. We deliberately do NOT create the dir: a missing
-    // file already reads empty, and the store's own writer create_dir_all's
-    // its parent, so leaving nothing on disk means nothing to clean up.
-    // TEST_PATH is thread-local and one test == one thread, so it never
-    // leaks across tests and needs no teardown.
+    // attach() runs restore_squads() -> squad_store::load(), which defaults
+    // to the real $HOME/.fno/squads.json; a dev box with a live store then
+    // imports its squads and breaks squad/row-count asserts that pass on a
+    // fresh-home CI runner. Point the store at a nonexistent per-thread path
+    // (missing file reads as an empty store; the writer creates its parent
+    // only when a real write happens) and restore becomes a no-op. TEST_PATH
+    // is thread-local and one test == one thread: no leaks, no teardown.
     let scratch = std::env::temp_dir().join(format!(
         "fno-seen-store-{}-{:?}",
         std::process::id(),
