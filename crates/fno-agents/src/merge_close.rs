@@ -42,11 +42,20 @@ fn short(text: &str) -> String {
     text.chars().take(200).collect()
 }
 
-fn unreadable() -> CloseOutcome {
+// `unreadable reconcile json` alone was a dead end (x-2e54): the row named
+// the symptom but threw away the one thing a reader needs to diagnose it -
+// what the verb actually printed. Carry a bounded snippet instead.
+fn unreadable(stdout: &str) -> CloseOutcome {
+    let sample = short(stdout.trim());
+    let sample = if sample.is_empty() {
+        "<empty>"
+    } else {
+        &sample
+    };
     CloseOutcome {
         acted: 0,
         skip_reason: Some("error".to_string()),
-        detail: "unreadable reconcile json".to_string(),
+        detail: format!("unreadable reconcile json: {sample}"),
     }
 }
 
@@ -67,7 +76,7 @@ pub fn outcome_from_reconcile(run: Result<String, String>) -> CloseOutcome {
         }
     };
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
-        return unreadable();
+        return unreadable(&stdout);
     };
     if parsed.get("held").and_then(serde_json::Value::as_bool) == Some(true) {
         // The single-flight receipt: another reconcile owns the scope, and a
@@ -87,7 +96,7 @@ pub fn outcome_from_reconcile(run: Result<String, String>) -> CloseOutcome {
         };
     }
     let Some(closed) = parsed.get("closed").and_then(serde_json::Value::as_array) else {
-        return unreadable();
+        return unreadable(&stdout);
     };
     let count_of = |key: &str| {
         parsed
@@ -246,12 +255,29 @@ mod tests {
 
     #[test]
     fn stdout_without_a_closed_array_is_an_error_never_a_zero() {
-        for stdout in ["", "some other output\n", "{\"held\": false}", "[1, 2, 3]"] {
+        for stdout in ["some other output\n", "{\"held\": false}", "[1, 2, 3]"] {
             let o = outcome_from_reconcile(Ok(stdout.to_string()));
             assert_eq!(o.acted, 0, "stdout {stdout:?}");
             assert_eq!(o.skip_reason.as_deref(), Some("error"), "stdout {stdout:?}");
-            assert_eq!(o.detail, "unreadable reconcile json", "stdout {stdout:?}");
+            assert!(
+                o.detail.starts_with("unreadable reconcile json: "),
+                "detail {:?} for stdout {stdout:?}",
+                o.detail
+            );
+            assert!(
+                o.detail.contains(stdout.trim()),
+                "detail {:?} should carry the raw stdout for {stdout:?}",
+                o.detail
+            );
         }
+    }
+
+    #[test]
+    fn unreadable_empty_stdout_names_itself_empty_not_blank() {
+        let o = outcome_from_reconcile(Ok(String::new()));
+        assert_eq!(o.acted, 0);
+        assert_eq!(o.skip_reason.as_deref(), Some("error"));
+        assert_eq!(o.detail, "unreadable reconcile json: <empty>");
     }
 
     #[test]
