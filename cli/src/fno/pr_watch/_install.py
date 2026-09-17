@@ -976,18 +976,16 @@ def _parked_block(events_path: Optional[Path], state_path: Optional[Path]) -> No
     from fno.pr_watch._state import pr_watcher_state_path
     from fno.rust_binary import resolve_binary
 
+    try:
+        from fno.paths import state_dir
+
+        fno_state = state_dir()
+    except Exception:
+        fno_state = Path.home() / ".fno"
     base = Path(state_path) if state_path is not None else pr_watcher_state_path()
     if events_path is None:
-        try:
-            from fno.paths import state_dir
-
-            events_path = state_dir() / "events.jsonl"
-        except Exception:
-            events_path = Path.home() / ".fno" / "events.jsonl"
-    try:
-        err_log = Path(state_dir() / "pr-watcher.err.log")
-    except Exception:
-        err_log = Path.home() / ".fno" / "pr-watcher.err.log"
+        events_path = fno_state / "events.jsonl"
+    err_log = fno_state / "pr-watcher.err.log"
 
     binary = resolve_binary()
     if binary is None:

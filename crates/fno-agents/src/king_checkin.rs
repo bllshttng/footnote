@@ -653,8 +653,8 @@ fn r_drain(ctx: &Ctx) -> Result<Value, String> {
 
 /// The parked-PR board fact: open parks with the remedy verb, read
 /// in-process from the one owner so a second reader of the store shape can
-/// never drift. A failed store read is a failed reading, never a silent
-/// "parked: none".
+/// never drift. An unreadable store reads empty, the same corrupt-reads-
+/// empty posture the Python watcher store has always had.
 fn r_parked() -> Result<Value, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cwd unreadable: {e}"))?;
     let ctx = crate::pr_park::Ctx::live(&cwd, crate::pr_park::Paths::from_home());

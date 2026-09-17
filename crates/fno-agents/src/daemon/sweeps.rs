@@ -181,7 +181,12 @@ pub fn sweep_all_roots(home: &AgentsHome) -> Option<(usize, usize, usize)> {
         if ctx.slug.is_empty() {
             continue;
         }
-        let r = pr_park::sweep(&ctx).ok()?;
+        // One repo's store failure must not starve the others: skip it and
+        // keep sweeping, or one read-only checkout parks the whole fleet's
+        // board behind it.
+        let Ok(r) = pr_park::sweep(&ctx) else {
+            continue;
+        };
         unparked += r.unparked;
         handled += r.handled;
         total += r.total;
