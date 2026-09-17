@@ -73,6 +73,11 @@ pub fn wait_for_path(path: &Path, budget: std::time::Duration) {
     panic!("path never appeared within {budget:?}: {}", path.display());
 }
 
+/// Budget for every wait on the startup sweep's outcome event. One value for
+/// the class: a per-site bump leaves the siblings flaking. A wait returns as
+/// soon as the event lands, so a generous budget costs a green run nothing.
+pub const RECONCILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Wait until the daemon's event log carries `needle`.
 ///
 /// The startup reconcile sweep runs CONCURRENTLY with the accept loop, so a

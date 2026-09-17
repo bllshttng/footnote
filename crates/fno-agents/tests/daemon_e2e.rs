@@ -373,7 +373,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
     // The sweep now runs concurrently with the accept loop (x-ef7f), so a served
     // RPC no longer implies it has landed. This test is about WHAT the sweep
     // settles, not when, so wait for the sweep's own event before reading.
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
 
     let resp = call(
         &home,
@@ -440,7 +440,7 @@ async fn startup_reconcile_failure_degrades_to_serving() {
     let mut daemon = start_daemon_env(&home, &[("FNO_AGENTS_FAIL_STARTUP_RECONCILE", "1")]);
     // Concurrent sweep (x-ef7f): wait for the failure to land before asserting
     // on what it did or did not write.
-    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", common::RECONCILE_BUDGET);
 
     // The daemon still serves despite the failed startup sweep (did not abort).
     let resp = call(
@@ -543,7 +543,7 @@ async fn cold_start_serves_while_the_startup_sweep_is_still_running() {
          runs; took {served_at:?}"
     );
 
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(60));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
     let done_at = t0.elapsed();
     // The sweep cannot finish before its own delay elapses, so this reading
     // proves it was still running when the response came back. Both readings
@@ -654,7 +654,7 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
 
     let mut incumbent = start_daemon(&home);
     let incumbent_pid = incumbent.id();
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
     // The pid-confirmed termination needs the incumbent REAPED, not only
     // dead: this test process is the parent, so an unwaited child lingers as
     // a zombie and kill(pid, 0) answers alive through the whole grace. A
@@ -728,7 +728,7 @@ async fn restart_leaves_exactly_one_daemon(rows: usize) {
         "the restarted daemon rejected the positive probe: {:?}",
         post_restart.error()
     );
-    wait_for_successor_reconcile_order(&home, outcome.new_pid, Duration::from_secs(10));
+    wait_for_successor_reconcile_order(&home, outcome.new_pid, common::RECONCILE_BUDGET);
     println!(
         "daemon_restart_served_during_sweep successor_pid={} rows={} answered={} teardown_casualties={}",
         outcome.new_pid, rows, answered, teardown_casualties
@@ -978,7 +978,7 @@ fn a_daemon_restart_over_a_loss_shaped_registry_loses_no_rows() {
     seed_loss_shaped_registry(&home);
 
     let child = start_daemon(&home);
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
     drop(child);
 
     let reg = state::load_registry(&home.registry_json()).unwrap();
@@ -1020,7 +1020,7 @@ fn a_future_schema_registry_is_refused_not_dropped_on_restart() {
     // The sweep reads the store, computes changes, then refuses the write.
     // The meta-event substitution still names the intended kind, so the
     // substring matches either the plain or the capped form.
-    common::wait_for_event(&home, "startup_reconcile_failed", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_failed", common::RECONCILE_BUDGET);
     drop(child);
 
     assert_eq!(
@@ -2057,7 +2057,7 @@ async fn registry_list_refuses_over_a_broken_registered_lane() {
     // the suite runs fast enough to reach the write before the sweep. Its
     // sibling `registry_lookup_distinguishes_unreadable_from_absent` already
     // waits for this event, which is why the same shape is stable there.
-    common::wait_for_event(&home, "startup_reconcile_done", Duration::from_secs(30));
+    common::wait_for_event(&home, "startup_reconcile_done", common::RECONCILE_BUDGET);
 
     // Break the registered lane out from under the running daemon.
     write_divergent_registry(&home);
@@ -2126,7 +2126,7 @@ async fn registry_lookup_distinguishes_unreadable_from_absent() {
     // OWN completion marker, and a marker that never arrives FAILS the test
     // instead of silently proceeding - a silent timeout here converts "did
     // not wait" into "lookup succeeded".
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + common::RECONCILE_BUDGET;
     loop {
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
         if events.contains("startup_reconcile_done") || events.contains("startup_reconcile_failed")
@@ -2430,7 +2430,7 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
 
     // The recovery pass runs asynchronously after startup; poll the registry
     // until the row settles (or the bound expires).
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + common::RECONCILE_BUDGET;
     let status = loop {
         let reg = state::load_registry(&home.registry_json()).unwrap();
         let Some(entry) = reg.find("thread-gone") else {
