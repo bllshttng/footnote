@@ -14,7 +14,6 @@ from typing import Any, Optional
 from fno.agents.dispatch import DispatchAskError
 from fno.agents.harnesses._acp import (
     AcpStdioSession,
-    error_detail as _acp_error_detail,
     initialize_params,  # noqa: F401  (re-exported for the contract test)
     iter_jsonl,  # noqa: F401  (re-exported for the contract test)
 )
@@ -130,21 +129,12 @@ class GrokStdioSession(AcpStdioSession):
     def _request_timeout(self) -> float:
         return GROK_REQUEST_TIMEOUT_S
 
-    def session_new(self) -> str:
-        response = self.request("session/new", session_new_params(self.cwd))
-        error = response.get("error")
-        if isinstance(error, dict):
-            detail = _acp_error_detail(error, " ")
-            # Same predicate require_authenticated uses. The old exact match on
-            # "Authentication required" dropped every other phrasing through to
-            # result(), which raises a bare RuntimeError and loses exit 13.
-            if is_auth_error(detail):
-                if self.stderr_text:
-                    detail = f"{detail}; stderr: {self.stderr_text}"
-                raise GrokAuthenticationRequired(detail)
-        result = self.result(response, "session/new")
-        session_id = result.get("sessionId")
-        if not isinstance(session_id, str) or not session_id:
-            raise RuntimeError("grok ACP session/new returned no positive sessionId marker")
-        self.session_id = session_id
-        return session_id
+    def _is_auth_error(self, detail: str) -> bool:
+        # Same predicate require_authenticated uses, so a grok that says "Not
+        # authenticated" keeps exit 13 on every verb.
+        return is_auth_error(detail)
+
+    def _auth_refusal(self, detail: str) -> DispatchAskError:
+        if self.stderr_text:
+            detail = f"{detail}; stderr: {self.stderr_text}"
+        return GrokAuthenticationRequired(detail)
