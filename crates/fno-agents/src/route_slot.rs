@@ -4271,7 +4271,7 @@ mod tests {
         assert_eq!(sessions[0]["view_records"].as_array().unwrap().len(), 1);
     }
 
-    // --- computed capacity + the refresh gate (x-1c38) -----------------------
+    // --- computed capacity + the refresh gate --------------------------------
 
     use crate::claims;
 
