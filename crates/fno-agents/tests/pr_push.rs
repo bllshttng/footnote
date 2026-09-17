@@ -76,7 +76,9 @@ D="$(dirname "$0")"
 echo "gh $*" >> "$D/gh.log"
 for a in "$@"; do case "$a" in
   */check-runs)
-    if [ -f "$D/pending" ]; then
+    if [ -f "$D/no-runs" ]; then
+      echo '{"check_runs":[]}'
+    elif [ -f "$D/pending" ]; then
       echo '{"check_runs":[{"name":"guards","status":"in_progress","conclusion":null,"html_url":"https://github.com/o/r/actions/runs/7/job/42"}]}'
     else
       echo '{"check_runs":[{"name":"guards","status":"completed","conclusion":"failure","html_url":"https://github.com/o/r/actions/runs/7/job/42"}]}'
@@ -255,4 +257,47 @@ fn a_first_push_sets_the_upstream() {
         "{:?}",
         log_of(&d, "git.log")
     );
+}
+
+#[test]
+fn a_second_push_inside_the_registration_window_is_refused() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("no-runs"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 0, "first push lands: {out}\n{err}");
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 2, "the window holds: {out}\n{err}");
+    assert!(
+        err.contains("may not be registered yet"),
+        "the refusal names the window: {err}"
+    );
+    assert_eq!(
+        log_of(&d, "git.log").matches("git push").count(),
+        1,
+        "exactly one push across both runs"
+    );
+}
+
+#[test]
+fn a_recent_stamp_with_registered_settled_rows_still_pushes() {
+    let (_t, d) = tmpdir();
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    // The stamp is now young, but the rows are registered and settled: the
+    // live read outranks the clock.
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 0, "settled rows outrank the stamp: {out}\n{err}");
+    assert_eq!(log_of(&d, "git.log").matches("git push").count(), 2);
+}
+
+#[test]
+fn force_ci_cancel_pushes_through_the_registration_window() {
+    let (_t, d) = tmpdir();
+    std::fs::write(d.join("no-runs"), "").unwrap();
+    let (code, out, err) = run_verb(&d, &[]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    let (code, out, err) = run_verb(&d, &["--force-ci-cancel"]);
+    assert_eq!(code, 0, "{out}\n{err}");
+    assert!(log_of(&d, "fno.log").contains("push_debounce_bypass"));
+    assert_eq!(log_of(&d, "git.log").matches("git push").count(), 2);
 }

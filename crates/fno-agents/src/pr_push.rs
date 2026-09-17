@@ -36,6 +36,10 @@ const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3600);
 /// to rebase.
 const PROTECTED: [&str; 4] = ["main", "master", "develop", "dev"];
 
+/// The hook's own debounce window (`hooks/git-protection.py`
+/// PUSH_DEBOUNCE_SECONDS). One threshold, two enforcers.
+const PUSH_DEBOUNCE_SECS: u64 = 120;
+
 // ── shared push layer (moved here from heal.rs) ─────────────────────────────
 
 /// A bounded external read with a caller label for the diagnostic.
@@ -287,6 +291,23 @@ pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
     if !ctx.force && !head.is_empty() {
         match crate::pr_push::read_checks_rows(&ctx.gh_bin, &ctx.cwd, head) {
             Ok(rows) => {
+                // Empty rows read two ways: nothing was ever queued, or
+                // GitHub has not registered the last push's run yet. The
+                // stamp clock covers the second window, the same instrument
+                // and threshold the hook uses for hand pushes; registered
+                // and settled rows always outrank the clock.
+                if rows.is_empty() {
+                    if let Some(age) = stamp_age_secs(ctx) {
+                        if age < PUSH_DEBOUNCE_SECS {
+                            return PushOutcome::InFlight {
+                                check: format!(
+                                    "last push {age}s ago, its run may not be registered yet"
+                                ),
+                                job: None,
+                            };
+                        }
+                    }
+                }
                 let arr = Value::Array(rows);
                 if any_pending(&arr) {
                     let row = crate::check_supersession::latest_per_name(&arr)
@@ -375,12 +396,42 @@ fn stamp_push(ctx: &PushCtx) {
             "_",
         )
     })
+    .map(|b| if b.is_empty() { "HEAD".to_string() } else { b })
     .unwrap_or_else(|_| "HEAD".to_string());
     let dir = &ctx.stamps_dir;
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
     let _ = std::fs::write(dir.join(format!("{branch}.stamp")), b"");
+}
+
+/// Age in seconds of this branch's last-push stamp, the same file the hook
+/// writes and reads. An absent or unreadable stamp answers None: the clock
+/// is a proxy and, like the hook's, it fails open.
+fn stamp_age_secs(ctx: &PushCtx) -> Option<u64> {
+    let branch = run_labeled(
+        "pr-push",
+        &ctx.git_bin,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        &ctx.cwd,
+        READ_TIMEOUT,
+    )
+    .map(|(_, out, _)| out.trim().to_string())
+    .ok()?;
+    let safe: String = branch
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let stamp = std::fs::metadata(ctx.stamps_dir.join(format!("{safe}.stamp"))).ok()?;
+    let modified = stamp.modified().ok()?;
+    let age = std::time::SystemTime::now().duration_since(modified).ok()?;
+    Some(age.as_secs())
 }
 
 /// The `push_debounce_bypass` journal row, one per --force-ci-cancel.
