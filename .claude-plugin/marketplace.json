@@ -15,8 +15,7 @@
       "description": "Set a target and walk away. Say f[no] to mostly done.",
       "version": "0.3.2",
       "category": "workflow",
-      "tags": ["workflow", "tdd", "planning", "code-review", "autonomous", "target"],
-      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" }
+      "tags": ["workflow", "tdd", "planning", "code-review", "autonomous", "target"]
     }
   ]
 }

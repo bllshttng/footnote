@@ -22,7 +22,7 @@ The **crown** is that authority itself, three levels deep at most, and a session
 
 ## Install
 
-**Agent integration** - the `/fno:*` commands and the walk-away workflow. Each AI CLI installs its own integration; the Claude plugin also bundles the `fno` CLI (its postinstall puts it on your PATH in a new session), so you don't need a separate CLI install:
+**Agent integration** - the `/fno:*` commands and the walk-away workflow. Each AI CLI installs its own integration; the Claude plugin also bundles the `fno` CLI (its first session runs the installer in the background, so `fno` is on your PATH from the next session), so you don't need a separate CLI install:
 
 ```
 Claude Code:   /plugin marketplace add bllshttng/footnote

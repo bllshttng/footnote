@@ -717,9 +717,7 @@ This is Spec 1 of 4. Specs 2-4 extend the substrate with automation:
 
 **`fno`: command not found**
 
-`fno` is installed as a script by the `footnote` package. Run via
-`uv run fno ...` from the `cli/` directory, or install the package into your
-virtualenv with `uv pip install -e cli/`.
+To install `fno`, follow [Verify it worked](getting-started.md#verify-it-worked). In a dev checkout, run `uv run fno ...` from the `cli/` directory, or install the package into your virtualenv with `uv pip install -e cli/`.
 
 **OAuth refresh failing through the symlink**
 

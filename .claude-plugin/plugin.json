@@ -4,6 +4,5 @@
   "description": "Set a target. Say f[no] to mostly done.",
   "author": {"name": "Jason Noah Choi"},
   "license": "Apache-2.0",
-  "keywords": ["workflow", "tdd", "planning", "code-review", "autonomous", "target"],
-  "postInstall": ".claude-plugin/postinstall.sh"
+  "keywords": ["workflow", "tdd", "planning", "code-review", "autonomous", "target"]
 }
