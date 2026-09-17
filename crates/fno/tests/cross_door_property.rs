@@ -439,6 +439,18 @@ exit 2
         "door 1: registry still holds the row"
     );
     // Door 2: the roster sweep. The agent list drops the roster-only row.
+    // The sweep retires an unowned session only on an fno-ownership marker,
+    // so stage the receipt an earlier retirement of U2 would have left - the
+    // leaked-retirement class this door exists to drain.
+    let receipts = fleet.agents_home().join("reap-receipts");
+    std::fs::create_dir_all(&receipts).unwrap();
+    std::fs::write(
+        receipts.join(format!("claude-{U2}.json")),
+        format!(
+            "{{\"row_name\":\"roster-only\",\"short_id\":\"{U2}\",\"harness\":\"claude\",\"harness_session_id\":\"{U2}\",\"reaped_at\":\"2026-09-16T00:00:00Z\"}}"
+        ),
+    )
+    .unwrap();
     let d2 = fleet.run(&shim_dir, &bin, &["roster-reap", "--apply"]);
     println!("door 2 (roster-reap): {d2}");
     let c2 = fleet.dir.join("claude-c2.json");
