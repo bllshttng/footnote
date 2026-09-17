@@ -44,17 +44,18 @@ def _rust_cross_tree_inputs() -> set[str]:
 
 
 def _cargo_job_step_inputs() -> set[str]:
-    job = _workflow()["jobs"]["test"]
-    run_blocks = [step.get("run", "") for step in job["steps"]]
+    jobs = _workflow()["jobs"]
     inputs: set[str] = set()
-    for run in run_blocks:
-        for block in re.findall(r"git diff --exit-code --(?P<paths>.*?)(?:\n\n|\Z)", run, re.S):
-            inputs.update(
-                path
-                for line in block.splitlines()
-                if (path := line.strip().lstrip("\\"))
-            )
-        inputs.update(re.findall(r"bash ([^\s;&|]+)", run))
+    for job_name in ("test-agents", "test-mux", "test"):
+        run_blocks = [step.get("run", "") for step in jobs[job_name]["steps"]]
+        for run in run_blocks:
+            for block in re.findall(r"git diff --exit-code --(?P<paths>.*?)(?:\n\n|\Z)", run, re.S):
+                inputs.update(
+                    path
+                    for line in block.splitlines()
+                    if (path := line.strip().lstrip("\\"))
+                )
+            inputs.update(re.findall(r"bash ([^\s;&|]+)", run))
     return inputs
 
 

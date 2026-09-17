@@ -237,14 +237,17 @@ def test_smoke_setup_cleans_fno_agents_before_building_cached_artifacts() -> Non
 
 def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:
     # The heavy cargo job moved to cli-ci.yml (x-861c): the shards must gate
-    # it, so the clean-before-test order is asserted there.
+    # it, so the clean-before-test order is asserted there. The job is now
+    # split by crate, and each crate's order lives in its own shard job.
     workflow = yaml.safe_load(_CLI_WORKFLOW.read_text())
-    steps = workflow["jobs"]["test"]["steps"]
-    names = [step.get("name", "") for step in steps]
-    clean = names.index("Clean cached Rust package artifacts")
-    clean_lines = _command_lines(steps[clean].get("run", ""))
+    jobs = workflow["jobs"]
 
-    for package in ("fno", "fno-agents"):
+    for job_name, package in (("test-agents", "fno-agents"), ("test-mux", "fno")):
+        steps = jobs[job_name]["steps"]
+        names = [step.get("name", "") for step in steps]
+        clean = names.index("Clean cached Rust package artifacts")
+        clean_lines = _command_lines(steps[clean].get("run", ""))
+
         assert (
             f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
             in clean_lines
