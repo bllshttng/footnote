@@ -4,17 +4,19 @@
 # dir, crown handoff doc, escalations dir and auto-memory stay writable.
 #
 # The policy moved into crates/fno-agents/src/hook/king_guard.rs and
-# the script became an exec wrapper, so the fixtures are real files the
-# native guard reads (registry.json under FNO_AGENTS_HOME, the court manifest
-# under the space's kings/, config.toml at the payload cwd) instead of stubbed
-# verb outputs. Every pre-port case keeps its semantics; the stub positive
-# control became a no-subprocess canary (the native guard must spawn no `fno`).
+# the script became a probe-and-relay wrapper (never exec: a candidate that
+# lacks the hook verb falls through instead of refusing every tool), so the
+# fixtures are real files the native guard reads (registry.json under
+# FNO_AGENTS_HOME, the court manifest under the space's kings/, config.toml at
+# the payload cwd) instead of stubbed verb outputs. Every pre-port case keeps
+# its semantics; the stub positive control became a no-subprocess canary (the
+# native guard must spawn no `fno`).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KGD="$REPO_ROOT/hooks/king-delegation-guard.sh"
 [[ -f "$KGD" ]] || { echo "FAIL: guard not found at $KGD" >&2; exit 1; }
-# Same resolution order as the wrapper: env, release, debug. A sibling leg
+# Same resolution order as the wrapper: PATH, env, release, debug. A sibling leg
 # of the packet (preflight, the cargo-isolation tests) may have cleaned the
 # target dir between provisioning and this run: rebuild the debug binary
 # quietly rather than fail on an artifact the environment is documented to
@@ -54,7 +56,12 @@ printf '%s\n' "$*" >> "$KGD_FNO_CALLS"
 exit 1
 STUB
 chmod +x "$TMP/bin/fno"
-export PATH="$TMP/bin:$PATH"
+# The wrapper tries the deployed PATH binary first; pin that slot to the same
+# BIN verified below so the suite tests policy, not the operator's installed
+# version.
+mkdir -p "$TMP/realbin"
+ln -s "$BIN" "$TMP/realbin/fno-agents"
+export PATH="$TMP/realbin:$PATH"
 export KGD_FNO_CALLS="$TMP/fno-calls.log"
 : > "$KGD_FNO_CALLS"
 
@@ -471,6 +478,61 @@ OUT="$(run_guard "$(edit_payload_t "$SRC_FILE" "$PARENT_TRANS")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && pass "limb: orphaned open spawn with later tool_use denied" \
   || fail "limb orphan rc=$RC out=${OUT:0:300}"
+
+# ── Stale-binary fallthrough: a binary without the hook verb must never ──────
+# wedge the session. Live outage 2026-09-17: 19 worktree builds
+# predated the verb; the old exec answered "unknown verb" and refused every
+# tool in those sessions.
+mkdir -p "$TMP/stalebin"
+cat > "$TMP/stalebin/fno-agents" <<'STALE'
+#!/usr/bin/env bash
+printf '%s\n' "fno-agents: unknown verb: hook (expected --emit-schema|...)"
+exit 2
+STALE
+chmod +x "$TMP/stalebin/fno-agents"
+
+registry_fixture "$CROWNED"
+manifest_fixture court
+
+# A stale PATH binary falls through to the env override: the court Edit is
+# still denied by a real policy decision, and the hook still exits 0.
+export FNO_AGENTS_BIN="$BIN"
+OUT="$(PATH="$TMP/stalebin:$PATH" run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
+echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
+  && pass "stale: unknown-verb PATH binary falls through, court Edit still denied" \
+  || fail "stale fallthrough rc=$RC out=${OUT:0:300}"
+unset FNO_AGENTS_BIN
+
+# A stale binary with no good binary behind it fail-opens: the session keeps
+# its tools. This is the exact outage shape, which used to exit 2 on every
+# call; run from a cwd with no in-tree build so nothing else can answer.
+mkdir -p "$TMP/bare"
+( cd "$TMP/bare" && printf '%s' "$(edit_payload "$SRC_FILE")" \
+    | FNO_AGENTS_BIN= PATH="$TMP/stalebin:/usr/bin:/bin" bash "$KGD" ) \
+    > "$TMP/stale-out.txt" 2>"$TMP/stale-err.txt"; RC=$?
+OUT="$(cat "$TMP/stale-out.txt")"
+ERR="$(cat "$TMP/stale-err.txt")"
+[[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"allowing"* ]] \
+  && pass "stale: no good binary fail-opens, session keeps its tools" \
+  || fail "stale fail-open rc=$RC out=$OUT err=$ERR"
+
+# The deployed PATH binary outranks an in-tree build even when the in-tree
+# build is healthy: policy comes from the installed release, not the branch.
+mkdir -p "$TMP/pathbin" "$TMP/repo/crates/fno-agents/target/debug"
+cat > "$TMP/pathbin/fno-agents" <<'PATHSTUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"stub":"path"}'
+PATHSTUB
+cat > "$TMP/repo/crates/fno-agents/target/debug/fno-agents" <<'DEBUGSTUB'
+#!/usr/bin/env bash
+printf '%s\n' '{"stub":"debug"}'
+DEBUGSTUB
+chmod +x "$TMP/pathbin/fno-agents" "$TMP/repo/crates/fno-agents/target/debug/fno-agents"
+OUT="$( cd "$TMP/repo" && printf '%s' '{"tool_name":"Edit"}' \
+    | PATH="$TMP/pathbin:$PATH" bash "$KGD" 2>/dev/null )"
+[[ "$OUT" == '{"stub":"path"}' ]] \
+  && pass "order: deployed PATH binary outranks a healthy in-tree build" \
+  || fail "order rc out=$OUT"
 
 # Positive control 1: the binary runs at all, so every PASS above is real.
 "$BIN" version >/dev/null 2>&1 \
