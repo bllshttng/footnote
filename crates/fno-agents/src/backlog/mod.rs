@@ -17,6 +17,7 @@ pub mod nodes;
 pub mod note_cli;
 pub mod note_history;
 pub mod note_migrate;
+pub mod note_stale;
 pub mod patch;
 pub mod pull_requests;
 pub mod receipt;
