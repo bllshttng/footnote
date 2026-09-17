@@ -2080,6 +2080,7 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         });
                     });
                 }
+                crate::question_sweep::daemon_tick(&ctx.home, now_epoch_secs());
                 // An enabled active-backlog project keeps the daemon resident even
                 // when the board is drained (OQ1 Option A): idle-exit must never
                 // kill a live drain supervisor.
