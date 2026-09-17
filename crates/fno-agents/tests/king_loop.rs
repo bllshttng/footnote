@@ -29,16 +29,26 @@ fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
 // A king has no PR, so none of the target conjuncts above apply. These drive
 // the same verb with `--driver king` over a king manifest and a mocked board.
 
+/// A `created_at` inside every default `span:96h` term, so a fixture that
+/// declares no term of its own never trips the Stop-hook term gate: these
+/// tests exercise the board/bound machinery downstream of that gate, not the
+/// term itself (`king_term_gate.rs`-equivalent coverage lives in
+/// `loop_reign.rs`'s and `loopcheck.rs`'s own unit tests).
+fn recent_created_at() -> String {
+    (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339()
+}
+
 fn king_manifest(dir: &Path, fno_id: &str) -> PathBuf {
     king_manifest_with_budget(dir, fno_id, 40)
 }
 
 fn king_manifest_with_budget(dir: &Path, fno_id: &str, budget: u64) -> PathBuf {
     let path = dir.join("king-state.md");
+    let created_at = recent_created_at();
     fs::write(
         &path,
         format!(
-            "---\nfno_id: {fno_id}\ncreated_at: 2026-08-18T00:00:00Z\nscope: drain\n\
+            "---\nfno_id: {fno_id}\ncreated_at: {created_at}\nscope: drain\n\
              harness: claude\nbudget_max_iterations: {budget}\n---\n"
         ),
     )
@@ -1213,8 +1223,11 @@ fn every_king_noprogress_terminal_escalates() {
     let quiet_state = quiet_cwd.join("king-state.md");
     fs::write(
         &quiet_state,
-        "---\nfno_id: k-quiet\ncreated_at: 2026-08-18T00:00:00Z\nscope: x-1111,x-2222\n\
-         harness: claude\n---\n",
+        format!(
+            "---\nfno_id: k-quiet\ncreated_at: {}\nscope: x-1111,x-2222\n\
+             harness: claude\n---\n",
+            recent_created_at()
+        ),
     )
     .unwrap();
     let quiet_events = quiet_cwd.join("events.jsonl");
@@ -1289,8 +1302,11 @@ fn the_manifest_iteration_ceiling_stops_a_king_that_is_still_working() {
     let state = cwd.join("king-state.md");
     fs::write(
         &state,
-        "---\nfno_id: k-budget\ncreated_at: 2026-08-18T00:00:00Z\nscope: drain\n\
-         harness: claude\nbudget_max_iterations: 3\n---\n",
+        format!(
+            "---\nfno_id: k-budget\ncreated_at: {}\nscope: drain\n\
+             harness: claude\nbudget_max_iterations: 3\n---\n",
+            recent_created_at()
+        ),
     )
     .unwrap();
 

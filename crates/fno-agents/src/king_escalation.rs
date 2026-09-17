@@ -38,6 +38,14 @@ pub fn reading_delivery_unreadable(scope: &str) -> String {
     format!("reading:delivery-unreadable:{}", scope.replace(',', "+"))
 }
 
+pub fn reading_term_reached() -> String {
+    "reading:term-reached".to_owned()
+}
+
+pub fn reading_term_unreadable() -> String {
+    "reading:term-unreadable".to_owned()
+}
+
 #[derive(Deserialize)]
 pub struct EscalationRequest {
     pub stalled: Vec<String>,

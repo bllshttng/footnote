@@ -656,7 +656,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::loop_reign::run_reign_state(&args[1..]);
     }
     if matches!(verb, "reign-shape") {
-        return fno_agents::loop_reign::run_reign_shape(&args[1..]);
+        return fno_agents::loop_reign::run_reign_shape_or_term(&args[1..]);
     }
 
     // `graph-get`/`bash-census`/`session-start-bytes`: daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).

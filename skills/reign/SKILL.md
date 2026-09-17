@@ -35,6 +35,7 @@ The crown is bestowed, never inferred. Verify it before anything else:
 - Register as a roster citizen if absent: `/fno:fno-me`.
 - Verify the merge machinery is alive: `fno doctor`, pr-watch row.
 - Declare the shape now: `fno agents king shape pass` for a one-wave pass, and `fno agents king shape court` THE MOMENT the reign spawns its first worker. This is the field the Stop nudge reads; an undeclared court is nagged at every stop.
+- Declare the term now: `fno agents king term <span:Nh|compactions:N>` (e.g. `fno agents king term span:96h`). An undeclared term still reads a 96h default, so this is optional but name it in the opening check-in line either way. When the Stop hook reports the term reached, hand off with `fno agents spawn --crown <scope> --succeed`, or extend it with a written reason: `fno agents king term <spec> --reason "..."`. A bare re-declaration without `--reason` is refused - the extension IS the receipt.
 
 ## Arm the beat
 

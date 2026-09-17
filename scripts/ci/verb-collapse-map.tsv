@@ -626,7 +626,8 @@ agents stale-escalate	T1	agents stale-escalate	6
 agents friction-escalate	T1	agents friction-escalate	5
 agents feed	T1	agents feed	13
 agents harness probe	T1	agents harness probe	0
-agents king shape	T1	agents king shape	5	
+agents king shape	T1	agents king shape	5
+agents king term	T1	agents king term	7
 do review invocations	T1	do review invocations	3	
 do review post-dispositions	T1	do review post-dispositions	1	
 doctor graph export	T1	doctor graph export	0

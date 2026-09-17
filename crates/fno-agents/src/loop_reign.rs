@@ -444,23 +444,28 @@ fn reign_state_with_projects(
     with_manifest(state, &holder_scope, root)
 }
 
-/// Rewrite `shape` in place on one scope's existing manifest, under the same
-/// `<scope>.md.lock` the arming and respawn paths flock. The only legal
-/// post-init write to a king manifest; every refusal is a `String` the CLI
-/// shell relays, matching the Python ValueError texts.
-pub fn set_manifest_shape(
+/// Rewrite one or more fields in place on one scope's existing manifest,
+/// under the same `<scope>.md.lock` the arming and respawn paths flock. The
+/// only legal post-init write to a king manifest; every refusal is a
+/// `String` the CLI shell relays, matching the Python ValueError texts.
+/// Fields already present are replaced in place; fields absent are inserted
+/// just after the opening fence, in `fields` order.
+pub fn set_manifest_fields(
     root: &Path,
     scope: &str,
-    shape: &str,
+    fields: &[(&str, &str)],
     expect_session: Option<&str>,
-) -> Result<String, String> {
-    if shape != "pass" && shape != "court" {
-        return Err(format!("shape must be pass or court, got {shape:?}"));
+) -> Result<(), String> {
+    if let Some((key, _)) = fields.iter().find(|(_, v)| v.contains('\n')) {
+        return Err(format!(
+            "refusing to write {key:?}: its value contains a newline, which the hand-rolled \
+             frontmatter cannot quote safely."
+        ));
     }
     let path = manifest_path(root, scope)?;
     if !path.is_file() {
         return Err(format!(
-            "no manifest at {}; declare a shape only on a crown you have armed with \
+            "no manifest at {}; declare a field only on a crown you have armed with \
              `fno agents king init --scope`.",
             path.display()
         ));
@@ -485,41 +490,47 @@ pub fn set_manifest_shape(
         if let (Some(expect), Some(named)) = (expect_session, manifest_session.as_deref()) {
             if named != expect {
                 return Err(format!(
-                    "refusing to reshape {scope:?}: the manifest names session {named}, not \
+                    "refusing to rewrite {scope:?}: the manifest names session {named}, not \
                      {expect}. Re-read with `fno agents court` before touching anything."
                 ));
             }
         }
+        let mut pending: std::collections::HashMap<&str, &str> = fields.iter().copied().collect();
         let mut out = String::with_capacity(content.len() + 16);
-        let mut replaced = false;
         for line in content.lines() {
-            if !replaced && line.split(':').next().is_some_and(|k| k.trim() == "shape") {
-                out.push_str(&format!("shape: {shape}"));
-                replaced = true;
+            let key = line.split(':').next().map(str::trim);
+            if let Some(value) = key.and_then(|k| pending.remove(k)) {
+                out.push_str(&format!("{}: {value}", key.unwrap()));
             } else {
                 out.push_str(line);
             }
             out.push('\n');
         }
-        if !replaced {
+        if !pending.is_empty() {
             // Insert just after the opening fence, where a reader scanning the
             // frontmatter expects the crown's own fields. Prepending to the
             // file would land the line ABOVE the `---`, invisible to every
             // fenced parser, and every manifest written before the field
             // existed hits this branch. Rebuild fresh: the replace loop above
-            // already emitted every line into `out`.
+            // already applied every already-present field into `out`.
             let mut rebuilt = String::with_capacity(out.len() + 16);
             let mut inserted = false;
-            for line in content.lines() {
+            for line in out.lines() {
                 rebuilt.push_str(line);
                 rebuilt.push('\n');
                 if !inserted && line.trim() == "---" {
-                    rebuilt.push_str(&format!("shape: {shape}\n"));
+                    for (key, value) in fields.iter().filter(|(k, _)| pending.contains_key(k)) {
+                        rebuilt.push_str(&format!("{key}: {value}\n"));
+                    }
                     inserted = true;
                 }
             }
             if !inserted {
-                rebuilt = format!("shape: {shape}\n{rebuilt}");
+                let mut prefix = String::new();
+                for (key, value) in fields.iter().filter(|(k, _)| pending.contains_key(k)) {
+                    prefix.push_str(&format!("{key}: {value}\n"));
+                }
+                rebuilt = format!("{prefix}{rebuilt}");
             }
             out = rebuilt;
         }
@@ -532,10 +543,160 @@ pub fn set_manifest_shape(
                 .map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
         }
         fs::rename(&tmp, &path).map_err(|e| format!("cannot replace {}: {e}", path.display()))?;
-        Ok(shape.to_string())
+        Ok(())
     })();
     unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
     result
+}
+
+/// Rewrite `shape` in place on one scope's existing manifest. A thin caller
+/// of [`set_manifest_fields`]; kept because the CLI verb and its tests key
+/// on this name and its `Ok(new_value)` return.
+pub fn set_manifest_shape(
+    root: &Path,
+    scope: &str,
+    shape: &str,
+    expect_session: Option<&str>,
+) -> Result<String, String> {
+    if shape != "pass" && shape != "court" {
+        return Err(format!("shape must be pass or court, got {shape:?}"));
+    }
+    set_manifest_fields(root, scope, &[("shape", shape)], expect_session)?;
+    Ok(shape.to_string())
+}
+
+/// `fno-agents reign-term`: declare or extend a crown's term, exit 0/1/2.
+/// A declared or reached term refuses replacement without `--reason`: the
+/// extension IS the receipt (a bare re-declaration would let a king dodge
+/// the handoff the Stop-hook gate demands).
+pub fn run_reign_term(args: &[String]) -> i32 {
+    let mut scope: Option<String> = None;
+    let mut term: Option<String> = None;
+    let mut reason: Option<String> = None;
+    let mut session: Option<String> = None;
+    let mut root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut events_path: Option<PathBuf> = None;
+    let mut global_events_path: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--scope" if i + 1 < args.len() => {
+                scope = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--term" if i + 1 < args.len() => {
+                term = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--reason" if i + 1 < args.len() => {
+                reason = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--session" if i + 1 < args.len() => {
+                session = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--root" if i + 1 < args.len() => {
+                root = PathBuf::from(&args[i + 1]);
+                i += 2;
+            }
+            "--events-path" if i + 1 < args.len() => {
+                events_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            "--global-events-path" if i + 1 < args.len() => {
+                global_events_path = Some(PathBuf::from(&args[i + 1]));
+                i += 2;
+            }
+            other => {
+                eprintln!("fno-agents reign-term: unknown flag {other}");
+                eprintln!(
+                    "fno-agents reign-term: --scope S --term SPEC [--reason TEXT] \
+                     [--session ID] [--root PATH] [--events-path PATH] [--global-events-path PATH]"
+                );
+                return 2;
+            }
+        }
+    }
+    let (Some(scope), Some(term)) = (scope, term) else {
+        eprintln!("fno-agents reign-term: --scope and --term are required");
+        return 2;
+    };
+    let spec = match crate::king_term::parse_spec(&term) {
+        Ok(spec) => spec,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let path = match manifest_path(&root, &scope) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("cannot read {}: {e}", path.display());
+            return 1;
+        }
+    };
+    let Some(manifest) = crate::loopcheck::parse_king_manifest(&content) else {
+        eprintln!("manifest unreadable: {}", path.display());
+        return 1;
+    };
+    if spec.is_compactions() && manifest.harness.as_deref().unwrap_or("claude") != "claude" {
+        eprintln!(
+            "fno-agents reign-term: compactions: terms only measure a claude transcript; this \
+             crown's harness is {:?}. Use span:<N>[smhd] instead.",
+            manifest.harness.as_deref().unwrap_or("")
+        );
+        return 1;
+    }
+    let prior_reading = crate::king_term::reading(&manifest, chrono::Utc::now(), None);
+    let already_declared = manifest
+        .term
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty());
+    let reached = matches!(
+        prior_reading.state,
+        crate::king_term::TermState::Reached { .. }
+    );
+    let reason = reason.filter(|r| !r.trim().is_empty());
+    if (already_declared || reached) && reason.is_none() {
+        eprintln!(
+            "refusing to replace a declared or reached term without --reason: the extension is \
+             the receipt. Hand off instead: fno agents spawn --crown {scope} --succeed"
+        );
+        return 1;
+    }
+    let mut fields: Vec<(&str, &str)> = vec![("term", &term)];
+    if let Some(reason) = reason.as_deref() {
+        fields.push(("term_reason", reason));
+    }
+    if let Err(e) = set_manifest_fields(&root, &scope, &fields, session.as_deref()) {
+        eprintln!("{e}");
+        return 1;
+    }
+    let events_path = events_path.unwrap_or_else(|| crate::paths::events_path(&root));
+    let global_events_path = global_events_path.unwrap_or_else(|| events_path.clone());
+    crate::loopcheck::emit_to_both(
+        &events_path,
+        &global_events_path,
+        "king_term",
+        serde_json::json!({
+            "scope": scope,
+            "session_id": manifest.harness_session_id,
+            "term": term,
+            "reason": reason,
+            "prior_term": manifest.term,
+            "prior_state": crate::king_term::state_word(&prior_reading.state),
+        }),
+    );
+    println!("{term}");
+    0
 }
 
 fn usage(verb: &str) -> String {
@@ -738,6 +899,18 @@ pub fn run_reign_state(args: &[String]) -> i32 {
             eprintln!("fno-agents reign-state: cannot serialize the reign state: {e}");
             1
         }
+    }
+}
+
+/// `fno-agents reign-shape [--term SPEC]`: a `--term` flag is a term
+/// declaration wearing the same registered verb (the client-actions shrink
+/// law bars a second verb for this: an argument of an existing action,
+/// never a new action).
+pub fn run_reign_shape_or_term(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--term") {
+        run_reign_term(args)
+    } else {
+        run_reign_shape(args)
     }
 }
 
@@ -1322,6 +1495,130 @@ mod tests {
         assert!(set_manifest_shape(&root, "a/b", "court", None)
             .unwrap_err()
             .contains("unsafe king scope"));
+    }
+
+    #[test]
+    fn term_declare_writes_the_field_and_emits_one_event() {
+        let root = tmp("term-declare");
+        write_manifest(
+            &root,
+            "alpha",
+            "aaaa1111-0000-4000-8000-000000000001",
+            "pass",
+        );
+        let events = root.join("events.jsonl");
+        let rc = run_reign_term(&[
+            "--scope".into(),
+            "alpha".into(),
+            "--term".into(),
+            "span:72h".into(),
+            "--root".into(),
+            root.display().to_string(),
+            "--events-path".into(),
+            events.display().to_string(),
+        ]);
+        assert_eq!(rc, 0);
+        let content = fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        assert!(
+            content.lines().any(|l| l.trim() == "term: span:72h"),
+            "manifest was {content}"
+        );
+        let logged = fs::read_to_string(&events).unwrap();
+        assert_eq!(
+            logged.lines().filter(|l| l.contains("king_term")).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn term_replace_without_reason_refuses_and_leaves_manifest_unchanged() {
+        let root = tmp("term-noreason");
+        let sid = "aaaa1111-0000-4000-8000-000000000001";
+        write_manifest(&root, "alpha", sid, "pass");
+        let events = root.join("events.jsonl");
+        let declare = |term: &str, extra: Vec<String>| {
+            let mut args = vec![
+                "--scope".to_string(),
+                "alpha".to_string(),
+                "--term".to_string(),
+                term.to_string(),
+                "--root".to_string(),
+                root.display().to_string(),
+                "--events-path".to_string(),
+                events.display().to_string(),
+            ];
+            args.extend(extra);
+            run_reign_term(&args)
+        };
+        assert_eq!(declare("span:48h", vec![]), 0);
+        assert_eq!(declare("span:120h", vec![]), 1);
+        let content = fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        assert!(
+            content.lines().any(|l| l.trim() == "term: span:48h"),
+            "extension without --reason must not touch the manifest: {content}"
+        );
+        assert_eq!(
+            declare(
+                "span:120h",
+                vec![
+                    "--reason".to_string(),
+                    "overstayed; handing off soon".to_string()
+                ],
+            ),
+            0
+        );
+        let content = fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        assert!(content.lines().any(|l| l.trim() == "term: span:120h"));
+        assert!(content
+            .lines()
+            .any(|l| l.trim() == "term_reason: overstayed; handing off soon"));
+    }
+
+    #[test]
+    fn term_compactions_refused_on_a_non_claude_harness() {
+        let root = tmp("term-codex");
+        let path = manifest_path(&root, "alpha").unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "---\nfno_id: 20260904T000000Z-kg1-abcdef\nscope: alpha\nshape: pass\n\
+             harness: codex\nharness_session_id: aaaa1111-0000-4000-8000-000000000001\n\
+             owner_pid: 1\nbudget_max_iterations: 40\nrespawn_count: 0\nrespawn_ceiling: 4\n---\n",
+        )
+        .unwrap();
+        let rc = run_reign_term(&[
+            "--scope".into(),
+            "alpha".into(),
+            "--term".into(),
+            "compactions:10".into(),
+            "--root".into(),
+            root.display().to_string(),
+        ]);
+        assert_eq!(rc, 1);
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("term:"), "manifest was {content}");
+    }
+
+    #[test]
+    fn term_rejects_a_bad_spec_before_touching_the_manifest() {
+        let root = tmp("term-badspec");
+        write_manifest(
+            &root,
+            "alpha",
+            "aaaa1111-0000-4000-8000-000000000001",
+            "pass",
+        );
+        let rc = run_reign_term(&[
+            "--scope".into(),
+            "alpha".into(),
+            "--term".into(),
+            "weeks:2".into(),
+            "--root".into(),
+            root.display().to_string(),
+        ]);
+        assert_eq!(rc, 1);
+        let content = fs::read_to_string(manifest_path(&root, "alpha").unwrap()).unwrap();
+        assert!(!content.contains("term:"), "manifest was {content}");
     }
 
     /// Both JSON-only verbs accept the flag: -J parses (0), never "unknown

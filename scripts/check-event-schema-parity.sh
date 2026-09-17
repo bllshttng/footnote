@@ -382,6 +382,11 @@ dual_owner_kinds = {
     # (`fno doctor event emit`) still writes rows until its port, and
     # schema.yaml validates both spellings.
     "reign_checkin",
+    # king_term: the Rust reign-shape/loop-check verbs are the one writer
+    # (declare/extend and the Stop-hook gate's reached/unreadable reading);
+    # the Python hand leg (`fno doctor event emit`) can still write a row,
+    # the same generic-emit shape as reign_checkin above.
+    "king_term",
 }
 collisions -= dual_owner_kinds
 if collisions:

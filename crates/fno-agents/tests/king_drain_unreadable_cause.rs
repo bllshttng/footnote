@@ -77,7 +77,10 @@ fn quiet_fire(body: &str) -> (tempfile::TempDir, [EnvGuard; 5], Vec<String>) {
     let state = dir.path().join("king.md");
     std::fs::write(
         &state,
-        "---\nfno_id: k-1\nscope: x-epic\ncreated_at: 2026-09-06T00:00:00Z\n---\n",
+        format!(
+            "---\nfno_id: k-1\nscope: x-epic\ncreated_at: {}\n---\n",
+            (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339()
+        ),
     )
     .unwrap();
     let events = dir.path().join("events.jsonl");

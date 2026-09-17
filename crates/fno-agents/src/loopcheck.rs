@@ -11515,13 +11515,15 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let bounded = |dry: u64, waiting: &str| {
         bound_breached(history.total, dry, manifest.max_iterations, waiting)
     };
+    let (reading, term_json) = crate::king_term::current_reading(&manifest);
+    let emit_term = |body| crate::king_term::emit_journal(&emit, &term_json, body);
     // Shared spine of both blind-board blocks: bounded, quiet emit, block.
     // The reading is what the branch measured, never a guess.
     let blind_block = |reading: &str, message: &str, actionable: i64, dry: u64| -> (i32, String) {
         if let Some(b) = bounded(dry, message) {
             return terminate(b.reason, &b.message, 0, b.fires, &[reading.to_owned()]);
         }
-        emit("king_loop_check", king_quiet_body(&session_id, actionable));
+        emit_term(king_quiet_body(&session_id, actionable));
         (0, king_output("block", None, message, actionable, dry + 1))
     };
 
@@ -11529,6 +11531,9 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
         crate::king_termination::stand_down_gate(&manifest, &parsed.transcript_path, &parsed.cwd)
     {
         return blind_block(&gate.reading, &gate.message, 0, dry);
+    }
+    if let Some(result) = crate::king_term::gate(&reading, &manifest.scope, dry, &blind_block) {
+        return result;
     }
 
     let board = match read_king_board(&parsed.fno_bin, &parsed.cwd, &parsed.state_path) {
@@ -11541,13 +11546,10 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
                 let reading = crate::king_escalation::reading_board_unreadable();
                 return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
             }
-            emit(
-                "king_loop_check",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "board_error": e,
-                }),
-            );
+            emit_term(serde_json::json!({
+                "session_id": session_id,
+                "board_error": e,
+            }));
             return (
                 2,
                 king_output(
@@ -11632,10 +11634,11 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             Some(_) => crate::king_escalation::reading_delivery_unreadable(&manifest.scope),
             None => crate::king_escalation::reading_undelivered(&manifest.scope),
         };
-        emit(
-            "king_loop_check",
-            crate::king_termination::king_undelivered_body(&session_id, undelivered, shrank),
-        );
+        emit_term(crate::king_termination::king_undelivered_body(
+            &session_id,
+            undelivered,
+            shrank,
+        ));
         if let Some(b) = bounded(dry, &message) {
             return terminate(b.reason, &b.message, 0, b.fires, &[reading]);
         }
@@ -11684,24 +11687,21 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             fires,
             journal,
         }) => {
-            emit("king_loop_check", journal);
+            emit_term(journal);
             return (0, king_output("block", None, &message, actionable, fires));
         }
         None => {}
     }
 
-    emit(
-        "king_loop_check",
-        serde_json::json!({
-            "session_id": session_id,
-            "actionable": board.actionable,
-            "actionable_ids": board.actionable_ids,
-            // Durable, because the dry-fire counter is rebuilt from this
-            // journal on every fire. A reset that lived only in the local
-            // binding was forgotten the moment this process exited.
-            "cleared": cleared,
-        }),
-    );
+    emit_term(serde_json::json!({
+        "session_id": session_id,
+        "actionable": board.actionable,
+        "actionable_ids": board.actionable_ids,
+        // Durable, because the dry-fire counter is rebuilt from this
+        // journal on every fire. A reset that lived only in the local
+        // binding was forgotten the moment this process exited.
+        "cleared": cleared,
+    }));
     let top = board
         .top_row
         .unwrap_or_else(|| "an actionable queue".to_string());
