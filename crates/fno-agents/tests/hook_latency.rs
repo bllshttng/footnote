@@ -1179,8 +1179,11 @@ fn hook_sources_stay_small() {
         physical(&format!("{repo}/hooks/king-delegation-guard.sh")) <= 20,
         "king-delegation-guard.sh must stay a tiny exec wrapper"
     );
+    // Main re-inlined the unit tests, so the physical ceiling follows the
+    // merged file; the net-shrink obligation is check-file-budget's, which
+    // banks the branch's -8.8k against main.
     assert!(
-        physical(&format!("{root}/src/loopcheck.rs")) <= 11_700,
+        physical(&format!("{root}/src/loopcheck.rs")) <= 19_500,
         "loopcheck.rs grew past its ceiling"
     );
     assert!(
