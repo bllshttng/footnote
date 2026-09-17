@@ -2,12 +2,12 @@
 //!
 //! Port of `hooks/king-delegation-guard.sh` policy: a session whose registry
 //! row carries a crown and whose reign manifest declares shape `court` is
-//! refused Edit/Write/NotebookEdit and shell writes to source. Write-path
-//! allowlist, never delegation advice: a crowned session may author its plans
-//! dir, crown handoff doc, escalations dir, and auto-memory; anything else
-//! fail-closes. Any failure to READ (payload, registry, manifest, config)
-//! allows - the never-block contract - except escalations, whose unresolved
-//! resolver turns off only that carve-out.
+//! refused Edit/Write/NotebookEdit and shell writes to source. Inverted
+//! predicate, never delegation advice: SOURCE is any path realpath-inside
+//! the repo root, except the repo's `.fno` state tree; everything else - the
+//! vault wherever it lives, memory wherever the harness keeps it - allows.
+//! Any failure to READ (payload, registry, manifest, config) allows - the
+//! never-block contract.
 //!
 //! The one behavior change the blueprint names: a missing `fno-agents`
 //! binary now allows with one stderr line (the wrapper's business), and the
@@ -141,16 +141,10 @@ pub fn run(_args: &[String]) -> i32 {
         return allow("");
     }
 
-    // 8. Allowed roots. Plans/handoff unresolvable ALLOWS everything (the
-    //    never-block contract); escalations unresolved only turns off itself.
-    let Some(plans_dir) = plans_content_dir(&cwd) else {
-        return allow("plans resolver unresolved; allowing");
-    };
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let Some(handoff) = crown_handoff_path(&cwd, home.as_deref(), crown_scope, &sid) else {
-        return allow("handoff resolver unresolved; allowing");
-    };
-    let escalations = crate::escalation::dir(&cwd);
+    // 8. The repo root is the only DENY region. Realpath containment has no
+    //    unresolvable state, so the never-block contract needs no escape
+    //    hatch here: outside the repo allows, whatever it is.
+    let repo_root = crate::paths::worktree_repo_root(&cwd);
 
     // 9. Limb carve-outs (checked after the roots resolve, like the shell).
     let agent_id = payload
@@ -175,13 +169,9 @@ pub fn run(_args: &[String]) -> i32 {
         ));
     }
 
-    // 10. Decide: the write-path allowlist, one predicate for every tool.
-    let allowed = |t: &str| {
-        in_plans(t, &cwd, &plans_dir)
-            || real_eq(t, &cwd, &handoff)
-            || in_memory(t, &cwd, home.as_deref())
-            || real_prefix(t, &cwd, &escalations)
-    };
+    // 10. Decide: deny SOURCE, allow everything else, one predicate for
+    //     every tool.
+    let allowed = |t: &str| !write_denied(t, &cwd, &repo_root);
     let denied: Option<String> = match tool {
         "Edit" | "Write" | "NotebookEdit" => {
             let file = ti
@@ -201,23 +191,21 @@ pub fn run(_args: &[String]) -> i32 {
         return allow("");
     };
     if mode == "warn" {
-        eprintln!("{}", deny_text(&denied, &plans_dir, &handoff, &escalations));
+        eprintln!("{}", deny_text(&denied, &repo_root));
         return allow("");
     }
-    let text = deny_text(&denied, &plans_dir, &handoff, &escalations);
+    let text = deny_text(&denied, &repo_root);
     eprint!("{text}");
     super::emit_block(&text)
 }
 
-/// The two-line refusal, byte-identical to the shell's `_deny_text`.
-fn deny_text(target: &str, plans: &Path, handoff: &Path, escalations: &Path) -> String {
+/// The two-line refusal. The shell twin is a pure exec shim, so this text is
+/// the only copy.
+fn deny_text(target: &str, repo_root: &Path) -> String {
     format!(
-        "king-delegation-guard: write target '{target}' is outside the allowed roots for a crowned session.\n\
-         Allowed roots: the plans directory ({plans}), the crown handoff doc ({handoff}), the escalations directory ({escalations}), and auto-memory ({home}/.claude/projects/*/memory/).\n",
-        plans = plans.display(),
-        handoff = handoff.display(),
-        escalations = escalations.display(),
-        home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string()),
+        "king-delegation-guard: write target '{target}' is inside the repo ({repo}), and a crowned session does not write SOURCE.\n\
+         Everything outside the repo allows; the repo's .fno state tree stays allowed.\n",
+        repo = repo_root.display(),
     )
 }
 
@@ -420,120 +408,6 @@ fn resolve_sid(payload_sid: &str, transcript: &str) -> String {
     sid
 }
 
-// ── Allowed roots ────────────────────────────────────────────────────────────
-
-/// `cli/src/fno/paths.py` `plans_content_dir` port: `.claude/settings*.json`
-/// tiers, then `plans_dir` (default `.fno/plans/` -> the space's plans dir).
-/// `None` = unresolvable (the caller allows everything, never blocks).
-fn plans_content_dir(cwd: &Path) -> Option<PathBuf> {
-    let root = crate::paths::worktree_repo_root(cwd);
-    for name in ["settings.local.json", "settings.json"] {
-        let parsed = std::fs::read_to_string(root.join(".claude").join(name))
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
-        if let Some(raw) = parsed
-            .as_ref()
-            .and_then(|v| v.get("plansDirectory"))
-            .and_then(Value::as_str)
-        {
-            if !raw.is_empty() {
-                let p = PathBuf::from(raw);
-                return Some(if p.is_absolute() { p } else { root.join(p) });
-            }
-        }
-    }
-    plans_dir(cwd)
-}
-
-/// `plans_dir` port: config `plans_dir`, default `.fno/plans/` -> the space's
-/// plans dir; plain-relative values anchor at the repo root; template or
-/// absolute values expand ~, {vault}, {project} (unresolvable -> None).
-fn plans_dir(cwd: &Path) -> Option<PathBuf> {
-    let raw = config_lookup(cwd, &["plans_dir"])
-        .and_then(|v| v.as_str().map(str::to_string))
-        .unwrap_or_else(|| ".fno/plans/".to_string());
-    if raw == ".fno/plans/" {
-        return Some(crate::paths::space_dir(cwd).join("plans"));
-    }
-    let leading = raw.trim_start();
-    if !leading.is_empty() && !leading.starts_with(['/', '~']) && !raw.contains(['$', '{']) {
-        return Some(
-            crate::paths::worktree_repo_root(cwd)
-                .join(raw)
-                .components()
-                .collect::<PathBuf>(),
-        );
-    }
-    // Template form: ~, {vault}, {project} over the finalize.rs helpers;
-    // None when an {...} token stays unresolved.
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let project = crate::finalize::resolve_project_name(None, home.as_deref(), cwd);
-    let expanded = crate::finalize::expand_handoffs_template(&raw, home.as_deref(), &project)?;
-    // `{vault}` reaches here only as a literal-brace token: expansion refuses
-    // unknown tokens, so resolve the vault root the way Python's _resolve did.
-    if expanded.to_string_lossy().contains('{') {
-        let candidates = vec![
-            cwd.join(".fno/config.toml"),
-            home.clone()?.join(".fno/config.toml"),
-        ];
-        let vault = crate::finalize::resolve_obsidian_vault(&candidates)?;
-        let vroot = crate::finalize::resolve_vault_root(&vault, home.as_deref())?;
-        let raw = expanded
-            .to_string_lossy()
-            .replace("{vault}", &vroot.to_string_lossy());
-        return (!raw.contains('{')).then(|| PathBuf::from(raw));
-    }
-    Some(expanded)
-}
-
-/// The crown handoff doc path (paths_cli.py `handoff` port): the scope form
-/// names `crown-<sanitized scope>` and takes the NEWEST existing `*-<key>.md`
-/// in the handoffs dir; the session form is today's `<YYYYMMDD>-<first 8 of
-/// the sid>.md`. Unresolvable dir -> None (the caller allows).
-fn crown_handoff_path(cwd: &Path, home: Option<&Path>, scope: &str, sid: &str) -> Option<PathBuf> {
-    let dir = crate::finalize::resolve_handoffs_dir(None, None, cwd, home);
-    let today = chrono::Local::now().format("%Y%m%d");
-    if !scope.is_empty() {
-        let key = format!("crown-{}", crate::king_checkin::sanitize_scope_key(scope));
-        // The glob `*-<key>.md` takes ANY prefix, empty included; a bare
-        // `sibling<key>.md` without the separator must not match.
-        let newest: Option<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let p = entry.path();
-                let name = p.file_name()?.to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    return None;
-                }
-                let stem = name.strip_suffix(".md")?;
-                if !stem
-                    .strip_suffix(&key)
-                    .is_none_or(|head| head.ends_with('-') || head.is_empty())
-                {
-                    return None;
-                }
-                let mtime = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                Some((p, mtime))
-            })
-            .fold(None, |best, (p, mtime)| match best {
-                best @ Some((_, b)) if mtime <= b => best,
-                _ => Some((p, mtime)),
-            });
-        return Some(
-            newest
-                .map(|(p, _)| p)
-                .unwrap_or_else(|| dir.join(format!("{today}-{key}.md"))),
-        );
-    }
-    let key: String = sid.chars().take(8).collect();
-    Some(dir.join(format!("{today}-{key}.md")))
-}
-
 // ── Containment ──────────────────────────────────────────────────────────────
 
 /// Lexical normalization (Python's os.path.normpath): collapse //, . and ..
@@ -591,41 +465,19 @@ fn real_of(p: &str, cwd: &Path) -> PathBuf {
     normpath(&joined)
 }
 
-/// Plans containment (normpath, not realpath - the shell compared normpaths).
-fn in_plans(p: &str, cwd: &Path, plans: &Path) -> bool {
-    let p = normpath(&abs_join(p, cwd));
-    let d = normpath(plans);
-    p == d || p.starts_with(&d)
-}
-
-/// Handoff containment: realpath equality (the vault symlink must not split
-/// the two spellings).
-fn real_eq(p: &str, cwd: &Path, target: &Path) -> bool {
-    real_of(p, cwd) == real_of(&target.to_string_lossy(), cwd)
-}
-
-/// Escalations containment: realpath prefix.
+/// Realpath prefix containment.
 fn real_prefix(p: &str, cwd: &Path, root: &Path) -> bool {
     let p = real_of(p, cwd);
     let root = real_of(&root.to_string_lossy(), cwd);
     p == root || p.starts_with(&root)
 }
 
-/// Memory carve-out: exactly `$HOME/.claude/projects/<project>/memory/**`.
-fn in_memory(p: &str, cwd: &Path, home: Option<&Path>) -> bool {
-    home.is_some_and(|home| {
-        let root = real_of(
-            &home.join(".claude").join("projects").to_string_lossy(),
-            cwd,
-        );
-        let p = real_of(p, cwd);
-        p.starts_with(&root)
-            && p.strip_prefix(&root)
-                .unwrap()
-                .components()
-                .nth(1)
-                .is_some_and(|c| c.as_os_str() == "memory")
-    })
+/// The inverted step-10 predicate (2026-09-17 ruling): SOURCE is any path
+/// realpath-inside the repo root, with one carve-out for the repo's `.fno`
+/// state tree so a vault-less user keeps the default plans path. The vault
+/// is not source; a write outside the repo allows wherever it lands.
+fn write_denied(t: &str, cwd: &Path, repo_root: &Path) -> bool {
+    real_prefix(t, cwd, repo_root) && !real_prefix(t, cwd, &repo_root.join(".fno"))
 }
 
 // ── Limb signatures ──────────────────────────────────────────────────────────
@@ -813,5 +665,65 @@ mod tests {
         let km = crate::loopcheck::parse_king_manifest(content).expect("parses");
         assert_eq!(km.shape, "court");
         assert_eq!(km.harness_session_id.as_deref(), Some("sess-king"));
+    }
+
+    /// Fixture: a repo checkout plus a vault OUTSIDE it; the internal
+    /// symlink is what a vault-backed checkout looks like on disk.
+    struct Roots {
+        base: PathBuf,
+        repo: PathBuf,
+    }
+
+    fn roots(tag: &str) -> Roots {
+        let base = std::env::temp_dir().join(format!("kgd-{tag}-{}", std::process::id()));
+        Roots {
+            repo: base.join("repo"),
+            base,
+        }
+    }
+
+    fn allowed(r: &Roots, target: &Path) -> bool {
+        !write_denied(&target.to_string_lossy(), &r.base, &r.repo)
+    }
+
+    #[test]
+    fn vault_via_internal_symlink_is_allowed() {
+        // Required test 1: the vault is not source. A write through the
+        // internal symlink resolves outside the repo and allows.
+        let r = roots("symlink");
+        let _ = std::fs::create_dir_all(r.repo.join("cli/src"));
+        let _ = std::fs::create_dir_all(r.base.join("vault/fno/analysis"));
+        let _ = std::os::unix::fs::symlink(r.base.join("vault"), r.repo.join("internal"));
+        assert!(allowed(&r, &r.repo.join("internal/fno/analysis/foo.json")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn source_write_is_denied() {
+        // Required test 2: the guard exists to stop a king writing SOURCE.
+        let r = roots("source");
+        assert!(!allowed(&r, &r.repo.join("cli/src/fno/anything.py")));
+        assert!(!allowed(&r, &r.repo.join("crates/fno-agents/src/lib.rs")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn repo_dotfno_state_is_allowed() {
+        // Required test 3: the carve-out keeps the default .fno/plans path
+        // writable for a vault-less user.
+        let r = roots("dotfno");
+        assert!(allowed(&r, &r.repo.join(".fno/plans/foo.md")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn no_vault_still_answers_denies_source_allows_outside() {
+        // Required test 4: no vault configured anywhere - the predicate only
+        // knows the repo root, so the guard answers the same: source denies,
+        // anything outside allows.
+        let r = roots("novault");
+        assert!(!allowed(&r, &r.repo.join("cli/src/fno/anything.py")));
+        assert!(allowed(&r, &r.base.join("anywhere/else/foo.md")));
+        let _ = std::fs::remove_dir_all(&r.base);
     }
 }
