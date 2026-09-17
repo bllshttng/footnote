@@ -2377,19 +2377,19 @@ fn read_pr_info(
     // round is never counted twice. An unreadable journal degrades to
     // project-only, today's behavior.
     let project_text = std::fs::read_to_string(events_path).unwrap_or_default();
-    let global_text = std::fs::read_to_string(global_events_path).unwrap_or_default();
+    let global_text =
+        attestation_journal::tail_text(global_events_path, attestation_journal::GLOBAL_TAIL_BYTES);
     let extra_global = missing_global_attestations(&global_text, &project_text, repo_slug);
     let events_text = if extra_global.is_empty() {
         project_text
     } else {
         format!("{project_text}\n{extra_global}")
     };
-    let events_text_for_tiling = &events_text;
     let mut tiling = compute_range_tiling(
         git_bin,
         cwd,
         base_ref,
-        &events_text_for_tiling,
+        &events_text,
         &head_branch,
         head_sha,
         max_rounds,
