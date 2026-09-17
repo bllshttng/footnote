@@ -2683,7 +2683,7 @@ event_types:
 
   - name: king_term
     description: "A crown's term was declared or extended via `fno agents king term <spec> [--reason]`, or the Stop-hook gate observed it reached. The receipt a reign's tenure bound leaves."
-    sources: [loop, hook]
+    sources: [loop, daemon, hook]
     data:
       required: [scope, term]
       properties:
