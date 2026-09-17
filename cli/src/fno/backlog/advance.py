@@ -4046,8 +4046,8 @@ EVENT_MISSION_ACTIVATED = "mission_activated"
 EVENT_MISSION_DEACTIVATED = "mission_deactivated"
 
 # The graph field epic advance sets on the epic node to mark the mission active.
-# Durable (graph.json), crash-safe, and read by both Python (read_graph) and
-# Rust (K2's drain loop reads graph.json directly). Cleared on cascade-close
+# Durable, crash-safe, and read by both Python (read_graph) and Rust (the
+# drain loop folds rows through the store client). Cleared on cascade-close
 # (_cascade_close_parents) or an explicit `--epic <id> --stop`.
 MISSION_ACTIVE_FIELD = "mission_active"
 

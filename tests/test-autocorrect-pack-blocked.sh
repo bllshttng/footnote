@@ -38,11 +38,30 @@ TMP="$(mktemp -d)" || fail "mktemp failed"
 trap 'rm -rf "$TMP"' EXIT
 
 drop_keeper() {
-  PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+  # Same standalone load as the pack: `import fno.graph.store` runs the
+  # package __init__, which needs deps a bare python3 does not carry, and a
+  # silent import failure would leak every spawned fixture keeper.
+  REPO_ROOT="$REPO_ROOT" PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" python3 -c '
+import importlib.util
+import os
 import sys
+import types
 from pathlib import Path
-from fno.graph.store import shutdown_keeper
-shutdown_keeper(Path(sys.argv[1]))
+
+cli_src = Path(os.environ["REPO_ROOT"], "cli", "src").resolve()
+fno_pkg = types.ModuleType("fno")
+fno_pkg.__path__ = [str(cli_src / "fno")]
+graph_pkg = types.ModuleType("fno.graph")
+graph_pkg.__path__ = [str(cli_src / "fno" / "graph")]
+sys.modules.setdefault("fno", fno_pkg)
+sys.modules.setdefault("fno.graph", graph_pkg)
+spec = importlib.util.spec_from_file_location(
+    "fno.graph.store", cli_src / "fno" / "graph" / "store.py"
+)
+store = importlib.util.module_from_spec(spec)
+sys.modules["fno.graph.store"] = store
+spec.loader.exec_module(store)
+store.shutdown_keeper(Path(sys.argv[1]))
 ' "$1" 2>/dev/null || true
 }
 
