@@ -177,6 +177,7 @@ done < <(
         cli/src crates hooks scripts skills 2>/dev/null \
         | grep -v '/tests/' \
         | grep -v 'scripts/lint/events-discipline.sh' \
+        | grep -v 'events-discipline:allow' \
         || true
 )
 

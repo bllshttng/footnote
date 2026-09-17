@@ -837,7 +837,9 @@ mod tests {
             .open(&live)
             .unwrap();
         f.write_all(b"\n{\"type\":\"control_plane_tick\"}").unwrap();
-        std::fs::rename(&live, s.segment("events.jsonl.1")).unwrap();
+        // events-discipline:allow: a fixture must build the legacy layout
+        // the generation importer exists to read.
+        std::fs::rename(&live, s.segment("events.jsonl.1")).unwrap(); // events-discipline:allow
         std::fs::write(
             &live,
             concat!(
