@@ -222,7 +222,9 @@ for row in rows:
         continue
     status = row.get("status") or row.get("_status")
     blocked_count = row.get("blocked_count") or 0
-    if status != "blocked" and not (isinstance(blocked_count, int) and blocked_count > 0):
+    if status != "blocked" and not (
+        isinstance(blocked_count, (int, float)) and blocked_count > 0
+    ):
         continue
     node_id = row.get("id")
     if not node_id:
