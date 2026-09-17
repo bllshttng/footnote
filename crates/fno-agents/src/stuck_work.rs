@@ -208,7 +208,7 @@ pub fn dead_holders(dirs: &[PathBuf]) -> Result<Vec<Finding>, String> {
             let repair = match &root {
                 Some(r) => format!(
                     "; repair: {} heal=auto",
-                    crate::arm_repair::release_verb(key, holder, r)
+                    crate::arm_repair::release_verb(key, holder, Some(r))
                 ),
                 None => "; heal=operator".to_string(),
             };
