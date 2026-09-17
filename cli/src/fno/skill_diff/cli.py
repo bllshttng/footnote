@@ -152,16 +152,12 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
         "dimension again is chasing a local maximum. Needs a design look, not another wording "
         "tweak - the failure is likely architectural. See observer run {run_id}'s failure ranking."
     ).format(run_id=run_id)
+    argv = [
+        "fno", "backlog", "idea", title, "-d", details, "-p", "p2",
+        "-t", "feature", "--difficulty", "medium", "--json",
+    ]
     try:
-        out = subprocess.run(
-            [
-                "fno", "backlog", "idea", title, "-d", details, "-p", "p2",
-                "-t", "feature", "--difficulty", "medium", "--json",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
+        out = subprocess.run(argv, capture_output=True, text=True, check=True)
     except (OSError, subprocess.CalledProcessError) as exc:
         _LOG.warning("skill-diff: filing no-diff-helps node failed: %s", exc)
         return None
@@ -177,10 +173,16 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
         # node, and the terminal event marked the run processed - silently
         # losing the finding. Fold into the candidate instead: the --wave-of
         # path appends a note with no prompt and is the non-interactive fold.
+        # Text similarity ranks any skill-diff node first, so fold only onto
+        # this skill's own node and mint a separate one otherwise.
         candidates = receipt.get("candidates") or []
         if not candidates or not candidates[0].get("id"):
             return None
         fold_id = candidates[0]["id"]
+        if not str(candidates[0].get("title") or "").startswith(
+            f"skill-diff: {skill_id} failure"
+        ):
+            return _file_no_diff_node_separate(argv)
         try:
             out = subprocess.run(
                 [
@@ -202,6 +204,16 @@ def _file_no_diff_node(skill_id: str, run_id: str, reason: str) -> Optional[str]
             return None
         return receipt.get("node_id") or fold_id
     return receipt.get("id") or None
+
+
+def _file_no_diff_node_separate(argv: list) -> Optional[str]:
+    try:
+        out = subprocess.run([*argv, "--separate"], capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        _LOG.warning("skill-diff: filing separate no-diff-helps node failed: %s", exc)
+        return None
+    receipt = _idea_receipt(out.stdout)
+    return (receipt or {}).get("id") or None
 
 
 def _no_diff_helps(name: str, level: str, run_id: str, skill_id: str, reason: str) -> None:
