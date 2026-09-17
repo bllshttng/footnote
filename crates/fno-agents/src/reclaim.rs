@@ -403,7 +403,7 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
                 eprintln!("fno doctor reclaim remove-for: usage: remove-for <tree> [--json]");
                 return 2;
             };
-            let json = args.iter().skip(2).any(|a| a == "--json");
+            let json = args.iter().skip(2).any(|a| crate::json_output::is_flag(a));
             let removed = crate::cargo_build_dirs::remove_for(Path::new(tree));
             if json {
                 println!("{{\"removed\": {removed}}}");
