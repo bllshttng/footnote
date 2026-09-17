@@ -1534,11 +1534,14 @@ pub use crate::review_freshness::{
 // coverage row's state deriver, the receipt line, and attestation authorship
 // live there, not here.
 mod async_wait;
+mod attestation_journal;
 mod authorship;
 mod awaiting_merge;
 mod coverage_receipt;
 mod review_count;
 mod review_state;
+use attestation_journal::missing_global_attestations;
+pub use attestation_journal::unattested_reviewers_scan_text;
 mod watch_lease;
 use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason};
 use authorship::carry_author_session_forward;
@@ -2099,174 +2102,26 @@ pub fn unattested_reviewers_scan(
     head_sha: &str,
     rounds_exhausted: bool,
 ) -> (Vec<UnattestedReviewer>, usize) {
-    let unsatisfied_all = || -> Vec<UnattestedReviewer> {
-        reviewers
+    // no evidence file -> gate unmet (fail closed)
+    let Ok(content) = std::fs::read_to_string(events_path) else {
+        let unsatisfied = reviewers
             .iter()
             .map(|r| UnattestedReviewer {
                 name: r.trim_start_matches('/').to_string(),
                 superseded_head: None,
                 failed_at_head: false,
             })
-            .collect()
+            .collect();
+        return (unsatisfied, 0);
     };
-    if reviewers.is_empty() {
-        return (Vec::new(), 0);
-    }
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        // no evidence file -> gate unmet (fail closed)
-        return (unsatisfied_all(), 0);
-    };
-    let mut malformed = 0usize;
-    // Single pass (gemini review): record the LATEST verdict per reviewer at the
-    // current head. events.jsonl is append-ordered, so a later attestation
-    // supersedes an earlier one for the same reviewer - a `fail` posted after a
-    // `pass` must revoke it, and a re-run `pass` after a `fail` must restore it
-    // (codex peer review P1: a later fail was previously ignored). A reviewer is
-    // satisfied iff its latest head-pinned verdict is exactly `pass`. O(lines).
-    let mut latest_pass: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
-    // reviewer -> every OLD head it attested at, in first-seen order, each
-    // carrying that head's LATEST verdict. A single-entry "most recent pass"
-    // map cannot survive a retraction: `pass A, pass B, fail B` overwrites A
-    // with B and then drops B, reporting no prior pass while A is still a real
-    // one (codex P2 on this PR). Multi-round review/fix cycles produce exactly
-    // that sequence.
-    let mut other_heads: std::collections::HashMap<String, Vec<(String, bool)>> =
-        std::collections::HashMap::new();
-    // per-reviewer answered-fail marks, collected in the SAME pass
-    // (review findings 1-2): which reviewers' own fails raised keyed
-    // findings, and whether a reviewer's latest counting line is a RETRACTION
-    // (which revokes and never satisfies). Plus the in-scope chain for the
-    // disposition read, so the whole scan parses the file once.
-    let mut fail_carries: std::collections::HashMap<String, bool> =
-        std::collections::HashMap::new();
-    let mut latest_is_retraction: std::collections::HashMap<String, bool> =
-        std::collections::HashMap::new();
-    let mut chain: Vec<Value> = Vec::new();
-    for line in content.lines() {
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            if line.contains("review_attestation") {
-                malformed += 1;
-            }
-            continue;
-        };
-        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
-            continue;
-        }
-        let Some(r) = val.pointer("/data/reviewer").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let r = r.trim_start_matches('/').to_string();
-        // An event with no `head_sha` is not head-pinned evidence and is
-        // skipped outright. Defaulting it to "" would make it MATCH a caller
-        // whose own head_sha is "", turning unpinned data into a pass (codex
-        // P1 on this PR).
-        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
-        // The SAME scope predicate the coverage axis uses (attestation_in_scope),
-        // applied before any freshness call: an attestation from another
-        // branch is not evidence about this PR at all, so it must never reach
-        // `latest_pass` or `other_heads` - recording it as a superseded head
-        // would name a reviewer that never touched this PR.
-        let line_branch = val
-            .pointer("/data/branch")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
-            continue;
-        }
-        chain.push(val.clone());
-        let is_retraction = val
-            .pointer("/data/retracts_attester")
-            .and_then(|v| v.as_str())
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
-        if !is_pass && !is_retraction && line_carries_keyed_findings(&val) {
-            fail_carries.insert(r.clone(), true);
-        }
-        // The SAME zero-evidence predicate the coverage axis uses: a review
-        // of nothing must not satisfy the config.review.reviewers gate either,
-        // which is the surface that floors the self-review obligation.
-        if zero_evidence_attestation(&val) {
-            continue;
-        }
-        // The SAME predicate the coverage axis uses, not a second head-equality
-        // rule beside it. Leaving this one a bare equality would have made the
-        // softening decorative: this is the scan that satisfies
-        // `config.review.reviewers`, so a rebase that carried the coverage
-        // count would still have killed the required `code-review` entry and
-        // demanded the re-review the carry exists to prevent.
-        if !freshness(line_head).counts() {
-            // Empty is not a head; recording it would put a `Some` in the
-            // message with nothing to print.
-            if line_head.is_empty() {
-                continue;
-            }
-            let seen = other_heads.entry(r).or_default();
-            match seen.iter().position(|(h, _)| h == line_head) {
-                Some(i) => seen[i].1 = is_pass, // latest verdict wins for that head
-                None => seen.push((line_head.to_string(), is_pass)),
-            }
-            continue;
-        }
-        latest_pass.insert(r.clone(), is_pass);
-        latest_is_retraction.insert(r, is_retraction);
-    }
-    // a latest-`fail` reviewer is satisfied when its OWN fails raised
-    // keyed findings AND the chain's blocking findings are all terminal (or
-    // cap-filed, which only hard findings survive). A bystander's
-    // findings-free fail never rides another reviewer's dispositions, and a
-    // RETRACTION latest never satisfies - it revokes, it never covers.
-    let any_answerable_fail = latest_pass
-        .iter()
-        .any(|(name, p)| !*p && fail_carries.get(name) == Some(&true));
-    let disposition_clear = any_answerable_fail && {
-        let blockers = disposition_blockers_on_chain(&chain);
-        !blockers_withhold(&blockers, rounds_exhausted)
-    };
-    let out = reviewers
-        .iter()
-        .map(|entry| entry.trim_start_matches('/'))
-        .filter(|name| match latest_pass.get(*name) {
-            Some(true) => false,
-            Some(false) => {
-                !(disposition_clear
-                    && latest_is_retraction.get(*name) != Some(&true)
-                    && fail_carries.get(*name) == Some(&true))
-            }
-            // No attestation from this reviewer AT THIS HEAD. Held while the
-            // budget can still fund a round - one review stays the floor, so
-            // an unreviewed PR is still unattested and rounds_exhausted is
-            // false at zero rounds.
-            //
-            // Past the cap it must yield, for the same reason the Some(false)
-            // arm beside it already does: the demand is unsatisfiable there.
-            // The only thing that clears "attest at this head" is another
-            // review round, and the budget will not fund one. Worse, this arm
-            // is re-armed by every FIX: an attestation is head-pinned, so
-            // closing the findings from round 2 moves HEAD and voids it. That
-            // is the treadmill the round cap exists to end, and leaving it
-            // here would keep the stop gate demanding rounds the merge gate
-            // has already discharged.
-            None => !rounds_exhausted,
-        })
-        .map(|name| UnattestedReviewer {
-            name: name.to_string(),
-            // An old head whose LATEST verdict is still a pass. Heads keep
-            // first-seen order, so a head re-attested later keeps its original
-            // slot and this may name a slightly older one - both are real
-            // passes, so the line stays true either way. Only a pass is worth
-            // naming: an old-head `fail` rendered as "passed at X, superseded"
-            // would imply a successful review that never happened.
-            superseded_head: other_heads
-                .get(name)
-                .and_then(|heads| heads.iter().rev().find(|(_, ok)| *ok))
-                .map(|(h, _)| h.clone()),
-            failed_at_head: latest_pass.get(name) == Some(&false),
-        })
-        .collect();
-    (out, malformed)
+    unattested_reviewers_scan_text(
+        &content,
+        reviewers,
+        freshness,
+        head_branch,
+        head_sha,
+        rounds_exhausted,
+    )
 }
 
 /// An operator review finding still open: a `review_finding` event for
@@ -2513,12 +2368,28 @@ fn read_pr_info(
     // consumer below (the classify_coverage local axis, the emitted
     // review_coverage row). Fail-closed inside: any git failure answers
     // not-tiled and today's single-attestation rule stands alone.
-    let events_text_for_tiling = std::fs::read_to_string(events_path).unwrap_or_default();
+    // The local attestation axis reads the project log PLUS the global
+    // journal's slug-scoped attestations: a review fork emits into its own
+    // checkout's project log and mirrors to the global journal, and when the
+    // fork's checkout dies the mirror alone survives (measured on PR 2137:
+    // three attestations for one head, zero copies in any surviving project
+    // log). Mirrors of rows the project log still holds are deduped, so a
+    // round is never counted twice. An unreadable journal degrades to
+    // project-only, today's behavior.
+    let project_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    let global_text =
+        attestation_journal::tail_text(global_events_path, attestation_journal::GLOBAL_TAIL_BYTES);
+    let extra_global = missing_global_attestations(&global_text, &project_text, repo_slug);
+    let events_text = if extra_global.is_empty() {
+        project_text
+    } else {
+        format!("{project_text}\n{extra_global}")
+    };
     let mut tiling = compute_range_tiling(
         git_bin,
         cwd,
         base_ref,
-        &events_text_for_tiling,
+        &events_text,
         &head_branch,
         head_sha,
         max_rounds,
@@ -2619,8 +2490,8 @@ fn read_pr_info(
     let login_skipped = no_external || !login_gate_active;
     // One scan feeds both the gate and its explanation, so the two cannot
     // disagree the way the decision and the message did on PR #618.
-    let (unattested, malformed_attestations) = unattested_reviewers_scan(
-        events_path,
+    let (unattested, malformed_attestations) = unattested_reviewers_scan_text(
+        &events_text,
         reviewers,
         &freshness,
         &head_branch,
@@ -2628,11 +2499,8 @@ fn read_pr_info(
         tiling.rounds_exhausted,
     );
     let reviewers_ok = unattested.is_empty();
-    // Coverage reads the same events.jsonl as the attestation scan (its local
-    // axis) plus the GitHub review arrays (its github_app axis). Read once;
-    // a missing file is empty (the local axis then contributes nothing, which
-    // is correct - no evidence of a local review).
-    let events_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    // Coverage reads the same merged journal text as the attestation scan
+    // (its local axis) plus the GitHub review arrays (its github_app axis).
     // Authorship carry-forward: when this process resolved no manifest
     // session, the previous coverage row's recorded author FOR THIS PR (the
     // scan filters on the number; the events file is project-wide) stands
@@ -2745,8 +2613,8 @@ fn read_pr_info(
                                 let (re_coverage, re_blockers) = classify_with(&tiling);
                                 coverage = re_coverage;
                                 blockers = re_blockers;
-                                let (re_unattested, _re_malformed) = unattested_reviewers_scan(
-                                    events_path,
+                                let (re_unattested, _re_malformed) = unattested_reviewers_scan_text(
+                                    &events_text,
                                     reviewers,
                                     &freshness,
                                     &head_branch,
