@@ -1239,13 +1239,13 @@ def set_cmd(
 
       fno config set <key> <value>        # single key (value may contain '=')
       fno config set a.b=1 c.d=2 ...       # atomic multi-key set
+      fno config set agents.profiles.target.lanes '["codex-luna","zai"]'
 
-    Each value is coerced to the field's type and validated against the schema
-    (e.g. ``config.agents.a2a.turn_ceiling`` must be >= 1), then written
-    atomically under a single file lock. In the multi-key form the batch is
-    all-or-nothing: if ANY value is invalid the file is left unchanged and the
-    command exits non-zero (AC2-ERR / AC2-FR). A key repeated in one call uses
-    the last value (AC2-EDGE).
+    A list takes a JSON array or `a,b`. Each value is coerced to the field's
+    type and schema-validated (``config.agents.a2a.turn_ceiling`` must be >= 1),
+    then written atomically under one file lock. The multi-key batch is
+    all-or-nothing: any invalid value leaves the file unchanged and exits
+    non-zero. A key repeated in one call uses the last value.
     """
     import sys
 
