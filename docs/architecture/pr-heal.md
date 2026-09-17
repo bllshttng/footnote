@@ -6,7 +6,7 @@ Everything after a push already had a reader. `fno do pr status` names the faili
 
 heal reads the PR's failing checks over REST, gets each failing job's log, matches it against a signature table, and applies the mechanical fix. `--playbook` prints the table. This page keeps no copy of the table, because a doc copy drifts and the verb's own output cannot.
 
-heal fixes three classes on its own. `rustfmt-drift` runs the pinned `cargo fmt` in each crate that rustfmt named. `ruff-lint` runs `ruff check --fix` over exactly the scope the gate reads. `closure-trailer` adds the generated `Backlog-Closure` trailer to the PR body. That edit re-fires the workflow through its `edited` trigger, so it needs no push. Every other signature escalates with the command that reproduces it locally.
+heal fixes three classes on its own. `rustfmt-drift` runs the pinned `cargo fmt` in each crate that rustfmt named. `ruff-lint` runs `ruff check --fix` over exactly the scope the gate reads. `closure-trailer` adds the generated `Backlog-Closure` trailer to the PR body. That edit re-fires the workflow through its `edited` trigger, so it needs no push. A fourth class, `cancelled`, gets `gh run rerun <run> --failed`: a cancelled run reached no verdict, so the rerun is how it reaches one. It is issued at most once per head sha, journal-guarded; a second cancelled verdict on the same sha escalates, because the rerun already reached a real result. Every other signature escalates with the command that reproduces it locally.
 
 ## The two rules
 
@@ -40,11 +40,27 @@ Four refusals gate it:
 3. **One push per PR per cycle.** Each PR is visited once per invocation. The single-PR rules above hold inside it. A run in flight keeps the commit local.
 4. **Inherited failures are named and skipped.** A check red on `origin/main` too is main's problem. It is never fixed on the branch.
 
-One invocation emits one `pr_heal_tick` row into the global `~/.fno/events.jsonl`. The row carries the counts: PRs seen, healed, skipped by reason, unknown signatures. `fno doctor event find --field type=pr_heal_tick --since 24h` reads it. `--all --apply --dry-run` rehearses every refusal and prints the plan without touching a worktree or the inbox.
+One invocation emits one `pr_heal_tick` row into the global `~/.fno/events.jsonl`. The row carries the counts: PRs seen, healed, skipped by reason, unknown signatures, escalations, `rerun` with the `rerun_shas` the once-per-sha guard reads back, and `duration_s`. `fno doctor event find --field type=pr_heal_tick --since 24h` reads it. `--all --apply --dry-run` rehearses every refusal and prints the plan without touching a worktree or the inbox.
 
-## The tick's heal phase
+## Detached from the tick
 
-When `auto_heal.enabled` is set, the pr-watch tick runs the drive loop on its 600s launchd cadence. The key defaults to false and lives with the other tick gates in `config.toml`. The phase sits between `king_wake` and `stranded`, so a PR the healer fixes this tick is not reported stranded in the same breath. The tick starts in `/`, so the phase passes each project root explicitly with `--cwd`.
+The tick's heal phase never runs the loop inside its own slice. Armed, the phase calls `pr-heal --all --apply --detach`, and the binary spawns itself (same args minus `--detach`) as a new session with stdio on `/dev/null` and returns 0 at once. The child's pid goes to `<state dir>/pr-heal.<root path>.pid`; a pid file naming a live process (EPERM counts alive) makes the next tick answer `skip_reason=in_flight` instead of spawning a second loop. Every detach decision emits one `control_plane_tick` arm row (`arm=heal`, `acted`, `skip_reason`), and the tick's own gate answers (`unarmed`, `no_binary`, `no_roots`) land in the same row shape, so the journal and the status line agree on why nothing ran.
+
+The pid file is the in-flight guard, so a stale file only ever costs one skipped tick: a dead pid is re-probed with `kill(pid, 0)` and overwritten on the next spawn.
+
+## The status line
+
+`fno do pr watch status` prints one `Heal:` line, rendered by `pr-heal --status` (the Python side passes only the arm bit and the journal):
+
+```
+Heal: armed; last run 2026-09-17T12:00:00Z (12m ago); healed 1, escalated 3, in-flight none
+```
+
+Unarmed it names the arm command. Armed with no `pr_heal_tick` row it reads `Heal: armed; never ran`. `fno do pr watch install` and `refresh` print the same line, so a fresh install shows the arm state.
+
+## Arming
+
+`fno config set auto_heal.enabled true`. The key defaults to false; the measurement that justified arming was taken 2026-09-16 over 15 red open PRs: 1 push, 3 cancelled-run reruns, 11 escalations, 0 failures inherited from main. One tick interval later the journal holds a `pr_heal_tick` row and status prints `last run`.
 
 ## How to add a signature
 
