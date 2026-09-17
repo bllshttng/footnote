@@ -436,7 +436,9 @@ mod tests {
         assert_eq!(cap["claude"]["accounts"]["primary"], "exhausted");
         assert_eq!(cap["claude"]["accounts"]["backup"], "ok");
 
-        // Drop the healthy backup from the records: exhausted + nothing.
+        // Drop the healthy backup from the records: exhausted + nothing. The
+        // first env releases the test-env lock before the second pins one.
+        drop(env);
         let env = Env::new(
             &state,
             &["[[accounts.records]]\nid = \"primary\"\nharness = \"claude\"\n"],
