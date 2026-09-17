@@ -784,6 +784,11 @@ pub fn append_envelope(
     let row_hash = Sha256::digest(line.as_bytes()).to_vec();
     let class = retention_class(&ty);
 
+    // The commit creates the directory it needs; the caller-side guards
+    // (Python's hermetic fence, the shell's opt-in parent guard) already ran.
+    if let Some(parent) = store.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", store.display()))?;
+    }
     let mut conn = open_store(&store)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)

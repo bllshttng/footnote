@@ -22,18 +22,60 @@ class EventStoreUnavailable(RuntimeError):
 
 
 def resolve_native_bin() -> str:
-    """Resolve the native ``fno`` binary: ``FNO_BIN`` first (the test seam,
-    same variable the loopcheck seam uses), else ``PATH``. A missing binary
-    is a named failure, never a silent file write."""
+    """Resolve the native ``fno`` binary: ``FNO_BIN`` first (the hermetic
+    runner passthrough, same channel as ``FNO_AGENTS_BIN``), then this
+    checkout's own build, then ``PATH``. The checkout build outranks ``PATH``
+    so a test tree never answers through a stale installed binary. A missing
+    binary is a named failure, never a silent file write."""
     bin_path = os.environ.get("FNO_BIN")
     if bin_path:
         return bin_path
+    # .../cli/src/fno/events/store_client.py -> parents[4] is the repo root.
+    repo_root = Path(__file__).resolve().parents[4]
+    for profile in ("debug", "release"):
+        candidate = repo_root / "crates" / "fno" / "target" / profile / "fno"
+        if candidate.exists():
+            return str(candidate)
     found = shutil.which("fno")
     if found:
         return found
     raise EventStoreUnavailable(
         "no native fno binary on PATH; the event store has no fallback writer"
     )
+
+
+def store_db_path(events_path: Path) -> Path:
+    """The store beside a journal: symlinks resolved, rotation suffixes and
+    the ``.jsonl`` stem stripped, ``.db`` appended - the same resolution the
+    native store performs, so a locator names one store from either side."""
+    resolved = Path(events_path).resolve()
+    stem = resolved.name
+    if stem.endswith(".jsonl"):
+        stem = stem[: -len(".jsonl")]
+    # A generation suffix (.1, .2) names the same store as the live journal.
+    if stem.rsplit(".", 1)[-1].isdigit():
+        stem = stem.rsplit(".", 1)[0]
+    return resolved.with_name(f"{stem}.db")
+
+
+def read_committed_lines(events_path: Path) -> list[str]:
+    """The committed envelope lines for one journal's store, in commit order.
+
+    Direct stdlib read of the SQL store; readers that only need the envelope
+    text use this instead of opening the journal. A store that does not exist
+    yet is an empty history, never an error.
+    """
+    import sqlite3
+
+    db = store_db_path(events_path)
+    if not db.exists():
+        return []
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = conn.execute("SELECT line FROM events ORDER BY seq").fetchall()
+    finally:
+        conn.close()
+    return [row[0] for row in rows]
 
 
 def emit_envelope(
