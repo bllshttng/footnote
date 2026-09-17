@@ -171,15 +171,19 @@ def _is_raw_graph_parse(node):
 
     This is the spelling that escaped the read_graph census: config_cli.py
     read the frozen graph.json as json.loads(graph.read_text()) and no
-    detector knew it. The graph_json() conjunction that decides it is a
-    graph read lives in _raw_parse_is_graph_read.
+    detector knew it. A bare `loads(...)` name (from json import loads)
+    counts too; the graph_json() conjunction in _raw_parse_is_graph_read is
+    what keeps other modules' loads calls out of the census.
     """
     if not isinstance(node, ast.Call):
         return False
     f = node.func
-    if not (isinstance(f, ast.Attribute) and f.attr == "loads"):
-        return False
-    if not (isinstance(f.value, ast.Name) and f.value.id == "json"):
+    if isinstance(f, ast.Attribute):
+        if f.attr != "loads":
+            return False
+        if not (isinstance(f.value, ast.Name) and f.value.id == "json"):
+            return False
+    elif not (isinstance(f, ast.Name) and f.id == "loads"):
         return False
     return _has_call(node, {"read_text", "read_bytes"})
 
@@ -544,6 +548,17 @@ def self_test() -> int:
     others = [n for n in ast.walk(other_tree) if _is_raw_graph_parse(n)]
     if len(others) != 1 or _raw_parse_is_graph_read(others[0], other_tree.body[0]):
         failures.append("raw graph-parse control: non-graph json parse gated in")
+
+    # The bare-name spelling (from json import loads) must be detected too.
+    bare_tree = ast.parse(
+        "def check(root):\n"
+        "    graph = paths.graph_json()\n"
+        "    if graph.is_file():\n"
+        "        data = loads(graph.read_text(encoding='utf-8'))\n"
+    )
+    bares = [n for n in ast.walk(bare_tree) if _is_raw_graph_parse(n)]
+    if len(bares) != 1:
+        failures.append("raw graph-parse control: bare loads() spelling not detected")
 
     if failures:
         for f in failures:
