@@ -121,8 +121,7 @@ pub fn run_review_summary(args: &[String]) -> i32 {
         return 0;
     };
     let events_path = parsed.events.unwrap_or_else(default_events_path);
-    let events_text =
-        crate::events_store::journal_text(&events_path, crate::events_store::REVIEW_EVENT_TYPES);
+    let events_text = crate::events_store::review_text(&events_path);
     if let Some(line) = summary_line(&events_text, &parsed.branch, &parsed.head) {
         println!("{line}");
     }
