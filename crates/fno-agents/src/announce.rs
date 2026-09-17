@@ -237,22 +237,12 @@ fn append_line(live: &Path, obj: &Value) -> Result<(), String> {
 // Scope matching: the exact port of mail/cli.py::_team_recipients
 // ---------------------------------------------------------------------------
 
-/// crown.py::_same_territory: alias-normalized member-set equality, blank
-/// answers false. `project:<p>` rides the same equality (the Python rule this
-/// replaces had no separate project arm).
-fn same_territory(held: Option<&str>, requested: &str, projects: &HashMap<String, String>) -> bool {
-    let members = |scope: &str| -> HashSet<String> {
-        scope
-            .split(',')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(|m| projects.get(m).cloned().unwrap_or_else(|| m.to_string()))
-            .collect()
-    };
-    match held {
-        Some(h) if !h.is_empty() => members(h) == members(requested),
-        _ => false,
-    }
+/// Which crown answers to `scope`: one rule shared with the walk, blank
+/// answers false. `project:<p>` rides the same rule.
+fn crown_answers(held: Option<&str>, requested: &str, projects: &HashMap<String, String>) -> bool {
+    held.is_some_and(|h| {
+        !h.is_empty() && crate::loop_king::crown_answers_to(h, requested, projects)
+    })
 }
 
 /// Is this session inside the announcement's audience? The SNAPSHOT question
@@ -289,7 +279,7 @@ fn matches_scope_now(
                 .get("crown_level")
                 .map(|c| !c.is_null())
                 .unwrap_or(false),
-            _ => same_territory(row_str(row, "crown_scope"), scope, projects),
+            _ => crown_answers(row_str(row, "crown_scope"), scope, projects),
         })
 }
 
@@ -311,7 +301,7 @@ fn resolve_audience(
         }
         if scope != "all" && scope != "kings" {
             let held = row_str(row, "crown_scope");
-            let crown_ok = same_territory(held, scope, projects);
+            let crown_ok = crown_answers(held, scope, projects);
             // project:<p> also matches rows WORKING in that project (their cwd
             // names the repo), so an announcement reaches the team, not only a
             // crown that may not exist.
@@ -1137,6 +1127,32 @@ mod tests {
             serde_json::to_string(&json!({ "schema_version": 1, "agents": rows })).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_set_king_is_in_the_audience_of_one_member_epic() {
+        let registry = vec![
+            agent_row(
+                "king-set",
+                "sess-set",
+                json!({"crown_level": 2, "crown_scope": "x-119e,x-4d9b"}),
+            ),
+            agent_row(
+                "king-folio",
+                "sess-folio",
+                json!({"crown_level": 0, "crown_scope": "alpha,beta"}),
+            ),
+        ];
+        let projects: HashMap<String, String> = [("alpha", "alpha"), ("beta", "beta")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+
+        assert_eq!(
+            resolve_audience("x-4d9b", &registry, &projects),
+            vec![identity_key("sess-set")]
+        );
+        assert!(resolve_audience("alpha", &registry, &projects).is_empty());
     }
 
     fn agent_row(name: &str, session: &str, extra: Value) -> Value {
