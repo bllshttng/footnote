@@ -38,6 +38,40 @@ Every red row names its cause as the first rule that holds. If no rule fires, th
 - `scheduler_down`: Every interval-bearing arm on the scheduler is silent together, and at least one holds an observed receipt. The job is not running, and the arm is fine.
 - `unexplained`: The scheduler looks healthy. The arm itself did not tick.
 
+### Cause, repair, and owner
+
+A red row says more than how long it has been down. `crates/fno-agents/src/arm_repair.rs` holds the one cause table. Its `annotate` step runs after `explain` in all three readers: `fno agents status`, the `arm_watch` notice, and the king check-in. It sets `cause`, `repair` and `heal` on the row, and the row's `line` ends with `repair: <verb> heal=auto|operator`. The notice and the check-in print that `line` as it is, so the three readers print the same text.
+
+| cause | repair | heal |
+|---|---|---|
+| `tick_overdue`, `launchd_foreign_plist`, `scheduler_down` on launchd | `fno do pr watch refresh` | auto |
+| `scheduler_down` on the daemon, `stale_daemon`, `daemon_down` | `fno agents restart` | operator |
+| `tick_timeout`, `timeout` | `fno do pr watch status` | operator |
+| `dead_holder` | `fno agents claim release <key> --holder <holder>` | auto |
+| `stale_build` | `fno doctor update` | auto |
+| `upstream_down` | the upstream row's repair | the upstream row's owner |
+| `parent_gone` | `fno backlog reconcile --json` | operator |
+| `unclassified`, `unexplained` | none | operator |
+| `configured_off`, `daemon_young` | none | none, the row is not a fault |
+
+The new classes:
+
+- `upstream_down`: The arm's `KNOWN_ARMS` entry names an upstream arm, and that arm is red. The row reads `UPSTREAM`, not `STALE` or `FAIL`, and `upstream` names the arm. `auto_continue` names `pr_watch_merge`: with no merges, it has nothing to act on.
+- `dead_holder`: A `merge_close` row reads `skip=held`, its holder pid is gone, and the hold is past 300 s. That row reads `FAIL`.
+- `stale_build`: The install pin (`~/.fno/source-pin.json`) names a linked worktree or a divergent source. A missing or unreadable pin is not evidence.
+- `parent_gone`: A failing row whose detail names `parent-gone`.
+- `unclassified`: A red row that matches no class. It keeps its skip token and names no verb.
+
+### The heal lane
+
+Every `arm_watch` tick runs the `heal=auto` repairs before it pages, and then pages only what is still red. The tick detail starts with the result: `heal=0`, `heal=off`, or the actions, for example `heal=dead_holder:2,refresh:ok`.
+
+- **Dead holder.** The tick releases each dead `flight:` hold. It reads the claim again and probes the pid just before the release, and the release is holder-bound. A claim that a live holder took in the meantime stays, and the detail reads `skipped:1`.
+- **Launchd refresh.** A launchd arm can be stale past the threshold with `tick_overdue`, `scheduler_down` or `launchd_foreign_plist`. Then the tick runs `fno do pr watch refresh` with a 120 s limit. It runs once for each episode. The set of stale arms and their last ticks is the episode token in the notify signal store.
+- **Stale build.** A row can read `stale_build`. Then the tick starts `fno doctor update` in the background from the canonical checkout. It does this at most once in 6 hours. The source-pin gate in `fno doctor update` still refuses a source that is not eligible. The next tick reads the pin again to see the result.
+
+`recovery.self_heal.enabled` (default `true`) is the switch. When it is `false`, no repair runs, the tick detail reads `heal=off`, and the rows still print their repair verbs for the operator.
+
 ### Stuck work
 
 `arm_watch` also pages on work that is stuck outside the arms table. One module, `crates/fno-agents/src/stuck_work.rs`, answers "what work is stuck" for three readers. `fno agents status` carries the `stuck_work` payload and the `stuck work:` block. The arm tick folds the findings into the notice token and body under the `control plane: needs attention` title. The king check-in reads them as its `control_plane` reading.
@@ -46,6 +80,8 @@ Two findings:
 
 - **Hung verb.** A process whose argv0 basename is `fno`, `fno-py` or `fno-agents` is a verb. So is a python interpreter driving a `/fno-py` script. When its age passes three times its declared `--timeout` (else 1800 s), the verb is hung. The raw forms are `30`, `30s`, `30m`, `30h`. One const excludes the long-lived shapes. They are `fno --server`, a bare `fno` with no verb, and an argv carrying `daemon`, `attach`, `mux`, or the pair `loop run`. `fno-agents-daemon` and `fno-agents-worker` never match the basename rule.
 - **Dead holder.** A `flight:` claim held more than 300 s whose holder pid probe reads `absent` on this host. Only `flight:` holds count: they are pid-scoped by design, while session claims outlive their ambient pid on purpose.
+
+A dead-holder line ends with its repair: `; repair: fno agents claim release <key> --holder <holder> heal=auto`. For a claim outside `$HOME`, the verb starts with `FNO_CLAIMS_ROOT=<root>`. A new shell then resolves the same claims dir.
 
 The read fails loud. A `ps` that cannot run, or an unreadable claims dir, is an error and never an empty list. A blind read cannot page as "nothing is stuck". The daemon drain is the other half of the same clock. Its `backlog advance` child runs under a wall clock equal to the lease its own flight lock carries (`flight_gate::FLIGHT_TTL_MS`). A child killed at the bound journals an `active_backlog_skip` with reason `advance-timeout`.
 
