@@ -722,14 +722,12 @@ pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
 /// live enough to answer). Best-effort by contract: never errors, returns the
 /// removal count.
 pub fn remove_for(tree: &Path) -> usize {
-    let root = repo_root_for(tree);
-    let fno_base = fno_build_base(&root);
-    let Ok(answer) = answer_tree(tree, &fno_base) else {
+    let Ok(dirs) = list_for(tree) else {
         return 0;
     };
-    let bases = managed_bases(&root);
+    let bases = managed_bases(&repo_root_for(tree));
     let mut removed = 0;
-    for dir in answer.dirs {
+    for dir in dirs {
         if !under_any(&dir, &bases) {
             continue;
         }
