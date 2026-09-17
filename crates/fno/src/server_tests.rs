@@ -10149,36 +10149,8 @@ fn emergency_roster_kills_plain_child_and_spares_keeper_child() {
     // what they read is unchanged and the test leaves no zombie.
 }
 
-#[test]
-fn keeper_list_parses_as_a_hidden_pane_verb() {
-    let args: Vec<OsString> = vec!["keeper".into(), "list".into(), "--json".into()];
-    let parsed = crate::mux_cli::parse_pane_args(&args).expect("parses");
-    assert_eq!(
-        parsed.cmd,
-        crate::mux_cli::PaneCmd::KeeperList {
-            json: true,
-            stale_after: None
-        }
-    );
-    let args: Vec<OsString> = vec![
-        "keeper".into(),
-        "list".into(),
-        "--stale-after".into(),
-        "24h".into(),
-    ];
-    let parsed = crate::mux_cli::parse_pane_args(&args).expect("parses");
-    assert_eq!(
-        parsed.cmd,
-        crate::mux_cli::PaneCmd::KeeperList {
-            json: false,
-            stale_after: Some(std::time::Duration::from_secs(86_400)),
-        }
-    );
-    // Named in the refusal surface (the verb-ratchet requires the
-    // dispatcher's message to name every verb it accepts); the curated
-    // root menu stays the one advertisement surface.
-    assert!(crate::mux_cli::PANE_VERBS.contains("keeper"));
-}
+#[path = "server_tests_keeper.rs"]
+mod server_tests_keeper;
 
 #[test]
 fn keeper_list_reports_zero_as_zero_and_exits_zero() {

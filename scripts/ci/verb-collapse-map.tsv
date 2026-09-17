@@ -460,35 +460,6 @@ mail unread	T1	mail unread	16
 mail view	T1	mail view	2
 mail withdraw	T1	mail withdraw	2
 mcp send	KEEP	mcp send	10	single-leaf group
-mux attach	T1	mux attach	11
-mux block annotate	T1	mux block annotate	4
-mux block pipe	T1	mux block pipe	6
-mux doctor	T1	mux doctor	7
-mux kill-server	T1	mux kill-server	9
-mux layout apply	T1	mux layout apply	14
-mux layout get	T1	mux layout get	2
-mux layout graft	T1	mux layout graft	15
-mux ls	T1	mux ls	15
-mux pane break	T1	mux pane break	1
-mux pane claim	T1	mux pane claim	2
-mux pane focus	T1	mux pane focus	2
-mux pane kill	T1	mux pane kill	11
-mux pane ls	T1	mux pane ls	10
-mux pane read	T1	mux pane read	12
-mux pane release	T1	mux pane release	1
-mux pane run	T1	mux pane run	26
-mux pane send	T1	mux pane send	13
-mux pane split	T1	mux pane split	1
-mux pane wait	T1	mux pane wait	7
-mux serve	T1	mux serve	15
-mux server	T1	mux server	5
-mux shell-init	T1	mux shell-init	13
-mux tab create	T1	mux tab create	2
-mux tab join	T1	mux tab join	3
-mux tab ls	T1	mux tab ls	2
-mux tab rename	T1	mux tab rename	3
-mux where	T1	mux where	16
-mux workspace prune	T1	mux workspace prune	14
 notify	KEEP	notify	18	single-leaf group
 observer replay	T1	observer replay	1
 observer sweep	T1	observer sweep	4

@@ -220,19 +220,24 @@ def test_smoke_setup_cleans_fno_agents_before_building_cached_artifacts() -> Non
     run = "\n".join(step.get("run", "") for step in action["runs"]["steps"])
     lines = _command_lines(run)
 
-    for package in ("fno", "fno-agents"):
-        clean = lines.index(
-            f"cargo clean -p {package} --manifest-path crates/{package}/Cargo.toml"
-        )
-        # The build pins CARGO_BUILD_BUILD_DIR (the repo build-dir config would
-        # otherwise put the final binary in the cargo-home build base, where
-        # the FRONT export never reads).
-        build = lines.index(
-            f'CARGO_BUILD_BUILD_DIR="$PWD/crates/{package}/target" '
-            f"cargo build --manifest-path crates/{package}/Cargo.toml"
-        )
+    # smoke-setup builds only fno-agents (the front fno crate builds in the
+    # dedicated cargo job), so only that package may appear here.
+    clean = lines.index(
+        "cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml"
+    )
+    # The build pins CARGO_BUILD_BUILD_DIR (the repo build-dir config would
+    # otherwise put the final binary in the cargo-home build base, where
+    # the FRONT export never reads).
+    build = lines.index(
+        'CARGO_BUILD_BUILD_DIR="$PWD/crates/fno-agents/target" '
+        "cargo build --manifest-path crates/fno-agents/Cargo.toml"
+    )
 
-        assert clean < build, f"smoke setup can execute a stale cached {package} binary"
+    assert clean < build, "smoke setup can execute a stale cached fno-agents binary"
+    assert not any(
+        line.startswith("cargo build --manifest-path crates/fno/Cargo.toml")
+        for line in lines
+    ), "smoke setup must not rebuild the front fno crate"
 
 
 def test_rust_ci_cleans_fno_agents_before_unit_tests() -> None:

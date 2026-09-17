@@ -43,12 +43,12 @@ fn typed_native_verbs_parse_and_refuse() {
         cli_args::classify(&[OsString::from("version"), OsString::from("--json")]),
         cli_args::FrontDoor::Version { json: true }
     );
-    // A malformed native shape is usage, never a forward (AC3-ERR): only
-    // `mux ...` rides the carry arm.
-    assert_eq!(
+    // A malformed native shape is usage, never a forward (AC3-ERR): the
+    // refusal is one command-qualified line.
+    assert!(matches!(
         cli_args::classify(&[OsString::from("--server")]),
-        cli_args::FrontDoor::Usage
-    );
+        cli_args::FrontDoor::Usage { .. }
+    ));
 }
 
 #[test]
@@ -57,12 +57,14 @@ fn pane_run_payload_stays_verbatim() {
     // command's argv; a common-flag spelling inside it is never ours to
     // parse. A fence-less MuxCommon::take across the whole argv stole them
     // (round-2 finding), silently trimming the spawned command's flags.
+    use fno::cli_args::{MuxTail, PaneOp};
     use fno::mux_cli::{parse_pane_args, PaneCmd};
-    let argv: Vec<OsString> = ["run", "--", "true", "--server", "x"]
+    let op = PaneOp::Run(MuxTail { tail: Vec::new() });
+    let argv: Vec<OsString> = ["--", "true", "--server", "x"]
         .iter()
         .map(OsString::from)
         .collect();
-    let parsed = parse_pane_args(&argv).expect("payload parses");
+    let parsed = parse_pane_args(&op, &argv).expect("payload parses");
     assert!(parsed.session.is_none());
     assert!(!parsed.json);
     match parsed.cmd {
@@ -74,11 +76,11 @@ fn pane_run_payload_stays_verbatim() {
     }
     // The flags BEFORE the payload still work, and a payload `--json` does
     // not leak into the pane verb's own output flag.
-    let argv: Vec<OsString> = ["run", "--json", "--", "claude", "--json"]
+    let argv: Vec<OsString> = ["--json", "--", "claude", "--json"]
         .iter()
         .map(OsString::from)
         .collect();
-    let parsed = parse_pane_args(&argv).expect("pre-payload flags parse");
+    let parsed = parse_pane_args(&op, &argv).expect("pre-payload flags parse");
     assert!(parsed.json);
     assert!(parsed.session.is_none());
     match parsed.cmd {
@@ -93,12 +95,14 @@ fn pane_run_payload_stays_verbatim() {
 fn pane_send_reads_flag_shaped_values() {
     // A flag VALUE that spells a common flag is text to send, not a flag to
     // strip: a fence-less pre-pass would have left --text valueless.
+    use fno::cli_args::{MuxTail, PaneOp};
     use fno::mux_cli::{parse_pane_args, PaneCmd, SendSource};
-    let argv: Vec<OsString> = ["send", "45", "--text", "--json"]
+    let op = PaneOp::Send(MuxTail { tail: Vec::new() });
+    let argv: Vec<OsString> = ["45", "--text", "--json"]
         .iter()
         .map(OsString::from)
         .collect();
-    let parsed = parse_pane_args(&argv).expect("flag-shaped value reads");
+    let parsed = parse_pane_args(&op, &argv).expect("flag-shaped value reads");
     assert!(parsed.session.is_none());
     assert!(!parsed.json);
     match parsed.cmd {

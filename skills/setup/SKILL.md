@@ -149,17 +149,19 @@ IT spawns (`config.mux.shell_integration: mux-panes`, on by default), so blocks
 "just work" in mux panes with zero config and WITHOUT touching the user's rc.
 
 Blocks in the user's OTHER terminals (iTerm, Terminal.app, a non-mux tab) need
-the markers too. Offer to add ONE eval line to their shell rc - never silently,
-always reversible:
+the markers too, and the same eval line registers shell completion for the
+native `fno` command tree (tab completion falls back to the shell default for
+the roots that still forward to Python). Offer to add ONE eval line to their
+shell rc - never silently, always reversible:
 
 ```bash
 # Detect their shell, then OFFER (ask [y/N], default no):
-#   "Add OSC 133 block markers to your global <zsh|bash> rc so blocks work in
-#    every terminal, not just mux panes? This appends one commented line to
-#    ~/.zshrc (or ~/.bashrc). [y/N]"
+#   "Add OSC 133 block markers and fno shell completion to your global <zsh|bash>
+#    rc so blocks and completion work in every terminal, not just mux panes?
+#    This appends one commented line to ~/.zshrc (or ~/.bashrc). [y/N]"
 # On y ONLY, append (idempotent - skip if _FNO_OSC133 already present):
 grep -q _FNO_OSC133 ~/.zshrc 2>/dev/null || {
-  printf '\n# fno OSC 133 block markers (remove this line + the next to undo)\n' >> ~/.zshrc
+  printf '\n# fno OSC 133 block markers + shell completion (remove this line + the next to undo)\n' >> ~/.zshrc
   echo 'eval "$(fno mux shell-init zsh)"' >> ~/.zshrc
 }
 ```

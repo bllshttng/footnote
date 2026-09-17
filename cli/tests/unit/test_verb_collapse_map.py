@@ -239,8 +239,11 @@ def test_map_covers_current_surface_once():
     # The decide shim then keeps four distinct compatibility leaves in the
     # baseline, including its hidden-origin retract option: 631 -> 635.
     # This branch allocates `agents king term`, the crown's-term declare
-    # verb, sharing the `king shape` dispatch point: 635 -> 636.
-    assert len(mapped) == 636, (
+    # verb, sharing the `king shape` dispatch point: 635 -> 636. The
+    # command-tree cutover then deleted the 29 mux rows: the typed mux tree
+    # declares those paths natively and the verb-ratchet reads the generated
+    # inventory, so no collapse-map row is consumed: 636 -> 607.
+    assert len(mapped) == 607, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -302,8 +305,10 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     kept = Counter(row["current-leaf"].split()[0] for row in rows if row["tier"] == "KEEP")
     projected = len(groups_with_dispatch) + sum(kept.values())
     # The merged tree carries 79 registered leaves before the decide shim's
-    # four retained compatibility leaves are counted: 79 -> 82.
-    assert projected == 82
+    # four retained compatibility leaves are counted: 79 -> 82. The
+    # command-tree cutover deleted the 29 mux rows (the native tree declares
+    # those paths; the ratchet reads the generated inventory): 82 -> 81.
+    assert projected == 81
     assert projected <= 99
 
 

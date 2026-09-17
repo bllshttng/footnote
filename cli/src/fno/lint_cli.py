@@ -193,10 +193,14 @@ def _root_namespace_names() -> list[str]:
 
     names = set(_python_root_names())
     try:
-        rust_paths, _families = ratchet.scan_rust_source()
+        rows = ratchet.read_native_inventory()
     except (OSError, ratchet.VerbRatchetError) as exc:
         raise RuntimeError(f"Rust root source unavailable: {exc}") from exc
-    names.update(path.split(maxsplit=1)[0] for path in rust_paths)
+    names.update(
+        row[0].split(maxsplit=1)[0]
+        for row in rows
+        if row and row[0] and row[0] != "(root)"
+    )
     return sorted(names)
 
 

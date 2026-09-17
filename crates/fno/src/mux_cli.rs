@@ -30,6 +30,7 @@
 //! - `pane` verbs (the list lives in [`PANE_VERBS`], named once): the
 //!   per-reply shapes in [`render_reply`].
 
+mod completion;
 mod restore;
 
 use self::restore::workspace_restore;
@@ -60,11 +61,13 @@ mod server_axis;
 
 pub use crate::cli_args::{BlockAnnotateArgs, BlockPipeArgs, MuxCommon};
 
+mod block_args;
 mod pane_args;
+use block_args::{parse_block_annotate, parse_block_args};
 use clap::Parser as _;
 pub use pane_args::{
     parse_pane_args, ParsedPane, PANE_LS_IDENTITY_HELP, PANE_REFERENCE_USAGE, PANE_RUN_WORKER_HELP,
-    PANE_SEND_RAW_HELP, PANE_VERBS,
+    PANE_SEND_RAW_HELP,
 };
 pub use server_axis::{
     env_server, note_server_flag, resolve_session, LEGACY_SERVER_ENV, SERVER_ENV,
@@ -202,9 +205,9 @@ fi
 /// (Warp/iTerm) works with zero setup (AC4-EDGE) - the scanner does not care
 /// who emits. An unsupported / missing shell is a one-line error (AC4-ERR).
 pub fn shell_init(shell: Option<&str>, json: bool) -> i32 {
-    let snippet = match shell {
-        Some("zsh") => ZSH_SHELL_INIT,
-        Some("bash") => BASH_SHELL_INIT,
+    let (snippet, completion) = match shell {
+        Some("zsh") => (ZSH_SHELL_INIT, Some(self::completion::zsh_script())),
+        Some("bash") => (BASH_SHELL_INIT, Some(self::completion::bash_script())),
         Some(other) => {
             eprintln!("fno mux shell-init: unsupported shell {other:?}; supported: zsh, bash");
             return EXIT_USAGE;
@@ -214,15 +217,22 @@ pub fn shell_init(shell: Option<&str>, json: bool) -> i32 {
             return EXIT_USAGE;
         }
     };
-    // --json wraps the snippet in the stable envelope (a script reads `.snippet`);
-    // the default prints the raw snippet for `eval "$(fno mux shell-init zsh)"`.
+    let completion = completion.unwrap_or_default();
+    // --json keeps the envelope additive: the snippet is byte-identical, and
+    // the completion generated from the typed tree rides its own field. The
+    // default prints both for `eval "$(fno mux shell-init zsh)"`.
     if json {
         println!(
             "{}",
-            serde_json::json!({ "shell": shell.unwrap_or(""), "snippet": snippet })
+            serde_json::json!({
+                "shell": shell.unwrap_or(""),
+                "snippet": snippet,
+                "completion": completion,
+            })
         );
     } else {
         print!("{snippet}");
+        print!("{completion}");
     }
     EXIT_OK
 }
@@ -1568,21 +1578,14 @@ pub fn stats(json: bool) -> i32 {
 /// remaining user-adjacent `squad` spellings, the key in the `--json`
 /// placement receipt and `~/.fno/squads.json`, ride the next change that
 /// bumps `PROTO_VERSION` or migrates the store for a real reason.
-pub fn workspace(args: &[OsString], env_session: Option<&str>) -> i32 {
-    // main.rs routes here only with a token after the family verb, so a bare
-    // `mux workspace` is the global usage arm; one failure shape here, an
-    // unknown verb.
-    let sub = args
-        .first()
-        .map(|a| a.to_string_lossy())
-        .unwrap_or_default();
-    match sub.as_ref() {
-        "prune" => squad_prune(&args[1..]),
-        "restore" => workspace_restore(&args[1..], env_session),
-        _ => {
-            eprintln!("fno mux workspace: unknown verb {sub:?} (expected prune|restore)");
-            EXIT_USAGE
-        }
+pub fn workspace(
+    op: crate::cli_args::WorkspaceOp,
+    args: &[OsString],
+    env_session: Option<&str>,
+) -> i32 {
+    match op {
+        crate::cli_args::WorkspaceOp::Prune(_) => squad_prune(args),
+        crate::cli_args::WorkspaceOp::Restore(_) => workspace_restore(args, env_session),
     }
 }
 
@@ -2400,8 +2403,9 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// `fno mux pane <verb> ...`: parse, resolve the session, run the verb over a
 /// one-shot v4 control connection, print machine-readable output, return the
 /// exit code. `env_session` is `FNO_SESSION` (set in every pane).
-pub fn pane(args: &[OsString], env_session: Option<&str>) -> i32 {
-    let parsed = match parse_pane_args(args) {
+pub fn pane(op: crate::cli_args::PaneOp, env_session: Option<&str>) -> i32 {
+    let args = op.tail();
+    let parsed = match parse_pane_args(&op, &args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("fno mux pane: {e}");
@@ -2672,15 +2676,9 @@ fn squad_target(squad: Option<String>) -> PaneTarget {
 }
 
 /// `fno mux tab ls|create|rename|join|close ...`.
-pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
-    let verb = match args.first().and_then(|a| a.to_str()) {
-        Some(v) => v.to_string(),
-        None => {
-            eprintln!("fno mux tab: needs a verb: ls|create|rename|join|move|close");
-            return EXIT_USAGE;
-        }
-    };
-    // Flag pass over the tokens after the verb.
+pub fn tab(op: crate::cli_args::TabOp, args: &[OsString], env_session: Option<&str>) -> i32 {
+    // Flag pass over the tokens after the operation word (the typed tree
+    // guarantees one was present and names this op).
     let mut squad = None;
     let mut name = None;
     let mut tab_sel = None;
@@ -2700,7 +2698,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     };
     let session = common.server.or(common.session);
     let json = common.json;
-    let mut i = 1;
+    let mut i = 0;
     while i < tab_args.len() {
         let tok = tab_args[i].as_str();
         let res = (|| -> Result<(), String> {
@@ -2772,15 +2770,15 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
         i += 1;
     }
 
-    let verb = match verb.as_str() {
-        "ls" => ControlVerb::TabLs {
+    let verb = match op {
+        crate::cli_args::TabOp::Ls(_) => ControlVerb::TabLs {
             squad: squad_target(squad),
         },
-        "create" => ControlVerb::TabCreate {
+        crate::cli_args::TabOp::Create(_) => ControlVerb::TabCreate {
             squad: squad_target(squad),
             name: name.filter(|n| !n.trim().is_empty()),
         },
-        "rename" => {
+        crate::cli_args::TabOp::Rename(_) => {
             let (Some(tab), Some(name)) = (tab_sel, name) else {
                 eprintln!("fno mux tab rename: needs --tab <sel> and --name <s>");
                 return EXIT_USAGE;
@@ -2791,7 +2789,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 name,
             }
         }
-        "join" => {
+        crate::cli_args::TabOp::Join(_) => {
             let (Some(src_tab), Some(anchor_pane), Some(direction)) = (src, at, dir) else {
                 eprintln!("fno mux tab join: needs --src <sel> --at <pane> --dir <dir>");
                 return EXIT_USAGE;
@@ -2802,7 +2800,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 direction,
             }
         }
-        "close" => {
+        crate::cli_args::TabOp::Close(_) => {
             let Some(tab) = tab_sel else {
                 eprintln!("fno mux tab close: needs --tab <sel> (bulk close: {PRUNE_REMEDY})");
                 return EXIT_USAGE;
@@ -2816,7 +2814,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
         // The direct-destination move: `--to` names the POSITION (the
         // same 1-based ordinal the tab bar shows), the server computes the
         // delta and runs the trunk the interactive reorder runs.
-        "move" => {
+        crate::cli_args::TabOp::Move(_) => {
             let (Some(tab), Some(to)) = (tab_sel, to) else {
                 eprintln!("fno mux tab move: needs --tab <sel> and --to <ordinal>");
                 return EXIT_USAGE;
@@ -2826,10 +2824,6 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 tab,
                 to,
             }
-        }
-        other => {
-            eprintln!("fno mux tab: unknown verb {other} (ls|create|rename|join|move|close)");
-            return EXIT_USAGE;
         }
     };
     run_on_existing_server(session.as_deref(), env_session, json, verb)
@@ -2884,8 +2878,8 @@ fn load_spec_file(path: &str) -> Result<crate::proto::LayoutSpec, String> {
     })
 }
 
-/// `fno mux layout get|apply ...` (get:; apply:).
-pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
+/// `fno mux layout get|apply ...`.
+pub fn layout(op: crate::cli_args::LayoutOp, args: &[OsString], env_session: Option<&str>) -> i32 {
     let (common, rest) = match MuxCommon::take(args) {
         Ok(t) => t,
         Err(e) => {
@@ -2895,21 +2889,21 @@ pub fn layout(args: &[OsString], env_session: Option<&str>) -> i32 {
     };
     let session = common.server.or(common.session);
     let json = common.json;
-    if rest.first().map(String::as_str) == Some("apply") {
-        return layout_apply_cli(session.as_deref(), env_session, json, &rest[1..]);
-    }
-    if rest.first().map(String::as_str) == Some("graft") {
-        return layout_graft_cli(session.as_deref(), env_session, json, &rest[1..]);
-    }
-    // Otherwise `get` (a bare `layout` also means get). The common flags
-    // already left in `take`, so the loop below sees only get's own flags.
-    let flags = match rest.first().map(String::as_str) {
-        Some("get") | None => rest,
-        Some(other) => {
-            eprintln!("fno mux layout: unknown verb {other} (get|apply|graft)");
-            return EXIT_USAGE;
+    // The operation word rides the tail (a common flag may sit before it);
+    // the typed tree already resolved it, so route on the op, not on
+    // rest.first().
+    match op {
+        crate::cli_args::LayoutOp::Apply(_) => {
+            return layout_apply_cli(session.as_deref(), env_session, json, &rest[1..]);
         }
-    };
+        crate::cli_args::LayoutOp::Graft(_) => {
+            return layout_graft_cli(session.as_deref(), env_session, json, &rest[1..])
+        }
+        // The common flags already left in `take`, so the loop below sees
+        // only get's own flags.
+        crate::cli_args::LayoutOp::Get(_) => {}
+    }
+    let flags = rest;
     let mut squad = None;
     let mut tab_sel = None;
     let mut i = 0;
@@ -5022,51 +5016,6 @@ fn render_reply(
 // `fno mux block pipe` - cross-pane block piping porcelain
 // ---------------------------------------------------------------------------
 
-/// A parsed `block pipe` invocation. Pure-parse struct, mirrors [`ParsedPane`].
-#[derive(Debug, PartialEq, Eq)]
-struct ParsedBlockPipe {
-    session: Option<String>,
-    json: bool,
-    from: u64,
-    to: u64,
-    block: BlockSel,
-    force: bool,
-}
-
-/// Parse the tokens after `mux block` into a [`ParsedBlockPipe`]. Pure, so the
-/// grammar is unit-testable without a socket. `pipe` is the only block verb.
-fn parse_block_args(args: &[OsString]) -> Result<ParsedBlockPipe, String> {
-    let verb = args
-        .first()
-        .and_then(|a| a.to_str())
-        .ok_or_else(|| "block needs a verb: pipe | annotate".to_string())?;
-    if verb != "pipe" {
-        return Err(format!("unknown block verb: {verb} (pipe | annotate)"));
-    }
-    let a = BlockPipeArgs::try_parse_from(&args[1..])
-        .map_err(|e| crate::cli_args::refusal_line("fno mux block pipe", &e))?;
-    if a.session.is_some() {
-        note_server_flag("--session");
-    }
-    Ok(ParsedBlockPipe {
-        session: a.server.or(a.session),
-        json: a.json,
-        from: parse_u64(
-            a.from.as_deref().ok_or("block pipe needs --from <pane>")?,
-            "--from",
-        )?,
-        to: parse_u64(
-            a.to.as_deref().ok_or("block pipe needs --to <pane>")?,
-            "--to",
-        )?,
-        block: match &a.block {
-            Some(b) => parse_block_sel(b)?,
-            None => BlockSel::Last,
-        },
-        force: a.force,
-    })
-}
-
 /// Data-integrity gate on the source block's metadata: an open (still
 /// running) or byte-cap-truncated block must never pipe - partial text is
 /// worse than no pipe (the verb's contract). Distinct from the idle guard:
@@ -5567,57 +5516,6 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
 /// cap only bounds how much of a large completed block rides into the event.
 const ANNOTATE_EXCERPT_CAP: usize = 2048;
 
-/// A parsed `block annotate` invocation. Pure-parse struct, mirrors
-/// [`ParsedBlockPipe`]. `node` carries the backlog node the finding is scoped
-/// to (the caller supplies the pane's server-tracked `FNO_NODE`, surfaced to
-/// the mux client as `Layout::focus_node`); the porcelain never guesses it.
-#[derive(Debug, PartialEq, Eq)]
-struct ParsedBlockAnnotate {
-    session: Option<String>,
-    from: u64,
-    block: BlockSel,
-    node: String,
-    message: String,
-}
-
-/// Parse the tokens after `mux block annotate` into a [`ParsedBlockAnnotate`].
-/// Pure, so the grammar is unit-testable without a socket. `--node` and `-m`
-/// are required; a missing `--node` is the "specify the node" refusal (a
-/// non-agent pane has no provenance to resolve, so the caller must name it).
-fn parse_block_annotate(args: &[OsString]) -> Result<ParsedBlockAnnotate, String> {
-    // args[0] is the "annotate" verb (block() already routed on it).
-    let a = BlockAnnotateArgs::try_parse_from(&args[1..])
-        .map_err(|e| crate::cli_args::refusal_line("fno mux block annotate", &e))?;
-    if a.session.is_some() {
-        note_server_flag("--session");
-    }
-    let session = a.server.or(a.session);
-    let from = a
-        .from
-        .as_deref()
-        .map(|v| parse_u64(v, "--from"))
-        .transpose()?;
-    let block = match &a.block {
-        Some(b) => parse_block_sel(b)?,
-        None => BlockSel::Last,
-    };
-    let node = a.node;
-    let message = a.message.ok_or("block annotate needs -m <text>")?;
-    if message.trim().is_empty() {
-        return Err("block annotate: --message is empty".to_string());
-    }
-    Ok(ParsedBlockAnnotate {
-        session,
-        from: from.ok_or("block annotate needs --from <pane>")?,
-        block,
-        node: node.ok_or(
-            "block annotate needs --node <id> (a pane's node cannot be guessed; \
-             pass the node whose work this pane holds)",
-        )?,
-        message,
-    })
-}
-
 /// `fno mux block annotate --from <pane> [--block last|<seq>] -m <text> --node
 /// <id> [--session]`: read a COMPLETED block from the source pane and record it
 /// as an operator review finding against `--node` via `fno backlog annotate add`.
@@ -5773,18 +5671,10 @@ fn cap_excerpt(text: &str, cap: usize) -> String {
 /// `fno mux block <verb> ...`: route the block verb family. `pipe`
 /// pipes a completed block into another pane's input; `annotate`
 /// records it as an operator review finding.
-pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
-    match args.first().and_then(|a| a.to_str()) {
-        Some("pipe") => block_pipe(args, env_session),
-        Some("annotate") => block_annotate(args, env_session),
-        Some(v) => {
-            eprintln!("fno mux block: unknown block verb: {v} (pipe | annotate)");
-            EXIT_USAGE
-        }
-        None => {
-            eprintln!("fno mux block: block needs a verb: pipe | annotate");
-            EXIT_USAGE
-        }
+pub fn block(op: crate::cli_args::BlockOp, args: &[OsString], env_session: Option<&str>) -> i32 {
+    match op {
+        crate::cli_args::BlockOp::Pipe(_) => block_pipe(args, env_session),
+        crate::cli_args::BlockOp::Annotate(_) => block_annotate(args, env_session),
     }
 }
 
@@ -5792,6 +5682,7 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
 mod tests {
     use super::*;
     use crate::pane_send_audit::{FNO_AGENTS_HOME_GUARD, FNO_BIN_GUARD};
+    use block_args::{ParsedBlockAnnotate, ParsedBlockPipe};
 
     // The paneless route-hint test lives in its own file; the parent is
     // shrink-only under the file-budget gate.
@@ -5834,8 +5725,28 @@ mod tests {
     mod server_axis_flag_tests;
 
     fn pane_args(tokens: &[&str]) -> Result<ParsedPane, String> {
-        let args: Vec<OsString> = tokens.iter().map(OsString::from).collect();
-        parse_pane_args(&args)
+        let op = op_of(tokens[0]);
+        let args: Vec<OsString> = tokens[1..].iter().map(OsString::from).collect();
+        parse_pane_args(&op, &args)
+    }
+
+    fn op_of(word: &str) -> crate::cli_args::PaneOp {
+        use crate::cli_args::{MuxTail, PaneOp};
+        let t = || MuxTail { tail: Vec::new() };
+        match word {
+            "ls" => PaneOp::Ls(t()),
+            "read" => PaneOp::Read(t()),
+            "run" => PaneOp::Run(t()),
+            "send" => PaneOp::Send(t()),
+            "wait" => PaneOp::Wait(t()),
+            "kill" => PaneOp::Kill(t()),
+            "claim" => PaneOp::Claim(t()),
+            "release" => PaneOp::Release(t()),
+            "split" => PaneOp::Split(t()),
+            "break" => PaneOp::Break(t()),
+            "focus" => PaneOp::Focus(t()),
+            _ => panic!("no test op mapping for {word}"),
+        }
     }
 
     #[test]
@@ -5895,7 +5806,9 @@ mod tests {
 
     #[test]
     fn pane_help_names_the_two_pane_reference_forms() {
-        let help = pane_args(&["--help"]).unwrap_err();
+        // The verb-position help request renders the pane group's help now
+        // (clap); its after_help carries the pane reference line.
+        let help = crate::cli_args::pane_group_help();
         assert!(help.contains("<pane-id>"), "{help}");
         assert!(help.contains("<session>:<pane-id>"), "{help}");
         assert!(help.contains("--session overrides"), "{help}");
@@ -5904,10 +5817,11 @@ mod tests {
     #[test]
     fn pane_run_help_documents_the_worker_flag() {
         // the flag is the capture funnel's front door, so the run
-        // verb's own help names it and what it records. Both spellings of the
-        // help request reach the same text.
-        for help_args in [&["run", "--help"][..], &["--help"][..]] {
-            let help = pane_args(help_args).unwrap_err();
+        // verb's own help names it and what it records. The group help
+        // (after_help) and the -h inside the run tail reach the same text.
+        let group_help = crate::cli_args::pane_group_help();
+        let tail_help = parse_pane_args(&op_of("run"), &os(&["--help"])).unwrap_err();
+        for help in [group_help, tail_help] {
             assert!(help.contains("--worker"), "{help}");
             assert!(
                 help.contains("idle row"),
@@ -6099,20 +6013,22 @@ mod tests {
     fn pane_focus_target_parse_digits_vs_selector_vs_fzf() {
         // All digits: the legacy integer door, byte-identical behavior.
         assert_eq!(
-            parse_pane_args(&os(&["focus", "31"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["31"])).unwrap().cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Pane(31)
             }
         );
         // Anything else is a selector resolved against the registry.
         assert_eq!(
-            parse_pane_args(&os(&["focus", "x919"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["x919"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Selector("x919".into())
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["focus", "t-x919-sentinel"]))
+            parse_pane_args(&op_of("focus"), &os(&["t-x919-sentinel"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Focus {
@@ -6121,16 +6037,18 @@ mod tests {
         );
         // --fzf with no positional opens the picker; with one it is usage.
         assert_eq!(
-            parse_pane_args(&os(&["focus", "--fzf"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["--fzf"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Pick
             }
         );
-        assert!(parse_pane_args(&os(&["focus", "--fzf", "31"])).is_err());
-        assert!(parse_pane_args(&os(&["focus", "--fzf", "x919"])).is_err());
-        assert!(parse_pane_args(&os(&["focus"])).is_err());
+        assert!(parse_pane_args(&op_of("focus"), &os(&["--fzf", "31"])).is_err());
+        assert!(parse_pane_args(&op_of("focus"), &os(&["--fzf", "x919"])).is_err());
+        assert!(parse_pane_args(&op_of("focus"), &os(&[])).is_err());
         // --fzf pairs with focus only.
-        assert!(parse_pane_args(&os(&["ls", "--fzf"])).is_err());
+        assert!(parse_pane_args(&op_of("ls"), &os(&["--fzf"])).is_err());
     }
 
     fn pane_row(name: &str, session: &str, pane: u64) -> PaneRow {
@@ -6571,7 +6489,7 @@ mod tests {
     #[test]
     fn mux_pane_parse_ls_read_kill() {
         assert_eq!(
-            parse_pane_args(&os(&["ls"])).unwrap(),
+            parse_pane_args(&op_of("ls"), &os(&[])).unwrap(),
             ParsedPane {
                 session: None,
                 json: false,
@@ -6579,7 +6497,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["read", "7", "--lines", "40", "--json"])).unwrap(),
+            parse_pane_args(&op_of("read"), &os(&["7", "--lines", "40", "--json"])).unwrap(),
             ParsedPane {
                 session: None,
                 json: true,
@@ -6592,7 +6510,7 @@ mod tests {
         );
         // --block last | <seq> selects a command block (lines ignored server-side).
         assert_eq!(
-            parse_pane_args(&os(&["read", "7", "--block", "last"]))
+            parse_pane_args(&op_of("read"), &os(&["7", "--block", "last"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Read {
@@ -6602,7 +6520,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["read", "7", "--block", "3"]))
+            parse_pane_args(&op_of("read"), &os(&["7", "--block", "3"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Read {
@@ -6611,9 +6529,9 @@ mod tests {
                 block: Some(BlockSel::Seq(3)),
             }
         );
-        assert!(parse_pane_args(&os(&["read", "7", "--block", "nope"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["7", "--block", "nope"])).is_err());
         assert_eq!(
-            parse_pane_args(&os(&["kill", "3", "--session", "work"])).unwrap(),
+            parse_pane_args(&op_of("kill"), &os(&["3", "--session", "work"])).unwrap(),
             ParsedPane {
                 session: Some("work".into()),
                 json: false,
@@ -6626,7 +6544,7 @@ mod tests {
     fn mux_pane_parse_split_break_and_ls_fno_id() {
         // split needs a direction; --focus opts into focus.
         assert_eq!(
-            parse_pane_args(&os(&["split", "5", "--direction", "right"]))
+            parse_pane_args(&op_of("split"), &os(&["5", "--direction", "right"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Split {
@@ -6636,7 +6554,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["split", "5", "-d", "up", "--focus"]))
+            parse_pane_args(&op_of("split"), &os(&["5", "-d", "up", "--focus"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Split {
@@ -6646,11 +6564,11 @@ mod tests {
             }
         );
         assert!(
-            parse_pane_args(&os(&["split", "5"])).is_err(),
+            parse_pane_args(&op_of("split"), &os(&["5"])).is_err(),
             "split without --direction is a usage error"
         );
         assert_eq!(
-            parse_pane_args(&os(&["break", "9", "--name", "solo"]))
+            parse_pane_args(&op_of("break"), &os(&["9", "--name", "solo"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Break {
@@ -6661,14 +6579,14 @@ mod tests {
         // `pane focus <pane>`: all digits is the legacy integer door.
         // The parse-level cases moved to pane_focus_target_parse.
         assert_eq!(
-            parse_pane_args(&os(&["focus", "31"])).unwrap().cmd,
+            parse_pane_args(&op_of("focus"), &os(&["31"])).unwrap().cmd,
             PaneCmd::Focus {
                 target: FocusTarget::Pane(31)
             }
         );
-        assert!(parse_pane_args(&os(&["focus"])).is_err());
+        assert!(parse_pane_args(&op_of("focus"), &os(&[])).is_err());
         assert_eq!(
-            parse_pane_args(&os(&["ls", "--fno-id", "abc123"]))
+            parse_pane_args(&op_of("ls"), &os(&["--fno-id", "abc123"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Ls {
@@ -6680,9 +6598,12 @@ mod tests {
     #[test]
     fn mux_pane_parse_run_tab_and_anchor() {
         // AC2-HP: `run --tab id:10 --at 2 --split down -- <argv>`.
-        let p = parse_pane_args(&os(&[
-            "run", "--tab", "id:10", "--at", "2", "--split", "down", "--", "/bin/cat",
-        ]))
+        let p = parse_pane_args(
+            &op_of("run"),
+            &os(&[
+                "--tab", "id:10", "--at", "2", "--split", "down", "--", "/bin/cat",
+            ]),
+        )
         .unwrap();
         let PaneCmd::Run { placement, .. } = p.cmd else {
             panic!("expected Run");
@@ -6690,17 +6611,19 @@ mod tests {
         assert_eq!(placement.tab, Some(TabSel::Id(10)));
         assert_eq!(placement.at, Some(2));
         assert_eq!(placement.split, Some(Dir::Down));
-        let capped = parse_pane_args(&os(&[
-            "run",
-            "--at",
-            "2",
-            "--split",
-            "down",
-            "--max-panes",
-            "4",
-            "--",
-            "/bin/cat",
-        ]))
+        let capped = parse_pane_args(
+            &op_of("run"),
+            &os(&[
+                "--at",
+                "2",
+                "--split",
+                "down",
+                "--max-panes",
+                "4",
+                "--",
+                "/bin/cat",
+            ]),
+        )
         .unwrap();
         let PaneCmd::Run { placement, .. } = capped.cmd else {
             panic!("expected Run");
@@ -6726,15 +6649,10 @@ mod tests {
     #[test]
     fn mux_pane_parse_run_takes_argv_verbatim_after_flags() {
         // Leading flags are ours; the command argv (incl. ITS flags) is not.
-        let p = parse_pane_args(&os(&[
-            "run",
-            "--cwd",
-            "/code/foo",
-            "--",
-            "claude",
-            "--print",
-            "hi",
-        ]))
+        let p = parse_pane_args(
+            &op_of("run"),
+            &os(&["--cwd", "/code/foo", "--", "claude", "--print", "hi"]),
+        )
         .unwrap();
         assert_eq!(
             p,
@@ -6751,19 +6669,20 @@ mod tests {
             }
         );
         // The `--` is optional: the first bare token begins the argv.
-        let p = parse_pane_args(&os(&["run", "echo", "marker"])).unwrap();
+        let p = parse_pane_args(&op_of("run"), &os(&["echo", "marker"])).unwrap();
         assert!(
             matches!(p.cmd, PaneCmd::Run { argv, .. } if argv == vec!["echo".to_string(), "marker".into()])
         );
         // An empty command is a usage error.
-        assert!(parse_pane_args(&os(&["run", "--cwd", "/x"])).is_err());
+        assert!(parse_pane_args(&op_of("run"), &os(&["--cwd", "/x"])).is_err());
     }
 
     #[test]
     fn mux_pane_parse_run_accepts_typed_placement_before_argv() {
-        let p = parse_pane_args(&os(&[
-            "run", "squad", "review", "split", "left", "claude", "--print",
-        ]))
+        let p = parse_pane_args(
+            &op_of("run"),
+            &os(&["squad", "review", "split", "left", "claude", "--print"]),
+        )
         .unwrap();
         assert!(matches!(
             p.cmd,
@@ -6779,8 +6698,11 @@ mod tests {
                 ..
             } if name == "review" && argv == &["claude", "--print"]
         ));
-        let aliases =
-            parse_pane_args(&os(&["run", "-s", "review", "-x", "right", "--", "echo"])).unwrap();
+        let aliases = parse_pane_args(
+            &op_of("run"),
+            &os(&["-s", "review", "-x", "right", "--", "echo"]),
+        )
+        .unwrap();
         assert!(matches!(
             aliases.cmd,
             PaneCmd::Run {
@@ -6794,9 +6716,10 @@ mod tests {
                 ..
             } if name == "review"
         ));
-        let long = parse_pane_args(&os(&[
-            "run", "--squad", "review", "--split", "up", "--", "echo",
-        ]))
+        let long = parse_pane_args(
+            &op_of("run"),
+            &os(&["--squad", "review", "--split", "up", "--", "echo"]),
+        )
         .unwrap();
         assert!(matches!(
             long.cmd,
@@ -6812,15 +6735,10 @@ mod tests {
             } if name == "review"
         ));
         // --workspace is an alias for --squad (US2): same PaneTarget.
-        let ws = parse_pane_args(&os(&[
-            "run",
-            "--workspace",
-            "review",
-            "--split",
-            "up",
-            "--",
-            "echo",
-        ]))
+        let ws = parse_pane_args(
+            &op_of("run"),
+            &os(&["--workspace", "review", "--split", "up", "--", "echo"]),
+        )
         .unwrap();
         assert!(matches!(
             ws.cmd,
@@ -6832,17 +6750,20 @@ mod tests {
                 ..
             } if name == "review"
         ));
-        assert!(parse_pane_args(&os(&["run", "squad", " ", "--", "echo"])).is_err());
-        assert!(parse_pane_args(&os(&["run", "--workspace", " ", "--", "echo"])).is_err());
-        assert!(parse_pane_args(&os(&["run", "split", "diagonal", "--", "echo"])).is_err());
-        assert!(parse_pane_args(&os(&["run", "--target", "review", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&op_of("run"), &os(&["squad", " ", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&op_of("run"), &os(&["--workspace", " ", "--", "echo"])).is_err());
+        assert!(parse_pane_args(&op_of("run"), &os(&["split", "diagonal", "--", "echo"])).is_err());
+        assert!(
+            parse_pane_args(&op_of("run"), &os(&["--target", "review", "--", "echo"])).is_err()
+        );
         // Bare "at" (mux_spawn.py's placement_args contract) used to have no
         // alias, so the parser broke its loop on "at" and folded it plus
         // everything after into argv instead of recognizing it as placement
         // - here paired with bare "split", the combo that crashed.
-        let bare_at = parse_pane_args(&os(&[
-            "run", "split", "right", "at", "3", "--json", "--", "codex",
-        ]))
+        let bare_at = parse_pane_args(
+            &op_of("run"),
+            &os(&["split", "right", "at", "3", "--json", "--", "codex"]),
+        )
         .unwrap();
         assert!(bare_at.json);
         assert!(matches!(
@@ -6862,7 +6783,7 @@ mod tests {
     #[test]
     fn mux_pane_parse_wait_defaults_and_units() {
         // --timeout is seconds -> ms; the default is bounded, never infinite.
-        let p = parse_pane_args(&os(&["wait", "5", "--quiet-ms", "200"])).unwrap();
+        let p = parse_pane_args(&op_of("wait"), &os(&["5", "--quiet-ms", "200"])).unwrap();
         assert_eq!(
             p.cmd,
             PaneCmd::Wait {
@@ -6873,8 +6794,11 @@ mod tests {
                 command_done: false,
             }
         );
-        let p =
-            parse_pane_args(&os(&["wait", "5", "--pattern", "done", "--timeout", "3"])).unwrap();
+        let p = parse_pane_args(
+            &op_of("wait"),
+            &os(&["5", "--pattern", "done", "--timeout", "3"]),
+        )
+        .unwrap();
         assert_eq!(
             p.cmd,
             PaneCmd::Wait {
@@ -6886,7 +6810,7 @@ mod tests {
             }
         );
         // --command-done is a bare flag.
-        let p = parse_pane_args(&os(&["wait", "5", "--command-done"])).unwrap();
+        let p = parse_pane_args(&op_of("wait"), &os(&["5", "--command-done"])).unwrap();
         assert_eq!(
             p.cmd,
             PaneCmd::Wait {
@@ -6902,7 +6826,7 @@ mod tests {
     #[test]
     fn mux_pane_parse_send_source_is_text_xor_stdin() {
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--text", "hi\r"]))
+            parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi\r"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Send {
@@ -6917,7 +6841,9 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--stdin"])).unwrap().cmd,
+            parse_pane_args(&op_of("send"), &os(&["2", "--stdin"]))
+                .unwrap()
+                .cmd,
             PaneCmd::Send {
                 pane: 2,
                 source: SendSource::Stdin,
@@ -6931,7 +6857,7 @@ mod tests {
         );
         // --guarded opts the send into the server-side turn-taken interlock.
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--stdin", "--guarded"]))
+            parse_pane_args(&op_of("send"), &os(&["2", "--stdin", "--guarded"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Send {
@@ -6946,7 +6872,7 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--text", "hi", "--submit"]))
+            parse_pane_args(&op_of("send"), &os(&["2", "--text", "hi", "--submit"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Send {
@@ -6964,9 +6890,12 @@ mod tests {
         // load-bearing half: an opt-in flag would leave every existing caller
         // unattributed and fix nothing.
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--text", "1", "--raw", "--submit"]))
-                .unwrap()
-                .cmd,
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "1", "--raw", "--submit"])
+            )
+            .unwrap()
+            .cmd,
             PaneCmd::Send {
                 pane: 2,
                 source: SendSource::Text("1".into()),
@@ -6979,9 +6908,10 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_pane_args(&os(
-                &["send", "2", "--text", "hi", "--fno-id", "addressed",]
-            ))
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "hi", "--fno-id", "addressed"])
+            )
             .unwrap()
             .cmd,
             PaneCmd::Send {
@@ -6999,7 +6929,7 @@ mod tests {
         // `--raw --submit` with no payload parses as an EMPTY raw text, never
         // the arity error that used to make the refusal's advice false.
         assert_eq!(
-            parse_pane_args(&os(&["send", "2", "--raw", "--submit"]))
+            parse_pane_args(&op_of("send"), &os(&["2", "--raw", "--submit"]))
                 .unwrap()
                 .cmd,
             PaneCmd::Send {
@@ -7016,28 +6946,24 @@ mod tests {
         // Every other source-less form is still a usage error: `--raw` or
         // `--submit` alone names no operation, and a plain source-less send
         // never worked.
-        assert!(parse_pane_args(&os(&["send", "2", "--raw"])).is_err());
-        assert!(parse_pane_args(&os(&["send", "2", "--submit"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--raw"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--submit"])).is_err());
         // Neither / both are usage errors.
-        assert!(parse_pane_args(&os(&["send", "2"])).is_err());
-        assert!(parse_pane_args(&os(&["send", "2", "--text", "x", "--stdin"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--text", "x", "--stdin"])).is_err());
         // --raw pairs only with send: on any other verb it is a usage error, not
         // a silently ignored flag that reads as "the envelope was skipped".
-        assert!(parse_pane_args(&os(&["read", "2", "--raw"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["2", "--raw"])).is_err());
     }
 
     #[test]
     fn mux_pane_parse_send_style_exception() {
         // The reasoned one-send exception threads to the renderer.
         assert_eq!(
-            parse_pane_args(&os(&[
-                "send",
-                "2",
-                "--text",
-                "hi",
-                "--style-exception",
-                "quoted"
-            ]))
+            parse_pane_args(
+                &op_of("send"),
+                &os(&["2", "--text", "hi", "--style-exception", "quoted"])
+            )
             .unwrap()
             .cmd,
             PaneCmd::Send {
@@ -7053,8 +6979,8 @@ mod tests {
         );
         // A valueless flag and a non-send verb are usage errors, mirroring
         // `--raw`: a silently ignored flag would read as "the exception held".
-        assert!(parse_pane_args(&os(&["send", "2", "--style-exception"])).is_err());
-        assert!(parse_pane_args(&os(&["read", "2", "--style-exception", "why"])).is_err());
+        assert!(parse_pane_args(&op_of("send"), &os(&["2", "--style-exception"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["2", "--style-exception", "why"])).is_err());
     }
 
     #[test]
@@ -7247,7 +7173,9 @@ mod tests {
         // The DEFAULT is the surprising half, so the help must state it. An
         // operator who only learns `--raw` exists still does not know what a
         // plain send now carries.
-        let err = parse_pane_args(&os(&["--help"])).unwrap_err();
+        // The pane group's help is clap's now; its after_help text carries
+        // the send contract.
+        let err = crate::cli_args::pane_group_help();
         assert!(err.contains("--raw"), "{err}");
         assert!(err.contains("<fno_mail>"), "{err}");
         assert!(err.contains("option prompt"), "{err}");
@@ -7304,12 +7232,10 @@ mod tests {
 
     #[test]
     fn mux_pane_parse_rejects_bad_verbs_flags_and_ids() {
-        assert!(parse_pane_args(&os(&["bogus"])).is_err());
-        assert!(parse_pane_args(&os(&[])).is_err());
-        assert!(parse_pane_args(&os(&["read", "notanumber"])).is_err());
-        assert!(parse_pane_args(&os(&["read", "7", "--nope"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["notanumber"])).is_err());
+        assert!(parse_pane_args(&op_of("read"), &os(&["7", "--nope"])).is_err());
         assert!(
-            parse_pane_args(&os(&["read"])).is_err(),
+            parse_pane_args(&op_of("read"), &os(&[])).is_err(),
             "read needs a pane id"
         );
     }
@@ -7531,7 +7457,7 @@ mod tests {
     #[test]
     fn block_pipe_parses_flags_and_defaults_to_last() {
         assert_eq!(
-            parse_block_args(&os(&["pipe", "--from", "4", "--to", "2"])),
+            parse_block_args(&os(&["--from", "4", "--to", "2"])),
             Ok(ParsedBlockPipe {
                 session: None,
                 json: false,
@@ -7543,7 +7469,6 @@ mod tests {
         );
         assert_eq!(
             parse_block_args(&os(&[
-                "pipe",
                 "--from",
                 "4",
                 "--to",
@@ -7571,15 +7496,7 @@ mod tests {
     #[test]
     fn block_annotate_parses_required_flags() {
         assert_eq!(
-            parse_block_annotate(&os(&[
-                "annotate",
-                "--from",
-                "3",
-                "--node",
-                "x-1",
-                "-m",
-                "off-by-one",
-            ])),
+            parse_block_annotate(&os(&["--from", "3", "--node", "x-1", "-m", "off-by-one",])),
             Ok(ParsedBlockAnnotate {
                 session: None,
                 from: 3,
@@ -7591,7 +7508,6 @@ mod tests {
         // --block seq + --session + long --message.
         assert_eq!(
             parse_block_annotate(&os(&[
-                "annotate",
                 "--from",
                 "3",
                 "--block",
@@ -7616,28 +7532,32 @@ mod tests {
     #[test]
     fn block_annotate_usage_errors() {
         // AC2-ERR: a missing --node is a refusal (no guessing the pane's node).
-        assert!(parse_block_annotate(&os(&["annotate", "--from", "3", "-m", "x"])).is_err());
+        assert!(parse_block_annotate(&os(&["--from", "3", "-m", "x"])).is_err());
         // Missing --from, missing -m, empty -m, unknown flag all refuse.
-        assert!(parse_block_annotate(&os(&["annotate", "--node", "x-1", "-m", "x"])).is_err());
-        assert!(parse_block_annotate(&os(&["annotate", "--from", "3", "--node", "x-1"])).is_err());
-        assert!(parse_block_annotate(&os(&[
-            "annotate", "--from", "3", "--node", "x-1", "-m", "  "
-        ]))
-        .is_err());
-        assert!(parse_block_annotate(&os(&[
-            "annotate", "--from", "3", "--node", "x-1", "-m", "x", "--oops",
-        ]))
-        .is_err());
+        assert!(parse_block_annotate(&os(&["--node", "x-1", "-m", "x"])).is_err());
+        assert!(parse_block_annotate(&os(&["--from", "3", "--node", "x-1"])).is_err());
+        assert!(parse_block_annotate(&os(&["--from", "3", "--node", "x-1", "-m", "  "])).is_err());
+        assert!(
+            parse_block_annotate(&os(&["--from", "3", "--node", "x-1", "-m", "x", "--oops",]))
+                .is_err()
+        );
     }
 
     #[test]
-    fn block_verb_dispatch_rejects_unknown() {
-        // The verb enumeration now carries both verbs.
-        let e = parse_block_args(&os(&["rerun"])).unwrap_err();
-        assert!(
-            e.contains("annotate"),
-            "verb list must enumerate annotate: {e}"
-        );
+    fn block_ops_declared_in_the_tree() {
+        // The operation words are declared in the typed tree now; the
+        // classifier refuses anything else (AC1-ERR).
+        let block = crate::cli_args::front_command()
+            .get_subcommands()
+            .find(|c| c.get_name() == "mux")
+            .expect("mux declared")
+            .get_subcommands()
+            .find(|c| c.get_name() == "block")
+            .expect("block declared")
+            .clone();
+        for op in ["pipe", "annotate"] {
+            assert!(block.find_subcommand(op).is_some(), "{op} declared");
+        }
     }
 
     #[test]
@@ -7658,10 +7578,10 @@ mod tests {
         // Missing --from / --to, an unknown flag, and an unknown verb are all
         // parse errors (exit 2 at the verb), never a partial pipe.
         assert!(parse_block_args(&os(&["pipe", "--to", "2"])).is_err());
-        assert!(parse_block_args(&os(&["pipe", "--from", "4"])).is_err());
-        assert!(parse_block_args(&os(&["pipe", "--from", "4", "--to", "2", "--oops"])).is_err());
+        assert!(parse_block_args(&os(&["--from", "4"])).is_err());
+        assert!(parse_block_args(&os(&["--from", "4", "--to", "2", "--oops"])).is_err());
         assert!(parse_block_args(&os(&["rerun"])).is_err());
-        assert!(parse_block_args(&os(&["pipe", "--from", "x", "--to", "2"])).is_err());
+        assert!(parse_block_args(&os(&["--from", "x", "--to", "2"])).is_err());
     }
 
     #[test]
