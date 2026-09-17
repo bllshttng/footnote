@@ -223,7 +223,9 @@ fn wait_for_raw_frame(
             | Ok(ServerMsg::SessionRetired { .. })
             // (v78) Server stats: same one-shot control shape.
             | Ok(ServerMsg::ServerStats { .. })
-            | Ok(ServerMsg::AgentRowsReceipt { .. }) => {}
+            | Ok(ServerMsg::AgentRowsReceipt { .. })
+            // (v83) Launcher progress: asserted by the launcher suites.
+            | Ok(ServerMsg::AgentLaunch(_)) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}

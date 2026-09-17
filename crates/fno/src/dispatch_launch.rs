@@ -2,9 +2,14 @@
 //! inputs, the door argv, the bounded shell-out, and the notice mapping.
 //! Lifted out of `server.rs` as its own module named by the question it
 //! answers - "how does a mux dispatch launch a node?" - so the shrink-only
-//! ratchet on `server.rs` is not fed by new code.
+//! ratchet on `server.rs` is not fed by new code. The sideline launcher
+//! extends the same boundaries: a free-form argv builder over the ONE door,
+//! a stdin-capturing shell-out, and one typed outcome decoder shared by
+//! node dispatch and the composer.
 
 use std::time::Duration;
+
+use crate::proto::agent_launch::AgentLaunchRequest;
 
 /// Bounded + fail-open (the digest_overlay idiom): read the board, launch the
 /// door, turn the outcome into the client notice. An empty return says nothing
@@ -109,6 +114,198 @@ pub(crate) async fn run_fno_captured(
     }
 }
 
+/// The launcher's spawn argv: pure and unit-pinned like
+/// [`dispatch_spawn_argv`]. The ONE launch executable stays the configured
+/// `fno` front door with `agents spawn`; cwd, harness and advanced values
+/// ride as separate argv elements, and the message NEVER rides argv - it
+/// arrives through `--prompt-file -` stdin at the shell-out below. No
+/// `--force`, no `--yolo`: normal gates decide, and a refusal is the
+/// product.
+pub(crate) fn launch_spawn_argv(fno: &str, req: &AgentLaunchRequest, session: &str) -> Vec<String> {
+    let mut argv: Vec<String> = [
+        fno.to_string(),
+        "agents".to_string(),
+        "spawn".to_string(),
+        "--harness".to_string(),
+        req.harness.clone(),
+        "--cwd".to_string(),
+        req.cwd.clone(),
+        "--substrate".to_string(),
+        req.substrate.clone(),
+        "--mux-session".to_string(),
+        session.to_string(),
+        // Fail immediately on a full spawn gate rather than queueing: a
+        // popup launch that silently waits reads as a hung button.
+        "--no-wait".to_string(),
+    ]
+    .to_vec();
+    if let Some(m) = &req.model {
+        argv.extend(["--model".to_string(), m.clone()]);
+    }
+    if let Some(e) = &req.effort {
+        argv.extend(["--effort".to_string(), e.clone()]);
+    }
+    if let Some(p) = &req.permission_mode {
+        argv.extend(["--permission-mode".to_string(), p.clone()]);
+    }
+    if let Some(t) = &req.placement {
+        argv.extend(["--tab".to_string(), t.clone()]);
+    }
+    // The seed rides stdin even when empty: an empty stdin is the honest
+    // "no seed requested", never a fabricated task.
+    argv.push("--prompt-file".to_string());
+    argv.push("-".to_string());
+    argv
+}
+
+/// One bounded `fno` shell-out that also feeds `stdin_bytes` to the child:
+/// the launcher's message reaches `--prompt-file -` exactly,
+/// bytes-for-bytes, with no shell interpolation. `kill_on_drop` + the two
+/// bounds (per-subprocess budget AND the whole attempt's deadline) carry
+/// over from [`run_fno_captured`].
+pub(crate) async fn run_fno_captured_with_stdin(
+    argv: &[&str],
+    stdin_bytes: &[u8],
+    timeout: Duration,
+    deadline: tokio::time::Instant,
+) -> Option<(bool, String, String)> {
+    let mut command = crate::process_admission::tokio_command(argv[0]);
+    command
+        .args(&argv[1..])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let fut = async move {
+        let mut child = crate::process_admission::tokio_spawn(&mut command).ok()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            // The seed write can lose a race with a door that refuses
+            // without reading stdin: the closed-pipe error is the door's
+            // own answer arriving early, so drain the exit status + stderr
+            // and let the decoder name the refusal. Swallowing the attempt
+            // here would call a decided refusal an ambiguous timeout.
+            let _ = stdin.write_all(stdin_bytes).await;
+            // Drop the handle so the child sees EOF and `--prompt-file -`
+            // terminates; without this the door blocks on its own read.
+            drop(stdin);
+        }
+        child.wait_with_output().await.ok().map(|o| {
+            (
+                o.status.success(),
+                String::from_utf8_lossy(&o.stdout).to_string(),
+                String::from_utf8_lossy(&o.stderr).to_string(),
+            )
+        })
+    };
+    match tokio::time::timeout(timeout.min(remaining), fut).await {
+        Err(_) => None,
+        Ok(None) => None,
+        Ok(Some(triple)) => Some(triple),
+    }
+}
+
+/// What one spawn attempt actually produced . The variants state
+/// BIRTH facts, not acknowledgments: `Launched` requires a decoded receipt,
+/// `Refused` requires the door's own no-birth answer, and everything
+/// uncertain - timeout, malformed success, recovery-required receipt, lost
+/// reply - is `Unknown`, never flattened into either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LaunchOutcome {
+    Launched {
+        name: String,
+        pane: Option<u64>,
+        /// Seed fact off the receipt, kept SEPARATE from birth: an
+        /// intentionally empty seed ("unattempted") is not a failed delivery.
+        seed_delivered: Option<bool>,
+    },
+    /// The door refused before any effect. Deliberate retry is safe.
+    Refused(String),
+    /// Whether a worker was born is unresolved.
+    Unknown(String),
+}
+
+/// The LAST parseable JSON object on stdout (a notice line may print first).
+/// Both receipt shapes live here: a pane receipt carries `pane_id`, a bg
+/// thread receipt carries `name` + `short_id`.
+fn spawn_receipt(stdout: &str) -> Option<serde_json::Value> {
+    let mut found = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let pane = v.get("pane_id").is_some();
+            let thread = v.get("name").is_some() && v.get("short_id").is_some();
+            if pane || thread {
+                found = Some(v);
+            }
+        }
+    }
+    found
+}
+
+/// The door's own error line: first non-empty stderr line, else stdout, cut
+/// at 160 chars. Shared by the notice mapping and the launcher decoder.
+pub(crate) fn refusal_detail(stderr: &str, stdout: &str) -> String {
+    let mut detail = crate::server::first_line_or(stderr, "");
+    if detail.is_empty() {
+        detail = crate::server::first_line_or(stdout, "");
+    }
+    if detail.chars().count() > 160 {
+        detail.chars().take(160).collect()
+    } else {
+        detail
+    }
+}
+
+/// Decode one launcher attempt . A recovery-required receipt is the
+/// load-bearing ambiguity: the transaction's own contract says the child MAY
+/// exist when persistence failed, so it decodes `Unknown`, never `Refused`.
+pub(crate) fn decode_launch_outcome(exit_ok: bool, stdout: &str, stderr: &str) -> LaunchOutcome {
+    if !exit_ok {
+        return match refusal_detail(stderr, stdout) {
+            d if d.is_empty() => LaunchOutcome::Refused("spawn failed".to_string()),
+            d => LaunchOutcome::Refused(d),
+        };
+    }
+    match spawn_receipt(stdout) {
+        Some(v) => {
+            let recovery = v
+                .get("status")
+                .and_then(|s| s.as_str())
+                .is_some_and(|s| s == "recovery_required")
+                || v.get("recovered").and_then(|r| r.as_bool()) == Some(true);
+            if recovery {
+                return LaunchOutcome::Unknown(
+                    "spawn reported recovery_required: the child may exist".to_string(),
+                );
+            }
+            let name = v
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let pane = v.get("pane_id").and_then(|p| p.as_u64());
+            // seed: "submitted" proves delivery; "unattempted" with an empty
+            // request message is the intentional interactive case. Absent or
+            // other -> unproven.
+            let seed_delivered = v
+                .get("seed")
+                .and_then(|s| s.as_str())
+                .map(|s| s == "submitted");
+            LaunchOutcome::Launched {
+                name,
+                pane,
+                seed_delivered,
+            }
+        }
+        None => LaunchOutcome::Unknown("spawn exited 0 with no readable receipt".to_string()),
+    }
+}
+
 /// Map a dispatch launch to the one-line client notice (change 3,
 /// step 4). Exit 0 with a pane receipt (a JSON line carrying `pane_id`)
 /// renders `dispatched <slug or id>`; the seed / pane_observation doubt text
@@ -141,18 +338,9 @@ pub(crate) fn dispatch_notice(
         // pane-send spawn where nothing was ever typed - and then tells them
         // not to re-seed the one pane that needs it. `submitted` is what makes
         // "delivered" true.
-        let mut receipt: Option<serde_json::Value> = None;
-        for line in stdout.lines() {
-            let line = line.trim();
-            if !line.starts_with('{') {
-                continue;
-            }
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-                if v.get("pane_id").is_some() {
-                    receipt = Some(v);
-                }
-            }
-        }
+        // The dispatch path is pane-substrate: its success decode stays
+        // pane-receipt-only, exactly as before the shared helper existed.
+        let receipt = spawn_receipt(stdout).filter(|v| v.get("pane_id").is_some());
         return match receipt {
             Some(v) => {
                 let seed = v.get("seed").and_then(|s| s.as_str());
@@ -210,13 +398,7 @@ pub(crate) fn dispatch_notice(
             };
         }
     }
-    let mut detail = crate::server::first_line_or(stderr, "");
-    if detail.is_empty() {
-        detail = crate::server::first_line_or(stdout, "");
-    }
-    if detail.chars().count() > 160 {
-        detail = detail.chars().take(160).collect();
-    }
+    let detail = refusal_detail(stderr, stdout);
     if detail.is_empty() {
         "grab work: dispatch failed".to_string()
     } else {
@@ -395,7 +577,7 @@ mod tests {
     fn node_identity_reads_the_last_json_object() {
         // `fno backlog next` on an empty board prints null: no node.
         assert!(node_identity("null\n").is_none());
-        assert!(node_identity("").is_none());
+        assert!(spawn_receipt("").is_none());
         // The board read carries id/slug/parent.
         assert_eq!(
             node_identity(r#"{"id":"x-1","slug":"feat","parent":null}"#),
@@ -407,6 +589,148 @@ mod tests {
                 .map(|(id, _slug, parent)| (id, parent)),
             Some(("x-2".to_string(), Some("e1".to_string())))
         );
+    }
+
+    #[test]
+    fn launch_spawn_argv_is_pinned() {
+        // Full-featured request: every optional pin rides as its own argv
+        // element; the message NEVER does (it rides stdin at the shell-out).
+        let req = AgentLaunchRequest {
+            request_id: 1,
+            revision: 1,
+            cwd: "/tmp/proj".into(),
+            harness: "codex".into(),
+            substrate: "pane".into(),
+            model: Some("gpt-5.6-luna".into()),
+            effort: Some("high".into()),
+            permission_mode: Some("workspace-write:on-request".into()),
+            placement: Some("name:work".into()),
+            message: "line one\nline \"two\" $ ` \u{1f600}".into(),
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &req, "work"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "codex",
+                "--cwd",
+                "/tmp/proj",
+                "--substrate",
+                "pane",
+                "--mux-session",
+                "work",
+                "--no-wait",
+                "--model",
+                "gpt-5.6-luna",
+                "--effort",
+                "high",
+                "--permission-mode",
+                "workspace-write:on-request",
+                "--tab",
+                "name:work",
+                "--prompt-file",
+                "-",
+            ]
+        );
+        // Minimal request: only the required axes + the stdin seed door.
+        let bare = AgentLaunchRequest {
+            request_id: 2,
+            revision: 1,
+            cwd: "/tmp/p2".into(),
+            harness: "claude".into(),
+            substrate: "thread".into(),
+            model: None,
+            effort: None,
+            permission_mode: None,
+            placement: None,
+            message: String::new(),
+        };
+        assert_eq!(
+            launch_spawn_argv("fno", &bare, "s"),
+            vec![
+                "fno",
+                "agents",
+                "spawn",
+                "--harness",
+                "claude",
+                "--cwd",
+                "/tmp/p2",
+                "--substrate",
+                "thread",
+                "--mux-session",
+                "s",
+                "--no-wait",
+                "--prompt-file",
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_launch_outcome_separates_birth_from_acknowledgment() {
+        // Pane receipt with a delivered seed: a verified birth.
+        assert_eq!(
+            decode_launch_outcome(
+                true,
+                r#"{"outcome":"launched","name":"w","pane_id":7,"seed":"submitted","pane_observation":"painted"}"#,
+                ""
+            ),
+            LaunchOutcome::Launched {
+                name: "w".into(),
+                pane: Some(7),
+                seed_delivered: Some(true)
+            }
+        );
+        // A bg thread receipt (name + short_id) is a birth with no pane.
+        assert_eq!(
+            decode_launch_outcome(
+                true,
+                r#"{"name":"w2","short_id":"a1b2","harness":"claude","status":"spawning"}"#,
+                ""
+            ),
+            LaunchOutcome::Launched {
+                name: "w2".into(),
+                pane: None,
+                seed_delivered: None
+            }
+        );
+        // An intentionally seedless launch: "unattempted" is NOT a failure
+        // when the request carried no message - it stays a birth whose seed
+        // fact reads false.
+        assert_eq!(
+            decode_launch_outcome(
+                true,
+                r#"{"name":"w3","pane_id":9,"seed":"unattempted"}"#,
+                ""
+            ),
+            LaunchOutcome::Launched {
+                name: "w3".into(),
+                pane: Some(9),
+                seed_delivered: Some(false)
+            }
+        );
+        // The door's pre-birth refusal: deliberate retry is safe.
+        assert_eq!(
+            decode_launch_outcome(
+                false,
+                "",
+                "fno agents spawn: capacity refused: no free slot"
+            ),
+            LaunchOutcome::Refused("fno agents spawn: capacity refused: no free slot".into())
+        );
+        // Exit 0 with no readable receipt: never a birth, never a refusal.
+        assert_eq!(
+            decode_launch_outcome(true, "", ""),
+            LaunchOutcome::Unknown("spawn exited 0 with no readable receipt".into())
+        );
+        // A recovery-required receipt leaves birth unresolved: the child may
+        // exist, so this is Unknown, never Refused.
+        assert!(matches!(
+            decode_launch_outcome(true, r#"{"name":"w4","pane_id":3,"recovered":true}"#, ""),
+            LaunchOutcome::Unknown(_)
+        ));
     }
 
     #[test]

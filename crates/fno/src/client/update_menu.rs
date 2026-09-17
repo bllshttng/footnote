@@ -166,11 +166,13 @@ pub(crate) fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>
         _ => {}
     }
     rows.push(entry("♺", "sweep threads"));
+    rows.push(entry("＋", "new agent"));
     rows.push(entry("⌨", "keybinds"));
     rows.push(entry("⚙", "settings"));
     rows.push(entry("⇄", "connections"));
     rows.push(entry("⏏", "detach"));
     actions.push(AuxAction::OpenSweep);
+    actions.push(AuxAction::OpenAgentLauncher);
     actions.push(AuxAction::OpenKeybinds);
     actions.push(AuxAction::OpenSettings);
     actions.push(AuxAction::OpenConnections);

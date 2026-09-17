@@ -6986,6 +6986,9 @@ fn agent_tails_push_updates_rows_without_a_row_change() {
 #[path = "server/tests/external_lifecycle_and_backlog_tests.rs"]
 mod external_lifecycle_and_backlog_tests;
 
+#[path = "server/tests/agent_launcher_tests.rs"]
+mod agent_launcher_tests;
+
 #[test]
 fn classify_guard_registry_keeps_document_and_row_failures_distinct() {
     // Document-level malformation already failed closed and keeps its own
@@ -8926,6 +8929,7 @@ fn empty_core() -> Core {
         agents: Vec::new(),
         agents_read_ok: false,
         journal: crate::spawn_journal::JournalCache::default(),
+        launch_desk: Default::default(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),
@@ -9558,17 +9562,13 @@ fn focus_only_push_layout_preserves_pending_pane_frames() {
 /// prunes the client, breaking every later `Command::FocusPane` (no
 /// client view to act on).
 fn seen_test_core() -> (Core, u64, u64, u64, mpsc::Receiver<ServerMsg>) {
-    // attach() below runs a once-per-server restore_squads() ->
-    // squad_store::load(), which defaults to the real $HOME/.fno/squads.json.
-    // A dev box with a live store imports its squads here (an extra $HOME
-    // pane, a squad-id collision), making squad/row-count asserts pass on a
-    // fresh-home CI runner but fail locally. Point the store at a per-thread
-    // path that does not exist, so load() reads it as an empty store and
-    // restore is a no-op. We deliberately do NOT create the dir: a missing
-    // file already reads empty, and the store's own writer create_dir_all's
-    // its parent, so leaving nothing on disk means nothing to clean up.
-    // TEST_PATH is thread-local and one test == one thread, so it never
-    // leaks across tests and needs no teardown.
+    // attach() runs restore_squads() -> squad_store::load(), which defaults
+    // to the real $HOME/.fno/squads.json; a dev box with a live store then
+    // imports its squads and breaks squad/row-count asserts that pass on a
+    // fresh-home CI runner. Point the store at a nonexistent per-thread path
+    // (missing file reads as an empty store; the writer creates its parent
+    // only when a real write happens) and restore becomes a no-op. TEST_PATH
+    // is thread-local and one test == one thread: no leaks, no teardown.
     let scratch = std::env::temp_dir().join(format!(
         "fno-seen-store-{}-{:?}",
         std::process::id(),
