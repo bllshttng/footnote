@@ -223,6 +223,11 @@ pub(crate) fn journal_text(journal: &Path, types: &[&str]) -> String {
     text
 }
 
+/// [`journal_text`] for the review-evidence rows every review reader parses.
+pub(crate) fn review_text(journal: &Path) -> String {
+    journal_text(journal, REVIEW_EVENT_TYPES)
+}
+
 fn ingest_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, String> {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,

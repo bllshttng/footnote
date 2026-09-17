@@ -2027,8 +2027,7 @@ pub fn unattested_reviewers_scan(
 ) -> (Vec<UnattestedReviewer>, usize) {
     // Read across rotation generations: a round that rotated out still counts.
     // An empty or unreadable store leaves the gate unmet (fail closed).
-    let content =
-        crate::events_store::journal_text(events_path, crate::events_store::REVIEW_EVENT_TYPES);
+    let content = crate::events_store::review_text(events_path);
     if content.is_empty() {
         let unsatisfied = reviewers
             .iter()
@@ -2070,9 +2069,7 @@ struct OpenFinding {
 /// failure yields no findings (the gate is only ADDED by evidence, never
 /// invented from an unreadable file).
 fn open_review_findings(events_path: &Path, node: &str) -> (Vec<OpenFinding>, usize) {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        return (Vec::new(), 0);
-    };
+    let content = crate::events_store::review_text(events_path);
     // Preserve first-seen order via a Vec of (id, first_line); a later duplicate
     // id (shouldn't happen - ids are minted) just refreshes the first_line.
     let mut findings: Vec<(String, String)> = Vec::new();
@@ -2292,8 +2289,7 @@ fn read_pr_info(
     // log). Mirrors of rows the project log still holds are deduped, so a
     // round is never counted twice. An unreadable journal degrades to
     // project-only, today's behavior.
-    let project_text =
-        crate::events_store::journal_text(events_path, crate::events_store::REVIEW_EVENT_TYPES);
+    let project_text = crate::events_store::review_text(events_path);
     let global_text =
         attestation_journal::tail_text(global_events_path, attestation_journal::GLOBAL_TAIL_BYTES);
     let extra_global = missing_global_attestations(&global_text, &project_text, repo_slug);
