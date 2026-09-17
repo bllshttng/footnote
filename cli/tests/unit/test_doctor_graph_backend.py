@@ -135,7 +135,9 @@ def test_status_prints_the_status_line(world, capsys):
     doctor_graph.graph_backend("status")
     out = capsys.readouterr().out
     assert out.startswith("backend=sqlite since=")
-    assert " days=0 keepers=" in out
+    assert " days=0" in out
+    assert "keepers=" not in out
+    assert "keepers: fno agents watchdog --only keeper" in out
 
 
 def test_status_prints_one_gate_line_per_gap(world, capsys):
