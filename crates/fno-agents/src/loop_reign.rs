@@ -902,6 +902,18 @@ pub fn run_reign_state(args: &[String]) -> i32 {
     }
 }
 
+/// `fno-agents reign-shape [--term SPEC]`: a `--term` flag is a term
+/// declaration wearing the same registered verb (the client-actions shrink
+/// law bars a second verb for this: an argument of an existing action,
+/// never a new action).
+pub fn run_reign_shape_or_term(args: &[String]) -> i32 {
+    if args.iter().any(|a| a == "--term") {
+        run_reign_term(args)
+    } else {
+        run_reign_shape(args)
+    }
+}
+
 /// `fno-agents reign-shape`: rewrite the manifest's shape, exit 0/1/2.
 pub fn run_reign_shape(args: &[String]) -> i32 {
     let mut scope: Option<String> = None;

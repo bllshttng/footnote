@@ -656,13 +656,7 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::loop_reign::run_reign_state(&args[1..]);
     }
     if matches!(verb, "reign-shape") {
-        // A `--term` flag is a term declaration wearing the same registered
-        // verb (the client-actions shrink law bars a second verb for this:
-        // an argument of an existing action, never a new action).
-        if args[1..].iter().any(|a| a == "--term") {
-            return fno_agents::loop_reign::run_reign_term(&args[1..]);
-        }
-        return fno_agents::loop_reign::run_reign_shape(&args[1..]);
+        return fno_agents::loop_reign::run_reign_shape_or_term(&args[1..]);
     }
 
     // `graph-get`/`bash-census`/`session-start-bytes`: daemon-free reads, not routable `fno agents` verbs (same reasoning as kill-check).
