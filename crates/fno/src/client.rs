@@ -10530,7 +10530,7 @@ async fn attach_and_run(
     let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::unbounded_channel::<SweepMsg>();
 
     // The update-readiness probe runs off the UI loop and reports back
-    // when the next probe is needed. Untagged (unlike conn_rx) - there is no per-open state to
+    // here. Untagged (unlike conn_rx) - there is no per-open state to
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
 
@@ -10676,7 +10676,7 @@ async fn attach_and_run(
                 let _ = tx.send(outcome);
             });
         }
-        // Kick a wanted harness-catalog probe , same one-in-flight
+        // Kick a wanted harness-catalog probe, same one-in-flight
         // discipline as the update probe.
         if view.catalog_want && !view.catalog_inflight {
             view.catalog_want = false;

@@ -1,4 +1,4 @@
-//! The sideline new-agent composer : one popup that launches a new
+//! The sideline new-agent composer: one popup that launches a new
 //! harness session through the canonical spawn door and hands off to the
 //! native session.
 //!
@@ -10,11 +10,17 @@
 //! verbatim and the draft survives.
 
 use super::{write_msg, ClientMsg, StdinFlow, View, MAX_MAIL_TEXT};
+use crate::clipboard::on_path;
 use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
 
 /// The message editor shows this many physical lines; longer prompts scroll
 /// internally so the popup survives an 80x24 terminal.
 const EDITOR_VISIBLE: usize = 4;
+
+/// Ceiling on an open bracketed paste's carried bytes. The submit gate
+/// refuses an over-cap message anyway; this only stops a close-marker-less
+/// paste from growing the carry forever.
+const MAX_PASTE_CARRY: usize = 16 * 1024;
 
 /// One harness candidate off the platform capability table: `native` is the
 /// compiled-in contract (a `[harness.<name>]` table in
@@ -516,6 +522,15 @@ impl LauncherEsc {
                     self.paste = None;
                     let text = String::from_utf8_lossy(&inner).to_string();
                     keys.push(LKey::Paste(text));
+                } else if buf.len() >= MAX_PASTE_CARRY {
+                    // A paste whose close marker never arrived (lost bytes, a
+                    // wedged terminal) would otherwise grow the carry without
+                    // limit. Treat the overflow as the end of the paste: the
+                    // bytes collected so far land as text and normal folding
+                    // resumes.
+                    let inner = std::mem::take(buf);
+                    self.paste = None;
+                    keys.push(LKey::Paste(String::from_utf8_lossy(&inner).to_string()));
                 }
                 continue;
             }
@@ -852,7 +867,11 @@ pub(crate) async fn launcher_keys(
             LKey::Paste(text) => {
                 if let Some(l) = view.launcher.as_mut() {
                     if l.focus == Focus::Message {
-                        for c in text.chars() {
+                        // The draft never exceeds the submit ceiling: chars
+                        // past it are dropped here, visibly at the next
+                        // render, rather than being refused only at Launch.
+                        let room = MAX_MAIL_TEXT.saturating_sub(l.draft.message.chars().count());
+                        for c in text.chars().take(room) {
                             insert_char(&mut l.draft, c);
                         }
                     }
@@ -882,15 +901,6 @@ fn cycle_harness(draft: &mut LaunchDraft, delta: i32) {
 /// canonical copy by fno-agents' build.rs. The catalog is the set of
 /// `[harness.<name>]` tables; there is no UI-only list to drift.
 const CAPABILITY_TOML: &str = include_str!("../harness_capabilities.toml");
-
-/// Is `<name>` on PATH right now? The one piece of installation evidence
-/// the capability table cannot know.
-fn on_path(name: &str) -> bool {
-    let Some(path_var) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path_var).any(|dir| dir.join(name).is_file())
-}
 
 /// The catalog read (instant: a compiled-in table plus PATH stats). Still
 /// delivered through the probe channel so the popup's render flow has one
@@ -1117,11 +1127,15 @@ pub(crate) async fn launcher_mouse(
         super::OverlayAnchor::Center,
     );
     let origin = layout.origin;
+    // The layout origin is the FRAME's top-left; the body starts below the
+    // chrome's top rows (title border). Without this offset every click
+    // focuses the row above the one it hit.
+    let top = chrome.rows_above();
     let (row, _col) = (rep.row as usize, rep.col as usize);
-    if row < origin.0 || row >= origin.0 + rows.len() {
+    let idx = row.checked_sub(origin.0 + top);
+    let Some(idx) = idx else {
         return Ok(());
-    }
-    let idx = row - origin.0;
+    };
     if let Some((focus, _)) = rows.get(idx) {
         let focus = *focus;
         if let Some(l) = view.launcher.as_mut() {

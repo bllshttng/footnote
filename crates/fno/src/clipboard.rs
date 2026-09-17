@@ -165,7 +165,7 @@ fn available_tool_with(on_path: impl Fn(&str) -> bool) -> Option<&'static str> {
 /// Is `name` a regular file in some `PATH` directory? Pure filesystem lookup, no
 /// spawn. ponytail: `is_file` not a full x-bit check - a non-executable name
 /// collision on PATH is vanishingly rare and doctor is advisory, not a gate.
-fn on_path(name: &str) -> bool {
+pub(crate) fn on_path(name: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
