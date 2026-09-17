@@ -866,19 +866,21 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "report" {
         return fno_agents::client_verbs::run_report(&args[1..], &AgentsHome::from_env()).await;
     }
-    // `wait`: block until an agent's registry row reaches a state. Reads
-    // `registry.json` directly and polls (no daemon RPC), so it needs no running
-    // daemon and dispatches here before build_request.
+    // `wait`: poll registry.json directly for a state (no daemon RPC).
     if verb == "wait" {
         return fno_agents::wait::run_wait(&args[1..], &AgentsHome::from_env()).await;
     }
 
-    // `pr-heal` classifies a red check and applies the mechanical fix.
-    // Binary-direct behind `fno do pr heal`, like `kill-check`: `matches!`
-    // because the Python parity guard scrapes `verb == "..."` and would
-    // demand a RUST_CLIENT_VERBS row for a non-routable verb. Daemon-free.
+    // `pr-heal`: classify a red check, apply the mechanical fix,
+    // binary-direct behind `fno do pr heal` (not routable, daemon-free).
     if matches!(verb, "pr-heal") {
         return fno_agents::heal::run_heal(&args[1..]);
+    }
+    if matches!(verb, "pr-push") {
+        return fno_agents::pr_push::run_push(&args[1..]);
+    }
+    if matches!(verb, "pr-rebase") {
+        return fno_agents::pr_rebase::run_rebase(&args[1..]);
     }
     // `subscribe`: follow the daemon's own `events.jsonl` and stream registry
     // state transitions + pane exits as NDJSON. File-follow, no daemon RPC, so it

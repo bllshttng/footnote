@@ -3,7 +3,8 @@
 Verbs:
     merge  - merge a PR with the fno-canonical guards (-> _merge.py)
     verify - audit an external PR gate, merged|reviews (-> _verify.py)
-    rebase - two-phase rebase with conflict delegation (-> _rebase.py)
+    rebase - two-phase rebase with conflict delegation (-> fno-agents pr-rebase)
+    push   - the one guarded push: fetch, rebase, preflight, push once (-> fno-agents pr-push)
     logs   - tail the failing CI job, spool the rest (-> _logs.py)
     wait   - poll status through the coalescing cache until settled/green (-> _wait.py)
 
@@ -387,6 +388,28 @@ def logs(
     raise typer.Exit(code=rc)
 
 
+def _forward_to_binary(verb: str, args: list[str]) -> None:
+    """Forward to the bundled fno-agents binary, binary-direct. The shared
+    body of the do-pr binary verbs (heal, push, rebase)."""
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            f"fno do pr {verb.replace('pr-', '')}: the fno-agents binary was not found. "
+            "It ships in the `pip install fno` wheel and with the plugin; "
+            "reinstall fno or run `fno doctor update --rust`, or set "
+            "FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+    result = subprocess.run([str(binary), verb, *args], check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
 @pr_app.command(
     "heal",
     hidden=True,
@@ -405,22 +428,7 @@ def heal(
     all_prs: bool = typer.Option(False, "--all", "-A", help="Report every red open PR."),
     playbook: bool = typer.Option(False, "--playbook", help="Print the signature table."),
 ) -> None:
-    import subprocess
-
-    from fno._subprocess_util import propagate_returncode
-    from fno.rust_binary import resolve_binary
-
-    binary = resolve_binary()
-    if binary is None:
-        typer.echo(
-            "fno do pr heal: the fno-agents binary was not found. It ships in "
-            "the `pip install fno` wheel and with the plugin; reinstall fno or "
-            "run `fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
-            err=True,
-        )
-        raise typer.Exit(code=127)
-
-    argv = [str(binary), "pr-heal"]
+    argv = []
     if pr_number is not None:
         argv.append(str(pr_number))
     if apply:
@@ -429,8 +437,7 @@ def heal(
         argv.append("--all")
     if playbook:
         argv.append("--playbook")
-    result = subprocess.run(argv, check=False)
-    raise typer.Exit(code=propagate_returncode(result.returncode))
+    _forward_to_binary("pr-heal", argv)
 
 
 @pr_app.command(
@@ -885,10 +892,24 @@ def publish_review_cmd(
     ),
 )
 def rebase(ctx: typer.Context) -> None:
-    from fno.pr import _rebase
+    _forward_to_binary("pr-rebase", list(ctx.args))
 
-    rc = _rebase.run_rebase(list(ctx.args))
-    raise typer.Exit(code=rc)
+
+@pr_app.command(
+    "push",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help=(
+        "The one guarded push: fetch, rebase onto origin/main, preflight, "
+        "push exactly once, print one receipt. Refuses while a CI run on the "
+        "remote head is still in flight (--force-ci-cancel overrides and "
+        "records the bypass; --no-preflight skips the preflight leg). "
+        "Exit 0 pushed, 1 preflight red, 2 a run in flight, 3 a refusal the "
+        "caller must fix (protected branch, dirty tree, conflict), 4 a read "
+        "error, 127 binary missing."
+    ),
+)
+def push(ctx: typer.Context) -> None:
+    _forward_to_binary("pr-push", list(ctx.args))
 
 
 @pr_app.command(

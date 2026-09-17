@@ -22,8 +22,40 @@
 //!   reported and left alone -- fixing it here would put main's problem in
 //!   someone else's diff.
 
+use crate::pr_push::{job_id, READ_TIMEOUT};
 use regex::Regex;
 use serde_json::Value;
+
+/// The shared push layer lives in pr_push. These adapters keep heal's call
+/// sites and message shapes unchanged while the implementation is single.
+fn run(
+    bin: &str,
+    args: &[&str],
+    cwd: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Result<(bool, String, String), String> {
+    crate::pr_push::run_labeled("pr-heal", bin, args, cwd, timeout)
+}
+
+fn gh_api(a: &Args, path: &str, extra: &[&str]) -> Result<String, String> {
+    crate::pr_push::gh_api(&a.gh_bin, &a.cwd, path, extra)
+}
+
+fn read_checks(a: &Args, head: &str) -> Result<Value, String> {
+    crate::pr_push::read_checks(&a.gh_bin, &a.cwd, head)
+}
+
+fn gh_api_pages(a: &Args, path: &str) -> Result<Vec<Value>, String> {
+    crate::pr_push::gh_api_pages(&a.gh_bin, &a.cwd, path)
+}
+
+fn porcelain(a: &Args) -> String {
+    crate::pr_push::porcelain(&a.git_bin, &a.cwd)
+}
+
+fn dirty(a: &Args) -> bool {
+    crate::pr_push::dirty(&a.git_bin, &a.cwd)
+}
 
 /// A command a remedy runs, with the repo-relative directory it runs in.
 /// `cwd` is empty for the repo root.
@@ -581,38 +613,6 @@ pub(crate) fn failing_rows(checks: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// True when any check is still running. Read AFTER a fix commit and before
-/// the push: pushing over a run in flight cancels it, which is the exact harm
-/// one session did seven times in one session.
-pub(crate) fn any_pending(checks: &Value) -> bool {
-    let deduped = crate::check_supersession::latest_per_name(checks);
-    deduped
-        .as_array()
-        .map(|rows| {
-            rows.iter().any(|row| {
-                !matches!(
-                    row.get("bucket")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .as_str(),
-                    "pass" | "fail" | "skipping" | "cancel"
-                )
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// The job id out of a check's `link`
-/// (`.../actions/runs/<run>/job/<job>`). Mirrors `_JOB_URL` in
-/// `cli/src/fno/pr/_logs.py`; a check with no job link (a commit
-/// StatusContext) has no log to read and answers `None`.
-pub(crate) fn job_id(link: &str) -> Option<String> {
-    let re = Regex::new(r"^https?://[^/]+/[^/]+/[^/]+/actions/runs/\d+/job/(\d+)")
-        .expect("static regex");
-    re.captures(link).map(|c| c[1].to_string())
-}
-
 // ── the verb ────────────────────────────────────────────────────────────────
 
 /// Exit codes. Zero means the PR has nothing red of its own; an `inherited`
@@ -624,9 +624,6 @@ pub(crate) const EXIT_CWD_REFUSAL: i32 = 3;
 pub(crate) const EXIT_READ_ERROR: i32 = 4;
 pub(crate) const EXIT_NO_GH: i32 = 127;
 
-/// A `gh` read. Generous next to the stop gate's 30s because a paginated
-/// check-runs read on a busy PR is slower than a single rollup read.
-const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// A remedy. `cargo fmt` over a large crate is the long pole.
 const REMEDY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -722,80 +719,6 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     Ok(a)
 }
 
-/// Run a command, returning (exit ok, stdout). A spawn failure and a non-zero
-/// exit are both "did not succeed" here; the caller only ever branches on
-/// success, and the distinction that matters (gh absent) is probed once.
-fn run(
-    bin: &str,
-    args: &[&str],
-    cwd: &std::path::Path,
-    timeout: std::time::Duration,
-) -> Result<(bool, String, String), String> {
-    match crate::loopcheck::bounded_read(bin.as_ref(), args, cwd, "heal", timeout) {
-        Ok(out) => Ok((
-            out.status.success(),
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr_tail).into_owned(),
-        )),
-        // heal's own wording. `bounded_read_diagnostic` hardcodes a
-        // `loop-check:` prefix, and naming a subsystem that did not run sends
-        // a reader to the wrong place.
-        Err(err) => Err(
-            crate::loopcheck::bounded_read_diagnostic("pr-heal", &err).replacen(
-                "loop-check: ",
-                "",
-                1,
-            ),
-        ),
-    }
-}
-
-/// `gh api` against the current repo. `{owner}`/`{repo}` are gh's own
-/// placeholders, resolved from the checkout, so heal never reads the remote
-/// just to learn its own name.
-///
-/// `--allow-escape-sequences` is not optional: gh refuses a colorized job log
-/// without it, through a pipe and a redirect alike. The retry without the
-/// flag covers a gh too old to know it, which is the same fallback the Python
-/// twin in `fno.pr._logs` carries. Without it, an older gh kills every read
-/// here, not just the log fetch.
-fn gh_api(a: &Args, path: &str, extra: &[&str]) -> Result<String, String> {
-    let mut args: Vec<&str> = vec!["api", "--allow-escape-sequences", path];
-    args.extend_from_slice(extra);
-    let (ok, out, err) = run(&a.gh_bin, &args, &a.cwd, READ_TIMEOUT)?;
-    if ok {
-        return Ok(out);
-    }
-    if err.to_lowercase().contains("unknown flag") {
-        let mut plain: Vec<&str> = vec!["api", path];
-        plain.extend_from_slice(extra);
-        let (ok, out, err) = run(&a.gh_bin, &plain, &a.cwd, READ_TIMEOUT)?;
-        if ok {
-            return Ok(out);
-        }
-        return Err(format!("gh api {path} failed: {}", err.trim()));
-    }
-    // The stderr tail is the whole difference between "404" and "rate limit"
-    // and "log expired"; a bare "failed" sends a reader back to gh by hand.
-    Err(format!("gh api {path} failed: {}", err.trim()))
-}
-
-/// Read a paginated `gh api` endpoint as one JSON array of PAGES.
-///
-/// `--paginate` alone concatenates page bodies with NO separator (`}{` for
-/// objects, `][` for arrays), which is not parseable JSON and has no reliable
-/// split point: a `][` appears inside any PR body carrying a markdown
-/// reference link. `--slurp` is gh's own answer and wraps the pages in a real
-/// array, so nothing here has to guess at a boundary.
-fn gh_api_pages(a: &Args, path: &str) -> Result<Vec<Value>, String> {
-    let raw = gh_api(a, path, &["--paginate", "--slurp"])?;
-    match serde_json::from_str::<Value>(&raw) {
-        Ok(Value::Array(pages)) => Ok(pages),
-        Ok(other) => Ok(vec![other]),
-        Err(e) => Err(format!("gh api {path} returned unparseable pages: {e}")),
-    }
-}
-
 /// The PR's head sha, head ref, and body.
 fn read_pr(a: &Args, pr: &str) -> Result<(String, String, String), String> {
     let raw = gh_api(a, &format!("repos/{{owner}}/{{repo}}/pulls/{pr}"), &[])?;
@@ -819,114 +742,6 @@ fn read_pr(a: &Args, pr: &str) -> Result<(String, String, String), String> {
         return Err("pr json carried no head sha".to_string());
     }
     Ok((head, head_ref, body))
-}
-
-/// The PR head's check runs, in the `bucket`/`link` shape the classifier and
-/// [`crate::check_supersession::latest_per_name`] already speak.
-///
-/// The read is REST. `gh pr checks` is GraphQL, and this repo's quota broker
-/// routes it away unconditionally, so a heal built on it could never run. The
-/// translation below is the whole cost of reading the cheap endpoint.
-fn read_checks(a: &Args, head: &str) -> Result<Value, String> {
-    let pages = gh_api_pages(
-        a,
-        &format!("repos/{{owner}}/{{repo}}/commits/{head}/check-runs"),
-    )?;
-    let mut rows: Vec<Value> = Vec::new();
-    for page in pages {
-        let Some(runs) = page.get("check_runs").and_then(|r| r.as_array()) else {
-            continue;
-        };
-        for run in runs {
-            rows.push(serde_json::json!({
-                "name": run.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                "bucket": rest_bucket(run),
-                "link": run.get("html_url").and_then(|v| v.as_str()).unwrap_or(""),
-                "workflow": run
-                    .pointer("/check_suite/id")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default(),
-                "startedAt": run.get("started_at").and_then(|v| v.as_str()).unwrap_or(""),
-                "completedAt": run.get("completed_at").and_then(|v| v.as_str()).unwrap_or(""),
-            }));
-        }
-    }
-    // The check-runs endpoint returns ONLY check-runs. A commit StatusContext
-    // (`fno/review-coverage`, `stacked-base-guard`) lives on a different
-    // endpoint, and reading one without the other is a false green: a PR whose
-    // every job passed while a status failed reported "nothing red".
-    rows.extend(read_statuses(a, head));
-    if rows.is_empty() {
-        return Err("check-runs read named no checks".to_string());
-    }
-    Ok(Value::Array(rows))
-}
-
-/// The commit's StatusContexts, in the same row shape as the check-runs.
-/// A read failure yields none rather than aborting the run: the check-runs
-/// half is still worth reporting, and the caller's exit code already treats
-/// an unreadable world as unsettled.
-fn read_statuses(a: &Args, head: &str) -> Vec<Value> {
-    let Ok(raw) = gh_api(
-        a,
-        &format!("repos/{{owner}}/{{repo}}/commits/{head}/status"),
-        &[],
-    ) else {
-        return Vec::new();
-    };
-    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
-        return Vec::new();
-    };
-    let Some(rows) = v.get("statuses").and_then(|s| s.as_array()) else {
-        return Vec::new();
-    };
-    rows.iter()
-        .map(|st| {
-            let state = st
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            serde_json::json!({
-                "name": st.get("context").and_then(|v| v.as_str()).unwrap_or(""),
-                "bucket": match state.as_str() {
-                    "success" => "pass",
-                    "pending" => "pending",
-                    _ => "fail",
-                },
-                "link": st.get("target_url").and_then(|v| v.as_str()).unwrap_or(""),
-                "workflow": "",
-                "startedAt": st.get("created_at").and_then(|v| v.as_str()).unwrap_or(""),
-                "completedAt": st.get("updated_at").and_then(|v| v.as_str()).unwrap_or(""),
-            })
-        })
-        .collect()
-}
-
-/// A REST check-run's `status`/`conclusion` folded to the `gh pr checks`
-/// bucket vocabulary. An unrecognized conclusion buckets `fail` rather than
-/// `pass`: a bucket heal does not understand must never read green.
-fn rest_bucket(run: &Value) -> &'static str {
-    let status = run
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase();
-    if status != "completed" {
-        return "pending";
-    }
-    match run
-        .get("conclusion")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase()
-        .as_str()
-    {
-        "success" => "pass",
-        "skipped" | "neutral" => "skipping",
-        "cancelled" => "cancel",
-        _ => "fail",
-    }
 }
 
 /// Classify every failing row of one PR. `cached_inherited` carries a
@@ -1014,22 +829,6 @@ fn refuse_wrong_worktree(a: &Args, head_ref: &str) -> Option<String> {
     } else {
         Some(reasons.join("; "))
     }
-}
-
-/// The worktree's uncommitted state, verbatim. Compared BEFORE and AFTER each
-/// remedy, because "is the tree dirty" is a whole-worktree question and the
-/// remedies share one worktree: the first remedy's edits are still
-/// uncommitted when the second runs, so a second remedy that changed nothing
-/// read as dirty and took credit for the first one's work.
-fn porcelain(a: &Args) -> String {
-    run(&a.git_bin, &["status", "--porcelain"], &a.cwd, READ_TIMEOUT)
-        .map(|(_, out, _)| out.trim().to_string())
-        .unwrap_or_default()
-}
-
-/// Whether the worktree carries uncommitted changes.
-fn dirty(a: &Args) -> bool {
-    !porcelain(a).is_empty()
 }
 
 /// Apply the auto remedies. Returns the signatures that were fixed and
@@ -1669,36 +1468,36 @@ fn run_one(a: &Args, pr: &str) -> i32 {
     if !committed {
         return code;
     }
-    // Re-read BEFORE pushing. A push over a run in flight cancels it, and
-    // that is the harm this verb exists to stop repeating.
-    match read_checks(a, &head) {
-        Ok(checks) if any_pending(&checks) => {
+    // Re-read BEFORE pushing through the shared guarded push. A push over a
+    // run in flight cancels it, and that is the harm this verb exists to
+    // stop repeating; an unreadable read holds the commit local.
+    let ctx = crate::pr_push::PushCtx {
+        git_bin: a.git_bin.clone(),
+        gh_bin: a.gh_bin.clone(),
+        fno_bin: String::new(),
+        cwd: a.cwd.clone(),
+        stamps_dir: crate::pr_push::default_stamps_dir(),
+        force: false,
+    };
+    match crate::pr_push::guarded_push(&ctx, &head) {
+        crate::pr_push::PushOutcome::Pushed { .. } => {
+            println!("pushed once");
+            code
+        }
+        crate::pr_push::PushOutcome::InFlight { .. } => {
             println!(
                 "run in flight; commit kept local, not pushing; \
                  rerun after fno do pr wait {pr}"
             );
             EXIT_IN_FLIGHT
         }
-        Ok(_) => {
-            let (ok, _, _) = run(&a.git_bin, &["push"], &a.cwd, READ_TIMEOUT).unwrap_or((
-                false,
-                String::new(),
-                String::new(),
-            ));
-            if ok {
-                println!("pushed once");
-                code
-            } else {
-                eprintln!("pr-heal: the fix is committed but the push failed");
-                EXIT_READ_ERROR
-            }
-        }
-        Err(msg) => {
-            // Unreadable is not "settled". Holding the commit local is the
-            // safe half of the fork; pushing on an unanswered read is the one
-            // that cancels somebody's run.
+        crate::pr_push::PushOutcome::Unreadable(msg) => {
             println!("could not re-read checks ({msg}); commit kept local, not pushing");
             EXIT_IN_FLIGHT
+        }
+        crate::pr_push::PushOutcome::PushFailed(_) => {
+            eprintln!("pr-heal: the fix is committed but the push failed");
+            EXIT_READ_ERROR
         }
     }
 }
@@ -1706,6 +1505,7 @@ fn run_one(a: &Args, pr: &str) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pr_push::{any_pending, rest_bucket};
     use serde_json::json;
     use std::path::Path;
 
