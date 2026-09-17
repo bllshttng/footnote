@@ -197,7 +197,7 @@ fn workspace_family_usage_names_prune() {
         (
             vec!["mux", "workspace"],
             "bare",
-            "fno mux workspace: 'fno mux workspace' requires a subcommand",
+            "A bare `mux workspace` refuses",
         ),
         (
             vec!["mux", "workspace", "bogus"],
@@ -223,7 +223,7 @@ fn retired_squad_spelling_is_not_advertised() {
     let out = fno().args(["mux", "workspace"]).output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("fno mux workspace prune"),
+        stderr.contains("mux workspace prune|restore"),
         "usage advertises the canonical spelling: {stderr}"
     );
     assert!(
