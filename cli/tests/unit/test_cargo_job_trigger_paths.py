@@ -43,6 +43,16 @@ def _rust_cross_tree_inputs() -> set[str]:
     return inputs
 
 
+def _manifest_paths_diffed_by(run: str) -> set[str]:
+    """Run the step's own awk filter over the manifest, so the test reads the paths CI diffs."""
+    awk = re.search(r"awk -F'\\t' '(?P<prog>[^']+)'", run)
+    assert awk, "the freshness step reads generated-artifacts.tsv without its awk filter"
+    out = subprocess.check_output(
+        ["awk", "-F\t", awk.group("prog"), "generated-artifacts.tsv"], cwd=_REPO_ROOT, text=True
+    )
+    return {line for line in out.splitlines() if line}
+
+
 def _cargo_job_step_inputs() -> set[str]:
     jobs = _workflow()["jobs"]
     inputs: set[str] = set()
@@ -53,8 +63,11 @@ def _cargo_job_step_inputs() -> set[str]:
                 inputs.update(
                     path
                     for line in block.splitlines()
-                    if (path := line.strip().lstrip("\\"))
+                    if (path := line.strip().lstrip("\\")) and not path.startswith("<")
                 )
+            if "generated-artifacts.tsv" in run:
+                inputs.add("generated-artifacts.tsv")
+                inputs.update(_manifest_paths_diffed_by(run))
             inputs.update(re.findall(r"bash ([^\s;&|]+)", run))
     return inputs
 

@@ -99,6 +99,15 @@ jobs:
           uv run fno-py doctor harness-matrix --write
           git diff --exit-code -- ../docs/harnesses/verb-matrix.md
 
+      # hooks/generated-write-guard.sh refuses edits only to generated copies
+      # that generated-artifacts.tsv or skill-bundles.yaml names. The census
+      # fails on a dead row and on a marked generated file no list covers.
+      - name: Generated-copy manifest complete (selftest, then check)
+        if: ${{ !cancelled() }}
+        run: |
+          bash scripts/tests/check-generated-manifest-selftest.sh
+          bash scripts/ci/check-generated-manifest.sh
+
       # x-3d21 R4/R5: a state path built by hand consults nothing, so no env
       # pin, guard or refusal can reach it. The ratchet fails in BOTH
       # directions - a new hand-built path, and a baselined line whose site was
