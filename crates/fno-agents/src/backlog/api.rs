@@ -273,35 +273,55 @@ fn read_rows(store: &Store) -> Result<Vec<Value>, ApiError> {
     Ok(crate::graph_store::read_rows(&store.graph)?)
 }
 
-fn typed_rows(store: &Store) -> Result<Vec<Node>, ApiError> {
-    Ok(read_rows(store)?
-        .iter()
+/// The pure read halves, over rows the caller already holds: the keeper
+/// feeds them from the cache, the store-reading functions delegate here so
+/// the two halves cannot drift. `defaulted` is read_rows' tail; `node_in`,
+/// `nodes_in` and `rows_in` are `node`, `nodes` and `rows` without the
+/// store read. A row the model cannot represent is skipped, the import's
+/// rule (the JSON leg stays authoritative and parity surfaces the gap);
+/// `rows_in` carries such a row through VERBATIM, so a reader seam cannot
+/// silently drop it.
+pub fn defaulted(mut rows: Vec<Value>) -> Vec<Value> {
+    crate::graph_store::apply_defaults(&mut rows, false);
+    rows
+}
+
+pub fn node_in(rows: &[Value], id: &str) -> Option<Node> {
+    rows.iter()
         .enumerate()
         .filter_map(|(ordinal, row)| {
-            // A row the model cannot represent is skipped, the import's
-            // rule: the JSON leg stays authoritative and parity surfaces
-            // the gap.
             Node::from_json(row).ok().map(|mut node| {
                 node.ordinal = ordinal as i64;
                 node
             })
         })
-        .collect())
-}
-
-pub fn node(store: &Store, id: &str) -> Result<Option<Node>, ApiError> {
-    Ok(typed_rows(store)?.into_iter().find(|n| n.id == id))
+        .find(|n| n.id == id)
 }
 
 /// Filter, then drop archived rows unless asked. Ordering and pagination
 /// happen in [`nodes`], so `first` counts the rows the caller would see.
-fn visible_rows(store: &Store, filter: &NodeFilter, page: &Page) -> Result<Vec<Node>, ApiError> {
-    let rows: Vec<Node> = typed_rows(store)?
-        .into_iter()
+pub fn nodes_in(rows: &[Value], filter: &NodeFilter, page: &Page) -> Connection<Node> {
+    let mut rows: Vec<Node> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(ordinal, row)| {
+            Node::from_json(row).ok().map(|mut node| {
+                node.ordinal = ordinal as i64;
+                node
+            })
+        })
         .filter(|n| filter_matches(n, filter))
         .filter(|n| page.include_archived || n.archived_at.is_none())
         .collect();
-    Ok(rows)
+    match page.order_by {
+        OrderBy::Ordinal => rows.sort_by_key(|n| n.ordinal),
+        OrderBy::CreatedAt => rows.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.ordinal.cmp(&b.ordinal))
+        }),
+    }
+    paginate(rows, page)
 }
 
 fn filter_matches(node: &Node, filter: &NodeFilter) -> bool {
@@ -367,6 +387,10 @@ fn filter_matches(node: &Node, filter: &NodeFilter) -> bool {
     true
 }
 
+pub fn node(store: &Store, id: &str) -> Result<Option<Node>, ApiError> {
+    Ok(node_in(&read_rows(store)?, id))
+}
+
 fn paginate(rows: Vec<Node>, page: &Page) -> Connection<Node> {
     let total = rows.len();
     let start = match page.after.as_deref().and_then(decode_cursor) {
@@ -400,16 +424,7 @@ pub fn nodes(
     filter: &NodeFilter,
     page: &Page,
 ) -> Result<Connection<Node>, ApiError> {
-    let mut rows = visible_rows(store, filter, page)?;
-    match page.order_by {
-        OrderBy::Ordinal => rows.sort_by_key(|n| n.ordinal),
-        OrderBy::CreatedAt => rows.sort_by(|a, b| {
-            a.created_at
-                .cmp(&b.created_at)
-                .then_with(|| a.ordinal.cmp(&b.ordinal))
-        }),
-    }
-    Ok(paginate(rows, page))
+    Ok(nodes_in(&read_rows(store)?, filter, page))
 }
 
 /// Every working-graph row through the store, in ordinal order. The one
@@ -421,14 +436,19 @@ pub fn nodes(
 /// queries drop it, the import's rule; a reader must not). Archived rows
 /// come back; the caller filters.
 pub fn rows(store: &Store) -> Result<Vec<Value>, ApiError> {
-    Ok(read_rows(store)?
-        .iter()
+    Ok(rows_in(&read_rows(store)?))
+}
+
+/// Every row, round-tripped through the model where it fits, verbatim
+/// where it does not - the pure half of [`rows`].
+pub fn rows_in(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
         .map(|row| {
             Node::from_json(row)
                 .map(|node| node.to_json())
                 .unwrap_or_else(|_| row.clone())
         })
-        .collect())
+        .collect()
 }
 
 /// The progress notes of one node, newest last (store order), paged.

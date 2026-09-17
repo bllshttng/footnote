@@ -713,6 +713,48 @@ fn api_transcript_helper_agrees_before_mutations() {
     assert_eq!(a, b);
 }
 
+/// The keeper feeds the pure read halves from the cache; the store-reading
+/// functions delegate to the same halves. This pins the seam: on both
+/// backends the pure halves over the store's rows answer byte-equal to the
+/// store reads (the AC8 pre-change-equality contract).
+#[test]
+fn api_pure_read_halves_equal_the_store_reads_on_both_backends() {
+    let (_d1, _d2, json_store, sqlite_store) = both_stores();
+    for store in [&json_store, &sqlite_store] {
+        let store_rows = read_rows(store).unwrap();
+        // rows: the round-tripped list.
+        assert_eq!(rows_in(&store_rows), rows(store).unwrap());
+        // node: one present id, one absent.
+        assert_eq!(
+            node_in(&store_rows, "ab-two").map(|n| n.to_json()),
+            node(store, "ab-two").unwrap().map(|n| n.to_json())
+        );
+        assert_eq!(node_in(&store_rows, "ab-nope").map(|n| n.to_json()), None);
+        // nodes: the default page and an id_in filter, compared as the wire
+        // projection (page info plus node rows).
+        let as_rows = |c: &Connection<Node>| {
+            (
+                serde_json::to_value(&c.page_info).unwrap(),
+                c.nodes.iter().map(|n| n.to_json()).collect::<Vec<_>>(),
+            )
+        };
+        let filter = NodeFilter::default();
+        let page = Page::default();
+        assert_eq!(
+            as_rows(&nodes(store, &filter, &page).unwrap()),
+            as_rows(&nodes_in(&store_rows, &filter, &page))
+        );
+        let id_filter = NodeFilter {
+            id_in: Some(vec!["ab-one".into(), "ab-three".into()]),
+            ..Default::default()
+        };
+        assert_eq!(
+            as_rows(&nodes(store, &id_filter, &page).unwrap()),
+            as_rows(&nodes_in(&store_rows, &id_filter, &page))
+        );
+    }
+}
+
 #[test]
 fn api_cursor_decodes_roundtrip() {
     let mut one = base_row("ab-one", "One", "idea");

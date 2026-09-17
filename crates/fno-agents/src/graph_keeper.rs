@@ -3443,7 +3443,28 @@ fn handle_api(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
         .and_then(Value::as_str)
         .ok_or_else(|| StoreError::Invalid("api needs an op".into()))?;
     let store = crate::backlog::api::Store::new(&state.graph);
-    const READ_OPS: &[&str] = &["node", "nodes", "comments", "version", "rows"];
+    // The whole-graph reads ride the cache: one api_rows materialization
+    // per version, under the read gate. The api replies are built from the
+    // same cached rows, so api rows/node/nodes cost one export per version,
+    // not one per request.
+    if matches!(op, "node" | "nodes" | "rows") {
+        let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+        let rows: Arc<Vec<Value>> = match read_graph_gated(state, false)? {
+            GraphRead::Cached(graph) => graph
+                .api_rows
+                .get_or_init(|| {
+                    Arc::new(crate::backlog::api::rows_in(
+                        &crate::backlog::api::defaulted((*graph.entries).clone()),
+                    ))
+                })
+                .clone(),
+            GraphRead::Fresh(entries, _) => Arc::new(crate::backlog::api::rows_in(
+                &crate::backlog::api::defaulted((*entries).clone()),
+            )),
+        };
+        return api_read_op(&store, op, params, &rows);
+    }
+    const READ_OPS: &[&str] = &["comments", "version"];
     if READ_OPS.contains(&op) {
         let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
         return api_op(&store, op, params);
@@ -3452,17 +3473,18 @@ fn handle_api(state: &StoreState, params: &Value) -> Result<Value, StoreError> {
     api_op(&store, op, params)
 }
 
-fn api_op(
+fn api_read_op(
     store: &crate::backlog::api::Store,
     op: &str,
     params: &Value,
+    rows: &[Value],
 ) -> Result<Value, StoreError> {
     use crate::backlog::api;
     let node_row = |node: &api::Node| node.to_json();
     match op {
         "node" => {
             let id = param_str(params, "id")?;
-            let found = api::node(store, id)?;
+            let found = api::node_in(rows, id);
             Ok(json!({
                 "node": found.map(|n| n.to_json()),
                 "version": api::version(store)?,
@@ -3478,13 +3500,30 @@ fn api_op(
                 .unwrap_or_default();
             let page: api::Page = serde_json::from_value(params.clone())
                 .map_err(|e| StoreError::Invalid(format!("bad page: {e}").into()))?;
-            let connection = api::nodes(store, &filter, &page)?;
+            let connection = api::nodes_in(rows, &filter, &page);
             Ok(json!({
                 "nodes": connection.nodes.iter().map(node_row).collect::<Vec<_>>(),
                 "page_info": serde_json::to_value(&connection.page_info).unwrap_or(Value::Null),
                 "version": api::version(store)?,
             }))
         }
+        "rows" => Ok(json!({
+            "rows": rows,
+            "version": api::version(store)?,
+        })),
+        _ => unreachable!("handle_api routes node/nodes/rows here"),
+    }
+}
+
+/// The reads that never touch the cache (comments walk a node's own rows;
+/// version is the mutation counter): today's api_op path.
+fn api_op(
+    store: &crate::backlog::api::Store,
+    op: &str,
+    params: &Value,
+) -> Result<Value, StoreError> {
+    use crate::backlog::api;
+    match op {
         "comments" => {
             let id = param_str(params, "id")?;
             let page: api::Page = serde_json::from_value(params.clone())
@@ -3501,10 +3540,6 @@ fn api_op(
             }))
         }
         "version" => Ok(json!({ "version": api::version(store)? })),
-        "rows" => Ok(json!({
-            "rows": api::rows(store)?,
-            "version": api::version(store)?,
-        })),
         _ => api_mutation(store, op, params),
     }
 }
@@ -4528,6 +4563,37 @@ mod tests {
         let reply = handle_request(&state, &payload);
         assert_eq!(reply["ok"], json!(false));
         assert_eq!(reply["error"]["kind"], json!("unreadable"));
+    }
+
+    #[test]
+    fn api_rows_runs_five_times_on_one_fill() {
+        // AC9-HP: five api rows reads, one fill - the api_rows projection
+        // fills once per version and every read after the first is a hit.
+        let (_dir, state) = sqlite_state(json!({
+            "entries": [
+                {"id": "x-a", "slug": "node-a", "title": "a", "status": "ready"},
+                {"id": "x-b", "slug": "node-b", "title": "b", "status": "done",
+                 "completed_at": "2026-09-01T00:00:00Z"},
+            ]
+        }));
+        let mut last = None;
+        for _ in 0..5 {
+            last = Some(handle_request(
+                &state,
+                &serde_json::to_vec(&json!({
+                    "id": 1,
+                    "method": "api",
+                    "params": {"op": "rows"}
+                }))
+                .unwrap(),
+            ));
+        }
+        assert_eq!(last.unwrap()["ok"], json!(true));
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            1,
+            "five api rows reads must parse once"
+        );
     }
 
     /// Reads the Identify reply's `store_backend` over the wire.
