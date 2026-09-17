@@ -825,6 +825,23 @@ def set_related(entries: list[dict], node_id: str, desired: list[str]) -> None:
     entries[:] = out
 
 
+def apply_related_update(entries: list[dict], node: dict, related: list[str], resolve) -> dict:
+    """Resolve ``related`` tokens via ``resolve``, write the set, and return
+    the live node object for ``node["id"]``.
+
+    ``set_related`` replaces every element of ``entries`` with new objects
+    from the keeper round trip, so any ``node`` reference taken before this
+    call is orphaned afterward; callers that keep writing fields onto the old
+    reference lose those writes silently.
+    """
+    from fno.graph._intake import _find_node, _parse_blocker_list
+
+    tokens = _parse_blocker_list(related)
+    desired = [] if tokens == ["null"] else [resolve(t) for t in tokens]
+    set_related(entries, node["id"], desired)
+    return _find_node(entries, node["id"])
+
+
 def canonicalize_entries(entries: list[dict]) -> list[dict]:
     """Reorder each entry's keys status-forward and refresh the children
     index. Returns a new list of new dicts; the ported implementation is the

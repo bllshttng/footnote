@@ -3511,24 +3511,12 @@ def cmd_update(
         resolved_id[0] = node["id"]
 
         if related is not None:
-            from fno.graph.store import set_related
+            from fno.graph.store import apply_related_update
 
-            tokens = _parse_blocker_list(related)
-            desired = (
-                []
-                if tokens == ["null"]
-                else [
-                    _resolve_asserted_id(t, entries, flag="--related", self_id=node["id"])
-                    for t in tokens
-                ]
+            node = apply_related_update(
+                entries, node, related,
+                lambda t: _resolve_asserted_id(t, entries, flag="--related", self_id=node["id"]),
             )
-            set_related(entries, node["id"], desired)
-            # set_related round-trips `entries` through the keeper and replaces
-            # every element (`entries[:] = out`), orphaning the `node` object
-            # captured above. Every field write below targets `node` directly,
-            # so without rebinding it here those writes land on a dict that is
-            # no longer part of `entries` and silently vanish on commit.
-            node = _find_node(entries, node["id"])
             projected_node[0] = node
 
         if source_node is not None:
