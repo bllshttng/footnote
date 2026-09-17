@@ -3414,13 +3414,14 @@ def dispatch_spawn_pane(
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
     crown_plan: Optional[dict] = None
+    crown_caller_name: Optional[str] = None
     if crown_level is not None:
-        # Same authorization + occupancy rule as the bg seam: a grant must be
-        # a strict subset of what the grantor holds, and a live holder blocks
-        # an heir from launching uncrowned. Both doors check, because either
-        # is a door.
+        # Same authorization + occupancy rule as the bg seam: a grant must be a
+        # strict subset of what the grantor holds, and a live holder blocks an
+        # heir from launching uncrowned. Both doors check, either is a door.
+        crown_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
         crown_refusal, crown_plan = plan_spawn_crown(
-            crown_scope or "", calling_agent_row(), succession,
+            crown_scope or "", caller_row, succession,
         )
         if crown_refusal is not None:
             raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
@@ -4672,7 +4673,7 @@ def dispatch_spawn_pane(
             if crown_succeeded and _declined_scope:
                 vacated_names = {row.name for row, cause in crown_cleared if cause == "succession"}
                 vacated = sorted(vacated_names)
-                noted = getattr(calling_agent_row(), "name", None) in vacated
+                noted = crown_caller_name in vacated
                 print(
                     f"spawn: crown over {_declined_scope!r} transferred from {', '.join(vacated)} "
                     f"to {name} (succession)." + (" You no longer hold it." if noted else ""),
