@@ -43,55 +43,9 @@ if [[ -L "$EVENTS_FILE" ]]; then
 fi
 EVENTS_ATOMIC_LINE_MAX_BYTES=4000
 
-_wait_for_event_gc() {
-    local events_path="${1:?events path required}"
-    local marker="${events_path}.gc.d"
-    local attempts=0
-    local max_attempts="${EVENTS_GC_WAIT_ATTEMPTS:-20}"
-    [[ "$max_attempts" =~ ^[0-9]+$ ]] || max_attempts=20
-    while [[ -d "$marker" && "$attempts" -lt "$max_attempts" ]]; do
-        if _steal_stale_event_dir "$marker"; then
-            continue
-        fi
-        sleep 0.05
-        attempts=$((attempts + 1))
-    done
-    [[ ! -d "$marker" ]]
-}
-
-_begin_shell_event_append() {
-    local events_path="${1:?events path required}"
-    local writer_pid="${2:?writer pid required}"
-    local active_dir="${events_path}.shell-writers.d"
-    local token identity
-    while true; do
-        _wait_for_event_gc "$events_path" || return 1
-        mkdir -p "$active_dir" 2>/dev/null || return 1
-        token="$active_dir/${writer_pid}.${RANDOM}"
-        if ! mkdir "$token" 2>/dev/null; then
-            continue
-        fi
-        identity=$(_event_process_identity "$writer_pid")
-        if [[ -z "$identity" ]] || ! printf '%s' "$identity" > "$token/owner"; then
-            command -p rm -f "$token/owner" 2>/dev/null || true
-            rmdir "$token" 2>/dev/null || true
-            return 1
-        fi
-        if [[ ! -d "${events_path}.gc.d" ]]; then
-            printf '%s' "$token"
-            return 0
-        fi
-        _end_shell_event_append "$token"
-    done
-}
-
-_end_shell_event_append() {
-    local token="${1:?writer token required}"
-    command -p rm -f "$token/owner" 2>/dev/null || true
-    rmdir "$token" 2>/dev/null || true
-    rmdir "$(dirname "$token")" 2>/dev/null || true
-}
-
+# The store is the acknowledgement boundary; there is no shell-side mutex,
+# spool directory, or rotation check. The native binary's SQL transaction
+# serializes every writer, in every language.
 # Roots a hermetic shell process may write a journal into. The Python half is
 # fno.events._hermetic_allowed_roots; keep the two in step. TMPDIR covers both
 # the neutralise sandbox and a test's own mktemp file, and the parent of an
@@ -195,7 +149,7 @@ _append_bounded_event() {
     local label="${1:?label required}"
     local event="${2:?event required}"
     local requested_path="${3:?events path required}"
-    local events_path current_path writer_token
+    local events_path
     local event_bytes
     event_bytes=$(printf '%s\n' "$event" | wc -c | tr -d '[:space:]')
     if (( event_bytes > EVENTS_ATOMIC_LINE_MAX_BYTES )); then
@@ -203,44 +157,28 @@ _append_bounded_event() {
             "$label" "$event_bytes" "$EVENTS_ATOMIC_LINE_MAX_BYTES" >&2
         return 1
     fi
-    local writer_pid="${BASHPID:-$$}"
-    while true; do
-        events_path="$requested_path"
-        if [[ -L "$events_path" ]]; then
-            events_path=$(_resolve_event_symlink "$events_path") || return 1
-        fi
-        # Both guards run BEFORE the mutex: _begin_shell_event_append mkdir -p's
-        # a writer dir beside the journal, so acquiring the lock itself creates
-        # the `.fno/` this refuses to create, in the file this refuses to touch.
-        #
-        # A skipped append returns 3, never 0. A caller reading 0 as "the line
-        # is on disk" is the shape this whole guard exists to refuse, and the
-        # thrash detector counts appended lines. Silent, because guard-mark
-        # fires per tool call and a note per call is noise in exactly the repos
-        # this leaves alone.
-        _refuse_shell_hermetic_escape "$events_path" "$label" || return 1
-        _shell_events_may_create_parent "$events_path" || return 3
-        writer_token=$(_begin_shell_event_append "$events_path" "$writer_pid") || return 1
-        current_path="$requested_path"
-        if [[ -L "$current_path" ]]; then
-            current_path=$(_resolve_event_symlink "$current_path") || {
-                _end_shell_event_append "$writer_token"
-                return 1
-            }
-        fi
-        if [[ "$current_path" == "$events_path" ]]; then
-            break
-        fi
-        _end_shell_event_append "$writer_token"
-    done
-    if ! mkdir -p "$(dirname "$events_path")" 2>/dev/null; then
-        _end_shell_event_append "$writer_token"
-        return 1
+    events_path="$requested_path"
+    if [[ -L "$events_path" ]]; then
+        events_path=$(_resolve_event_symlink "$events_path") || return 1
     fi
-    local append_rc=0
-    printf '%s\n' "$event" >> "$events_path" 2>/dev/null || append_rc=$?
-    _end_shell_event_append "$writer_token"
-    return "$append_rc"
+    # Both guards run BEFORE the commit: the store would happily create the
+    # parent directory the append guard exists to refuse.
+    #
+    # A skipped append returns 3, never 0. A caller reading 0 as "the row is
+    # stored" is the shape this whole guard exists to refuse, and the thrash
+    # detector counts appended lines. Silent, because guard-mark fires per
+    # tool call and a note per call is noise in exactly the repos this
+    # leaves alone.
+    _refuse_shell_hermetic_escape "$events_path" "$label" || return 1
+    _shell_events_may_create_parent "$events_path" || return 3
+    # One bounded native commit. The store's SQL transaction is the
+    # serialization point; there is no shell-side spool, fragment, or
+    # fallback line.
+    local bin="${FNO_BIN:-}"
+    if [[ -z "$bin" ]]; then
+        bin=$(command -v fno 2>/dev/null) || return 1
+    fi
+    printf '%s' "$event" | "$bin" doctor event emit-envelope --events "$events_path" >/dev/null 2>&1
 }
 
 emit_event() {
@@ -257,7 +195,7 @@ emit_event() {
         --arg src "$source" \
         --arg type "$type" \
         --argjson data "$data" \
-        '{timestamp: $ts, source: $src, type: $type, data: $data}' 2>/dev/null) || return 0
+        '{ts: $ts, source: $src, type: $type, data: $data}' 2>/dev/null) || return 0
     _append_bounded_event emit_event "$event" "$EVENTS_FILE" || true
 }
 
@@ -275,7 +213,10 @@ emit_event_raw() {
     # default-case and the arg-case. Assign-then-default avoids the
     # parser ambiguity entirely.
     local json="${2:-}"
-    local source="${3:-}"
+    # The store refuses a source-less envelope: every row names its producer.
+    # A caller passing none inherits the hook tree's default, the same
+    # EMIT_SOURCE_ID convention emit_polling_external_review uses.
+    local source="${3:-${EMIT_SOURCE_ID:-target}}"
     [[ -z "$json" ]] && json='{}'
     local events_path="${EVENTS_FILE:-.fno/events.jsonl}"
     local event
@@ -284,8 +225,7 @@ emit_event_raw() {
         --arg type "$type" \
         --arg source "$source" \
         --argjson data "$json" \
-        '{ts: $ts, type: $type, data: $data}
-        + (if $source == "" then {} else {source: $source} end)' 2>/dev/null) || return 0
+        '{ts: $ts, type: $type, source: $source, data: $data}' 2>/dev/null) || return 0
     _append_bounded_event emit_event_raw "$event" "$events_path" || true
 }
 
