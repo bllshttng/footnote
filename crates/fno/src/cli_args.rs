@@ -653,9 +653,19 @@ fn front_door_from(root: FnoRoot, args: &[OsString]) -> FrontDoor {
         Some(RootCmd::Version { json }) => FrontDoor::Version { json },
         // Everything unclaimed IS the forwarded Python surface.
         Some(RootCmd::External(_)) => FrontDoor::Forward,
-        Some(RootCmd::Mux(MuxRoot { cmd })) => FrontDoor::Mux(MuxParsed {
-            cmd: mux_with_tail(cmd, args),
-        }),
+        Some(RootCmd::Mux(mux)) => {
+            // The server subcommand carries its own deprecated `--session`
+            // alias; it warns here, exactly where the root-level spelling
+            // warned above (main.rs routes on the parsed fields only).
+            if let MuxCmd::Server(s) = &mux.cmd {
+                if s.session.is_some() {
+                    crate::mux_cli::note_server_flag("--session");
+                }
+            }
+            FrontDoor::Mux(MuxParsed {
+                cmd: mux_with_tail(mux.cmd, args),
+            })
+        }
     }
 }
 
