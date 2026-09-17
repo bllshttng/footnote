@@ -51,7 +51,7 @@ const READING_NAMES: [&str; 14] = [
 ];
 
 /// The numeric keys this verb owns and diffs versus the previous beat.
-const NUMERIC_DIFF_KEYS: [&str; 8] = [
+const NUMERIC_DIFF_KEYS: [&str; 9] = [
     "open_prs",
     "free_claim_no_driver",
     "blocked",
@@ -60,6 +60,7 @@ const NUMERIC_DIFF_KEYS: [&str; 8] = [
     "active_nodes",
     "live_workers",
     "undelivered",
+    "held_open",
 ];
 
 /// Diff keys absent from the previous beat's data: a hand-journaled baseline
@@ -674,6 +675,34 @@ fn r_parked() -> Result<Value, String> {
     Ok(json!({"open": open.len(), "rows": open}))
 }
 
+/// The held reading (x-55ae): nodes an open operator question blocks, oldest
+/// question first. One fold over the question journals in process; the rows
+/// carry everything the render needs to name the decide verb.
+fn r_held() -> Result<Value, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd unreadable: {e}"))?;
+    let home = crate::paths::AgentsHome::from_env();
+    let fno_dir = home
+        .root()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "agents home has no parent".to_string())?;
+    let journals = crate::needs::question_journals(&fno_dir, &cwd);
+    let rows = crate::needs::held_rows(&journals);
+    let rows: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "node": r.node,
+                "question_id": r.question_id,
+                "question": r.question,
+                "ts": r.ts,
+                "epoch": r.epoch,
+            })
+        })
+        .collect();
+    Ok(json!({"open": rows.len(), "rows": rows}))
+}
+
 fn owner_repo(url: &str) -> Result<String, String> {
     let url = url.trim().trim_end_matches('/');
     let tail = url.rsplit_once(':').map(|(_, t)| t).unwrap_or(url);
@@ -832,6 +861,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("crown", r_crown());
     take("refusal_rate", r_refusal_rate());
     take("drain", r_drain(ctx));
+    take("held", r_held());
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
     take("parked", r_parked());
@@ -894,6 +924,9 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
     }
     if let Some(drain) = get("drain").filter(|r| r.ok) {
         data.insert("undelivered".into(), drain.value.clone());
+    }
+    if let Some(held) = get("held").filter(|r| r.ok) {
+        data.insert("held_open".into(), held.value["open"].clone());
     }
     if let Some(ci) = get("main_ci").filter(|r| r.ok) {
         data.insert("main_ci".into(), ci.value.clone());
@@ -1164,6 +1197,48 @@ fn render_lines(
                     dash(row.get("age_minutes")),
                     reason
                 ));
+            }
+        }
+    }
+
+    match failed("held") {
+        Some(r) => lines.push(format!("READER FAILED held: {}", r.error)),
+        None => {
+            // Held nodes (x-55ae): the rows already carry node, question id
+            // and ask time; the line names the decide verb that clears them.
+            let rows = by_name("held")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null)
+                .get("rows")
+                .and_then(|r| r.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if rows.is_empty() {
+                lines.push("held: none".into());
+            } else {
+                let now = SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                lines.push(format!(
+                    "held: {} node(s) waiting on the operator",
+                    rows.len()
+                ));
+                for row in rows.iter().take(MAX_COURT_ROWS) {
+                    let age = row
+                        .get("epoch")
+                        .and_then(Value::as_u64)
+                        .map(|e| now.saturating_sub(e) / 60)
+                        .unwrap_or(0);
+                    lines.push(format!(
+                        "  {} on question {}, age {}m; answer with: fno backlog decide {} \"<ruling>\" --question-id {}",
+                        dash(row.get("node")),
+                        dash(row.get("question_id")),
+                        age,
+                        dash(row.get("node")),
+                        dash(row.get("question_id")),
+                    ));
+                }
             }
         }
     }
@@ -2268,12 +2343,54 @@ mod tests {
         dir.join("events.jsonl")
     }
 
+    #[test]
+    fn held_rows_render_the_decide_verb_and_none_when_clear() {
+        let mut readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": ""}),
+        );
+        readings.push(Reading::took(
+            "held",
+            json!({"open": 2, "rows": [
+                {"node": "x-1", "question_id": "q-1", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0},
+                {"node": "x-2", "question_id": "q-2", "question": "pick", "ts": "2026-09-10T12:00:00Z", "epoch": 0}
+            ]}),
+        ));
+        let data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("held_open"), Some(&json!(2)));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let summary: Vec<&String> = lines.iter().filter(|l| l.starts_with("held: ")).collect();
+        assert_eq!(summary.len(), 1, "lines: {lines:?}");
+        assert!(summary[0].contains("2 node(s)"), "lines: {lines:?}");
+        let verbs: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("fno backlog decide"))
+            .collect();
+        assert_eq!(verbs.len(), 2, "each row names the decide verb");
+    }
+
+    #[test]
+    fn held_absent_reads_none() {
+        let readings = sample_readings(
+            json!({"open_prs": 0, "free_claim_no_driver": 0, "blocked": 0, "blocked_on": []}),
+            json!({"active_nodes": 0, "total_nodes": 0, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 0, "oldest_worker_seen": ""}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        assert!(lines.iter().any(|l| l == "held: none"), "lines: {lines:?}");
+    }
+
     fn prev_row() -> Value {
         json!({"ts": "2026-09-10T12:00:00Z", "type": "reign_checkin", "source": "loop",
             "data": {"scope": "x-bbbb", "change": "no change", "open_prs": 9,
                      "free_claim_no_driver": 1, "blocked": 2,
                      "escalations_open": 0, "escalations_overdue": 0,
-                     "active_nodes": 4, "live_workers": 3, "undelivered": 9}})
+                     "active_nodes": 4, "live_workers": 3, "undelivered": 9,
+                     "held_open": 0}})
     }
 
     #[test]

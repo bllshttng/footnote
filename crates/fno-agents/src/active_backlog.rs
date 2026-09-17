@@ -1568,8 +1568,13 @@ pub fn native_receipt(config_cwd: &Path, registry_path: &Path) -> Result<Vec<Val
 /// The held map for one config cwd: one fold over the question journals,
 /// failing open to an empty map (a missing journal holds nothing).
 fn held_for(cwd: &Path, registry_path: &Path) -> std::collections::BTreeMap<String, String> {
+    // catch_unwind: the fold resolves the state root, which can panic in a
+    // process with no declared hermetic root; a held read never kills a tick.
     match registry_path.parent().and_then(Path::parent) {
-        Some(fno_dir) => crate::needs::held_nodes(&crate::needs::question_journals(fno_dir, cwd)),
+        Some(fno_dir) => std::panic::catch_unwind(|| {
+            crate::needs::held_nodes(&crate::needs::question_journals(fno_dir, cwd))
+        })
+        .unwrap_or_default(),
         None => Default::default(),
     }
 }

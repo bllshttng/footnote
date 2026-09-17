@@ -510,8 +510,13 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // Held nodes: ONE fold over the question journals (x-55ae), computed once
     // and read by the ready partition below. Fail-open: an unreadable journal
     // is an empty map, the same posture the question scans elsewhere take.
-    let held_map =
-        crate::needs::held_nodes(&crate::needs::question_journals(&home_dot_fno(), &cwd));
+    // catch_unwind like the blocked-child read below: the fold resolves the
+    // state root, which panics under a test process with no declared root,
+    // and this function never panics on a source.
+    let held_map = std::panic::catch_unwind(|| {
+        crate::needs::held_nodes(&crate::needs::question_journals(&home_dot_fno(), &cwd))
+    })
+    .unwrap_or_default();
     let (
         prs,
         pr_nodes,
@@ -1040,6 +1045,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
         undispatched,
         blocked_child,
         entries,
+        held: held_map,
         warnings,
         autonomous_merge: autonomous_merge_enabled(&cwd),
         scope_ids,
@@ -1276,6 +1282,7 @@ mod tests {
             lane: ok_read(Value::Array(Vec::new())),
             undispatched: ok_read(Value::Array(Vec::new())),
             entries: None,
+            held: Default::default(),
             warnings: Vec::new(),
             autonomous_merge: false,
             scope_ids: None,
