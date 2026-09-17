@@ -642,19 +642,25 @@ def settle_spawn_crown(
     rows: list,
     *,
     scope: str,
-    succession: bool,
-    succession_caller_name: Optional[str],
+    plan: dict,
     exclude_name: Optional[str] = None,
 ) -> "tuple[list, str, list]":
-    """The one-live-crown guard a crowned spawn runs, as a pure function over rows.
+    """Apply a pre-launch crown-settle PLAN under the registry lock.
 
-    One behavior the bg and pane spawn paths each hand-wrote, order kept: clear
-    terminal holders of ``scope``, collect live holders (skipping the row a
-    revive replaces), succession before refusal. Returns ``(rows, outcome,
-    vacated)``: outcome is ``granted`` | ``succeeded`` | ``declined`` (the
-    caller stamps its own row, dropping the crown fields when declined), and
-    ``vacated`` lists ``(row_before_clear, cause)`` to journal once the
-    registry write commits.
+    ``plan`` is the answer :func:`plan_spawn_crown` already got from Rust's
+    ``crown-settle`` payload kind, against a registry snapshot read before the
+    lock. This is a plain compare against the rows this write actually sees,
+    never a re-decision - the ``granting_scope`` idiom (``promote_existing_session``
+    below). Clears terminal holders of ``scope`` as before (cause
+    ``holder_terminal``); when the live holders this write sees still match
+    ``plan["holders"]``, applies ``plan["vacate"]`` (cause ``succession``) and
+    returns ``plan["outcome"]``. A holder that appeared since the plan was
+    computed - the one case a stale plan cannot see - still declines here: two
+    live crowns over one scope cannot be undone (see the caller in
+    ``dispatch.py``). Returns ``(rows, outcome, vacated)``: outcome is
+    ``granted`` | ``succeeded`` | ``declined`` (the caller stamps its own row,
+    dropping the crown fields when declined), and ``vacated`` lists
+    ``(row_before_clear, cause)`` to journal once the write commits.
     """
     from fno.agents.registry import TERMINAL_STATUSES
 
@@ -663,24 +669,72 @@ def settle_spawn_crown(
         if row.crown_scope == scope and row.status in TERMINAL_STATUSES:
             vacated.append((row, "holder_terminal"))
             rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
-    holders = [
-        row for row in rows
+    live_holders = sorted(
+        row.name for row in rows
         if row.name != exclude_name
         and row.crown_scope == scope
         and row.status not in TERMINAL_STATUSES
-    ]
-    outcome = "granted"
-    if succession and succession_caller_name and holders and all(
-        h.name == succession_caller_name for h in holders
-    ):
+    )
+    if live_holders == sorted(plan.get("holders") or []):
+        vacate_names = set(plan.get("vacate") or [])
         for index, row in enumerate(rows):
-            if row.crown_scope == scope and row.name == succession_caller_name:
+            if row.crown_scope == scope and row.name in vacate_names:
                 vacated.append((row, "succession"))
                 rows[index] = replace(row, crown_level=None, crown_scope=None, crown_grantor=None)
-        outcome = "succeeded"
-    elif holders:
-        outcome = "declined"
-    return rows, outcome, vacated
+        return rows, plan["outcome"], vacated
+    if live_holders:
+        return rows, "declined", vacated
+    return rows, "granted", vacated
+
+
+def plan_spawn_crown(
+    scope: str,
+    caller_row,
+    succession: bool,
+    exclude_name: Optional[str] = None,
+) -> "tuple[Optional[str], Optional[dict]]":
+    """Decide, BEFORE launch, whether a crowned spawn is granted, transfers, or
+    refuses. Runs the same authority check both spawn doors ran inline
+    (:func:`grant_error`, same arguments), then asks Rust's ``crown-settle``
+    payload kind (``crown_settle::resolve``) for occupancy against a fresh
+    registry read. Returns ``(refusal, answer)``: a non-``None`` refusal means
+    refuse before launch; ``answer`` (the full crown-settle JSON) is the PLAN
+    :func:`settle_spawn_crown` applies again under the lock.
+
+    Fails closed: a crowned spawn with no occupancy answer must not launch, so
+    a missing/broken ``fno-agents`` binary refuses rather than proceeding
+    uncrowned.
+    """
+    grant_problem = grant_error(
+        scope, caller_row, allow_terminal_recovery=True, allow_succession=succession,
+    )
+    if grant_problem is not None:
+        return grant_problem, None
+    from fno.agents.registry import load_registry
+    from fno.agents.spawn_overlay_client import SpawnOverlayUnavailable, spawn_overlay_call
+
+    caller_name = getattr(caller_row, "name", None)
+    caller = {"kind": "agent", "name": caller_name} if caller_name else {"kind": "human"}
+    try:
+        rows = load_registry()
+    except Exception as exc:
+        return f"cannot decide crown occupancy: the registry could not be read ({exc})", None
+    payload = {
+        "kind": "crown-settle",
+        "scope": scope,
+        "succession": succession,
+        "caller": caller,
+        "exclude_name": exclude_name,
+        "rows": [
+            {"name": row.name, "crown_scope": row.crown_scope, "status": row.status}
+            for row in rows
+        ],
+    }
+    try:
+        answer = spawn_overlay_call(payload)
+    except SpawnOverlayUnavailable as exc:
+        return f"cannot decide crown occupancy: {exc}", None
+    return answer.get("refusal"), answer
 
 
 def arm_crowned_missions(scope: Optional[str]) -> Optional[list[str]]:

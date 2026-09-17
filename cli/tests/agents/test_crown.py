@@ -235,7 +235,9 @@ def _spawn_crowned(monkeypatch, tmp_path, *, grantor_env: Optional[str], **crown
     )
 
 
-def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypatch) -> None:
+def test_crown_stamped_grantor_is_the_spawning_session(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
     from fno.agents.registry import AgentEntry, load_registry, update_registry
     import fno.king.state as king_state
 
@@ -279,7 +281,7 @@ def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypat
 
 
 def test_crown_grantor_defaults_to_human_for_a_direct_spawn(
-    tmp_path: Path, monkeypatch, capsys
+    tmp_path: Path, monkeypatch, capsys, native_backlog_door
 ) -> None:
     from fno.agents.registry import load_registry
 
@@ -295,7 +297,7 @@ def test_crown_grantor_defaults_to_human_for_a_direct_spawn(
 
 
 def test_pane_spawn_clears_a_terminal_holder_before_reclaiming_its_scope(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, native_backlog_door
 ) -> None:
     from fno.agents.registry import AgentEntry, load_registry, update_registry
 
@@ -371,39 +373,36 @@ def _crown_row(name: str, *, status: str = "busy", scope="epic-x"):
 
 
 def test_settle_spawn_crown_outcomes() -> None:
-    """The four answers the guard can give, with no spawn at all: granted,
-    succeeded, declined, and the terminal clear that rides a reclaim."""
+    """The four answers the plan-applier can give, with no spawn at all:
+    granted, succeeded, a race-backstop decline (the plan named a holder the
+    write no longer sees), and the terminal clear that rides a reclaim."""
     from fno.agents.crown import settle_spawn_crown
 
+    granted_plan = {"outcome": "granted", "holders": [], "vacate": []}
     rows, outcome, vacated = settle_spawn_crown(
-        [_crown_row("a", scope=None)],
-        scope="epic-x",
-        succession=False,
-        succession_caller_name=None,
+        [_crown_row("a", scope=None)], scope="epic-x", plan=granted_plan,
     )
     assert outcome == "granted"
     assert vacated == []
 
     caller = _crown_row("caller")
-    rows, outcome, vacated = settle_spawn_crown(
-        [caller], scope="epic-x", succession=True, succession_caller_name="caller"
-    )
+    succeeded_plan = {"outcome": "succeeded", "holders": ["caller"], "vacate": ["caller"]}
+    rows, outcome, vacated = settle_spawn_crown([caller], scope="epic-x", plan=succeeded_plan)
     assert outcome == "succeeded"
     assert [r.crown_scope for r in rows] == [None]
     assert [(r.name, cause) for r, cause in vacated] == [("caller", "succession")]
 
+    # The race backstop: the plan was computed against "caller" holding the
+    # scope, but the write sees "stranger" instead - declines rather than
+    # applying a plan for a holder that is no longer there.
     stranger = _crown_row("stranger")
-    rows, outcome, vacated = settle_spawn_crown(
-        [stranger], scope="epic-x", succession=True, succession_caller_name="caller"
-    )
+    rows, outcome, vacated = settle_spawn_crown([stranger], scope="epic-x", plan=succeeded_plan)
     assert outcome == "declined"
     assert rows[0].crown_scope == "epic-x", "a declined spawn leaves the holder alone"
     assert vacated == []
 
     dead = _crown_row("dead", status="exited")
-    rows, outcome, vacated = settle_spawn_crown(
-        [dead], scope="epic-x", succession=False, succession_caller_name=None
-    )
+    rows, outcome, vacated = settle_spawn_crown([dead], scope="epic-x", plan=granted_plan)
     assert outcome == "granted"
     assert [(r.name, cause) for r, cause in vacated] == [("dead", "holder_terminal")]
     assert rows[0].crown_scope is None
@@ -1890,11 +1889,14 @@ def test_racing_in_place_crowns_leave_exactly_one_live_holder(
 
 
 
-def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkeypatch) -> None:
-    """A second crown-bearing spawn at an already-occupied scope spawns UNCROWNED,
-    not a duplicate crown. The one-live-crown guard inside _append (mux_spawn.py)
-    declines the crown atomically, under the registry write lock, so two racing
-    spawns cannot both stamp."""
+def test_spawn_crown_refuses_before_launch_when_scope_already_occupied(
+    tmp_path: Path, monkeypatch, native_backlog_door
+) -> None:
+    """A crown-bearing spawn at an already-occupied scope, with no --succeed,
+    refuses BEFORE launch rather than spawning uncrowned: launching an heir
+    that holds no crown is exactly the failure the pre-launch occupancy check
+    exists to prevent."""
+    from fno.agents.dispatch import DispatchAskError
     from fno.agents.registry import AgentEntry, load_registry, write_registry
 
     use_tmpdir(monkeypatch, tmp_path)
@@ -1907,18 +1909,16 @@ def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkey
     )])
     # Spawn a new worker with --crown level=1,scope=epic-x (same scope). The
     # caller is an attended human (no agent identity), so it is authorized to
-    # attempt the grant; the guard declines it because the incumbent holds it.
-    _spawn_crowned(
-        monkeypatch, tmp_path,
-        grantor_env=None,
-        crown_level=1, crown_scope="epic-x",
-    )
+    # attempt the grant; the pre-launch check still refuses because the
+    # incumbent holds the scope and no --succeed named the transfer.
+    with pytest.raises(DispatchAskError, match="--succeed"):
+        _spawn_crowned(
+            monkeypatch, tmp_path,
+            grantor_env=None,
+            crown_level=1, crown_scope="epic-x",
+        )
     rows = load_registry()
-    new = next(r for r in rows if r.name == "king-epic")
-    # The worker launched (exists in the registry) but WITHOUT a crown
-    assert new.crown_level is None
-    assert new.crown_scope is None
-    assert new.crown_grantor is None
+    assert not [r for r in rows if r.name == "king-epic"], "a refused crown must launch nothing"
     # The incumbent's crown is untouched
     inc = next(r for r in rows if r.name == "incumbent")
     assert inc.crown_level == 1

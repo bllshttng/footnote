@@ -15,6 +15,9 @@
 //!   event bus stays the emitter.
 //! - kind `fallback`: the failover-chain validation (`validate_fallback` in
 //!   Python). Returns canonical links or the exact refusal the Python raised.
+//! - kind `crown-settle`: whether a crowned spawn is granted, transfers, or
+//!   refuses (`crown_settle::resolve`), a port of Python's
+//!   `settle_spawn_crown` with a new human-succession branch.
 
 use crate::provider::{known_providers_csv, KNOWN_PROVIDERS};
 use serde_json::{json, Map, Value};
@@ -151,8 +154,9 @@ pub fn resolve(payload: Value) -> Result<Value, String> {
         Some("pane-group") => resolve_pane_group(&payload),
         Some("fallback") => resolve_fallback(&payload),
         Some("codex-route") => resolve_codex_route_kind(&payload),
+        Some("crown-settle") => crate::crown_settle::resolve(&payload),
         other => Err(format!(
-            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route"
+            "spawn-overlay: unknown kind {other:?}; expected overlay|model-vendor|lane-vendor|link-meta|pane-group|fallback|codex-route|crown-settle"
         )),
     }
 }

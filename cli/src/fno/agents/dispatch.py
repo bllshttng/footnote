@@ -86,8 +86,8 @@ from fno.agents.registry import (
 from fno.agents.crown import (
     calling_agent_row,
     crown_validation_error,
-    grant_error,
     journal_spawn_crown,
+    plan_spawn_crown,
     settle_spawn_crown,
 )
 from fno.harness_identity import (
@@ -1440,8 +1440,8 @@ def _claude_create_path(
     account_record_id: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
-    succession: bool = False,
-    succession_caller_name: Optional[str] = None,
+    crown_plan: Optional[dict] = None,
+    crown_caller_name: Optional[str] = None,
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
@@ -1838,11 +1838,9 @@ def _claude_create_path(
         # a king reviving its own exited session must not be blocked by the
         # corpse it is about to overwrite.
         if crown_level is not None and crown_scope:
+            assert crown_plan is not None  # set by the pre-launch call above
             entries, crown_outcome, crown_cleared = settle_spawn_crown(
-                entries,
-                scope=crown_scope,
-                succession=succession,
-                succession_caller_name=succession_caller_name,
+                entries, scope=crown_scope, plan=crown_plan,
                 exclude_name=name if revive else None,
             )
             if crown_outcome == "succeeded":
@@ -1890,9 +1888,11 @@ def _claude_create_path(
                 file=sys.stderr,
             )
         elif crown_succeeded:
+            vacated = sorted({row.name for row, cause in crown_cleared if cause == "succession"})
+            noted = crown_caller_name in vacated
             print(
-                f"spawn: crown over {crown_scope!r} transferred from this session "
-                f"to {name} (succession). You no longer hold it.",
+                f"spawn: crown over {crown_scope!r} transferred from {', '.join(vacated)} "
+                f"to {name} (succession)." + (" You no longer hold it." if noted else ""),
                 file=sys.stderr,
             )
         if crown_scope and not crown_declined and king_loop_armed is False:
@@ -2518,23 +2518,10 @@ def dispatch_spawn(
         raise DispatchAskError(crown_problem, exit_code=2)
     # Bound for every path, not just the crowned one: the create call below
     # reads it unconditionally, and an uncrowned spawn must not crash on a
-    # name only the crown block ever assigns.
-    succession_caller_name: Optional[str] = None
+    # plan only the crown block ever assigns.
+    crown_plan: Optional[dict] = None
+    crown_caller_name: Optional[str] = None
     if crown_level is not None:
-        # Authorization, at the seam every caller reaches: you cannot hand down
-        # authority you do not hold. Refuses BEFORE the launch rather than
-        # declining after, because an unauthorized grant is an authority error,
-        # not a race - nothing should exist as a result of it.
-        succession_caller = calling_agent_row()
-        succession_caller_name = getattr(succession_caller, "name", None)
-        grant_problem = grant_error(
-            crown_scope or "",
-            succession_caller,
-            allow_terminal_recovery=True,
-            allow_succession=succession,
-        )
-        if grant_problem is not None:
-            raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
         if once or headless:
             raise DispatchAskError(
                 "--crown needs a session that outlives the grant; a one-shot "
@@ -2691,6 +2678,19 @@ def dispatch_spawn(
                     f"use 'fno agents rm {name}' first or pick another name",
                     exit_code=2,
                 )
+
+            if crown_level is not None:
+                # Refuses BEFORE launch - nothing exists as a result of an
+                # authority error. caller_row is read once and its name
+                # threaded to the write as crown_caller_name, so the receipt
+                # need not re-resolve it.
+                crown_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
+                crown_refusal, crown_plan = plan_spawn_crown(
+                    crown_scope or "", caller_row, succession,
+                    exclude_name=name if revive else None,
+                )
+                if crown_refusal is not None:
+                    raise DispatchAskError(f"--crown: {crown_refusal}", exit_code=2)
 
             # a revive must come back on the route the row was born with
             # unless this invocation resolved one of its own; raises exit 2 when
@@ -2928,8 +2928,8 @@ def dispatch_spawn(
                         account_record_id=account_record_id,
                         crown_level=crown_level,
                         crown_scope=crown_scope,
-                        succession=succession,
-                        succession_caller_name=succession_caller_name,
+                        crown_plan=crown_plan,
+                        crown_caller_name=crown_caller_name,
                         route_provider=route_provider,
                         node=node,
                         route_model=route_model,
