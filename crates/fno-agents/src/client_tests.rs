@@ -2233,121 +2233,96 @@ fn render_list_json_folds_in_the_codex_loaded_block_when_probed() {
     assert_eq!(parsed["codex_loaded"]["threads"][0]["cwd"], "/repo");
 }
 
-/// The registry table is the surface nearly every reader sees: `list`
-/// auto-routes here whenever an installed binary is present. An address
-/// column that existed only on the Python table would leave that reader
-/// copying NAME, whose durable write queues under a key no drain reads --
-/// the exact stranded-mail failure the column exists to end.
+/// AC1/AC7: the operator's ten columns in order, ROW is the served ordinal,
+/// and SESSION is the full id, never truncated. Positive strings, never a
+/// shorter output.
 #[test]
-fn render_list_table_carries_the_mailbox_address() {
+fn render_list_table_shows_the_ten_roster_columns() {
     let agents = json!([
         {
             "name": "pane-worker",
-            "address": "e6f78b98",
             "harness": "claude",
-            "short_id": null,
-            "session_id": null,
-            "cwd": "/home/user/project",
-            "created_at": "2026-05-25T00:00:00Z",
-            "last_message_at": null,
-            // The liveness key is omitted on purpose. The assertions below
-            // never read it, and `check-plan-rung-authority` ratchets an
-            // identifier count over production Rust files with this
-            // module's inline tests included, so an unused fixture key
-            // would move a baseline that polices plan-frontmatter
-            // classification and has nothing to do with this table.
-            "live_status": null,
-            "pid": null,
-            "last_reconciled_at": null,
-            "log_path": null,
-        }
-    ]);
-
-    let table = render_list_table(&agents, &[], Some(3), Some(3));
-    let lines: Vec<&str> = table.lines().collect();
-
-    assert!(
-        lines[0].find("NAME") < lines[0].find("ADDRESS"),
-        "ADDRESS sits second, mirroring the Python renderer: {:?}",
-        lines[0]
-    );
-    // By value, not by header presence: a column that is always `-` is the
-    // same lie in a different shape. This row is the shape the column
-    // exists for -- a pane worker whose only other identifier was its name.
-    assert!(
-        lines[1].contains("e6f78b98"),
-        "address value must reach the row: {:?}",
-        lines[1]
-    );
-}
-
-/// AC5-UI: render_list_table drops LIVE and adds CHECKED + PID; AC2-UI: a
-/// never-reconciled row renders `never`; AC4: a PTY pid is shown, an ask
-/// row's null pid renders `-`.
-#[test]
-fn render_list_table_has_checked_and_pid_columns_not_live() {
-    let agents = json!([
-        {
-            "name": "pty-worker",
-            "harness": "codex",
-            "short_id": "wk1",
-            "session_id": null,
-            "cwd": "/home/user/project",
-            "created_at": "2026-05-25T00:00:00Z",
-            "last_message_at": null,
-            "status": "live",
-            "live_status": null,
-            "pid": 4242,
-            "last_reconciled_at": "2026-05-25T00:00:00Z",
-            "log_path": null,
+            "harness_session_id": "e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+            "effort": "xhigh",
+            "status": "writing",
+            "requested_model": "glm-5.3-flash[1m]",
+            "model": "glm-5.3-flash[1m]",
+            "model_basis": "requested",
+            "observed_model": {"kind": "no-transcript"},
+            "pr": 2136,
+            "pr_basis": "node",
         },
         {
-            "name": "ask-row",
-            "harness": "claude",
-            "short_id": null,
-            "session_id": "cl-xyz",
-            "cwd": "/home/user/other",
-            "created_at": "2026-05-25T00:00:00Z",
-            "last_message_at": null,
-            "status": "exited",
-            "live_status": null,
-            "pid": null,
-            "last_reconciled_at": null,
-            "log_path": null,
+            "name": "bare-worker",
+            "harness": "codex",
+            "session_id": "019f4d0c-full",
+            "effort": null,
+            "status": "quiet",
+            "observed_model": {"kind": "no-model-yet"},
+            "pr": null,
+            "pr_basis": "no-node",
         }
     ]);
-    let table = render_list_table(&agents, &[], Some(3), Some(3));
+    let table = render_list_table(&agents, &[], Some(2), Some(2));
     let lines: Vec<&str> = table.lines().collect();
-    // AC5-UI: header shows STATUS + CHECKED + PID, and LIVE is gone.
-    assert!(
-        lines[0].contains("NAME")
-            && lines[0].contains("HARNESS")
-            && lines[0].contains("STATUS")
-            && lines[0].contains("CHECKED")
-            && lines[0].contains("PID")
-            && lines[0].contains("CWD"),
-        "header must contain the new column set, got: {:?}",
-        lines[0]
+    assert_eq!(
+        lines[0].split_whitespace().collect::<Vec<_>>().join(" "),
+        "ROW NAME SESSION HARNESS MODEL EFFORT PR AGE LAST MESSAGE STATUS"
     );
+    let first = lines[1];
+    assert!(first.starts_with("1 "), "ROW is 1-based: {first}");
     assert!(
-        !lines[0].contains("LIVE"),
-        "LIVE column must be removed, got: {:?}",
-        lines[0]
+        first.contains("e6f78b98-e594-47ed-ad81-84f8a78b8bb7"),
+        "full session id: {first}"
     );
-    // header + 2 data rows
-    assert!(lines.len() >= 3, "got {} lines", lines.len());
-    // PTY row shows its worker pid (AC4-HP at the table surface).
-    let pty_line = lines.iter().find(|l| l.contains("pty-worker")).unwrap();
-    assert!(pty_line.contains("4242"), "PTY pid in table: {pty_line}");
-    // Never-reconciled ask row renders `never` (AC2-UI), not `0s`/blank.
-    let ask_line = lines.iter().find(|l| l.contains("ask-row")).unwrap();
+    assert!(first.contains("glm-5.3-flash[1m] (requested)"), "{first}");
     assert!(
-        ask_line.contains("never"),
-        "unprobed row shows never: {ask_line}"
+        first.contains("xhigh") && first.contains("#2136"),
+        "{first}"
     );
+    let second = lines[2];
+    assert!(second.starts_with("2 "), "{second}");
+    assert!(second.contains("019f4d0c-full"), "{second}");
+    assert!(second.contains("- (unrequested)"), "{second}");
+    assert!(second.contains("- (no-node)"), "{second}");
 }
 
-/// EVENT AGE renders the transcript's newest-activity age and LAST
+/// AC3/AC6: an observation outranks the stored request, and every PR
+/// absence names its reason.
+#[test]
+fn render_list_table_qualifies_model_and_pr_cells() {
+    let agents = json!([
+        {
+            "name": "sub-worker",
+            "requested_model": "glm-5.3-flash[1m]",
+            "model": "glm-5.3-flash[1m]",
+            "model_basis": "requested",
+            "model_substituted": {"requested": "glm-5.3-flash", "observed": "claude-opus-5"},
+            "observed_model": {"kind": "observed", "model": "claude-opus-5"},
+            "pr": null,
+            "pr_basis": "no-pr",
+        },
+        {
+            "name": "graph-worker",
+            "requested_model": "gpt-5.6-luna",
+            "observed_model": {"kind": "observed", "model": "gpt-5.6-luna"},
+            "pr": null,
+            "pr_basis": "graph-unreadable",
+        }
+    ]);
+    let table = render_list_table(&agents, &[], Some(2), Some(2));
+    let sub = table.lines().find(|l| l.contains("sub-worker")).unwrap();
+    assert!(
+        sub.contains("claude-opus-5 (observed; requested glm-5.3-flash[1m])"),
+        "{sub}"
+    );
+    assert!(sub.contains(" none "), "{sub}");
+    let graph = table.lines().find(|l| l.contains("graph-worker")).unwrap();
+    assert!(graph.contains("gpt-5.6-luna (observed)"), "{graph}");
+    assert!(graph.contains("? (graph-unreadable)"), "{graph}");
+}
+
+/// AGE renders the transcript's newest-activity age and LAST
 /// MESSAGE the flattened last-turn text. The registry timestamp this column
 /// was wired to for its whole life was null on many rows while the worker
 /// was mid-sentence, so a "last message" column that never showed a
@@ -2396,7 +2371,7 @@ fn render_list_table_has_event_age_and_last_message_columns() {
     let lines: Vec<&str> = table.lines().collect();
 
     assert!(
-        lines[0].contains("EVENT AGE") && lines[0].contains("LAST MESSAGE"),
+        lines[0].contains(" AGE ") && lines[0].contains("LAST MESSAGE"),
         "header must carry both new columns, got: {:?}",
         lines[0]
     );

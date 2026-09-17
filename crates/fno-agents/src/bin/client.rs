@@ -4709,97 +4709,77 @@ fn truncate_cell(s: &str, width: usize) -> String {
     }
 }
 
-/// Render agents list as a human-readable table (Task 3.1; CHECKED/PID added by
-/// plan, Architecture C).
-///
-/// Columns: NAME HARNESS STATUS CHECKED PID EVENT AGE LAST MESSAGE CWD. CHECKED
-/// is the relative age since the last reconcile probe (`never` when unprobed);
-/// it replaces the old always-`-` LIVE column (AC5-UI). PID is the worker pid
-/// for a PTY agent (`-` for a one-shot ask, which has no managed process).
-/// EVENT AGE is the relative age of the transcript's newest activity and LAST
-/// MESSAGE the flattened last-turn text - beside the state column on
-/// purpose, so a row claiming to be busy while its transcript is hours old
-/// shows the disagreement instead of hiding it. This is a functional table;
-/// byte-exact match with Python is not required (Python's table is
-/// time-dependent via relative timestamps).
+/// Render agents list as a human-readable table: ROW NAME SESSION HARNESS
+/// MODEL EFFORT PR AGE LAST MESSAGE STATUS. MODEL and PR name the basis they
+/// were read from, so an absent value never reads as unset. AGE is the age of
+/// the transcript's newest activity, beside LAST MESSAGE and STATUS on
+/// purpose: a row claiming to be busy while its transcript is hours old shows
+/// the disagreement. JSON keeps every column this table drops.
 fn render_list_table(
     agents: &Value,
     discovered: &[Value],
     truth_probe_asked: Option<u64>,
     truth_probe_answered: Option<u64>,
 ) -> String {
-    // HARNESS, not PROVIDER: the column has always shown the harness, and the
-    // old heading made a claude-hosted worker on a zai route read as running
-    // on claude. Same rename on the Python renderer.
-    // ADDRESS sits second, mirroring the Python renderer. `list` auto-routes
-    // here whenever an installed binary is present, so a column added only to
-    // the Python table would be missing from the surface nearly every reader
-    // sees -- and the whole point of the column is that a reader with no
-    // address copies NAME, whose durable write queues under a key no drain
-    // reads. The value is read off the row (both projections emit `address`),
-    // never re-derived, so the two tables cannot disagree.
     let headers = [
+        "ROW",
         "NAME",
-        "ADDRESS",
+        "SESSION",
         "HARNESS",
-        "STATUS",
-        "CHECKED",
-        "PID",
-        "EVENT AGE",
+        "MODEL",
+        "EFFORT",
+        "PR",
+        "AGE",
         "LAST MESSAGE",
-        "CWD",
+        "STATUS",
     ];
     let empty_arr = vec![];
     let rows = agents.as_array().unwrap_or(&empty_arr);
     let now = chrono::Utc::now();
+    let text = |r: &Value, key: &str| {
+        r[key]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("-")
+            .to_string()
+    };
 
-    // Compute display values for each row
-    let display: Vec<[String; 9]> = rows
+    let display: Vec<[String; 10]> = rows
         .iter()
-        .map(|r| {
-            let name = r["name"].as_str().unwrap_or("-").to_string();
-            let address = r["address"].as_str().unwrap_or("-").to_string();
-            let harness = r["harness"].as_str().unwrap_or("-").to_string();
-            let status = r["status"].as_str().unwrap_or("-").to_string();
-            let checked = render_checked(r["last_reconciled_at"].as_str(), now);
-            let pid = r["pid"]
-                .as_u64()
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "-".to_string());
+        .enumerate()
+        .map(|(i, r)| {
+            // The full id, never truncated: the first eight are the address.
+            let session = r["harness_session_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| text(r, "session_id"));
             // `unknown`, not `never`: no transcript was READ, which is an
             // absent reading, not a claim that no event ever happened.
-            let event_age = match r["last_event_at"].as_str() {
+            let age = match r["last_event_at"].as_str() {
                 Some(ts) => render_checked(Some(ts), now),
                 None => "unknown".to_string(),
             };
-            // The transcript's LAST turn, not the registry timestamp this
-            // column was wired to for its whole life: that field is null on
-            // many rows while the worker is mid-sentence, so a "last message"
-            // column that never showed a message. Capped so one long line
-            // cannot blow out CWD.
             let last_msg = r["last_message"]
                 .as_str()
                 .map(|s| truncate_cell(s, LAST_MESSAGE_WIDTH))
                 .unwrap_or_else(|| "-".to_string());
-            let cwd = r["cwd"].as_str().unwrap_or("-").to_string();
             [
-                name, address, harness, status, checked, pid, event_age, last_msg, cwd,
+                (i + 1).to_string(),
+                text(r, "name"),
+                session,
+                text(r, "harness"),
+                fno_agents::list_row::model_cell(r),
+                text(r, "effort"),
+                fno_agents::list_row::pr_cell(r),
+                age,
+                last_msg,
+                text(r, "status"),
             ]
         })
         .collect();
 
-    // Column widths: max of header and data
-    let mut widths = [
-        headers[0].len(),
-        headers[1].len(),
-        headers[2].len(),
-        headers[3].len(),
-        headers[4].len(),
-        headers[5].len(),
-        headers[6].len(),
-        headers[7].len(),
-        headers[8].len(),
-    ];
+    let mut widths = headers.map(str::len);
     for row in &display {
         for (i, cell) in row.iter().enumerate() {
             // Chars, not bytes: the `{:<width$}` pad below counts chars, so a
