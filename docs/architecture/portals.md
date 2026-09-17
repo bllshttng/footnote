@@ -26,8 +26,10 @@ The tiling primitive already existed. The tab menu offers Join Left, Join Right,
 |---|---|
 | CLI, spawn | `fno agents spawn --substrate thread --portal N` (one call; `--tab`/`--split` honored on a fresh open), or `fno mux thread <name> --portal N`. Omitted is portal 0. |
 | CLI, default spawn | A bare `fno agents spawn` seats a thread wherever the harness seats one and, from inside a mux, opens portal 0 on it automatically. `--portal N` names another index. |
+| CLI, an existing row | `fno mux thread <key>` shows one live paneless row through a portal (or focuses the portal it already has) and never creates, resumes, or duplicates a worker. `<key>` is the agent name, or the full `session` id `fno agents whoami` prints: a thread-shaped Codex row answers to the full id, Claude to its printed `short_id`. The match is exact, no prefix and no substring; those tiers belong to `fno mux view`, `fno mux where` and `fno mux pane focus`. Zero matches, or several rows answering the same key, refuse and spawn no worker. |
 | Sideline, portal 0 | Enter (or a click) on a paneless live row. |
 | Sideline, a new portal | `P` opens the next free index. |
+| Sideline, an already-shown row | The row's portal takes focus with Enter, or `fno mux thread reseat <name> --portal N` moves it to another index. |
 | Layout | The existing Join actions tile open portals. |
 
 The one-call spawn form, its geometry rules, and its refusals are documented in [fno-agents-spawn.md](../guides/fno-agents-spawn.md).
