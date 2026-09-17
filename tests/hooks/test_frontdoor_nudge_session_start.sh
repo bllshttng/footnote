@@ -113,8 +113,8 @@ run_hook() { PATH="$FAKEBIN:$BASE_PATH" CLAUDE_PLUGIN_DATA="$DATA" bash "$PHOOK"
 
 # Wait up to 10s for the detached installer to release its lock.
 wait_unlocked() {
-  local i
-  for i in $(seq 1 50); do
+  local _
+  for _ in $(seq 1 50); do
     [[ -d "$DATA/postinstall.lock" ]] || return 0
     sleep 0.2
   done
@@ -172,6 +172,22 @@ wait "$HOLDER" 2>/dev/null
 [[ ! -e "$MARK" ]] || fail "a live lock must block a second installer"
 grep -q "install in progress" <<<"$out" || fail "live lock must report in progress, got: $out"
 pass "live lock holder -> no second installer, in-progress message"
+
+# --- Case 8b: a live pid on a lock older than 60 minutes is a reused pid ------
+rm -rf "$DATA" "$MARK"
+mkdir -p "$DATA/postinstall.lock"
+sleep 30 &
+HOLDER=$!
+echo "$HOLDER" >"$DATA/postinstall.lock/pid"
+touch -t 200001010000 "$DATA/postinstall.lock"
+out=$(run_hook)
+kill "$HOLDER" 2>/dev/null
+wait "$HOLDER" 2>/dev/null
+grep -q "Installing the fno CLI" <<<"$out" || fail "a lock older than 60 minutes must be reclaimed, got: $out"
+wait_unlocked || fail "reclaimed installer left its lock"
+[[ -e "$MARK" ]] || fail "reclaimed lock never ran the installer"
+[[ ! -d "$DATA/postinstall.lock.reclaim" ]] || fail "reclaim mutex left behind"
+pass "lock older than 60 minutes with a live (reused) pid -> reclaimed, installer runs"
 
 # --- Case 9: CLAUDE_PLUGIN_DATA unset -> today's reminder, no installer --------
 rm -rf "$DATA" "$MARK"

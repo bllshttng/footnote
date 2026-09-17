@@ -43,15 +43,21 @@ if [[ -n "$DATA" && -f "$INSTALLER" ]] && mkdir -p "$DATA" 2>/dev/null; then
   LOCK="$DATA/postinstall.lock"
   VERSION="$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null | head -1)"
   if [[ -n "$VERSION" && "$(cat "$STAMP" 2>/dev/null)" != "$VERSION" ]]; then
-    # A lock with no pid file yet is live for 10 minutes: the pid is written just
-    # after mkdir, and a second session in that gap must not start a second install.
-    if [[ -d "$LOCK" ]]; then
+    # Reclaim a stale lock under a short mutex, so two sessions never remove
+    # each other's fresh lock. A lock with no pid file yet is live for 10
+    # minutes: the pid is written just after mkdir. Any lock older than 60
+    # minutes is stale, because a reused pid would otherwise hold it forever.
+    find "$LOCK.reclaim" -maxdepth 0 -mmin +1 -exec rmdir {} \; 2>/dev/null
+    if [[ -d "$LOCK" ]] && mkdir "$LOCK.reclaim" 2>/dev/null; then
       holder="$(cat "$LOCK/pid" 2>/dev/null)"
-      if [[ -n "$holder" ]]; then
+      if [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then
+        rm -rf "$LOCK"
+      elif [[ -n "$holder" ]]; then
         kill -0 "$holder" 2>/dev/null || rm -rf "$LOCK"
       elif [[ -n "$(find "$LOCK" -maxdepth 0 -mmin +10 2>/dev/null)" ]]; then
         rm -rf "$LOCK"
       fi
+      rmdir "$LOCK.reclaim" 2>/dev/null
     fi
     if mkdir "$LOCK" 2>/dev/null; then
       last="$(tail -1 "$LOG" 2>/dev/null)"
