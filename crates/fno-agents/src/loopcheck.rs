@@ -9096,48 +9096,23 @@ pub(crate) fn decide_with_payload(
                             &project_events,
                             &session_id,
                         ) {
-                            emit(
-                                "termination",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "reason": "DoneAwaitingMerge",
-                                    "message": msg.clone()
-                                }),
-                            );
-                            emit(
-                                "loop_check",
-                                serde_json::json!({
-                                    "session_id": session_id,
-                                    "fingerprint": fingerprint,
-                                    "fires": this_fire,
-                                    "consecutive_unchanged": consecutive_after,
-                                    "streak_window_secs": streak_window,
-                                    "decision": "allow",
-                                    "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
-                                    "intent_source": intent_source,
-                                    "pr_state": pr_info.state.as_str(),
-                                    "ci": pr_info.ci_conclusion.render(),
-                                    "reviewed": pr_info.reviewed,
-                                    "review_skipped": pr_info.review_skipped,
-                                    "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                                    "fp_read_failed": fp_read_failed
-                                }),
+                            term_row("DoneAwaitingMerge", &msg);
+                            fire_row(
+                                "allow",
+                                if intent == Intent::Promise {
+                                    "promise"
+                                } else {
+                                    "backstop"
+                                },
+                                false,
+                                serde_json::json!({}),
                             );
                             best_effort_notify(
                                 &format!("PR #{} ready - merge held by ruling", pr_info.number),
                                 &msg,
                             );
                         }
-                        return (
-                            0,
-                            allow_output(
-                                "allow",
-                                Some(TerminationReason::DoneAwaitingMerge),
-                                &msg,
-                                this_fire,
-                                Some(fingerprint),
-                            ),
-                        );
+                        return terminal("allow", Some(TerminationReason::DoneAwaitingMerge), &msg);
                     }
                 }
 
@@ -9192,32 +9167,16 @@ pub(crate) fn decide_with_payload(
                                 &project_events,
                                 &session_id,
                             ) {
-                                emit(
-                                    "termination",
-                                    serde_json::json!({
-                                        "session_id": session_id,
-                                        "reason": "DoneAwaitingMerge",
-                                        "message": msg.clone()
-                                    }),
-                                );
-                                emit(
-                                    "loop_check",
-                                    serde_json::json!({
-                                        "session_id": session_id,
-                                        "fingerprint": fingerprint,
-                                        "fires": this_fire,
-                                        "consecutive_unchanged": consecutive_after,
-                                        "streak_window_secs": streak_window,
-                                        "decision": "allow",
-                                        "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
-                                        "intent_source": intent_source,
-                                        "pr_state": pr_info.state.as_str(),
-                                        "ci": pr_info.ci_conclusion.render(),
-                                        "reviewed": pr_info.reviewed,
-                                        "review_skipped": pr_info.review_skipped,
-                                        "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                                        "fp_read_failed": fp_read_failed
-                                    }),
+                                term_row("DoneAwaitingMerge", &msg);
+                                fire_row(
+                                    "allow",
+                                    if intent == Intent::Promise {
+                                        "promise"
+                                    } else {
+                                        "backstop"
+                                    },
+                                    false,
+                                    serde_json::json!({}),
                                 );
                                 best_effort_notify(
                                     &format!(
@@ -13398,7 +13357,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let p = dir.path().join("events.jsonl");
         write_fire_log(&p, &fires);
-        let (_, streak, _, window) = read_prior_fires(&p, "sess", FP, now, gap);
+        let (_, streak, _, window) = read_prior_fires(&p, "sess", Some(FP), now, gap);
         (streak, window)
     }
 
@@ -13450,7 +13409,7 @@ mod tests {
                 ("2026-06-05T11:59:58Z".to_string(), "DIFFERENT"),
             ],
         );
-        let (_, streak, _, _) = read_prior_fires(&p, "sess", FP, now, 300);
+        let (_, streak, _, _) = read_prior_fires(&p, "sess", Some(FP), now, 300);
         assert_eq!(streak, 0, "a 2-second-old change still resets the streak");
     }
 
@@ -13468,7 +13427,7 @@ mod tests {
         ];
         std::fs::write(&p, lines.join("\n") + "\n").unwrap();
 
-        let (_, streak, last_fp, _) = read_prior_fires(&p, "sess", FP, at(NOW), 300);
+        let (_, streak, last_fp, _) = read_prior_fires(&p, "sess", Some(FP), at(NOW), 300);
         assert_eq!(
             streak, 1,
             "unplaceable fires skip; the good one still counts"
