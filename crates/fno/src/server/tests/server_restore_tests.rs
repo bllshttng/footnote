@@ -2065,12 +2065,12 @@ fn seed_three_old_workers(scratch: &str) -> (StoreScratch, String, String) {
     let origin = s.dir.join("repo");
     std::fs::create_dir_all(&origin).unwrap();
     let origin = origin.to_string_lossy().into_owned();
-    let key = crate::squad_store::origin_key(&[origin.clone()]);
+    let key = crate::squad_store::origin_key(std::slice::from_ref(&origin));
     let old: Vec<_> = ["t-old-one", "t-old-two", "t-old-three"]
         .iter()
         .map(|n| shared_identity_worker(n))
         .collect();
-    crate::squad_store::upsert("", &key, &[origin.clone()], &old).unwrap();
+    crate::squad_store::upsert("", &key, std::slice::from_ref(&origin), &old).unwrap();
     (s, origin, key)
 }
 
