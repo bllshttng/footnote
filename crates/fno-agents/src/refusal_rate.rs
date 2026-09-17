@@ -29,6 +29,18 @@ fn refusal_regex() -> Result<regex::Regex, String> {
     regex::Regex::new(REFUSAL_PATTERN).map_err(|e| format!("bad refusal regex: {e}"))
 }
 
+/// The first `max_chars` characters of `text`, split on a char boundary.
+/// A byte-offset slice (`&text[..N]`) panics when `N` lands inside a
+/// multi-byte UTF-8 character - real tool output routinely carries one
+/// (an em dash, a checkmark, a box-drawing glyph), so this reader must
+/// never assume ASCII.
+fn lead(text: &str, max_chars: usize) -> &str {
+    match text.char_indices().nth(max_chars) {
+        Some((byte_idx, _)) => &text[..byte_idx],
+        None => text,
+    }
+}
+
 /// One `tool_use` call paired with its `tool_result` text, in transcript
 /// order. `result` is `None` when no result was ever recorded (an
 /// interrupted call): that call still counts toward `total`, never toward
@@ -104,7 +116,7 @@ pub fn refusal_rate(transcript: &Path, window: usize) -> Result<Value, String> {
     let refused = trailing
         .iter()
         .filter(|c| match &c.result {
-            Some(r) => re.is_match(&r[..r.len().min(CONTENT_LEAD_CHARS)]),
+            Some(r) => re.is_match(lead(r, CONTENT_LEAD_CHARS)),
             None => false,
         })
         .count();
@@ -213,5 +225,30 @@ mod tests {
     fn unreadable_transcript_is_an_error() {
         let err = refusal_rate(Path::new("/nonexistent/path.jsonl"), 200).unwrap_err();
         assert!(err.contains("unreadable"));
+    }
+
+    // A byte-offset slice at exactly CONTENT_LEAD_CHARS bytes would panic
+    // here (multi-byte char straddling the cut); `lead` must split on a
+    // char boundary instead.
+    #[test]
+    fn a_multibyte_character_at_the_lead_boundary_does_not_panic() {
+        let mut content = "x".repeat(CONTENT_LEAD_CHARS - 1);
+        content.push('—'); // em dash: 3 UTF-8 bytes, straddles the cut
+        content.push_str("Usage: this text is past the lead and unread");
+        let lines = vec![transcript_line("t1", "Bash", Some(&content))];
+        let file = write_transcript(&lines);
+        let result = refusal_rate(file.path(), 200).unwrap();
+        assert_eq!(result["total"], 1);
+        assert_eq!(result["refused"], 0, "the matching text sits past the lead");
+    }
+
+    #[test]
+    fn lead_splits_on_a_char_boundary_never_mid_codepoint() {
+        let mut s = "x".repeat(9);
+        s.push('—'); // s has 10 chars: 9 ascii, then one 3-byte char
+        assert_eq!(lead(&s, 9), "x".repeat(9)); // cut right before the multibyte char
+        assert_eq!(lead(&s, 3), "xxx");
+        assert_eq!(lead(&s, 10), s); // exactly all chars, none dropped
+        assert_eq!(lead(&s, 100), s); // fewer chars than requested: unchanged
     }
 }

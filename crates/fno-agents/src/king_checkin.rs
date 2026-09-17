@@ -921,7 +921,7 @@ fn refusal_rate_of(previous_data: Option<&Value>) -> Option<f64> {
 
 /// Sets `refusal_rate_rising`: true only when the current rate exceeds the
 /// last beat's, and that beat's exceeded the one before it. A single high
-/// tick is noise; two consecutive rises is the handoff signal (R6).
+/// tick is noise; two consecutive rises is the handoff signal.
 fn mark_refusal_rate_trend(
     data: &mut Map<String, Value>,
     previous_data: Option<&Value>,
@@ -963,13 +963,26 @@ fn derive_change(
             }
         }
     }
-    let attention: Vec<&str> = data
+    let mut attention: Vec<String> = data
         .get("control_plane_attention")
         .and_then(|a| a.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
-    // Attention outranks silence: a control plane failing for 30 minutes is
-    // never journaled as "no change", whatever the counts did.
+    if data
+        .get("refusal_rate_rising")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        attention.push("refusal rate rising two consecutive beats".into());
+    }
+    // Attention outranks silence: a control plane failing for 30 minutes,
+    // or a refusal rate climbing two beats running, is never journaled as
+    // "no change", whatever the counts did.
     if !attention.is_empty() {
         let moved_suffix = if moved.is_empty() {
             String::new()
@@ -1645,14 +1658,13 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
 
     let ts = iso_now();
     let readings = collect_readings(&ctx);
-    let data = build_data(&readings, &ctx.scope);
+    let mut data = build_data(&readings, &ctx.scope);
     let (previous, previous_error) = previous_row(&ctx);
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
-    let derived = derive_change(previous_data, &data, &previous_error);
-    let mut data = data;
     let second_previous = second_previous_loop_row(&ctx);
     let second_previous_data = second_previous.as_ref().and_then(|p| p.get("data"));
     mark_refusal_rate_trend(&mut data, previous_data, second_previous_data);
+    let derived = derive_change(previous_data, &data, &previous_error);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
     let mut lines = render_lines(
         &ctx.scope,
@@ -2093,6 +2105,19 @@ mod tests {
             .find(|l| l.starts_with("refusal_rate:"))
             .unwrap();
         assert!(line.ends_with(" - RISING (handoff signal)"), "line: {line}");
+    }
+
+    // A rising refusal rate outranks silence the same way control-plane
+    // attention does: it must never journal as "no change".
+    #[test]
+    fn refusal_rate_rising_reads_as_attention_not_no_change() {
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("refusal_rate_rising".into(), json!(true));
+        let change = derive_change(None, &data, "");
+        assert!(
+            change.starts_with("attention: refusal rate rising"),
+            "change: {change}"
+        );
     }
 
     #[test]
