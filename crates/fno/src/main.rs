@@ -131,6 +131,10 @@ enum Role {
     /// (clap's rendered help for an explicit help request, else one
     /// command-qualified refusal line naming the bad token).
     MuxUsage(String),
+    /// `fno doctor event emit-envelope|export ...`: the native storage verbs
+    /// (x-0915). Args from the subcommand name onward; Python keeps the rich
+    /// emit surface and the other event names until their cutover.
+    DoctorEvent(Vec<OsString>),
     /// Any other args: the Python-CLI forwarding path.
     Forward,
 }
@@ -173,6 +177,12 @@ fn parse_web_args(rest: &[OsString]) -> Option<fno::web::WebArgs> {
 
 fn decide_role(args: &[OsString], is_tty: bool) -> Role {
     use cli_args::FrontDoor;
+    // The native `doctor event` storage verbs are classified lexically,
+    // before clap: the Python CLI still owns the `doctor` tree for every
+    // other name, so `fno doctor event emit` must keep forwarding.
+    if let Some(rest) = fno::event_cli::classify_doctor_event(args) {
+        return Role::DoctorEvent(rest);
+    }
     match cli_args::classify(args) {
         FrontDoor::Forward => Role::Forward,
         FrontDoor::Usage { message } => {
@@ -326,6 +336,7 @@ fn main() {
             std::process::exit(mux_cli::shell_init(shell.as_deref(), json))
         }
         Role::MuxDoctor(json) => std::process::exit(mux_cli::doctor(json)),
+        Role::DoctorEvent(rest) => std::process::exit(fno::event_cli::run(&rest)),
         Role::MuxStats(json) => std::process::exit(mux_cli::stats(json)),
         Role::MuxWeb(web_args) => {
             // The bridge serves for hours, so the warning its startup
