@@ -1977,10 +1977,12 @@ def test_status_prints_scanned_in_merge_scan_line(
 
 
 def test_status_prints_the_unarmed_heal_line_with_the_arm_command(
-    tmp_home, tmp_launch_agents, capsys, monkeypatch
+    tmp_home, tmp_launch_agents, capsys, monkeypatch, tmp_path
 ):
     """auto_heal.enabled false -> `Heal: unarmed` plus the exact arm command,
-    without ever resolving the Rust binary."""
+    and the heal readout never shells the binary. status itself still shells
+    it for the parked-PR read, so the stub records every invocation and the
+    assert is scoped to the heal verb."""
     from types import SimpleNamespace
 
     import fno.pr_watch._install as m
@@ -1992,10 +1994,15 @@ def test_status_prints_the_unarmed_heal_line_with_the_arm_command(
             pr_watch=SimpleNamespace(interval_seconds=600, enabled=True),
         ),
     )
-    monkeypatch.setattr(
-        "fno.rust_binary.resolve_binary",
-        lambda: pytest.fail("an unarmed readout never shells the binary"),
+    argv_log = tmp_path / "stub-argv.log"
+    stub = tmp_path / "fno-agents"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" >> {argv_log}\n"
+        "echo '{}'\n"
     )
+    stub.chmod(0o755)
+    monkeypatch.setattr("fno.rust_binary.resolve_binary", lambda: stub)
     monkeypatch.setattr(
         m,
         "liveness_report_live",
@@ -2008,13 +2015,16 @@ def test_status_prints_the_unarmed_heal_line_with_the_arm_command(
         "Heal: unarmed (auto_heal.enabled=false; "
         "arm with: fno config set auto_heal.enabled true)"
     ) in out, out
+    argv = argv_log.read_text().splitlines()
+    assert not any("pr-heal" in a for a in argv), "the unarmed readout shelled pr-heal"
 
 
 def test_status_shells_pr_heal_status_when_armed(
     tmp_home, tmp_launch_agents, capsys, monkeypatch, tmp_path
 ):
     """Armed, status passes --status --armed --events-file to the binary and
-    prints its line verbatim."""
+    prints its line verbatim. The parked-PR read shells the same stub, so the
+    log is appended to and the heal argv is asserted as one contiguous run."""
     from types import SimpleNamespace
 
     import fno.pr_watch._install as m
@@ -2031,7 +2041,8 @@ def test_status_shells_pr_heal_status_when_armed(
     stub = tmp_path / "fno-agents"
     stub.write_text(
         "#!/bin/sh\n"
-        f"printf '%s\\n' \"$@\" > {argv_log}\n"
+        f"printf '%s\\n' \"$@\" >> {argv_log}\n"
+        "echo '{}'\n"
         f"echo '{line}'\n"
     )
     stub.chmod(0o755)
@@ -2047,7 +2058,10 @@ def test_status_shells_pr_heal_status_when_armed(
     out = capsys.readouterr().out
     assert line in out, out
     argv = argv_log.read_text().splitlines()
-    assert argv == ["pr-heal", "--status", "--armed", "--events-file", str(events_file)], argv
+    expected = ["pr-heal", "--status", "--armed", "--events-file", str(events_file)]
+    assert any(
+        argv[i : i + len(expected)] == expected for i in range(len(argv))
+    ), argv
 
 
 def test_armed_status_with_no_binary_degrades_to_a_line_that_says_so(

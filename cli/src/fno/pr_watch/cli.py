@@ -1272,7 +1272,7 @@ def tick() -> None:
                 # gate answers that never reach the binary.
                 _emit_tick_row(
                     "heal",
-                    interval_s=int(cfg.interval_seconds),
+                    interval_s=int(getattr(cfg, "interval_seconds", 600)),
                     acted=0,
                     skip_reason=answer.replace("-", "_"),
                     detail=f"auto_heal gate: {answer}",

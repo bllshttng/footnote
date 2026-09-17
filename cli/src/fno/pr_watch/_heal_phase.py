@@ -52,7 +52,7 @@ def run_heal_phase(
         run = subprocess.run
     for root in roots:
         try:
-            run(
+            proc = run(
                 [
                     str(binary),
                     "pr-heal",
@@ -65,6 +65,19 @@ def run_heal_phase(
                 check=False,
                 timeout=_DRIVE_TIMEOUT_S,
             )
+            # 0..3 are drive-loop verdicts (clean, escalations remain,
+            # in-flight, refusal). 4 is a read error and 127 a missing binary:
+            # a binary too old to know --detach fails this way in milliseconds
+            # and would otherwise read as "ran" with zero healing done.
+            code = getattr(proc, "returncode", 0)
+            if code not in (0, 1, 2, 3):
+                log.warning(
+                    "pr-watch: heal drive loop for %s exited %s "
+                    "(4 = read error, 127 = binary missing; a stale binary "
+                    "that lacks --detach fails this way; run `fno doctor`)",
+                    root,
+                    code,
+                )
         except Exception as exc:  # noqa: BLE001 - one root never stops the rest
             log.warning("pr-watch: heal drive loop failed for %s: %s", root, exc)
     return "ran"

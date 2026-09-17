@@ -1063,7 +1063,20 @@ pub fn run_heal(argv: &[String]) -> i32 {
         eprintln!("pr-heal: needs a PR number (or --all, or --playbook)");
         return EXIT_READ_ERROR;
     };
-    let (code, _) = run_one(&a, &pr);
+    let (code, reran_shas) = run_one(&a, &pr);
+    if !reran_shas.is_empty() {
+        // The once-per-sha rerun guard reads rerun_shas off pr_heal_tick
+        // rows. The drive loop writes its own; this is the single-PR apply
+        // path's row, so a manual rerun is never issued a second time.
+        emit_tick_event(
+            &a,
+            &std::collections::BTreeMap::new(),
+            0,
+            false,
+            &reran_shas,
+            0.0,
+        );
+    }
     code
 }
 
@@ -3012,6 +3025,33 @@ exit 0
         let events = log_of(d, "events.jsonl");
         assert!(events.contains("\"rerun\":1"), "{events}");
         assert!(events.contains("\"rerun_shas\":[\"aaa1\"]"), "{events}");
+    }
+
+    #[test]
+    fn a_manual_single_pr_rerun_is_ledgered_for_the_once_per_sha_guard() {
+        // The guard reads rerun_shas off pr_heal_tick rows; the drive loop
+        // writes its own. A manual `pr-heal <n> --apply` writes one too, so
+        // a hand rerun is never issued a second time by the next cycle.
+        let tmp = tempfile::tempdir().unwrap();
+        let d = tmp.path();
+        stub_gh_drive_rerun(d);
+        stub_git_drive(d);
+        stub_fno(d, r#"{"questions":[]}"#);
+        hold_claim(d);
+        std::fs::create_dir_all(d.join("wt/crates/fno-agents")).unwrap();
+        let mut args = args_for(d, &["--apply"]);
+        args.push("--claims-root".to_string());
+        args.push(d.to_string_lossy().into_owned());
+        args.push("--events-file".to_string());
+        args.push(d.join("events.jsonl").to_string_lossy().into_owned());
+        run_heal(&args);
+        run_heal(&args);
+        let gh = log_of(d, "gh.log");
+        assert_eq!(
+            gh.matches("run rerun 777").count(),
+            1,
+            "the second manual apply never re-runs the sha: {gh}"
+        );
     }
 
     #[test]

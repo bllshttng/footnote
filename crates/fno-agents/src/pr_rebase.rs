@@ -1,6 +1,6 @@
 //! `fno-agents pr-rebase` -- two-phase rebase with the conflict-delegation
 //! protocol, ported from the Python `fno.pr._rebase` (which this replaces;
-//! new code lands in crates per d-b6cc1a2a). The exit-code contract is
+//! new code lands in crates, never cli/src/fno). The exit-code contract is
 //! load-bearing for skill orchestration (a caller dispatches the
 //! conflict-resolver agent on exit 42, then calls back `--continue`), so it
 //! is preserved verbatim:
@@ -192,7 +192,7 @@ fn conflict_resolution(repo: &Path) -> String {
 /// `git rebase --continue` exits non-zero (1) when it pauses on NEW conflicts
 /// in a SUBSEQUENT commit, so gating the needs_resolver path on `rc == 0`
 /// would misreport "more conflicts remain" as a hard failure and break the
-/// caller's resolve-loop. Caught by gemini on PR #524.
+/// caller's resolve-loop.
 fn phase_b_continue(base: &str, cwd: &Path, git_bin: &str) -> (i32, Value) {
     eprintln!("Running git rebase --continue...");
     let rc = run_git(git_bin, &["rebase", "--continue"], cwd, true)
