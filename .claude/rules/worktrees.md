@@ -11,7 +11,7 @@ Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hoo
 - **Unset (OSS-neutral default):** harness-native `<repo>/.claude/worktrees/<name>` (gitignored, search-clean). No config needed.
 - **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`).
 - **`worktree.use_conductor_canonical: true` is DEPRECATED:** acts as `worktrees_base = ~/conductor/workspaces`. Prefer `worktrees_base`.
-- Cargo output lives in TWO places per checkout. Final binaries sit in `crates/*/target`. Intermediates sit in the build base, one hash dir per workspace root, so sibling builds never share the artifact lock. Details in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md). Never name-match target dirs: `cli/src/fno/target`, `skills/target`, and `tests/target` are source dirs. A 2026-09-02 name-based sweep deleted 66 across 26 worktrees. Match cargo dirs by `CACHEDIR.TAG` on the nearest ancestor, by `crates/*/target`, or by a tagged build-base hash dir.
+- Cargo output lives in TWO places per checkout. Final binaries sit in `crates/*/target`. Intermediates land in the fno build base (`paths.cargo_targets_base`, default `~/.fno/cargo-build`), or in `~/.cargo/build` when the env is unset. `fno doctor reclaim` lane `cargo_build_dirs` sweeps both daily, and matches by `CACHEDIR.TAG`, base, and member fingerprint, never by name. Details in [worktree-mechanics](../../docs/architecture/worktree-mechanics.md). Never name-match target dirs: `cli/src/fno/target`, `skills/target`, and `tests/target` are source dirs. A 2026-09-02 name-based sweep deleted 66 across 26 worktrees.
 
 ## Creating and entering one
 

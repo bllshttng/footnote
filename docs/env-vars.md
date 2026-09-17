@@ -9,6 +9,7 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `ANTHROPIC_API_KEY` | py | Anthropic API key; presence enables bare-key auth for the LLM lane. |
 | `ANTHROPIC_BASE_URL` | py+rs | Overrides the Anthropic API base URL. |
 | `ANTHROPIC_MODEL` | py | Overrides the default Anthropic model. |
+| `CARGO` | rs | Names the cargo binary the `cargo_build_dirs` lane runs `cargo metadata` through; the PATH scan and `$CARGO_HOME/bin/cargo` are the fallbacks. |
 | `CARGO_BUILD_BUILD_DIR` | rs | unclear: crates/fno-agents/src/hook/stop.rs:519 |
 | `CARGO_HOME` | py+rs | Cargo install root; the default is ~/.cargo. |
 | `CENSUS_DEFERRED_FILE` | py | unclear: cli/src/fno/test_cmd.py:2250 |
@@ -62,7 +63,8 @@ A meaning not derivable from the read site stays `unclear: <file:line>`, never i
 | `FNO_BUS_RETAIN` | py | unclear: cli/src/fno/bus/log.py:62 |
 | `FNO_CAPABILITY_PARITY_DIR` | rs | unclear: crates/fno/src/agents_view.rs:3316 |
 | `FNO_CAPABILITY_PARITY_JSON` | rs | unclear: crates/fno/src/agents_view.rs:3318 |
-| `FNO_CARGO_TARGETS_BASE` | py | Overrides the managed cargo build base the removal-time reclaim deletes under; test escape hatch. |
+| `FNO_CARGO_FREE_BYTES` | rs | Overrides the free-space read the `cargo_build_dirs` cap lane defends against; test escape hatch. |
+| `FNO_CARGO_TARGETS_BASE` | rs | Overrides the managed fno cargo build base the `cargo_build_dirs` lane sweeps and the tree-removal reclaim deletes under; test escape hatch. |
 | `FNO_CC_DAEMON_RV_ROOT` | py | unclear: cli/src/fno/agents/session_procs.py:40 |
 | `FNO_CLAIMS_ROOT` | py+rs | unclear: cli/src/fno/agents/account_env.py:158 |
 | `FNO_CLAUDE_DAEMON_DIR` | py+rs | unclear: cli/src/fno/agents/discover.py:2353 |
