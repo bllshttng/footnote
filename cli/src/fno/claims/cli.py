@@ -1815,19 +1815,49 @@ def session_pid(
     ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
-    """Resolve the durable session pid (nearest harness ancestor:
-    claude/codex/gemini/opencode/agy) for the hybrid liveness pid-arm. Prints the
+    """Resolve the durable session pid (nearest harness ancestor that is not
+    Claude Code pool machinery) for the hybrid liveness pid-arm. Prints the
     pid on stdout, or nothing when uncapturable (plain-shell / no harness
-    ancestor; the caller degrades to TTL-only liveness). Always exit 0 - a
-    missing pid is a safe degrade, not an error."""
-    from .session_pid import resolve_session_pid
+    ancestor / a pooled bg-spare; the caller degrades to TTL-only liveness).
+    Always exit 0 - a missing pid is a safe degrade, not an error.
 
-    pid = resolve_session_pid(from_pid=from_pid)
+    The walk is native: this command fronts the fno-agents binary, which owns
+    the one implementation (`spawn_context::session_identity_ambient`). The
+    Python module `session_pid` is a SHIM over this very verb, so importing it
+    here would recurse.
+    """
+    import subprocess as _subprocess
+
+    from fno.rust_binary import resolve_binary
+
+    binary = resolve_binary()
+    if binary is None:
+        # Uncapturable: empty stdout, exit 0 (the shim's degrade shape).
+        if json_output:
+            typer.echo(json.dumps({"session_pid": None, "harness": None}))
+        return
+    cmd = [str(binary), "claim", "session-pid"]
+    if from_pid is not None:
+        cmd += ["--from-pid", str(from_pid)]
     if json_output:
-        typer.echo(json.dumps({"session_pid": pid}))
-    elif pid is not None:
-        typer.echo(str(pid))
-    # else: emit nothing on stdout so `$(fno agents claim session-pid)` is empty.
+        cmd.append("--json")
+    try:
+        result = _subprocess.run(  # noqa: S603 - resolved binary, fixed verb
+            cmd, capture_output=True, text=True, check=False
+        )
+    except OSError:
+        if json_output:
+            typer.echo(json.dumps({"session_pid": None, "harness": None}))
+        return
+    if json_output:
+        try:
+            payload = json.loads(result.stdout)
+        except ValueError:
+            payload = {"session_pid": None, "harness": None}
+        typer.echo(json.dumps(payload))
+    elif result.stdout.strip():
+        typer.echo(result.stdout.strip())
+    # Always exit 0 - this command always exits 0.
 
 
 def _acquire_lane(*, lane: str, max_lanes: int, ttl: str, json_output: bool) -> None:

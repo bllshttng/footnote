@@ -2743,53 +2743,25 @@ pub fn renew(key: &str, holder: &str, ttl_ms: i64, root: Option<&Path>) -> Resul
     result
 }
 
-/// The durable session pid: the nearest harness ancestor of THIS process.
+/// The durable session pid: the nearest harness ancestor of THIS process
+/// that is not pool machinery, resolved in-process from the census table.
 ///
-/// Delegates to `fno agents claim session-pid`, the one implementation of the walk
-/// (`cli/src/fno/claims/session_pid.py`). `fno do target init` already shells the
-/// same verb to acquire, so re-implementing the ancestry scan here would put two
-/// producers on one answer and let them drift.
+/// The Python shims (`session_pid.py`) exec `fno agents claim session-pid`,
+/// whose native front is `run_claim_session_pid`, and that front resolves
+/// through the SAME `session_identity_ambient` this calls directly - one
+/// producer, no subprocess behind the recovery mutex. The old shell-out
+/// needed a poll-and-kill wall-clock bound because a python start ran inside
+/// the mutex; an in-process census read has no such wait, so the bound went
+/// with the subprocess.
 ///
-/// Returns `None` on every failure - verb missing, non-numeric output, no
-/// harness ancestor - because the caller's fallback is to leave the anchor
-/// exactly as it found it. An unresolvable pid is not a reason to write a worse
-/// one.
+/// Returns `None` on every failure - no harness ancestor, or a refused
+/// pool-machinery ancestor (a thread worker has no process of its own) -
+/// because the caller's fallback is to leave the anchor exactly as it
+/// found it. An unresolvable pid is not a reason to write a worse one.
 fn durable_session_pid() -> Option<i32> {
-    let fno = std::env::var_os("FNO_BIN").unwrap_or_else(|| std::ffi::OsString::from("fno"));
-    let mut child = std::process::Command::new(&fno)
-        .args(["agents", "claim", "session-pid", "--from-pid"])
-        .arg(std::process::id().to_string())
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    // BOUNDED, because this runs inside the per-claim recovery mutex: an
-    // unbounded wait on a slow python start stalls every acquire, refresh and
-    // reap contending on the same key. The host has no `timeout` binary, so the
-    // bound is native: poll `try_wait`, then kill. A kill degrades to None, and
-    // None leaves the anchor exactly as it was found.
-    let deadline = std::time::Instant::now() + SESSION_PID_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
-            Err(_) => return None,
-        }
-    }
-    let out = child.wait_with_output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<i32>()
-        .ok()
+    crate::spawn_context::session_identity_ambient(std::process::id())
+        .0
+        .map(|pid| pid as i32)
 }
 
 /// The live pid the fleet registry records for `session_id`, or `None`.
@@ -2812,9 +2784,9 @@ fn registry_session_pid(session_id: Option<&str>) -> Option<i32> {
         return None;
     }
     // LOCK-FREE by necessity: this runs inside the per-claim recovery mutex,
-    // and load_registry's shared flock has no bound - the same shape
-    // SESSION_PID_TIMEOUT exists to bound on this very critical section. The
-    // registry file is replaced by atomic rename, so an unlocked open reads a
+    // and load_registry's shared flock has no bound - an unbounded wait here
+    // would stall every acquire, refresh and reap contending on the same key.
+    // The registry file is replaced by atomic rename, so an unlocked open reads a
     // consistent snapshot; a parse failure degrades to None and the legacy
     // anchor path, never to a wedged renewal.
     let home = crate::paths::AgentsHome::from_env_opt()?;
@@ -2828,18 +2800,6 @@ fn registry_session_pid(session_id: Option<&str>) -> Option<i32> {
     })?;
     crate::daemon::pid_is_ours(pid.0, Some(pid.1)).then_some(pid.0 as i32)
 }
-
-/// Wall-clock ceiling on the `claim session-pid` shell-out.
-///
-/// UNDER the python side's own wait for this same mutex. `compare_and_rebind`
-/// gives up after `_RECOVERY_LOCK_MAX_WAIT_S` (5.0s) and `reap`'s targeted
-/// recovery waits zero, so a bound above that let a cold python start here hold
-/// the lock long enough to make a successor's `fno do target init --handover-from`
-/// refuse as mutex-busy, fall through to a plain acquire, and cancel the
-/// session on ClaimHeldByOther. Three seconds leaves headroom under 5 and is
-/// still ample for a warm resolve; a slower one degrades to None, which leaves
-/// the anchor alone.
-const SESSION_PID_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Critical section of [`renew`]: re-read under the mutex (the holder may have
 /// changed while we grabbed it), then extend only a still-live, still-ours claim.
@@ -2958,17 +2918,19 @@ fn renew_locked(
 }
 
 /// Process-global lock serializing every test (in ANY module) that mutates OR
-/// READS `FNO_CLAIMS_ROOT` / `PATH` / `FNO_BIN`. Env vars are process-global and
-/// the crate test suite runs multithreaded, so a per-module lock lets a daemon
-/// test and a drive test interleave and clobber each other's env - one shared
-/// mutex is the only correct serialization. `cfg(test)` sets crate-wide during
-/// `cargo test`, so this is visible to every module's test code.
+/// READS `FNO_CLAIMS_ROOT` / `FNO_SESSION_PID` / `FNO_SESSION_HARNESS` / the
+/// test census override. Env vars are process-global and the crate test suite
+/// runs multithreaded, so a per-module lock lets a daemon test and a drive
+/// test interleave and clobber each other's env - one shared mutex is the only
+/// correct serialization. `cfg(test)` sets crate-wide during `cargo test`, so
+/// this is visible to every module's test code.
 ///
 /// READS COUNT, and the word "mutates" alone used to say otherwise. The race is
 /// reader-vs-writer, so a lock only writers take excludes nobody: while one test
-/// holds `FNO_BIN` pointed at its own stub, every concurrent test that resolves a
-/// binary through `$FNO_BIN` silently execs that stub instead of its own. A
-/// reader is not exempt just because it leaves the variable as it found it.
+/// holds the session-pid stamps pointed at its own answer, every concurrent test
+/// that resolves a durable pid through the ambient resolver silently reads that
+/// stamp instead of walking. A reader is not exempt just because it leaves the
+/// variable as it found it.
 #[cfg(test)]
 pub fn test_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -3177,15 +3139,14 @@ mod tests {
             "fixture must start SUSPECT or this proves nothing"
         );
 
-        let stub = stub_session_pid(td.path(), &std::process::id().to_string());
-        std::env::set_var("FNO_BIN", &stub);
+        let saved_stamps = stamp_session_pid(std::process::id());
         let result = renew(
             "node:x-corpse",
             "target-session:me",
             120_000,
             Some(td.path()),
         );
-        std::env::remove_var("FNO_BIN");
+        restore_session_pid_stamps(saved_stamps);
         assert_eq!(result, Ok(true));
 
         let after = read_claim(&td, "node:x-corpse");
@@ -3222,15 +3183,14 @@ mod tests {
         let before = read_claim(&td, "node:x-anchor").acquired_at;
         std::thread::sleep(Duration::from_millis(2));
 
-        let stub = stub_session_pid(td.path(), &std::process::id().to_string());
-        std::env::set_var("FNO_BIN", &stub);
+        let saved_stamps = stamp_session_pid(std::process::id());
         let _ = renew(
             "node:x-anchor",
             "target-session:me",
             120_000,
             Some(td.path()),
         );
-        std::env::remove_var("FNO_BIN");
+        restore_session_pid_stamps(saved_stamps);
 
         let after = read_claim(&td, "node:x-anchor");
         assert_eq!(
@@ -3257,7 +3217,7 @@ mod tests {
         // extends the TTL and leaves the claim v2/SUSPECT. The Rust renewal
         // must answer the same: repairing one to v1/LIVE here would make a
         // lockfile's schema and classification depend on which binary last
-        // renewed it. The stub proves the refusal is a refusal - a resolvable
+        // renewed it. The stamp proves the refusal is a refusal - a resolvable
         // durable pid exists and is still not written.
         let _guard = test_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         let td = TempDir::new().unwrap();
@@ -3271,15 +3231,14 @@ mod tests {
         assert_eq!(before.schema_version, 2);
         assert!(before.expires_at.is_some());
 
-        let stub = stub_session_pid(td.path(), &std::process::id().to_string());
-        std::env::set_var("FNO_BIN", &stub);
+        let saved_stamps = stamp_session_pid(std::process::id());
         let result = renew(
             "node:x-v2renew",
             "target-session:me",
             240_000,
             Some(td.path()),
         );
-        std::env::remove_var("FNO_BIN");
+        restore_session_pid_stamps(saved_stamps);
         assert_eq!(result, Ok(true));
 
         let after = read_claim(&td, "node:x-v2renew");
@@ -3316,15 +3275,31 @@ mod tests {
         // same reason.
         std::thread::sleep(Duration::from_millis(2));
 
-        let stub = stub_session_pid(td.path(), "");
-        std::env::set_var("FNO_BIN", &stub);
+        // No stamp pair, and a census override whose nearest harness ancestor
+        // is a bg-spare: the refusing walk answers None, which leaves the
+        // anchor exactly as it was found - the thread-worker shape.
+        let saved_stamps = scrub_session_pid_stamps();
+        crate::spawn_context::set_test_ancestry_table(Some(
+            [
+                crate::census::test_proc_row(100, 90, "bash -c fno agents claim acquire"),
+                crate::census::test_proc_row(
+                    90,
+                    80,
+                    "claude bg-spare --bg-spare /tmp/cc-daemon-501/608d3bdb/spare/6cd18353.claim.sock",
+                ),
+            ]
+            .into_iter()
+            .map(|r| (r.pid, r))
+            .collect(),
+        ));
         let result = renew(
             "node:x-noanchor",
             "target-session:me",
             120_000,
             Some(td.path()),
         );
-        std::env::remove_var("FNO_BIN");
+        crate::spawn_context::set_test_ancestry_table(None);
+        restore_session_pid_stamps(saved_stamps);
         assert_eq!(result, Ok(true));
 
         let after = read_claim(&td, "node:x-noanchor");
