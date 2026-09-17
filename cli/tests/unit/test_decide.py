@@ -452,12 +452,6 @@ def tmp_graph(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # The guarded metadata reader (decide's read side) resolves through
     # paths.graph_json at call time; pin it to the same hermetic file.
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
-    # entries_with_archive resolves the archive through fno.paths, which is
-    # graph_json().parent / "graph-archive.json"; pin both so the read-through
-    # test stays hermetic.
-    monkeypatch.setattr(
-        "fno.paths.graph_archive_json", lambda: tmp_path / "graph-archive.json"
-    )
     return g
 
 
@@ -1133,13 +1127,13 @@ def test_supersession_marks_the_older_decision(root: Path, tmp_graph: Path, inde
 
 
 def test_list_survives_archiving_of_the_subject(root: Path, tmp_graph: Path, index: Path):
-    """A decision recorded pre-archive is still listable post-archive
-    through entries_with_archive."""
+    """A decision recorded pre-archive is still listable post-archive: the
+    archived row stays in the same store, stamped, so the read needs no
+    sidecar."""
     runner.invoke(decide_app, ["--subject", "x-7d94", "--decision", "fold first"])
     entries = json.loads(tmp_graph.read_text())["entries"]
-    archive = tmp_graph.parent / "graph-archive.json"
-    archive.write_text(json.dumps({"entries": entries}) + "\n")
-    tmp_graph.write_text(json.dumps({"entries": []}) + "\n")
+    entries[0]["archived_at"] = "2026-09-17T00:00:00Z"
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
 
     listed = runner.invoke(decide_app, ["list", "--subject", "x-7d94"])
     assert listed.exit_code == 0, listed.output
@@ -2695,17 +2689,16 @@ def test_no_identity_explicit_operator_authority_records(
     assert _events(root)[0]["data"]["authority_source"] == "operator"
 
 
-def test_a_torn_archive_also_stops_the_backfill(
+def test_a_torn_archive_does_not_stop_the_backfill(
     root: Path, tmp_graph: Path, index: Path
 ):
-    """entries_with_archive reads the archive softly. A guard on the working
-    graph alone would drop every archived node's decisions from a backfill that
-    still printed "+0" and exited 0."""
+    """The advisory file left behind by an old export is dead weight: the
+    backfill reads archived residents through the store, so a torn file is
+    ignored, not an incident."""
     (tmp_graph.parent / "graph-archive.json").write_text('{"entries": [{"id": "x-ar')
 
     res = runner.invoke(decide_app, ["reindex"])
-    assert res.exit_code == 1, res.output
-    assert "backlog decide-reindex: failed" in res.output
+    assert res.exit_code == 0, res.output
 
 
 def test_a_corrupt_graph_does_not_produce_a_receipt_that_lies(

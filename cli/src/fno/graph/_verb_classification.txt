@@ -47,7 +47,6 @@ requeue
 # storage + sweep machinery
 archive
 unarchive
-archive-dedupe-ids
 maintain
 groom
 # graph-row mutation (stamps deferred_kind under the lock)

@@ -554,7 +554,8 @@ fn node_subject_idents(node_id: &str, graph_path: Option<&std::path::Path>) -> V
     if graph_path.is_none() && crate::graph_get::external_backend_selected() {
         return idents;
     }
-    let Ok(entries) = crate::backlog::api::rows(&crate::backlog::api::Store::new(path)) else {
+    let Ok(entries) = crate::backlog::api::rows(&crate::backlog::api::Store::new(path), false)
+    else {
         return idents;
     };
     if let Some(entry) = crate::graph_get::find_entry(&entries, node_id) {

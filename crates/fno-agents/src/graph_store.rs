@@ -2666,36 +2666,6 @@ pub fn read_defaulted_opts(
     }
 }
 
-/// The working graph plus archived nodes, the working graph winning on id
-/// (store.entries_with_archive). The archive's read failures degrade to the
-/// working graph: the archive is advisory.
-pub fn entries_with_archive(entries: &[Value], archive_path: &Path) -> Vec<Value> {
-    if !archive_path.exists() {
-        return entries.to_vec();
-    }
-    let archived = match read_defaulted(archive_path, false) {
-        Ok(v) => v,
-        Err(_) => return entries.to_vec(),
-    };
-    let live: std::collections::HashSet<String> = entries
-        .iter()
-        .filter(|e| is_dict(e))
-        .filter_map(|e| entry_id(e).map(str::to_string))
-        .collect();
-    let mut out = entries.to_vec();
-    for a in archived {
-        if is_dict(&a) {
-            let id = entry_id(&a).map(str::to_string);
-            if let Some(id) = id {
-                if !live.contains(&id) {
-                    out.push(a);
-                }
-            }
-        }
-    }
-    out
-}
-
 /// Normalize a plan_path for comparison (store.normalize_plan_path):
 /// os.path.normpath's LEXICAL fold (dot segments collapsed, no symlink
 /// resolution) plus trailing-separator strip, so abs/rel spellings of one

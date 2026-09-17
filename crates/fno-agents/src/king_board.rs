@@ -378,7 +378,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
             warnings.push("graph not read: board budget exhausted".to_string());
             None
         }
-        Some(_) => match crate::backlog::api::rows(&store) {
+        Some(_) => match crate::backlog::api::rows(&store, false) {
             Ok(e) => Some(e),
             Err(e) => {
                 warnings.push(format!("graph unreadable: {}", e.0));

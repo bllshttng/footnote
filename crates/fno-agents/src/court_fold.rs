@@ -512,7 +512,7 @@ pub fn court_fold(
     crowns: &[Value],
 ) -> Result<Value, String> {
     let entries: Vec<Value> =
-        crate::backlog::api::rows(&crate::backlog::api::Store::new(graph_path))
+        crate::backlog::api::rows(&crate::backlog::api::Store::new(graph_path), false)
             .map_err(|e| format!("graph unreadable: {}", e.0))?;
     let projects = crate::king_board::project_map(cwd);
     let now_secs = (crate::claims::now_ms() / 1000).max(0) as u64;

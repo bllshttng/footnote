@@ -514,7 +514,6 @@ def build_receipt(
         else resolve_configured_path(settings.state_dir, project_root=repo, settings=settings)
         / "graph.json"
     )
-    archive_path = graph_path.parent / "graph-archive.json"
     configured_plans_path = resolve_configured_path(
         settings.plans_dir,
         project_root=repo,
@@ -525,10 +524,14 @@ def build_receipt(
         graph_entries, graph_error = _load_graph(graph_path)
     archive_error = None
     if archive_entries is _UNSET:
-        if archive_path.exists():
-            archive_entries, archive_error = _load_graph(archive_path)
-        else:
-            archive_entries = []
+        # The archive lives in the same store as the working graph (task
+        # 15.1); a store failure degrades to an empty archive receipt.
+        try:
+            from fno.graph.store import read_archive_entries
+
+            archive_entries = read_archive_entries(path=graph_path)
+        except Exception as exc:  # noqa: BLE001 - the receipt reports, it does not fail
+            archive_entries, archive_error = [], str(exc)
     archive = archive_entries if isinstance(archive_entries, list) else []
     graph = _graph_section(
         seed,

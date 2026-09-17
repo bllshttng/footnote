@@ -18,7 +18,6 @@ from fno.graph.store import (
     _apply_graph_defaults,
     append_session_record,
     _read_json,
-    _write_json,
     locked_mutate_graph,
     read_graph,
     render_canonical_views,
@@ -139,25 +138,6 @@ def test_ac2_err_read_json_corrupt(tmp_path):
     p.write_text("not json at all")
     with pytest.raises(GraphCorruptError):
         _read_json(p)
-
-
-def test_ac1_hp_write_json_roundtrip(tmp_path):
-    """AC1-HP: _write_json creates file, _read_json reads it back."""
-    p = tmp_path / "g.json"
-    entries = [{"id": "ab-11223344", "title": "Roundtrip"}]
-    _write_json(entries, p)
-    result = _read_json(p)
-    assert result == entries
-
-
-def test_ac1_hp_write_json_atomic(tmp_path):
-    """AC1-HP: _write_json uses temp file + os.replace (no partial writes)."""
-    p = tmp_path / "g.json"
-    entries = [{"id": "ab-aaaabbbb"}]
-    _write_json(entries, p)
-    assert p.exists()
-    # No .tmp file should linger
-    assert list(tmp_path.glob("*.tmp")) == []
 
 
 def test_ac1_hp_apply_graph_defaults():
@@ -430,22 +410,29 @@ def test_canonical_graph_renders_to_board_targets(tmp_path, monkeypatch):
 def test_canonical_auto_render_keeps_archive_only_rows(tmp_path, monkeypatch):
     """A write cannot clobber the private served board back to live-only."""
     import fno.graph._constants as gc
+    from fno.graph.store import _worker_binary
+
+    if _worker_binary() is None:
+        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     graph_json = state_dir / "graph.json"
-    archive_json = state_dir / "graph-archive.json"
-    archive_json.write_text(
+    # The archived row is a stamped resident of the same store, not a sibling
+    # advisory file; it must be seeded before the first db open folds the seed.
+    graph_json.write_text(
         json.dumps({"entries": [
             {"id": "ab-archive1", "title": "ARCHIVE-AUTO-RENDER-MARKER",
-             "status": "done", "project": "fno"},
+             "status": "done", "project": "fno",
+             "archived_at": "2026-08-01T00:00:00Z"},
         ]}),
         encoding="utf-8",
     )
     monkeypatch.setattr(gc, "GRAPH_JSON", graph_json)
     monkeypatch.setattr(gc, "GRAPH_HTML", state_dir / "graph.html")
     monkeypatch.setattr(gc, "GRAPH_MD", state_dir / "graph.md")
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: archive_json)
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph_json)
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
 
     locked_mutate_graph(
         graph_json,
