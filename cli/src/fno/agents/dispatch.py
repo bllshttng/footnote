@@ -1441,6 +1441,7 @@ def _claude_create_path(
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     crown_plan: Optional[dict] = None,
+    crown_caller_name: Optional[str] = None,
     route_provider: Optional[str] = None,
     sandbox_settings: Optional[Mapping[str, object]] = None,
     node: Optional[str] = None,
@@ -1888,7 +1889,7 @@ def _claude_create_path(
             )
         elif crown_succeeded:
             vacated = sorted({row.name for row, cause in crown_cleared if cause == "succession"})
-            noted = getattr(calling_agent_row(), "name", None) in vacated
+            noted = crown_caller_name in vacated
             print(
                 f"spawn: crown over {crown_scope!r} transferred from {', '.join(vacated)} "
                 f"to {name} (succession)." + (" You no longer hold it." if noted else ""),
@@ -2519,6 +2520,7 @@ def dispatch_spawn(
     # reads it unconditionally, and an uncrowned spawn must not crash on a
     # plan only the crown block ever assigns.
     crown_plan: Optional[dict] = None
+    crown_caller_name: Optional[str] = None
     if crown_level is not None:
         if once or headless:
             raise DispatchAskError(
@@ -2678,15 +2680,13 @@ def dispatch_spawn(
                 )
 
             if crown_level is not None:
-                # Authorization + occupancy: you cannot hand down authority
-                # you do not hold, and a live holder blocks an heir from
-                # launching uncrowned. Refuses BEFORE launch, not after -
-                # nothing should exist as a result of an authority error.
-                # exclude_name drops the revived row (now known) from holders.
+                # Refuses BEFORE launch - nothing exists as a result of an
+                # authority error. caller_row is read once and its name
+                # threaded to the write as crown_caller_name, so the receipt
+                # need not re-resolve it.
+                crown_caller_name = getattr((caller_row := calling_agent_row()), "name", None)
                 crown_refusal, crown_plan = plan_spawn_crown(
-                    crown_scope or "",
-                    calling_agent_row(),
-                    succession,
+                    crown_scope or "", caller_row, succession,
                     exclude_name=name if revive else None,
                 )
                 if crown_refusal is not None:
@@ -2929,6 +2929,7 @@ def dispatch_spawn(
                         crown_level=crown_level,
                         crown_scope=crown_scope,
                         crown_plan=crown_plan,
+                        crown_caller_name=crown_caller_name,
                         route_provider=route_provider,
                         node=node,
                         route_model=route_model,

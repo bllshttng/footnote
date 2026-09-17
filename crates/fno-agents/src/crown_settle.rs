@@ -10,13 +10,12 @@
 //! of the scope must already be that agent.
 //!
 //! Rows arrive as plain JSON here, not a typed registry row, so a row's
-//! status is matched by string against Python's `TERMINAL_STATUSES`
-//! (`registry.py:105`) exactly, the same string-match reasoning
-//! `loop_reign.rs` documents for its own terminal check.
+//! status is matched by string against `announce::TERMINAL_STATUSES`
+//! (itself `registry.py::TERMINAL_STATUSES`), the same string-match
+//! reasoning `announce.rs` documents for its own terminal check.
 
+use crate::announce::TERMINAL_STATUSES;
 use serde_json::{json, Value};
-
-const TERMINAL_STATUSES: [&str; 4] = ["exited", "orphaned", "failed", "permanent_dead"];
 
 enum Caller {
     Human,
@@ -34,8 +33,7 @@ fn parse_caller(value: Option<&Value>) -> Option<Caller> {
 }
 
 /// Decide occupancy for one crowned spawn over `scope`. See the module doc
-/// for the caller/succession rules; the request and answer shapes are
-/// documented on the plan this ports (fno x-3f1c).
+/// for the caller/succession rules and the request/answer shapes.
 pub fn resolve(payload: &Value) -> Result<Value, String> {
     let scope = payload
         .get("scope")
@@ -214,6 +212,21 @@ mod tests {
         let refusal = out["refusal"].as_str().unwrap();
         assert!(refusal.contains("king-a"));
         assert!(refusal.contains("--succeed"));
+    }
+
+    #[test]
+    fn agent_succession_over_a_multi_holder_scope_declines() {
+        // holders = ["king-a", "king-b"]; the caller matches one but not all,
+        // so succession must fall through to the ordinary decline rather
+        // than succeeding a partial match.
+        let out = resolve(&json!({
+            "kind": "crown-settle", "scope": "fno", "succession": true,
+            "caller": {"kind": "agent", "name": "king-a"},
+            "rows": [row("king-a", "fno", "busy"), row("king-b", "fno", "busy")],
+        }))
+        .unwrap();
+        assert_eq!(out["outcome"], "declined");
+        assert_eq!(out["vacate"], json!([]));
     }
 
     #[test]

@@ -27,8 +27,10 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
-/// Terminal registry statuses (registry.py::TERMINAL_STATUSES).
-const TERMINAL_STATUSES: &[&str] = &["exited", "orphaned", "failed", "permanent_dead"];
+/// Terminal registry statuses (registry.py::TERMINAL_STATUSES). `pub(crate)`
+/// so other JSON-row readers in this crate (`crown_settle`) share the one
+/// string-matched copy instead of re-declaring it.
+pub(crate) const TERMINAL_STATUSES: &[&str] = &["exited", "orphaned", "failed", "permanent_dead"];
 
 const ANNOUNCE_KIND: &str = "announce";
 const LANDED_KIND: &str = "landed";
