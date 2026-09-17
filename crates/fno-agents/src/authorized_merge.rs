@@ -1025,6 +1025,24 @@ fn parse_slot_holder(holder: &str) -> Option<u64> {
     holder.strip_prefix("pr:")?.parse::<u64>().ok()
 }
 
+/// The live merge-slot holder for `base_ref`, fail-open: any claims fault
+/// reads as None so a consumer that only decides whether idling is safe (the
+/// loopcheck classifier) never blocks on a claims io error, the same polarity
+/// the merge path itself takes. Some(pr) only for a LIVE or SUSPECT slot
+/// whose holder parses; a self-held slot stays Some(self) and the caller
+/// filters it.
+pub(crate) fn merge_slot_holder(cwd: &Path, base_ref: &str) -> Option<u64> {
+    let root = canonical_repo_root(cwd);
+    let (state, record) = claims::status(&slot_key(base_ref), root.as_deref());
+    match state {
+        ClaimState::Live | ClaimState::Suspect => {
+            let record = record?;
+            parse_slot_holder(&record.holder)
+        }
+        _ => None,
+    }
+}
+
 fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {
     let err = String::from_utf8_lossy(stderr).trim().to_string();
     if err.is_empty() {

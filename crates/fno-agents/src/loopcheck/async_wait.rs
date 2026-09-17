@@ -4,7 +4,7 @@
 //! lives beside the classifier it gates.
 
 use super::watch_lease::ARM_HINT_LEAD;
-use super::{nudge_class_idlable, short_sha, CiConclusion, PrInfo, PrState};
+use super::{nudge_class_idlable, short_sha, CiConclusion, Coverage, PrInfo, PrState};
 
 /// An open PR whose merge commit cannot be created. GitHub starts no
 /// `pull_request` workflow on it, so a zero check count is a positive fact,
@@ -91,6 +91,28 @@ pub(super) fn async_wait_class(
     {
         return Some("review");
     }
+    // A green, shipped, fully-reviewed PR whose sole remaining blocker is the
+    // repo's one-at-a-time merge slot held by ANOTHER PR (x-de4c): external
+    // truth by the classifier's own contract. Another PR owns the slot, the
+    // holder's fate ends it, and nothing this session does shortens it - the
+    // same shape as waiting on CI, so idling is correct and waiting awake is
+    // pure waste. Measured 2026-09-17 on node x-c971: PR 2129 green at 34/34,
+    // held behind 2135, burned one invocation per stop tick because the
+    // classifier had only the ci and review labels.
+    //
+    // A hold the session CAN act on still refuses: BEHIND means the base
+    // moved, so a rebase is work to do now. An unread coverage axis is not a
+    // sole blocker either - the read remedy owns that render - so Unknown
+    // refuses the idle the same way. The read site drops a self-held slot;
+    // this arm restates it so a hand-built PrInfo cannot idle on its own.
+    if pr.ci_conclusion.is_ok()
+        && pr.merge_slot_holder.is_some()
+        && pr.merge_slot_holder != Some(pr.number.unsigned_abs())
+        && !pr.base_behind
+        && !matches!(pr.coverage.coverage, Coverage::Unknown)
+    {
+        return Some("merge_slot");
+    }
     None
 }
 
@@ -124,6 +146,16 @@ pub(super) fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
         format!(
             "background Bash `fno do pr wait {pr_number} --until review --timeout=30m` (wakes when a new review posts, or after ~30m)"
         )
+    } else if blocker == "merge_slot" {
+        // No checks are pending on THIS PR, so a settled watcher would exit
+        // instantly and the session would just re-block (codex P2, the same
+        // trap the review arm dodges). The slot frees OUTSIDE this PR - the
+        // holder merges, closes, goes red, or its lease ends - so the review
+        // watcher's 30m bound is the honest heartbeat: each wake re-evaluates
+        // the hold and re-arms while it lasts.
+        format!(
+            "background Bash `fno do pr wait {pr_number} --until review --timeout=30m` (wakes when a new review posts, or after ~30m; the slot frees outside this PR, so the bound is the heartbeat)"
+        )
     } else {
         format!(
             "background Bash `fno do pr wait {pr_number} --until settled --timeout=30m` (wakes when CI settles - green or red - or after ~30m)"
@@ -152,6 +184,8 @@ mod tests {
             failing_checks: vec![],
             ci_has_pending: true,
             mergeable: "CONFLICTING".to_string(),
+            merge_slot_holder: None,
+            base_behind: false,
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
@@ -211,15 +245,97 @@ mod tests {
     #[test]
     fn conflicting_review_idle_is_refused_too() {
         // A review of a conflicting head is superseded by the rebase that
-        // moves it, so the bot-review idle must refuse with the CI one.
+        // moves the head, so the bot-review idle must refuse with the CI one.
         let pr = PrInfo {
             range_tiling: RangeTiling::default(),
             ci_conclusion: CiConclusion::Success,
             ci_has_pending: false,
             missing_bots: vec!["chatgpt-codex-connector".into()],
             mergeable: "CONFLICTING".to_string(),
+            merge_slot_holder: None,
+            base_behind: false,
             ..conflicting_pr()
         };
         assert_eq!(async_wait_class(&pr, true, true), None);
+    }
+
+    /// A green, shipped, fully-reviewed PR whose sole remaining blocker is
+    /// the merge slot held by PR 2135 - the measured x-c971 specimen shape.
+    fn held_green_pr() -> PrInfo {
+        PrInfo {
+            ci_conclusion: CiConclusion::Success,
+            ci_has_pending: false,
+            reviewed: true,
+            mergeable: "MERGEABLE".to_string(),
+            merge_slot_holder: Some(2135),
+            ..conflicting_pr()
+        }
+    }
+
+    #[test]
+    fn merge_slot_hold_is_an_async_wait() {
+        // The node's verify line: green + head-shipped + findings empty + sole
+        // blocker is the hold -> a wait class, so the watching tag idles.
+        assert_eq!(
+            async_wait_class(&held_green_pr(), true, true),
+            Some("merge_slot")
+        );
+    }
+
+    #[test]
+    fn slot_hold_with_red_head_refuses() {
+        // The node's verify line: a red or conflicting head is work to debug
+        // or rebase NOW, never an async wait.
+        let mut pr = held_green_pr();
+        pr.ci_conclusion = CiConclusion::Failure(Some("ci/python".into()));
+        assert_eq!(async_wait_class(&pr, true, true), None);
+    }
+
+    #[test]
+    fn behind_base_refuses_the_idle_and_names_the_rebase() {
+        // The actionable half of the node: a BEHIND base is rebase work to do
+        // now, so the hold must not idle, and the block reason must teach the
+        // rebase rather than the arm-and-tag ritual.
+        let mut pr = held_green_pr();
+        pr.base_behind = true;
+        assert_eq!(async_wait_class(&pr, true, true), None);
+        let reason = build_block_reason(&pr, "abc", true, true);
+        assert!(reason.contains("rebase"), "got: {reason}");
+        assert!(
+            !reason.contains("<watching"),
+            "actionable hold must not teach the ritual: {reason}"
+        );
+    }
+
+    #[test]
+    fn self_held_slot_is_no_hold() {
+        // A slot this PR holds itself is not a hold on this session: the read
+        // site filters it, and the classifier restates the guard so a
+        // hand-built PrInfo cannot idle on its own slot.
+        let mut pr = held_green_pr();
+        pr.merge_slot_holder = Some(404);
+        assert_eq!(async_wait_class(&pr, true, true), None);
+    }
+
+    #[test]
+    fn unknown_coverage_refuses_the_slot_idle() {
+        // An unread coverage axis is not a sole blocker: the read remedy owns
+        // that render, so the idle refuses the same verdict.
+        let mut pr = held_green_pr();
+        pr.coverage.coverage = Coverage::Unknown;
+        assert_eq!(async_wait_class(&pr, true, true), None);
+    }
+
+    #[test]
+    fn slot_block_reason_names_the_holder_and_the_ritual() {
+        // The idlable half renders the hold + the arm-and-tag ritual, and the
+        // hint comes from the classifier by construction (build_block_reason
+        // derives it), so the two can never disagree about the wait.
+        let reason = build_block_reason(&held_green_pr(), "abc", true, true);
+        assert!(
+            reason.contains("merge slot held by PR #2135"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("reason=\"merge_slot\""), "got: {reason}");
     }
 }

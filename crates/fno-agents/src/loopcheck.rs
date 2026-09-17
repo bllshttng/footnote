@@ -1177,6 +1177,15 @@ struct PrInfo {
     /// cannot merge past main-red until the branch is rebased, and the terminal
     /// would drop the node from retry circulation while it is un-mergeable.
     mergeable: String,
+    /// Live merge-slot holder for this PR's base ref when ANOTHER PR holds it
+    /// (x-de4c). A fail-open read of the local claims store - no GitHub spend.
+    /// None on no hold, a self-held slot, or an unreadable store.
+    merge_slot_holder: Option<u64>,
+    /// GitHub `mergeStateStatus` == BEHIND (REST `mergeable_state` == behind):
+    /// the base moved past this PR's head, so a rebase is work to do now and a
+    /// merge-slot hold must not idle (x-de4c keeps the refusal for a hold the
+    /// session can act on). Absent on either payload reads as false.
+    base_behind: bool,
     /// Newest review/comment/inline-comment activity (ISO8601 or "none");
     /// folded into the fingerprint's 4th component on done() fires.
     latest_review_ts: String,
@@ -1732,7 +1741,8 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
-const PR_VIEW_FIELDS: &str = "state,number,headRefName,headRefOid,mergeable,baseRefName,author";
+const PR_VIEW_FIELDS: &str =
+    "state,number,headRefName,headRefOid,mergeable,mergeStateStatus,baseRefName,author";
 
 fn pr_head_oid(pr_json: &Value) -> Option<String> {
     pr_json
@@ -2207,6 +2217,8 @@ fn read_pr_info(
             failing_checks: Vec::new(),
             ci_has_pending: false,
             mergeable: "UNKNOWN".to_string(),
+            merge_slot_holder: None,
+            base_behind: false,
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: Vec::new(),
@@ -2259,6 +2271,16 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("UNKNOWN")
         .to_string();
+    // BEHIND on either payload spelling (GraphQL `mergeStateStatus`, REST
+    // `mergeable_state`): the base moved past this head, so a rebase is work
+    // to do now. Absent on both reads as false (fail-open to idlable).
+    let base_behind = ["mergeStateStatus", "mergeable_state"].iter().any(|k| {
+        pr_json
+            .get(*k)
+            .and_then(|v| v.as_str())
+            .map(|s| s.eq_ignore_ascii_case("behind"))
+            .unwrap_or(false)
+    });
 
     // One freshness resolver for every reviewer on this PR.
     // Both producers and both presence scans read it, so there is one rule
@@ -2324,6 +2346,8 @@ fn read_pr_info(
             failing_checks: Vec::new(),
             ci_has_pending: false,
             mergeable,
+            merge_slot_holder: None,
+            base_behind: false,
             latest_review_ts: "none".to_string(),
             reviewed: true,
             missing_bots: Vec::new(),
@@ -2850,6 +2874,11 @@ fn read_pr_info(
         );
     }
 
+    // The merge-slot hold (x-de4c): a local claims read keyed to this PR's
+    // base ref, so idling on a slot held by another PR costs no GitHub spend.
+    // A slot this PR holds itself is not a hold on THIS session.
+    let merge_slot_holder = crate::authorized_merge::merge_slot_holder(cwd, base_ref)
+        .filter(|m| *m != number.unsigned_abs());
     Ok(PrInfo {
         range_tiling: tiling,
         state,
@@ -2859,6 +2888,8 @@ fn read_pr_info(
         failing_checks,
         ci_has_pending,
         mergeable,
+        merge_slot_holder,
+        base_behind,
         latest_review_ts,
         reviewed,
         missing_bots,
@@ -10675,6 +10706,30 @@ fn build_block_reason(
         return coverage_unavailable_description(&pr.head_oid);
     }
 
+    // x-de4c: a green, reviewed, shipped PR whose sole remaining blocker is
+    // the repo's one-at-a-time merge slot. The ritual hint rides only the
+    // non-actionable half - a BEHIND base is rebase work to do NOW, and
+    // async_wait_class refuses that idle, so `hint("merge_slot")` is empty
+    // there by construction.
+    if let Some(holder) = pr.merge_slot_holder {
+        if holder != pr.number.unsigned_abs() {
+            if pr.base_behind {
+                return format!(
+                    "PR #{}: the base moved past this head while PR #{} holds the merge \
+                     slot - rebase onto the base (`fno do pr rebase`), push, then re-check.",
+                    pr.number, holder
+                );
+            }
+            return format!(
+                "PR #{}: merge slot held by PR #{} (frees when it merges, closes, goes \
+                 red, or its lease ends).{}",
+                pr.number,
+                holder,
+                hint("merge_slot")
+            );
+        }
+    }
+
     format!("PR #{} done() returned false (unknown reason)", pr.number)
 }
 
@@ -13946,6 +14001,8 @@ mod tests {
             failing_checks: vec![],
             ci_has_pending: false,
             mergeable: "UNKNOWN".to_string(),
+            merge_slot_holder: None,
+            base_behind: false,
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
@@ -14163,6 +14220,8 @@ git_bounded();";
             failing_checks: vec![],
             ci_has_pending: true,
             mergeable: "UNKNOWN".to_string(),
+            merge_slot_holder: None,
+            base_behind: false,
             latest_review_ts: "none".to_string(),
             reviewed: false,
             missing_bots: vec![],
