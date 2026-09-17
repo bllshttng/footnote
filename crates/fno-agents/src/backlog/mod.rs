@@ -467,8 +467,8 @@ pub fn authoritative_sync(
     let _report = write_changed(&transaction, before, after, true)?;
     let version = content_version(after);
     stamp_version(&transaction, &version)?;
+    confirm_ids_landed(&transaction, after)?;
     transaction.commit().map_err(|error| error.to_string())?;
-    confirm_ids_landed(&connection, after)?;
     Ok(version)
 }
 
@@ -716,6 +716,7 @@ pub(crate) fn write_changed(
     strict: bool,
 ) -> Result<WriteReport, String> {
     if strict {
+        let mut seen_ids = std::collections::BTreeSet::new();
         for (ordinal, row) in after.iter().enumerate() {
             let Some(id) = row.get("id").and_then(Value::as_str) else {
                 return Err(format!(
@@ -726,6 +727,9 @@ pub(crate) fn write_changed(
                 return Err(format!(
                     "row at ordinal {ordinal} is unrepresentable: empty string id"
                 ));
+            }
+            if !seen_ids.insert(id) {
+                return Err(format!("duplicate id in after rows: {id}"));
             }
         }
     }
@@ -1807,6 +1811,21 @@ mod tests {
 
         assert!(error.contains("ordinal 2"));
         assert!(error.contains("missing string id"));
+    }
+
+    #[test]
+    fn authoritative_publish_rejects_duplicate_ids() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after.push(after[0].clone());
+
+        let error = authoritative_sync(&graph, &before, &after).unwrap_err();
+
+        assert!(error.contains("duplicate id"));
+        assert!(error.contains("ab-one"));
     }
 
     #[test]
