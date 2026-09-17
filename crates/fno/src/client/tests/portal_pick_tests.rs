@@ -329,3 +329,90 @@ async fn selector_h_on_agent_row_stays_inert() {
     assert!(buf.is_empty(), "h sends nothing");
     assert_eq!(v.selector, Some(8), "h neither reaches nor closes");
 }
+
+// ---- task 1.1: the `P` refusal names the row's state -----------------------
+
+/// The display position of the named agent row.
+fn cursor_on(v: &View, name: &str) -> usize {
+    v.display_rows()
+        .iter()
+        .position(|r| matches!(r, DisplayRow::Agent(a) if a.name == name))
+        .unwrap_or_else(|| panic!("row {name} is on screen"))
+}
+
+#[tokio::test]
+async fn portal_pick_refusal_names_the_portal_state_and_reseat() {
+    // AC1-HP: `P` on a row already shown through a portal names the row,
+    // its portal and tab, and the verb that moves it - not the old
+    // state-free rule sentence that contradicted the picker listing.
+    let mut v = portal_pick_view();
+    let cur = cursor_on(&v, "nairobi");
+    v.selector = Some(cur);
+    let mut buf: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+    assert!(buf.is_empty(), "a refusal sends nothing");
+    assert!(v.portal_pick.is_none(), "the picker never opens");
+    let (notice, _) = v.notice.expect("the state is named on screen");
+    assert!(notice.contains("nairobi"), "{notice}");
+    assert!(notice.contains("portal 0"), "{notice}");
+    assert!(notice.contains("tab 1"), "{notice}");
+    assert!(notice.contains("reseat"), "{notice}");
+}
+
+#[tokio::test]
+async fn portal_pick_refusal_names_the_pane_state_and_reseat() {
+    // A pane-hosted row that is no portal seat still refuses - the gate
+    // does not move - but the refusal names the pane state it observes.
+    let mut v = portal_pick_view();
+    v.layout.agents[0].portal = None; // nairobi keeps pane 10, loses portal 0
+    let cur = cursor_on(&v, "nairobi");
+    v.selector = Some(cur);
+    let mut buf: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+    assert!(
+        v.portal_pick.is_none(),
+        "the gate holds: the picker stays shut"
+    );
+    let (notice, _) = v.notice.expect("the state is named on screen");
+    assert!(notice.contains("nairobi"), "{notice}");
+    assert!(notice.contains("already has a pane"), "{notice}");
+    assert!(notice.contains("reseat"), "{notice}");
+    assert!(notice.contains("tab 1"), "{notice}");
+}
+
+#[tokio::test]
+async fn portal_pick_refusal_on_an_exited_row_names_the_exit_not_reseat() {
+    // AC1-ERR: an exited row gets its name and its exit. `reseat` moves a
+    // LIVE worker, so the exited arm must not offer it.
+    let mut v = portal_pick_view();
+    v.layout.agents[3].attach_id = None;
+    v.layout.agents[3].exited = true; // bg-claude exits
+    let cur = cursor_on(&v, "bg-claude");
+    v.selector = Some(cur);
+    let mut buf: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+    let (notice, _) = v.notice.expect("the exit is named on screen");
+    assert!(notice.contains("bg-claude"), "{notice}");
+    assert!(notice.contains("exited"), "{notice}");
+    assert!(
+        !notice.contains("reseat"),
+        "no reseat for the dead: {notice}"
+    );
+}
+
+#[tokio::test]
+async fn portal_pick_refusal_on_a_non_agent_row_states_the_rule() {
+    // AC1-EDGE (half 1): no row in hand means no state to name, so this is
+    // the one arm allowed to state the rule.
+    let mut v = portal_pick_view();
+    let cur = v
+        .display_rows()
+        .iter()
+        .position(|r| !matches!(r, DisplayRow::Agent(_)))
+        .expect("a non-agent row");
+    v.selector = Some(cur);
+    let mut buf: Vec<u8> = Vec::new();
+    selector_keys(&mut v, b"P", &mut buf).await.unwrap();
+    let (notice, _) = v.notice.expect("the rule is named on screen");
+    assert_eq!(notice, "a portal shows an agent row");
+}
