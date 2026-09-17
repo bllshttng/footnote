@@ -50,19 +50,6 @@ def _keeper_gaps(client) -> list[str]:
     return list(client.request("backend_gate", {}).get("gaps") or [])
 
 
-def _keepers() -> str:
-    from fno import paths
-    from fno.graph.store import _Keeper
-
-    backends = []
-    for sock in sorted(paths.state_dir().rglob("*.store.sock")):
-        try:
-            backends.append(str(_Keeper(sock).identify().get("store_backend", "unknown")))
-        except Exception as exc:  # noqa: BLE001 - report, never crash
-            backends.append(f"unreachable: {exc}")
-    return "{" + ", ".join(f"'{b}'" for b in backends) + "}"
-
-
 def _flip(target: str) -> None:
     from fno import paths
     from fno.graph.store import _client_for
@@ -90,7 +77,7 @@ def _flip(target: str) -> None:
         set_config_value("graph.read_source", target, scope="global")
     except Exception as exc:  # noqa: BLE001 - keeper flipped; name the remedy
         typer.echo(f"graph backend: keeper flipped but graph.read_source not written ({exc}); run `fno config set graph.read_source {target}`", err=True)
-    typer.echo(f"backend={target} keepers={_keepers()}")
+    typer.echo(f"backend={target}")
 
 
 @graph_app.command("backend")
@@ -111,8 +98,9 @@ def graph_backend(
         since_text = since.strftime("%Y-%m-%d") if since else "never"
         days = (datetime.now(timezone.utc) - since).days if since else 0
         typer.echo(
-            f"backend={state.get('backend')} since={since_text} days={days} keepers={_keepers()}"
+            f"backend={state.get('backend')} since={since_text} days={days}"
         )
+        typer.echo("keepers: fno agents watchdog --only keeper")
         gaps = _keeper_gaps(client)
         if gaps:
             for gap in gaps:

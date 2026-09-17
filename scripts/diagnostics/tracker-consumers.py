@@ -24,6 +24,7 @@ No frozen verb counts anywhere: the registry is enumerated at run time.
 from __future__ import annotations
 
 import argparse
+import ast
 import os
 import re
 import sys
@@ -153,6 +154,72 @@ def _guard_fires_runtime() -> tuple[bool, str]:
         os.environ.pop("FNO_TRACKER_BACKEND", None)
 
 
+def _has_call(subtree, names):
+    for node in ast.walk(subtree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            fname = f.id if isinstance(f, ast.Name) else (
+                f.attr if isinstance(f, ast.Attribute) else ""
+            )
+            if fname in names:
+                return True
+    return False
+
+
+def _is_raw_graph_parse(node):
+    """A raw graph-store parse: json.loads over read_text/read_bytes bytes.
+
+    This is the spelling that escaped the read_graph census: config_cli.py
+    read the frozen graph.json as json.loads(graph.read_text()) and no
+    detector knew it. A bare `loads(...)` name (from json import loads)
+    counts too; the graph_json() conjunction in _raw_parse_is_graph_read is
+    what keeps other modules' loads calls out of the census.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    if isinstance(f, ast.Attribute):
+        if f.attr != "loads":
+            return False
+        if not (isinstance(f.value, ast.Name) and f.value.id == "json"):
+            return False
+    elif not (isinstance(f, ast.Name) and f.id == "loads"):
+        return False
+    return _has_call(node, {"read_text", "read_bytes"})
+
+
+def _raw_parse_is_graph_read(site, top) -> bool:
+    """A raw parse counts as a graph read only when its outermost enclosing
+    function also calls graph_json(): any other json.loads(read_text) is
+    another file's parse."""
+    return (
+        _is_raw_graph_parse(site)
+        and top is not None
+        and _has_call(top, {"graph_json"})
+    )
+
+
+def _classify_site(site, top, *, allow, mach, guarded_names, refusal_calls):
+    """One detected read site's bucket, or (None, reason) unclassified."""
+    if top is None:
+        return (None, None) if allow else (None, "at module level")
+    if allow:
+        return "owner", None
+    if mach:
+        return "guarded-machinery", None
+    switched = _has_call(top, {"active_backend_name", "_external_mode"})
+    guarded = top.name in guarded_names or _has_call(top, refusal_calls)
+    params = {a.arg for a in top.args.args}
+    params |= {a.arg for a in top.args.kwonlyargs}
+    if guarded:
+        return "guarded-verb", None
+    if switched:
+        return "backend-switched", None
+    if site.args and isinstance(site.args[0], ast.Name) and site.args[0].id in params:
+        return "redirect-seam", None
+    return None, f"in {top.name}()"
+
+
 def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
     """AST census of direct read_graph consumers plus the Rust direct parser.
 
@@ -170,11 +237,11 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
                           read is unreachable under an external selection.
       redirect-seam     - reads only an EXPLICIT caller-supplied path (a
                           hermetic-test seam), never the default store.
-    Anything else is unclassified and fails the census. Regexes would flag
-    imports and docstrings; the AST only sees real calls.
+    A second detector beside read_graph catches the raw parse spelling:
+    json.loads over read_text/read_bytes inside a function that also calls
+    graph_json(). Anything else is unclassified and fails the census.
+    Regexes would flag imports and docstrings; the AST only sees real calls.
     """
-    import ast
-
     problems: list[str] = []
     total = 0
     owner_files = {str(REPO_ROOT / p) for p in READ_ALLOWLIST if p.endswith(".py")}
@@ -206,17 +273,6 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
         # through it is guarded by that first act.
         "_create_node_impl",
     }
-
-    def _has_call(subtree, names):
-        for node in ast.walk(subtree):
-            if isinstance(node, ast.Call):
-                f = node.func
-                fname = f.id if isinstance(f, ast.Name) else (
-                    f.attr if isinstance(f, ast.Attribute) else ""
-                )
-                if fname in names:
-                    return True
-        return False
 
     def _is_read_graph(node):
         if not isinstance(node, ast.Call):
@@ -257,32 +313,32 @@ def census_reads(verbose: bool = False) -> tuple[int, list[str]]:
                     top_fn = parent
                 cur = parent
 
-        for site in [n for n in ast.walk(tree) if _is_read_graph(n)]:
+        for site in [
+            n for n in ast.walk(tree) if _is_read_graph(n) or _is_raw_graph_parse(n)
+        ]:
             top = _outermost(site)
+            if not _is_read_graph(site) and not _raw_parse_is_graph_read(site, top):
+                # A raw parse with no graph_json() in the enclosing body is
+                # another file's parse, not a graph-store read.
+                continue
+            klass, problem = _classify_site(
+                site,
+                top,
+                allow=allow_module,
+                mach=mach_module,
+                guarded_names=guarded_names,
+                refusal_calls=refusal_calls,
+            )
             if top is None:
                 # A module-level read has no command/callback boundary any
                 # guard could sit on; only the storage owners may do it.
-                if not allow_module:
+                if problem:
                     problems.append(
                         f"unclassified consumer: {rel}:{site.lineno} at module level"
                     )
                 continue
-            switched = _has_call(top, {"active_backend_name", "_external_mode"})
-            guarded = top.name in guarded_names or _has_call(top, refusal_calls)
-            params = {a.arg for a in top.args.args}
-            params |= {a.arg for a in top.args.kwonlyargs}
             total += 1
-            if allow_module:
-                klass = "owner"
-            elif mach_module:
-                klass = "guarded-machinery"
-            elif guarded:
-                klass = "guarded-verb"
-            elif switched:
-                klass = "backend-switched"
-            elif site.args and isinstance(site.args[0], ast.Name) and site.args[0].id in params:
-                klass = "redirect-seam"
-            else:
+            if problem:
                 problems.append(
                     f"unclassified consumer: {rel}:{site.lineno} "
                     f"in {top.name}()"
@@ -456,14 +512,62 @@ def self_test() -> int:
     if rust_json_leg_reader_sites(reader_fixt):
         failures.append("json-leg reader control: cfg(test) read_defaulted was not skipped")
 
+    # Raw graph-parse detector, both edges: the config_cli spelling
+    # (json.loads over graph_json() bytes) must be detected, gated in by the
+    # graph_json() conjunction, and FAIL classification; the same parse
+    # inside an allowlisted owner must classify without a problem, and the
+    # same parse with no graph_json() in the body is not a graph read.
+    hit_tree = ast.parse(
+        "def check(root):\n"
+        "    graph = paths.graph_json()\n"
+        "    if graph.is_file():\n"
+        "        data = json.loads(graph.read_text(encoding='utf-8'))\n"
+    )
+    hits = [n for n in ast.walk(hit_tree) if _is_raw_graph_parse(n)]
+    if len(hits) != 1:
+        failures.append("raw graph-parse control: injected json.loads(read_text) not detected")
+    elif not _raw_parse_is_graph_read(hits[0], hit_tree.body[0]):
+        failures.append("raw graph-parse control: graph_json() conjunction not joined")
+    else:
+        klass, problem = _classify_site(
+            hits[0], hit_tree.body[0], allow=False, mach=False,
+            guarded_names=frozenset(), refusal_calls=frozenset(),
+        )
+        if klass is not None or not problem:
+            failures.append("raw graph-parse control: unclassified raw parse not named")
+        klass, problem = _classify_site(
+            hits[0], hit_tree.body[0], allow=True, mach=False,
+            guarded_names=frozenset(), refusal_calls=frozenset(),
+        )
+        if problem is not None or klass != "owner":
+            failures.append("raw graph-parse control: allowlisted owner named anyway")
+    other_tree = ast.parse(
+        "def load_cfg(p):\n"
+        "    data = json.loads(p.read_text(encoding='utf-8'))\n"
+    )
+    others = [n for n in ast.walk(other_tree) if _is_raw_graph_parse(n)]
+    if len(others) != 1 or _raw_parse_is_graph_read(others[0], other_tree.body[0]):
+        failures.append("raw graph-parse control: non-graph json parse gated in")
+
+    # The bare-name spelling (from json import loads) must be detected too.
+    bare_tree = ast.parse(
+        "def check(root):\n"
+        "    graph = paths.graph_json()\n"
+        "    if graph.is_file():\n"
+        "        data = loads(graph.read_text(encoding='utf-8'))\n"
+    )
+    bares = [n for n in ast.walk(bare_tree) if _is_raw_graph_parse(n)]
+    if len(bares) != 1:
+        failures.append("raw graph-parse control: bare loads() spelling not detected")
+
     if failures:
         for f in failures:
             print(f"tracker-consumers: SELF-TEST FAILURE: {f}", file=sys.stderr)
         return 1
     print(
         "tracker-consumers: self-test detected the injected unmarked verb, "
-        "the injected forbidden reader, the runtime refusal, and the "
-        "json-leg reader"
+        "the injected forbidden reader, the runtime refusal, the "
+        "json-leg reader, and the raw graph parse"
     )
     print(SELF_TEST_OK_MARKER)
     return 0
