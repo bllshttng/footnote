@@ -70,7 +70,7 @@ template = "fno [{project}] {data.title} - {data.body} ({data.pointer})"
 enabled = true
 ```
 
-The arm notices ride this sink too. `arm_watch`, the `notify_watch` board and main-CI lanes, and the `provider_cap` notices all land as `operator_notice` rows. `arm_watch` names arms broken past `[notify] arm_failing_after_s`, plus hung verbs and dead flight holders.
+The arm notices ride this sink too. `arm_watch`, the `notify_watch` board and main-CI lanes, and the `provider_cap` notices all land as `operator_notice` rows. `arm_watch` names arms broken past `[notify] arm_failing_after_s`, plus hung verbs and dead flight holders. Each notice line is the row's own status line. It names the cause and ends with `heal=auto` or `heal=operator`. A known verb comes before the owner as `repair: <verb>`. An arm that waits on a red arm reads `UPSTREAM` with `cause=upstream_down`. Before it pages, the tick runs the `heal=auto` repairs (switch: `recovery.self_heal.enabled`, default `true`), so a notice names only what is still red. The cause table is in [control-plane-loop](architecture/control-plane-loop.md#cause-repair-and-owner).
 
 In the Rust callers `--pointer` leads the argv: `fno inbox notify --pointer P TITLE BODY`. The Python group callback refuses an option after its positionals, so the trailing form exits 2 and writes no row. `arm_watch` counts a notice sent only on exit 0. A notice that died at the gate leaves the dedupe token unwritten, so the next tick retries.
 

@@ -89,10 +89,16 @@ pub fn outcome_from_reconcile(run: Result<String, String>) -> CloseOutcome {
             .get("held_for_s")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0);
+        // The key lets the dead-holder repair name the exact claim; an older
+        // receipt without it keeps the old text.
+        let detail = match parsed.get("key").and_then(serde_json::Value::as_str) {
+            Some(key) => format!("flight {key} held by {holder} for {held_for_s}s"),
+            None => format!("flight held by {holder} for {held_for_s}s"),
+        };
         return CloseOutcome {
             acted: 0,
             skip_reason: Some("held".to_string()),
-            detail: format!("flight held by {holder} for {held_for_s}s"),
+            detail,
         };
     }
     let Some(closed) = parsed.get("closed").and_then(serde_json::Value::as_array) else {
@@ -288,6 +294,18 @@ mod tests {
         assert_eq!(o.acted, 0);
         assert_eq!(o.skip_reason.as_deref(), Some("held"));
         assert_eq!(o.detail, "flight held by single-flight:42:ab for 91s");
+    }
+
+    #[test]
+    fn a_held_receipt_with_a_key_names_the_key() {
+        let stdout =
+            r#"{"held":true,"key":"flight:k","holder":"single-flight:42:ab","held_for_s":91}"#;
+        let o = outcome_from_reconcile(Ok(stdout.to_string()));
+        assert_eq!(o.skip_reason.as_deref(), Some("held"));
+        assert_eq!(
+            o.detail,
+            "flight flight:k held by single-flight:42:ab for 91s"
+        );
     }
 
     #[test]

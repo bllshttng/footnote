@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::paths::AgentsHome;
+use crate::stuck_work::Finding;
 use crate::tick_ledger::{ArmStatus, DaemonFacts, ProducerEvidence};
 
 /// The arm's own beat, matching its `KNOWN_ARMS` row.
@@ -102,48 +103,96 @@ pub fn tick_arm_watch(
     }
 }
 
+/// One heal-then-page pass: classify the rows, run the safe repairs, read the
+/// stuck work again, and page only what is still red. `collect` is the stuck
+/// work read and `run` executes a repair, both handed in so a test drives the
+/// whole tick. The detail leads with the heal token, so the 200-char cap never
+/// cuts it.
+#[allow(clippy::too_many_arguments)]
+pub fn tick_with_heal(
+    rows: &mut [ArmStatus],
+    install_off_main: bool,
+    heal_enabled: bool,
+    threshold_s: u64,
+    store: &Path,
+    now_unix: u64,
+    collect: impl Fn() -> Result<Vec<Finding>, String>,
+    run: &mut dyn FnMut(&str) -> bool,
+    send: impl FnOnce(&str, &str) -> bool,
+) -> WatchOutcome {
+    let (findings, mut note) = split(collect());
+    crate::arm_repair::annotate(
+        rows,
+        &crate::arm_repair::RepairFacts::new(install_off_main, &findings),
+    );
+    let heal = crate::arm_repair::heal(
+        rows,
+        &findings,
+        heal_enabled,
+        store,
+        now_unix,
+        threshold_s,
+        run,
+    );
+    let findings = if heal.contains("dead_holder:") {
+        let (again, again_note) = split(collect());
+        note = again_note;
+        again
+    } else {
+        findings
+    };
+    let mut outcome = tick_arm_watch(rows, &findings, threshold_s, store, now_unix, send);
+    let mut detail = heal;
+    for part in [Some(outcome.detail.clone()), note].into_iter().flatten() {
+        if !part.is_empty() {
+            detail.push_str("; ");
+            detail.push_str(&part);
+        }
+    }
+    outcome.detail = detail;
+    outcome
+}
+
+fn split(read: Result<Vec<Finding>, String>) -> (Vec<Finding>, Option<String>) {
+    match read {
+        Ok(found) => (found, None),
+        Err(reason) => (Vec::new(), Some(format!("stuck work unread: {reason}"))),
+    }
+}
+
 /// One body line per overdue arm, then the pointer. Lines stop when the next
 /// one would push the body past the 600-char cap; the pointer is kept
-/// whatever the truncation cuts.
+/// whatever the truncation cuts, and names how many lines it cut.
 fn notice_body(overdue: &[&ArmStatus], findings: &[crate::stuck_work::Finding]) -> String {
     const CAP: usize = 600;
-    let pointer = "fno agents status";
-    let mut body = String::new();
-    let lines = overdue
+    // Room for the `+N more: ` prefix the pointer takes when lines are cut.
+    const MORE: usize = 16;
+    let lines: Vec<String> = overdue
         .iter()
-        .map(|row| row_line(row))
-        .chain(findings.iter().map(|f| f.line.clone()));
-    for line in lines {
+        .map(|row| row.line.trim().to_string())
+        .chain(findings.iter().map(|f| f.line.clone()))
+        .collect();
+    let mut body = String::new();
+    let mut kept = 0;
+    for line in &lines {
         let sep = if body.is_empty() { "" } else { "\n" };
-        if body.len() + sep.len() + line.len() + 1 + pointer.len() > CAP {
+        if body.len() + sep.len() + line.len() + 1 + "fno agents status".len() + MORE > CAP {
             break;
         }
         body.push_str(sep);
-        body.push_str(&line);
+        body.push_str(line);
+        kept += 1;
     }
+    let pointer = match lines.len() - kept {
+        0 => "fno agents status".to_string(),
+        cut => format!("+{cut} more: fno agents status"),
+    };
     if body.is_empty() {
-        return pointer.to_string();
+        return pointer;
     }
     body.push('\n');
-    body.push_str(pointer);
+    body.push_str(&pointer);
     body
-}
-
-/// The body line for one overdue row: FAIL names the skip reason and how long the arm has been failing; STALE names the cause and the row age; UNOBSERVED says the journals hold no receipt.
-pub fn row_line(row: &ArmStatus) -> String {
-    if row.producer_evidence == ProducerEvidence::Unobserved {
-        return format!("{} UNOBSERVED no producer receipt in the journals", row.arm);
-    }
-    if row.failing {
-        let skip = row.skip_reason.as_deref().unwrap_or("unknown");
-        return match row.failing_for_s {
-            Some(s) => format!("{} FAIL {skip} for {s}s", row.arm),
-            None => format!("{} FAIL {skip} no_ok_in_journal", row.arm),
-        };
-    }
-    let cause = row.cause.as_deref().unwrap_or("stale");
-    let age = row.age_s.unwrap_or(0);
-    format!("{} STALE {cause} for {age}s", row.arm)
 }
 
 /// The overdue set: the arms failing, stale-past-cause, or receipt-less past
@@ -161,7 +210,10 @@ pub fn overdue_arms(rows: &[ArmStatus], threshold_s: u64) -> Vec<&ArmStatus> {
             let stale_overdue = row.stale
                 && matches!(
                     row.cause.as_deref(),
-                    Some("scheduler_down") | Some("tick_overdue")
+                    Some("scheduler_down")
+                        | Some("tick_overdue")
+                        | Some("upstream_down")
+                        | Some("stale_build")
                 )
                 && row.age_s.is_some_and(|s| s >= threshold_s);
             // An unobserved periodic arm has no receipt to age, so no
@@ -235,16 +287,16 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
         );
         let threshold = crate::agents_config::notify_arm_failing_after_s(&config_cwd);
         let store = crate::operator_notice::notify_signals_path();
-        let (findings, stuck_note) = match crate::stuck_work::collect(&config_cwd) {
-            Ok(found) => (found, None),
-            Err(reason) => (Vec::new(), Some(format!("stuck work unread: {reason}"))),
-        };
-        let mut outcome = tick_arm_watch(
-            &rows,
-            &findings,
+        let install_off_main = crate::arm_repair::RepairFacts::live(&[]).install_off_main;
+        let outcome = tick_with_heal(
+            &mut rows,
+            install_off_main,
+            crate::agents_config::self_heal_enabled(&config_cwd),
             threshold,
             &store,
             now_unix,
+            || crate::stuck_work::collect(&config_cwd),
+            &mut |action| crate::arm_repair::run_repair(action, &config_cwd),
             |title, body| {
                 crate::operator_notice::notify_operator_confirmed(
                     title,
@@ -253,12 +305,6 @@ pub fn maybe_tick(arm: &Arm, home: AgentsHome) {
                 )
             },
         );
-        if let Some(note) = stuck_note {
-            if !outcome.detail.is_empty() {
-                outcome.detail.push_str("; ");
-            }
-            outcome.detail.push_str(&note);
-        }
         let journal = crate::loop_runtime::Journal::new_raw(
             home.events_jsonl(),
             crate::daemon::global_events_path(&home),
