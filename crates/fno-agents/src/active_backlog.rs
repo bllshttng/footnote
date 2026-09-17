@@ -2308,7 +2308,7 @@ async fn mission_drain_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::territory::{ActiveBacklogFacts, Territory};
+    use crate::territory::Territory;
 
     fn held_facts() -> territory::ActiveBacklogFacts {
         territory::ActiveBacklogFacts {
