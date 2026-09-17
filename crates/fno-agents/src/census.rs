@@ -25,6 +25,7 @@ const TAG_REPLY: u8 = 5; // both keepers
 /// One row of the process table: the columns `ps -Ao
 /// pid,ppid,state,etime,%cpu,rss,command` reports, read without exec'ing
 /// `ps` (setuid on macOS, so a sandboxed caller's seatbelt refuses it).
+#[derive(Clone)]
 pub struct ProcRow {
     pub pid: u32,
     pub ppid: u32,
@@ -33,6 +34,20 @@ pub struct ProcRow {
     pub cpu_pct: f64,
     pub rss_kb: u64,
     pub command: String,
+}
+
+/// A synthetic row for tests that walk a table without a live census.
+#[cfg(test)]
+pub(crate) fn test_proc_row(pid: u32, ppid: u32, command: &str) -> ProcRow {
+    ProcRow {
+        pid,
+        ppid,
+        state: 'S',
+        elapsed_s: 1,
+        cpu_pct: 0.0,
+        rss_kb: 0,
+        command: command.to_string(),
+    }
 }
 
 /// The process table plus the count of pids whose row could not be read.
