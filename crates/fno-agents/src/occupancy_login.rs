@@ -158,7 +158,7 @@ mod tests {
         assert!(!is_login_shell(&[
             "/bin/bash",
             "-c",
-            "source ~/.claude/shell-snapshots/x"
+            "source ~/snapshots/x"
         ]));
         assert!(!is_login_shell(&[]));
         assert!(!is_login_shell(&[
