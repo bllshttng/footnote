@@ -38,6 +38,14 @@ fn main() {
         libc::pthread_sigmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
     }
 
+    // Shed a leaked anti-recursion pin before the runtime starts any other
+    // thread: env mutation is only sound while the process is still
+    // single-threaded, and both the tokio runtime below and the test-owner
+    // watchdog spawn threads that may read this same var concurrently.
+    if leaked_dispatch_pin(std::env::var_os("FNO_AGENTS_RUNTIME").as_deref()) {
+        std::env::remove_var("FNO_AGENTS_RUNTIME");
+    }
+
     // A failed daemon must surface a non-zero exit and a clear stderr line; it
     // must never panic silently (Silent-Failure-Hunter posture).
     let rt = match tokio::runtime::Builder::new_multi_thread()
@@ -95,10 +103,6 @@ fn main() {
             eprintln!("fno-agents-daemon: refusing to start without an owner watchdog");
             std::process::exit(3);
         }
-    }
-
-    if leaked_dispatch_pin(std::env::var_os("FNO_AGENTS_RUNTIME").as_deref()) {
-        std::env::remove_var("FNO_AGENTS_RUNTIME");
     }
 
     let home = AgentsHome::from_env();
