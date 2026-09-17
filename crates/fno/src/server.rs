@@ -5839,18 +5839,17 @@ impl Core {
         if !has_sid {
             return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId);
         }
-        if !a.exited {
-            return RowResumeDisposition::NoPane(match a.liveness {
-                agents_view::Liveness::Alive => AgentNoPaneReason::LivePaneless,
-                // BackendNotLive asserts a FALSIFIED backend, so it
-                // fires only on Dead. Unmeasured is the absent reading and
-                // says so itself - the old fold printed "backend is not live"
-                // for rows whose pane was running in this very sideline.
-                agents_view::Liveness::Dead => AgentNoPaneReason::BackendNotLive,
-                agents_view::Liveness::Unmeasured => AgentNoPaneReason::LivenessUnmeasured,
-            });
+        // Reconcile marks a row it measured gone `orphaned`, not `exited`:
+        // a positive dead reading resumes whatever the status word says.
+        match (a.exited, &a.liveness) {
+            (false, agents_view::Liveness::Alive) => {
+                RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+            }
+            (false, agents_view::Liveness::Unmeasured) => {
+                RowResumeDisposition::NoPane(AgentNoPaneReason::LivenessUnmeasured)
+            }
+            _ => RowResumeDisposition::Resumable,
         }
-        RowResumeDisposition::Resumable
     }
 
     /// The disposition with the pane join applied: a pane in THIS

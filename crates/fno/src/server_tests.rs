@@ -48,6 +48,9 @@ mod keeper_adopt_tests;
 // The pane_send fail-closed gate family.
 #[path = "server/tests/pane_send_gate_tests.rs"]
 mod pane_send_gate_tests;
+// The dead-row resume disposition family.
+#[path = "server/tests/dead_row_resume_tests.rs"]
+mod dead_row_resume_tests;
 
 #[test]
 fn node_from_argv_reads_the_wrapper_token() {
@@ -4840,25 +4843,26 @@ fn row_resume_disposition_gates_on_harness_form_and_session_id() {
             !Core::row_resumable(&live_codex),
             "a live codex row has a process writing its rollout: resuming under it opens a second writer"
         );
-    let mut backend_not_live = base();
-    backend_not_live.exited = false;
-    backend_not_live.liveness = agents_view::Liveness::Unmeasured;
+    let mut not_exited = base();
+    not_exited.exited = false;
+    not_exited.liveness = agents_view::Liveness::Unmeasured;
     assert!(
         !matches!(
-            Core::row_resume_disposition(&backend_not_live),
+            Core::row_resume_disposition(&not_exited),
             RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
         ),
         "an unmeasured backend must not be labeled live"
     );
     assert_eq!(
-        Core::row_resume_disposition(&backend_not_live),
+        Core::row_resume_disposition(&not_exited),
         RowResumeDisposition::NoPane(AgentNoPaneReason::LivenessUnmeasured),
         "(x-d401) unmeasured names the absent reading, not a dead backend"
     );
-    backend_not_live.liveness = agents_view::Liveness::Dead;
+    not_exited.liveness = agents_view::Liveness::Dead;
     assert_eq!(
-        Core::row_resume_disposition(&backend_not_live),
-        RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
+        Core::row_resume_disposition(&not_exited),
+        RowResumeDisposition::Resumable,
+        "a positive dead reading resumes whatever the status word says"
     );
     let mut agy = base();
     agy.harness = Some("agy".into());
@@ -4925,40 +4929,6 @@ fn row_resume_disposition_gates_on_harness_form_and_session_id() {
     assert_eq!(
         Core::row_resume_disposition(&no_harness),
         RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness)
-    );
-}
-
-#[test]
-fn row_resume_disposition_unmeasured_names_the_absent_reading() {
-    // (x-d401, AC2-EDGE) Liveness::Unmeasured is NOT a dead backend, and
-    // must not print one. The old fold returned BackendNotLive for every
-    // non-Alive reading, so a row whose pane was live eight rows down the
-    // same sideline told the operator its backend was not live. The
-    // narrowed BackendNotLive fires only on the falsified case (Dead).
-    let base = || RegistryAgent {
-        harness_session_id: Some("01a027ad".into()),
-        harness: Some("codex".into()),
-        name: "w".into(),
-        cwd: "/w".into(),
-        exited: true,
-        liveness: agents_view::Liveness::Alive,
-        ..Default::default()
-    };
-    let mut unmeasured = base();
-    unmeasured.exited = false;
-    unmeasured.liveness = agents_view::Liveness::Unmeasured;
-    assert_eq!(
-        Core::row_resume_disposition(&unmeasured),
-        RowResumeDisposition::NoPane(AgentNoPaneReason::LivenessUnmeasured),
-        "an unmeasured backend must read as no-reading, never as dead"
-    );
-    let mut dead = base();
-    dead.exited = false;
-    dead.liveness = agents_view::Liveness::Dead;
-    assert_eq!(
-        Core::row_resume_disposition(&dead),
-        RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive),
-        "a falsified backend keeps the confident verdict"
     );
 }
 
@@ -5051,12 +5021,12 @@ fn resume_target_from_argv_parses_both_harness_forms_anchored() {
 }
 
 #[test]
-fn unbound_pane_running_a_session_makes_backend_not_live_unreachable() {
+fn unbound_pane_running_a_session_keeps_its_row_live_paneless() {
     // (x-d401, AC2-HP) A pane in this session whose argv resumes the
     // row's session id is DIRECT OBSERVATION the backend is live. The
     // row must read LivePaneless (peek, do not resume - a resume opens a
     // second writer on the live rollout), whatever the registry's
-    // liveness field says, and BackendNotLive must be unreachable.
+    // liveness field says.
     let mut core = empty_core();
     core.session_name = "main".into();
     core.shells = vec!["/bin/cat".into()];
@@ -5099,11 +5069,12 @@ fn unbound_pane_running_a_session_makes_backend_not_live_unreachable() {
         !core.row_resumable_in_session(&row),
         "a session a pane is already running must not be resumed again"
     );
-    // A pane resuming a DIFFERENT session leaves the row's own reading.
+    // A pane resuming a DIFFERENT session leaves the row's own dead
+    // reading, which resumes.
     core.panes.get_mut(&pid).unwrap().resume_target = Some("other-session".into());
     assert_eq!(
         core.row_resume_disposition_in_session(&row),
-        RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
+        RowResumeDisposition::Resumable
     );
 }
 

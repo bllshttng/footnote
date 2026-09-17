@@ -3880,11 +3880,15 @@ def _batch_resolver():
     return resolve
 
 
-def _registry_falsifier(handle: str) -> str | None:
-    """The falsifier for one ``handle``. A wrapper over
-    [`_registry_falsifiers`] so the three-key match has ONE implementation and
-    the single-handle path cannot drift from the batch one."""
-    return _registry_falsifiers([handle])[handle]
+def _truth_line(result: dict, falsifier: str | None) -> str:
+    """The human truth line. A falsified row reads dead, never its last
+    transcript state."""
+    from fno.agents.session_truth import render_truth
+
+    payload = _truth_payload(result, falsifier=falsifier)
+    if payload["reachability"] == "unreachable":
+        result = {**result, "state": "dead"}
+    return f"{render_truth(result)} [{payload['reachability']}: {payload['basis']}]"
 
 
 def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
@@ -3973,7 +3977,7 @@ def cmd_truth(
     """
     import json as _json
 
-    from fno.agents.session_truth import render_truth, resolve_session_truth
+    from fno.agents.session_truth import resolve_session_truth
 
     # Split rather than one combined test, so the positional narrows to `str`
     # for the single-handle path below without an assert standing in for the
@@ -4017,11 +4021,7 @@ def cmd_truth(
             )
         else:
             for name, result, falsifier in answers:
-                payload = _truth_payload(result, falsifier=falsifier)
-                sys.stdout.write(
-                    f"{name}: {render_truth(result)} "
-                    f"[{payload['reachability']}: {payload['basis']}]\n"
-                )
+                sys.stdout.write(f"{name}: {_truth_line(result, falsifier)}\n")
         sys.stdout.flush()
         # Always 0: an unresolvable handle is reported in its own entry, never
         # in an exit code the whole batch would have to share.
@@ -4032,12 +4032,11 @@ def cmd_truth(
         raise typer.Exit(code=2)
 
     result = resolve_session_truth(handle)
-    falsifier = _registry_falsifier(handle)
+    falsifier = _registry_falsifiers([handle])[handle]
     if json_out:
         sys.stdout.write(_json.dumps(_truth_payload(result, falsifier=falsifier)) + "\n")
     else:
-        payload = _truth_payload(result, falsifier=falsifier)
-        sys.stdout.write(f"{render_truth(result)} [{payload['reachability']}: {payload['basis']}]\n")
+        sys.stdout.write(_truth_line(result, falsifier) + "\n")
     sys.stdout.flush()
     # Both are unresolvable-handle exits (13, the lifecycle not-found code); the
     # reason distinguishes the routine miss from a crashing resolver, which

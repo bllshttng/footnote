@@ -95,7 +95,6 @@ impl Drop for ResumeProgramGuard {
     }
 }
 
-/// The session id a pane-run argv resumes: the token after
 /// The session id a pane argv is resuming, derived from the SAME declared
 /// resume form the resume spawn builds: the argv's command names a harness
 /// the capability table gives a form, the argv carries that form's literal
@@ -105,9 +104,9 @@ impl Drop for ResumeProgramGuard {
 /// file`) never parses as a resume target, and a harness the table gives no
 /// form never parses at all. `None` for a shell pane or a run with no
 /// resume form. The row-to-pane join: `row_resume_disposition_in_session`
-/// reads it so a pane visibly running a session makes `BackendNotLive`
-/// unreachable for that session's row - for EVERY declared harness, not
-/// just the two this function once hardcoded.
+/// reads it so a pane visibly running a session keeps that session's row
+/// LivePaneless - for EVERY declared harness, not just the two this
+/// function once hardcoded.
 pub(super) fn resume_target_from_argv(argv: &[String]) -> Option<String> {
     let start = super::env_assignments_start(argv).unwrap_or(0);
     let rest = &argv[start..];

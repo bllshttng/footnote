@@ -540,6 +540,7 @@ _EVIDENCE = {
     "your-move": "awaiting your reply",
     "working": "active",
     "stalled": "silent",
+    "dead": "falsified",
 }
 
 

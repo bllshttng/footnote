@@ -319,7 +319,7 @@ fn default_true() -> bool {
 /// v80: `PanePlacement.fit` serde(default), the server picks the tab; floor 58.
 /// v81: `RestoreRow.portal` (serde default), the verb fills held seats; floor 58.
 /// v82: `AgentRow.lineage_kind` (serde default), the served CHILD/PEER word;
-/// the sideline nests only CHILD rows; floor stays 58.
+/// the sideline nests only CHILD rows; `BackendNotLive` also removed here.
 pub const PROTO_VERSION: u32 = 82;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
@@ -995,10 +995,11 @@ pub struct AnchoredLayoutSpec {
 /// Why a paneless registry-backed agent cannot take the third row-action branch.
 /// The client renders this only after pane focus, daemon attach, and dead-row
 /// resume have all been ruled out. Missing fields from pre-v53 rows remain the
-/// generic compatibility notice. The enum is NOT additive-tolerant; a new
-/// variant bumps `PROTO_VERSION` (53 -> 54 for `BackendNotLive`, 56 -> 57 for
-/// `LivenessUnmeasured`) so older peers are rejected by the handshake before
-/// they decode this row.
+/// generic compatibility notice. The enum is NOT additive-tolerant; a variant
+/// added or removed bumps `PROTO_VERSION` (53 -> 54 for the v82-removed
+/// `BackendNotLive`, 56 -> 57 for `LivenessUnmeasured`, 81 -> 82 for the
+/// removal) so older peers are rejected by the handshake before they decode
+/// this row.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentNoPaneReason {
@@ -1006,11 +1007,9 @@ pub enum AgentNoPaneReason {
     MissingHarness,
     MissingSessionId,
     UnsupportedHarness,
-    BackendNotLive,
     /// (v57) The liveness reading is absent: no confirmed-dead pid and
-    /// no confirmed-live backend either. Distinct from `BackendNotLive`
-    /// because that variant asserts a falsified backend; this one says the
-    /// reading does not exist and names the check to run instead.
+    /// no confirmed-live backend. Says the reading does not exist and names
+    /// the check to run instead.
     LivenessUnmeasured,
 }
 

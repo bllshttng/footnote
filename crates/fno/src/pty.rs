@@ -625,9 +625,8 @@ impl PtyShell {
         let keeper_child = launch_keeper(
             keeper_bin, &sock_path, session, pane_id, rows, cols, cwd, argv,
         )?;
-        // Only the failure paths below consume this; a success leaves the
-        // keeper to its own lifecycle (it unlinks its socket and exits when
-        // the child does).
+        // The failure paths below kill and wait the keeper; a success hands
+        // it to a waiter thread that reaps it when it exits.
         let cleanup = |mut child: std::process::Child| {
             // SAFETY: SIGKILL to a process we just spawned and are refusing.
             unsafe {
@@ -679,7 +678,15 @@ impl PtyShell {
         let pty = wire_keeper(
             stream, child_pid, sock_path, pane_id, seed_buf, out_tx, exit_tx,
         );
-        drop(keeper_child);
+        // setsid() leaves the keeper this server's child. Only a wait reaps
+        // it; without one it stays a zombie for the server's whole life.
+        std::thread::Builder::new()
+            .name("fno-mux-keeper-waiter".into())
+            .spawn(move || {
+                let mut keeper_child = keeper_child;
+                let _ = keeper_child.wait();
+            })
+            .expect("spawn keeper waiter thread");
         Ok((PtyShell::Keeper(pty), ring))
     }
 
