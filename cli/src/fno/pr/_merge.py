@@ -61,6 +61,10 @@ POST_MERGE_RECONCILE_TIMEOUT_S = 300.0
 _MERGE_LOCK_WAIT_S = 120
 _MERGE_LOCK_POLL_S = 5
 
+#: The terminal-exemption reason prefix, and the last receipt _emit printed.
+ALREADY_TERMINAL = "PR already "
+LAST_RECEIPT: dict = {}
+
 
 def _emit(
     pr: int,
@@ -95,6 +99,7 @@ def _emit(
         "reason": reason,
         "strategy": strategy,
     }
+    LAST_RECEIPT.update(obj)
     if cleanup:
         obj["cleanup"] = cleanup
     line = json.dumps(obj, separators=(",", ":")) + "\n"
@@ -1792,23 +1797,6 @@ def _overlaps(base_paths: List[str], pr_paths: List[str]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def run_merge_for_durable_grant(
-    pr_number: int, cwd: str, timeout_s: float = 300.0
-) -> int:
-    """The watcher's internal durable-grant merge entry (returns run_merge's code).
-
-    Canonical ``run_merge`` with ``authority="durable_grant"``: the parked
-    worker's recorded receipt is the posture, and every other guard - hold,
-    in-flight review, incarnation fence, stub manifest, coverage, posture,
-    CI - runs identically. The exit code is the receipt's outcome: 0 merged,
-    2 held/skipped (retryable, no failure budget consumed), anything else a
-    failed attempt. ``timeout_s`` bounds the authorized-merge owner call.
-    """
-    return run_merge(
-        [str(int(pr_number))], cwd=cwd, authority="durable_grant", timeout_s=timeout_s
-    )
-
-
 def run_merge(
     argv: Sequence[str], cwd: Optional[str] = None, *,
     authority: str = "manifest", timeout_s: float = 300.0,
@@ -2013,7 +2001,7 @@ def run_merge(
         _emit(
             pr_number,
             "skipped",
-            f"PR already {_refs[2].lower()}; nothing to merge "
+            f"{ALREADY_TERMINAL}{_refs[2].lower()}; nothing to merge "
             "(the coverage gate protects what would merge)",
             "none",
             err=False,

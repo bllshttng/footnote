@@ -14,6 +14,10 @@
 //! grant. Config readers resolve to false on unreadable files, so an
 //! unreadable config reads `held` here where the Python original read
 //! `unknown` - both refuse, only the state word differs.
+//!
+//! The queue drops `superseded` and `done` nodes, reads each checkout's
+//! repo root and live config once, and rotates its head by the caller's
+//! tick index, so a slow head never starves the tail.
 
 use crate::agents_config;
 use crate::backlog::api::{self as backlog_api, Store as GraphStore};
@@ -24,8 +28,10 @@ use crate::king_board::scope::graph_json_path;
 use crate::paths::canonical_repo_root;
 use crate::tick_ledger::parse_rfc3339_unix;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// The verdict vocabulary. `granted` is the only state that authorizes a
 /// merge call.
@@ -366,21 +372,28 @@ pub fn repo_slug_from_pr_url(pr_url: &str) -> Option<String> {
 
 /// Which PRs a dispatch lane may execute this tick, counted over
 /// already-read entries. Pure: `root_of` and `cfg_of` are closures so tests
-/// need no filesystem.
+/// need no filesystem. `root_of` must depend only on the entry's `cwd`,
+/// because roots are memoized by that string.
 pub fn queue_from_entries(
     entries: &[Value],
     claim_of: &dyn Fn(&str) -> ClaimState,
     root_of: &dyn Fn(&Value) -> Option<PathBuf>,
     cfg_of: &dyn Fn(&Path) -> LiveConfig,
+    rotate: u64,
 ) -> Value {
     let mut candidates = 0usize;
     let mut verdicts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut roots: HashMap<String, Option<PathBuf>> = HashMap::new();
+    let configs: RefCell<HashMap<PathBuf, LiveConfig>> = RefCell::new(HashMap::new());
     let mut queue: Vec<Value> = Vec::new();
     for entry in entries {
         if !entry.is_object() {
             continue;
         }
-        if entry.get("status").and_then(Value::as_str) == Some("superseded") {
+        if matches!(
+            entry.get("status").and_then(Value::as_str),
+            Some("superseded") | Some("done")
+        ) {
             continue;
         }
         let Some(pr) = entry.get("pr_number").and_then(Value::as_i64) else {
@@ -415,11 +428,25 @@ pub fn queue_from_entries(
             *verdicts.entry(UNKNOWN).or_default() += 1;
             continue;
         };
-        let Some(root) = root_of(entry) else {
+        let cwd_key = entry
+            .get("cwd")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if !roots.contains_key(&cwd_key) {
+            roots.insert(cwd_key.clone(), root_of(entry));
+        }
+        let Some(root) = roots.get(&cwd_key).cloned().unwrap_or(None) else {
             *verdicts.entry(UNKNOWN).or_default() += 1;
             continue;
         };
-        let verdict = verdict_for_pr(entries, pr, Some(&slug), claim_of, &|| cfg_of(&root));
+        let verdict = verdict_for_pr(entries, pr, Some(&slug), claim_of, &|| {
+            configs
+                .borrow_mut()
+                .entry(root.clone())
+                .or_insert_with(|| cfg_of(&root))
+                .clone()
+        });
         *verdicts.entry(verdict.state).or_default() += 1;
         if verdict.state == GRANTED {
             let grant = verdict.grant.unwrap_or(Value::Null);
@@ -435,6 +462,10 @@ pub fn queue_from_entries(
                 },
             }));
         }
+    }
+    if !queue.is_empty() {
+        let k = (rotate % queue.len() as u64) as usize;
+        queue.rotate_left(k);
     }
     let counts = json!({
         GRANTED: verdicts.get(GRANTED).copied().unwrap_or(0),
@@ -493,22 +524,30 @@ pub fn verdict_op(rows: Result<Vec<Value>, String>, payload: &Value) -> String {
 
 /// One `grant-queue` answer over already-read rows. An `Err` rows read is an
 /// error receipt - the caller refuses its tick's merge work, it never
-/// guesses a queue.
-pub fn queue_op(rows: Result<Vec<Value>, String>) -> String {
+/// guesses a queue. The receipt carries `elapsed_ms` so the caller can see
+/// the read's cost.
+pub fn queue_op(rows: Result<Vec<Value>, String>, rotate: u64, started: Instant) -> Value {
     match rows {
-        Err(e) => json!({"error": format!("graph unreadable: {e}")}).to_string(),
-        Ok(entries) => queue_from_entries(
-            &entries,
-            &|k| claim_status(k, None).0,
-            &|entry: &Value| {
-                entry
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .and_then(|cwd| canonical_repo_root(Path::new(cwd)))
-            },
-            &live_config,
-        )
-        .to_string(),
+        Err(e) => json!({
+            "error": format!("graph unreadable: {e}"),
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        }),
+        Ok(entries) => {
+            let mut out = queue_from_entries(
+                &entries,
+                &|k| claim_status(k, None).0,
+                &|entry: &Value| {
+                    entry
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .and_then(|cwd| canonical_repo_root(Path::new(cwd)))
+                },
+                &live_config,
+                rotate,
+            );
+            out["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+            out
+        }
     }
 }
 
@@ -521,7 +560,11 @@ pub fn run_op(op: &str, payload: &Value) -> String {
             let rows = read_rows(payload);
             verdict_op(rows, payload)
         }
-        "grant-queue" => queue_op(read_rows(payload)),
+        "grant-queue" => {
+            let started = Instant::now();
+            let rotate = payload.get("rotate").and_then(Value::as_u64).unwrap_or(0);
+            queue_op(read_rows(payload), rotate, started).to_string()
+        }
         other => json!({"error": format!("unknown op {other}")}).to_string(),
     }
 }

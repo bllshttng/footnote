@@ -4791,7 +4791,7 @@ event_types:
           description: "Bounded diagnostic: the warm miss reason or the ritual receipt tail."
 
   - name: merge_grant_execution
-    description: "One attributable attempt by the PR watcher to execute a durable dispatch grant on an OPEN PR: reserved under the per-PR lock before the canonical merge core runs, then executed, held, or failed from the core's verdict. Attribution only - the merge core's own receipts carry the reasons."
+    description: "One attributable attempt by the PR watcher to execute a durable dispatch grant on an OPEN PR: reserved under the per-PR lock before the canonical merge core runs, then executed, held, or failed from the core's verdict. Held and failed rows carry the merge core's printed reason."
     sources: [daemon]
     data:
       required: [phase, actor, pr]
@@ -4819,6 +4819,9 @@ event_types:
         recorded_at:
           type: string
           description: "When the winning receipt was recorded."
+        reason:
+          type: string
+          description: "The merge core's printed reason on a held or failed attempt, at most 300 characters."
         exit_code:
           type: integer
           description: "The merge core's exit code on a failed attempt."
@@ -4834,7 +4837,7 @@ event_types:
           description: "GitHub PR number."
         reason:
           type: string
-          description: "Why this PR was skipped: 'no-checkout' (repo_dir missing/absent), 'claimed' (live node: or walker: claim)."
+          description: "Why this PR was skipped: 'no-checkout' (repo_dir missing/absent), 'claimed' (live node: or walker: claim), 'locked' (another merge holds the per-PR lock), 'no-watermark' (no watcher row), 'merged' (an overlapping tick merged it), 'parked' (retries exhausted), 'not-open' (the listing saw it merged or closed), 'execute-budget' (too little merge-phase slice left)."
 
   - name: pr_watch_dispatch_failed
     description: "A headless claude skill fired by the PR-state watcher returned an error (rc != 0, is_error:true, or non-JSON stdout). The PR will be retried on the next tick."

@@ -1212,14 +1212,14 @@ def run_execute_queue(
     notify: Callable,
     max_retries: int,
     claim: Any,
-) -> tuple[int, int]:
-    """Drain the merge phase's granted rows; returns ``(executed,
-    skipped)``. Contract: docs/architecture/pr-watch-merge-phase.md."""
+) -> dict[str, int]:
+    """Drain the merge phase's granted rows; returns executed, held, failed and
+    skipped counts that sum to len(queue). Contract: docs/architecture/pr-watch-merge-phase.md."""
+    from fno.pr import _merge
     from fno.pr_watch._state import WatermarkStore
 
-    if not queue:
-        return (0, 0)
     holder = f"pr-watch-merge:{os.getpid()}"
+    counts = {"executed": 0, "held": 0, "failed": 0, "skipped": 0}
 
     def _grant(phase: str, pr: int, cand: Any, grant: dict, **extra: Any) -> None:
         emit("merge_grant_execution",
@@ -1227,27 +1227,30 @@ def run_execute_queue(
               "node_id": cand.node_id, **extra, **grant})
 
     store = WatermarkStore(path=store_path)
-    executed = 0
-    skipped = 0
+    slowest = 0.0
     for cand, key, grant_fields in queue:
         pr = cand.pr_number
         pr_lock_key = f"pr-watch:{cand.repo_slug or 'unknown'}:{pr}"
         try:
             claim.acquire_pr_lock(pr_lock_key, holder)
         except Exception:
-            log.debug("pr-watch: PR #%d already being merged, skipping", pr)
-            skipped += 1
+            emit("pr_watch_skipped", {"pr": pr, "reason": "locked"})
+            counts["skipped"] += 1
             continue
         try:
             entry = store.get(key)
-            # A parked row never retries from the queue, and an overlapping
-            # tick's merge_dispatched keeps the first attempt the only one.
-            if not isinstance(entry, dict) or entry.get("merge_dispatched") or entry.get("parked"):
-                continue
             left = phase_seconds_left()
-            if left is not None and left < _FIRE_FLOOR_S:
-                emit("pr_watch_skipped", {"pr": pr, "reason": "execute-budget"})
-                skipped += 1
+            if not isinstance(entry, dict):
+                emit("pr_watch_skipped", {"pr": pr, "reason": "no-watermark"})
+                counts["skipped"] += 1
+                continue
+            why = ("merged" if entry.get("merge_dispatched") else "parked" if entry.get("parked")
+                   else "not-open" if entry.get("last_seen_state") == "NOT_OPEN"
+                   else "execute-budget" if left is not None and left < max(_FIRE_FLOOR_S, slowest)
+                   else None)
+            if why:
+                emit("pr_watch_skipped", {"pr": pr, "reason": why})
+                counts["skipped"] += 1
                 continue
             try:
                 prior_retries = int(entry.get("retries") or 0)
@@ -1259,27 +1262,34 @@ def run_execute_queue(
             entry["retries"] = prior_retries + 1
             store.set(key, entry)
             set_tick_phase("merge:execute")
-            from fno.pr._merge import run_merge_for_durable_grant
+            started = time.monotonic()
+            _merge.LAST_RECEIPT.clear()
             try:
-                rc = run_merge_for_durable_grant(
-                    pr, str(cand.repo_dir), timeout_s=_ritual_timeout()
-                )
+                rc = _merge.run_merge([str(pr)], cwd=str(cand.repo_dir),
+                                      authority="durable_grant",
+                                      timeout_s=_ritual_timeout())
             except Exception as exc:  # noqa: BLE001 - a crash is a failed attempt
                 log.warning("pr-watch: durable-grant merge for PR #%d crashed: %s", pr, exc)
-                rc = 1
+                rc, _merge.LAST_RECEIPT["reason"] = 1, f"crashed: {exc}"
+            slowest = max(slowest, time.monotonic() - started)
+            reason = str(_merge.LAST_RECEIPT.get("reason") or "no reason printed")[:300]
             if rc == 0:
-                executed += 1
+                counts["executed"] += 1
                 entry["merge_dispatched"] = True
                 entry["retries"] = 0
                 store.set(key, entry)
                 _grant("executed", pr, cand, grant_fields)
             elif rc == 2:
-                # Held by a canonical guard: retryable, no failure budget.
+                # Retryable, no failure budget; an already-terminal PR never retries.
+                counts["held"] += 1
                 entry["retries"] = prior_retries
+                if reason.startswith(_merge.ALREADY_TERMINAL):
+                    entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
-                _grant("held", pr, cand, grant_fields)
+                _grant("held", pr, cand, grant_fields, reason=reason)
             else:
-                _grant("failed", pr, cand, grant_fields, exit_code=rc)
+                counts["failed"] += 1
+                _grant("failed", pr, cand, grant_fields, exit_code=rc, reason=reason)
                 if prior_retries + 1 >= max_retries:
                     entry["parked"] = "retries-exhausted"
                     store.set(key, entry)
@@ -1293,7 +1303,7 @@ def run_execute_queue(
                 claim.release_pr_lock(pr_lock_key, holder)
             except Exception as exc:
                 log.warning("pr-watch: failed to release PR lock for #%d: %s", pr, exc)
-    return (executed, skipped)
+    return counts
 
 
 # ---------------------------------------------------------------------------
