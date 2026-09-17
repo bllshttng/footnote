@@ -393,7 +393,39 @@ const REVIEW_VERBS: &[&str] = &["code-review", "review", "review-changes", "sigm
 /// finds 10 of 11 review laws (it misses the one filed under a node id);
 /// adding `attest|findings|max_rounds` finds 11 of 11 with zero false
 /// positives.
-const STAGES: &[(&str, &[&str])] = &[("review", &["review", "attest", "findings", "max_rounds"])];
+const STAGES: &[(&str, &[&str])] = &[
+    ("review", &["review", "attest", "findings", "max_rounds"]),
+    (
+        "blueprint",
+        &[
+            "blueprint",
+            "plan",
+            "planning",
+            "difficulty",
+            "model",
+            "subagent",
+            "python",
+            "crate",
+            "port",
+        ],
+    ),
+    (
+        "target",
+        &[
+            "target", "execute", "worktree", "spawn", "review", "merge", "attest", "python",
+            "crate", "port",
+        ],
+    ),
+];
+
+/// The non-review verb names each stage classifies, next to REVIEW_VERBS.
+/// `/fno:execute` classifies as target: it runs a bound plan, the same
+/// governed ground. Named explicitly for the same reason REVIEW_VERBS is.
+const STAGE_VERBS: &[(&str, &str)] = &[
+    ("blueprint", "blueprint"),
+    ("target", "target"),
+    ("execute", "target"),
+];
 
 /// Normalize a skill invocation to the bare verb: strip one leading `/` or
 /// `$`, cut at the first whitespace, keep the text after the last `:`. The
@@ -411,27 +443,50 @@ fn normalize_verb(raw: &str) -> String {
     }
 }
 
-/// The stage classifier: a Skill tool call reads the skill name under the
-/// keys the harness versions use; any other event reads the prompt's first
-/// whitespace-separated token.
-fn classify_stage(hook: &Value) -> Option<&'static str> {
+/// The stage classifier's input: the raw verb-carrying token and the full
+/// text a node id may ride in (skill name plus args, or the whole prompt).
+fn stage_input(hook: &Value) -> Option<(String, String)> {
     let tool = hook.get("tool_name").and_then(Value::as_str).unwrap_or("");
-    let raw = if tool == "Skill" {
+    if tool == "Skill" {
         let input = hook.get("tool_input");
         let read = |k: &str| input.and_then(|i| i.get(k)).and_then(Value::as_str);
         let name = read("skill")
             .or_else(|| read("name"))
             .or_else(|| read("command"))?;
-        name.to_owned()
+        let args = read("args").unwrap_or("");
+        Some((name.to_owned(), format!("{name} {args}")))
     } else {
-        hook.get("prompt")
-            .and_then(Value::as_str)?
-            .split_whitespace()
-            .next()?
-            .to_owned()
-    };
+        let prompt = hook.get("prompt").and_then(Value::as_str)?;
+        let head = prompt.split_whitespace().next()?.to_owned();
+        Some((head, prompt.to_owned()))
+    }
+}
+
+/// The first node-id-shaped token in the stage input's full text, lowercased.
+/// A payload with no node id carries no node subjects to match.
+fn payload_node_id(hook: &Value) -> Option<String> {
+    let (_, text) = stage_input(hook)?;
+    text.split_whitespace()
+        .map(|t| t.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .find(|t| matches_node_id_shape(&t.to_lowercase()))
+        .map(|t| t.to_lowercase())
+}
+
+/// The stage classifier: a Skill tool call reads the skill name under the
+/// keys the harness versions use; any other event reads the prompt's first
+/// whitespace-separated token.
+fn classify_stage(hook: &Value) -> Option<&'static str> {
+    let (raw, _) = stage_input(hook)?;
     let verb = normalize_verb(&raw);
-    REVIEW_VERBS.contains(&verb.as_str()).then_some("review")
+    REVIEW_VERBS
+        .contains(&verb.as_str())
+        .then_some("review")
+        .or_else(|| {
+            STAGE_VERBS
+                .iter()
+                .find(|(v, _)| *v == verb)
+                .map(|(_, s)| *s)
+        })
 }
 
 /// The law's first sentence, split at `". "`, `"! "` or `"? "`.
@@ -456,28 +511,75 @@ fn stage_law_line(row: &Value) -> Option<String> {
     ))
 }
 
-/// The context block for a stage with laws: cap 2000 bytes, first law line
-/// always renders, overflow counted in one final line.
-fn render_stage_block(stage: &str, keywords: &[&str], index: &decision_index::Index) -> String {
-    let mut text = format!(
-        "## Law governing {stage}\n\nThese live operator rulings govern the {stage} you are starting. Act inside them. Do not re-derive them.\n"
-    );
-    let matching: Vec<String> = index
+/// Which laws a stage block lists: keyword match over `{subject} {decision}`,
+/// or the payload node's subjects (node id, epic id, project slug) named in
+/// either field - minus rows whose subject equals the node id itself (the
+/// think-inspect receipt already carries the node's own rulings).
+fn stage_matching_lines(
+    index: &decision_index::Index,
+    keywords: &[&str],
+    idents: &[String],
+    node_id: &str,
+) -> Vec<String> {
+    index
         .rows
         .iter()
+        .filter(|row| {
+            let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
+            // The node id is carried separately: `idents` is sorted, so its
+            // first element is whichever subject sorts smallest (often the
+            // project slug), never reliably the node id.
+            let node_row = !node_id.is_empty() && subject.trim().eq_ignore_ascii_case(node_id);
+            !node_row
+        })
         .filter_map(|row| {
             let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
             let decision = row.get("decision").and_then(Value::as_str).unwrap_or("");
             let haystack = format!("{subject} {decision}").to_lowercase();
-            keywords
-                .iter()
-                .any(|k| haystack.contains(k))
-                .then(|| stage_law_line(row))
-                .flatten()
+            let hit = keywords.iter().any(|k| haystack.contains(k))
+                || idents.iter().any(|i| haystack.contains(i));
+            hit.then(|| stage_law_line(row)).flatten()
         })
-        .collect();
+        .collect()
+}
+
+/// Node subjects for a stage payload that names a node: the node id itself,
+/// its epic id (the graph row's `parent`) and the project slug, read through
+/// the crate's graph read. An unreadable graph degrades to node-id-only
+/// matching; the node id alone never needs the graph.
+fn node_subject_idents(node_id: &str, graph_path: Option<&std::path::Path>) -> Vec<String> {
+    let mut idents = vec![node_id.to_lowercase()];
+    let default_path = crate::graph_get::default_graph_path();
+    let path = graph_path.unwrap_or(&default_path);
+    if graph_path.is_none() && crate::graph_get::external_backend_selected() {
+        return idents;
+    }
+    let Ok(entries) = crate::backlog::api::rows(&crate::backlog::api::Store::new(path)) else {
+        return idents;
+    };
+    if let Some(entry) = crate::graph_get::find_entry(&entries, node_id) {
+        for field in ["parent", "project"] {
+            if let Some(v) = entry.get(field).and_then(Value::as_str) {
+                let v = v.trim().to_lowercase();
+                if !v.is_empty() {
+                    idents.push(v);
+                }
+            }
+        }
+    }
+    idents.sort();
+    idents.dedup();
+    idents
+}
+
+/// The context block for a stage with laws: cap 2000 bytes, first law line
+/// always renders, overflow counted in one final line.
+fn render_stage_block(stage: &str, matching: &[String], damaged: usize) -> String {
+    let mut text = format!(
+        "## Law governing {stage}\n\nThese live operator rulings govern the {stage} you are starting. Act inside them. Do not re-derive them.\n"
+    );
     let mut rendered = 0usize;
-    for line in &matching {
+    for line in matching {
         // The first law line always renders, cap or no cap.
         if rendered > 0 && text.len() + line.len() + 1 > 2000 {
             break;
@@ -492,10 +594,10 @@ fn render_stage_block(stage: &str, keywords: &[&str], index: &decision_index::In
             "- and {remaining} more: fno backlog decisions --lane law --state live\n"
         ));
     }
-    if index.damaged > 0 {
+    if damaged > 0 {
         text.push_str(&format!(
             "{} index row(s) could not be parsed, so this list may be incomplete.\n",
-            index.damaged
+            damaged
         ));
     }
     text
@@ -504,7 +606,11 @@ fn render_stage_block(stage: &str, keywords: &[&str], index: &decision_index::In
 /// The stage answer. A readable index with zero matching laws renders
 /// nothing (`hook_output: null`), which is the correct answer for that
 /// input; a failed read is a report, never silence.
-fn stage_answer_with(req: StageRequest, path: Option<&std::path::Path>) -> Value {
+fn stage_answer_with(
+    req: StageRequest,
+    index_path: Option<&std::path::Path>,
+    graph_path: Option<&std::path::Path>,
+) -> Value {
     let stage = classify_stage(&req.hook);
     let mut hook_output = None;
     if let Some(stage_name) = stage {
@@ -513,27 +619,33 @@ fn stage_answer_with(req: StageRequest, path: Option<&std::path::Path>) -> Value
             .find(|(s, _)| *s == stage_name)
             .map(|(_, k)| *k)
             .unwrap_or(&[]);
-        let default_path = decision_index::default_state_path("decisions.jsonl");
-        let index_path = path.unwrap_or(&default_path);
+        let node_id = payload_node_id(&req.hook);
+        let idents = node_id
+            .as_deref()
+            .map(|id| node_subject_idents(id, graph_path))
+            .unwrap_or_default();
+        let default_index = decision_index::default_state_path("decisions.jsonl");
+        let index_path = index_path.unwrap_or(&default_index);
         match decision_index::live_laws(index_path) {
             Ok(index) => {
-                if index.rows.iter().any(|row| {
-                    let subject = row.get("subject").and_then(Value::as_str).unwrap_or("");
-                    let decision = row.get("decision").and_then(Value::as_str).unwrap_or("");
-                    let haystack = format!("{subject} {decision}").to_lowercase();
-                    keywords.iter().any(|k| haystack.contains(k))
-                }) {
+                let matching = stage_matching_lines(
+                    &index,
+                    keywords,
+                    &idents,
+                    node_id.as_deref().unwrap_or(""),
+                );
+                if !matching.is_empty() {
                     hook_output = Some(json!({
                         "hookSpecificOutput": {
                             "hookEventName": req.hook.get("hook_event_name").cloned().unwrap_or(Value::Null),
-                            "additionalContext": render_stage_block(stage_name, keywords, &index),
+                            "additionalContext": render_stage_block(stage_name, &matching, index.damaged),
                         }
                     }));
                 }
             }
             Err(reason) => {
                 let text = format!(
-                    "## Law governing {stage_name}\n\nThe decision index could not be read ({reason}), so the rulings that govern this review are unknown. Run fno backlog decisions --lane law --state live before you act on review policy.\n"
+                    "## Law governing {stage_name}\n\nThe decision index could not be read ({reason}), so the rulings that govern this {stage_name} are unknown. Run fno backlog decisions --lane law --state live before you act on {stage_name} policy.\n"
                 );
                 hook_output = Some(json!({
                     "hookSpecificOutput": {
@@ -712,7 +824,7 @@ pub fn run_law_match(args: &[String]) -> i32 {
             serde_json::to_string(&law_answer_with(&r, near)).expect("serializes")
         }
         MatchRequest::Stage(r) => {
-            serde_json::to_string(&stage_answer_with(r, None)).expect("serializes")
+            serde_json::to_string(&stage_answer_with(r, None, None)).expect("serializes")
         }
         MatchRequest::Validate(r) => {
             serde_json::to_string(&validate_answer(&r)).expect("serializes")
@@ -988,7 +1100,7 @@ mod tests {
                 "args": "high https://github.com/o/r/pull/1"
             }
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path));
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
         assert_eq!(answer["stage"], "review");
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -1026,7 +1138,7 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "$fno:review low"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path));
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
         assert_eq!(answer["stage"], "review");
         assert_eq!(
             answer["hook_output"]["hookSpecificOutput"]["hookEventName"],
@@ -1047,6 +1159,7 @@ mod tests {
         let answer = stage_answer_with(
             StageRequest { hook },
             Some(std::path::Path::new("/nonexistent/fno/decisions.jsonl")),
+            None,
         );
         assert_eq!(answer["stage"], "review");
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
@@ -1079,7 +1192,7 @@ mod tests {
                 "prompt": "/fno:reviewer"
             }),
         ] {
-            let answer = stage_answer_with(StageRequest { hook: hook.clone() }, Some(&path));
+            let answer = stage_answer_with(StageRequest { hook: hook.clone() }, Some(&path), None);
             assert_eq!(answer["stage"], Value::Null, "{hook}");
             assert_eq!(answer["hook_output"], Value::Null, "{hook}");
         }
@@ -1094,7 +1207,7 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:review low"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path));
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
         assert_eq!(answer["stage"], "review");
         assert_eq!(answer["hook_output"], Value::Null);
     }
@@ -1118,7 +1231,7 @@ mod tests {
             "hook_event_name": "UserPromptSubmit",
             "prompt": "/fno:review low"
         });
-        let answer = stage_answer_with(StageRequest { hook }, Some(&path));
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
         let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .expect("context present");
@@ -1262,5 +1375,171 @@ mod tests {
         // near hit of itself.
         assert!(!line.contains("near live law d-00000001"), "{line}");
         assert!(line.contains("sits near live law d-777e7d1f"), "{line}");
+    }
+
+    fn write_index(dir: &std::path::Path, rows: &[String]) -> std::path::PathBuf {
+        let path = dir.join("decisions.jsonl");
+        std::fs::write(&path, rows.join("\n") + "\n").expect("writes");
+        path
+    }
+
+    fn stage_row(id: &str, subject: &str, decision: &str) -> String {
+        format!(
+            "{{\"type\":\"operator_decision\",\"ts\":\"2026-09-12T00:00:00Z\",\
+             \"data\":{{\"decision_id\":\"{id}\",\"subject\":\"{subject}\",\
+             \"decision\":\"{decision}\",\"text\":\"x\",\"authority_source\":\"operator\"}}}}"
+        )
+    }
+
+    #[test]
+    fn ac1_blueprint_payload_surfaces_the_language_law() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_index(
+            dir.path(),
+            &[stage_row(
+                "d-b6cc1a2a",
+                "new-code-language",
+                "New code goes in crates. Existing Python is shrink-only.",
+            )],
+        );
+        let hook = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Skill",
+            "tool_input": {
+                "skill": "fno:blueprint",
+                "args": "x-aaaa"
+            }
+        });
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+        assert_eq!(answer["stage"], "blueprint");
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context present");
+        assert!(ctx.contains("Law governing blueprint"), "{ctx}");
+        assert!(ctx.contains("d-b6cc1a2a"), "{ctx}");
+    }
+
+    #[test]
+    fn ac2_epic_named_law_lists_node_subject_law_dropped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_index(
+            dir.path(),
+            &[
+                stage_row(
+                    "d-epic0001",
+                    "epic-merge-authority",
+                    "The x-bbbb epic keeps merge authority with the crown.",
+                ),
+                stage_row("d-node0001", "x-aaaa", "unfindable by topic"),
+                stage_row(
+                    "d-fnos0001",
+                    "fno",
+                    "a ruling named for the project slug stands",
+                ),
+            ],
+        );
+        let hook = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Skill",
+            "tool_input": {
+                "skill": "fno:blueprint",
+                "args": "x-aaaa"
+            }
+        });
+        // Hermetic graph fixture: the epic read must never lean on the
+        // machine's live graph.json.
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::json!({
+                "entries": [
+                    {"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}
+                ]
+            })
+            .to_string(),
+        )
+        .expect("writes");
+        let answer = stage_answer_with(StageRequest { hook }, Some(&path), Some(&graph));
+        let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("context present");
+        assert!(ctx.contains("d-epic0001"), "{ctx}");
+        assert!(
+            !ctx.contains("unfindable by topic"),
+            "node-subject row must be dropped: {ctx}"
+        );
+        assert!(
+            ctx.contains("d-fnos0001"),
+            "project-slug subject must not be dropped: {ctx}"
+        );
+    }
+
+    #[test]
+    fn ac1_target_and_execute_verbs_classify_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_index(
+            dir.path(),
+            &[stage_row(
+                "d-b6cc1a2a",
+                "new-code-language",
+                "New code goes in crates. Existing Python is shrink-only.",
+            )],
+        );
+        for hook in [
+            serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "/fno:target x-aaaa"
+            }),
+            serde_json::json!({
+                "hook_event_name": "UserPromptSubmit",
+                "prompt": "$fno:execute a-plan-path"
+            }),
+        ] {
+            let answer = stage_answer_with(StageRequest { hook }, Some(&path), None);
+            assert_eq!(answer["stage"], "target");
+            let ctx = answer["hook_output"]["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .expect("context present");
+            assert!(ctx.contains("Law governing target"), "{ctx}");
+        }
+    }
+
+    #[test]
+    fn payload_node_id_extracts_from_skill_args_or_prompt() {
+        let skill = serde_json::json!({
+            "tool_name": "Skill",
+            "tool_input": { "skill": "fno:blueprint", "args": "x-aaaa" }
+        });
+        assert_eq!(payload_node_id(&skill).as_deref(), Some("x-aaaa"));
+        let prompt = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:target x-aaaa now"
+        });
+        assert_eq!(payload_node_id(&prompt).as_deref(), Some("x-aaaa"));
+        let no_node = serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "/fno:target auto-merge \"a feature\""
+        });
+        assert_eq!(payload_node_id(&no_node), None);
+    }
+
+    #[test]
+    fn node_subject_idents_resolves_parent_and_project() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            serde_json::json!({
+                "entries": [
+                    {"id": "x-aaaa", "parent": "x-bbbb", "project": "fno"}
+                ]
+            })
+            .to_string(),
+        )
+        .expect("writes");
+        let idents = node_subject_idents("x-aaaa", Some(&graph));
+        assert_eq!(idents, vec!["fno", "x-aaaa", "x-bbbb"]);
+        let missing = node_subject_idents("x-ffff", Some(&graph));
+        assert_eq!(missing, vec!["x-ffff"]);
     }
 }
