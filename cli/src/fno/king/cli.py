@@ -304,7 +304,12 @@ def done_cmd(
             raise typer.Exit(2)
         # One member of a set crown is not a crown: vacating nothing and
         # clearing no manifest would still print a false expiry receipt.
-        live = [row for row in load_registry() if row.status not in _TERMINAL_ROW_STATUSES]
+        try:
+            rows = load_registry()
+        except Exception as exc:  # noqa: BLE001 - named, never swallowed
+            typer.echo(f"king: crown expire failed: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        live = [row for row in rows if row.status not in _TERMINAL_ROW_STATUSES]
         if not any(row.crown_scope == scope for row in live):
             for row in live:
                 if crown_answers_to(row.crown_scope, scope):
