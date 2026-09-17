@@ -132,9 +132,11 @@ Proceed to push (user has chosen not to have CI).
 ### 3. Push Branch
 
 ```bash
-# Push with upstream tracking
-git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
+# Fetch, rebase onto origin/main, preflight, push once
+fno do pr push
 ```
+
+Handle the verb's refusals like any other refusal here: exit 3 names the thing to fix (protected branch, dirty tree, a conflict that needs `fno do pr rebase`), fix and re-run; exit 2 means a CI run is in flight, wait with `fno do pr wait <n> --until settled` and re-run; exit 1 means preflight is red and the PR should not be opened yet.
 
 ### 4. Generate PR Description from Commits
 
