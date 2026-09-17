@@ -34,7 +34,7 @@ PLAN_DOC = """
 """
 
 
-def _fidelity(rows, graph=None, *, plan_doc=PLAN_DOC, summary="", diff=None):
+def _fidelity(rows, graph=None, *, plan_doc=PLAN_DOC, summary="", diff=None, deliveries=None):
     return build_plan_fidelity(
         rows,
         graph or [],
@@ -43,6 +43,7 @@ def _fidelity(rows, graph=None, *, plan_doc=PLAN_DOC, summary="", diff=None):
         read_plan_doc=lambda p: plan_doc,
         read_summary=lambda row: summary,
         read_diff=lambda pr: diff,
+        deliveries=deliveries,
     )
 
 
@@ -118,6 +119,26 @@ def test_coverage_line_reports_joined_pct():
     pf = _fidelity(rows, summary="", diff=["cli/src/fno/scoreboard/fold.py"])
     assert pf["coverage"]["planned_rows"] == 2
     assert pf["coverage"]["joined_pct"] == 50
+
+
+def test_backstop_delivery_uses_graph_node_plan_path():
+    plan_path = "/x/plan-a.md"
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
+         "phases_completed": ["think", "plan"], "plan_path": plan_path,
+         "project": "footnote", "session_id": "plan-sess", "cost_usd": 2.0},
+        {"completed": "2026-07-03T11:00:00", "termination_reason": "reconcile-backstop",
+         "project": "fno", "graph_node_id": "x-1", "pr_number": 42,
+         "session_id": "delivery-sess", "cost_usd": 6.0},
+    ]
+    graph = [{"id": "x-1", "plan_path": plan_path, "project": "fno"}]
+
+    pf = _fidelity(rows, graph=graph, diff=[], deliveries={"x-1": {"delivered": True}})
+
+    joined = [r for r in pf["results"] if r["status"] == "joined"]
+    assert len(joined) == 1
+    assert joined[0]["session_id"] == "plan-sess"
+    assert pf["coverage"]["joined_pct"] == 100
 
 
 def test_no_data_when_window_empty():
@@ -684,6 +705,45 @@ def test_compute_plan_fidelity_scopes_selection_to_this_repo(monkeypatch, tmp_pa
     assert decision["planned"] == 1
     assert decision["refused"] is True
     assert decision["unjoined"][0]["session_id"] == "s-local"
+
+
+def test_compute_plan_fidelity_keeps_backstop_delivery_in_scope(monkeypatch, tmp_path):
+    import fno.paths as paths
+    import fno.plan.fidelity as fid
+    import fno.scoreboard.fold as fold
+
+    plan = tmp_path / "plan.md"
+    plan.write_text("# plan\n")
+    rows = [
+        {"completed": "2026-07-03T10:00:00", "termination_reason": "NoWork",
+         "phases_completed": ["think", "plan"], "plan_path": str(plan),
+         "project": "footnote", "session_id": "plan-sess"},
+        {"completed": "2026-07-03T11:00:00", "termination_reason": "reconcile-backstop",
+         "project": "fno", "graph_node_id": "x-1", "pr_number": 42,
+         "session_id": "delivery-sess"},
+    ]
+    monkeypatch.setattr(paths, "_slug_from_git_remote", lambda root=None: "footnote")
+    monkeypatch.setattr(fold, "load_ledger_rows", lambda *a, **k: rows)
+    monkeypatch.setattr(
+        fid,
+        "_load_graph_nodes",
+        lambda: [{"id": "x-1", "plan_path": str(plan), "project": "fno"}],
+    )
+    monkeypatch.setattr(fid, "_read_covering_carveouts", lambda *a, **k: [])
+    monkeypatch.setattr(
+        fold,
+        "classify_deliveries",
+        lambda *a, **k: {"by_node": {"x-1": {"delivered": True}}},
+    )
+    monkeypatch.setattr(fold, "_default_read_diff", lambda pr: [])
+    monkeypatch.setattr(fold, "_default_read_summary", lambda row: "")
+    monkeypatch.setattr(fold, "_default_read_plan_doc", lambda path: plan.read_text())
+
+    decision = fid.compute_plan_fidelity(plan_path=str(plan))
+
+    assert decision["refused"] is False
+    assert decision["planned"] == 1
+    assert decision["delivered"] == 1
 
 
 def test_compute_plan_fidelity_scopes_ledger_rows_before_the_fold(monkeypatch, tmp_path):

@@ -534,6 +534,13 @@ def test_shared_serve_root_refuses_root_that_dies_after_snapshot(monkeypatch, tm
         "fno.agents.spawn_gate._pid_alive",
         lambda _pid, _start: False,
     )
+    # Keep the fixture on the unproven-death path. A host PID reuse must not
+    # change this test into the separate, proven-recycled case.
+    monkeypatch.setattr(
+        doctor_footprint,
+        "_pid_recycled",
+        lambda _pid, _start: False,
+    )
 
     assert doctor_footprint._live_shared_serve_root_pids(snapshot_pids={900}) == (
         set(),
