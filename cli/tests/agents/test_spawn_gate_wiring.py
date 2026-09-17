@@ -149,6 +149,27 @@ def test_gate_refusal_propagates_exit_code(runner, monkeypatch):
     assert not dispatched
 
 
+def test_sandbox_policy_refusal_happens_before_the_gate(
+    runner, gate_calls, tmp_path
+):
+    """A refusal after admission would leak the gate mutex; this one refuses first."""
+    calls, _ = gate_calls
+    policy = tmp_path / "policy.json"
+    policy.write_text("{}")
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn", "--name", "w1", "hi", "--harness", "claude",
+            "--substrate", "pane", "--sandbox-write-policy", str(policy),
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "--sandbox-write-policy needs the thread substrate" in result.output
+    assert calls == []
+
+
 def test_force_and_no_wait_flags_reach_the_gate(runner, gate_calls, monkeypatch):
     calls, _ = gate_calls
     _fake_created(monkeypatch)
