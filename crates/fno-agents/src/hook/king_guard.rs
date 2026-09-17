@@ -4,10 +4,11 @@
 //! row carries a crown and whose reign manifest declares shape `court` is
 //! refused Edit/Write/NotebookEdit and shell writes to source. Write-path
 //! allowlist, never delegation advice: a crowned session may author its plans
-//! dir, crown handoff doc, escalations dir, and auto-memory; anything else
-//! fail-closes. Any failure to READ (payload, registry, manifest, config)
-//! allows - the never-block contract - except escalations, whose unresolved
-//! resolver turns off only that carve-out.
+//! dir, the handoffs dir, escalations dir, auto-memory, and the vault
+//! `internal/fno` tree; anything else fail-closes. Any failure to READ
+//! (payload, registry, manifest, config) allows - the never-block contract -
+//! except escalations, whose unresolved resolver turns off only that
+//! carve-out.
 //!
 //! The one behavior change the blueprint names: a missing `fno-agents`
 //! binary now allows with one stderr line (the wrapper's business), and the
@@ -141,15 +142,16 @@ pub fn run(_args: &[String]) -> i32 {
         return allow("");
     }
 
-    // 8. Allowed roots. Plans/handoff unresolvable ALLOWS everything (the
+    // 8. Allowed roots. Plans/vault unresolvable ALLOWS everything (the
     //    never-block contract); escalations unresolved only turns off itself.
     let Some(plans_dir) = plans_content_dir(&cwd) else {
         return allow("plans resolver unresolved; allowing");
     };
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let Some(handoff) = crown_handoff_path(&cwd, home.as_deref(), crown_scope, &sid) else {
-        return allow("handoff resolver unresolved; allowing");
+    let Some(vault_fno) = vault_internal_fno(&cwd, home.as_deref()) else {
+        return allow("vault root unresolved; allowing");
     };
+    let handoffs = crate::finalize::resolve_handoffs_dir(None, None, &cwd, home.as_deref());
     let escalations = crate::escalation::dir(&cwd);
 
     // 9. Limb carve-outs (checked after the roots resolve, like the shell).
@@ -177,10 +179,15 @@ pub fn run(_args: &[String]) -> i32 {
 
     // 10. Decide: the write-path allowlist, one predicate for every tool.
     let allowed = |t: &str| {
-        in_plans(t, &cwd, &plans_dir)
-            || real_eq(t, &cwd, &handoff)
-            || in_memory(t, &cwd, home.as_deref())
-            || real_prefix(t, &cwd, &escalations)
+        write_allowed(
+            t,
+            &cwd,
+            &plans_dir,
+            &handoffs,
+            home.as_deref(),
+            &escalations,
+            &vault_fno,
+        )
     };
     let denied: Option<String> = match tool {
         "Edit" | "Write" | "NotebookEdit" => {
@@ -201,22 +208,33 @@ pub fn run(_args: &[String]) -> i32 {
         return allow("");
     };
     if mode == "warn" {
-        eprintln!("{}", deny_text(&denied, &plans_dir, &handoff, &escalations));
+        eprintln!(
+            "{}",
+            deny_text(&denied, &plans_dir, &handoffs, &escalations, &vault_fno)
+        );
         return allow("");
     }
-    let text = deny_text(&denied, &plans_dir, &handoff, &escalations);
+    let text = deny_text(&denied, &plans_dir, &handoffs, &escalations, &vault_fno);
     eprint!("{text}");
     super::emit_block(&text)
 }
 
-/// The two-line refusal, byte-identical to the shell's `_deny_text`.
-fn deny_text(target: &str, plans: &Path, handoff: &Path, escalations: &Path) -> String {
+/// The two-line refusal. The shell twin is a pure exec shim, so this text is
+/// the only copy.
+fn deny_text(
+    target: &str,
+    plans: &Path,
+    handoffs: &Path,
+    escalations: &Path,
+    vault_fno: &Path,
+) -> String {
     format!(
         "king-delegation-guard: write target '{target}' is outside the allowed roots for a crowned session.\n\
-         Allowed roots: the plans directory ({plans}), the crown handoff doc ({handoff}), the escalations directory ({escalations}), and auto-memory ({home}/.claude/projects/*/memory/).\n",
+         Allowed roots: the plans directory ({plans}), the handoffs directory ({handoffs}), the escalations directory ({escalations}), auto-memory ({home}/.claude/projects/*/memory/), and the vault fno tree ({vault_fno}).\n",
         plans = plans.display(),
-        handoff = handoff.display(),
+        handoffs = handoffs.display(),
         escalations = escalations.display(),
+        vault_fno = vault_fno.display(),
         home = std::env::var("HOME").unwrap_or_else(|_| "~".to_string()),
     )
 }
@@ -486,54 +504,6 @@ fn plans_dir(cwd: &Path) -> Option<PathBuf> {
     Some(expanded)
 }
 
-/// The crown handoff doc path (paths_cli.py `handoff` port): the scope form
-/// names `crown-<sanitized scope>` and takes the NEWEST existing `*-<key>.md`
-/// in the handoffs dir; the session form is today's `<YYYYMMDD>-<first 8 of
-/// the sid>.md`. Unresolvable dir -> None (the caller allows).
-fn crown_handoff_path(cwd: &Path, home: Option<&Path>, scope: &str, sid: &str) -> Option<PathBuf> {
-    let dir = crate::finalize::resolve_handoffs_dir(None, None, cwd, home);
-    let today = chrono::Local::now().format("%Y%m%d");
-    if !scope.is_empty() {
-        let key = format!("crown-{}", crate::king_checkin::sanitize_scope_key(scope));
-        // The glob `*-<key>.md` takes ANY prefix, empty included; a bare
-        // `sibling<key>.md` without the separator must not match.
-        let newest: Option<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| {
-                let p = entry.path();
-                let name = p.file_name()?.to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    return None;
-                }
-                let stem = name.strip_suffix(".md")?;
-                if !stem
-                    .strip_suffix(&key)
-                    .is_none_or(|head| head.ends_with('-') || head.is_empty())
-                {
-                    return None;
-                }
-                let mtime = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                Some((p, mtime))
-            })
-            .fold(None, |best, (p, mtime)| match best {
-                best @ Some((_, b)) if mtime <= b => best,
-                _ => Some((p, mtime)),
-            });
-        return Some(
-            newest
-                .map(|(p, _)| p)
-                .unwrap_or_else(|| dir.join(format!("{today}-{key}.md"))),
-        );
-    }
-    let key: String = sid.chars().take(8).collect();
-    Some(dir.join(format!("{today}-{key}.md")))
-}
-
 // ── Containment ──────────────────────────────────────────────────────────────
 
 /// Lexical normalization (Python's os.path.normpath): collapse //, . and ..
@@ -598,10 +568,38 @@ fn in_plans(p: &str, cwd: &Path, plans: &Path) -> bool {
     p == d || p.starts_with(&d)
 }
 
-/// Handoff containment: realpath equality (the vault symlink must not split
-/// the two spellings).
-fn real_eq(p: &str, cwd: &Path, target: &Path) -> bool {
-    real_of(p, cwd) == real_of(&target.to_string_lossy(), cwd)
+/// `<vault>/internal/fno` (the `escalation::dir_with_home` shape): obsidian
+/// vault resolved from the project then global config, mapped to its root.
+/// The ruling of 2026-09-17: the vault is not source - every folder under
+/// `internal/fno` is a king's to write. None -> the caller ALLOWS everything
+/// (never-block).
+fn vault_internal_fno(cwd: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = vec![cwd.join(".fno/config.toml")];
+    if let Some(h) = home {
+        candidates.push(h.join(".fno/config.toml"));
+    }
+    let vault = crate::finalize::resolve_obsidian_vault(&candidates)?;
+    let vroot = crate::finalize::resolve_vault_root(&vault, home)?;
+    Some(vroot.join("internal").join("fno"))
+}
+
+/// The step-10 allowlist predicate: plans dir, the whole handoffs dir (no
+/// mtime-selected single file), auto-memory, escalations, and the vault
+/// `internal/fno` tree. Everything else - SOURCE - denies.
+fn write_allowed(
+    t: &str,
+    cwd: &Path,
+    plans: &Path,
+    handoffs: &Path,
+    home: Option<&Path>,
+    escalations: &Path,
+    vault_fno: &Path,
+) -> bool {
+    in_plans(t, cwd, plans)
+        || real_prefix(t, cwd, handoffs)
+        || in_memory(t, cwd, home)
+        || real_prefix(t, cwd, escalations)
+        || real_prefix(t, cwd, vault_fno)
 }
 
 /// Escalations containment: realpath prefix.
@@ -813,5 +811,107 @@ mod tests {
         let km = crate::loopcheck::parse_king_manifest(content).expect("parses");
         assert_eq!(km.shape, "court");
         assert_eq!(km.harness_session_id.as_deref(), Some("sess-king"));
+    }
+
+    /// Fixture roots: a vault tree plus an unrelated source repo, so the two
+    /// acceptance shapes have somewhere real to resolve against.
+    struct Roots {
+        base: PathBuf,
+        home: PathBuf,
+        vault_fno: PathBuf,
+        handoffs: PathBuf,
+        plans: PathBuf,
+        escalations: PathBuf,
+    }
+
+    fn roots(tag: &str) -> Roots {
+        let base = std::env::temp_dir().join(format!("kgd-{tag}-{}", std::process::id()));
+        let home = base.join("home");
+        let vault_fno = base.join("c3po/internal/fno");
+        let escalations = vault_fno.join("escalations");
+        let handoffs = vault_fno.join("handoffs");
+        Roots {
+            handoffs,
+            vault_fno,
+            plans: base.join("repo/.fno/plans"),
+            escalations,
+            home,
+            base,
+        }
+    }
+
+    fn allowed(r: &Roots, target: &Path) -> bool {
+        write_allowed(
+            &target.to_string_lossy(),
+            &r.base,
+            &r.plans,
+            &r.handoffs,
+            Some(&r.home),
+            &r.escalations,
+            &r.vault_fno,
+        )
+    }
+
+    #[test]
+    fn vault_internal_fno_analysis_write_is_allowed() {
+        // Acceptance 1: every folder under internal/fno is a king's to
+        // write; the vault is not source.
+        let r = roots("analysis");
+        assert!(allowed(&r, &r.vault_fno.join("analysis/foo.json")));
+        assert!(allowed(&r, &r.vault_fno.join("backlog/x.md")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn source_write_still_denied() {
+        // Acceptance 2: the guard exists to stop a king writing SOURCE.
+        let r = roots("source");
+        assert!(!allowed(&r, &r.base.join("repo/cli/src/fno/anything.py")));
+        assert!(!allowed(
+            &r,
+            &r.base.join("repo/crates/fno-agents/src/lib.rs")
+        ));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn handoffs_dir_sibling_allowed_without_mtime_selection() {
+        // Any file in the handoffs dir, including one newer than the "crown"
+        // doc, is allowed - the arm is a dir prefix, not one mtime-picked file.
+        let r = roots("handoffs");
+        assert!(allowed(
+            &r,
+            &r.handoffs.join("20990101-anyone-crown-fno.md")
+        ));
+        assert!(allowed(&r, &r.handoffs.join("notes.md")));
+        let _ = std::fs::remove_dir_all(&r.base);
+    }
+
+    #[test]
+    fn memory_still_allowed_and_vault_unresolvable_returns_none() {
+        let r = roots("memory");
+        assert!(allowed(
+            &r,
+            &r.home.join(".claude/projects/-proj/memory/note.md")
+        ));
+        // Never-block: no config anywhere -> None, and the caller allows.
+        let bare = std::env::temp_dir().join(format!("kgd-bare-{}", std::process::id()));
+        assert_eq!(vault_internal_fno(&bare, Some(&bare),), None);
+        let _ = std::fs::remove_dir_all(&r.base);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    #[test]
+    fn vault_internal_fno_resolves_from_config() {
+        let r = roots("resolve");
+        let cfg = r.home.join(".fno/config.toml");
+        let _ = std::fs::create_dir_all(cfg.parent().unwrap());
+        let _ = std::fs::write(&cfg, "[obsidian]\nenabled = true\nvault = \"c3po\"\n");
+        assert_eq!(
+            vault_internal_fno(&r.base, Some(&r.home)),
+            // A bare vault name maps to ~/c3po (paths.vault_root's rule).
+            Some(r.home.join("c3po/internal/fno"))
+        );
+        let _ = std::fs::remove_dir_all(&r.base);
     }
 }
