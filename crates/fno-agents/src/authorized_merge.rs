@@ -393,19 +393,25 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                             }
                         }
                         Ok(mut holder) => {
-                            // A holder that merged, closed, or went red frees
-                            // its slot now instead of waiting out the TTL.
+                            // A holder that merged, closed, went red, or took
+                            // a dispatch hold frees its slot now instead of
+                            // waiting out the TTL. The hold read is fail_open:
+                            // evicting on an unreadable read would collapse the
+                            // ordering the slot exists to keep.
                             if let Some(m) = holder {
                                 if m != n {
-                                    let stale_holder = match probes.pr_facts(cwd, Some(m)) {
-                                        Ok(holder_facts) => {
-                                            is_terminal_state(&holder_facts.state)
-                                                || probes.checks_verdict(cwd, m) == "red"
-                                        }
-                                        // Unreadable holder PR keeps the slot;
-                                        // the TTL bounds it.
-                                        Err(_) => false,
-                                    };
+                                    let holder_held =
+                                        probes.dispatch_hold(cwd, m).fail_open().is_some();
+                                    let stale_holder = holder_held
+                                        || match probes.pr_facts(cwd, Some(m)) {
+                                            Ok(holder_facts) => {
+                                                is_terminal_state(&holder_facts.state)
+                                                    || probes.checks_verdict(cwd, m) == "red"
+                                            }
+                                            // Unreadable holder PR keeps the
+                                            // slot; the TTL bounds it.
+                                            Err(_) => false,
+                                        };
                                     if stale_holder {
                                         probes.release_slot(cwd, &facts.base_ref, m);
                                         holder = None;
@@ -419,7 +425,7 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                             "{ci}merge_slot_held: PR {m} holds the merge slot; \
                                              PR {n} waits so PR {m}'s rebased CI stays current; \
                                              the slot frees when PR {m} merges, closes, goes red, \
-                                             or its {ttl}m lease ends",
+                                             takes a dispatch hold, or its {ttl}m lease ends",
                                             ci = if stale.is_some() {
                                                 "ci_base_stale; "
                                             } else {
@@ -532,17 +538,22 @@ pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
         },
         Ok(authorized) => {
             let outcome = effect(probes, request, &authorized);
-            // decide() only reaches effect() once the slot's protective job
-            // (keep this PR's rebased CI from restaling while it waits) is
-            // already done, so every terminal effect() outcome - landed,
-            // durably Failed, HeadChanged, or Unknown - releases it here
-            // rather than starving the queue for the rest of the lease. A PR
-            // that never held the slot releases nothing (holder-matched).
-            probes.release_slot(
-                request.cwd.as_path(),
-                &authorized.facts.base_ref,
-                authorized.facts.number,
-            );
+            // decide() takes the slot only under Effect::Merge, so only a
+            // Merge hands it back. Every terminal effect() outcome of a Merge
+            // - landed, durably Failed, HeadChanged, or Unknown - releases it
+            // here rather than starving the queue for the rest of the lease.
+            // An arm leaves GitHub to merge later; a slot dropped here lets a
+            // racer restale the queue the armed PR is still waiting in, and a
+            // holder that arms keeps the slot until its merge lands, which the
+            // eviction above then reads as terminal. A PR that never held the
+            // slot releases nothing (holder-matched).
+            if request.effect == Effect::Merge {
+                probes.release_slot(
+                    request.cwd.as_path(),
+                    &authorized.facts.base_ref,
+                    authorized.facts.number,
+                );
+            }
             outcome
         }
         Err(outcome) => outcome,
@@ -1409,6 +1420,9 @@ mod tests {
         /// by PR number - a holder read in the slot logic.
         other_facts: RefCell<HashMap<u64, PrFacts>>,
         other_checks: RefCell<HashMap<u64, String>>,
+        /// Dispatch holds keyed by PR, so a test can hold a holder without
+        /// holding the PR under decision.
+        other_holds: RefCell<HashMap<u64, ProbeOutcome>>,
     }
 
     fn open_facts() -> PrFacts {
@@ -1453,7 +1467,10 @@ mod tests {
         fn node_binding(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
             self.node_binding.clone().unwrap_or(ProbeOutcome::Clear)
         }
-        fn dispatch_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
+        fn dispatch_hold(&self, _cwd: &Path, pr: u64) -> ProbeOutcome {
+            if let Some(hold) = self.other_holds.borrow().get(&pr) {
+                return hold.clone();
+            }
             self.dispatch_hold.clone().unwrap_or(ProbeOutcome::Clear)
         }
         fn review_hold(&self, _cwd: &Path, _pr: u64) -> ProbeOutcome {
@@ -1684,6 +1701,113 @@ mod tests {
         assert!(outcome8.detail().contains("PR 8 now holds the merge slot"));
         assert_eq!(*fake.slot.borrow(), Some(8));
         assert_eq!(*fake.release_slot_calls.borrow(), vec![7]);
+    }
+
+    #[test]
+    fn a_holder_under_a_dispatch_hold_releases_its_slot_to_a_waiting_stale_pr() {
+        // A held holder is neither terminal nor red, so only the hold read
+        // frees it. The hold answers per PR: if the fake keyed it globally,
+        // PR 8 would refuse at the hold gate before reaching the slot logic.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            facts: Some(PrFacts {
+                number: 8,
+                head_sha: "eight".to_string(),
+                ..open_facts()
+            }),
+            covered_head: Some("eight".to_string()),
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 4 behind".to_string())),
+            ..clean()
+        };
+        fake.other_facts.borrow_mut().insert(
+            7,
+            PrFacts {
+                number: 7,
+                state: "OPEN".to_string(),
+                ..open_facts()
+            },
+        );
+        fake.other_checks
+            .borrow_mut()
+            .insert(7, "green".to_string());
+        fake.other_holds.borrow_mut().insert(
+            7,
+            ProbeOutcome::Refused("dispatch_hold: held by the crown for a queued node".to_string()),
+        );
+
+        let req8 = Request {
+            require_checks: true,
+            pr: Some(8),
+            ..request(Effect::Merge)
+        };
+        let outcome8 = run(&fake, &req8);
+        assert_eq!(outcome8.word(), "held");
+        assert!(outcome8.detail().contains("PR 8 now holds the merge slot"));
+        assert_eq!(*fake.slot.borrow(), Some(8));
+        assert_eq!(*fake.release_slot_calls.borrow(), vec![7]);
+    }
+
+    #[test]
+    fn an_inconclusive_hold_read_keeps_the_slot_with_its_holder() {
+        // The eviction hold read is fail_open: an unreadable hold must not
+        // evict, so the lease stays the bound.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            facts: Some(PrFacts {
+                number: 8,
+                head_sha: "eight".to_string(),
+                ..open_facts()
+            }),
+            covered_head: Some("eight".to_string()),
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 4 behind".to_string())),
+            ..clean()
+        };
+        fake.other_facts.borrow_mut().insert(
+            7,
+            PrFacts {
+                number: 7,
+                state: "OPEN".to_string(),
+                ..open_facts()
+            },
+        );
+        fake.other_checks
+            .borrow_mut()
+            .insert(7, "green".to_string());
+        fake.other_holds.borrow_mut().insert(
+            7,
+            ProbeOutcome::Inconclusive("hold-check could not run".to_string()),
+        );
+
+        let req8 = Request {
+            require_checks: true,
+            pr: Some(8),
+            ..request(Effect::Merge)
+        };
+        let outcome8 = run(&fake, &req8);
+        assert_eq!(outcome8.word(), "held");
+        assert!(outcome8.detail().contains("merge_slot_held"));
+        assert_eq!(*fake.slot.borrow(), Some(7));
+        assert!(fake.release_slot_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn an_arm_never_releases_the_slot() {
+        // decide() takes the slot only under Effect::Merge, so the release in
+        // run() belongs to the same effect: an armed holder keeps the slot
+        // until its merge lands, which the eviction then reads as terminal.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            ..clean()
+        };
+        let req = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Arm)
+        };
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "armed");
+        assert!(fake.release_slot_calls.borrow().is_empty());
+        assert_eq!(*fake.slot.borrow(), Some(7));
     }
 
     #[test]
