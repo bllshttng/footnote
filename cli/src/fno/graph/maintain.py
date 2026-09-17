@@ -2182,7 +2182,7 @@ def abandoned_leg(entries, claimed, graph_path, apply):
         for e in entries:
             nid = e.get("id") if isinstance(e, dict) else None
             if isinstance(nid, str) and any(is_open_do_row(r) for r in e.get("sessions") or []):
-                names = [w.get("name") for w in classify_workers(reading.workers_on(nid))[0]]
+                names = [str(w.get("name")) for w in classify_workers(reading.workers_on(nid))[0]]
                 if names:
                     engaged_on[nid] = names
         rows = detect_abandoned_do_rows(
