@@ -270,7 +270,7 @@ pub(crate) fn managed_bases(root: &Path, trees: &[PathBuf]) -> Vec<PathBuf> {
     if base == fno_base {
         return reject(&mut bases);
     }
-    if trees.iter().any(|tree| base.starts_with(tree)) {
+    if trees.iter().any(|tree| phys(base).starts_with(phys(tree))) {
         return reject(&mut bases);
     }
     bases.push(base.to_path_buf());
@@ -1033,6 +1033,8 @@ mod tests {
 
         let found = cargo_bin();
 
+        // Restore before asserting: a panicking assert must not leak the
+        // mutated env into the later tests this lock serializes.
         std::env::set_var("PATH", &real_path);
         std::env::remove_var("CARGO_HOME");
         std::env::remove_var("CBD_FB");

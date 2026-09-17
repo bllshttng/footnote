@@ -213,30 +213,3 @@ def test_ppid_walk_ignores_nonpositive_and_self(pid):
     procs = {30: row(30, pid, SPARE_ARGV)}
     hits = by_pid(run([30], procs))
     assert (hits[30].verdict, hits[30].action) == ("holds", "keep")
-
-
-def test_holds_and_inert_vocabularies():
-    """The sweep bridge matches on these exact words; pin them."""
-    import worktree_occupancy as m
-
-    assert {m.HOLDS, m.INERT} == {"holds", "inert"}
-    assert {m.KEEP, m.TERMINATE, m.RETIRE} == {"keep", "terminate", "retire"}
-
-
-def test_no_registry_or_cwd_read_in_module():
-    """Verify step 6: the only cwd/registry mentions are the trap comment."""
-    bad = []
-    for i, line in enumerate(SCRIPT.read_text().splitlines(), 1):
-        if '"cwd"' in line or ".cwd" in line or "registry" in line.lower():
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            bad.append((i, stripped))
-    assert bad == [], bad
-
-
-@pytest.mark.parametrize("pid", [1, 0, -1])
-def test_ppid_walk_ignores_nonpositive_and_self(pid):
-    procs = {30: row(30, pid, SPARE_ARGV)}
-    hits = by_pid(run([30], procs))
-    assert (hits[30].verdict, hits[30].action) == ("holds", "keep")
