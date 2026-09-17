@@ -1057,13 +1057,7 @@ pub fn maybe_retirement_sweep(
         };
         let roster_detail = if scope_off {
             "off".to_string()
-        } else if !roster.kept.is_empty()
-            && roster.retired.is_empty()
-            && roster
-                .kept
-                .iter()
-                .all(|j| j.reason.contains("roster unreadable"))
-        {
+        } else if roster.instrument_unread {
             "unreadable".to_string()
         } else {
             format!(
@@ -1493,6 +1487,7 @@ mod tests {
         _scope: crate::agents_config::RosterScope,
     ) -> crate::roster_reap::RosterReapSummary {
         crate::roster_reap::RosterReapSummary {
+            instrument_unread: true,
             kept: vec![crate::roster_reap::RosterJudgement {
                 short_id: String::new(),
                 node: None,

@@ -31,10 +31,10 @@
 //! (the default) is the chain above, `all` widens to rows fno itself
 //! spawned (sessions or registry provenance) whose work is open. The rule
 //! under every value is positive: an unowned session retires only on an
-//! fno-ownership marker - provenance through the sessions join or the
-//! registry's stored node field, or a reap receipt an earlier retirement
-//! staged for the same session (the leaked-retirement class: the sweep
-//! that leaked a session is the sweep that staged its receipt). A name
+//! fno-ownership marker - a sessions[] row fno wrote, or a reap receipt
+//! an earlier retirement staged for the same session (the
+//! leaked-retirement class: the sweep that leaked a session is the sweep
+//! that staged its receipt). A name
 //! pattern or a transcript mention is exactly how a hand-started session
 //! acquires a phantom node, so weak provenance keeps. An adopted registry
 //! row is a healer's or `fno agents adopt`'s note about a session, not
@@ -75,6 +75,10 @@ pub struct RosterReapSummary {
     pub deduped: usize,
     /// Rows the fno registry still names: the registry sweep's business.
     pub kept_owned: usize,
+    /// An instrument this pass could not read (the claude roster
+    /// enumeration, or the fno registry). Everything was kept, and the
+    /// tick detail names the failed read instead of counting keeps.
+    pub instrument_unread: bool,
     pub kept: Vec<RosterJudgement>,
     pub retired: Vec<RosterJudgement>,
     /// Apply-mode removals whose typed outcome did not confirm: named,
@@ -178,6 +182,7 @@ pub(crate) fn run(
             if rows.is_empty() {
                 // The enumeration failed outright: keep everything. A sweep
                 // that cannot see the roster removes nothing.
+                summary.instrument_unread = true;
                 summary.kept = warnings
                     .iter()
                     .map(|w| judgement("", None, format!("roster unreadable: {w}"), false))
@@ -322,11 +327,11 @@ pub(crate) fn run(
             .source
             .map(|s| s.as_str())
             .unwrap_or("sessions");
-        // The fno-ownership marker: provenance through the sessions join or
-        // the registry's stored node field - the two joins fno writes - or
-        // a reap receipt an earlier retirement staged for this session (the
-        // same build_reap_receipt plus path-exists pair `write_receipt`
-        // uses). A name pattern or a transcript mention is exactly how a
+        // The fno-ownership marker: a sessions[] row fno wrote, or a reap
+        // receipt an earlier retirement staged for this session (the same
+        // `<harness>-<session id>` key `write_receipt` files under - a
+        // stat, not a receipt build, which would walk the transcript store
+        // per row). A name pattern or a transcript mention is exactly how a
         // hand-started session acquires a phantom node, so weak provenance
         // is not a marker. Checked only where a retirement is possible.
         let strong_source = matches!(
@@ -335,8 +340,13 @@ pub(crate) fn run(
                 | Some(crate::node_route::NodeSource::Registry)
         );
         let receipt_marker = || {
-            crate::receipt::build_reap_receipt(&entry, None)
-                .is_ok_and(|r| crate::receipt::reap_receipt_path(home, &r).exists())
+            entry
+                .harness_session_id
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .is_some_and(|sid| {
+                    crate::receipt::reap_receipt_path_for(home, entry.harness_name(), sid).exists()
+                })
         };
         // the terminal read hoisted out of the Open arm. Every row
         // here is claude by construction, so `row.state` is in hand, and
@@ -598,7 +608,23 @@ pub fn roster_reap(
     dry_run: bool,
 ) -> RosterReapSummary {
     let roster = crate::claude_roster::read_all_agents_union();
-    let registry = crate::state::load_registry(&home.registry_json()).unwrap_or_default();
+    let registry = match crate::state::load_registry(&home.registry_json()) {
+        Ok(registry) => registry,
+        Err(e) => {
+            // The same fail-closed posture the registry sweep holds: a
+            // registry that cannot be read cannot prove that none of its
+            // rows owns a session, so this sweep removes nothing.
+            let mut summary = RosterReapSummary::default();
+            summary.instrument_unread = true;
+            summary.kept = vec![judgement(
+                "",
+                None,
+                format!("registry unreadable: {e}"),
+                false,
+            )];
+            return summary;
+        }
+    };
     let store = std::cell::RefCell::new(crate::gc_inventory::HarnessStoreIndex::default());
     run(
         home,

@@ -1168,7 +1168,7 @@ fn an_adopted_corpse_absent_from_a_known_roster_retires() {
     std::fs::remove_dir_all(home.root()).ok();
 }
 
-/// The roster sweep's second tick (x-6b61 AC2-HP): once the roster sweep has
+/// The roster sweep's second tick (AC2-HP): once the roster sweep has
 /// removed the session, the adopted row is absent from a known roster that
 /// still lists OTHER sessions - positive absence, not an empty read - and
 /// the registry sweep retires it through `origin_corpse`. `kept_not_spawn`
