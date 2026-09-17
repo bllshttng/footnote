@@ -119,7 +119,7 @@ FIELD_META: dict[str, Meta] = {
     "backlog.maintain.max_failed_attempts": Meta("advanced", "Consecutive failures before a node auto-defers."),
     "backlog.maintain.validity_days": Meta("advanced", "Age (days) before a stale idea enters the validity sweep."),
     "backlog.maintain.validity_batch_size": Meta("advanced", "Oldest-first validity-sweep batch size (clamped to 100)."),
-    "backlog.maintain.abandoned_do_row_hours": Meta("advanced", "Hours before `maintain --apply` reaps an open do row: its session transcript-quiet and provably gone, or the row itself idle with no reachable worker on its node."),
+    "backlog.maintain.abandoned_do_row_hours": Meta("advanced", "Idle hours before `maintain --apply` and `requeue` settle an open do row with no live claim and no reachable worker on its node."),
     "backlog.maintain.budget_seconds": Meta("advanced", "Wall-clock budget (seconds) for one `fno backlog maintain` pass; a short run exits 4 with a partial receipt naming the leg it stopped in."),
     "backlog.staleness_days": Meta(
         "advanced",

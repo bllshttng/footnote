@@ -202,6 +202,9 @@ def _unclaim_node(task_id: str) -> None:
 
 def cmd_requeue(node: str, *, json_out: bool = False) -> None:
     """Return a node wedged ``in_progress`` by a dead worker to the queue."""
+    from datetime import datetime, timezone
+
+    from fno.graph.maintain import abandoned_do_rows, do_row_idle_s
     from fno.agents.reachability import REACHABLE, classify_reachability, inference_samples
     from fno.agents.session_truth import _humanize_age, resolve_session_truth
     from fno.claims.core import claim_status
@@ -245,18 +248,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         typer.echo(f"requeue: claim {key} reads {state}{basis_note}{holder_note}; only {' or '.join(_REQUEUEABLE_CLAIM_STATES)} may requeue{grace_note}.", err=True)
         raise typer.Exit(code=3)
 
-    from datetime import datetime, timezone
-
-    from fno.graph.maintain import do_row_idle_s
-
     now = datetime.now(timezone.utc)
-    try:
-        from fno.config import load_settings
-
-        bound_h = load_settings().backlog.maintain.abandoned_do_row_hours
-    except Exception:
-        bound_h = 24
-    reading = None
     open_rows = [r for r in (row.get("sessions") or []) if is_open_do_row(r)]
     pairs = [(r, resolve_session_truth(r.get("session_id") or "")) for r in open_rows]
     for r, truth in pairs:
@@ -271,31 +263,19 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         )
         if reach.verdict != REACHABLE:
             continue
-        # A live session proves only that the session lives. A row idle past
-        # the bound settles unless a REACHABLE worker is on this node.
-        idle = do_row_idle_s(row, r, now.timestamp())
-        if idle is not None and idle > bound_h * 3600:
-            from fno.claims import roster
-
-            reading = reading or roster.read_roster(require_live_probe=False)
-            if not reading.consulted:
-                typer.echo(f"requeue: roster unread ({reading.reason}); cannot rule out a worker on {node_id}.", err=True)
-                raise typer.Exit(code=3)
-            engaged = [w.get("name") for w in roster.classify_workers(reading.workers_on(node_id))[0]]
-            if not engaged:
-                continue
-            typer.echo(f"requeue: reachable worker {', '.join(map(str, engaged))} is on {node_id}; the idle do row stays.", err=True)
-            raise typer.Exit(code=3)
+        try:  # A live session proves only that it lives: the row's idle clock decides, as in the daily sweep.
+            why = next((a.reason for a in abandoned_do_rows([{**row, "locked_by": None}], set()) if a.session_id == r.get("session_id") and a.verdict == "held"), None)
+        except Exception as exc:  # noqa: BLE001 - an unread roster refuses
+            why = f"cannot rule out a worker on {node_id}: {exc}"
+        if why is None:
+            continue
         # reap-open is NOT named here: this worker reads reachable, so a
         # death claim would be false. The owner's honest self-close is.
-        idle_note = "unmeasured" if idle is None else _humanize_age(idle).strip()
         typer.echo(
             f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
             "a reachable worker still owns the do window. If that session is "
             f"yours and has stopped this node: fno backlog session add {node_id} "
-            f"--phase do --ended-at {now.strftime('%Y-%m-%dT%H:%M:%SZ')}. "
-            f"Row idle {idle_note}; requeue settles it once idle passes {bound_h}h "
-            "with no reachable worker on the node.",
+            f"--phase do --ended-at {now.strftime('%Y-%m-%dT%H:%M:%SZ')}. The do row stays: {why}.",
             err=True,
         )
         raise typer.Exit(code=3)

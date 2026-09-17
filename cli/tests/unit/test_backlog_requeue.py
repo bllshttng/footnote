@@ -98,6 +98,14 @@ def _dead_truth(monkeypatch, state="stalled", age_s=18000, observed=None) -> Non
     )
 
 
+@pytest.fixture(autouse=True)
+def _quiet_roster(monkeypatch):
+    """No unit test reads the live fleet: a consulted, empty roster by default."""
+    from fno.claims import roster
+
+    monkeypatch.setattr(roster, "read_roster", lambda **_kw: roster.RosterReading(True, 0, {}))
+
+
 def _started_ago(seconds: int) -> str:
     from datetime import datetime, timedelta, timezone
 
@@ -510,7 +518,7 @@ def test_requeue_reachable_refusal_names_its_clock(tmp_graph, claims_root, monke
     result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
     assert result.exit_code == 3, _out(result)
     assert f"fno backlog session add {NODE_ID} --phase do --ended-at" in _out(result)
-    assert "requeue settles it once idle passes 24h" in _out(result)
+    assert "The do row stays: row idle 0h, inside the 24h bound" in _out(result)
 
 
 def test_requeue_refuses_an_idle_row_when_the_roster_is_unread(tmp_graph, claims_root, monkeypatch):
