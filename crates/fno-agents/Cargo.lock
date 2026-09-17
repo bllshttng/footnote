@@ -561,6 +561,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "crossterm",
+ "fno-event-store",
  "libc",
  "portable-pty",
  "regex",
@@ -585,6 +586,7 @@ dependencies = [
  "clap",
  "crossterm",
  "fno",
+ "fno-event-store",
  "futures-util",
  "getrandom 0.3.4",
  "libc",
@@ -603,6 +605,18 @@ dependencies = [
  "tokio-tungstenite",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "fno-event-store"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

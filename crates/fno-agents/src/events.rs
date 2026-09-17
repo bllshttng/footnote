@@ -42,35 +42,9 @@ pub const ROTATE_AT_BYTES: u64 = 8 * 1024 * 1024;
 /// Sibling journal suffix for ephemeral-class rows. The Python
 /// `fno.events` module declares the same string; a parity test
 /// (`cli/tests/events/test_ephemeral_set_parity.py`) holds the two equal so
-/// both languages write the same sibling file.
-pub const EPHEMERAL_SUFFIX: &str = ".ephemeral";
-
-/// Event types the schema declares `retention: ephemeral`. These are
-/// routed to the `.ephemeral` sibling journal at the write boundary so a
-/// high-cadence gauge (mux_pane_counters: 30s samples, ~5KB a row) cannot
-/// consume the durable journal's rotation budget. Kept equal to
-/// `cli/src/fno/events/schema.yaml` by the same parity test; flip the class in
-/// both places or the two write boundaries route differently.
-pub const EPHEMERAL_EVENT_TYPES: &[&str] = &[
-    "claim_acquired",
-    "claim_clock_skew_rejected",
-    "claim_force_overridden",
-    "claim_idempotent_reacquired",
-    "claim_rebound",
-    "claim_refreshed",
-    "claim_released",
-    "claim_stale_reclaimed",
-    "graph_tx_conflict",
-    "human_touch",
-    "mux_pane_counters",
-    "orphan_reap_sweep",
-    "single_flight_gate",
-];
-
-/// Whether an event kind belongs to the schema-declared ephemeral class.
-pub fn is_ephemeral_event(kind: &str) -> bool {
-    EPHEMERAL_EVENT_TYPES.contains(&kind)
-}
+/// both languages write the same sibling file. Owned by the
+/// `fno-event-store` crate; re-exported here for the write boundary.
+pub use fno_event_store::{is_ephemeral_event, EPHEMERAL_EVENT_TYPES, EPHEMERAL_SUFFIX};
 
 /// Errors the emitter surfaces to its caller. Emission failures are logged by
 /// the daemon rather than aborting the operation that triggered them: a missing
