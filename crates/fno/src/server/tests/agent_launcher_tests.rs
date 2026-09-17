@@ -27,7 +27,7 @@ async fn agent_launch_refuses_pre_birth_and_settles_the_desk() {
     // A nonexistent project path: refused BEFORE any effect - no spawn task
     // ever runs, so no AgentLaunchUpdate can arrive on the core channel.
     core.agent_launch(1, launch_req(1, "/definitely/not/a/dir/", "claude"));
-    let state = core.launch_desk.settled_state(1);
+    let state = core.launch_desk.settled_state(1, 1);
     match state {
         Some(crate::proto::agent_launch::LaunchState::Refused { reason }) => {
             assert!(reason.contains("does not exist"), "reason: {reason}");
@@ -55,7 +55,7 @@ async fn duplicate_request_id_replays_without_a_second_attempt() {
     // The second submission hit the finished map and replayed; the desk
     // still holds exactly one terminal state for the id.
     assert!(matches!(
-        core.launch_desk.settled_state(1),
+        core.launch_desk.settled_state(1, 1),
         Some(crate::proto::agent_launch::LaunchState::Refused { .. })
     ));
     drop(out_tx);

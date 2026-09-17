@@ -424,3 +424,85 @@ fn paint_dock_clips_to_width_and_height() {
     assert_eq!(cells[11].c, ' ', "beyond text_w untouched");
     assert_eq!(cells[0].c, ' ', "row 0 untouched");
 }
+
+/// During an unresolved Unknown the Launch row is dead: Enter (and a
+/// click, which routes through the same submit gate) must not mint a
+/// second spawn attempt while the first birth is unresolved.
+#[test]
+fn launch_is_dead_while_an_unknown_outcome_blocks_retry() {
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.armed = Some(1);
+        l.phase = Phase::Submitting { request_id: 1 };
+    }
+    apply_launch_update(
+        &mut v,
+        AgentLaunchUpdate {
+            request_id: 1,
+            state: LaunchState::Unknown {
+                reason: "launch timed out".into(),
+            },
+        },
+    );
+    // Arm-released Unknown: the exact state the old gate leaked through.
+    assert_eq!(v.launcher.as_ref().unwrap().armed, None);
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Launch;
+    }
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    assert!(matches!(
+        v.launcher.as_ref().unwrap().phase,
+        Phase::Unknown { .. }
+    ));
+    assert!(sock.is_empty(), "nothing went on the wire: {sock:?}");
+}
+
+/// A Starting attempt whose update is lost must stay escapable: the
+/// Dismiss row is reachable during Submitting and returns the dock to
+/// Editing (retry then arms a fresh id, one attempt each).
+#[test]
+fn submitting_dock_offers_dismiss_and_recovers_to_editing() {
+    let mut v = view_with_launcher();
+    v.launcher_catalog = catalog(&[("claude", true, true)]);
+    sync_catalog(&mut v);
+    if let Some(l) = v.launcher.as_mut() {
+        l.armed = Some(1);
+        l.phase = Phase::Submitting { request_id: 1 };
+    }
+    // The dismiss row exists while starting.
+    let rows = v.launcher.as_ref().unwrap().render_rows(&v, 4);
+    assert!(
+        rows.iter()
+            .any(|(_, s)| s.contains("[ dismiss still starting ]")),
+        "dismiss reachable while starting: {:?}",
+        rows.iter().map(|(_, s)| s).collect::<Vec<_>>()
+    );
+    if let Some(l) = v.launcher.as_mut() {
+        l.focus = Focus::Dismiss;
+    }
+    let sock: Vec<u8> = Vec::new();
+    let mut sock = sock;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let _ = super::agent_launcher::launcher_keys(&mut v, b"\r", &mut sock).await;
+    });
+    assert!(matches!(v.launcher.as_ref().unwrap().phase, Phase::Editing));
+    assert_eq!(v.launcher.as_ref().unwrap().armed, None);
+}
+
+/// A degraded catalog re-probes on the next open instead of sticking for
+/// the session.
+#[test]
+fn degraded_catalog_reprobes_on_reopen() {
+    let mut v = plain_view();
+    v.launcher_catalog = Some(CatalogOutcome::Degraded("probe failed".into()));
+    open(&mut v);
+    assert!(v.catalog_want, "a degraded read re-arms the probe");
+}
