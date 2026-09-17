@@ -433,6 +433,7 @@ fn run_request(
     ledger: Option<&[Value]>,
     now: i64,
     seams: &RequestSeams,
+    precomputed: Option<&HashMap<String, Vec<state::RegistryEntry>>>,
 ) -> (u64, bool) {
     // 2. Doneness re-read: every named node must read done, with no recorded
     // merge_status that contradicts the merge. An ABSENT merge_status passes
@@ -472,7 +473,12 @@ fn run_request(
     // idle king reads state=done, so exclusion is by NAME, never by roster
     // state. Crowned/operator rows are settled keeps; a refusal below is a
     // HOLD - the request matched the row and must come back for it.
-    let joined = merge_cleanup_rows(home, request);
+    // The pass precomputed these exact candidates for the batched age
+    // probe; reuse them so the registry is read once per request, not twice.
+    let joined = precomputed
+        .and_then(|m| m.get(&request.request_id))
+        .cloned()
+        .unwrap_or_else(|| merge_cleanup_rows(home, request));
     let mut kept: Vec<String> = Vec::new();
     let mut rows: Vec<state::RegistryEntry> = Vec::new();
     for entry in joined {
@@ -749,6 +755,7 @@ pub(crate) fn consume_merge_cleanup_requests(
     // loop below: in-grace and expired requests never reach `finished`,
     // so their rows cost nothing to probe.
     let mut batch_entries: Vec<state::RegistryEntry> = Vec::new();
+    let mut precomputed: HashMap<String, Vec<state::RegistryEntry>> = HashMap::new();
     for root in roots {
         for request in pending.iter().filter(|r| r.repo == *root) {
             let merged_at = request.merged_at.unwrap_or(request.ts_unix);
@@ -756,12 +763,15 @@ pub(crate) fn consume_merge_cleanup_requests(
             if age < grace_secs.max(0) || age > MERGE_REAP_EXPIRY_SECS {
                 continue;
             }
+            let mut rows = Vec::new();
             for entry in merge_cleanup_rows(home, request) {
                 if entry.crown_level.is_some() || entry.origin.as_deref() == Some("operator") {
                     continue;
                 }
-                batch_entries.push(entry);
+                batch_entries.push(entry.clone());
+                rows.push(entry);
             }
+            precomputed.insert(request.request_id.clone(), rows);
         }
     }
     let batch_refs: Vec<&state::RegistryEntry> = batch_entries.iter().collect();
@@ -822,6 +832,7 @@ pub(crate) fn consume_merge_cleanup_requests(
                 ledger.as_deref(),
                 now,
                 &seams,
+                Some(&precomputed),
             );
             acted += acted_n;
             held_requests += usize::from(held);
@@ -1144,6 +1155,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 0);
         assert!(
@@ -1189,6 +1201,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 0);
         assert!(held, "a recorded non-merged status holds the request");
@@ -1232,6 +1245,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 0);
         assert!(held, "an open additional PR holds the request");
@@ -1394,6 +1408,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 2, "one row + one tree");
         assert!(!held, "the settled request completed");
@@ -1465,6 +1480,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
         let completed = events
@@ -1513,6 +1529,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 0);
         assert!(held, "an open node holds the request");
@@ -1556,6 +1573,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 1, "the row is removed, the tree is not");
         let events = std::fs::read_to_string(home.events_jsonl()).unwrap();
@@ -1579,6 +1597,7 @@ mod tests {
             None,
             1_000_001,
             &seams,
+            None,
         );
         assert_eq!(second, 0, "nothing left to remove");
         assert!(held_second, "the tree hold keeps the request pending");
@@ -1613,6 +1632,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         let dir = home.root().join("reap-receipts");
         let files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
@@ -1677,6 +1697,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 0, "no row removed on an unconfirmed native removal");
         assert!(held, "an unverified effect holds the request");
@@ -1768,6 +1789,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 1, "one row removed");
         assert!(!held, "the request completed");
@@ -1824,6 +1846,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted_a, 0, "the holding request removes nothing");
         assert!(held_a, "the open node holds its own request");
@@ -1836,6 +1859,7 @@ mod tests {
             None,
             1_000_001,
             &seams,
+            None,
         );
         assert_eq!(
             acted_b, 1,
@@ -1886,6 +1910,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 0, "nothing removed");
         assert!(held, "the request holds for the writing worker");
@@ -1935,6 +1960,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 0);
         assert!(!held);
@@ -1973,6 +1999,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 1, "the exact candidate row is selected: {acted}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
@@ -2005,6 +2032,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 0, "an absent row is never removed: {acted}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
@@ -2037,6 +2065,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 1, "the legacy fallback still selects: {acted}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
@@ -2068,6 +2097,7 @@ mod tests {
             None,
             1_000_000,
             &seams,
+            None,
         );
         assert_eq!(acted, 1, "the wrapped row still selects: {acted}");
         std::fs::remove_dir_all(home.root().parent().unwrap()).ok();
