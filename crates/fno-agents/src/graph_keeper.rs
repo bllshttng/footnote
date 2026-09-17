@@ -1652,21 +1652,14 @@ fn handle_ready(state: &StoreState, params: &Value) -> Result<Value, StoreError>
             .unwrap_or_else(|| crate::claims::now_ms()),
     };
     // Borrowed in both arms: a deep clone of the owned graph per ready call
-    // would re-spend most of what the cache just saved.
+    // would re-spend most of the cache just saved.
     let cached;
-    let sqlite;
     let entries: &[Value] = match params.get("entries").and_then(Value::as_array) {
         Some(a) => a,
-        None => match state.backend() {
-            Backend::Json => {
-                cached = cached_entries(state, false, false)?;
-                &cached
-            }
-            Backend::Sqlite => {
-                sqlite = read_state(state, false, true)?;
-                &sqlite
-            }
-        },
+        None => {
+            cached = cached_entries(state, false, false)?;
+            &cached
+        }
     };
     match select(entries, &opts) {
         Ok(reply) => Ok(json!({
@@ -1698,17 +1691,10 @@ fn handle_read(state: &StoreState, params: &Value) -> Result<Value, StoreError> 
     // Entries only: the parity-era byte-serialization echoes rode every
     // reply and tripled its size on a large graph; the differential stage
     // that needed them is over (graph_store_parity.rs is characterization).
-    match state.backend() {
-        Backend::Json => {
-            let entries = cached_entries(state, keep_malformed, strict)?;
-            Ok(json!({ "entries": entries }))
-        }
-        Backend::Sqlite => {
-            let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
-            let entries = read_state(state, keep_malformed, !strict)?;
-            Ok(json!({ "entries": entries }))
-        }
-    }
+    // Both backends through the cache; keep_malformed reads stay fresh
+    // (cached_entries), and strictness only changes the json parse.
+    let entries = cached_entries(state, keep_malformed, strict)?;
+    Ok(json!({ "entries": entries }))
 }
 
 /// The by-id read: exact id-then-slug rows from the cache, in argument order,
@@ -1730,16 +1716,20 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
             "read_ids needs a non-empty ids list".into(),
         ));
     }
-    let mut overlaid = match state.backend() {
-        Backend::Json => (*cached_entries(state, false, false)?).clone(),
-        Backend::Sqlite => read_state(state, false, true)?,
-    };
-    graph_store::apply_readiness_overlay(&mut overlaid);
+    let entries = cached_entries(state, false, false)?;
+    // The borrowed id index over the cached rows: matching and readiness
+    // read the same pre-overlay list the whole-list overlay always read,
+    // but only the matched rows are copied and overlaid.
+    let by_id = graph_store::index_by_id(&entries);
     let mut out = Vec::with_capacity(tokens.len());
     let mut missing = Vec::new();
     for token in &tokens {
-        match crate::graph_get::find_entry(&overlaid, token) {
-            Some(entry) => out.push(entry.clone()),
+        match crate::graph_get::find_entry(&entries, token) {
+            Some(entry) => {
+                let mut row = entry.clone();
+                graph_store::overlay_entry(&mut row, &by_id);
+                out.push(row);
+            }
             None => missing.push(token.clone()),
         }
     }
@@ -1751,10 +1741,7 @@ fn handle_read_ids(state: &StoreState, params: &Value) -> Result<Value, StoreErr
 /// derives the rung map from this light read instead of a full begin, which
 /// ships the whole graph for one derived value.
 fn handle_plan_refs(state: &StoreState) -> Result<Value, StoreError> {
-    let entries = match state.backend() {
-        Backend::Json => cached_entries(state, false, false)?,
-        Backend::Sqlite => std::sync::Arc::new(read_state(state, false, true)?),
-    };
+    let entries = cached_entries(state, false, false)?;
     let refs: Vec<Value> = entries
         .iter()
         .filter(|e| graph_store::is_dict(e))
@@ -4151,6 +4138,152 @@ mod tests {
             state.file_opens.load(Ordering::SeqCst),
             1,
             "read_ids must ride the cache"
+        );
+    }
+
+    /// A sqlite-backed fixture: entries written to graph.json, shadowed into
+    /// graph.db with a stamped version, backend flipped to sqlite.
+    fn sqlite_state(entries: Value) -> (tempfile::TempDir, StoreState) {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(&graph, serde_json::to_string(&entries).unwrap()).unwrap();
+        let rows = graph_store::read_defaulted(&graph, false).unwrap();
+        crate::backlog::shadow_sync(&graph, &[], &rows, "sha256:seed").unwrap();
+        crate::backlog::set_backend(&graph, Backend::Sqlite).unwrap();
+        let state = read_state(&graph);
+        (dir, state)
+    }
+
+    #[test]
+    fn eight_concurrent_sqlite_reads_parse_once_and_agree() {
+        // AC1-HP: the single-flight fill - 8 cold readers, one real parse
+        // (file_opens 1), every reply ok and byte-equal.
+        let (_dir, state) = sqlite_state(json!({
+            "entries": [
+                {"id": "x-a", "slug": "node-a", "title": "a", "status": "ready"},
+                {"id": "x-b", "slug": "node-b", "title": "b", "status": "done",
+                 "completed_at": "2026-09-01T00:00:00Z"},
+            ]
+        }));
+        let state = std::sync::Arc::new(state);
+        let request =
+            serde_json::to_vec(&json!({"id": 1, "method": "read", "params": {}})).unwrap();
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let s = std::sync::Arc::clone(&state);
+            let value = request.clone();
+            threads.push(std::thread::spawn(move || handle_request(&s, &value)));
+        }
+        let replies: Vec<Value> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        for reply in &replies {
+            assert_eq!(reply["ok"], json!(true), "{reply}");
+        }
+        for reply in &replies[1..] {
+            assert_eq!(reply, &replies[0], "all 8 replies must be byte-equal");
+        }
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            1,
+            "one single-flight fill for 8 concurrent cold readers"
+        );
+    }
+
+    #[test]
+    fn a_sqlite_write_drops_the_cache_and_the_next_read_refills() {
+        // AC2-HP: a warm cache, a keeper-side write, then a read: the write
+        // drops the cache, the read refills once (file_opens 2) and shows
+        // the new content.
+        let (_dir, state) = sqlite_state(json!({
+            "entries": [{"id": "x-a", "slug": "node-a", "title": "before", "status": "ready"}]
+        }));
+        let _ = handle_read(&state, &json!({})).unwrap();
+        assert_eq!(state.file_opens.load(Ordering::SeqCst), 1);
+        handle_op(
+            &state,
+            &json!({
+                "name": "update_fields",
+                "params": {"node_id": "x-a", "fields": {"title": "written"}},
+            }),
+        )
+        .unwrap();
+        let after = handle_read(&state, &json!({})).unwrap();
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            2,
+            "the sqlite publish drops the cache; the read refills once"
+        );
+        assert!(
+            after.to_string().contains("written"),
+            "the read must show the write: {after}"
+        );
+    }
+
+    #[test]
+    fn sqlite_read_handlers_share_one_fill_between_writes() {
+        // AC4-HP: begin, plan_refs, ready and read_ids on a sqlite keeper,
+        // each run twice with no write between: file_opens stays 1 and the
+        // paired replies are equal.
+        let (_dir, state) = sqlite_state(json!({
+            "entries": [
+                {"id": "x-a", "slug": "node-a", "title": "a", "status": "ready",
+                 "plan_path": "docs/plans/p.md", "cwd": "/tmp/proj"},
+                {"id": "x-b", "slug": "node-b", "title": "b", "status": "idea"},
+            ]
+        }));
+        let begin1 = handle_begin(&state).unwrap();
+        let refs1 = handle_plan_refs(&state).unwrap();
+        let ready1 = handle_ready(&state, &json!({"claimed": []})).unwrap();
+        let ids1 = handle_read_ids(&state, &json!({"ids": ["x-a"]})).unwrap();
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            1,
+            "the four handlers share the one fill"
+        );
+        let begin2 = handle_begin(&state).unwrap();
+        let refs2 = handle_plan_refs(&state).unwrap();
+        let ready2 = handle_ready(&state, &json!({"claimed": []})).unwrap();
+        let ids2 = handle_read_ids(&state, &json!({"ids": ["x-a"]})).unwrap();
+        assert_eq!(
+            state.file_opens.load(Ordering::SeqCst),
+            1,
+            "the second round is all hits"
+        );
+        assert_eq!(begin1, begin2);
+        assert_eq!(refs1, refs2);
+        assert_eq!(ready1, ready2);
+        assert_eq!(ids1, ids2);
+        // The begin pairing: version names the rows it ships.
+        assert!(begin1["version"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:seed"));
+        assert_eq!(begin1["entries"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn read_ids_overlay_matches_the_whole_list_overlay_when_the_blocker_is_done() {
+        // AC5-EDGE: the single-row overlay path must answer exactly what the
+        // whole-list overlay answers - a done blocker releases the dependent.
+        let (_dir, state) = sqlite_state(json!({
+            "entries": [
+                {"id": "x-hit", "slug": "node-hit", "title": "hit", "status": "ready",
+                 "blocked_by": ["x-gate"]},
+                {"id": "x-gate", "slug": "node-gate", "title": "gate", "status": "done",
+                 "completed_at": "2026-09-01T00:00:00Z"},
+            ]
+        }));
+        let ids = handle_read_ids(&state, &json!({"ids": ["x-hit"]})).unwrap();
+        let mut whole = crate::backlog::read_entries(&state.graph).unwrap();
+        graph_store::apply_readiness_overlay(&mut whole);
+        let expected = whole
+            .iter()
+            .find(|e| graph_store::entry_id(e) == Some("x-hit"))
+            .unwrap();
+        assert_eq!(ids["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(ids["entries"][0]["status"], expected["status"]);
+        assert_eq!(
+            ids["entries"][0]["blocked_reason"],
+            expected["blocked_reason"]
         );
     }
 
