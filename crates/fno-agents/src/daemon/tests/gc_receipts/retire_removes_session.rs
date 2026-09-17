@@ -795,11 +795,11 @@ fn a_row_fno_stopped_keeps_for_open_work() {
     );
     assert!(
         summary
-            .kept_open_work
+            .kept_open_work_stale
             .iter()
             .any(|(id, _, _, _)| id == "abcd1234"),
         "the row keeps for open work: {:?}",
-        summary.kept_open_work
+        summary.kept_open_work_stale
     );
     assert!(
         !summary

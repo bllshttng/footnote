@@ -742,6 +742,30 @@ pub(crate) fn consume_merge_cleanup_requests(
     // roster.
     let agents_memo: std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>> =
         std::cell::RefCell::new(None);
+    // x-6834 change 1: the age seam batched. Every candidate row of every
+    // request past the merge grace is probed in ONE child (the same seam
+    // `gc_sweep::run` takes) instead of one child per row - the per-row
+    // wrapper `probe_row_age` is gone. The eligibility here mirrors the
+    // loop below: in-grace and expired requests never reach `finished`,
+    // so their rows cost nothing to probe.
+    let mut batch_entries: Vec<state::RegistryEntry> = Vec::new();
+    for root in roots {
+        for request in pending.iter().filter(|r| r.repo == *root) {
+            let merged_at = request.merged_at.unwrap_or(request.ts_unix);
+            let age = now.saturating_sub(merged_at);
+            if age < grace_secs.max(0) || age > MERGE_REAP_EXPIRY_SECS {
+                continue;
+            }
+            for entry in merge_cleanup_rows(home, request) {
+                if entry.crown_level.is_some() || entry.origin.as_deref() == Some("operator") {
+                    continue;
+                }
+                batch_entries.push(entry);
+            }
+        }
+    }
+    let batch_refs: Vec<&state::RegistryEntry> = batch_entries.iter().collect();
+    let ages = crate::gc::probe_entry_ages(&batch_refs);
     for root in roots {
         for request in pending.iter().filter(|r| r.repo == *root) {
             total_requests += 1;
@@ -769,7 +793,7 @@ pub(crate) fn consume_merge_cleanup_requests(
             }
             let seams = RequestSeams {
                 finished: &|entry| {
-                    let age = crate::gc::probe_row_age(entry);
+                    let age = ages.get(&crate::gc::row_handle(entry)).copied().flatten();
                     let terminal = if entry.harness_name() == "claude" {
                         let mut memo = agents_memo.borrow_mut();
                         let agents = memo.get_or_insert_with(crate::claude_roster::read_all_agents);

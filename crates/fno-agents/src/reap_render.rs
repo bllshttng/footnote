@@ -143,6 +143,13 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 json!({"id": id, "node": node, "status": status, "reader": reader})
             })
             .collect();
+        let open_work_stale: Vec<Value> = summary
+            .kept_open_work_stale
+            .iter()
+            .map(|(id, node, status, reader)| {
+                json!({"id": id, "node": node, "status": status, "reader": reader})
+            })
+            .collect();
         let active: Vec<Value> = summary
             .kept_active
             .iter()
@@ -219,6 +226,7 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
                 "kept_node_conflict": triples(&summary.kept_node_conflict),
                 "kept_pr_contradicts": triples(&summary.kept_pr_contradicts),
                 "kept_open_work": open_work,
+                "kept_open_work_stale": open_work_stale,
                 "kept_open_do_row": open_do,
                 "kept_open_pr": pair(&summary.kept_open_pr),
                 "kept_planning_unclosed": planning_unclosed,
@@ -329,6 +337,11 @@ pub fn render_reap(summary: &GcSummary, json_out: bool, dry_run: bool) -> String
     for (id, node, status, reader) in &summary.kept_open_work {
         out.push_str(&format!(
             "  kept {id} (open work: {node} {status}; read via {reader})\n"
+        ));
+    }
+    for (id, node, status, reader) in &summary.kept_open_work_stale {
+        out.push_str(&format!(
+            "  kept {id} (open work inside the retire window: {node} {status}; read via {reader}; quiet past the window retires)\n"
         ));
     }
     for (id, node) in &summary.kept_open_do_row {
@@ -666,6 +679,7 @@ mod tests {
             "kept_node_conflict",
             "kept_pr_contradicts",
             "kept_open_work",
+            "kept_open_work_stale",
             "kept_open_do_row",
             "kept_active",
             "kept_probe_unread",
@@ -810,6 +824,32 @@ mod tests {
         assert_eq!(
             v["kept_open_work"],
             json!([{"id": "b1", "node": "N3", "status": "in_review", "reader": "sessions"}])
+        );
+    }
+
+    /// x-6834 change 2: the stale bucket names the pinning node and says
+    /// the keep has a clock, in both renderings.
+    #[test]
+    fn reap_open_work_stale_names_the_node_and_its_clock() {
+        let s = GcSummary {
+            kept_open_work_stale: vec![(
+                "b2".into(),
+                "N4".into(),
+                "in_progress".into(),
+                "sessions".into(),
+            )],
+            ..Default::default()
+        };
+        let text = render_reap(&s, false, false);
+        assert!(
+            text.contains("  kept b2 (open work inside the retire window: N4 in_progress"),
+            "{text}"
+        );
+        let out = render_reap(&s, true, false);
+        let v: Value = serde_json::from_str(out.trim()).expect("valid json");
+        assert_eq!(
+            v["kept_open_work_stale"],
+            json!([{"id": "b2", "node": "N4", "status": "in_progress", "reader": "sessions"}])
         );
     }
 

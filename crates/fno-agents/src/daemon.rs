@@ -960,13 +960,44 @@ pub(crate) fn run_claude_rm_in(
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
                 let code = status.code().unwrap_or(-1);
-                let output = child.wait_with_output().ok();
-                let detail = output
-                    .as_ref()
-                    .map(|output| String::from_utf8_lossy(&output.stderr))
-                    .unwrap_or_default();
-                // retired-ok: reports the shellout this code ran and its exit code; tells no reader to run it.
-                return Err(format!("claude rm exited {code}: {}", detail.trim()));
+                // Drain both pipes on their own threads, handing bytes back
+                // over a channel rather than a join: a grandchild of `claude
+                // rm` can inherit the pipe fds, and a join then waits on IT,
+                // not the exited child - the shape truth_probe's bounded run
+                // documents. The grace bounds that wait here, so the
+                // cascade's refusal is never wedged on a wedged grandchild.
+                const DRAIN_GRACE: Duration = Duration::from_secs(2);
+                let mut out_pipe = child.stdout.take();
+                let mut err_pipe = child.stderr.take();
+                let (out_tx, out_rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    if let Some(pipe) = out_pipe.as_mut() {
+                        let _ = std::io::Read::read_to_end(pipe, &mut buf);
+                    }
+                    let _ = out_tx.send(buf);
+                });
+                let (err_tx, err_rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    if let Some(pipe) = err_pipe.as_mut() {
+                        let _ = std::io::Read::read_to_end(pipe, &mut buf);
+                    }
+                    let _ = err_tx.send(buf);
+                });
+                let out = out_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+                let err = err_rx.recv_timeout(DRAIN_GRACE).unwrap_or_default();
+                let stdout = String::from_utf8_lossy(&out);
+                let stderr = String::from_utf8_lossy(&err);
+                let detail = match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
+                    (true, true) => "stderr and stdout were both empty".to_string(),
+                    (true, false) => stderr.trim().to_string(),
+                    (false, true) => stdout.trim().to_string(),
+                    (false, false) => {
+                        format!("stderr: {}; stdout: {}", stderr.trim(), stdout.trim())
+                    }
+                };
+                return Err(format!("claude rm exited {code}: {detail}"));
             }
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));

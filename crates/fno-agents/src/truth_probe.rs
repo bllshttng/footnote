@@ -115,8 +115,12 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     // fast-failing spawn per affected row, and the second attempt always keeps
     // its WARN, so a stuck probe is loud rather than silent.
     // No deadline: nobody handed this probe a budget, so the latch wait is not
-    // taken out of its attempts. Five seconds each, as it has always had.
-    family1_truth_latched(handle, Duration::from_secs(5), None)
+    // taken out of its attempts. The bound is the batch's one-handle bound
+    // (x-6834 change 1): the batch bound is funded by measurement, the old
+    // 5 s figure never was, and the wrong handle once walked the transcript
+    // store 15-24 s per row against it. A test pins the relationship so the
+    // two cannot drift apart.
+    family1_truth_latched(handle, family1_truth_batch_timeout(1), None)
 }
 
 /// One `fno agents truth <handle>` in flight per handle, machine-wide.
@@ -1864,5 +1868,16 @@ mod tests {
         // A non-JSON stdout (e.g. a crashed probe) falls back to the stderr tail.
         let detail = family1_truth_failure_detail(b"not json", "  banner  ");
         assert_eq!(detail, "banner");
+    }
+
+    // x-6834 change 1: the single probe's bound rides the batch's one-handle
+    // bound, never below it - the batch bound is the one funded by
+    // measurement, and the old flat 5 s was not.
+    #[test]
+    fn the_single_probe_bound_is_never_below_the_batch_one_handle_bound() {
+        assert!(
+            family1_truth_batch_timeout(1) >= std::time::Duration::from_secs(20),
+            "the single probe's bound must track the batch's one-handle bound"
+        );
     }
 }

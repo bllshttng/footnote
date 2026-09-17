@@ -1451,7 +1451,22 @@ async fn run(args: Vec<String>) -> i32 {
         None
     };
 
-    let call_result = call(&home, &daemon_bin, &req).await;
+    let call_result = if verb_owned == "rm" {
+        // x-6834 change 3: a stale daemon means the removal would be
+        // executed by the OLD binary - the exact shape that left four
+        // sessions stamped origin=adopted while their harness sessions
+        // stayed alive. The notice moves onto the refusal path for rm:
+        // non-zero, no `removed:` line, and the remedy named. `list` keeps
+        // its advisory drift notice (a stale read is still a read).
+        if let Some(w) = drift_warning(&check_daemon_drift(&home).await, None) {
+            eprintln!("fno-agents: refusing rm: {w}");
+            eprintln!("  the removal was not attempted; run `fno doctor update` (or restart the daemon) and retry");
+            return 21;
+        }
+        call(&home, &daemon_bin, &req).await
+    } else {
+        call(&home, &daemon_bin, &req).await
+    };
     drop(daemon_spawn_gate);
     match call_result {
         Ok(resp) => match resp.payload {
@@ -1528,6 +1543,16 @@ async fn run(args: Vec<String>) -> i32 {
                     && result.get("stopped").and_then(Value::as_bool) == Some(false)
                 {
                     return 18;
+                }
+                // x-6834 change 3: a receipt over a surviving harness row is
+                // the "reports success while removing nothing" shape that
+                // stamped four sessions origin=adopted. The renderer already
+                // prints the survival in its notes; the exit code now says it
+                // too, whatever the reason.
+                if verb_owned == "rm"
+                    && result.get("harness_removed").and_then(Value::as_bool) == Some(false)
+                {
+                    return 21;
                 }
                 // The daemon-bound thread lane (codex and every other
                 // attach-with-server harness): the RPC created the row, so the
@@ -3144,6 +3169,13 @@ fn run_roster_reap(rest: &[String]) -> i32 {
         "{}",
         fno_agents::roster_reap::render(&summary, json_out, dry_run)
     );
+    if summary.nothing_resolved() {
+        eprintln!(
+            "fno-agents: roster-reap refused: probed {} row(s), the truth probe resolved none",
+            summary.probed
+        );
+        return 1;
+    }
     0
 }
 
@@ -3266,11 +3298,21 @@ fn run_node_route(rest: &[String]) -> i32 {
             let answer = match store.matches(&entry) {
                 // the age is the newest timestamped entry through the
                 // shared probe, not a file stat.
-                Some(hits) if !hits.is_empty() => match fno_agents::gc::probe_row_age(&entry) {
-                    Some(age) if age <= grace_secs => serde_json::json!({"state": "live"}),
-                    Some(_) => serde_json::json!({"state": "quiet"}),
-                    None => serde_json::json!({"state": "unresolved"}),
-                },
+                Some(hits) if !hits.is_empty() => {
+                    // The same batched seam the sweeps take, not a deleted
+                    // per-row wrapper: the entry's harness_session_id is set,
+                    // so `row_handle` returns it and that is the key the map
+                    // answers under.
+                    let age = fno_agents::gc::probe_entry_ages(&[&entry])
+                        .get(&fno_agents::gc::row_handle(&entry))
+                        .copied()
+                        .flatten();
+                    match age {
+                        Some(age) if age <= grace_secs => serde_json::json!({"state": "live"}),
+                        Some(_) => serde_json::json!({"state": "quiet"}),
+                        None => serde_json::json!({"state": "unresolved"}),
+                    }
+                }
                 _ => serde_json::json!({"state": "unresolved"}),
             };
             answers.insert(pair.clone(), answer);
