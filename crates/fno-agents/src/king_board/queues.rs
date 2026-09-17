@@ -426,7 +426,7 @@ pub(crate) struct BoardInputs {
     /// The graph entries (None = unreadable); one read shared with scope
     /// compile, undispatched classify, and claimed-node lookups.
     pub(crate) entries: Option<Vec<Value>>,
-    /// Held nodes (x-55ae): node -> the open question id that holds it. The
+    /// Held nodes: node -> the open question id that holds it. The
     /// ready feed has already partitioned them out; the undispatched queue
     /// reads the same map so a held node never reads as stuck work.
     pub(crate) held: std::collections::BTreeMap<String, String>,
@@ -636,7 +636,7 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             .filter(|node| KING_PRIORITIES.contains(&s_str(node, "priority").unwrap_or("")))
             .filter(|node| {
                 // A held node has a named question, not a missing dispatch
-                // (x-55ae); it renders under held, never here.
+                //; it renders under held, never here.
                 !node
                     .get("id")
                     .and_then(Value::as_str)

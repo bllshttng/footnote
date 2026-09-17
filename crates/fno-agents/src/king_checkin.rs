@@ -675,7 +675,7 @@ fn r_parked() -> Result<Value, String> {
     Ok(json!({"open": open.len(), "rows": open}))
 }
 
-/// The held reading (x-55ae): nodes an open operator question blocks, oldest
+/// The held reading: nodes an open operator question blocks, oldest
 /// question first. One fold over the question journals in process; the rows
 /// carry everything the render needs to name the decide verb.
 fn r_held() -> Result<Value, String> {
@@ -1204,7 +1204,7 @@ fn render_lines(
     match failed("held") {
         Some(r) => lines.push(format!("READER FAILED held: {}", r.error)),
         None => {
-            // Held nodes (x-55ae): the rows already carry node, question id
+            // Held nodes: the rows already carry node, question id
             // and ask time; the line names the decide verb that clears them.
             let rows = by_name("held")
                 .map(|r| &r.value)

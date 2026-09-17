@@ -1614,7 +1614,7 @@ fn drain_targets_json(
             None
         };
         // A held mission stops the whole territory: the drain must not spawn
-        // into an epic a question is blocking (x-55ae). Other held members
+        // into an epic a question is blocking. Other held members
         // drop from the member list; the receipt names the question.
         if mission.as_deref().is_some_and(|m| held.contains_key(m)) {
             if let Some(qid) = mission.as_deref().and_then(|m| held.get(m)) {
@@ -1691,7 +1691,7 @@ pub fn resolve_targets_report(config_cwd: &Path, registry_path: &Path) -> DrainR
                 Ok(targets) => {
                     if targets.is_empty() && skip_reason.is_none() {
                         // Every live target held: name the question, not a
-                        // generic empty receipt (x-55ae).
+                        // generic empty receipt.
                         if let Some((_, qid)) = held_drops.first() {
                             skip_reason = Some(format!("held:{qid}"));
                         }

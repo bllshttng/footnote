@@ -114,7 +114,7 @@ fn worked_node_ids(read: &SourceRead) -> HashSet<String> {
 
 /// Split held nodes out of the ready feed: an open question whose `blocks`
 /// names a node keeps it off the board's ready list and under the `held`
-/// source with the question id (x-55ae). Pure so the split is testable; the
+/// source with the question id. Pure so the split is testable; the
 /// held map is `needs::held_nodes` over the question journals. A ready feed
 /// that never answered passes through untouched - the split never reads an
 /// unreadable source as held-free.
@@ -507,7 +507,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
     // slices were derived above in the reference's order.
     let entries_ref = entries.as_deref();
     let cwd_for_threads = cwd.clone();
-    // Held nodes: ONE fold over the question journals (x-55ae), computed once
+    // Held nodes: ONE fold over the question journals, computed once
     // and read by the ready partition below. Fail-open: an unreadable journal
     // is an empty map, the same posture the question scans elsewhere take.
     // catch_unwind like the blocked-child read below: the fold resolves the
@@ -719,7 +719,7 @@ pub fn read_board(opts: &BoardOpts) -> Value {
                 .unwrap_or(SourceRead::err("ready: reader panicked")),
         };
         // An open question whose blocks names the node holds it out of ready
-        // (x-55ae); the held rows land under a `held` source beside `ready`.
+        //; the held rows land under a `held` source beside `ready`.
         let (ready, held_rows) = partition_held(ready, &held_map);
         if !held_rows.is_empty() {
             sources.insert(
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[test]
     fn held_partition_moves_the_row_and_names_the_question() {
-        // x-55ae acceptance: a ready node an open question blocks is absent
+        //  acceptance: a ready node an open question blocks is absent
         // from ready and present under held with the question id.
         let ready = ok_read(json!([
             {"id": "x-free", "priority": "p1", "title": "free"},

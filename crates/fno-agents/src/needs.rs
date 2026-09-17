@@ -740,7 +740,7 @@ pub(crate) fn held_rows_from_raw(raw: &str) -> Vec<HeldRow> {
     rows
 }
 
-/// The open question ids whose node reads a terminal rung (x-55ae): a
+/// The open question ids whose node reads a terminal rung: a
 /// question's node is the `node` field plus every `blocks` entry, and a rung
 /// is `done` or `superseded`. Pure over journal contents; the caller
 /// supplies the graph statuses and does the writing.
@@ -1984,7 +1984,7 @@ mod tests {
         assert_eq!(items.len(), 2);
     }
 
-    // --- held fold (x-55ae) --------------------------------------------------
+    // --- held fold --------------------------------------------------
 
     fn operator_question_blocked(ts: &str, qid: &str, question: &str, blocks: &[&str]) -> String {
         let blocks = blocks
