@@ -141,6 +141,7 @@ def arm_king_manifest(
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     crown_grantor: Optional[str] = None,
+    model: Optional[str] = None,
     row: Any = None,
 ) -> Optional[Path]:
     """Refresh loop state at the moment a crown becomes authoritative."""
@@ -152,6 +153,9 @@ def arm_king_manifest(
         crown_grantor = (
             crown_grantor if crown_grantor is not None else getattr(row, "crown_grantor", None)
         )
+        # The crowned row's own request is the pin the wake must repeat; a
+        # manifest without it wakes the king on the account default (x-8fb2).
+        model = model or getattr(row, "requested_model", None)
     if state_root is None:
         state_root = _owner_state_root(owner_cwd)
     if not king_loop_enabled():
@@ -179,6 +183,7 @@ def arm_king_manifest(
             crown_level=crown_level,
             crown_scope=crown_scope,
             crown_grantor=crown_grantor,
+            model=model,
         )
         path.with_suffix(".cancelled").unlink(missing_ok=True)
     return path
@@ -248,6 +253,7 @@ def write_manifest(
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     crown_grantor: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> dict[str, str]:
     """Write the manifest once; raises KingManifestExists if it is there.
 
@@ -267,6 +273,7 @@ def write_manifest(
         "shape": shape if shape in ("pass", "court") else "pass",
         "harness": os.environ.get("FNO_HARNESS", "claude"),
         "harness_session_id": harness_session_id,
+        "model": (model or "").strip(),
         "owner_pid": str(owner_pid or os.getpid()),
         "owner_cwd": owner_cwd or str(Path.cwd()),
         "budget_max_iterations": str(max_iterations),

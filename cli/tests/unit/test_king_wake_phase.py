@@ -196,7 +196,8 @@ def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path
     )
     target.manifest.parent.mkdir(parents=True, exist_ok=True)
     target.manifest.write_text(
-        "---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8"
+        "---\nfno_id: k-1\nscope: epic-x\nmodel: glm-5.3-flash[1m]\n---\n",
+        encoding="utf-8",
     )
 
     phase_mod._dispatch_walk(target, "mail", "fno-agents", "aa11bb22")
@@ -204,6 +205,32 @@ def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path
     assert argv[argv.index("--wake-address") + 1] == "aa11bb22"
     assert argv[argv.index("--wake-reason") + 1] == "mail"
     assert argv[argv.index("--wake-holder") + 1] == "king-x"
+    # x-8fb2: the walk repeats the crown manifest's pin, so the respawned
+    # king (and every successor the walk mints) runs the crowned model.
+    assert argv[argv.index("--model") + 1] == "glm-5.3-flash[1m]"
+
+
+def test_a_model_less_manifest_refuses_the_walk(tmp_path):
+    # A manifest with no model pin used to spawn a king on the account
+    # default (measured 2026-09-17: opus). The walk refuses and says so in
+    # its wake log; the successor event never fires on a refused spawn.
+    from fno.pr_watch import _king_wake as phase_mod
+
+    target = CrownTarget(
+        holder="king-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=_king_manifest(tmp_path),
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+
+    spawned = phase_mod._dispatch_walk(target, "mail", "fno-agents", "aa11bb22")
+
+    assert spawned is False
+    log = target.manifest.with_suffix(".md.wake.log").read_text(encoding="utf-8")
+    assert "no model pin" in log
 
 
 def test_king_wake_permission_mode_the_woken_session_argv_carries_bypass():
@@ -579,7 +606,10 @@ def test_the_spawned_walk_argv_carries_the_successor_flag(monkeypatch, tmp_path)
         short_id="aa11bb22",
     )
     target.manifest.parent.mkdir(parents=True, exist_ok=True)
-    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+    target.manifest.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nmodel: glm-5.3-flash[1m]\n---\n",
+        encoding="utf-8",
+    )
 
     phase_mod._dispatch_walk(target, "mail", "fno-agents", "king-x", None, True)
 
@@ -984,7 +1014,10 @@ def test_the_spawned_walk_argv_carries_the_board_diff(monkeypatch, tmp_path):
         short_id="aa11bb22",
     )
     target.manifest.parent.mkdir(parents=True, exist_ok=True)
-    target.manifest.write_text("---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8")
+    target.manifest.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\nmodel: glm-5.3-flash[1m]\n---\n",
+        encoding="utf-8",
+    )
 
     phase_mod._dispatch_walk(
         target, "board", "fno-agents", None, "added: x-2 (ready/p1)"
@@ -1561,3 +1594,30 @@ def test_a_stopped_pass_rotates_its_starting_crown_per_debounce_window(tmp_path)
     assert [d[0] for d in rec2.dispatches] == [f"epic-{(first + 1) % 5}"], (
         f"the pass must start one crown later: {s2}"
     )
+
+
+def test_arm_writes_the_row_model_pin_onto_the_manifest(tmp_path, monkeypatch):
+    # x-8fb2: the crown manifest is the wake's only model source, so arming
+    # folds the crowned row's requested_model into the manifest. The refuse
+    # side of this contract is test_a_model_less_manifest_refuses_the_walk.
+    from types import SimpleNamespace
+
+    from fno.king import state as king_state
+
+    monkeypatch.setattr(king_state, "king_loop_enabled", lambda: True)
+    parse_manifest = king_state.parse_manifest
+    path = king_state.arm_king_manifest(
+        "epic-x",
+        "0de85539-1a2b-7c3d-8e4f-5a6b7c8d9e0f",
+        state_root=tmp_path,
+        row=SimpleNamespace(
+            pid=1,
+            cwd=str(tmp_path),
+            crown_level=1,
+            crown_scope="epic-x",
+            crown_grantor="human",
+            requested_model="glm-5.3-flash[1m]",
+        ),
+    )
+    assert path is not None
+    assert parse_manifest(path)["model"] == "glm-5.3-flash[1m]"
