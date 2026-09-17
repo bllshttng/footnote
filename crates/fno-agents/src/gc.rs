@@ -134,7 +134,7 @@ pub struct GcRow {
     /// ESRCH. The origin gate skips such a row, so it is judged like any
     /// other row; every downstream gate still applies.
     pub origin_corpse: bool,
-    /// The open-work window (x-6834 change 2): how long an OPEN-work row may
+    /// The open-work window (change 2): how long an OPEN-work row may
     /// sit transcript-quiet before its node stops counting as evidence of a
     /// live session. Quiet past it, the row falls to the same grace gate a
     /// done row takes; inside it, the keep names the pinning node. Resolved
@@ -220,7 +220,7 @@ pub enum KeepReason {
     /// At least one named node is not done; the first open one is reported.
     OpenWork { node: String, status: String },
     /// Open work whose transcript is quiet INSIDE the open-work window
-    /// (x-6834 change 2): the row keeps for now, but the keep has a clock -
+    /// (change 2): the row keeps for now, but the keep has a clock -
     /// quiet past the window falls to the grace gate - and it names the
     /// stale node pinning it, so an operator can act on the node.
     OpenWorkStale { node: String, status: String },
@@ -409,7 +409,7 @@ pub fn gc_decide(row: &GcRow, grace_secs: i64) -> (GcAction, Option<KeepReason>)
             if row.session_released() {
                 return grace_gate(row, grace_secs);
             }
-            // x-6834 change 2: open NODE state alone is not evidence a
+            // change 2: open NODE state alone is not evidence a
             // SESSION is alive, and inside this window neither is an open
             // node plus quiet. A row quiet past the open-work window falls
             // to the same grace gate a released row takes; a row inside it
@@ -498,7 +498,7 @@ pub fn row_handle(e: &crate::state::RegistryEntry) -> String {
 
 /// The label a sweep REPORTS a row under: the short id, falling back to the
 /// name - the operator-facing identity every summary bucket, hold, and
-/// release ruling keys on. x-6834 change 1 split this from [`row_handle`],
+/// release ruling keys on. change 1 split this from [`row_handle`],
 /// the PROBE handle: the probe must ask the harness session id, while the
 /// report keeps the handle an operator (and `reap --release`) already holds.
 pub fn row_label(e: &crate::state::RegistryEntry) -> String {
@@ -2963,7 +2963,7 @@ mod tests {
                 })
             )
         );
-        // x-6834 change 2: an open row with NO transcript age has no clock,
+        // change 2: an open row with NO transcript age has no clock,
         // so it keeps under the unchanged open-work reason - it can never
         // age past the window, and absence is never quiet.
         let unclocked = GcRow {
@@ -3323,7 +3323,7 @@ mod tests {
         ));
     }
 
-    /// x-6834 change 2, AC2-EDGE: an Open row quiet PAST the open-work
+    /// change 2, AC2-EDGE: an Open row quiet PAST the open-work
     /// window falls to the grace gate and retires; the same row INSIDE the
     /// window keeps, and the keep names its pinning node.
     #[test]
@@ -3349,7 +3349,7 @@ mod tests {
         );
     }
 
-    /// x-6834 change 2, AC2-HP: a NoProvenance row whose SESSION carries a
+    /// change 2, AC2-HP: a NoProvenance row whose SESSION carries a
     /// terminal state but which never reported a finished turn reaches the
     /// grace gate - a quiet row past the grace retires instead of keeping
     /// forever on the missing turn marker.
@@ -3377,7 +3377,7 @@ mod tests {
         );
     }
 
-    /// x-6834 change 1: the handle a row is probed under prefers the
+    /// change 1: the handle a row is probed under prefers the
     /// harness session id - `fno agents truth` resolves a full session id
     /// for registry AND roster rows alike, while a short id resolves for
     /// registry rows only. A registry row with no session id falls back to

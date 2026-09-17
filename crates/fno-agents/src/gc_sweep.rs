@@ -34,7 +34,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::events::EventEmitter;
-use crate::gc::{gc_decide, row_handle, row_label, tree_action, GcAction, GcRow, KeepReason, TreeAction};
+use crate::gc::{
+    gc_decide, row_handle, row_label, tree_action, GcAction, GcRow, KeepReason, TreeAction,
+};
 use crate::graph_store::{self, WorkState};
 use crate::node_route;
 use crate::paths::AgentsHome;
@@ -110,7 +112,7 @@ pub struct GcSummary {
     /// done; the first open one, and the provenance source that resolved it,
     /// so a sessions-join keep is distinguishable from a name-pattern keep.
     pub kept_open_work: Vec<(String, String, String, String)>,
-    /// `(id, node, status, reader)` (x-6834 change 2): open work whose
+    /// `(id, node, status, reader)` (change 2): open work whose
     /// transcript is quiet INSIDE the open-work window. The keep names the
     /// stale node pinning the row; quiet past the window the row falls to
     /// the grace gate and would retire, so a reader can tell an aging keep
@@ -1616,7 +1618,7 @@ pub(crate) fn run_with_release(
     release: Option<&Release>,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
-    // x-6834 change 2: the open-work window, resolved once per pass beside
+    // change 2: the open-work window, resolved once per pass beside
     // the grace the caller handed in. The daemon and the verb both resolve
     // grace against the process cwd, so this reads the same config ladder
     // without a new parameter threaded through every caller.

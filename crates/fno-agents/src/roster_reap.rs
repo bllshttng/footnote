@@ -71,7 +71,7 @@ pub struct RosterReapSummary {
     pub visited: usize,
     /// Unique rows this pass JUDGED (visited minus deduped) - beside
     /// `visited` so a reader can tell "looked at 75, answered about 3"
-    /// from "looked at 75, all fine" (x-6834 change 1).
+    /// from "looked at 75, all fine" (change 1).
     pub enumerated: usize,
     /// Rows that reached the quiet gate and so cost a batch age answer.
     pub probed: usize,
@@ -97,7 +97,7 @@ pub struct RosterReapSummary {
 }
 
 impl RosterReapSummary {
-    /// AC1-ERR (x-6834 change 1): rows reached the quiet gate and the batch
+    /// AC1-ERR (change 1): rows reached the quiet gate and the batch
     /// answered none of them. That is not a clean pass with nothing to do -
     /// the probe resolved nothing at all - so the verb refuses instead of
     /// reporting success while removing nothing.
@@ -515,7 +515,7 @@ pub(crate) fn run(
     // default pages 24 handles per truth probe instead of paying one
     // subprocess per row. Judgements push in roster order. `answered`
     // beside `probed` is what turns "nothing resolved" into a refusal the
-    // verb can act on (x-6834 change 1, AC1-ERR).
+    // verb can act on (change 1, AC1-ERR).
     let refs: Vec<&RegistryEntry> = candidates.iter().map(|c| &c.entry).collect();
     let ages = age_many(&refs);
     summary.probed = candidates.len();

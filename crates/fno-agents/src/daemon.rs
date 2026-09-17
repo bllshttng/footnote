@@ -966,6 +966,7 @@ pub(crate) fn run_claude_rm_in(
                 // `truth_probe::drain_to_detail` documents).
                 const DRAIN_GRACE: Duration = Duration::from_secs(2);
                 let detail = crate::truth_probe::drain_to_detail(&mut child, DRAIN_GRACE);
+                // retired-ok: reports the shellout this code ran and its exit code; tells no reader to run it.
                 return Err(format!("claude rm exited {code}: {detail}"));
             }
             Ok(None) if std::time::Instant::now() < deadline => {

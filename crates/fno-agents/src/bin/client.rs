@@ -1452,7 +1452,7 @@ async fn run(args: Vec<String>) -> i32 {
     };
 
     let call_result = if verb_owned == "rm" {
-        // x-6834 change 3: a stale daemon means the removal would be
+        // change 3: a stale daemon means the removal would be
         // executed by the OLD binary - the exact shape that left four
         // sessions stamped origin=adopted while their harness sessions
         // stayed alive. The notice moves onto the refusal path for rm:
@@ -1544,7 +1544,7 @@ async fn run(args: Vec<String>) -> i32 {
                 {
                     return 18;
                 }
-                // x-6834 change 3: a receipt over a surviving harness row is
+                // change 3: a receipt over a surviving harness row is
                 // the "reports success while removing nothing" shape that
                 // stamped four sessions origin=adopted. The renderer already
                 // prints the survival in its notes; the exit code now says it

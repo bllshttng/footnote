@@ -467,7 +467,7 @@ pub fn retire_interval_s(cwd: &Path, grace_secs: u64) -> u64 {
 /// specimen was over three hours old; a younger deps binary may be a live run.
 pub const DEFAULT_ORPHAN_MIN_ELAPSED_SECS: u64 = 900;
 
-/// Default open-work retire window (x-6834 change 2): an OPEN-work row whose
+/// Default open-work retire window (change 2): an OPEN-work row whose
 /// transcript has been quiet this long is no longer evidenced by its node.
 /// Well above the 900 s retire grace on purpose - an open node is a real
 /// claim until a full day of silence says otherwise - and resolvable from
@@ -1600,7 +1600,7 @@ mod tests {
         assert_eq!(read_roster_scope("[agents.reap]\nretain_days = 3\n"), None);
     }
 
-    // x-6834 change 2: the open-work window reads agents.reap and fails open
+    // change 2: the open-work window reads agents.reap and fails open
     // to the default - a zero would reap every open row on the next sweep,
     // so it is a typo, never a setting.
     #[test]

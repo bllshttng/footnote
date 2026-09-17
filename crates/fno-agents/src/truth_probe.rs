@@ -116,7 +116,7 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     // its WARN, so a stuck probe is loud rather than silent.
     // No deadline: nobody handed this probe a budget, so the latch wait is not
     // taken out of its attempts. The bound is the batch's one-handle bound
-    // (x-6834 change 1): the batch bound is funded by measurement, the old
+    // (change 1): the batch bound is funded by measurement, the old
     // 5 s figure never was, and the wrong handle once walked the transcript
     // store 15-24 s per row against it. A test pins the relationship so the
     // two cannot drift apart.
@@ -1907,7 +1907,7 @@ mod tests {
         assert_eq!(detail, "banner");
     }
 
-    // x-6834 change 1: the single probe's bound rides the batch's one-handle
+    // change 1: the single probe's bound rides the batch's one-handle
     // bound, never below it - the batch bound is the one funded by
     // measurement, and the old flat 5 s was not.
     #[test]

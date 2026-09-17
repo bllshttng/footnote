@@ -827,7 +827,7 @@ mod tests {
         );
     }
 
-    /// x-6834 change 2: the stale bucket names the pinning node and says
+    /// change 2: the stale bucket names the pinning node and says
     /// the keep has a clock, in both renderings.
     #[test]
     fn reap_open_work_stale_names_the_node_and_its_clock() {

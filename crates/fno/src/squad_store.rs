@@ -1998,7 +1998,7 @@ pub fn begin_external_stop(id: &str, name: &str, cwd: &str) -> io::Result<Lifecy
 /// [`begin_external_stop`].
 pub fn begin_external_rm(id: &str) -> io::Result<LifecycleCas> {
     // The record is absent: say THAT, not "no such stopped row" - the
-    // reader would look for a stopped row that never existed (x-6834
+    // reader would look for a stopped row that never existed (
     // change 4, AC4-ERR).
     let mut outcome = LifecycleCas::Refused(format!("no external lifecycle record: {id}"));
     mutate_lifecycle(|records| {

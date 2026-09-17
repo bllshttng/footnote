@@ -71,7 +71,7 @@ pub(crate) fn resolve_target<'a>(
     }
     let matches: Vec<&RegistryAgent> = agents.iter().filter(|a| a.name == name).collect();
     // The external refusal is a fact about OWNERSHIP, keyed on registry
-    // identity, not the display flag (x-6834 change 4). An upgraded orphan
+    // identity, not the display flag (change 4). An upgraded orphan
     // IS an fno registry row - it carries session ids - so the refusal only
     // fires for a row with no registry identity at all (a synthesized
     // foreign row carries none). The refusal text is unchanged for that
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn an_upgraded_orphan_resolves_by_identity_and_by_name() {
-        // x-6834 AC4-HP: an upgraded orphan is an fno registry row whose
+        //  AC4-HP: an upgraded orphan is an fno registry row whose
         // short id the roster still lists - displayed external, but carrying
         // session ids. RemoveAgent owns it: both legs answer Registry.
         let mut a = row("t-win", Some("11111111-1111-4111-8111-111111111111"));
@@ -404,7 +404,7 @@ mod tests {
 
     #[test]
     fn a_foreign_row_without_identity_still_refuses() {
-        // x-6834 AC4-EDGE: a genuinely foreign roster row carries no
+        //  AC4-EDGE: a genuinely foreign roster row carries no
         // registry identity, so the manage-it-from-its-own-session refusal
         // still fires on the name leg.
         let mut ext = row("t-win", None);

@@ -748,7 +748,7 @@ pub(crate) fn consume_merge_cleanup_requests(
     // roster.
     let agents_memo: std::cell::RefCell<Option<crate::claude_roster::ClaudeAgentsSnapshot>> =
         std::cell::RefCell::new(None);
-    // x-6834 change 1: the age seam batched. Every candidate row of every
+    // change 1: the age seam batched. Every candidate row of every
     // request past the merge grace is probed in ONE child (the same seam
     // `gc_sweep::run` takes) instead of one child per row - the per-row
     // wrapper `probe_row_age` is gone. The eligibility here mirrors the
