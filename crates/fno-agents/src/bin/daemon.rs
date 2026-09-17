@@ -97,6 +97,10 @@ fn main() {
         }
     }
 
+    if leaked_dispatch_pin(std::env::var_os("FNO_AGENTS_RUNTIME").as_deref()) {
+        std::env::remove_var("FNO_AGENTS_RUNTIME");
+    }
+
     let home = AgentsHome::from_env();
     let mut opts = DaemonOptions::default();
     // Allow an idle-exit override (seconds) via env for tests / tuning.
@@ -162,9 +166,27 @@ fn parse_home_arg(args: &[String]) -> Option<String> {
     None
 }
 
+/// `FNO_AGENTS_RUNTIME=python` is a per-child anti-recursion pin. A daemon
+/// lazy-started by a pinned child would keep it for life, and every arm child
+/// would then refuse the verbs that have no Python leg (`rm` exits 127).
+fn leaked_dispatch_pin(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| v.to_string_lossy().trim().eq_ignore_ascii_case("python"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leaked_dispatch_pin_matches_python_case_and_whitespace_insensitively() {
+        let some = |v: &str| Some(std::ffi::OsString::from(v));
+        assert!(leaked_dispatch_pin(some("python").as_deref()));
+        assert!(leaked_dispatch_pin(some(" Python ").as_deref()));
+        assert!(!leaked_dispatch_pin(some("rust").as_deref()));
+        assert!(!leaked_dispatch_pin(some("auto").as_deref()));
+        assert!(!leaked_dispatch_pin(some("").as_deref()));
+        assert!(!leaked_dispatch_pin(None));
+    }
 
     #[test]
     fn parse_home_arg_takes_both_spellings() {
