@@ -720,6 +720,15 @@ jobs:
         # package this shard tests.
         run: cargo clean -p fno --manifest-path crates/fno/Cargo.toml
 
+      - name: Build fno-agents binaries (mux tests spawn the worker)
+        working-directory: crates/fno-agents
+        # The mux lib tests spawn the paired fno-agents-worker keeper binary,
+        # resolved from the sibling crate's build dir. The single job this
+        # shard split from got that binary for free because its fno-agents
+        # legs ran first in the same workspace; the shard has no fno-agents
+        # test steps, so it builds the bins itself.
+        run: cargo build --bins
+
       - name: cargo test --lib --bins (fno mux)
         working-directory: crates/fno
         run: cargo test --lib --bins
