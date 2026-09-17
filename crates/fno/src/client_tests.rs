@@ -10009,20 +10009,13 @@ fn client_selector_fold_swallows_a_whole_parameterised_csi() {
 
 #[test]
 fn every_escape_fold_swallows_an_unrecognised_sequence_whole() {
-    // PARITY over all four folds, deliberately not four separate tests.
-    // The leak-whole-sequence guarantee was only ever asserted against
-    // `fold_search_input`, and the two folds nobody tested were the two that
-    // leaked: `fold_selector_keys` and `fold_modal_keys` each dropped ONE
-    // byte after `ESC [` and let the tail out as plain keys.
-    //
-    // That was survivable while every overlay closed on a key it did not
-    // recognise. Giving the pickers cursors is what weaponised it, because
-    // the leaked bytes are exactly the ones that now commit: a digit commits
-    // a MoveTab, and `ESC [ 1 ; 5 H` ends in the `H` that commits an attach
-    // split. A capability upgrade turned a dormant defect destructive.
-    //
-    // Written as one sweep so a FIFTH fold added later inherits the
-    // guarantee instead of inheriting nothing.
+    // PARITY over all four folds in one sweep, so a fifth fold inherits
+    // the leak-whole-sequence guarantee instead of nothing: `fold_selector_keys`
+    // and `fold_modal_keys` each dropped ONE byte after `ESC [`, which was
+    // survivable while overlays closed on keys they did not recognise, and
+    // destructive once cursored pickers committed the leaked bytes (a digit
+    // commits a MoveTab; `ESC [ 1 ; 5 H` ends in the `H` that commits an
+    // attach split).
     let sequences: &[(&str, &[u8])] = &[
         ("ctrl-up", b"\x1b[1;5A"),
         ("ctrl-down", b"\x1b[1;5B"),
