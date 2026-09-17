@@ -3,8 +3,8 @@
 //! A parked record stopped polling and, after one OS notice, the PR was
 //! invisible to merge scan, heal and the king. Red CI is the state a working
 //! session is in while it pushes fixes, so "retries exhausted" read as
-//! "forgotten until a human noticed" (x-6bf4: six open PRs parked in one
-//! afternoon, 17 finished delivery records cluttering the list above them).
+//! "forgotten until a human noticed": six open PRs parked in one afternoon,
+//! with 17 finished delivery records cluttering the list above them.
 //! This verb is the ONE reader that can change a park record: `list` buckets
 //! every parked row (open / finished / foreign), `unpark` clears one or all
 //! open rows, `sweep` un-parks an open row whose PR head moved since it was

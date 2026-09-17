@@ -197,7 +197,7 @@ pub struct Request {
     /// absent/`"manifest"` (the interactive verb). On the durable-grant lane a
     /// red verdict is the state a working session is in while it pushes fixes,
     /// so it holds; spending a retry on it parked six open PRs in one
-    /// afternoon (x-6bf4). The interactive lane keeps `Failed`, where the
+    /// afternoon. The interactive lane keeps `Failed`, where the
     /// `merge_status=failed` stamp is the worker's signal to stop.
     pub authority: Option<String>,
 }
@@ -2335,8 +2335,8 @@ mod tests {
 
     #[test]
     fn a_red_verdict_holds_on_the_durable_grant_lane_and_fails_interactive() {
-        // x-6bf4: red CI is the state a working session is in while it pushes
-        // fixes. Spending a retry on it parked six open PRs in one afternoon.
+        // Red CI is the state a working session is in while it pushes fixes.
+        // Spending a retry on it parked six open PRs in one afternoon.
         let mut req = request(Effect::Merge);
         req.require_checks = true;
         req.authority = Some("durable_grant".to_string());

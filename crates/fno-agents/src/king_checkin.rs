@@ -651,7 +651,7 @@ fn r_drain(ctx: &Ctx) -> Result<Value, String> {
     Ok(payload.get("undelivered").cloned().unwrap_or(Value::Null))
 }
 
-/// The parked-PR board fact (x-6bf4): open parks with the remedy verb, read
+/// The parked-PR board fact: open parks with the remedy verb, read
 /// in-process from the one owner so a second reader of the store shape can
 /// never drift. A failed store read is a failed reading, never a silent
 /// "parked: none".

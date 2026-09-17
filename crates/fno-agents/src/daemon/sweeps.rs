@@ -1,5 +1,5 @@
 //! The daemon's interval-gated maintenance sweeps (stale questions, park
-//! records), split out of daemon.rs for the file budget (x-6bf4). Each sweep
+//! records), split out of daemon.rs for the file budget. Each sweep
 //! shares one shape: a stamp-gated interval floor, a dispatch-pause skip with
 //! a paced sidecar row, and one journal row per run including a quiet one.
 
