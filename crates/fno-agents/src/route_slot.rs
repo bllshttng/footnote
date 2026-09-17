@@ -847,6 +847,10 @@ fn states_leg(payload: &Value) -> Value {
             // The readout never refreshes: display judges on current
             // evidence, and its preview walk must not probe either.
             obj.remove("capacity_refresh");
+            // The walk reuses the map this readout computed instead of
+            // reading the state file a second time.
+            obj.entry("capacity".to_string())
+                .or_insert_with(|| capacity.clone());
         }
         let slot_out = resolve_slot_payload(&slot_payload);
         let candidate = slot_out.get("candidate");
@@ -4408,7 +4412,6 @@ mod tests {
     /// decides the pick: lanes[0] codex-luna instead of the sonnet fallthrough.
     #[test]
     fn refresh_gate_probes_a_stale_lane_and_the_pick_uses_the_fresh_reading() {
-        let stubdir = tempfile::tempdir().expect("stubdir");
         let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
         let marker = env.1.path().join("marker");
         let stub = write_refresh_stub(env.1.path(), &fresh_codex_row(), &marker);
