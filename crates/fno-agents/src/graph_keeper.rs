@@ -1033,18 +1033,6 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// The read path every owned-graph read serves through. CALLER MUST HOLD
-/// `state.gate` in at least read mode: the entries and the tx digest this
-/// returns describe ONE gate-held window, so an intervening keeper-side
-/// commit can never pair a fresh version with stale entries (that pairing is
-/// what makes the tx conflict instead of silently clobbering).
-///
-/// Cache hit: identity-validated, the paired digest comes free. Miss: the
-/// digest is computed BEFORE the parse (the pre-cache order), so even the
-/// uncached remainder keeps the property that any interleave degrades to a
-/// commit conflict. Filled only by a clean, non-empty parse whose file did
-/// not move between the two stats, and the stored version digests exactly
-/// the bytes parsed.
 /// The gate-held read outcome: `Cached` carries the stored snapshot (its
 /// serialized views are available), `Fresh` carries values read past the
 /// cache because this instant is not one to pin (no identity, a file that
@@ -1080,6 +1068,18 @@ fn sqlite_unreadable(state: &StoreState, error: String) -> StoreError {
 /// with the entries: a foreign writer landing mid-read pairs stale entries
 /// with a version they do not match, which degrades to a begin conflict
 /// exactly as the version-before-entries order always has.
+/// The read path every owned-graph read serves through. CALLER MUST HOLD
+/// `state.gate` in at least read mode: the entries and the tx digest this
+/// returns describe ONE gate-held window, so an intervening keeper-side
+/// commit can never pair a fresh version with stale entries (that pairing is
+/// what makes the tx conflict instead of silently clobbering).
+///
+/// Cache hit: identity-validated, the paired digest comes free. Miss: the
+/// digest is computed BEFORE the parse (the pre-cache order), so even the
+/// uncached remainder keeps the property that any interleave degrades to a
+/// commit conflict. Filled only by a clean, non-empty parse whose file did
+/// not move between the two stats, and the stored version digests exactly
+/// the bytes parsed.
 fn read_graph_gated(state: &StoreState, strict: bool) -> Result<GraphRead, StoreError> {
     match state.backend() {
         Backend::Json => {

@@ -228,7 +228,7 @@ fn main() {
     }
     let sock = args.store.join("load.store.sock");
     let _ = std::fs::remove_file(&sock);
-    let mut worker = std::process::Command::new(&args.worker)
+    let spawned = std::process::Command::new(&args.worker)
         .args(["--store-keeper", "--sock"])
         .arg(&sock)
         .arg("--graph")
@@ -236,8 +236,17 @@ fn main() {
         .env("FNO_STORE_KEEPER_IDLE_SECS", "0")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn fno-agents-worker");
+        .spawn();
+    let mut worker = match spawned {
+        Ok(worker) => worker,
+        Err(error) => {
+            eprintln!(
+                "keeper-read-load: cannot spawn {}: {error}",
+                args.worker.display()
+            );
+            std::process::exit(2);
+        }
+    };
     let code = run_load(&mut worker, &sock, &args);
     let _ = worker.kill();
     let _ = worker.wait();
