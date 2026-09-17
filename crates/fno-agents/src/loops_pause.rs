@@ -276,15 +276,24 @@ fn corrupt(path: &Path, error: impl Into<String>) -> PauseState {
     }
 }
 
-/// The effective dispatch verdict: manual sentinel OR fleet incident. The
-/// stop hook's `pause_message()` deliberately stays manual-only.
+/// The effective dispatch verdict: manual sentinel OR fleet incident.
 pub fn is_paused() -> bool {
     dispatch_pause().is_paused()
 }
 
+/// The stop hook's pause read. It folds the fleet incident in too: a held
+/// worker whose stop hook saw only the manual sentinel would count every
+/// fire as NoProgress and die on a hold it was told to obey.
 pub fn pause_message() -> Option<String> {
-    let state = read_state();
-    state.is_paused().then(|| state.message())
+    pause_message_for(&read_state(), crate::fleet_incident::verdict())
+}
+
+fn pause_message_for(
+    manual: &PauseState,
+    incident: crate::fleet_incident::Verdict,
+) -> Option<String> {
+    let pause = combine(manual, incident);
+    pause.is_paused().then(|| pause.detail())
 }
 
 fn write_pause(who: &str, ttl_ms: Option<u64>) -> Result<PauseState, String> {
@@ -509,6 +518,38 @@ mod tests {
         );
         assert!(matches!(combined, DispatchPause::Manual { .. }));
         assert_eq!(combined.skip_reason(), "loops_paused");
+    }
+
+    #[test]
+    fn pause_message_names_a_fleet_incident() {
+        let mut record = stopped_record(7);
+        record.reason = "load".into();
+        let message = pause_message_for(
+            &PauseState::Clear,
+            crate::fleet_incident::Verdict::Stopped(record),
+        )
+        .expect("a fleet stop pauses the stop hook");
+        assert!(message.contains("generation 7"), "{message}");
+        assert!(message.contains("load"), "{message}");
+    }
+
+    #[test]
+    fn pause_message_is_none_when_clear_and_names_an_unreadable_incident() {
+        let mut clear = stopped_record(3);
+        clear.state = "clear".into();
+        assert_eq!(
+            pause_message_for(
+                &PauseState::Clear,
+                crate::fleet_incident::Verdict::Clear(clear)
+            ),
+            None
+        );
+        let message = pause_message_for(
+            &PauseState::Clear,
+            crate::fleet_incident::Verdict::Unavailable("unparseable: x".into()),
+        )
+        .expect("an unreadable incident pauses");
+        assert!(message.contains("unreadable"), "{message}");
     }
 
     #[test]
