@@ -1188,17 +1188,13 @@ def _create_node_impl(
         # against; before the rollup block, whose broad except would swallow a
         # refusal.
         if related:
-            from fno.graph._intake import _parse_blocker_list
-            from fno.graph.store import set_related
+            from fno.graph.store import apply_related_update
 
-            set_related(
-                entries,
-                new_id,
-                [
-                    _resolve_asserted_id(t, entries, flag="--related", self_id=new_id)
-                    for t in _parse_blocker_list(related)
-                ],
+            node = apply_related_update(
+                entries, node, related,
+                lambda t: _resolve_asserted_id(t, entries, flag="--related", self_id=new_id),
             )
+            node_holder[0] = node
         # Rollup resolution runs INSIDE the mutator: it reads the same locked
         # snapshot the node was born into and applies an auto-link in the same
         # write, so no second lock and no window where the node exists unlinked.
@@ -3511,18 +3507,13 @@ def cmd_update(
         resolved_id[0] = node["id"]
 
         if related is not None:
-            from fno.graph.store import set_related
+            from fno.graph.store import apply_related_update
 
-            tokens = _parse_blocker_list(related)
-            desired = (
-                []
-                if tokens == ["null"]
-                else [
-                    _resolve_asserted_id(t, entries, flag="--related", self_id=node["id"])
-                    for t in tokens
-                ]
+            node = apply_related_update(
+                entries, node, related,
+                lambda t: _resolve_asserted_id(t, entries, flag="--related", self_id=node["id"]),
             )
-            set_related(entries, node["id"], desired)
+            projected_node[0] = node
 
         if source_node is not None:
             node["source_node_id"] = (
