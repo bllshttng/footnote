@@ -1253,6 +1253,179 @@ fn refresh_cache_after_publish(state: &StoreState, outcome: &graph_store::Mutate
     }
 }
 
+/// The full-graph read replies spliced from the cache's serialized views.
+/// `read` and `begin` are the two replies whose bodies are one cached byte
+/// run; the frame bytes equal `encode(TAG_RESPONSE, to_vec(handle_request
+/// (...)))` for the same request (AC6).
+enum SplicedReply {
+    Read {
+        id: u64,
+        entries: Arc<Vec<u8>>,
+    },
+    Begin {
+        id: u64,
+        version: String,
+        digests: Arc<Vec<u8>>,
+        entries: Arc<Vec<u8>>,
+    },
+}
+
+impl SplicedReply {
+    /// (prefix, pieces, suffix): the cache's byte runs ride as shared pieces,
+    /// written without a copy; only the small envelope is per-request.
+    fn pieces(&self) -> (Vec<u8>, Vec<SplicePiece>, &'static [u8]) {
+        match self {
+            SplicedReply::Read { id, entries } => (
+                format!(r#"{{"id":{id},"ok":true,"result":{{"entries":"#).into_bytes(),
+                vec![SplicePiece::Shared(Arc::clone(entries))],
+                &b"}}"[..],
+            ),
+            SplicedReply::Begin {
+                id,
+                version,
+                digests,
+                entries,
+            } => (
+                format!(r#"{{"id":{id},"ok":true,"result":{{"version":"#).into_bytes(),
+                vec![
+                    SplicePiece::Inline(serde_json::to_vec(&version).unwrap_or_default()),
+                    SplicePiece::Inline(br#","base_digests":"#.to_vec()),
+                    SplicePiece::Shared(Arc::clone(digests)),
+                    SplicePiece::Inline(br#","entries":"#.to_vec()),
+                    SplicePiece::Shared(Arc::clone(entries)),
+                ],
+                &b"}}"[..],
+            ),
+        }
+    }
+
+    fn write_to(&self, stream: &mut UnixStream) -> std::io::Result<()> {
+        let (prefix, pieces, suffix) = self.pieces();
+        let payload_len =
+            prefix.len() + pieces.iter().map(|p| p.len()).sum::<usize>() + suffix.len();
+        let mut head = [0u8; 5];
+        head[0] = TAG_RESPONSE;
+        head[1..5].copy_from_slice(&(payload_len as u32).to_le_bytes());
+        stream.write_all(&head)?;
+        stream.write_all(&prefix)?;
+        for piece in &pieces {
+            piece.write_to(stream)?;
+        }
+        stream.write_all(suffix)?;
+        stream.flush()
+    }
+
+    /// The assembled frame, for the byte-equality tests only.
+    #[cfg(test)]
+    fn frame(&self) -> Vec<u8> {
+        let (prefix, pieces, suffix) = self.pieces();
+        let mut out = Vec::new();
+        let payload_len =
+            prefix.len() + pieces.iter().map(|p| p.len()).sum::<usize>() + suffix.len();
+        out.push(TAG_RESPONSE);
+        out.extend_from_slice(&(payload_len as u32).to_le_bytes());
+        out.extend_from_slice(&prefix);
+        for piece in &pieces {
+            out.extend_from_slice(&piece.bytes());
+        }
+        out.extend_from_slice(suffix);
+        out
+    }
+}
+
+enum SplicePiece {
+    /// The cache's serialized view: written straight from the shared bytes.
+    Shared(Arc<Vec<u8>>),
+    /// A small per-request separator or version string.
+    Inline(Vec<u8>),
+}
+
+impl SplicePiece {
+    fn len(&self) -> usize {
+        match self {
+            SplicePiece::Shared(bytes) => bytes.len(),
+            SplicePiece::Inline(bytes) => bytes.len(),
+        }
+    }
+
+    fn write_to(&self, stream: &mut UnixStream) -> std::io::Result<()> {
+        match self {
+            SplicePiece::Shared(bytes) => stream.write_all(bytes),
+            SplicePiece::Inline(bytes) => stream.write_all(bytes),
+        }
+    }
+
+    #[cfg(test)]
+    fn bytes(&self) -> Vec<u8> {
+        match self {
+            SplicePiece::Shared(bytes) => bytes.as_ref().clone(),
+            SplicePiece::Inline(bytes) => bytes.clone(),
+        }
+    }
+}
+
+/// The splice attempt for one request frame: `read` (never keep_malformed)
+/// and `begin` on a cacheable read. Anything else - another method, a
+/// request that is not JSON, an uncached (Fresh) read, a store error -
+/// returns None and the caller falls through to handle_request, so error
+/// shapes and odd methods keep their exact reply. A spliced `begin` still
+/// remembers its snapshot for the commit_rows conflict path.
+fn splice_reply(state: &StoreState, payload: &[u8]) -> Option<SplicedReply> {
+    let req: Value = serde_json::from_slice(payload).ok()?;
+    let id = req.get("id").and_then(Value::as_u64).unwrap_or(0);
+    let method = req.get("method").and_then(Value::as_str)?;
+    match method {
+        "read" => {
+            if req
+                .get("params")
+                .map(|p| {
+                    p.get("keep_malformed")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false)
+            {
+                return None;
+            }
+        }
+        "begin" => {}
+        _ => return None,
+    }
+    let _gate = state.gate.read().unwrap_or_else(|e| e.into_inner());
+    match read_graph_gated(state, false).ok()? {
+        GraphRead::Fresh(..) => None,
+        GraphRead::Cached(graph) => {
+            let entries = graph
+                .entries_json
+                .get_or_init(|| Arc::new(serde_json::to_vec(&*graph.entries).unwrap_or_default()))
+                .clone();
+            if entries.is_empty() {
+                return None;
+            }
+            if method == "read" {
+                return Some(SplicedReply::Read { id, entries });
+            }
+            let version = graph.version.clone();
+            let digests = graph
+                .base_digests_json
+                .get_or_init(|| {
+                    Arc::new(
+                        serde_json::to_vec(&canonical_row_digests(&graph.entries))
+                            .unwrap_or_default(),
+                    )
+                })
+                .clone();
+            remember_snapshot(state, &version, &graph.entries);
+            Some(SplicedReply::Begin {
+                id,
+                version,
+                digests,
+                entries,
+            })
+        }
+    }
+}
+
 fn serve_client(
     state: Arc<StoreState>,
     mut stream: UnixStream,
@@ -1356,6 +1529,15 @@ fn serve_client(
                 // that is mid-publish or mid-reply cannot be cut by an
                 // exiting keeper.
                 let _inflight = state.inflight.read().unwrap_or_else(|e| e.into_inner());
+                // The splice fast path: read and begin stream the cache's
+                // serialized bytes with no reply-tree copy. Everything else,
+                // and any splice refusal, keeps today's handle_request path.
+                if let Some(spliced) = splice_reply(&state, &payload) {
+                    if spliced.write_to(&mut stream).is_ok() {
+                        continue;
+                    }
+                    return;
+                }
                 let reply = handle_request(&state, &payload);
                 let body = serde_json::to_vec(&reply).unwrap_or_else(|_| {
                     json!({"id": 0, "ok": false,
@@ -4285,6 +4467,67 @@ mod tests {
             ids["entries"][0]["blocked_reason"],
             expected["blocked_reason"]
         );
+    }
+
+    fn assert_splice_frame_byte_equal(state: &StoreState) {
+        // AC6-HP: the spliced frame equals encode(TAG_RESPONSE,
+        // to_vec(handle_request(...))) for the same request.
+        for method in ["read", "begin"] {
+            let payload = serde_json::to_vec(&json!({"id": 7, "method": method})).unwrap();
+            let via_handle = encode(
+                TAG_RESPONSE,
+                &serde_json::to_vec(&handle_request(state, &payload)).unwrap(),
+            );
+            let spliced = splice_reply(state, &payload).expect("read/begin must splice");
+            assert_eq!(spliced.frame(), via_handle, "{method} frame bytes");
+        }
+    }
+
+    #[test]
+    fn spliced_frames_equal_handle_request_frames_on_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("graph.json");
+        std::fs::write(
+            &graph,
+            r#"{"entries":[{"id":"x-1","slug":"s1","title":"t","status":"ready"}]}"#,
+        )
+        .unwrap();
+        let state = read_state(&graph);
+        assert_splice_frame_byte_equal(&state);
+    }
+
+    #[test]
+    fn spliced_frames_equal_handle_request_frames_on_sqlite() {
+        let (_dir, state) = sqlite_state(json!({
+            "entries": [
+                {"id": "x-1", "slug": "s1", "title": "t", "status": "ready"},
+                {"id": "x-2", "slug": "s2", "title": "u", "status": "idea"},
+            ]
+        }));
+        assert_splice_frame_byte_equal(&state);
+    }
+
+    #[test]
+    fn an_unversioned_sqlite_graph_answers_unreadable_as_today() {
+        // AC7-ERR: a store whose db names sqlite but holds no version errors
+        // kind unreadable, and the splice refuses so the reply keeps its
+        // exact shape.
+        let (dir, state) = sqlite_state(json!({
+            "entries": [{"id": "x-a", "slug": "node-a", "title": "a", "status": "ready"}]
+        }));
+        let db = rusqlite::Connection::open(dir.path().join("graph.db")).unwrap();
+        db.execute("DELETE FROM graph_meta WHERE key = 'version'", [])
+            .unwrap();
+        drop(db);
+        let payload =
+            serde_json::to_vec(&json!({"id": 3, "method": "read", "params": {}})).unwrap();
+        assert!(
+            splice_reply(&state, &payload).is_none(),
+            "an erroring read must not splice"
+        );
+        let reply = handle_request(&state, &payload);
+        assert_eq!(reply["ok"], json!(false));
+        assert_eq!(reply["error"]["kind"], json!("unreadable"));
     }
 
     /// Reads the Identify reply's `store_backend` over the wire.
