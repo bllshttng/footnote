@@ -29,7 +29,11 @@ def test_process_proxy_boundary_restores_path_on_close(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", original)
     monkeypatch.setattr(
         "fno.setup.github_cli.worker_environment",
-        lambda base: {**dict(base), "PATH": f"{proxy}{os.pathsep}{original}"},
+        lambda base: {
+            **dict(base),
+            "PATH": f"{proxy}{os.pathsep}{original}",
+            "FNO_GH_PROXY_DIR": proxy,
+        },
     )
     closed = []
 
@@ -163,6 +167,83 @@ def test_worker_environment_uses_config_free_fallback(monkeypatch, tmp_path):
     assert calls == [None, fallback]
     assert env["PATH"].split(os.pathsep)[0] == str(fallback)
     assert env["FNO_GH_PROXY_DIR"] == str(fallback)
+
+
+def _proxy_dirs(monkeypatch, tmp_path):
+    durable = tmp_path / "durable"
+    fallback = tmp_path / "fallback"
+    monkeypatch.setattr("fno.setup.github_cli.github_cli_proxy_dir", lambda: durable)
+    monkeypatch.setattr("fno.setup.github_cli.fallback_proxy_dir", lambda: fallback)
+    real = tmp_path / "real-bin" / "gh"
+    real.parent.mkdir()
+    real.write_text("#!/bin/sh\necho real\n")
+    real.chmod(0o755)
+    return durable, fallback, real
+
+
+def _no_close():
+    class Context:
+        def call_on_close(self, callback):
+            pass
+
+    return Context()
+
+
+def _config_broken():
+    raise AttributeError("settings stub has no state_dir")
+
+
+def test_root_callback_puts_durable_proxy_first(monkeypatch, tmp_path):
+    durable, fallback, real = _proxy_dirs(monkeypatch, tmp_path)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("FNO_REAL_GH", str(real))
+    monkeypatch.delenv("FNO_GH_PROXY_DIR", raising=False)
+    protect_process_path(_no_close())
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(durable)
+    assert os.environ["FNO_GH_PROXY_DIR"] == str(durable.resolve())
+    assert not fallback.exists()
+
+
+def test_root_callback_ignores_inherited_dir_when_config_fails(monkeypatch, tmp_path):
+    _, fallback, real = _proxy_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr("fno.setup.github_cli.github_cli_proxy_dir", _config_broken)
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("FNO_REAL_GH", str(real))
+    monkeypatch.setenv("FNO_GH_PROXY_DIR", "/nonexistent-root/unwritable")
+    protect_process_path(_no_close())
+    assert os.environ["PATH"].split(os.pathsep)[0] == str(fallback)
+
+
+def _temp_first_path(fallback, real):
+    ensure_proxy(directory=fallback, real_gh=real)
+    return os.pathsep.join([str(fallback), str(real.parent), "/usr/bin"])
+
+
+def test_worker_environment_moves_lineage_off_temp_shim(monkeypatch, tmp_path):
+    durable, fallback, real = _proxy_dirs(monkeypatch, tmp_path)
+    path = _temp_first_path(fallback, real)
+    env = worker_environment({"PATH": path})
+    entries = env["PATH"].split(os.pathsep)
+    assert entries.index(str(durable)) < entries.index(str(fallback))
+    assert env["FNO_GH_PROXY_DIR"] == str(durable.resolve())
+
+
+def test_worker_environment_keeps_temp_shim_when_durable_fails(monkeypatch, tmp_path):
+    _, fallback, real = _proxy_dirs(monkeypatch, tmp_path)
+    path = _temp_first_path(fallback, real)
+    monkeypatch.setattr("fno.setup.github_cli.github_cli_proxy_dir", _config_broken)
+    env = worker_environment({"PATH": path})
+    assert env["FNO_GH_PROXY_DIR"] == str(fallback.resolve())
+    assert env["PATH"] == path
+
+
+def test_worker_environment_rematerializes_deleted_durable_shim(monkeypatch, tmp_path):
+    durable, _, real = _proxy_dirs(monkeypatch, tmp_path)
+    ensure_proxy(directory=durable, real_gh=real)
+    (durable / "gh").unlink()
+    env = worker_environment({"PATH": os.pathsep.join([str(real.parent), "/usr/bin"])})
+    assert (durable / "gh").read_text() == '#!/bin/sh\nexec fno-gh-proxy "$@"\n'
+    assert env["PATH"].split(os.pathsep)[0] == str(durable)
 
 
 def test_delegate_replaces_proxy_to_preserve_tty(monkeypatch):

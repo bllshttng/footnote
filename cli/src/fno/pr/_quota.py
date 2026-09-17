@@ -74,7 +74,7 @@ _SHIM_SCAN_BYTES = 65536
 def _is_proxy_shim(path: Path) -> bool:
     """Is this ``gh`` our own broker shim, judged by content rather than location?
 
-    ``github_cli_proxy_dir()`` is TMPDIR-derived, so directory identity only
+    ``fallback_proxy_dir()`` is TMPDIR-derived, so directory identity only
     recognizes a shim written by a process sharing our TMPDIR. A background job
     or a launchd agent inherits the shim on PATH but computes a different
     directory, and so fails to recognize it. The shim is a two-line script, but
