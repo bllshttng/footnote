@@ -3923,7 +3923,7 @@ def cmd_unclaim(
     _unclaim_node(task_id)
 
 
-@cli.command("requeue", hidden=True, epilog="Paired verb: fno backlog update <node> --locked-by <worker> re-claims the node.")
+@cli.command("requeue", hidden=True, epilog="Paired verbs: fno agents claim acquire node:<node> takes the lockfile; fno backlog update <node> --locked-by <worker> stamps the graph field.")
 def cmd_requeue(
     node: str = typer.Argument(..., help="Node id / slug / bare-hex to return to the queue."),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit a structured receipt."),
