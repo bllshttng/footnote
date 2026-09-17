@@ -48,6 +48,9 @@ pub struct Abort {
 pub enum AbortCause {
     Budget,
     NoProgress,
+    /// Held on an open operator question: a clean stop for input, not a
+    /// failure - the loop stopped once with the question named.
+    HeldOnQuestion,
     Interrupted,
     Failed,
 }
@@ -215,6 +218,9 @@ pub fn classify(reason: TerminationReason) -> RunOutcome {
         TerminationReason::NoProgress => Outcome::Aborted(Abort {
             cause: AbortCause::NoProgress,
         }),
+        TerminationReason::HeldOnQuestion => Outcome::Aborted(Abort {
+            cause: AbortCause::HeldOnQuestion,
+        }),
         TerminationReason::Interrupted => Outcome::Cancelled,
         TerminationReason::Aborted => Outcome::Aborted(Abort {
             cause: AbortCause::Failed,
@@ -263,6 +269,7 @@ pub fn legacy_projection(reason: &TerminationReason) -> PredicateProjection {
             reason,
             TerminationReason::NoProgress
                 | TerminationReason::Budget
+                | TerminationReason::HeldOnQuestion
                 | TerminationReason::Interrupted
                 | TerminationReason::Aborted
         ),
@@ -316,6 +323,7 @@ impl From<RunOutcome> for TerminationReason {
             Some(Outcome::Aborted(abort)) => match abort.cause {
                 AbortCause::Budget => Self::Budget,
                 AbortCause::NoProgress => Self::NoProgress,
+                AbortCause::HeldOnQuestion => Self::HeldOnQuestion,
                 AbortCause::Interrupted => Self::Interrupted,
                 AbortCause::Failed => Self::Aborted,
             },
