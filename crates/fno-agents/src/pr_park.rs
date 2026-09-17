@@ -553,7 +553,7 @@ pub(crate) fn now_secs() -> u64 {
 /// `fno-agents pr-park list|unpark|sweep`. Binary-direct behind
 /// `fno do pr watch`, like `pr-heal`: not a routable `fno agents` verb.
 pub fn run(args: &[String]) -> i32 {
-    let mut json_out = false;
+    let json_out = crate::json_output::requested(args);
     let mut all_open = false;
     let mut cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut key: Option<String> = None;
@@ -563,7 +563,6 @@ pub fn run(args: &[String]) -> i32 {
     while let Some(a) = it.next() {
         match a.as_str() {
             "list" | "unpark" | "sweep" if sub.is_empty() => sub = a.as_str(),
-            "--json" => json_out = true,
             "--all-open" => all_open = true,
             "--cwd" => cwd = it.next().map(PathBuf::from).unwrap_or(cwd),
             "--state" => {
