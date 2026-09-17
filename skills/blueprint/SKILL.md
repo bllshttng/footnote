@@ -275,6 +275,35 @@ fi
 
    After `$NODE_ID` is minted, run the **Model Pin / Routing** and **Blueprint Provenance Stamp** gates ([references/blueprint-gates.md](references/blueprint-gates.md#model-pin-transcription--when-a-plan-supplies-a-model)) when their triggers fire.
 
+3b-bis. **Node-bearing filename for raw-prose intake** (US5)
+
+   A node-seeded plan is authored with its id already in the name (step 3, and
+   `/think`'s save rule). Only the **raw-prose** path - `/blueprint "some
+   feature"` with no node - lands id-less, and auto-intake has just minted its
+   node id (`$NODE_ID`, the `intake <id> -> backlog` line). Give the artifact
+   its node-bearing name and repoint `plan_path`, so a roadmap base keyed on the
+   node id finds it:
+
+   ```bash
+   "${SKILL_DIR}/scripts/rename-plan-to-node-id.sh" "$PLAN_PATH" "$NODE_ID"
+   ```
+
+   The helper is idempotent and non-fatal: a plan already ending `-$NODE_ID.md`
+   (every node-seeded path) is a no-op, a pre-existing target is never
+   clobbered, and any failure leaves the id-less file intact and re-runnable -
+   it never blocks the handoff. If `$PLAN_PATH` still points at the old name in
+   the same session, read the helper's `renamed <new-path>` line and use that
+   path downstream.
+
+3b-ter. **Commit the plan write.** The rename runs first so the commit names the final path. Every blueprint write is one commit in the plans dir's own git repo, on the design-doc path too. The cause names what moved this write: a finding, a ruling id, or a note timestamp. A first write says `initial blueprint`.
+
+   ```bash
+   VERSION_LINE="$(bash "${SKILL_DIR}/scripts/commit-plan.sh" "$PLAN_PATH" "$NODE_ID" "<cause>")" \
+     || fno backlog note "$NODE_ID" "blueprint write not versioned: $VERSION_LINE"
+   ```
+
+   A `failed` line never blocks the close. The plan is already intaken and the claim must release, so the failure lands on the node as a note instead. `unversioned` means the plans dir is not in a git repo and the write has no history. Name the status word in the handoff message.
+
    After successful adoption, close the blueprint phase before returning the completion message:
 
    ```bash
@@ -318,26 +347,6 @@ fi
    ```
 
    Plan binding is artifact-only and never claims that the Blueprint phase completed.
-
-3b-bis. **Node-bearing filename for raw-prose intake** (US5)
-
-   A node-seeded plan is authored with its id already in the name (step 3, and
-   `/think`'s save rule). Only the **raw-prose** path - `/blueprint "some
-   feature"` with no node - lands id-less, and auto-intake has just minted its
-   node id (`$NODE_ID`, the `intake <id> -> backlog` line). Give the artifact
-   its node-bearing name and repoint `plan_path`, so a roadmap base keyed on the
-   node id finds it:
-
-   ```bash
-   "${SKILL_DIR}/scripts/rename-plan-to-node-id.sh" "$PLAN_PATH" "$NODE_ID"
-   ```
-
-   The helper is idempotent and non-fatal: a plan already ending `-$NODE_ID.md`
-   (every node-seeded path) is a no-op, a pre-existing target is never
-   clobbered, and any failure leaves the id-less file intact and re-runnable -
-   it never blocks the handoff. If `$PLAN_PATH` still points at the old name in
-   the same session, read the helper's `renamed <new-path>` line and use that
-   path downstream.
 
 4. **Present** plan and offer execution
 
