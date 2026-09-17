@@ -7,12 +7,8 @@ from __future__ import annotations
 
 import json
 import pathlib
-import re
 
 from fno.agents.format import (
-    JSON_SCHEMA_VERSION,
-    render_json,
-    render_table,
     serialize_entry,
 )
 from fno.agents.registry import AgentEntry
@@ -159,213 +155,6 @@ def test_serialize_entry_shape_is_stable_across_providers() -> None:
     }.issubset(claude_row.keys())
 
 
-def test_render_json_for_populated_registry() -> None:
-    """AC1-UI — --json output contains the documented top-level keys."""
-    rows = [
-        serialize_entry(_claude_entry(), live_status="Working"),
-        serialize_entry(_codex_entry(), live_status=None),
-    ]
-    filters = {"cwd": None, "provider": None, "status": None}
-
-    out = render_json(rows, filters_applied=filters)
-    parsed = json.loads(out)
-
-    assert parsed["count"] == 2
-    assert parsed["schema_version"] == JSON_SCHEMA_VERSION
-    assert parsed["filters_applied"] == filters
-    assert _contract()["projection_omissions"] == ["model", "model_basis"]
-    assert parsed["fields_omitted"] == _contract()["projection_omissions"]
-    assert len(parsed["agents"]) == 2
-
-
-def test_render_json_for_empty_registry() -> None:
-    """AC1-EDGE — empty registry returns valid empty shape."""
-    out = render_json([], filters_applied={"cwd": None, "provider": None, "status": None})
-    parsed = json.loads(out)
-
-    assert parsed["agents"] == []
-    assert parsed["count"] == 0
-    assert parsed["schema_version"] == JSON_SCHEMA_VERSION
-    assert _contract()["projection_omissions"] == ["model", "model_basis"]
-    assert parsed["fields_omitted"] == _contract()["projection_omissions"]
-
-
-def test_render_json_is_round_trip_parseable() -> None:
-    """AC3-UI — output is valid JSON (jq round-trip)."""
-    rows = [serialize_entry(_claude_entry(), live_status="Idle")]
-    filters = {"cwd": "/Users/foo/code/proj", "provider": "claude", "status": "live"}
-
-    out = render_json(rows, filters_applied=filters)
-    # Round-trip: parse, dump, parse again — same shape.
-    first = json.loads(out)
-    second = json.loads(json.dumps(first))
-    assert first == second
-
-
-def test_render_json_filter_intersection_with_zero_matches() -> None:
-    """AC3-EDGE — empty rows with non-null filters."""
-    filters = {"cwd": "/nonexistent", "provider": "gemini", "status": None}
-
-    out = render_json([], filters_applied=filters)
-    parsed = json.loads(out)
-
-    assert parsed["agents"] == []
-    assert parsed["count"] == 0
-    assert parsed["filters_applied"] == filters
-
-
-def test_render_table_header_row_present() -> None:
-    """AC1-HP — table has the documented header row."""
-    rows = [
-        serialize_entry(_claude_entry(), live_status="Working"),
-    ]
-
-    out = render_table(rows)
-
-    # Header tokens — flexible to width-adjustment, strict on presence.
-    assert "NAME" in out
-    assert "HARNESS" in out
-    assert "STATUS" in out
-    assert "LIVE" in out
-    assert "LAST MESSAGE" in out
-    assert "CWD" in out
-
-
-def test_render_table_data_row_count_matches_entries() -> None:
-    """AC1-HP — 3 registry entries → 3 data rows."""
-    rows = [
-        serialize_entry(_claude_entry(name="a"), live_status="Working"),
-        serialize_entry(_codex_entry(name="b"), live_status=None),
-        serialize_entry(
-            _claude_entry(name="c", status="orphaned"), live_status=None
-        ),
-    ]
-
-    out = render_table(rows)
-    # Non-blank lines: 1 header + 3 data rows. There can be a separator row.
-    body_lines = [ln for ln in out.splitlines() if ln.strip()]
-    # At minimum: header + 3 data = 4 lines. Separator optional.
-    assert len(body_lines) >= 4
-    assert "a" in out
-    assert "b" in out
-    assert "c" in out
-
-
-def test_render_table_shows_dash_for_null_live_status() -> None:
-    """Codex / fallback entries get '-' in the LIVE column (AC1-HP)."""
-    rows = [serialize_entry(_codex_entry(), live_status=None)]
-
-    out = render_table(rows)
-
-    # The codex entry's LIVE column should not contain 'Working' / 'Idle' /
-    # 'Needs input'; the empty-marker is the literal '-'.
-    assert "Working" not in out
-    assert "Idle" not in out
-    assert "Needs input" not in out
-    assert " - " in out or out.rstrip().endswith("-")
-
-
-def test_render_table_shows_orphan_status() -> None:
-    """AC1-HP — orphaned entry's STATUS column shows 'orphan' (or 'orphaned')."""
-    rows = [
-        serialize_entry(
-            _claude_entry(name="zombie", status="orphaned"), live_status=None
-        ),
-    ]
-
-    out = render_table(rows)
-
-    assert "orphan" in out.lower()
-
-
-def test_render_table_for_empty_registry_emits_header_only() -> None:
-    """Empty rows → header row + no data rows (still parseable shape)."""
-    out = render_table([])
-
-    assert "NAME" in out
-    assert "HARNESS" in out
-    # No data row implies no agent-name tokens; we don't have any to assert
-    # absence of, so just confirm the call doesn't crash on empty input.
-
-
-def test_render_table_does_not_crash_on_missing_last_message_at() -> None:
-    """Domain pitfall — legacy v1 entries may have last_message_at=None."""
-    entry = _claude_entry(last_message_at=None)
-    rows = [serialize_entry(entry, live_status=None)]
-
-    out = render_table(rows)
-
-    # The renderer must handle None and emit a placeholder (e.g. '-').
-    assert entry.name in out
-
-
-def test_render_table_event_age_column_beside_status() -> None:
-    """The transcript age renders as its own column next to STATUS, so
-    a row whose store-read state says one thing and whose transcript says
-    another shows both readings instead of resolving the conflict silently."""
-    from datetime import datetime, timedelta, timezone
-
-    fresh = (
-        datetime.now(timezone.utc) - timedelta(seconds=5)
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    rows = [
-        serialize_entry(_claude_entry(), live_status="Working", last_event_at=fresh)
-    ]
-
-    out = render_table(rows)
-
-    assert "EVENT AGE" in out
-    # A freshly-stamped event renders a wall-clock + relative token, not the
-    # bare '-' an absent reading gets.
-    assert fresh[11:19] in out
-    match = re.search(r"\((\d+)s\)", out)
-    assert match is not None
-    assert 4 <= int(match.group(1)) <= 15
-
-
-def test_render_table_event_age_absent_renders_dash_not_fresh() -> None:
-    """The honest-limits rule from the node: a row with no transcript reading
-    must render as unread ('-'), never as fresh - an absent reading is not
-    evidence of health."""
-    rows = [serialize_entry(_claude_entry(), live_status="Working")]
-
-    out = render_table(rows)
-
-    # Columnar slice, not a token split: "EVENT AGE" and "LAST MESSAGE" are
-    # two-word headers, so the header line has more whitespace-separated
-    # tokens than a data row has cells.
-    header, data = out.splitlines()[0], out.splitlines()[1]
-    idx = header.index("EVENT AGE")
-    assert data[idx : idx + len("EVENT AGE")].strip() == "-"
-
-
-def test_render_table_last_message_shows_transcript_text() -> None:
-    """LAST MESSAGE carries the last transcript turn. The column spent
-    its life wired to `last_message_at` - a timestamp, often null - so it never
-    showed a message; a 429 or a wait line is the actual diagnostic."""
-    rows = [
-        serialize_entry(
-            _claude_entry(name="short"),
-            live_status=None,
-            last_message="[tool_use: Bash] running the suite now",
-        ),
-        # Absent probe reading renders '-', and a long line is capped at 40
-        # chars so one transcript line cannot own the table.
-        serialize_entry(
-            _claude_entry(name="long"),
-            live_status=None,
-            last_message="x" * 120,
-        ),
-    ]
-
-    out = render_table(rows)
-
-    assert "running the suite now" in out
-    assert "…" in out
-    long_cells = [ln for ln in out.splitlines() if "xxxx" in ln]
-    assert len(long_cells[0].split()) > 1, "a capped message must not eat CWD"
-
-
 def test_serialize_entry_carries_the_last_event_pair() -> None:
     """The stamp and the last-turn text reach the JSON row, and default to None
     (not to a fabricated fresh reading) when the probe never answered."""
@@ -391,16 +180,8 @@ def test_serialize_entry_carries_the_last_event_pair() -> None:
 # crates/fno-agents/src/daemon.rs pins the Rust side, and a key added to one and
 # not the other fails CI.
 #
-# Which one is reachable, measured 2026-08-20 rather than assumed: `serialize_entry`
-# IS what serves `fno agents list`. The Rust `fno` binary forwards every
-# non-mux subcommand to the Python CLI (`decide_role` in crates/fno/src/main.rs),
-# and the JSON it prints carries `render_json`'s own `agents`/`count`/
-# `filters_applied` wrapper. The daemon's `agent.list` projection answers the
-# RPC its own consumers make - the mux table, fleetview - and crates/fno/src/
-# server.rs:1205 reaches even that by shelling out to `agents list --json`.
-# This comment used to claim the reverse. It sent a reader building the DND
-# column toward the wrong serializer, which is how a fix lands on a path nobody
-# takes.
+# The served `fno agents list` is the Rust projection; `serialize_entry` still
+# feeds the field-coverage lint and must keep the shared key set.
 # ---------------------------------------------------------------------------
 
 _SCHEMA_PATH = (
@@ -511,14 +292,12 @@ def test_serialize_entry_provider_names_vendor_not_harness(_unused=None) -> None
     row = serialize_entry(
         _claude_entry(provider="zai"), live_status=None
     )
-    payload = json.loads(render_json([row], filters_applied={}))
 
     assert row["provider"] == "zai"
     assert row["provider"] != row["harness"]
     assert row["harness"] == "claude"
     assert "model" not in row
     assert "model_basis" not in row
-    assert payload["fields_omitted"] == ["model", "model_basis"]
 
 
 # ---------------------------------------------------------------------------
@@ -560,48 +339,6 @@ def test_address_is_null_when_no_identity_was_recorded() -> None:
     entry = _codex_entry(harness_session_id=None, short_id=None)
 
     assert serialize_entry(entry, live_status=None)["address"] is None
-
-
-def test_table_shows_address_and_never_truncates_it() -> None:
-    """A truncated address is a wrong address, so NAME and CWD absorb overflow
-    and the address column does not."""
-    row = serialize_entry(
-        _claude_entry(
-            name="a-very-long-worker-name-that-will-be-truncated-for-sure",
-            cwd="/Users/foo/code/some/deeply/nested/project/path/that/is/long",
-            harness_session_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
-        ),
-        live_status=None,
-    )
-
-    out = render_table([row], terminal_width=60)
-
-    assert "ADDRESS" in out.splitlines()[0]
-    assert "e6f78b98" in out
-
-
-def test_discovered_lane_leads_with_the_address_not_the_label() -> None:
-    """The alias is a display label. It led the discovered table, so it was the
-    leftmost thing a reader copied, and it is not an address."""
-    discovered = [
-        {
-            "handle": "etl-3ad1f42d",
-            "session_id": "3ad1f42d-1111-2222-3333-444455556666",
-            "short_id": "3ad1f42d",
-            "status": "idle",
-            "project": "etl",
-            "cwd": "/Users/foo/code/etl",
-        }
-    ]
-
-    out = render_table([], discovered=discovered)
-
-    lines = out.splitlines()
-    banner = next(i for i, ln in enumerate(lines) if "DISCOVERED LIVE" in ln)
-    header = lines[banner + 1]
-    assert header.index("ADDRESS") < header.index("LABEL")
-    assert "3ad1f42d" in out
-    assert "etl-3ad1f42d" in out
 
 
 # ---------------------------------------------------------------------------

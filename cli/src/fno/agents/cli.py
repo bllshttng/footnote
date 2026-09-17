@@ -3026,51 +3026,15 @@ def cmd_list(
         "--no-discovered skips the ~/.claude/sessions scan).",
     ),
 ) -> None:
-    """List registered agents with optional filters.
+    """List registered agents: ROW NAME SESSION HARNESS MODEL EFFORT PR AGE
+    LAST MESSAGE STATUS, JSON when stdout is not a TTY or ``--json`` is passed.
 
-    Output format follows Locked Decision 4: JSON when stdout is not a
-    TTY OR ``--json`` is passed; human-readable table otherwise.
-
-    The discovered-live-sessions lane surfaces host-local,
-    un-adopted Claude Code sessions so they are addressable by handle; pass
-    ``--no-discovered`` to skip the registry scan.
-
-    ``model`` is omitted from every row on purpose: the stored model is
-    intended configuration, not observed truth. Read ``observed_model``
-    (transcript-sampled, with a sample count) and ``requested_model``;
-    ``fields_omitted`` names what was dropped.
+    The ``fno-agents`` client owns this verb; the options above document its
+    surface. There is no Python list lane left: a missing binary is refused.
     """
-    from fno.agents.read import list_agents
-    from fno._flag_aliases import refuse_retired_provider
+    from fno.agents.rust_runtime import refuse_without_binary
 
-    refuse_retired_provider(_provider_tombstone)
-
-    status_value: str | None = status.value if status is not None else None
-    progress_value: str | None = progress.value if progress is not None else None
-    is_tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
-
-    result = list_agents(
-        cwd=cwd,
-        # The CLI flag is the harness axis and now feeds the harness filter.
-        # It used to ride the `provider` param, which compared the harness
-        # pre-split and the vendor after, so `--harness claude` dropped every
-        # claude-hosted row the moment the axes separated.
-        harness=harness,
-        status=status_value,
-        progress=progress_value,
-        json_out=json_out,
-        tty=is_tty,
-        discover=discovered,
-    )
-    for warn in result.warnings:
-        sys.stderr.write(f"WARN: {warn}\n")
-    if result.output:
-        sys.stdout.write(result.output)
-        if not result.output.endswith("\n"):
-            sys.stdout.write("\n")
-        sys.stdout.flush()
-    if result.exit_code != 0:
-        raise typer.Exit(code=result.exit_code)
+    refuse_without_binary("list")
 
 
 @agents_app.command("sweep", hidden=True)

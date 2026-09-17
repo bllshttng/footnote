@@ -17,25 +17,28 @@ fno agents list
 A typical human-table view:
 
 ```
-NAME              ADDRESS   HARNESS  STATUS    CHECKED  PID     EVENT AGE  LAST MESSAGE           CWD
-worker-frontend   7f3a2c1d  claude   live      4m       75742   2m         running the suite now  /Users/foo/code/proj
-worker-migration  9b1e44f0  codex    live      18s      75810   18s        [tool_use: Bash] ls    /Users/foo/code/proj
-worker-design     4c8d21ab  claude   orphaned  2h       -       unknown    -                      /Users/foo/code/proj
+ROW NAME              SESSION                               HARNESS MODEL                         EFFORT PR          AGE     LAST MESSAGE           STATUS
+1   worker-frontend   7f3a2c1d-5e0b-4c1a-9d2e-0a1b2c3d4e5f  claude  glm-5.3-flash (observed)      xhigh  #2136       2m      running the suite now  writing
+2   worker-migration  019f4d0c-8a7b-7c61-b2d0-3e4f5a6b7c8d  codex   gpt-5.6-luna[1m] (requested)  high   none        unknown -                      quiet
+3   worker-design     4c8d21ab-1111-2222-3333-444455556666  claude  - (unrequested)               -      - (no-node) unknown -                      orphaned
 ```
 
 Columns:
 
 | Column | Meaning |
 |---|---|
+| ROW | The 1-based position in the served attention order. |
 | NAME | Agent name (the identifier you pass to `ask` / `logs`). |
-| ADDRESS | The mailbox address mail can actually reach this worker at; `-` when it has none. |
+| SESSION | The full harness session id, never truncated. Its first eight characters are the mail address. |
 | HARNESS | The harness: `claude`, `codex`, `gemini`, `opencode`, or `agy`. |
-| STATUS | The transcript verdict: `live`, `orphaned` (the transcript reads done or stalled), or `unknown` (the probe could not answer). Stored registry status is lifecycle metadata and does not decide this column. |
-| CHECKED | Relative age since the last reconcile probe (`never` when never probed, `?` when the stored timestamp will not parse). |
-| PID | Worker pid for a PTY agent; `-` for a one-shot ask, which has no managed process. |
-| EVENT AGE | Relative age of the transcript's newest activity, read by the same probe as STATUS; `unknown` when no transcript was read. A `live` row with an hours-old EVENT AGE is the wedged-worker signal. |
+| MODEL | The model with the basis it was read from. `(observed)` is the transcript reading and always wins. `(observed; requested X)` names a substitution. `(requested)` or `(verified)` is the stored value when nothing was observed. `- (unrequested)` means no model was ever requested. |
+| EFFORT | The stored reasoning effort, or `-`. |
+| PR | The primary PR of the row's node: `#N`, `none` (the node has no PR), `- (no-node)` (the row works no node), or `? (graph-unreadable)`. |
+| AGE | Relative age of the transcript's newest activity; `unknown` when no transcript was read. A busy STATUS with an hours-old AGE is the wedged-worker signal. |
 | LAST MESSAGE | Flattened text of the worker's last transcript turn (`[tool_use: name]` markers inline), capped for display; `-` when the probe did not answer. |
-| CWD | Working directory the agent was created in, printed in full. |
+| STATUS | The served activity word: `writing`, `quiet`, `parked`, `refused`, `orphaned`, or `unknown`. |
+
+`--json` keeps every field the table drops, such as `cwd`, `pid`, `address` and `last_reconciled_at`. `fno agents list` needs the `fno-agents` binary. There is no Python list lane, so `FNO_AGENTS_RUNTIME=python` refuses the verb with exit 127.
 
 The emitter refuses self-contradictory stored fields. If a terminal `status` is behind a fresher transcript event, it becomes `unknown` with `basis: stale-verdict-fresher-event`. If `last_message_at` is newer than `last_event_at`, it becomes `null` with `last_message_at_basis: refused-newer-than-transcript`. When process-start evidence is unavailable, `liveness_origin` is `null` and `liveness_origin_basis` names which of five causes produced it: `pid-absent`, `created-at-absent`, `created-at-unreadable`, `pid-start-absent`, or `pid-start-unreadable`. Otherwise the origin is `resumed` or `survivor` and the basis is `null`, because the value is its own evidence.
 
@@ -45,7 +48,7 @@ The emitter refuses self-contradictory stored fields. If a terminal `status` is 
 fno agents list --harness claude               # claude agents only
 fno agents list --status orphaned              # only stale entries
 fno agents list --cwd ~/code/proj              # only agents created in this repo
-fno agents list --harness claude --status live --cwd ~/code/proj
+fno agents list --harness claude --status writing --cwd ~/code/proj
 ```
 
 `--cwd` resolves relative paths to absolute before comparing, so `./.` works.
@@ -76,6 +79,12 @@ Returns a canonical object suitable for scripts:
       "status": "live",
       "live_status": null,
       "observed_model": { "kind": "observed", "model": "glm-5.2", "samples": 300 },
+      "requested_model": "glm-5.2",
+      "model": "glm-5.2",
+      "model_basis": "requested",
+      "node": "x-58e3",
+      "pr": 2136,
+      "pr_basis": "node",
       "pid": 75742,
       "last_reconciled_at": "2026-05-20T17:30:00Z",
       "liveness_origin": "survivor",
@@ -93,14 +102,14 @@ Returns a canonical object suitable for scripts:
   "discovered_sessions": [],
   "discovered_count": 0,
   "filters_applied": { "cwd": null, "harness": null, "provider": null, "status": null, "progress": null },
-  "fields_omitted": ["model", "model_basis"],
+  "fields_omitted": [],
   "schema_version": 3
 }
 ```
 
 The row's key set is pinned by [`schemas/agents-list-row.json`](../../schemas/agents-list-row.json), which both serializers are tested against; edit that file first when adding a key. Every entry carries the same keys regardless of harness, so a consumer never branches on harness to find a field. JSON is the default whenever stdout is a pipe, so `fno agents list | jq .` Just Works without an explicit `--json`.
 
-`harness` names the CLI, not the model vendor. `provider` beside it is the model vendor the row was spawned with, stamped at spawn and never inferred from `harness`. An old alias once duplicated the harness value here, so a z.ai-routed worker reported `provider: claude` and that falsely looked like an Anthropic fallback. The alias was removed for that lie, and the removal then hid the real vendor axis, which the split had just created. `provider` is back with its true meaning. `model` stays omitted because the stored value describes intended configuration, not observed runtime truth, and the envelope reports that as `fields_omitted: ["model"]`. `harness_session_id` is the worker's own session id in its harness's store.
+`harness` names the CLI, not the model vendor. `provider` beside it is the model vendor the row was spawned with, stamped at spawn and never inferred from `harness`. An old alias once duplicated the harness value here, so a z.ai-routed worker reported `provider: claude` and that falsely looked like an Anthropic fallback. The alias was removed for that lie, and the removal then hid the real vendor axis, which the split had just created. `provider` is back with its true meaning. `model` is projected with `model_basis` beside it, because an omitted field read as unset. The basis says whether the stored value is a request or a verified reading. `observed_model` stays the transcript truth, and every renderer puts it ahead of the stored value. `harness_session_id` is the worker's own session id in its harness's store.
 
 `observed_model` answers the question `provider` does not: which model the worker is ACTUALLY running.
 It is derived from the worker's own transcript at read time, never recorded at spawn, because a spawn records intent and would report the intended model in exactly the case you suspect a fallback.

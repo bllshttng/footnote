@@ -160,6 +160,17 @@ def test_route_missing_binary_exits_127(capsys) -> None:
     assert "not found" in err
 
 
+def test_python_forced_list_is_refused_with_no_table(monkeypatch) -> None:
+    """There is no Python list lane: forcing it names the binary and exits 127."""
+    from fno.cli import app
+
+    monkeypatch.setenv(rr.RUNTIME_ENV, "python")
+    result = CliRunner().invoke(app, ["agents", "list"])
+    assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
+    assert f"requires the '{rust_binary.BINARY_NAME}' binary" in result.output
+    assert "NAME" not in result.output
+
+
 def test_route_exec_failure_exits_127(capsys, tmp_path) -> None:
     """A resolved binary whose exec raises OSError fails legibly, not as a traceback."""
     binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)

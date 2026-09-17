@@ -380,11 +380,9 @@ class AgentEntry:
     model: Optional[str] = None
     # The basis for `model`: "requested" (stamped at spawn from the
     # flag or route the caller named) or "verified" (read back from a verified
-    # pane status). A bare model is two facts in one field - the
-    # shape - so the pair travels together. None on rows that predate the
-    # field or carry no model. Additive-optional; stays OUT of the list-row
-    # projection (model is a projection omission by standing ruling: intended
-    # configuration must not surface as observed runtime truth).
+    # pane status). A bare model is two facts in one field, so the pair travels
+    # together, and the list row projects both. None on rows that predate the
+    # field or carry no model.
     model_basis: Optional[str] = None
     effort: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)

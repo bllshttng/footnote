@@ -36,7 +36,6 @@ from fno.agents.reachability import (
     MODEL_REFUSED,
     NO_EVIDENCE,
     NO_INFERENCE,
-    PARKED,
     PROMISE,
     PROVIDER_REFUSED,
     REFUSED,
@@ -205,27 +204,6 @@ def test_the_stalled_threshold_is_a_knob_not_a_physical_constant() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_python_surfaces_share_one_derivation() -> None:
-    """The routing assertion: no surface may carry its own opinion.
-
-    A fix that makes two verbs agree while resume/peek/top keep private
-    liveness logic leaves the same trap with a smaller blast radius -- the
-    guard-on-one-of-N-reachable-paths shape.
-
-    Only the PYTHON surfaces are asserted here. ``resume`` is a Rust verb
-    (client_verbs.rs) that reaches this derivation by shelling out to
-    ``fno agents truth --json``; its congruence is pinned by
-    :func:`test_truth_json_carries_the_reachability_verdict_for_rust_callers`
-    below, which guards the actual wire between them.
-    """
-    import fno.agents.reachability as reach
-
-    mod = __import__("fno.agents.read", fromlist=["reachability"])
-    assert getattr(mod, "reachability", None) is reach.reachability, (
-        "fno.agents.read does not consult the shared derivation"
-    )
-
-
 def test_both_list_lanes_render_through_the_same_wire_mapping() -> None:
     """`fno agents list` has TWO lanes and they share one payload.
 
@@ -236,11 +214,9 @@ def test_both_list_lanes_render_through_the_same_wire_mapping() -> None:
     identity, not by equal values, so a copied function fails here too.
     """
     from fno.agents import discover as discover_mod
-    from fno.agents import read as read_mod
     from fno.agents import reachability
 
     for seam in ("classify_reachability", "classify_progress", "rendered_activity"):
-        assert getattr(read_mod, seam) is getattr(reachability, seam), seam
         assert getattr(discover_mod, seam) is getattr(reachability, seam), seam
 
 

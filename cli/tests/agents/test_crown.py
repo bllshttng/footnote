@@ -477,8 +477,8 @@ def test_whoami_no_crown_line_for_uncrowned() -> None:
 # --- list marks crowned rows -------------------------------------------------
 
 
-def test_list_serialize_and_table_mark_the_crown() -> None:
-    from fno.agents.format import render_table, serialize_entry
+def test_list_serialize_marks_the_crown() -> None:
+    from fno.agents.format import serialize_entry
     from fno.agents.registry import AgentEntry
 
     crowned = AgentEntry(
@@ -491,12 +491,6 @@ def test_list_serialize_and_table_mark_the_crown() -> None:
     assert js["crown"] == "L1 epic-x"
     assert js["crown_level"] == 1 and js["crown_grantor"] == "human"
     assert serialize_entry(plain, None)["crown"] is None
-
-    table = render_table([serialize_entry(crowned, None), serialize_entry(plain, None)])
-    assert "king-epic [L1 epic-x]" in table  # crowned row carries the marker
-    # the uncrowned row's name is unadorned
-    assert any(line.startswith("worker ") or line.strip().startswith("worker")
-               for line in table.splitlines())
 
 
 def test_top_rows_join_the_crown_by_name() -> None:

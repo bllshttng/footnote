@@ -1,6 +1,6 @@
 # fno agents — list + logs read surface
 
-Two read verbs sit on top of the registry substrate: `fno agents list` (registry roster + live status) and `fno agents logs <name>` (per-agent transcript tail). Both are pure-read — they never mutate the registry. This doc covers the design; the how-to lives in the [list/logs user guide](../guides/fno-agents-list-logs.md).
+Two read verbs sit on top of the registry substrate: `fno agents list` (registry roster + live status) and `fno agents logs <name>` (per-agent transcript tail). The `fno-agents` Rust client serves `list`: the daemon's `agent.list` projection builds the row, and `render_list_table` in `crates/fno-agents/src/bin/client.rs` draws the table. The MODEL and PR cells come from `crates/fno-agents/src/list_row.rs`. The Python list lane is deleted, so the sections below that describe `read.py` cover `logs` only. Both are pure-read — they never mutate the registry. This doc covers the design; the how-to lives in the [list/logs user guide](../guides/fno-agents-list-logs.md).
 
 Parent: [fno-agents-registry-and-dispatch.md](fno-agents-registry-and-dispatch.md). Sibling: [fno-agents-followup.md](fno-agents-followup.md).
 
@@ -13,8 +13,8 @@ The primary caller is an LLM orchestrator. `list --json` returns the fleet shape
 ```
 cli/src/fno/agents/
 ├── cli.py                  ← Typer wiring; adds the `logs` verb
-├── format.py               ← pure JSON + table renderers
-├── read.py                 ← list_agents + read_logs entry points
+├── format.py               ← serialize_entry (row shape for the field-coverage lint)
+├── read.py                 ← read_logs entry point
 └── harnesses/
     └── claude.py           ← claude_agents_json + logs shellouts
 ```
@@ -36,34 +36,6 @@ Which key and which spelling a claude build emits has changed twice, so the prov
 A spelling not in the input map passes through unchanged with a drift warning, which is what keeps the NEXT rename loud instead of silent.
 
 Both fields appear on every JSON entry. `live_status` is `null` for non-Claude entries and for Claude entries when the shellout fails or omits the entry. Conflating them would lose information — an `orphaned` registry entry whose `live_status` is `null` because claude reports it doesn't exist is a different story than a `live` entry whose `live_status` is `Idle` because the supervisor is between jobs.
-
-## Live-status augmentation flow
-
-```
-list_agents(filters, json_out, tty)
-   │
-   ├─ load_registry()                      ← read-only, no flock
-   ├─ apply filters (cwd / provider / status)
-   ├─ if any claude entry survives filtering:
-   │    └─ harnesses.claude.claude_agents_json()
-   │         ├─ subprocess.run(timeout=3.0, capture)
-   │         ├─ on every failure mode → ({}, [warning])
-   │         └─ on success → {short_id: {live_status, ...}}
-   ├─ serialize_entry(entry, live_status, observed_model)  ← canonical row dict
-   └─ render_json | render_table           ← format selection
-```
-
-Failure modes that the augmentation step catches internally and surfaces as warnings (never as a non-zero exit):
-
-- `FileNotFoundError` — `claude` binary missing from PATH
-- `subprocess.TimeoutExpired` — exceeded the 3-second per-call budget
-- non-zero claude exit
-- `json.JSONDecodeError`
-- structural drift in the response shape (no short id under any accepted key)
-- a TOTAL drop of the AGENT rows (zero parsed, counting only rows whose `kind` is not `interactive`) adds one summary warning naming the count, because an empty map otherwise reads exactly like "no agents running". The operator's own interactive sessions appear in the same array and carry no id by design, so they are excluded: counting them would cry drift at a machine that simply has no agents running.
-- live-status sentinel drift (a resolved value outside `{Working, Needs input, Idle, Done}` triggers a forensic warning but passes through unchanged)
-
-`read.py` does NOT add a broad `except Exception` around the call — programmer errors should crash visibly. The contract is: `claude_agents_json` returns `({}, warnings)` on every documented failure; anything else escaping is a bug.
 
 ## Logs branch by provider
 
@@ -113,21 +85,25 @@ Without these checks, the loop would hang silently on every common log-rotation 
       "status": "live",
       "live_status": "Working",
       "observed_model": { "kind": "observed", "model": "glm-5.2", "samples": 300 },
+      "model": "glm-5.2",
+      "model_basis": "requested",
+      "pr": null,
+      "pr_basis": "no-node",
       "log_path": "/Users/foo/.fno/agents/worker-frontend/output.jsonl"
     }
   ],
   "count": 1,
   "filters_applied": { "cwd": null, "provider": null, "status": null, "progress": null },
-  "fields_omitted": ["model", "model_basis"],
+  "fields_omitted": [],
   "schema_version": 2
 }
 ```
 
-The schema version is owned by `format.py::JSON_SCHEMA_VERSION` and is intentionally distinct from the registry's `SCHEMA_VERSION`. The CLI output and the storage substrate evolve on independent cadences.
+The schema version is owned by the Rust client and is intentionally distinct from the registry's `SCHEMA_VERSION`. The CLI output and the storage substrate evolve on independent cadences.
 
 All entries have the same key set regardless of harness. Consumers that grep for keys can rely on `short_id == null` for non-Claude entries rather than checking for key presence.
 
-`harness` names the CLI. `observed_model` names the model that answered, derived from each worker's transcript by `session_truth.observed_model`. Both list emitters use that resolver. Python calls it directly in `read.py`. Rust reads it from the existing `fno agents truth --json` probe. Row-level `provider` and `model` are omitted because registry storage records intended vendor and model configuration, not what answered. The top-level `fields_omitted` array makes that projection choice explicit instead of letting a consumer interpret missing keys as null storage.
+`harness` names the CLI. `observed_model` names the model that answered, derived from each worker's transcript by `session_truth.observed_model`. Rust reads it from the existing `fno agents truth --json` probe. Row-level `model` rides with `model_basis`, so a stored request never reads as what answered. `pr` rides with `pr_basis` for the same reason: a null PR always names why it is null. `fields_omitted` stays in the envelope and is empty.
 
 ## Format selection
 
@@ -154,7 +130,4 @@ The `KNOWN_LIVE_STATUSES` allowlist in `harnesses/claude.py` catches the orthogo
 
 ## Test surface
 
-`list` + `logs` coverage lives in `cli/tests/agents/`, across five files.
-`test_format.py` (serialize_entry / render_json / render_table), `test_read.py` (list_agents filters, fallback paths, pure-read invariant), and `test_harnesses_claude_read.py` (claude_agents_json failure modes and logs() streaming + SIGINT).
-Then `test_cli_list_logs.py` (CLI plumbing, exit codes, the `--json` Claude branch) and `test_follow_signal.py` (a real subprocess `python -m fno.cli` invocation with SIGINT delivery).
-The acceptance-criterion-to-test mapping lives in the design doc.
+The list row contract is `list_row_key_set_matches_shared_contract` in `crates/fno-agents/src/daemon_tests.rs`, against `schemas/agents-list-row.json`. The table tests are the `render_list_table_*` tests in `crates/fno-agents/src/client_tests.rs`, and the cell rules are tested in `crates/fno-agents/src/list_row.rs`. `logs` coverage lives in `cli/tests/agents/`: `test_harnesses_claude_read.py`, `test_cli_list_logs.py` and `test_follow_signal.py`.

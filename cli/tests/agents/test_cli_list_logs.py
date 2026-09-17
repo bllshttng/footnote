@@ -7,7 +7,6 @@ wiring, exit codes, TTY behavior, and the AC3-ERR allowed-values list.
 """
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -76,68 +75,6 @@ def _patch_claude_subprocess(monkeypatch):
 # --- `fno agents list` -------------------------------------------------------
 
 
-def test_list_empty_registry_emits_json_with_zero_count(
-    tmp_path, monkeypatch, runner, _patch_claude_subprocess
-):
-    """AC1-EDGE — empty registry returns valid empty shape."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.cli import agents_app
-
-    result = runner.invoke(agents_app, ["list", "--json"])
-
-    assert result.exit_code == 0, result.output
-    parsed = json.loads(result.output)
-    assert parsed["count"] == 0
-    assert parsed["agents"] == []
-
-
-def test_list_corrupt_registry_exits_1(
-    tmp_path, monkeypatch, runner, _patch_claude_subprocess
-):
-    """AC1-ERR — corrupt JSON exits 1, stderr names file path + parser error."""
-    use_tmpdir(monkeypatch, tmp_path)
-    from fno import paths
-
-    target = paths.agents_registry_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("{garbage", encoding="utf-8")
-
-    from fno.agents.cli import agents_app
-
-    # CliRunner separates stdout/stderr only when mix_stderr=False is used;
-    # by default they're combined. Either way, the parser error surfaces.
-    result = runner.invoke(agents_app, ["list", "--json"])
-
-    assert result.exit_code == 1
-    assert str(target) in result.output
-
-
-def test_list_populated_table_renders_in_tty(
-    tmp_path, monkeypatch, runner, _patch_claude_subprocess
-):
-    """AC1-HP — 3 entries render under a TTY."""
-    use_tmpdir(monkeypatch, tmp_path)
-    write_registry(
-        [
-            _claude(name="alpha"),
-            _codex(name="bravo"),
-            _claude(name="charlie", status="orphaned"),
-        ]
-    )
-
-    from fno.agents.cli import agents_app
-
-    # CliRunner's stdout is not a real TTY, so the JSON default would
-    # kick in. Force the table path via monkeypatching isatty.
-    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
-    result = runner.invoke(agents_app, ["list"])
-
-    assert result.exit_code == 0, result.output
-    assert "alpha" in result.output
-    assert "bravo" in result.output
-    assert "charlie" in result.output
-
-
 def test_list_invalid_status_value_exits_2_with_allowed_values(
     tmp_path, monkeypatch, runner, _patch_claude_subprocess
 ):
@@ -151,70 +88,6 @@ def test_list_invalid_status_value_exits_2_with_allowed_values(
     # Typer puts the allowed-values list in the usage error.
     assert "writing" in result.output.lower()
     assert "orphaned" in result.output.lower()
-
-
-def test_list_filter_by_status_orphaned(
-    tmp_path, monkeypatch, runner, _patch_claude_subprocess
-):
-    use_tmpdir(monkeypatch, tmp_path)
-    write_registry(
-        [
-            _claude(name="alive", status="live"),
-            _claude(
-                name="dead",
-                status="orphaned",
-                short_id="def67890",
-            ),
-        ]
-    )
-
-    from fno.agents import session_truth
-    from fno.agents.cli import agents_app
-
-    monkeypatch.setattr(
-        session_truth,
-        "resolve_session_truth",
-        lambda handle, **_kwargs: {
-            "state": "stalled" if handle == "dead" else "working",
-            # x-c672: the status word keys on the measured age, so the
-            # fixtures carry one. The dead row reads stalled with NO age
-            # (an unanswered read), the live row a fresh transcript.
-            "last_activity_age_s": None if handle == "dead" else 30,
-        },
-    )
-
-    # A row whose probe answered nothing is UNKNOWN, not orphaned (x-16d8,
-    # x-c672): silence is absence of evidence and never a death sentence.
-    # `orphaned` means a falsifier affirmatively fired -- see the
-    # process-gone case below.
-    result = runner.invoke(agents_app, ["list", "--status", "unknown", "--json"])
-
-    assert result.exit_code == 0, result.output
-    parsed = json.loads(result.output)
-    assert parsed["count"] == 1
-    assert parsed["agents"][0]["name"] == "dead"
-    assert parsed["agents"][0]["basis"] == "silent"
-
-    # And nothing is orphaned, because no row was actually falsified.
-    result = runner.invoke(agents_app, ["list", "--status", "orphaned", "--json"])
-    assert json.loads(result.output)["count"] == 0
-
-
-def test_list_non_tty_defaults_to_json(
-    tmp_path, monkeypatch, runner, _patch_claude_subprocess
-):
-    """Locked Decision 4 — non-TTY stdout defaults to JSON."""
-    use_tmpdir(monkeypatch, tmp_path)
-    write_registry([_claude(name="alpha")])
-
-    from fno.agents.cli import agents_app
-
-    monkeypatch.setattr("sys.stdout.isatty", lambda: False, raising=False)
-    result = runner.invoke(agents_app, ["list"])
-
-    assert result.exit_code == 0, result.output
-    parsed = json.loads(result.output)
-    assert parsed["count"] == 1
 
 
 # --- `fno agents logs <name>` -----------------------------------------------
@@ -451,60 +324,3 @@ def test_every_word_the_renderer_produces_is_a_filterable_status():
 # falls back, so the row carries the derived reading.
 # ---------------------------------------------------------------------------
 
-
-def test_list_json_rows_carry_their_own_observed_model(
-    tmp_path, monkeypatch, runner, _patch_claude_subprocess
-):
-    """AC2-HP: every row carries an observed_model derived from THAT row's own
-    transcript, taken off the truth call the row already makes."""
-    use_tmpdir(monkeypatch, tmp_path)
-    write_registry([_claude(name="alpha"), _codex(name="bravo")])
-
-    from fno.agents import session_truth
-
-    models = {
-        "alpha": {"kind": "observed", "model": "glm-5.2", "samples": 300},
-        "bravo": {"kind": "observed", "model": "gpt-5.6-sol", "samples": 12},
-    }
-
-    def fake(handle, **_kw):
-        # The discovered-sessions lane resolves truth for its own handles too,
-        # so default rather than raise on anything outside the registry rows.
-        return {
-            "handle": handle,
-            "state": "working",
-            "reason": None,
-            "last_activity_age_s": 5,
-            "session_id": "s",
-            "observed_model": models.get(handle, {"kind": "no-transcript"}),
-            "suggestions": [],
-        }
-
-    monkeypatch.setattr(session_truth, "resolve_session_truth", fake)
-
-    from fno.agents.cli import agents_app
-
-    result = runner.invoke(agents_app, ["list", "--json"])
-
-    assert result.exit_code == 0, result.output
-    rows = {r["name"]: r for r in json.loads(result.output)["agents"]}
-    # Per-row, not one value smeared across the listing: the read must survive
-    # the later rebinding of `truth` to the unrelated node-claim reading.
-    assert rows["alpha"]["observed_model"] == models["alpha"]
-    assert rows["bravo"]["observed_model"] == models["bravo"]
-
-
-def test_list_json_row_without_a_transcript_says_so(
-    tmp_path, monkeypatch, runner, _patch_claude_subprocess
-):
-    """AC3-ERR: no transcript -> the row still renders, exit code unchanged."""
-    use_tmpdir(monkeypatch, tmp_path)
-    write_registry([_claude(name="alpha")])
-
-    from fno.agents.cli import agents_app
-
-    result = runner.invoke(agents_app, ["list", "--json"])
-
-    assert result.exit_code == 0, result.output
-    row = json.loads(result.output)["agents"][0]
-    assert row["observed_model"] == {"kind": "no-transcript"}

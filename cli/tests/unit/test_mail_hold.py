@@ -664,23 +664,6 @@ def test_a_lapsed_hold_renders_no_dnd_because_mail_flows_again():
     assert row["dnd"] is None
 
 
-def test_the_table_renders_a_dnd_column():
-    rows = [
-        {
-            "name": HANDLE,
-            "address": HANDLE,
-            "harness": "claude",
-            "status": "live",
-            "dnd": "~4m",
-            "cwd": "/tmp",
-        }
-    ]
-    table = fmt.render_table(rows, terminal_width=200)
-
-    assert "DND" in table.splitlines()[0]
-    assert "~4m" in table
-
-
 def _full_entry(**over):
     from fno.agents.registry import AgentEntry
 
