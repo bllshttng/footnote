@@ -2130,19 +2130,18 @@ def detect_abandoned_do_rows(entries, *, live_claimed, engaged_on, now_s, quiet_
 
 
 def abandoned_do_rows(entries, claimed):
-    """One roster read, then the detector at the configured bound; raises on an unread roster so nothing reaps blind."""
+    """The detector at the configured bound; the roster is read only when a row is past it, and an unread one raises so nothing reaps blind."""
     from fno.claims.roster import classify_workers, read_roster
     from fno.config import load_settings
+    from fno.graph.statuses import is_open_do_row
 
-    reading = read_roster(require_live_probe=False)
-    if not reading.consulted:
+    bound, now_s = load_settings().backlog.maintain.abandoned_do_row_hours * 3600, datetime.now(timezone.utc).timestamp()
+    past = any((do_row_idle_s(e, r, now_s) or 0) > bound for e in entries for r in e.get("sessions") or [] if is_open_do_row(r))
+    reading = read_roster(require_live_probe=False) if past else None
+    if reading is not None and not reading.consulted:
         raise RuntimeError(f"roster unread ({reading.reason})")
-    hours = load_settings().backlog.maintain.abandoned_do_row_hours
-    engaged_on = {n: [str(w.get("name")) for w in classify_workers(ws)[0]] for n, ws in reading.workers_by_node.items()}
-    return detect_abandoned_do_rows(
-        entries, live_claimed=claimed, engaged_on=engaged_on,
-        now_s=datetime.now(timezone.utc).timestamp(), quiet_after_s=hours * 3600,
-    )
+    engaged_on = {n: [str(w.get("name")) for w in classify_workers(ws)[0]] for n, ws in (reading.workers_by_node if reading else {}).items()}
+    return detect_abandoned_do_rows(entries, live_claimed=claimed, engaged_on=engaged_on, now_s=now_s, quiet_after_s=bound)
 
 
 def abandoned_leg(entries, claimed, graph_path, apply):

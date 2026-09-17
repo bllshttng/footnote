@@ -513,8 +513,10 @@ def test_requeue_holds_an_idle_row_with_a_reachable_worker_on_the_node(tmp_graph
 
 
 def test_requeue_reachable_refusal_names_its_clock(tmp_graph, claims_root, monkeypatch):
+    """A fresh row can only be held, so the refusal never waits on a fleet read."""
     _seed(tmp_graph, [_fresh_node()])
     _dead_truth(monkeypatch, state="working", age_s=60)
+    _roster(monkeypatch, consulted=False)
     result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
     assert result.exit_code == 3, _out(result)
     assert f"fno backlog session add {NODE_ID} --phase do --ended-at" in _out(result)
