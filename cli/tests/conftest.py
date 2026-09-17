@@ -476,7 +476,7 @@ def _block_live_provider_exec(request, monkeypatch, tmp_path_factory):
     # cursor_agent (module constant) / pi.rpc_argv / grok.acp_argv / kimi
     # (inline argv, no constant to import).
     provider_bins = {
-        "claude", "codex", "pi", "grok", "kimi",
+        "claude", "codex", "pi", "grok", "kimi", "dsh",
         _agy.AGY_BINARY, _cursor.CURSOR_AGENT_BINARY,
     }
 
