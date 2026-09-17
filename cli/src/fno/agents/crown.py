@@ -946,6 +946,7 @@ def reclaim_crown(handle: Optional[str] = None) -> dict[str, Any]:
                     crown_level=level,
                     crown_scope=scope,
                     crown_grantor=returned_by,
+                    model=getattr(target, "requested_model", None),
                 )
                 is not None
             )
@@ -1176,6 +1177,7 @@ def promote_existing_session(handle: str, scopes: list[str]) -> dict[str, Any]:
                 crown_level=level,
                 crown_scope=scope,
                 crown_grantor=grantor,
+                model=getattr(target, "requested_model", None),
             )
         except (OSError, ValueError) as exc:
             raise CrownPromotionError(

@@ -110,6 +110,10 @@ def _write_graph(
         "domain": "code",
         "priority": "p1",
         "difficulty": difficulty,
+        # The seam gate (x-8fb2) refuses an unpinned spawn, and CI runs with
+        # no routing config, so the grid declines with an empty chain and the
+        # pin must ride the node itself.
+        "model": "glm-5.3-flash[1m]",
         "cwd": cwd,
         "created_at": "2026-09-07T00:00:00+00:00",
         "touched_at": "2026-09-07T00:00:00+00:00",

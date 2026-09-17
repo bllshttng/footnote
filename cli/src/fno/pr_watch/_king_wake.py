@@ -396,9 +396,25 @@ def _dispatch_walk(
     address: Optional[str] = None,
     detail: Optional[str] = None,
     successor: bool = False,
-) -> None:
+) -> bool:
     """Spawn the wake-mode walk, detached. The address and the diff travel on
-    the command line: the fresh session cannot derive either itself."""
+    the command line: the fresh session cannot derive either itself.
+
+    Neither can it derive a model: the argv carries the crown manifest's pin,
+    and a manifest without one refuses the walk - an unpinned king respawn
+    bills the account default model."""
+    from fno.king.state import parse_manifest
+
+    model = (parse_manifest(target.manifest).get("model") or "").strip()
+    log = target.manifest.with_suffix(".md.wake.log")
+    if not model:
+        with log.open("ab") as sink:
+            sink.write(
+                f"king-wake refused {target.scope}: the crown manifest carries "
+                "no model pin; re-crown pinned, never respawn on the account "
+                "default.\n".encode("utf-8")
+            )
+        return False
     argv = [
         binary,
         "loop",
@@ -407,6 +423,8 @@ def _dispatch_walk(
         "king",
         "--scope",
         target.scope,
+        "--model",
+        model,
         "--wake",
         "--wake-reason",
         reason,
@@ -419,7 +437,6 @@ def _dispatch_walk(
         argv += ["--wake-detail", detail]
     if successor:
         argv += ["--wake-successor"]
-    log = target.manifest.with_suffix(".md.wake.log")
     with log.open("ab") as sink:
         subprocess.Popen(  # noqa: S603 - fixed argv, no shell
             argv,
@@ -428,6 +445,7 @@ def _dispatch_walk(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+    return True
 
 
 #: A pass stops under 15s left (one truth read measured 10.4s) rather than
@@ -702,10 +720,11 @@ def run_king_wake(
         window_count = verdict.count
         if dispatch_fn is not None:
             dispatch_fn(target, reason, wake_address, wake_detail, holder_gone)
+            spawned = True
         else:
             import shutil
 
-            _dispatch_walk(
+            spawned = _dispatch_walk(
                 target,
                 reason,
                 shutil.which("fno-agents") or "fno-agents",
@@ -713,7 +732,22 @@ def run_king_wake(
                 wake_detail,
                 holder_gone,
             )
-        if holder_gone:
+            if not spawned:
+                # A refused spawn still spent a wake bill; the feed must say
+                # why nothing launched, not leave it in the wake log alone.
+                refusal = "manifest-carries-no-model-pin"
+                emit(
+                    "king_wake_refused",
+                    {
+                        "scope": target.scope,
+                        "refusal": refusal,
+                        "reason": reason,
+                        "window_count": window_count,
+                        "ceiling": ceiling,
+                    },
+                )
+                summary["refused"].append({"scope": target.scope, "refusal": refusal})
+        if holder_gone and spawned:
             # The new session does not exist yet; its trail is the walk's journal.
             from fno.king.state import parse_manifest as _pm
 
