@@ -1322,8 +1322,8 @@ pub fn run_gate(
             },
         ) {
             claims::AcquireOutcome::Acquired(_) => true,
-            // Contention is a live peer: a dead holder's pid already freed
-            // the claim inside acquire. Queue; --no-wait refuses fast.
+            // Contention is a holder acquire could not prove dead: a dead
+            // holder's pid already freed the claim. Queue; --no-wait refuses fast.
             claims::AcquireOutcome::HeldByOther { .. } => false,
             claims::AcquireOutcome::Error(e) => {
                 if fail_closed {
@@ -1351,7 +1351,7 @@ pub fn run_gate(
             // tell "cap is full" from "the gate is wedged".
             if flags.no_wait {
                 eprintln!(
-                    "spawn-gate: a live spawner holds the gate mutex; refusing \
+                    "spawn-gate: a holder the gate cannot prove dead holds the gate mutex; refusing \
                      (--no-wait). Read the holder with `fno agents claim status gate:spawn`."
                 );
                 return Err(Refusal::with_receipt(
@@ -1365,7 +1365,7 @@ pub fn run_gate(
             }
             if now.duration_since(since) >= MUTEX_WAIT_BUDGET && !fail_closed {
                 eprintln!(
-                    "spawn-gate: a live holder kept the gate mutex for {}s; proceeding unserialized",
+                    "spawn-gate: the gate mutex stayed held for {}s; proceeding unserialized",
                     MUTEX_WAIT_BUDGET.as_secs()
                 );
                 acquired_mutex = true;
@@ -1759,7 +1759,7 @@ pub fn run_gate(
             };
             if mutex_blocked_since.is_some() {
                 eprintln!(
-                    "spawn-gate: {reason} after {}s; a live process holds the gate mutex. \
+                    "spawn-gate: {reason} after {}s; a holder the gate cannot prove dead holds the gate mutex. \
                      Read it with `fno agents claim status gate:spawn`. Release a stuck holder \
                      with `fno agents claim release gate:spawn --force --reason \"<why>\"`.",
                     QUEUE_TIMEOUT.as_secs()
