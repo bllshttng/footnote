@@ -1350,7 +1350,7 @@ fn spawn_detached(argv: &[String]) -> std::io::Result<u32> {
 /// with stdio on /dev/null, so the tick's 30s slice only pays the spawn and
 /// the drive loop's own 60s/300s bounds are what apply. `argv` is the exact
 /// args this process received (the child argv re-adds the verb).
-pub(crate) fn run_detached(
+fn run_detached(
     a: &Args,
     argv: &[String],
     spawn: &dyn Fn(&[String]) -> std::io::Result<u32>,
