@@ -22,7 +22,7 @@ def row(pid, ppid, argv, **extra):
     return d
 
 
-def run(pids, procs, keeper_verdicts=None, job_of_pid=None, job_state=None, home=HOME, tty_idle=None):
+def run(pids, procs, keeper_verdicts=None, job_of_pid=None, job_state=None, home=HOME, tty_idle=None, child_of=None):
     return classify(
         pids,
         procs=procs,
@@ -32,6 +32,7 @@ def run(pids, procs, keeper_verdicts=None, job_of_pid=None, job_state=None, home
         home=home,
         now=1_000_000.0,
         tty_idle=tty_idle,
+        child_of=child_of,
     )
 
 
@@ -238,6 +239,19 @@ class TestIdleLoginShell:
         hits = by_pid(run([41, 42], procs, tty_idle=lambda pid: 145_000.0))
         assert (hits[41].verdict, hits[41].action) == ("holds", "keep")
         assert (hits[42].verdict, hits[42].action) == ("holds", "keep")
+
+    def test_live_child_probe_holds_when_snapshot_misses_the_child(self):
+        """The snapshot can miss a child spawned after enumeration; the live
+        probe must hold the tree in that race."""
+        hits = by_pid(
+            run(
+                [48],
+                {48: row(48, 1, LOGIN_SHELL)},
+                tty_idle=lambda pid: 145_000.0,
+                child_of=lambda pid: True,
+            )
+        )
+        assert (hits[48].verdict, hits[48].action) == ("holds", "keep")
 
     def test_active_login_shell_holds(self):
         hits = by_pid(run([43], {43: row(43, 1, LOGIN_SHELL)}, tty_idle=lambda pid: 3_600.0))

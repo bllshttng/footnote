@@ -234,7 +234,7 @@ fn repo_root_for(tree: &Path) -> PathBuf {
 /// (where env-unset cargo runs land) only when the env-free resolution of the
 /// canonical checkout's first manifest has the hash-dir shape, sits outside
 /// every registered tree, and is none of `/`, `$HOME`, or the fno base.
-pub(crate) fn managed_bases(root: &Path) -> Vec<PathBuf> {
+pub(crate) fn managed_bases(root: &Path, trees: &[PathBuf]) -> Vec<PathBuf> {
     let fno_base = fno_build_base(root);
     let mut bases = vec![fno_base.clone()];
     let reject = |bases: &mut Vec<PathBuf>| {
@@ -270,10 +270,7 @@ pub(crate) fn managed_bases(root: &Path) -> Vec<PathBuf> {
     if base == fno_base {
         return reject(&mut bases);
     }
-    if registered_trees(root)
-        .iter()
-        .any(|tree| base.starts_with(tree))
-    {
+    if trees.iter().any(|tree| base.starts_with(tree)) {
         return reject(&mut bases);
     }
     bases.push(base.to_path_buf());
@@ -504,14 +501,15 @@ struct Row {
 /// `cargo-build-dirs` summary line.
 pub fn sweep(root: &Path, apply: bool, now: SystemTime) -> SweepReport {
     let mut rep = SweepReport::default();
-    let bases = managed_bases(root);
+    let trees = registered_trees(root);
+    let bases = managed_bases(root, &trees);
     rep.bases = bases.len();
     let fno_base = fno_build_base(root);
     rep.effective_cap_bytes = effective_cap_bytes(root);
 
     let mut names: BTreeSet<String> = BTreeSet::new();
     let mut resolved: BTreeSet<PathBuf> = BTreeSet::new();
-    for tree in registered_trees(root) {
+    for tree in trees {
         match answer_tree(&tree, &fno_base) {
             Ok(answer) => {
                 rep.trees_resolved += 1;
@@ -725,7 +723,8 @@ pub fn remove_for(tree: &Path) -> usize {
     let Ok(dirs) = list_for(tree) else {
         return 0;
     };
-    let bases = managed_bases(&repo_root_for(tree));
+    let base_root = repo_root_for(tree);
+    let bases = managed_bases(&base_root, &registered_trees(&base_root));
     let mut removed = 0;
     for dir in dirs {
         if !under_any(&dir, &bases) {
@@ -992,13 +991,13 @@ mod tests {
         let mut env = setup("badbase", "never-broken");
         // /x/y/aa/bb: shape passes, `/x/y` has fewer than 3 components.
         std::env::set_var("CBD_FB_ANSWER", "/x/y/aa/bb");
-        let bases = managed_bases(&env.root);
+        let bases = managed_bases(&env.root, &registered_trees(&env.root));
         assert_eq!(bases, vec![env.fno_base.clone()], "{bases:?}");
 
         // Inside the registered tree: the base IS a tree, outside-every-tree
         // fails.
         std::env::set_var("CBD_FB_ANSWER", env.root.join("00/abc123"));
-        let bases = managed_bases(&env.root);
+        let bases = managed_bases(&env.root, &registered_trees(&env.root));
         assert_eq!(bases, vec![env.fno_base.clone()], "{bases:?}");
     }
 

@@ -112,8 +112,26 @@ def _tty_idle_reader(now: float) -> Callable[[int], Optional[float]]:
     return read
 
 
+def _live_child_probe() -> Callable[[int], bool]:
+    """Live children of a pid, read at decision time.
+
+    The procs snapshot can miss a child spawned after enumeration; the live
+    probe closes that hole for the R6 inert verdict."""
+
+    def has_child(pid: int) -> bool:
+        try:
+            import psutil
+
+            return bool(psutil.Process(pid).children())
+        except Exception:  # noqa: BLE001 - an unreadable process keeps the tree
+            return False
+
+    return has_child
+
+
 def _direct_verdict(
-    pid: int, row: dict, *, keeper_verdicts, job_of_pid, job_state, home, procs, tty_idle
+    pid: int, row: dict, *, keeper_verdicts, job_of_pid, job_state, home, procs, tty_idle,
+    child_of=None
 ) -> Optional[Hit]:
     """R1/R2/R3 over one row. None means no rule names this process."""
     argv = _argv(row)
@@ -165,9 +183,16 @@ def _direct_verdict(
     # R6: an idle login shell pins nothing. The shell keeps running - verdict
     # inert, action keep, so archive-worktree.sh (which signals only
     # `terminate` rows) never closes a terminal tab; the shell only loses its
-    # cwd. Fail closed: unreadable tty, active tty, or any child all hold.
+    # cwd. Fail closed: unreadable tty, active tty, or any child all hold -
+    # the child test reads both the snapshot and (when the caller supplies the
+    # probe) the live process table, so a child the snapshot missed still
+    # holds.
     if _login_shell(row) and tty_idle is not None and procs is not None:
-        if not any(isinstance(r.get("ppid"), int) and r.get("ppid") == pid for r in procs.values()):
+        snapshot_childless = not any(
+            isinstance(r.get("ppid"), int) and r.get("ppid") == pid for r in procs.values()
+        )
+        probed_childless = child_of is None or not child_of(pid)
+        if snapshot_childless and probed_childless:
             idle_s = tty_idle(pid)
             tty_name = ""
             try:
@@ -203,6 +228,7 @@ def classify(
     home: str,
     now: float,
     tty_idle: Optional[Callable[[int], Optional[float]]] = None,
+    child_of: Optional[Callable[[int], bool]] = None,
 ) -> List[Hit]:
     """Classify each pid, first match wins: R0 no ps row, R1 keeper, R2 claude
     bg session, R3 orphaned tool shell, R4 descendant of any of these, R6
@@ -216,7 +242,7 @@ def classify(
             continue
         direct = _direct_verdict(
             pid, row, keeper_verdicts=keeper_verdicts, job_of_pid=job_of_pid, job_state=job_state, home=home,
-            procs=procs, tty_idle=tty_idle,
+            procs=procs, tty_idle=tty_idle, child_of=child_of,
         )
         if direct is None:
             direct = _descendant_verdict(
@@ -227,6 +253,7 @@ def classify(
                 job_state=job_state,
                 home=home,
                 tty_idle=tty_idle,
+                child_of=child_of,
             )
         if direct is None:
             hits.append(Hit(pid, HOLDS, KEEP, reason=f"unclassified: {_argv0(row)}", cmd=_cmd(row)))
@@ -235,7 +262,7 @@ def classify(
     return hits
 
 
-def _descendant_verdict(row, procs, *, keeper_verdicts, job_of_pid, job_state, home, tty_idle=None) -> Optional[Hit]:
+def _descendant_verdict(row, procs, *, keeper_verdicts, job_of_pid, job_state, home, tty_idle=None, child_of=None) -> Optional[Hit]:
     """R4: inherit the first classified ancestor's verdict and action."""
     pid = row.get("pid")
     cur = row.get("ppid")
@@ -246,7 +273,7 @@ def _descendant_verdict(row, procs, *, keeper_verdicts, job_of_pid, job_state, h
             return None
         hit = _direct_verdict(
             cur, ancestor, keeper_verdicts=keeper_verdicts, job_of_pid=job_of_pid, job_state=job_state, home=home,
-            procs=procs, tty_idle=tty_idle,
+            procs=procs, tty_idle=tty_idle, child_of=child_of,
         )
         if hit is not None:
             return Hit(
@@ -352,6 +379,7 @@ def main(argv: List[str]) -> int:
             home=home,
             now=now,
             tty_idle=_tty_idle_reader(now),
+            child_of=_live_child_probe(),
         )
         del worktree  # the enumeration is cwd-based; the tree names the hits
     except Exception:  # noqa: BLE001 - a broken classifier must read as broken
