@@ -122,6 +122,11 @@ def resolve_node_spawn(
         effective_verb = node_effective_verb(node)
     # x-aaaa: the verb code resolves (and refuses) BEFORE the resolver.
     verb_code = "t" if is_reconcile else verb_code_for(effective_verb or node_verb)
+    # A node's own raw pin is a sanctioned source (route_resolve reads the same
+    # field), so fold it in before the grid consult: the gate below must see
+    # every pin the node carries, whatever its door passed.
+    if not (model or "").strip():
+        model = (node.get("model") or "").strip() or None
     # --provider selects the account/record (or a bare kind like "claude"),
     # layer-separate from `harness` (the record's cli). NOT the launch harness:
     # defaulting it here once launched claude carrying codex syntax.
@@ -145,6 +150,17 @@ def resolve_node_spawn(
             harness = grid_harness
             grid_lane_route = grid_route_resolved
             grid_lane_account = grid_account_resolved
+    # An unpinned spawn bills the account's default model (measured 2026-09-17:
+    # opus on this fleet), the silent substitution a routing law can never
+    # survive. A dropped pin REFUSES; grid_why carries the resolver's terminal
+    # verbatim when one exists.
+    if not (model or "").strip():
+        decline = f"; {grid_why}" if grid_why else ""
+        raise SpawnError(
+            f"refusing to dispatch {node_id}: no model survives resolution "
+            f"(unpinned = the account default model){decline}; pin the node's "
+            "model or repair the routing config, then retry."
+        )
     # x-aaaa/ the name mints ONCE here - after the lane/model consult,
     # before spawn - so it carries the model tag, riding the receipt.
     agent_name = _worker_agent_name(

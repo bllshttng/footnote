@@ -22,18 +22,24 @@ from fno.backlog import advance
 
 
 def _node_row(
-    node_id: str, difficulty: str | None = "low", verb: str | None = None
+    node_id: str,
+    difficulty: str | None = "low",
+    verb: str | None = None,
+    model: str | None = "glm-5.3-flash[1m]",
 ) -> dict:
     """The minimal node dict tests pass to the dispatcher.
 
     Key presence is what the projection check reads; difficulty low derives
     /target, matching what the builtin path asserted before the None branch
     was deleted. An out-of-family ``verb`` rides the row so the lifecycle
-    table abstains and the explicit verb wins, as the deleted None path did."""
+    table abstains and the explicit verb wins, as the deleted None path did.
+    The default model pin clears the x-8fb2 seam gate; a pin-less node is
+    ``model=None`` and the gate's subject."""
     return {
         "id": node_id,
         "dispatch_verb": verb or "",
         "difficulty": difficulty,
+        "model": model,
     }
 
 _REAL_SUBPROCESS_RUN = advance.subprocess.run
@@ -180,7 +186,9 @@ def _resolve(monkeypatch, source):
     # the dispatcher refuses a node with no dict; the env seam under test
     # still has to clear that gate, so hand it minimal verb evidence.
     return resolve_node_spawn(
-        "x-0000", None, "slug", node={"dispatch_verb": "target"}, verb="target",
+        "x-0000", None, "slug",
+        node={"dispatch_verb": "target", "model": "glm-5.3-flash[1m]"},
+        verb="target",
         source=source,
     )
 
@@ -663,3 +671,55 @@ def test_target_dispatch_never_reads_the_registry_for_reuse(monkeypatch, tmp_pat
     data = _rows(ev, "dispatch_spawned")[0]["data"]
     assert "retask" not in data
     assert "retask_fallthrough" not in data
+
+
+# --- the model pin: a dropped pin refuses, never defaults (x-8fb2) -----------
+
+
+def _unreadable_grid(monkeypatch):
+    """The unreadable decline in the exact terminal format the real
+    _grid_lane_for emits when the capacity read raises (advance.py)."""
+    monkeypatch.setattr(
+        advance,
+        "_grid_lane_for",
+        lambda node, **kw: (None, None, None, None, "grid=unreadable (capacity read down)"),
+    )
+
+
+def test_unreadable_capacity_refuses_the_unpinned_dispatch(monkeypatch):
+    """The leak x-8fb2 prices: an unreadable capacity read used to spawn on
+    the account default (opus here). The seam refuses instead, naming why."""
+    captured = _capture(monkeypatch, _settings())
+    _unreadable_grid(monkeypatch)
+    with pytest.raises(advance.SpawnError) as exc:
+        advance._spawn_worker(
+            "x-0000", None, "slug", node=_node_row("x-0000", model=None)
+        )
+    assert "no model survives resolution" in str(exc.value)
+    assert "grid=unreadable" in str(exc.value)
+    assert "cmd" not in captured, "refused before spawning"
+
+
+def test_a_raw_node_pin_survives_an_unreadable_grid(monkeypatch):
+    """A node whose pin resolves keeps dispatching even when the grid is
+    unreadable: the refusal is for DROPPED pins, not for all dispatches."""
+    captured = _capture(monkeypatch, _settings())
+    _unreadable_grid(monkeypatch)
+    advance._spawn_worker("x-0000", None, "slug", node=_node_row("x-0000"))
+    assert _flag(captured["cmd"], "--model") == "glm-5.3-flash[1m]"
+
+
+def test_a_declined_lane_refuses_and_names_the_terminal(monkeypatch):
+    """The dispatch_lanes shape: the door resolved the grid, got a terminal
+    refusal, and used to pass it as a receipt string only. Same refusal."""
+    captured = _capture(monkeypatch, _settings())
+    with pytest.raises(advance.SpawnError) as exc:
+        advance._spawn_worker(
+            "x-0000", None, "slug",
+            harness="claude",
+            grid_reason="grid=no lane accepts the pinned provider",
+            node=_node_row("x-0000", model=None),
+        )
+    assert "no model survives resolution" in str(exc.value)
+    assert "grid=no lane accepts the pinned provider" in str(exc.value)
+    assert "cmd" not in captured, "refused before spawning"
