@@ -63,6 +63,7 @@ const CLAIMS_DIRNAME: &str = ".fno/claims";
 /// Where the single-flight latch keeps the answers its claims protect. Beside
 /// the claims dir, under the same root, so one resolver owns both.
 const FLIGHT_DIRNAME: &str = ".fno/flight";
+const BUILD_WAITERS_DIRNAME: &str = ".fno/claims/build-waiters";
 const EXPIRED_SUBDIR: &str = ".expired";
 
 /// Recovery-mutex wait: poll cadence + deadline (mirrors core.py's 20ms/5s).
@@ -275,6 +276,8 @@ const GLOBAL_ID_PREFIXES: &[&str] = &[
     // claim lookup - it degrades to the machine-wide root like every other
     // global key, never to a refusal that no root can be found.
     "test",
+    // `build:cargo` (test_run.rs build-admit): one cargo build per machine.
+    "build",
 ];
 
 /// Dotted configuration keys whose opt-out values are backed by global claims.
@@ -364,6 +367,17 @@ pub(crate) fn claims_dir_for(root: Option<&Path>) -> Option<PathBuf> {
 /// and no `$FNO_CLAIMS_ROOT` can reach.
 pub(crate) fn flight_dir(root: &Path) -> PathBuf {
     root.join(FLIGHT_DIRNAME)
+}
+
+/// Where a cargo build held on `build:cargo` leaves its waiter marker, so the
+/// stop hook of the session that started the build can read the hold. `None`
+/// under a cargo test that declared no root: a read must not panic there.
+pub(crate) fn build_waiters_dir() -> Option<PathBuf> {
+    let pinned = std::env::var_os("FNO_CLAIMS_ROOT").is_some_and(|v| !v.is_empty());
+    if cfg!(test) && !pinned && !crate::paths::test_root_declared() {
+        return None;
+    }
+    global_claims_root().map(|root| root.join(BUILD_WAITERS_DIRNAME))
 }
 
 /// Enumerate readable claims from the global store and an optional repository
