@@ -531,27 +531,39 @@ def shape_cmd(
     typer.echo(f"scope:  {own}")
 
 
-@king_app.command("term")
-def term_cmd(
-    spec: str = typer.Argument(..., help="span:<N>[smhd] or compactions:<N>."),
-    reason: str = typer.Option(
-        "", "--reason", help="Required to replace a declared or reached term: the receipt."
-    ),
-    scope: str = typer.Option(
-        "", "--scope", help="Crown scope to declare on. Default: this session's own crown."
-    ),
-) -> None:
+@king_app.command(
+    "term",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def term_cmd(ctx: typer.Context) -> None:
     """Declare or extend this reign's term: the bound past which the Stop
     hook demands a handoff receipt (``--succeed``) or a written ``--reason``.
 
-    Undeclared reads a 96h default. The write lives in Rust; this shell
-    keeps the caller ladder (Python self-stamp).
+    Usage: ``king term <spec> [--reason TEXT] [--scope SCOPE]``, spec being
+    ``span:<N>[smhd]`` or ``compactions:<N>``. Undeclared reads a 96h
+    default. Flags pass through as raw args (the flag-registry ratchet bars
+    new ``typer.Option`` calls in this tree; a new verb belongs in crates),
+    so this shell scans them by hand rather than declaring them. The write
+    lives in Rust; this shell keeps the caller ladder (Python self-stamp).
     """
     import re
     import subprocess
 
     from fno._subprocess_util import propagate_returncode
 
+    passed = list(ctx.args)
+    positional = [a for a in passed if not a.startswith("-")]
+    if not positional:
+        _refuse("king: term needs a spec: span:<N>[smhd] or compactions:<N>.")
+    spec = positional[0]
+    reason = next(
+        (passed[i + 1] for i, t in enumerate(passed) if t == "--reason" and i + 1 < len(passed)),
+        "",
+    )
+    scope = next(
+        (passed[i + 1] for i, t in enumerate(passed) if t == "--scope" and i + 1 < len(passed)),
+        "",
+    )
     if not re.fullmatch(r"span:[0-9]+[smhd]|compactions:[0-9]+", spec.strip()):
         _refuse(f"king: bad term spec {spec!r}; legal forms: span:<N>[smhd], compactions:<N>")
     argv, own = _own_crown_argv("reign-shape", scope)
@@ -975,6 +987,10 @@ agents_king_app.command("cancel")(cancel_cmd)
 agents_king_app.command("escalate")(escalate_cmd)
 agents_king_app.command("drain")(drain_cmd)
 agents_king_app.command("shape")(shape_cmd)
+agents_king_app.command(
+    "term",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)(term_cmd)
 # The stop hooks resolve the crown manifest through this hidden verb: the
 # deprecated `fno king` spelling once missed the verb_moves fold and burned
 # every stop's unavailable-retries. The hooks now name `agents king` directly.
