@@ -197,6 +197,7 @@ pub mod paths;
 pub mod pi;
 pub mod plugin_install;
 pub mod pr_nudge;
+pub mod pr_park;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provider;
@@ -1040,6 +1041,14 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Emitted even on outcome none/duplicate, so a quiet run cannot be
     // mistaken for a sweep that never ran.
     "stale_sweep",
+    // Park sweep (daemon-emitted): `fno-agents pr-park sweep` ran on its 6h
+    // floor and un-parked open rows whose head moved or whose park passed
+    // 24h, marking finished rows handled. Emitted even on a quiet or skipped
+    // run, so a quiet run cannot be mistaken for a sweep that never ran.
+    "park_sweep",
+    // A parked PR resumed polling (pr-park-emitted): retries reset, by hand
+    // (the king row's verb) or by the sweep.
+    "pr_watch_unparked",
     // Dead-row GC also reconstructs the loop's canonical failure event when a
     // convention-named dispatch disappeared without a termination receipt.
     "node_failed",
@@ -1250,7 +1259,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "python", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "agents", "approvals", "backlog", "bash", "cli", "config", "daemon", "fno-loop", "hook", "loop", "megatron", "megawalk", "migration", "observer", "pr-heal", "pr-park", "python", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

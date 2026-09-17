@@ -189,6 +189,11 @@ fn main() {
     if args.first().map(String::as_str) == Some("evals-attempt") {
         std::process::exit(fno_agents::eval_attempt::run_evals_attempt(&args[1..]));
     }
+    // `pr-park`: the park-record owner behind `fno do pr watch`; dispatches
+    // here like evals-arm because the shrink law bars a new `run` arm.
+    if args.first().map(String::as_str) == Some("pr-park") {
+        std::process::exit(fno_agents::pr_park::run(&args[1..]));
+    }
     let code = rt.block_on(run(args));
     std::process::exit(code);
 }
@@ -868,14 +873,10 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::wait::run_wait(&args[1..], &AgentsHome::from_env()).await;
     }
 
-    // `pr-heal` classifies a red check and applies the mechanical fix. Binary-
-    // direct behind `fno do pr heal`, like `kill-check`: it is NOT a routable
-    // `fno agents` verb, so it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS
-    // (whose lengths the --help parity test asserts equal). `matches!` rather
-    // than `verb == "..."` for the same reason `version` uses it: the Python
-    // parity guard scrapes `verb == "..."` and would demand a RUST_CLIENT_VERBS
-    // row for a verb that is not an `fno agents` verb. Daemon-free, so it
-    // dispatches here before build_request.
+    // `pr-heal` classifies a red check and applies the mechanical fix.
+    // Binary-direct behind `fno do pr heal`, like `kill-check`: `matches!`
+    // because the Python parity guard scrapes `verb == "..."` and would
+    // demand a RUST_CLIENT_VERBS row for a non-routable verb. Daemon-free.
     if matches!(verb, "pr-heal") {
         return fno_agents::heal::run_heal(&args[1..]);
     }

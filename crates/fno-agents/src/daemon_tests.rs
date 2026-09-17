@@ -765,7 +765,7 @@ fn stale_summary_absent_is_none_not_zero() {
 fn stale_sweep_takes_no_apply_form() {
     // The lane routes information and changes no removal path: the fn
     // body may not carry an apply decision at all.
-    let src = include_str!("daemon.rs");
+    let src = include_str!("daemon/sweeps.rs");
     let idx = src.find("fn stale_sweep(").expect("stale_sweep exists");
     let body = &src[idx..idx + 2000.min(src.len() - idx)];
     assert!(!body.contains("--apply"));

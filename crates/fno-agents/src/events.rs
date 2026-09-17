@@ -267,7 +267,7 @@ pub(crate) fn now_rfc3339() -> String {
 
 /// Convert unix seconds (UTC) to civil (Y, M, D, h, m, s). Uses Howard Hinnant's
 /// days_from_civil inverse; correct for all dates this daemon will ever stamp.
-fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
+pub(crate) fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
     let hour = (rem / 3600) as u32;

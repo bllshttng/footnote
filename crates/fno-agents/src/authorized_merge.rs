@@ -193,6 +193,13 @@ pub struct Request {
     /// coverage status receipt) and then asks again for the effect, which
     /// re-runs the whole chain. Nothing is merged or armed on this pass.
     pub decide_only: bool,
+    /// Which caller asks: `"durable_grant"` (the watcher's merge phase) or
+    /// absent/`"manifest"` (the interactive verb). On the durable-grant lane a
+    /// red verdict is the state a working session is in while it pushes fixes,
+    /// so it holds; spending a retry on it parked six open PRs in one
+    /// afternoon. The interactive lane keeps `Failed`, where the
+    /// `merge_status=failed` stamp is the worker's signal to stop.
+    pub authority: Option<String>,
 }
 
 /// A probe that either cleared, refused, or could not evaluate.
@@ -477,9 +484,15 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                 }
             }
             "red" => {
-                return Err(Outcome::Failed {
-                    reason: "checks are red; require_checks_pass forbids merging without green"
-                        .to_string(),
+                return Err(match request.authority.as_deref() {
+                    Some("durable_grant") => Outcome::Held {
+                        reason: "checks are red; the healer or the worker owns the next push"
+                            .to_string(),
+                    },
+                    _ => Outcome::Failed {
+                        reason: "checks are red; require_checks_pass forbids merging without green"
+                            .to_string(),
+                    },
                 })
             }
             verdict => {
@@ -1378,6 +1391,10 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
             .get("decide_only")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        authority: payload
+            .get("authority")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
     })
 }
 
@@ -1553,6 +1570,7 @@ mod tests {
             require_checks: false,
             covered_head: None,
             decide_only: false,
+            authority: None,
         }
     }
 
@@ -2313,6 +2331,32 @@ mod tests {
         };
         assert_eq!(run(&red, &req).word(), "failed");
         assert!(red.gh_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_red_verdict_holds_on_the_durable_grant_lane_and_fails_interactive() {
+        // Red CI is the state a working session is in while it pushes fixes.
+        // Spending a retry on it parked six open PRs in one afternoon.
+        let mut req = request(Effect::Merge);
+        req.require_checks = true;
+        req.authority = Some("durable_grant".to_string());
+        let red = Fake {
+            checks: Some("red".to_string()),
+            ..clean()
+        };
+        let held = run(&red, &req);
+        assert_eq!(held.word(), "held");
+        assert!(held
+            .detail()
+            .contains("the healer or the worker owns the next push"));
+        assert!(red.gh_calls.borrow().is_empty());
+
+        // The interactive lane keeps `failed`: the merge_status=failed stamp is
+        // the worker's signal, and the existing tests above depend on it.
+        let mut interactive = request(Effect::Merge);
+        interactive.require_checks = true;
+        interactive.authority = Some("manifest".to_string());
+        assert_eq!(run(&red, &interactive).word(), "failed");
     }
 
     #[test]

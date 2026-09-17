@@ -2207,6 +2207,7 @@ def run_merge(
             timeout_s=timeout_s,
             accept_flake=accept_flake,
             flake=flake,
+            authority=authority,
         )
 
 
@@ -2241,6 +2242,7 @@ def _authorized_merge(
     covered_head: str = "",
     decide_only: bool = False,
     timeout_s: float = 300.0,
+    authority: str = "manifest",
 ) -> dict:
     """Ask the one authorized-merge operation, in fno-agents.
 
@@ -2261,6 +2263,7 @@ def _authorized_merge(
         "auto_merge_source": source,
         "require_checks": bool(require_checks),
         "decide_only": bool(decide_only),
+        "authority": authority,
     }
     if approved is not None:
         payload["approved"] = bool(approved)
@@ -2321,6 +2324,7 @@ def _do_merge(
     timeout_s: float = 300.0,
     accept_flake: bool = False,
     flake: Optional[dict] = None,
+    authority: str = "manifest",
 ) -> int:
     """Steps (3)-(4): authorize through the one owner, then run the effect.
 
@@ -2337,6 +2341,7 @@ def _do_merge(
         "source": auto_merge_source,
         "require_checks": auto_merge.require_checks_pass,
         "covered_head": covered_pin(pr_number, repo, covered_head),
+        "authority": authority,
     }
 
     # Authorize BEFORE publishing anything. The coverage status greens the head

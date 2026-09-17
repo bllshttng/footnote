@@ -584,126 +584,6 @@ pub fn process_start_time(_pid: u32) -> Option<u64> {
     None
 }
 
-/// How long between stale-question reconciles. Stale rows are measured in
-/// hundreds of hours, so the interval bounds discovery lag, not freshness:
-/// a row that crosses the wake ceiling waits at most one interval before a
-/// human is told. Identity-keyed dedupe lives in the verb, so an eager run
-/// costs one sweep and changes nothing.
-const STALE_SWEEP_INTERVAL_SECS: i64 = 21_600;
-
-/// One fleet's stale-sweep reading, parsed from the verb's JSON line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StaleSweepReport {
-    pub stale: usize,
-    pub oldest_h: i64,
-    pub outcome: String,
-}
-
-/// Parse the JSON object `fno agents stale-escalate --json` prints on stdout.
-///
-/// The scheduled invocation passes `--json`, so stdout is ONE JSON line whose
-/// `summary` field happens to carry a `Summary: ...` string - the line itself
-/// never starts with it. Parse the object's fields, not that embedded text.
-///
-/// Returns `None` rather than a zeroed report when no readable object is
-/// present. A sweep that could not read its own output must not report
-/// "0 stale", which is indistinguishable from a clean machine: an absence has
-/// two explanations and a count must only ever come from a real reading. The
-/// outcome word rides along because on the refused path the count is NOT a
-/// real reading - the event must be able to say so rather than fabricate a
-/// measured zero.
-pub fn parse_stale_sweep(stdout: &str) -> Option<StaleSweepReport> {
-    let line = stdout
-        .lines()
-        .map(str::trim_start)
-        .find(|l| l.starts_with('{'))?;
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    Some(StaleSweepReport {
-        stale: usize::try_from(value.get("stale_count")?.as_u64()?).ok()?,
-        oldest_h: value.get("oldest_h")?.as_i64()?,
-        outcome: value.get("outcome")?.as_str()?.to_string(),
-    })
-}
-
-/// Stale-question reconcile on a 6h floor: report-only, no apply mode.
-///
-/// Rows past the wake ceiling are the watchdog's needs-human bucket - no
-/// action lane may take them - so the durable question channel is the only
-/// surface they reach. This sweep is its trigger; the verb inside reconciles
-/// one question to the measured set, so a re-run is a duplicate no-op unless
-/// the set changed. Removal stays everywhere it already was: this fn takes no
-/// apply flag and shells no action verb, and the run closure is injected so
-/// the policy is testable without shelling out.
-///
-/// Emits one `stale_sweep` event per run, INCLUDING on outcome `none` or
-/// `duplicate`: a tick that stays silent when it finds nothing cannot be told
-/// from a tick that never ran.
-pub fn stale_sweep(
-    home: &AgentsHome,
-    emitter: &EventEmitter,
-    now: i64,
-    run: &dyn Fn() -> Option<String>,
-) -> usize {
-    let stamp = home.root().join("stale-escalate.stamp");
-    let last = std::fs::read_to_string(&stamp)
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-        .unwrap_or(0);
-    if now.saturating_sub(last) < STALE_SWEEP_INTERVAL_SECS {
-        return 0;
-    }
-    // the sweep's only child is `agents stale-escalate --json`, so an
-    // effective dispatch pause suspends the sweep without consuming its
-    // cadence: no closure call, no stamp write, and a positive skip row so
-    // intentional silence cannot read as a dead arm. The row is paced by a
-    // SIDECAR stamp at the sweep's own interval - the real stamp stays
-    // untouched, so a due sweep stays due - because the idle tick reaches
-    // this arm every ~5s and an unpaced row would grow events.jsonl by
-    // ~17k rows/day for the length of the incident. On clear the next due
-    // tick runs normally. Serve-only liveness is NOT behind this gate - its
-    // call site sits before this arm and stays eligible while dispatch polls
-    // are held (AC3-LIVENESS).
-    let pause = crate::loops_pause::dispatch_pause();
-    if pause.is_paused() {
-        let skip_stamp = home.root().join("stale-escalate.skipstamp");
-        let last_skip = std::fs::read_to_string(&skip_stamp)
-            .ok()
-            .and_then(|s| s.trim().parse::<i64>().ok())
-            .unwrap_or(0);
-        if now.saturating_sub(last_skip) >= STALE_SWEEP_INTERVAL_SECS {
-            let _ = emitter.emit(
-                "stale_sweep",
-                &json!({
-                    "outcome": "skipped",
-                    "reason": pause.skip_reason(),
-                    "detail": pause.detail(),
-                }),
-            );
-            let _ = std::fs::write(&skip_stamp, now.to_string());
-        }
-        return 0;
-    }
-    let outcome = match run().as_deref().and_then(parse_stale_sweep) {
-        Some(r) => {
-            let _ = emitter.emit(
-                "stale_sweep",
-                &json!({
-                    "stale_count": r.stale,
-                    "oldest_h": r.oldest_h,
-                    "outcome": r.outcome,
-                }),
-            );
-            1
-        }
-        None => {
-            let _ = emitter.emit("stale_sweep", &json!({"error": "unreadable-summary"}));
-            0
-        }
-    };
-    let _ = std::fs::write(&stamp, now.to_string());
-    outcome
-}
-
 pub(crate) use crate::gc_inventory::index_tree;
 // the pane kill and its absence vocabulary moved to pane_stop.rs
 // with the stop helper that now shares them.
@@ -1979,6 +1859,10 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
     // beside it. The verb dedupes on outcome identity, so an extra run is a
     // no-op; the gate exists so a slow fleet probe never stacks.
     let stale_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Park sweep: same one-in-flight discipline. The verb is idempotent on a
+    // store nobody touched, so an extra run is a no-op; the gate exists so a
+    // slow head probe never stacks.
+    let park_sweep_in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let idle_probe_verdict: Arc<
         std::sync::Mutex<Option<(bool, Instant, Option<std::time::SystemTime>)>>,
     > = Arc::new(std::sync::Mutex::new(None));
@@ -2178,6 +2062,22 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                 .ok()
                                 .filter(|o| o.status.success())
                                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                        });
+                    });
+                }
+                // Park sweep, the arm beside `stale_sweep`: same doc comment
+                // there covers the one-in-flight shape. The run closure walks
+                // every repo root the registry knows, so parked rows of other
+                // repos are un-parked from THEIR checkout (the head probe
+                // resolves PR numbers against the repo they belong to).
+                if !park_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let flag = Arc::clone(&park_sweep_in_flight);
+                    let home = ctx.home.clone();
+                    let emitter = EventEmitter::new(ctx.home.events_jsonl(), "daemon");
+                    tokio::task::spawn_blocking(move || {
+                        let _gate = SweepGate(flag);
+                        park_sweep(&home, &emitter, now_epoch_secs(), &|| {
+                            sweeps::sweep_all_roots(&home)
                         });
                     });
                 }
@@ -8248,6 +8148,13 @@ fn fill_random(buf: &mut [u8]) {
         *byte = (x & 0xff) as u8;
     }
 }
+
+/// The interval-gated maintenance sweeps (stale questions, park records),
+/// split out for the file budget; each is stamp-gated and pause-aware.
+pub(crate) mod sweeps;
+pub(crate) use sweeps::{park_sweep, stale_sweep};
+#[cfg(test)]
+pub(crate) use sweeps::{parse_stale_sweep, PARK_SWEEP_INTERVAL_SECS, STALE_SWEEP_INTERVAL_SECS};
 
 #[cfg(test)]
 #[path = "daemon_tests.rs"]

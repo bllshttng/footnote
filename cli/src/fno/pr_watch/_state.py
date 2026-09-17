@@ -28,6 +28,7 @@ Baseline discipline:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -193,15 +194,25 @@ class WatermarkStore:
     def set(self, key: str, entry: dict) -> None:
         """Upsert *entry* under *key* and persist atomically.
 
+        Takes an advisory flock on ``<path>.lock`` (the same file the Rust
+        pr-park mutations hold) and re-reads the disk state under it, so a
+        park sweep that rewrote the file while this tick sat in a long merge
+        is merged, not clobbered by this process's load-once dict.
+
         Uses a tmp file + ``os.replace`` so readers never see a partial
         write.  The tmp file is created in the same directory as the state
         file (same filesystem) to guarantee the replace is atomic on POSIX.
         The tmp file is removed on failure so no garbage is left behind.
         """
-        self.load()  # ensure _data is initialised
-        assert self._data is not None
-        self._data[key] = entry
-        self._persist()
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = Path(str(self._path) + ".lock")
+        with open(lock_path, "a") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            fresh = self._read_or_reset()
+            fresh[key] = entry
+            self._data = fresh
+            self._persist()
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
     def normalize_keys(self) -> KeyNormalization:
         """Rewrite legacy keys to globally-qualified keys in memory.
