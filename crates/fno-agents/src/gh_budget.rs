@@ -253,18 +253,19 @@ fn window_points(ledger: &Ledger, now: i64) -> i64 {
         .sum()
 }
 
-fn lock_path(path: &Path) -> PathBuf {
+pub(crate) fn lock_path(path: &Path) -> PathBuf {
     PathBuf::from(format!("{}.lock", path.display()))
 }
 
 /// flock held for the scope of one read-modify-write, following
-/// `loop_king::bump_respawn_count`.
-struct FileLock {
+/// `loop_king::bump_respawn_count`. Shared with the pr-park store so the
+/// daemon sweep and the watcher tick serialize on the same `.lock` file.
+pub(crate) struct FileLock {
     handle: std::fs::File,
 }
 
 impl FileLock {
-    fn acquire(path: &Path) -> FileLock {
+    pub(crate) fn acquire(path: &Path) -> FileLock {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }

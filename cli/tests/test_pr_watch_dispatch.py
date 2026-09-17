@@ -160,6 +160,27 @@ class TestWatermarkStore:
         store.set("owner/repo#1", entry)
         assert store.get("owner/repo#1") == entry
 
+    def test_set_merges_with_an_external_write_landed_behind_its_back(self, tmp_path):
+        """A park sweep (Rust) rewriting the store while this tick sat in a
+        merge must survive: set() re-reads the disk under the flock instead
+        of writing its load-once dict over the sweep's row."""
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "pr-watcher-state.json"
+        store = WatermarkStore(path=store_path)
+        store.set("owner/repo#1", {"last_seen_state": "OPEN", "retries": 0, "parked": None})
+        # The sweep lands a row the in-memory cache has never seen.
+        data = json.loads(store_path.read_text())
+        data["owner/repo#2"] = {"last_seen_state": "OPEN", "retries": 0, "parked": "checks-red"}
+        store_path.write_text(json.dumps(data))
+        # The tick's own write for its key must not clobber the sweep's row.
+        store.set("owner/repo#1", {"last_seen_state": "OPEN", "retries": 1, "parked": None})
+        final = json.loads(store_path.read_text())
+        assert final["owner/repo#2"]["parked"] == "checks-red"
+        assert final["owner/repo#1"]["retries"] == 1
+        # The cache is left coherent with the disk.
+        assert store.get("owner/repo#2")["parked"] == "checks-red"
+
     def test_atomic_persist_via_os_replace(self, tmp_path):
         """AC-VERIFY: persisted JSON is valid and contains the expected key."""
         from fno.pr_watch._state import WatermarkStore
@@ -4051,7 +4072,7 @@ class TestDurableGrantExecution:
     GRANT = {"source": "config", "recorded_by": "spawner-session",
              "recorded_at": "2026-08-24T10:00:00Z"}
 
-    def _fake_merge(self, monkeypatch, rc):
+    def _fake_merge(self, monkeypatch, rc, reason=None):
         merge_calls: list[dict] = []
         self._merge_calls = merge_calls
 
@@ -4060,6 +4081,10 @@ class TestDurableGrantExecution:
             merge_calls.append({"pr": int(argv[0]), "timeout_s": timeout_s})
             if isinstance(rc, BaseException):
                 raise rc
+            if reason is not None:
+                from fno.pr import _merge as merge_mod
+
+                merge_mod.LAST_RECEIPT["reason"] = reason
             return rc
 
         monkeypatch.setattr("fno.pr._merge.run_merge", _merge)
@@ -4127,6 +4152,28 @@ class TestDurableGrantExecution:
         entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
         assert entry["retries"] == 0
         assert not entry.get("parked")
+
+    def test_red_hold_parks_instead_of_looping(self, tmp_path, monkeypatch):
+        """A red check-set holds forever by design: park with the why so the
+        sweep resumes the row on the next push, instead of re-running the
+        whole merge chain on every tick with a dead worker."""
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        self._seed_entries(tmp_path, [1])
+        self._fake_merge(
+            monkeypatch, 2,
+            reason="checks are red; the healer or the worker owns the next push",
+        )
+        counts = self._drain(self._queue(tmp_path), deps, monkeypatch, tmp_path)
+
+        assert counts == {"executed": 0, "held": 1, "failed": 0, "skipped": 0}
+        parked = [e for e in deps["events"] if e["type"] == "pr_watch_parked"]
+        assert any(e["data"]["reason"] == "checks-red" for e in parked)
+        assert len(deps["notifications"]) == 1
+        from fno.pr_watch._state import WatermarkStore
+
+        entry = WatermarkStore(path=tmp_path / "state.json").get("owner/repo#1")
+        assert entry["parked"] == "checks-red"
+        assert entry["retries"] == 0
 
     def test_failed_consumes_budget_and_parks_at_max(self, tmp_path, monkeypatch):
         deps = _make_tick_deps(tmp_path, candidates=[])

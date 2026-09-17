@@ -172,11 +172,13 @@ pub fn park_sweep(
 /// so parked rows of other repos are judged from THEIR checkout (the head
 /// probe resolves a PR number against the repo it belongs to).
 pub fn sweep_all_roots(home: &AgentsHome) -> Option<(usize, usize, usize)> {
-    let paths = pr_park::Paths::from_home();
     let mut unparked = 0usize;
     let mut handled = 0usize;
     let mut total = 0usize;
     for root in registry_repo_roots(home) {
+        // Per-root resolution: the store follows the config a watcher in THAT
+        // checkout would read, not this process's home.
+        let paths = pr_park::Paths::resolve(std::path::Path::new(&root));
         let ctx = pr_park::Ctx::live(std::path::Path::new(&root), paths.clone());
         if ctx.slug.is_empty() {
             continue;

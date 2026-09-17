@@ -1287,6 +1287,18 @@ def run_execute_queue(
                     entry["last_seen_state"] = "NOT_OPEN"
                 store.set(key, entry)
                 _grant("held", pr, cand, grant_fields, reason=reason)
+                if reason.startswith("checks are red"):
+                    # A red hold never clears by retrying: the healer or the
+                    # worker owns the next push, so park with the why instead
+                    # of re-running the whole merge chain every tick. The park
+                    # sweep resumes the row on the next head change.
+                    entry["parked"] = "checks-red"
+                    store.set(key, entry)
+                    emit("pr_watch_parked", {"pr": pr, "reason": "checks-red"})
+                    _notify_parked_pr(
+                        notify, pr, cand.repo_slug, prior_retries,
+                        "durable-grant merge",
+                    )
             else:
                 counts["failed"] += 1
                 _grant("failed", pr, cand, grant_fields, exit_code=rc, reason=reason)

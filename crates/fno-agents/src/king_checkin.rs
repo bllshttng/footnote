@@ -657,7 +657,7 @@ fn r_drain(ctx: &Ctx) -> Result<Value, String> {
 /// empty posture the Python watcher store has always had.
 fn r_parked() -> Result<Value, String> {
     let cwd = std::env::current_dir().map_err(|e| format!("cwd unreadable: {e}"))?;
-    let ctx = crate::pr_park::Ctx::live(&cwd, crate::pr_park::Paths::from_home());
+    let ctx = crate::pr_park::Ctx::live(&cwd, crate::pr_park::Paths::resolve(&cwd));
     let rows = crate::pr_park::list_rows(&ctx);
     let open: Vec<Value> = rows
         .iter()

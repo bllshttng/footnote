@@ -237,3 +237,55 @@ fn a_row_that_merged_while_parked_is_handled_not_resumed() {
     assert_eq!(data["owner/repo#101"]["parked"], json!(HANDLED));
     let _ = std::fs::remove_dir_all(paths.state.parent().unwrap());
 }
+
+#[test]
+fn resolve_follows_a_configured_state_dir() {
+    // The store must follow the same `state_dir` the Python watcher reads,
+    // or the king's parked board and the daemon sweep watch an empty file
+    // while the parks live under the override.
+    let dir = std::env::temp_dir().join(format!(
+        "pr-park-test-resolve-{}-{}",
+        std::process::id(),
+        now_secs()
+    ));
+    let repo = dir.join("repo");
+    write(
+        &repo.join(".fno/config.toml"),
+        "state_dir = \"alt-state\"\n",
+    );
+    // A relative config value resolves against the repo, the way a watcher
+    // started in that checkout resolves it.
+    let p = Paths::resolve(&repo);
+    assert_eq!(
+        p.state,
+        repo.join("alt-state").join("pr-watcher-state.json")
+    );
+    assert_eq!(p.events, repo.join("alt-state").join("events.jsonl"));
+    write(
+        &repo.join(".fno/config.toml"),
+        "state_dir = \"/tmp/park-alt-abs\"\n",
+    );
+    let p = Paths::resolve(&repo);
+    assert_eq!(
+        p.state,
+        Path::new("/tmp/park-alt-abs").join("pr-watcher-state.json")
+    );
+    // No key, no divergence: the home default, so a default install (and a
+    // test env) resolves exactly where the watcher already writes.
+    write(&repo.join(".fno/config.toml"), "unrelated = true\n");
+    assert_eq!(Paths::resolve(&repo).state, Paths::from_home().state);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mutations_hold_the_lock_file_the_watcher_takes() {
+    // The `.lock` files are the cross-language serialization point: the
+    // Python WatermarkStore.set() takes the same flock, so a sweep rewrite
+    // can never interleave with a tick write.
+    let paths = tmp_paths("lock");
+    fixture(&paths);
+    let _ = unpark(&ctx(paths.clone()), Some("owner/repo#101"), false).unwrap();
+    assert!(crate::gh_budget::lock_path(&paths.state).exists());
+    assert!(crate::gh_budget::lock_path(&paths.delivery).exists());
+    let _ = std::fs::remove_dir_all(paths.state.parent().unwrap());
+}

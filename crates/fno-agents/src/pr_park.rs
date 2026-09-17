@@ -44,6 +44,15 @@ pub(crate) struct Paths {
 }
 
 impl Paths {
+    fn for_root(root: PathBuf) -> Paths {
+        Paths {
+            state: root.join("pr-watcher-state.json"),
+            delivery: root.join("pr-watcher-state-delivery.json"),
+            events: root.join("events.jsonl"),
+            err_log: root.join("pr-watcher.err.log"),
+        }
+    }
+
     /// The durable defaults beside the state root: the same files the Python
     /// watcher writes (`~/.fno/pr-watcher-state.json` + its `-delivery`
     /// sidecar, `~/.fno/events.jsonl`, `~/.fno/pr-watcher.err.log`).
@@ -53,11 +62,28 @@ impl Paths {
             .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| PathBuf::from(".fno"));
-        Paths {
-            state: root.join("pr-watcher-state.json"),
-            delivery: root.join("pr-watcher-state-delivery.json"),
-            events: root.join("events.jsonl"),
-            err_log: root.join("pr-watcher.err.log"),
+        Paths::for_root(root)
+    }
+
+    /// The paths a configured `state_dir` moves. Only an explicit
+    /// `state_dir` key diverges from [`Paths::from_home`], so a test env or
+    /// default install resolves exactly where the watcher already writes.
+    pub fn resolve(cwd: &Path) -> Paths {
+        let configured = crate::agents_config::config_lookup(cwd, &["state_dir"])
+            .and_then(|v| v.as_str().map(str::to_string));
+        match configured {
+            Some(raw) if !raw.trim().is_empty() => {
+                let root = match raw.strip_prefix("~/") {
+                    Some(rest) => match std::env::var_os("HOME") {
+                        Some(home) => PathBuf::from(home).join(rest),
+                        None => return Paths::from_home(),
+                    },
+                    None if Path::new(&raw).is_absolute() => PathBuf::from(raw),
+                    None => cwd.join(&raw),
+                };
+                Paths::for_root(root)
+            }
+            _ => Paths::from_home(),
         }
     }
 }
@@ -333,6 +359,10 @@ fn unpark_where(
 ) -> Result<usize, String> {
     let mut changed = 0usize;
     for path in [&paths.state, &paths.delivery] {
+        // One flock per file across the whole read-modify-write: the watcher
+        // tick's next full-dict `set()` must land after this rewrite, not on
+        // top of a snapshot taken before it.
+        let _lock = crate::gh_budget::FileLock::acquire(&crate::gh_budget::lock_path(path));
         let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
         let mut data: Map<String, Value> = match serde_json::from_str(&text) {
             Ok(Value::Object(m)) => m,
@@ -486,6 +516,7 @@ fn do_unpark(paths: &Paths, key: &str, by: &str) -> Result<(), String> {
 
 fn record_parked_head(paths: &Paths, key: &str, head: &str) -> Result<(), String> {
     for path in [&paths.state, &paths.delivery] {
+        let _lock = crate::gh_budget::FileLock::acquire(&crate::gh_budget::lock_path(path));
         let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
         let mut data: Map<String, Value> = match serde_json::from_str(&text) {
             Ok(Value::Object(m)) => m,
@@ -504,6 +535,7 @@ fn record_parked_head(paths: &Paths, key: &str, head: &str) -> Result<(), String
 fn mark_handled(paths: &Paths, keys: &[String]) -> Result<usize, String> {
     let mut changed = 0usize;
     for path in [&paths.state, &paths.delivery] {
+        let _lock = crate::gh_budget::FileLock::acquire(&crate::gh_budget::lock_path(path));
         let text = std::fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
         let mut data: Map<String, Value> = match serde_json::from_str(&text) {
             Ok(Value::Object(m)) => m,
