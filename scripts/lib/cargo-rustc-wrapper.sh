@@ -35,14 +35,22 @@ esac
 case " $* " in
     *" -vV "* | *" --print"*) ;;
     *)
-        # A failed admission is said once per cargo, not once per crate.
+        # A failed admission is said once per cargo, not once per crate. A
+        # marker older than an hour belongs to an earlier cargo with this pid.
         unadmitted="${TMPDIR:-/tmp}/fno-build-unadmitted.$PPID"
-        if [[ ! -e "$unadmitted" ]] && command -v fno-agents >/dev/null 2>&1; then
+        if [[ -e "$unadmitted" && -n "$(find "$unadmitted" -mmin -60 2>/dev/null)" ]]; then
+            :
+        elif command -v fno-agents >/dev/null 2>&1; then
             repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-            fno-agents test-run build-admit --cargo-pid "$PPID" --worktree "$repo_root" || {
-                echo "cargo-rustc-wrapper: build admission unavailable (exit $?); building unadmitted" >&2
+            rc=0
+            fno-agents test-run build-admit --cargo-pid "$PPID" --worktree "$repo_root" || rc=$?
+            if [[ "$rc" -ge 128 ]]; then
+                # A signal stopped the wait: cargo is stopping, so compile nothing.
+                exit "$rc"
+            elif [[ "$rc" -ne 0 ]]; then
+                echo "cargo-rustc-wrapper: build admission unavailable (exit $rc); building unadmitted" >&2
                 : >"$unadmitted" 2>/dev/null || true
-            }
+            fi
         fi
         ;;
 esac
