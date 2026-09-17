@@ -29,32 +29,61 @@ fn f64_of(v: Option<&Value>) -> Option<f64> {
     v.and_then(Value::as_f64)
 }
 
-struct Health {
+pub(crate) struct Health {
     rate_limited_until: Option<f64>,
     last_error_at: Option<f64>,
 }
 
-struct Window {
+pub(crate) struct Window {
     used_pct: f64,
     resets_at: Option<f64>,
 }
 
-struct Snapshot {
+pub(crate) struct Snapshot {
     probed_at: f64,
     partial: bool,
     windows: Vec<Window>,
 }
 
+impl Snapshot {
+    /// A snapshot from a freshly probed row (the `--refresh --json` map): the
+    /// in-memory observation wins over the disk read, source `window`.
+    pub(crate) fn from_refresh_row(row: &Value) -> Option<Snapshot> {
+        let obj = row.as_object()?;
+        Some(Snapshot {
+            probed_at: f64_of(obj.get("probed_at"))?,
+            partial: obj.get("partial").and_then(Value::as_bool).unwrap_or(false),
+            windows: parse_windows(obj.get("windows"))?,
+        })
+    }
+}
+
 /// One account's headroom verdict, mirroring the Python rotation invariant.
 #[derive(PartialEq, Clone, Copy, Debug)]
-enum Verdict {
+pub(crate) enum Verdict {
     Exhausted,
     Low,
     Ok,
     Unknown,
 }
 
-fn headroom(health: Option<&Health>, usage: Option<&Snapshot>, now: f64) -> Verdict {
+/// The verdict plus the evidence that produced it. The chain walk reads
+/// `.verdict` only; the capacity map (route_capacity) carries the rest as the
+/// account's provenance, exactly as the Python `_headroom_from` did.
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub(crate) struct HeadroomVerdict {
+    pub verdict: Verdict,
+    /// `lock` | `window` | `stale` | `absent` | `empty`.
+    pub source: &'static str,
+    pub observed_at: Option<f64>,
+    pub resets_at: Option<f64>,
+}
+
+pub(crate) fn headroom(
+    health: Option<&Health>,
+    usage: Option<&Snapshot>,
+    now: f64,
+) -> HeadroomVerdict {
     // Record-level health TTL: an aged-out last_error_at drops the whole
     // entry, locks included.
     let h = health.filter(|h| {
@@ -63,13 +92,24 @@ fn headroom(health: Option<&Health>, usage: Option<&Snapshot>, now: f64) -> Verd
     });
     let rlu = h.and_then(|h| h.rate_limited_until).filter(|t| *t > now);
     let lock_at = h.and_then(|h| h.last_error_at);
-    let snap = usage.filter(|s| s.probed_at >= now - USAGE_TTL_SECONDS);
+    // A snapshot older than the usage TTL reads as absent, and its windows
+    // stop binding - the same treatment read_usage gives a stale row.
+    let (snap, window): (Option<&Snapshot>, &'static str) = match usage {
+        None => (None, "absent"),
+        Some(s) if s.probed_at < now - USAGE_TTL_SECONDS => (None, "stale"),
+        Some(s) => (Some(s), "fresh"),
+    };
 
     // A death recorded after the probe is the newer fact: the lock decides
     // until a newer probe replaces the window.
     if let (Some(_), Some(lock_at), Some(s)) = (rlu, lock_at, snap) {
         if s.probed_at <= lock_at {
-            return Verdict::Exhausted;
+            return HeadroomVerdict {
+                verdict: Verdict::Exhausted,
+                source: "lock",
+                observed_at: Some(lock_at),
+                resets_at: rlu,
+            };
         }
     }
     // A window with no reset can never be "already reset", so it always
@@ -90,13 +130,35 @@ fn headroom(health: Option<&Health>, usage: Option<&Snapshot>, now: f64) -> Verd
                 .filter(|w| w.used_pct >= 100.0)
                 .collect();
             if !exhausted.is_empty() {
-                return Verdict::Exhausted;
+                let resets = exhausted
+                    .iter()
+                    .filter_map(|w| w.resets_at)
+                    .reduce(f64::min);
+                return HeadroomVerdict {
+                    verdict: Verdict::Exhausted,
+                    source: "window",
+                    observed_at: Some(s.probed_at),
+                    resets_at: resets,
+                };
             }
             if s.partial {
-                return Verdict::Low;
+                // A partial response has a missing window, so never answer OK
+                // from it. The reset is the soonest one actually observed.
+                let soonest = binding.iter().filter_map(|w| w.resets_at).reduce(f64::min);
+                return HeadroomVerdict {
+                    verdict: Verdict::Low,
+                    source: "window",
+                    observed_at: Some(s.probed_at),
+                    resets_at: soonest,
+                };
             }
             if binding.is_empty() {
-                return Verdict::Ok;
+                return HeadroomVerdict {
+                    verdict: Verdict::Ok,
+                    source: "window",
+                    observed_at: Some(s.probed_at),
+                    resets_at: None,
+                };
             }
             let worst = binding.iter().copied().fold(f64::NAN, |a, w| {
                 if a.is_nan() || w.used_pct > a {
@@ -106,21 +168,55 @@ fn headroom(health: Option<&Health>, usage: Option<&Snapshot>, now: f64) -> Verd
                 }
             });
             if worst >= THRESHOLD_PCT {
-                return Verdict::Low;
+                let worst_reset = binding
+                    .iter()
+                    .copied()
+                    .filter(|w| w.used_pct == worst)
+                    .filter_map(|w| w.resets_at)
+                    .next();
+                return HeadroomVerdict {
+                    verdict: Verdict::Low,
+                    source: "window",
+                    observed_at: Some(s.probed_at),
+                    resets_at: worst_reset,
+                };
             }
-            return Verdict::Ok;
+            return HeadroomVerdict {
+                verdict: Verdict::Ok,
+                source: "window",
+                observed_at: Some(s.probed_at),
+                resets_at: None,
+            };
         }
     }
     if rlu.is_some() {
         // A lock remains useful when no fresh usable usage read exists.
-        return Verdict::Exhausted;
+        return HeadroomVerdict {
+            verdict: Verdict::Exhausted,
+            source: "lock",
+            observed_at: lock_at,
+            resets_at: rlu,
+        };
     }
     // Absent, stale, or window-less: UNKNOWN never means exhausted and stays
     // a legal failover destination.
-    Verdict::Unknown
+    if snap.is_none() {
+        return HeadroomVerdict {
+            verdict: Verdict::Unknown,
+            source: window,
+            observed_at: None,
+            resets_at: None,
+        };
+    }
+    HeadroomVerdict {
+        verdict: Verdict::Unknown,
+        source: "empty",
+        observed_at: None,
+        resets_at: None,
+    }
 }
 
-fn parse_windows(raw: Option<&Value>) -> Option<Vec<Window>> {
+pub(crate) fn parse_windows(raw: Option<&Value>) -> Option<Vec<Window>> {
     let arr = raw?.as_array()?;
     let mut out = Vec::new();
     for w in arr {
@@ -145,7 +241,7 @@ fn clamp_pct(v: f64) -> f64 {
     v.clamp(0.0, 100.0)
 }
 
-fn parse_usage(raw: &Value) -> Map<String, Value> {
+pub(crate) fn parse_usage(raw: &Value) -> Map<String, Value> {
     let mut out = Map::new();
     if let Some(block) = raw.get("usage").and_then(Value::as_object) {
         for (pid, entry) in block {
@@ -258,6 +354,37 @@ fn type_name(v: &Value) -> &'static str {
     }
 }
 
+/// A `Health` from a parsed provider-health map value, shared with the
+/// capacity read (one construction, no second impl).
+pub(crate) fn health_from_map(v: Option<&Value>) -> Option<Health> {
+    let obj = v?.as_object()?;
+    Some(Health {
+        rate_limited_until: f64_of(obj.get("rate_limited_until")),
+        last_error_at: f64_of(obj.get("last_error_at")),
+    })
+}
+
+/// A `Snapshot` from a parsed usage-map value, shared with the capacity read.
+pub(crate) fn snapshot_from_map(v: Option<&Value>) -> Option<Snapshot> {
+    let obj = v?.as_object()?;
+    Some(Snapshot {
+        probed_at: f64_of(obj.get("probed_at")).unwrap_or(0.0),
+        partial: obj.get("partial").and_then(Value::as_bool).unwrap_or(false),
+        windows: obj
+            .get("windows")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .map(|w| Window {
+                        used_pct: f64_of(w.get("used_pct")).unwrap_or(0.0),
+                        resets_at: f64_of(w.get("resets_at")),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
 /// The worst headroom verdict across the link's accounts. Callers that must
 /// treat UNKNOWN differently from exhausted (the provider-cap destination
 /// filter, trap 3) read this instead of the collapsed bool.
@@ -297,27 +424,9 @@ fn worst_link_verdict(
     }
     let mut worst = Verdict::Ok;
     for pid in &ids {
-        let h = health.get(pid).map(|v| Health {
-            rate_limited_until: f64_of(v.get("rate_limited_until")),
-            last_error_at: f64_of(v.get("last_error_at")),
-        });
-        let u = usage.get(pid).map(|v| Snapshot {
-            probed_at: f64_of(v.get("probed_at")).unwrap_or(0.0),
-            partial: v.get("partial").and_then(Value::as_bool).unwrap_or(false),
-            windows: v
-                .get("windows")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .map(|w| Window {
-                            used_pct: f64_of(w.get("used_pct")).unwrap_or(0.0),
-                            resets_at: f64_of(w.get("resets_at")),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        });
-        match headroom(h.as_ref(), u.as_ref(), now) {
+        let h = health_from_map(health.get(pid));
+        let u = snapshot_from_map(usage.get(pid));
+        match headroom(h.as_ref(), u.as_ref(), now).verdict {
             Verdict::Exhausted => return Verdict::Exhausted,
             Verdict::Unknown => worst = Verdict::Unknown,
             _ => {}

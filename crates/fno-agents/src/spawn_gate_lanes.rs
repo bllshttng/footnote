@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -851,29 +851,8 @@ pub(crate) fn check_lane_quota_lock(
     ))
 }
 
-/// The provider runtime-state payload: `$FNO_RUNTIME_STATE_PATH`, else the
-/// configured state root's `provider-runtime-state.json`. An unreadable file
-/// is an empty payload (unlocked), matching the Python reader's None arm.
 fn runtime_state_payload(config_cwd: &Path) -> Value {
-    let path: PathBuf = match std::env::var_os("FNO_RUNTIME_STATE_PATH") {
-        Some(override_) => PathBuf::from(override_),
-        None => {
-            let mut path = agents_config::state_dir(config_cwd).unwrap_or_else(default_state_dir);
-            path.push("provider-runtime-state.json");
-            path
-        }
-    };
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or(Value::Null)
-}
-
-fn default_state_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".fno")
+    crate::route_capacity::runtime_state_payload(config_cwd)
 }
 
 /// The account's binding rate-limit deadline, when its health entry is fresh
