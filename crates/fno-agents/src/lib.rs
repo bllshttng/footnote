@@ -95,6 +95,7 @@ mod completion_output;
 pub mod component_update;
 pub mod context_run;
 pub mod court_fold;
+pub mod crown_settle;
 pub mod cursor_agent;
 pub mod daemon;
 pub mod decision_index;
