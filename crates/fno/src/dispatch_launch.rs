@@ -181,9 +181,12 @@ pub(crate) async fn run_fno_captured_with_stdin(
         let mut child = crate::process_admission::tokio_spawn(&mut command).ok()?;
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            if stdin.write_all(stdin_bytes).await.is_err() {
-                return None;
-            }
+            // The seed write can lose a race with a door that refuses
+            // without reading stdin: the closed-pipe error is the door's
+            // own answer arriving early, so drain the exit status + stderr
+            // and let the decoder name the refusal. Swallowing the attempt
+            // here would call a decided refusal an ambiguous timeout.
+            let _ = stdin.write_all(stdin_bytes).await;
             // Drop the handle so the child sees EOF and `--prompt-file -`
             // terminates; without this the door blocks on its own read.
             drop(stdin);
