@@ -1,11 +1,11 @@
 """Slot policy dispatch, end to end on the real seams (operator amendment).
 
 Everything here runs on isolated fixtures: a tmp graph for the defer/queue
-state, monkeypatched capacity, and the spawn seam invoked in-process. No live
-global config, no real quota locks, no exit-masking pipeline. The queue
-contract is proved in full: a typed refusal, PERSISTED deferred state through
-the landed backlog owners, and one controlled successful retry after the
-capacity observation changes.
+state, a pinned runtime-state file for the verb's capacity read, and the
+spawn seam invoked in-process. No live global config, no real quota locks, no
+exit-masking pipeline. The queue contract is proved in full: a typed refusal,
+PERSISTED deferred state through the landed backlog owners, and one controlled
+successful retry after the capacity observation changes.
 """
 from __future__ import annotations
 
@@ -78,20 +78,69 @@ def _last_json(text):
     return json.loads(lines[-1])
 
 
+def _pin_capacity(monkeypatch, claude=None, codex=None, extra=None, active=None):
+    """Pin the capacity readings the verb judges lanes with.
+
+    The Python capacity read was deleted (x-1c38): the verb computes it from
+    the runtime-state file, so a hermetic one rides in through env instead of
+    a monkeypatched Python function. claude/codex pin one account record each
+    (`cl-a` for claude, `cx-a` for codex); None leaves the harness with no
+    record, which reads unknown. `extra` adds per-account readings as
+    {harness: {account: state}} (a dict value may carry resets_at). `active`
+    writes identity stamps as {harness: account}. Returns (config, state)
+    paths so a test can move capacity mid-flight.
+    """
+    import os
+    import tempfile
+    import time as _time
+
+    d = tempfile.mkdtemp(prefix="fno-cap-")
+    records = []
+    for harness, spec in (("claude", claude), ("codex", codex)):
+        if spec is not None:
+            records.append((f"{'cl' if harness == 'claude' else 'cx'}-a", harness, spec))
+    for harness, accounts in (extra or {}).items():
+        for account, spec in accounts.items():
+            records.append((account, harness, spec))
+    cfg = os.path.join(d, "config.toml")
+    with open(cfg, "w") as f:
+        f.write(f"state_dir = '{d}'\n")
+        for account, harness, _spec in records:
+            f.write(f'[[accounts.records]]\nid = "{account}"\nharness = "{harness}"\n')
+    now = _time.time()
+
+    def row(spec) -> dict:
+        if isinstance(spec, dict):
+            state, resets = spec.get("state", "ok"), spec.get("resets_at")
+        else:
+            state, resets = spec, None
+        pct = {"ok": 5.0, "low": 95.0}.get(state, 100.0)
+        return {
+            "probed_at": now,
+            "partial": False,
+            "windows": [{"label": "daily", "used_pct": pct, "resets_at": resets}],
+        }
+
+    state = os.path.join(d, "state.json")
+    with open(state, "w") as f:
+        f.write(json.dumps({"usage": {a: row(spec) for a, _h, spec in records}}))
+    for harness, account in (active or {}).items():
+        os.makedirs(os.path.join(d, "providers"), exist_ok=True)
+        with open(os.path.join(d, "providers", f".active-{harness}"), "w") as f:
+            f.write(account)
+    monkeypatch.setenv("FNO_CONFIG", cfg)
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", state)
+    return cfg, state
+
+
 def test_queue_refusal_is_typed_and_names_retry_at(monkeypatch, capsys):
     """The refusal half of AC6-QUEUE: exit 78, typed JSON, per-lane reasons,
     and the reset horizon the dispatcher should honour."""
     monkeypatch.setenv("FNO_SPAWN_GATE", "1")
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {
-            "claude": {
-                "state": "exhausted",
-                "accounts": {"zai-main": "exhausted"},
-                "resets": {"zai-main": 1900000000.0},
-                "evidence": {},
-            },
-        },
+    _pin_capacity(
+        monkeypatch,
+        claude="exhausted",
+        extra={"claude": {"zai-main": {"state": "exhausted", "resets_at": 1900000000.0}}},
     )
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
@@ -108,7 +157,9 @@ def test_queue_refusal_is_typed_and_names_retry_at(monkeypatch, capsys):
     assert payload["status"] == "refused"
     assert payload["reason"] == "slot_exhausted"
     assert payload["retry_at"] == 1900000000
-    assert {"name": "flash-x", "reason": "capacity=exhausted"} in payload["lanes"]
+    # the computed reading carries its provenance; the cause is what matters
+    flash = next(lane for lane in payload["lanes"] if lane["name"] == "flash-x")
+    assert flash["reason"].startswith("capacity=exhausted")
 
 
 @requires_rust
@@ -118,17 +169,7 @@ def test_exhausted_slot_persists_defer_and_the_retry_selects(
     """The full queue contract: refusal, persisted deferred state through the
     landed backlog owners, then one controlled successful selection."""
     monkeypatch.setenv("FNO_SPAWN_GATE", "1")
-    exhausted = {
-        "claude": {
-            "state": "exhausted",
-            "accounts": {"zai-main": "exhausted"},
-            "resets": {},
-            "evidence": {},
-        },
-    }
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity", lambda **kw: exhausted
-    )
+    _pin_capacity(monkeypatch, claude="exhausted", extra={"claude": {"zai-main": "exhausted"}})
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
         inject_spawn_defaults(
@@ -167,17 +208,7 @@ def test_exhausted_slot_persists_defer_and_the_retry_selects(
     # launches. The seam re-reads capacity; nothing cached the refusal. The
     # route owns the model (no --model by design), so the coordinate to assert
     # is harness + route + account.
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {
-            "claude": {
-                "state": "ok",
-                "accounts": {"zai-main": "ok"},
-                "resets": {},
-                "evidence": {},
-            },
-        },
-    )
+    _pin_capacity(monkeypatch, claude="ok", extra={"claude": {"zai-main": "ok"}})
     err2 = io.StringIO()
     out = inject_spawn_defaults(
         ["spawn", "--name", "w", "/fno:target x-1"],
@@ -196,20 +227,16 @@ def test_manual_account_switch_terminal_never_logs_in(monkeypatch):
     """AC6-QUEUE: identity-only exhaustion names the manual terminal; fno
     never signs in or re-enables remote control itself."""
     monkeypatch.setenv("FNO_SPAWN_GATE", "1")
-    monkeypatch.setattr(
-        "fno.route_resolve.runtime_capacity",
-        lambda **kw: {
-            "claude": {
-                "state": "ok",
-                "accounts": {"makers": "ok", "readyrule": "ok"},
-                "resets": {},
-                "evidence": {"makers": "proven", "readyrule": "mismatch"},
-            },
-        },
+    _pin_capacity(
+        monkeypatch,
+        extra={"claude": {"makers": "ok", "readyrule": "ok"}},
+        active={"claude": "makers"},
     )
+    # The unknown arm needs a harness with NO stamp: under one proven stamp
+    # every other claude account reads mismatch, so ghost rides codex.
     rows = [
         {"name": "alt-a", "harness": "claude", "model": "a", "account": "readyrule"},
-        {"name": "alt-b", "harness": "claude", "model": "b", "account": "ghost"},
+        {"name": "alt-b", "harness": "codex", "model": "b", "account": "ghost"},
     ]
     err = io.StringIO()
     with pytest.raises(SystemExit) as exc:
