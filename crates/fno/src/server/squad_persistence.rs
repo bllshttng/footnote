@@ -26,6 +26,14 @@ impl Core {
             .min()
     }
 
+    /// Clearing a squad's name is refused when no label derives (no origins)
+    /// or another live squad already holds the identity its origins derive.
+    pub(super) fn clear_name_refused(&self, sid: u64, origins: &[String]) -> bool {
+        origins.is_empty()
+            || (self.live_holder_of("", &crate::squad_store::origin_key(origins), Some(sid)))
+                .is_some()
+    }
+
     /// True when another live squad shares `sid`'s stored identity. Neither
     /// live member list is known to be complete, so the write is skipped and
     /// the fault is noticed once per identity per server life.

@@ -11683,11 +11683,8 @@ impl Core {
                 match self.session.squad(squad) {
                     Some(sq) => {
                         let clean = sanitize_name(&name, MAX_SQUAD_NAME);
-                        // Blank-after-sanitize CLEARS back to the derived label
-                        // (the RenameTab precedent) - EXCEPT an origin-less
-                        // squad, whose derived label would be empty: there a
-                        // blank is refused (nothing to fall back to).
-                        if clean.is_empty() && sq.origins.is_empty() {
+                        // Blank-after-sanitize CLEARS back to the derived label.
+                        if clean.is_empty() && self.clear_name_refused(squad, &sq.origins) {
                             self.notice(client_id, "name required");
                             return Flow::Continue;
                         }
