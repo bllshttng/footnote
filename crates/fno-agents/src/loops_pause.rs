@@ -374,7 +374,9 @@ fn parse_ttl(value: &str) -> Result<u64, String> {
     if n == 0 {
         return Err(format!("TTL must be > 0: {value:?}"));
     }
-    Ok(n * mult * 1000)
+    n.checked_mul(mult)
+        .and_then(|ms| ms.checked_mul(1000))
+        .ok_or_else(|| format!("--ttl too large: {value:?}"))
 }
 
 fn parse_pause_options(args: &[String]) -> Result<PauseOptions, String> {
@@ -452,16 +454,11 @@ fn run_mail_hold(extra: &[&str]) -> MailLeg {
             Some(0) => MailLeg::Ok(String::from_utf8_lossy(&output.stdout).trim().to_string()),
             Some(3) => MailLeg::NoIdentity,
             _ => {
-                let mut detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                detail.truncate(200);
-                MailLeg::Failed(detail)
+                let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                MailLeg::Failed(crate::evidence::truncate_chars(&detail, 200))
             }
         },
-        Err(error) => {
-            let mut detail = error.to_string();
-            detail.truncate(200);
-            MailLeg::Failed(detail)
-        }
+        Err(error) => MailLeg::Failed(crate::evidence::truncate_chars(&error.to_string(), 200)),
     }
 }
 

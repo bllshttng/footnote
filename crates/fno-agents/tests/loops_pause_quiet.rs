@@ -147,6 +147,24 @@ fn ac5_a_zero_ttl_is_refused_and_writes_no_sentinel() {
 }
 
 #[test]
+fn a_ttl_too_large_to_multiply_is_refused_not_a_panic() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+
+    with_env(&home, None, || {
+        let (code, output) = run_loops_capture(&owned(&[
+            "pause-all",
+            "--ttl",
+            "300000000000000d",
+            "--json",
+        ]));
+        assert_eq!(code, 2, "{output}");
+        assert!(!home.join(".fno/loops-paused.json").exists());
+    });
+}
+
+#[test]
 fn ac6_resume_all_lifts_the_mail_leg() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
@@ -198,6 +216,34 @@ fn ac7_a_failing_stub_still_lifts_the_sentinel() {
         assert_eq!(output["resumed"], true);
         assert!(!home.join(".fno/loops-paused.json").exists());
         let mail_leg = output["lifted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["leg"] == "mail")
+            .unwrap();
+        assert_eq!(mail_leg["state"], "failed");
+    });
+}
+
+#[test]
+fn a_failing_stub_with_multibyte_stderr_does_not_panic_on_truncation() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    // 90 copies of a 3-byte char: byte offset 200 falls inside the 67th
+    // character (198..201), so a byte-indexed truncate(200) panics on a
+    // non-char-boundary; a char-indexed one cannot.
+    let payload = tmp.path().join("payload");
+    fs::write(&payload, "中".repeat(90)).unwrap();
+    let bin = stub(
+        tmp.path(),
+        &format!("cat {} 1>&2\nexit 1", payload.display()),
+    );
+
+    with_env(&home, Some(&bin), || {
+        let (code, output) = run_loops_capture(&owned(&["pause-all", "--ttl", "5m", "--json"]));
+        assert_eq!(code, 0, "{output}");
+        let mail_leg = output["silenced"]
             .as_array()
             .unwrap()
             .iter()
