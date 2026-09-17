@@ -294,6 +294,12 @@ class QuotaConfig(BaseModel):
     # it is armed deliberately rather than inherited on upgrade.
     pick_on_launch: bool = False
 
+    @property
+    def observes(self) -> bool:
+        """True when either flag wants usage seen - the one gate every probe
+        site shares, so ``observe``/``defer_dispatch`` combine in one place."""
+        return self.observe or self.defer_dispatch
+
 
 class ProvidersConfig(BaseModel):
     """Wrapper for the config.providers block plus the sibling config.agents block.

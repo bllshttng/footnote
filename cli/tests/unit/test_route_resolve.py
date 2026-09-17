@@ -575,7 +575,6 @@ def test_runtime_capacity_default_never_probes(monkeypatch):
 
     probed: list[str] = []
     monkeypatch.setattr(rs, "refresh_usage", lambda account, *_a, **_kw: probed.append(account))
-    monkeypatch.setattr(rr, "_quota_observes", lambda: True)
     _fake_headroom(monkeypatch, {"acct": "unknown"})
     inv = _inv([
         {"name": "x", "harness": "codex", "model": "m", "band": "high", "account": "acct"},

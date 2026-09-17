@@ -1645,7 +1645,7 @@ def evaluate_quota_signal(
     # quota for another project's launch, and an absent record there reads as
     # UNKNOWN, which proceeds instead of cutting over.
     quota = load_quota_config(repo_root=repo_root)
-    if not (quota.observe or quota.defer_dispatch):
+    if not quota.observes:
         return QuotaSignal(
             provider_id,
             HeadroomState.UNKNOWN,

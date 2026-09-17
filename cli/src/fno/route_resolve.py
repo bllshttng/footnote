@@ -762,7 +762,7 @@ def _identity_evidence(harness: str, accounts: list[str]) -> dict[str, str]:
 
 
 def _quota_observes() -> bool:
-    """True when quota config wants usage seen (observe or defer_dispatch).
+    """True when quota config wants usage seen (``QuotaConfig.observes``).
 
     Fail-open to False on any config-read error, same posture as the one
     other probe site (``runtime_state.evaluate_quota_signal``).
@@ -770,8 +770,7 @@ def _quota_observes() -> bool:
     try:
         from fno.adapters.providers.loader import load_quota_config
 
-        quota = load_quota_config()
-        return bool(quota.observe or quota.defer_dispatch)
+        return load_quota_config().observes
     except Exception:  # noqa: BLE001 - an unreadable quota config never probes
         return False
 
@@ -797,10 +796,11 @@ def runtime_capacity(
         harnesses = list(dict.fromkeys(
             [*providers, *(r.harness for r in inv.rows.values() if r.harness)]
         ))
+        should_probe = probe_stale and _quota_observes()
         out: dict[str, object] = {}
         for harness in harnesses:
             accounts = harness_accounts(harness, settings=settings, inventory=inv)
-            if probe_stale and accounts and _quota_observes():
+            if should_probe and accounts:
                 for account in accounts:
                     refresh_usage(account)
             detail: dict[str, str] = {}
