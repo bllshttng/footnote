@@ -1091,12 +1091,13 @@ fn detect_intent_full(transcript_path: &Path) -> Intent {
 /// PR state vocabulary (fu-4faa3d). Parsed once at the read_pr_info boundary.
 /// `as_str()` reproduces the exact legacy strings so the fingerprint (which
 /// persists across fires in events.jsonl) stays byte-identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PrState {
     Open,
     Merged,
     Closed,
     /// No PR, or an unrecognized gh state string (fail-closed, AC5-EDGE).
+    #[default]
     None,
 }
 
@@ -1126,7 +1127,7 @@ impl PrState {
 
 /// CI conclusion vocabulary (fu-4faa3d). `render()` reproduces the exact
 /// legacy strings ("FAILURE:{name}" carries the failing check name).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum CiConclusion {
     Success,
     /// Failing check name when one was identified.
@@ -1135,6 +1136,7 @@ enum CiConclusion {
     /// CI read skipped via ci.declared_none.
     Skipped,
     /// No checks found (fail-closed unless declared_none).
+    #[default]
     None,
 }
 
@@ -1155,7 +1157,7 @@ impl CiConclusion {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct PrInfo {
     state: PrState,
     number: i64,
@@ -2207,33 +2209,11 @@ fn read_pr_info(
         None => read_pr_view(gh_bin, cwd, pr_selector)?,
     }) else {
         // No PR yet: world-state, not an error. done() is simply false, and
-        // the backstop can resolve a stuck no-PR session as NoProgress.
+        // the backstop can resolve a stuck no-PR session as NoProgress. Every
+        // omitted field is PrInfo's no-information default.
         return Ok(PrInfo {
-            range_tiling: RangeTiling::default(),
-            state: PrState::None,
-            number: 0,
-            head_oid: String::new(),
-            ci_conclusion: CiConclusion::None,
-            failing_checks: Vec::new(),
-            ci_has_pending: false,
             mergeable: "UNKNOWN".to_string(),
-            merge_slot_holder: None,
-            base_behind: false,
-            latest_review_ts: "none".to_string(),
-            reviewed: false,
-            missing_bots: Vec::new(),
-            bot_nudges: Vec::new(),
-            stale_bots: Vec::new(),
-            unaddressed_findings: Vec::new(),
-            review_skipped: false,
-            unattested_reviewers: Vec::new(),
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: Vec::new(),
-            },
+            ..PrInfo::default()
         });
     };
 
@@ -2338,31 +2318,14 @@ fn read_pr_info(
     // unshipped work.
     if state == PrState::Merged {
         return Ok(PrInfo {
-            range_tiling: RangeTiling::default(),
             state,
             number,
             head_oid,
             ci_conclusion: CiConclusion::Skipped,
-            failing_checks: Vec::new(),
-            ci_has_pending: false,
             mergeable,
-            merge_slot_holder: None,
-            base_behind: false,
-            latest_review_ts: "none".to_string(),
             reviewed: true,
-            missing_bots: Vec::new(),
-            bot_nudges: Vec::new(),
-            stale_bots: Vec::new(),
-            unaddressed_findings: Vec::new(),
             review_skipped: true,
-            unattested_reviewers: Vec::new(),
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: Vec::new(),
-            },
+            ..PrInfo::default()
         });
     }
 
@@ -5144,6 +5107,13 @@ impl Coverage {
     }
 }
 
+/// A known zero: the same value every no-information site already wrote.
+impl Default for Coverage {
+    fn default() -> Self {
+        Coverage::Covered(0)
+    }
+}
+
 /// Authorship of a local attestation lives in [`authorship`]: the enum, its
 /// classifier, and the manifest fallback all answer one question.
 ///
@@ -5259,7 +5229,7 @@ fn human_approval_counts(v: &ReviewerVerdict, flag: bool) -> bool {
 }
 
 /// The coverage over a PR plus the per-reviewer verdicts that produced it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CoverageReport {
     pub coverage: Coverage,
     pub verdicts: Vec<ReviewerVerdict>,
@@ -13976,31 +13946,12 @@ mod tests {
         // flight; a Pending conclusion must read as "still running", never
         // as the misleading "CI red ... failed" (observed live on PR #455).
         let pr = PrInfo {
-            range_tiling: RangeTiling::default(),
             state: PrState::Open,
             number: 455,
             head_oid: "abc".to_string(),
             ci_conclusion: CiConclusion::Pending,
-            failing_checks: vec![],
-            ci_has_pending: false,
             mergeable: "UNKNOWN".to_string(),
-            merge_slot_holder: None,
-            base_behind: false,
-            latest_review_ts: "none".to_string(),
-            reviewed: false,
-            missing_bots: vec![],
-            bot_nudges: vec![],
-            stale_bots: vec![],
-            unaddressed_findings: vec![],
-            review_skipped: false,
-            unattested_reviewers: vec![],
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: vec![],
-            },
+            ..PrInfo::default()
         };
         let reason = build_block_reason(&pr, "abc", true, true);
         assert!(
@@ -14195,31 +14146,13 @@ git_bounded();";
     /// An open PR whose head matches local HEAD, CI still pending, no findings.
     fn watch_pr() -> PrInfo {
         PrInfo {
-            range_tiling: RangeTiling::default(),
             state: PrState::Open,
             number: 404,
             head_oid: "abc".to_string(),
             ci_conclusion: CiConclusion::Pending,
-            failing_checks: vec![],
             ci_has_pending: true,
             mergeable: "UNKNOWN".to_string(),
-            merge_slot_holder: None,
-            base_behind: false,
-            latest_review_ts: "none".to_string(),
-            reviewed: false,
-            missing_bots: vec![],
-            bot_nudges: vec![],
-            stale_bots: vec![],
-            unaddressed_findings: vec![],
-            review_skipped: false,
-            unattested_reviewers: vec![],
-            malformed_attestations: 0,
-            posture: None,
-            coverage: CoverageReport {
-                github_approval_satisfies: false,
-                coverage: Coverage::Covered(0),
-                verdicts: vec![],
-            },
+            ..PrInfo::default()
         }
     }
 
