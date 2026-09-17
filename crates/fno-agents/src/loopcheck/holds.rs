@@ -232,6 +232,128 @@ fn node_in(node_id: &str, blocks: &[String]) -> bool {
     blocks.iter().any(|b| b == node_id)
 }
 
+/// What the question gates decided about this fire: fall through, block
+/// once, or terminate the loop.
+pub(crate) enum QuestionGateStop {
+    None,
+    Block {
+        reason: String,
+    },
+    Terminate {
+        reason: super::TerminationReason,
+        message: String,
+    },
+}
+
+/// The stop gate's question family, in order: a decided question left
+/// without a decision record blocks (step 3b), then a node held on an open
+/// question blocks once and terminates on the second fire (step 3c). The
+/// journals fold as a UNION (operator verbs write to the canonical root's
+/// journal; a worktree stop gate reads its own cwd's), and the gate's own
+/// loop_check/termination rows land through `emit`, so the held state the
+/// second fire reads is the journal itself, never the fingerprint.
+pub(crate) fn question_gates(
+    project_events: &std::path::Path,
+    global_events: &std::path::Path,
+    cwd: &std::path::Path,
+    session_id: &str,
+    node_id: &str,
+    emit: &dyn Fn(&str, serde_json::Value),
+) -> QuestionGateStop {
+    let mut journals = vec![project_events.to_path_buf(), global_events.to_path_buf()];
+    if let Some(canon) = crate::paths::canonical_repo_root(cwd) {
+        let canonical_journal = crate::paths::events_path(&canon);
+        if !journals.contains(&canonical_journal) {
+            journals.push(canonical_journal);
+        }
+    }
+    // Step 3b: a session that closed one of ITS OWN operator questions WITH
+    // an answer but emitted no matching operator_decision event is held, and
+    // the hold names the question. Scopes to questions this session asked so
+    // a foreign session's unfinished business cannot wedge an unrelated loop.
+    let unrecorded = scan_unrecorded_decisions(&journals, session_id);
+    if !unrecorded.is_empty() {
+        let names = unrecorded
+            .iter()
+            .map(|u| format!("{} '{}'", u.question_id, u.question))
+            .collect::<Vec<_>>()
+            .join(", ");
+        emit(
+            "loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "decision": "block",
+                "gate": "unrecorded_decision",
+                "unrecorded": unrecorded.iter().map(|u| u.question_id.clone()).collect::<Vec<_>>()
+            }),
+        );
+        return QuestionGateStop::Block {
+            reason: format!(
+                "a decided question has no decision record ({names}); record it with \
+                 `fno backlog decide <node> \"...\" --question-id <id>` \
+                 (the gate matches on the question id; a re-run of the clear is a \
+                 no-op once the question is closed) \
+                 so the decision survives this session"
+            ),
+        };
+    }
+    // Step 3c: the first fire on a held node blocks ONCE, naming the question
+    // id and the two remedies; the second fire on the same still-open question
+    // terminates, so a held node stops once and is never re-asked.
+    let held = scan_open_holds(&journals, session_id, node_id);
+    if !held.is_empty() {
+        let qids = held
+            .iter()
+            .map(|h| h.question_id.clone())
+            .collect::<Vec<_>>();
+        let first_fire = held.iter().any(|h| !h.already_blocked);
+        let h = &held[0];
+        if first_fire {
+            emit(
+                "loop_check",
+                serde_json::json!({
+                    "session_id": session_id,
+                    "decision": "block",
+                    "gate": "held_on_question",
+                    "held": qids,
+                }),
+            );
+            return QuestionGateStop::Block {
+                reason: format!(
+                    "held on open question {}: '{}'; answer it with \
+                     `fno backlog decide <node> \"<ruling>\" --question-id {}` \
+                     or close the question to move on",
+                    h.question_id, h.question, h.question_id
+                ),
+            };
+        }
+        let options_line = if h.options.is_empty() {
+            String::new()
+        } else {
+            format!(" options: {};", h.options.join(" | "))
+        };
+        let digest = format!(
+            "still held on open question {}: '{}'{}. answer it with \
+             `fno backlog decide <node> \"<ruling>\" --question-id {}`",
+            h.question_id, h.question, options_line, h.question_id
+        );
+        emit(
+            "termination",
+            serde_json::json!({
+                "session_id": session_id,
+                "reason": "HeldOnQuestion",
+                "question_id": h.question_id,
+                "message": digest,
+            }),
+        );
+        return QuestionGateStop::Terminate {
+            reason: super::TerminationReason::HeldOnQuestion,
+            message: digest,
+        };
+    }
+    QuestionGateStop::None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

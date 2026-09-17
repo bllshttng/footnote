@@ -1550,7 +1550,6 @@ mod review_count;
 mod review_state;
 use attestation_journal::missing_global_attestations;
 pub use attestation_journal::unattested_reviewers_scan_text;
-use holds::scan_unrecorded_decisions;
 mod watch_lease;
 use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason};
 use authorship::carry_author_session_forward;
@@ -8099,135 +8098,27 @@ pub(crate) fn decide_with_payload(
         manifest.plan_path.as_deref(),
         &project_events,
     );
-    // ── Step 3b: decided question left no decision record ────────────────────
-    // The recording obligation is enforced here, never self-reported: a
-    // session that closed one of ITS OWN operator questions WITH an answer but
-    // emitted no matching operator_decision event is held, and the hold names
-    // the question. Scopes to questions this session asked so a foreign
-    // session's unfinished business cannot wedge an unrelated loop. The
-    // journals are folded as a UNION because the operator verbs write to the
-    // canonical root's journal while a worktree stop gate reads its own cwd's
-    // - a record on any of the three paths clears the gate.
-    let unrecorded = if session_id != "unknown" {
-        // One journal per space: the cwd's journal IS the canonical journal for
-        // this repo (the old worktree-vs-canonical fork is what the spaces move
-        // retired), so the union collapses to the two live journals.
-        let mut journals = vec![project_events.clone(), global_events.clone()];
-        if let Some(canon) = crate::paths::canonical_repo_root(&cwd) {
-            let canonical_journal = crate::paths::events_path(&canon);
-            if !journals.contains(&canonical_journal) {
-                journals.push(canonical_journal);
-            }
-        }
-        scan_unrecorded_decisions(&journals, &session_id)
-    } else {
-        Vec::new()
-    };
-    if !unrecorded.is_empty() {
-        let names = unrecorded
-            .iter()
-            .map(|u| format!("{} '{}'", u.question_id, u.question))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let reason = format!(
-            "a decided question has no decision record ({names}); record it with \
-             `fno backlog decide <node> \"...\" --question-id <id>` \
-             (the gate matches on the question id; a re-run of the clear is a \
-             no-op once the question is closed) \
-             so the decision survives this session"
-        );
-        emit(
-            "loop_check",
-            serde_json::json!({
-                "session_id": session_id,
-                "decision": "block",
-                "gate": "unrecorded_decision",
-                "unrecorded": unrecorded.iter().map(|u| u.question_id.clone()).collect::<Vec<_>>()
-            }),
-        );
-        return (0, allow_output("block", None, &reason, 0, None));
-    }
-    // ── Step 3c: a node held on an open operator question ────────────────────
-    // The first fire blocks ONCE, naming the question id and the two remedies
-    // (answer it with the decide verb, or close it). The second fire on the
-    // same still-open question terminates HeldOnQuestion with a digest, so a
-    // held node stops once and is never re-asked. The journal is the held
-    // state: the first fire's block row is what the second fire reads, so the
-    // fingerprint is not consulted.
-    let held = if session_id != "unknown" {
-        // Same journal union the unrecorded-decision gate above folds: the
-        // cwd's journal, the global one, and the canonical root's.
-        let mut hold_journals = vec![project_events.clone(), global_events.clone()];
-        if let Some(canon) = crate::paths::canonical_repo_root(&cwd) {
-            let canonical_journal = crate::paths::events_path(&canon);
-            if !hold_journals.contains(&canonical_journal) {
-                hold_journals.push(canonical_journal);
-            }
-        }
-        holds::scan_open_holds(
-            &hold_journals,
+    // ── Steps 3b/3c: the question gates (decided-but-unrecorded; held-on-open)
+    // Both folds live in `holds` beside the scans they drive; the journal
+    // union, the emit rows, and the order (unrecorded first, then held) are
+    // theirs.
+    if session_id != "unknown" {
+        match holds::question_gates(
+            &project_events,
+            &global_events,
+            &cwd,
             &session_id,
             node_id.as_deref().unwrap_or(""),
-        )
-    } else {
-        Vec::new()
-    };
-    if !held.is_empty() {
-        let qids = held
-            .iter()
-            .map(|h| h.question_id.clone())
-            .collect::<Vec<_>>();
-        let first_fire = held.iter().any(|h| !h.already_blocked);
-        if first_fire {
-            let h = &held[0];
-            emit(
-                "loop_check",
-                serde_json::json!({
-                    "session_id": session_id,
-                    "decision": "block",
-                    "gate": "held_on_question",
-                    "held": qids,
-                }),
-            );
-            let reason = format!(
-                "held on open question {}: '{}'; answer it with \
-                 `fno backlog decide <node> \"<ruling>\" --question-id {}` \
-                 or close the question to move on",
-                h.question_id, h.question, h.question_id
-            );
-            return (0, allow_output("block", None, &reason, 0, None));
+            &emit,
+        ) {
+            holds::QuestionGateStop::None => {}
+            holds::QuestionGateStop::Block { reason } => {
+                return (0, allow_output("block", None, &reason, 0, None));
+            }
+            holds::QuestionGateStop::Terminate { reason, message } => {
+                return (0, allow_output("allow", Some(reason), &message, 0, None));
+            }
         }
-        // Every hold has had its one block: terminate with the digest.
-        let h = &held[0];
-        let options_line = if h.options.is_empty() {
-            String::new()
-        } else {
-            format!(" options: {};", h.options.join(" | "))
-        };
-        let digest = format!(
-            "still held on open question {}: '{}'{}. answer it with \
-             `fno backlog decide <node> \"<ruling>\" --question-id {}`",
-            h.question_id, h.question, options_line, h.question_id
-        );
-        emit(
-            "termination",
-            serde_json::json!({
-                "session_id": session_id,
-                "reason": "HeldOnQuestion",
-                "question_id": h.question_id,
-                "message": digest,
-            }),
-        );
-        return (
-            0,
-            allow_output(
-                "allow",
-                Some(TerminationReason::HeldOnQuestion),
-                &digest,
-                0,
-                None,
-            ),
-        );
     }
     // ── Check gh binary availability ──────────────────────────────────────────
     // Only a NotFound spawn reads as absence. Every other spawn failure is
