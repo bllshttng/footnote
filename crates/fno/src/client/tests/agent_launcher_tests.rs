@@ -49,7 +49,7 @@ fn sync_catalog(v: &mut View) {
 }
 
 fn type_message(v: &mut View, text: &str) {
-    // Focus the message field from a fresh popup: Harness -> Project ->
+    // Focus the message field from a fresh dock: Harness -> Project ->
     // Message.
     if let Some(l) = v.launcher.as_mut() {
         l.focus = Focus::Message;
@@ -89,7 +89,7 @@ fn esc_hides_and_reopening_restores_the_draft() {
     type_message(&mut v, "ship it");
     let revision_before = v.launcher.as_ref().unwrap().draft.revision;
     close(&mut v);
-    assert!(v.launcher.is_none(), "popup hidden");
+    assert!(v.launcher.is_none(), "dock hidden");
     assert!(v.launcher_closed.is_some(), "draft retained");
     // Reopen: same draft, same revision, nothing lost.
     open(&mut v);
@@ -231,7 +231,7 @@ fn stale_update_cannot_overwrite_a_newer_draft() {
         v.launcher.as_ref().unwrap().phase,
         Phase::Refused { .. }
     ));
-    // A STALE id (2 never armed by this popup) applies nowhere: the popup's
+    // A STALE id (2 never armed by this dock) applies nowhere: the dock's
     // newer draft state survives.
     let stale = AgentLaunchUpdate {
         request_id: 2,
@@ -264,10 +264,10 @@ fn unknown_outcome_blocks_retry_until_dismiss() {
         v.launcher.as_ref().unwrap().phase,
         Phase::Unknown { .. }
     ));
-    // The attempt is remembered BEYOND the popup (close + reopen).
+    // The attempt is remembered BEYOND the dock (close + reopen).
     close(&mut v);
     open(&mut v);
-    assert!(v.launch_attempt.is_some(), "attempt outlives the popup");
+    assert!(v.launch_attempt.is_some(), "attempt outlives the dock");
     // Dismiss is the explicit action that resolves the block; the draft
     // survives and launch is possible again.
     if let Some(l) = v.launcher.as_mut() {
@@ -319,7 +319,7 @@ fn render_rows_carry_every_primary_field_at_80x24() {
     v.launcher_catalog = catalog(&[("claude", true, true)]);
     sync_catalog(&mut v);
     let l = v.launcher.as_ref().unwrap();
-    let rows = l.render_rows(&v);
+    let rows = l.render_rows(&v, 4);
     let text: Vec<String> = rows.iter().map(|(_, s)| s.clone()).collect();
     let joined = text.join("\n");
     for needle in ["harness", "project", "message", "advanced", "Launch"] {
@@ -336,7 +336,7 @@ fn render_rows_carry_every_primary_field_at_80x24() {
     if let Some(l) = v.launcher.as_mut() {
         l.draft.expanded = true;
     }
-    let rows = v.launcher.as_ref().unwrap().render_rows(&v);
+    let rows = v.launcher.as_ref().unwrap().render_rows(&v, 4);
     let joined = rows
         .into_iter()
         .map(|(_, s)| s)
@@ -369,4 +369,58 @@ fn footer_names_the_lifecycle_and_the_refusal_reason() {
         footer.contains("refused") && footer.contains("no free slot"),
         "footer: {footer}"
     );
+}
+
+/// The dock's text block is dynamic: the editor window tracks the typed
+/// lines up to a cap that holds the dock near half the panel, and deleting
+/// shrinks it back down.
+#[test]
+fn dock_editor_window_is_dynamic_and_capped() {
+    let mut v = view_with_launcher();
+    v.term = (24, 80);
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(
+        l.dock_layout(24),
+        (6, 1),
+        "4 fields + 1 typed line + footer"
+    );
+
+    // Ten typed lines against a 24-row panel: the window caps at
+    // 24/2 - 4 fields - 1 footer = 7 and the dock holds at half the panel.
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.message = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10".into();
+    }
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.dock_layout(24), (12, 7), "capped at half the panel");
+
+    // Deleting lines shrinks the dock again.
+    if let Some(l) = v.launcher.as_mut() {
+        l.draft.message = "one\ntwo".into();
+    }
+    let l = v.launcher.as_ref().unwrap();
+    assert_eq!(l.dock_layout(24), (7, 2), "two typed lines, dock shrinks");
+}
+
+/// The dock never hides: on a panel too small for even the collapsed fields
+/// beside one sideline row, the editor floors at one line and the painter
+/// clips the rest.
+#[test]
+fn dock_layout_floors_at_one_editor_line_on_tiny_panels() {
+    let mut v = view_with_launcher();
+    v.term = (24, 80);
+    let l = v.launcher.as_ref().unwrap();
+    // 8 rows: cap = 8/2 - 4 fields - 1 footer = 0, floored to 1.
+    assert_eq!(l.dock_layout(8), (6, 1));
+}
+
+/// paint_dock truncates to the panel width and clips at the terminal rows.
+#[test]
+fn paint_dock_clips_to_width_and_height() {
+    let data = vec![(Focus::Harness, "abcdefghij".to_string())];
+    let mut cells = vec![Cell::default(); 2 * 6];
+    super::agent_launcher::paint_dock(&mut cells, &data, "xy", 1, 2, 6, 5);
+    let painted: String = cells[6..11].iter().map(|c| c.c).collect();
+    assert_eq!(painted, "abcde", "truncated to text_w");
+    assert_eq!(cells[11].c, ' ', "beyond text_w untouched");
+    assert_eq!(cells[0].c, ' ', "row 0 untouched");
 }
