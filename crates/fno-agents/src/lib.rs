@@ -198,6 +198,8 @@ pub mod pi;
 pub mod plugin_install;
 pub mod pr_nudge;
 pub mod pr_park;
+pub mod pr_push;
+pub mod pr_rebase;
 pub mod protocol;
 pub mod prove_it_verdicts;
 pub mod provider;

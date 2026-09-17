@@ -880,6 +880,18 @@ async fn run(args: Vec<String>) -> i32 {
     if matches!(verb, "pr-heal") {
         return fno_agents::heal::run_heal(&args[1..]);
     }
+    // `pr-push` / `pr-rebase`: the guarded push and the two-phase rebase,
+    // binary-direct behind `fno do pr push` / `fno do pr rebase`, same
+    // posture as `pr-heal`: NOT routable `fno agents` verbs, so they stay
+    // out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS. `matches!` for the same
+    // reason `version` uses it. Daemon-free, so they dispatch here before
+    // build_request.
+    if matches!(verb, "pr-push") {
+        return fno_agents::pr_push::run_push(&args[1..]);
+    }
+    if matches!(verb, "pr-rebase") {
+        return fno_agents::pr_rebase::run_rebase(&args[1..]);
+    }
     // `subscribe`: follow the daemon's own `events.jsonl` and stream registry
     // state transitions + pane exits as NDJSON. File-follow, no daemon RPC, so it
     // dispatches here before build_request.
