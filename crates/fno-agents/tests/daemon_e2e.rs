@@ -1355,6 +1355,116 @@ exit 2
     std::fs::remove_dir_all(home.root()).ok();
 }
 
+/// A daemon lazy-started by a pinned child (`FNO_AGENTS_RUNTIME=python`) must
+/// shed the pin at startup so it does not hold it for the daemon's whole life.
+/// Every arm child would otherwise inherit it and refuse the verbs with no
+/// Python leg (`rm` exits 127). Proven by having the daemon spawn a real
+/// `rm` child (a `claude` stub, same shape as the surface reap test above)
+/// and having that child record what it sees.
+#[tokio::test]
+async fn pinned_daemon_sheds_runtime_pin_before_spawning_an_rm_child() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    seed_pane_row(&home, "pinned-worker");
+    state::update_registry(&home.registry_json(), |registry| {
+        let row = registry.find_mut("pinned-worker").unwrap();
+        row.status = fno_agents::AgentStatus::Exited;
+        row.exited_at = None;
+    })
+    .unwrap();
+
+    let shim_dir = home.root().join("shims");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let claude_state = home.root().join("claude-row");
+    let mux_state = home.root().join("mux-pane");
+    let runtime_seen = home.root().join("runtime-seen");
+    std::fs::write(&claude_state, "e6f78b98\n").unwrap();
+    std::fs::write(&mux_state, "main:10\n").unwrap();
+    write_executable(
+        &shim_dir.join("claude"),
+        r#"#!/bin/sh
+if [ "$1" = "agents" ]; then
+  if [ -f "$CLAUDE_STATE" ]; then
+    printf '[{"kind":"background","id":"e6f78b98","state":"stopped"}]\n'
+  else
+    printf '[]\n'
+  fi
+  exit 0
+fi
+if [ "$1" = "rm" ] && [ "$2" = "e6f78b98" ]; then
+  printf '%s' "${FNO_AGENTS_RUNTIME-unset}" > "$RUNTIME_SEEN"
+  /bin/rm -f "$CLAUDE_STATE"
+  exit 0
+fi
+exit 2
+"#,
+    );
+    write_executable(
+        &shim_dir.join("fno"),
+        r#"#!/bin/sh
+if [ "$1" = "mux" ] && [ "$2" = "pane" ] && [ "$3" = "kill" ] && \
+   [ "$4" = "--server" ] && [ "$5" = "main" ] && [ "$6" = "10" ]; then
+  /bin/rm -f "$MUX_STATE"
+  exit 0
+fi
+if [ "$1" = "mux" ] && [ "$2" = "pane" ] && [ "$3" = "ls" ]; then
+  if [ -f "$MUX_STATE" ]; then
+    printf '[{"session":"main","pane_id":10}]\n'
+  else
+    printf '[]\n'
+  fi
+  exit 0
+fi
+exit 2
+"#,
+    );
+
+    let path = format!(
+        "{}:{}",
+        shim_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let claude_state_env = claude_state.to_string_lossy().into_owned();
+    let mux_state_env = mux_state.to_string_lossy().into_owned();
+    let runtime_seen_env = runtime_seen.to_string_lossy().into_owned();
+    let mut daemon = start_daemon_env(
+        &home,
+        &[
+            ("PATH", &path),
+            ("CLAUDE_STATE", &claude_state_env),
+            ("MUX_STATE", &mux_state_env),
+            ("RUNTIME_SEEN", &runtime_seen_env),
+            ("FNO_AGENTS_NO_STARTUP_RECONCILE", "1"),
+            ("FNO_AGENTS_RUNTIME", "python"),
+        ],
+    );
+
+    let out = Command::new(CLIENT_BIN)
+        .args(["rm", "pinned-worker"])
+        .envs(fno_agents::test_run::self_owner_env())
+        .env("FNO_AGENTS_HOME", home.root())
+        .output()
+        .expect("rm client runs");
+    assert!(
+        out.status.success(),
+        "rm failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let seen = std::fs::read_to_string(&runtime_seen)
+        .expect("claude rm child must have run and recorded its FNO_AGENTS_RUNTIME view");
+    assert_eq!(
+        seen, "unset",
+        "daemon must shed a leaked FNO_AGENTS_RUNTIME=python pin before spawning an rm child"
+    );
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}
+
 // ---------------------------------------------------------------------------
 // Daemon binary-version drift restart (ab-1891cdff): US2 (restart swaps the
 // daemon), US3 (PTY workers survive -- Outcome B), US1/US4 (drift warned on
