@@ -333,7 +333,6 @@ fn render_rows_carry_every_primary_field_at_80x24() {
     // At 80 columns the longest row still fits the content width.
     assert!(text.iter().all(|s| s.chars().count() < 72));
     // Expanding advanced reveals the four pins.
-    drop(l);
     if let Some(l) = v.launcher.as_mut() {
         l.draft.expanded = true;
     }
