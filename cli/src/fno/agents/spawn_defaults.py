@@ -1232,18 +1232,21 @@ def inject_spawn_defaults(
     if lanes_present or not model_occupied or enforced:
         if not model_occupied or enforced:
             grid_node_entry = _grid_node(out[1:], env)
-        capacity: Optional[dict[str, object]] = None
         _slot_inventory = None
-        if lanes_present or grid_node_entry or enforced:
+        slot_walk_armed = lanes_present or grid_node_entry or enforced
+        capacity_refresh = False
+        if slot_walk_armed:
             try:
                 from fno import route_resolve as _rr
 
                 _slot_inventory = _rr.resolve_inventory()
-                capacity = dict(_rr.runtime_capacity(inventory=_slot_inventory))
-            except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
-                capacity = {}
-        if capacity is not None:
-            # the resolved leading verb is the phase authority.
+            except Exception:  # noqa: BLE001 - an unreadable inventory grids on defaults
+                _slot_inventory = None
+            # The verb computes capacity itself now, and the spawn door
+            # refreshes a stale or never-probed lane reading once before the
+            # walk skips the lane (the same rule the dispatch seam follows).
+            capacity_refresh = True
+        if slot_walk_armed:
             # blueprint/think bill planning; target never acquires frontier
             # eligibility merely because its low-difficulty node has no plan -
             # that model-only plan-presence inference is gone (the derived
@@ -1265,7 +1268,7 @@ def inject_spawn_defaults(
                 slot_candidate, slot_chain, _slot_verdict = _rr.resolve_slot(
                     profile_verb,
                     grid_node_entry,
-                    capacity,
+                    None,
                     inventory=_slot_inventory,
                     settings=settings,
                     substrate=explicit_substrate,
@@ -1284,6 +1287,7 @@ def inject_spawn_defaults(
                         (explicit_vendor or "").strip() or None if explicit_vendor_present else None
                     ),
                     meta=_slot_meta,
+                    capacity_refresh=capacity_refresh,
                 )
             except Exception as _exc:  # noqa: BLE001 - legacy degrades; strict refuses
                 if enforced:
