@@ -761,19 +761,37 @@ def _identity_evidence(harness: str, accounts: list[str]) -> dict[str, str]:
         return {}
 
 
+def _quota_observes() -> bool:
+    """True when quota config wants usage seen (observe or defer_dispatch).
+
+    Fail-open to False on any config-read error, same posture as the one
+    other probe site (``runtime_state.evaluate_quota_signal``).
+    """
+    try:
+        from fno.adapters.providers.loader import load_quota_config
+
+        quota = load_quota_config()
+        return bool(quota.observe or quota.defer_dispatch)
+    except Exception:  # noqa: BLE001 - an unreadable quota config never probes
+        return False
+
+
 def runtime_capacity(
     providers: tuple[str, ...] = ("claude", "codex", "gemini", "opencode"),
     *,
     settings: object = None,
     inventory: Optional[Inventory] = None,
+    probe_stale: bool = False,
 ) -> dict[str, object]:
     """Harness capacity: per-account headroom aggregated MAX (exhausted only
     if EVERY account is); a proven active slot account IS the aggregate. The
     value is ``{state, window, accounts, sources, observed_at, evidence,
-    resets}``. Never probes, never touches the network.
+    resets}``. Probes only when ``probe_stale`` is set (and quota observation
+    is on): a stale or never-probed account is refreshed before its headroom
+    is read, so a dispatch decision never skips a lane on outdated evidence.
     """
     try:
-        from fno.adapters.providers.runtime_state import headrooms
+        from fno.adapters.providers.runtime_state import headrooms, refresh_usage
 
         inv = inventory if inventory is not None else resolve_inventory(settings=settings)
         harnesses = list(dict.fromkeys(
@@ -782,6 +800,9 @@ def runtime_capacity(
         out: dict[str, object] = {}
         for harness in harnesses:
             accounts = harness_accounts(harness, settings=settings, inventory=inv)
+            if probe_stale and accounts and _quota_observes():
+                for account in accounts:
+                    refresh_usage(account)
             detail: dict[str, str] = {}
             resets: dict[str, object] = {}
             sources: dict[str, str] = {}

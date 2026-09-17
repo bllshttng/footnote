@@ -1687,7 +1687,7 @@ def _grid_lane_for(
 
         inventory = route_resolve.resolve_inventory()
         capacity: dict[str, object] = dict(
-            route_resolve.runtime_capacity(inventory=inventory)
+            route_resolve.runtime_capacity(inventory=inventory, probe_stale=True)
         )
         profile_verb = ((verb or "target").strip().lstrip("/")) or "target"
         candidate, chain, _verdict = route_resolve.resolve_slot(

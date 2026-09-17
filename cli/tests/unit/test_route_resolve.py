@@ -538,6 +538,99 @@ def test_runtime_capacity_keeps_per_account_sources_and_observed_at(monkeypatch)
     assert cap["claude"]["window"] == "stale"
 
 
+def test_runtime_capacity_probes_stale_account_when_requested(monkeypatch):
+    """AC1-HP: probe_stale=True refreshes a stale lane account, and the
+    returned state comes from the post-refresh read, not the stale cache."""
+    import fno.adapters.providers.runtime_state as rs
+    from fno.adapters.providers.runtime_state import Headroom, HeadroomState
+
+    probed: list[str] = []
+
+    def _refresh(account, *_a, **_kw):
+        probed.append(account)
+        return object()
+
+    def _many(provider_ids, **_kw):
+        state = HeadroomState.OK if probed else HeadroomState.UNKNOWN
+        source = "window" if probed else "stale"
+        return {pid: Headroom(state, None, source=source) for pid in provider_ids}
+
+    monkeypatch.setattr(rs, "refresh_usage", _refresh)
+    monkeypatch.setattr(rs, "headrooms", _many)
+    monkeypatch.setattr(rr, "_quota_observes", lambda: True)
+    inv = _inv([
+        {"name": "x", "harness": "codex", "model": "m", "band": "high",
+         "account": "stale-acct"},
+    ])
+    cap = rr.runtime_capacity(
+        ("codex",), settings=_account_settings(), inventory=inv, probe_stale=True
+    )
+    assert probed == ["stale-acct"]
+    assert cap["codex"]["state"] == "ok"
+
+
+def test_runtime_capacity_default_never_probes(monkeypatch):
+    """AC2-HP: the default probe_stale=False never calls refresh_usage."""
+    import fno.adapters.providers.runtime_state as rs
+
+    probed: list[str] = []
+    monkeypatch.setattr(rs, "refresh_usage", lambda account, *_a, **_kw: probed.append(account))
+    monkeypatch.setattr(rr, "_quota_observes", lambda: True)
+    _fake_headroom(monkeypatch, {"acct": "unknown"})
+    inv = _inv([
+        {"name": "x", "harness": "codex", "model": "m", "band": "high", "account": "acct"},
+    ])
+    rr.runtime_capacity(("codex",), settings=_account_settings(), inventory=inv)
+    assert probed == []
+
+
+def test_runtime_capacity_probe_failure_stays_unknown(monkeypatch):
+    """AC3-EDGE: a failed probe on a stale account leaves state unknown and
+    raises nothing out of runtime_capacity."""
+    import fno.adapters.providers.runtime_state as rs
+
+    monkeypatch.setattr(rs, "refresh_usage", lambda account, *_a, **_kw: None)
+    monkeypatch.setattr(rr, "_quota_observes", lambda: True)
+    _fake_headroom(monkeypatch, {"acct": "unknown"})
+    inv = _inv([
+        {"name": "x", "harness": "codex", "model": "m", "band": "high", "account": "acct"},
+    ])
+    cap = rr.runtime_capacity(
+        ("codex",), settings=_account_settings(), inventory=inv, probe_stale=True
+    )
+    assert cap["codex"]["state"] == "unknown"
+
+
+def test_runtime_capacity_probes_never_probed_account(monkeypatch):
+    """AC4-EDGE: a never-probed (absent) account is refreshed the same as a
+    stale one - there is no separate absent-vs-stale filter."""
+    import fno.adapters.providers.runtime_state as rs
+    from fno.adapters.providers.runtime_state import Headroom, HeadroomState
+
+    probed: list[str] = []
+
+    def _refresh(account, *_a, **_kw):
+        probed.append(account)
+        return object()
+
+    def _many(provider_ids, **_kw):
+        state = HeadroomState.OK if probed else HeadroomState.UNKNOWN
+        return {pid: Headroom(state, None, source="absent") for pid in provider_ids}
+
+    monkeypatch.setattr(rs, "refresh_usage", _refresh)
+    monkeypatch.setattr(rs, "headrooms", _many)
+    monkeypatch.setattr(rr, "_quota_observes", lambda: True)
+    inv = _inv([
+        {"name": "x", "harness": "codex", "model": "m", "band": "high",
+         "account": "never-probed"},
+    ])
+    cap = rr.runtime_capacity(
+        ("codex",), settings=_account_settings(), inventory=inv, probe_stale=True
+    )
+    assert probed == ["never-probed"]
+    assert cap["codex"]["state"] == "ok"
+
+
 # --- resolve_tier / node_model (inventory-backed) --------------------------- #
 
 

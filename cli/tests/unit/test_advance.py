@@ -3611,6 +3611,37 @@ def test_grid_lane_for_and_resolve_slot_agree(monkeypatch):
     assert reason == "slot=exhausted queue"
 
 
+def test_grid_lane_for_passes_probe_stale(monkeypatch):
+    """AC5-HP (x-1c38): the dispatcher tick refreshes a stale lane account
+    before judging it, so a stale codex reading does not fall through to
+    claude-sonnet-5 when a fresh probe would have picked codex-luna."""
+    from fno import route_resolve
+
+    seen: dict = {}
+
+    def _fake_capacity(**kw):
+        seen["probe_stale"] = kw.get("probe_stale")
+        return {"codex": "ok", "claude": "ok"}
+
+    monkeypatch.setattr(route_resolve, "runtime_capacity", _fake_capacity)
+    monkeypatch.setattr(
+        route_resolve, "resolve_inventory", lambda **kw: route_resolve.Inventory()
+    )
+    monkeypatch.setattr(
+        route_resolve, "resolve_slot",
+        lambda *a, **k: (
+            {"harness": "codex", "model": "codex-luna"},
+            ["slot agents.profiles.target.lanes[0] codex-luna capacity=ok"],
+            "armed",
+        ),
+    )
+    node = {"difficulty": "medium", "priority": "p1"}
+    harness, model, *_ = adv._grid_lane_for(node, model=None, provider=None)
+    assert seen["probe_stale"] is True
+    assert harness == "codex"
+    assert model == "codex-luna"
+
+
 def test_grid_lane_for_returns_the_grid_candidates_route(monkeypatch):
     """AC2-HP (x-b545): the route the grid leg emits survives the seam. The
     single monkeypatchable answer carries vendor AND model as one fact."""
