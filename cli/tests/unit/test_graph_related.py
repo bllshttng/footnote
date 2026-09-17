@@ -387,3 +387,38 @@ def test_a_related_chain_holds_back_transitively():
     ]
     to_archive, _remaining, _skipped = partition_for_archive(entries, 30, now)
     assert to_archive == [], "b waits on c, and a waits on b"
+
+
+# ---------------------------------------------------------------------------
+# x-129e: --related alongside other flags in one `update` call
+# ---------------------------------------------------------------------------
+
+
+def test_related_combined_with_other_flags_lands_every_field(tmp_graph):
+    """A multi-flag `update` must write every flag, not just --related.
+
+    set_related round-trips `entries` through the keeper's pure_op and
+    replaces every element (`entries[:] = out`), which used to orphan the
+    `node` dict captured earlier in the mutator: every field written on
+    `node` after the --related block (size, blocked_by, details, ...) landed
+    on a copy no longer reachable from `entries` and silently vanished on
+    commit, while --related itself (which writes straight to `entries`)
+    always looked like it worked.
+    """
+    r = runner.invoke(
+        app,
+        [
+            "backlog", "update", "x-aaaa",
+            "--related", "x-bbbb",
+            "--add-blocker", "x-cccc",
+            "--size", "L",
+            "--details", "multi-flag update",
+        ],
+    )
+    assert r.exit_code == 0, r.output
+    entries = json.loads(tmp_graph.read_text())["entries"]
+    node = next(e for e in entries if e["id"] == "x-aaaa")
+    assert node.get("related") == ["x-bbbb"]
+    assert node.get("blocked_by") == ["x-cccc"]
+    assert node.get("size") == "L"
+    assert node.get("details") == "multi-flag update"

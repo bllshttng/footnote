@@ -3523,6 +3523,13 @@ def cmd_update(
                 ]
             )
             set_related(entries, node["id"], desired)
+            # set_related round-trips `entries` through the keeper and replaces
+            # every element (`entries[:] = out`), orphaning the `node` object
+            # captured above. Every field write below targets `node` directly,
+            # so without rebinding it here those writes land on a dict that is
+            # no longer part of `entries` and silently vanish on commit.
+            node = _find_node(entries, node["id"])
+            projected_node[0] = node
 
         if source_node is not None:
             node["source_node_id"] = (
