@@ -1140,8 +1140,14 @@ fn read_graph_gated(state: &StoreState, strict: bool) -> Result<GraphRead, Store
                 return Ok(GraphRead::Cached(hit));
             }
             state.file_opens.fetch_add(1, Ordering::SeqCst);
-            let entries = crate::backlog::read_entries(&state.graph)
+            let mut entries = crate::backlog::read_entries(&state.graph)
                 .map_err(|error| sqlite_unreadable(state, error))?;
+            // The defaulted view, same as the json arm caches: the api rows
+            // consumers received apply_defaults output before this cache
+            // existed (graph_store::read_rows runs the same pass), and the
+            // computed children summaries are exactly the part a raw
+            // read_entries row lacks.
+            graph_store::apply_defaults(&mut entries, false);
             let entries = Arc::new(entries);
             let post = crate::backlog::version(&state.graph)
                 .map_err(|error| sqlite_unreadable(state, error))?;
