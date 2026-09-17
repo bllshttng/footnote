@@ -2115,14 +2115,14 @@ def do_row_session_gone(harness, session_id, cwd, *, quiet_after_s, now_s):
         return False, "transcript unreadable"
 
 
-def do_row_idle_s(entry, row, now_s) -> Optional[float]:
+def do_row_idle_s(entry, row, now_s) -> Optional[int]:
     """Seconds since the row started or its own session last noted the node; None is unmeasured."""
     stamps = [_parse_ts(row.get("started_at"))] + [
         _parse_ts(n.get("ts")) for n in entry.get("progress_notes") or []
         if isinstance(n, dict) and n.get("source_session_id") == row.get("session_id")
     ]
     stamps = [s for s in stamps if s is not None]
-    return now_s - max(stamps).timestamp() if stamps else None
+    return int(now_s - max(stamps).timestamp()) if stamps else None
 
 
 def detect_abandoned_do_rows(
@@ -2153,7 +2153,7 @@ def detect_abandoned_do_rows(
             elif engaged_on.get(nid):
                 verdict, why = "held", f"reachable worker on node {', '.join(engaged_on[nid])}"
             elif idle is not None and idle > quiet_after_s:
-                verdict, why = "gone", f"row idle {int(idle // 3600)}h, no reachable worker on the node"
+                verdict, why = "gone", f"row idle {idle // 3600}h, no reachable worker on the node"
             elif live_worked.get(nid):
                 verdict, why = "held", f"live roster worker {', '.join(live_worked[nid])}"
             else:

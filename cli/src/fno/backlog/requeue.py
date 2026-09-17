@@ -245,6 +245,18 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
         typer.echo(f"requeue: claim {key} reads {state}{basis_note}{holder_note}; only {' or '.join(_REQUEUEABLE_CLAIM_STATES)} may requeue{grace_note}.", err=True)
         raise typer.Exit(code=3)
 
+    from datetime import datetime, timezone
+
+    from fno.graph.maintain import do_row_idle_s
+
+    now = datetime.now(timezone.utc)
+    try:
+        from fno.config import load_settings
+
+        bound_h = load_settings().backlog.maintain.abandoned_do_row_hours
+    except Exception:
+        bound_h = 24
+    reading = None
     open_rows = [r for r in (row.get("sessions") or []) if is_open_do_row(r)]
     pairs = [(r, resolve_session_truth(r.get("session_id") or "")) for r in open_rows]
     for r, truth in pairs:
@@ -257,20 +269,36 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
             # A 429 corpse dies writing its error, so its age is freshest at death.
             observed_model=truth.get("observed_model"),
         )
-        if reach.verdict == REACHABLE:
-            from datetime import datetime, timezone
+        if reach.verdict != REACHABLE:
+            continue
+        # A live session proves only that the session lives. A row idle past
+        # the bound settles unless a REACHABLE worker is on this node.
+        idle = do_row_idle_s(row, r, now.timestamp())
+        if idle is not None and idle > bound_h * 3600:
+            from fno.claims import roster
 
-            # reap-open is NOT named here: this worker reads reachable, so a
-            # death claim would be false. The owner's honest self-close is.
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            typer.echo(
-                f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
-                "a reachable worker still owns the do window. If that session is "
-                f"yours and has stopped this node: fno backlog session add {node_id} "
-                f"--phase do --ended-at {now}",
-                err=True,
-            )
+            reading = reading or roster.read_roster(require_live_probe=False)
+            if not reading.consulted:
+                typer.echo(f"requeue: roster unread ({reading.reason}); cannot rule out a worker on {node_id}.", err=True)
+                raise typer.Exit(code=3)
+            engaged = [w.get("name") for w in roster.classify_workers(reading.workers_on(node_id))[0]]
+            if not engaged:
+                continue
+            typer.echo(f"requeue: reachable worker {', '.join(map(str, engaged))} is on {node_id}; the idle do row stays.", err=True)
             raise typer.Exit(code=3)
+        # reap-open is NOT named here: this worker reads reachable, so a
+        # death claim would be false. The owner's honest self-close is.
+        idle_note = "unmeasured" if idle is None else _humanize_age(idle).strip()
+        typer.echo(
+            f"requeue: {r.get('harness')}:{r.get('session_id')} reads {reach.render()}; "
+            "a reachable worker still owns the do window. If that session is "
+            f"yours and has stopped this node: fno backlog session add {node_id} "
+            f"--phase do --ended-at {now.strftime('%Y-%m-%dT%H:%M:%SZ')}. "
+            f"Row idle {idle_note}; requeue settles it once idle passes {bound_h}h "
+            "with no reachable worker on the node.",
+            err=True,
+        )
+        raise typer.Exit(code=3)
 
     for r in open_rows:
         reap_open_session_record(_graph_path(), node_id, phase="do", harness=r.get("harness") or "", session_id=r.get("session_id") or "")
@@ -287,7 +315,7 @@ def cmd_requeue(node: str, *, json_out: bool = False) -> None:
 
     # `working, 0 samples` names a corpse and `working, 31 samples` names a
     # worker. None is a harness that keeps no transcript, never a zero.
-    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s"))} for r, truth in pairs]
+    settled = [{"harness": r.get("harness"), "session_id": r.get("session_id"), "state": truth.get("state"), "samples": inference_samples(truth.get("observed_model")), "last_event_at": truth.get("last_event_at"), "age": _humanize_age(truth.get("last_activity_age_s")), "row_idle_s": do_row_idle_s(row, r, now.timestamp())} for r, truth in pairs]
     receipt = {"node_id": node_id, "status_before": status_before, "status_after": status_after, "settled": settled}
     if json_out:
         typer.echo(json.dumps(receipt, sort_keys=True))
