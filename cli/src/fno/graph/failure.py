@@ -60,16 +60,17 @@ def emit_undefer_boundary(node_id: str, path: Optional[Path] = None) -> None:
     target: Optional[Path] = None
     try:
         target = path if path is not None else events_path()
+        # The flat envelope the old file append wrote becomes canonical at the
+        # storage boundary; _classify accepts either shape on the read side.
         record = {
-            "unit_id": node_id,
             "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "kind": _UNDEFER_TYPE,
+            "type": _UNDEFER_TYPE,
+            "source": "backlog",
+            "data": {"unit_id": node_id},
         }
-        target.parent.mkdir(parents=True, exist_ok=True)
-        # A single JSONL record is well under PIPE_BUF (4096), so an 'a'-mode
-        # write is atomic and interleaves at line boundaries with the walker.
-        with open(target, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(record, target)
     except Exception as exc:  # noqa: BLE001 - never break the undefer
         print(
             f"fno backlog: warning: {_UNDEFER_TYPE} boundary for {node_id} "

@@ -223,13 +223,11 @@ def _emit_daemon_envelope(
         "source": source,
         "data": data,
     }
-    line = json.dumps(record, separators=(",", ":")) + "\n"
     try:
-        target = daemon_lifecycle_log()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "a", encoding="utf-8") as fh:
-            fh.write(line)
-    except OSError as exc:
+        from fno.events.store_client import emit_envelope
+
+        emit_envelope(record, daemon_lifecycle_log())
+    except Exception as exc:  # noqa: BLE001 - a failed log write must not break spawn
         print(f"fno agents: warning: daemon envelope {kind}: {exc}", file=sys.stderr)
 
 
