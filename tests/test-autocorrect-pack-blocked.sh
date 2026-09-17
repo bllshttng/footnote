@@ -25,9 +25,17 @@ fail() { printf '[autocorrect-blocked] FAIL: %s\n' "$*" >&2; exit 1; }
 skip() { printf '[autocorrect-blocked] SKIP: %s\n' "$*" >&2; exit 77; }
 
 # The store read needs a keeper to answer; without the worker binary the
-# fixture store cannot exist.
+# fixture store cannot exist. The smoke gate builds the crate's debug bins
+# (structural "Build fno-agents debug binary" step, or the auto-inserted
+# build this marker line triggers in changed-smoke: target/debug/fno-agents-worker),
+# so the repo checkout's own build output is the third arm here.
 worker_resolvable() {
   if [[ -n "${FNO_AGENTS_WORKER:-}" && -f "$FNO_AGENTS_WORKER" ]]; then return 0; fi
+  if [[ -x "$REPO_ROOT/crates/fno-agents/target/debug/fno-agents-worker" ]]; then
+    FNO_AGENTS_WORKER="$REPO_ROOT/crates/fno-agents/target/debug/fno-agents-worker"
+    export FNO_AGENTS_WORKER
+    return 0
+  fi
   command -v fno-agents-worker >/dev/null 2>&1
 }
 worker_resolvable || skip "no fno-agents-worker (FNO_AGENTS_WORKER unset, binary not on PATH)"
