@@ -813,6 +813,7 @@ mod tests {
         root: PathBuf,
         fno_base: PathBuf,
         fb_base: PathBuf,
+        fb_parent: PathBuf,
     }
 
     /// Repo + both sandbox bases + the fake cargo wired through CARGO.
@@ -827,8 +828,11 @@ mod tests {
         let fno_base = root.join("fno-base");
         // The fallback base must sit OUTSIDE every registered tree (the repo
         // root itself when git cannot answer), exactly as on a real machine -
-        // a base under the root is rejected by design.
-        let fb_base = temp_root(&format!("{tag}-fb"));
+        // a base under the root is rejected by design. Nested one level so
+        // the >=3-component guard passes on Linux too, where /tmp/<name>
+        // would be only two.
+        let fb_parent = temp_root(&format!("{tag}-fb"));
+        let fb_base = fb_parent.join("base");
         std::fs::create_dir_all(&fno_base).unwrap();
         std::fs::create_dir_all(&fb_base).unwrap();
         fake_cargo(&root, broken_token);
@@ -840,6 +844,7 @@ mod tests {
             root,
             fno_base,
             fb_base,
+            fb_parent,
         }
     }
 
@@ -850,7 +855,7 @@ mod tests {
             std::env::remove_var("CBD_FB_ANSWER");
             std::env::remove_var("FNO_CARGO_TARGETS_BASE");
             let _ = std::fs::remove_dir_all(&self.root);
-            let _ = std::fs::remove_dir_all(&self.fb_base);
+            let _ = std::fs::remove_dir_all(&self.fb_parent);
         }
     }
 

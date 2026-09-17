@@ -1452,6 +1452,27 @@ else
 fi
 rm -rf "$S" "$STUB"
 
+# An fno-agents stand-in whose `reclaim remove-for` mirrors the lane's
+# ownership answer: it deletes the planted hash dir only when the dir sits
+# under the managed base named by FNO_CARGO_TARGETS_BASE. /bin/rm directly,
+# so the PATH rm-stub never sees a binary-lane delete.
+new_agents_stub() {
+    local bin="$1" hash_dir="$2"
+    mkdir -p "$bin"
+    cat > "$bin/fno-agents" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1 \$2" == "reclaim remove-for" && -n "\$FNO_CARGO_TARGETS_BASE" ]]; then
+    case "$hash_dir/" in
+        "\$FNO_CARGO_TARGETS_BASE"/*) /bin/rm -rf "$hash_dir"; printf '{"removed": 1}\n' ;;
+        *) printf '{"removed": 0}\n' ;;
+    esac
+else
+    printf '{"removed": 0}\n'
+fi
+EOF
+    chmod +x "$bin/fno-agents"
+}
+
 # Shared fixture for the removal-lane tests: a sandbox worktree whose
 # workspace resolves to a planted hash dir under a managed base.
 new_removal_fixture() {
@@ -1468,11 +1489,12 @@ new_removal_fixture() {
     RM_LOG="$STUB/rm.log"
     new_rm_stub "$STUB/bin" "$RM_LOG"
     new_cargo_stub "$STUB/bin" "$S/base/ab/c002"
+    new_agents_stub "$STUB/bin" "$S/base/ab/c002"
 }
 
 # 9b. AC2-HP: the WorktreeRemove hook reclaims the hash dir, then removes.
 new_removal_fixture
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="$STUB/bin/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" \
     bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
 rc=$?
 if [[ $rc -eq 0 && ! -d "$S/wt" && ! -d "$S/base/ab/c002" ]]; then
@@ -1485,7 +1507,7 @@ rm -rf "$S" "$STUB"
 
 # 9c. AC2b-HP: the archive lane reclaims the hash dir too.
 new_removal_fixture
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="$STUB/bin/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" \
     bash "$ARCHIVE" "$S/wt" --yes 2>&1)
 rc=$?
 if [[ $rc -eq 0 && ! -d "$S/wt" && ! -d "$S/base/ab/c002" ]]; then
@@ -1506,7 +1528,8 @@ mkdir -p "$S/wt/crates/x" "$S/outside/c003"
 new_hash_dir "$S/outside/c003"
 STUB=$(mktemp -d -t srm-edge.XXXXXX)
 new_cargo_stub "$STUB/bin" "$S/outside/c003"
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+new_agents_stub "$STUB/bin" "$S/outside/c003"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="$STUB/bin/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" \
     bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
 rc=$?
 if [[ $rc -eq 0 && ! -d "$S/wt" && -d "$S/outside/c003" ]]; then
@@ -1527,7 +1550,7 @@ mkdir -p "$S/wt/crates/x" "$S/base/ab/c004"
 new_hash_dir "$S/base/ab/c004"
 STUB=$(mktemp -d -t srm-fail.XXXXXX)
 new_cargo_stub "$STUB/bin" "FAIL"
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" \
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="/nonexistent/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" \
     bash "$HOOK" <<< "{\"worktree_path\":\"$S/wt\"}" 2>&1)
 rc=$?
 if [[ $rc -eq 0 && ! -d "$S/wt" && -d "$S/base/ab/c004" ]]; then
