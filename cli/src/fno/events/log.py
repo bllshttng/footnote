@@ -3,7 +3,7 @@
 Format: one JSON object per line in .fno/events.jsonl
 Schema: {type, campaign_id, session_id, nonce, ts, payload}
 
-Writes are atomic via filelock so concurrent processes can't interleave bytes.
+Writes commit through the native event store; no file lock is needed.
 """
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
 
-import filelock
 import yaml
 
 
@@ -137,9 +136,9 @@ def emit_event(
         # backlog/advance both carried: a hand-built path consults neither
         # FNO_EVENTS_PATH nor FNO_REPO_ROOT, so a test emitting through this
         # writer lands a production-shaped row in the developer's journal. This
-        # module writes under its own filelock rather than through
-        # append_event, so it never meets that guard and resolving correctly is
-        # the whole protection it gets.
+        # module wrote under its own filelock rather than through
+        # append_event; resolving through fno.paths is still what keeps a
+        # test emit out of the developer's production journal.
         from fno.paths import project_events_json
 
         events_path = project_events_json()
@@ -168,24 +167,20 @@ def emit_event(
     nonce = mint_nonce()
     ts = datetime.now(timezone.utc).isoformat()
 
-    event: LegacyEvent = {
-        "type": event_type,
-        "campaign_id": campaign_id,
-        "session_id": session_id,
-        "nonce": nonce,
-        "ts": ts,
-        "payload": payload,
-    }
-    line = json.dumps(event, ensure_ascii=False) + "\n"
+    # The legacy envelope becomes canonical at the storage boundary: the
+    # store only commits {ts, type, source, data}, so the legacy fields land
+    # under data and the row stays joinable by every canonical reader
+    # (normalize_event projects either shape on the read side).
+    data: Dict[str, Any] = dict(payload)
+    if session_id:
+        data.setdefault("session_id", session_id)
+    if campaign_id:
+        data.setdefault("campaign_id", campaign_id)
+    data.setdefault("nonce", nonce)
+    envelope = {"ts": ts, "type": event_type, "source": "legacy", "data": data}
+    from fno.events.store_client import emit_envelope
 
-    # Ensure parent directory exists
-    events_path.parent.mkdir(parents=True, exist_ok=True)
-
-    lock_path = str(events_path) + ".lock"
-    with filelock.FileLock(lock_path, timeout=10):
-        with events_path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
-
+    emit_envelope(envelope, events_path, timeout=10)
     return nonce
 
 
