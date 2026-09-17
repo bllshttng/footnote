@@ -334,10 +334,12 @@ pub(crate) fn run(
         // per row). A name pattern or a transcript mention is exactly how a
         // hand-started session acquires a phantom node, so weak provenance
         // is not a marker. Checked only where a retirement is possible.
+        // Sessions only: the Registry source reads the entry's stored node
+        // field, which a synthetic roster row never carries, so naming it
+        // here would be a dead arm.
         let strong_source = matches!(
             verdict.route.source,
             Some(crate::node_route::NodeSource::Sessions)
-                | Some(crate::node_route::NodeSource::Registry)
         );
         let receipt_marker = || {
             entry
