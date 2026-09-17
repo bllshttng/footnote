@@ -45,6 +45,17 @@ pub struct ArmSpec {
     /// Who schedules this arm, so a never-ticked row names its scheduler and
     /// `explain` can blame the tier that owns the silence.
     pub scheduler: &'static str,
+    /// The arm whose work this arm consumes. When the upstream arm is red,
+    /// this arm's silence is the upstream's fault, and the row names it.
+    pub upstream: Option<&'static str>,
+}
+
+/// The upstream arm named in [`KNOWN_ARMS`], if any.
+pub fn upstream_of(arm: &str) -> Option<&'static str> {
+    KNOWN_ARMS
+        .iter()
+        .find(|s| s.arm == arm)
+        .and_then(|s| s.upstream)
 }
 
 /// Every arm the readout shows, whether or not it has ever ticked.
@@ -53,71 +64,85 @@ pub const KNOWN_ARMS: &[ArmSpec] = &[
         arm: "king_wake",
         default_interval_s: 900,
         scheduler: SCHED_LAUNCHD,
+        upstream: None,
     },
     ArmSpec {
         arm: "watchdog",
         default_interval_s: 600,
         scheduler: SCHED_LAUNCHD,
+        upstream: None,
     },
     ArmSpec {
         arm: "pr_watch_merge",
         default_interval_s: 600,
         scheduler: SCHED_LAUNCHD,
+        upstream: None,
     },
     ArmSpec {
         arm: "active_backlog",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
+        upstream: None,
     },
     ArmSpec {
         arm: "auto_continue",
         default_interval_s: 1800,
         scheduler: "session",
+        upstream: Some("pr_watch_merge"),
     },
     ArmSpec {
         arm: "notify_watch",
         default_interval_s: 300,
         scheduler: SCHED_LAUNCHD,
+        upstream: None,
     },
     ArmSpec {
         arm: "stop_hook",
         default_interval_s: 0,
         scheduler: "hook:target-stop-hook",
+        upstream: None,
     },
     ArmSpec {
         arm: "reap",
         default_interval_s: 60,
         scheduler: SCHED_DAEMON,
+        upstream: None,
     },
     ArmSpec {
         arm: "retire",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
+        upstream: None,
     },
     ArmSpec {
         arm: "machine_watch",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
+        upstream: None,
     },
     ArmSpec {
         arm: "arm_watch",
         default_interval_s: 300,
         scheduler: SCHED_DAEMON,
+        upstream: None,
     },
     ArmSpec {
         arm: "provider_cap",
         default_interval_s: crate::provider_cap::PROVIDER_CAP_INTERVAL_S,
         scheduler: SCHED_DAEMON,
+        upstream: None,
     },
     ArmSpec {
         arm: "merge_close",
         default_interval_s: crate::merge_close::MERGE_CLOSE_INTERVAL_S,
         scheduler: SCHED_DAEMON,
+        upstream: None,
     },
     ArmSpec {
         arm: "crown_ledger",
         default_interval_s: crate::king_ledger::CROWN_LEDGER_INTERVAL_S,
         scheduler: SCHED_DAEMON,
+        upstream: None,
     },
 ];
 
@@ -216,6 +241,12 @@ pub struct ArmStatus {
     /// The rendered readout line, filled by [`explain`] for every row, red or
     /// not, so no consumer re-formats it.
     pub line: String,
+    /// The one verb that repairs a red row, set by `arm_repair::annotate`.
+    pub repair: Option<String>,
+    /// Who runs the repair: `auto` (the arm_watch heal lane) or `operator`.
+    pub heal: Option<String>,
+    /// The red arm this row waits on, when its cause is `upstream_down`.
+    pub upstream: Option<String>,
 }
 
 /// The journal list every arms read folds: the agents home journal plus the
@@ -369,6 +400,9 @@ fn arm_status(
             failing_for_s: None,
             cause: None,
             line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
         };
     };
     let interval_s = tick
@@ -402,6 +436,9 @@ fn arm_status(
         failing_for_s,
         cause: None,
         line: String::new(),
+        repair: None,
+        heal: None,
+        upstream: None,
     }
 }
 
@@ -886,28 +923,14 @@ fn stale_cause(
     None
 }
 
-/// The human hint appended after each cause token.
+/// The human hint appended after each cause token. The text lives in the one
+/// cause table, `arm_repair`; only the young-daemon hint carries a live number.
 fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
-    match cause {
-        "daemon_young" => match daemon {
-            DaemonFacts::Up { uptime_s, .. } => {
-                format!("daemon up {uptime_s}s, first window not elapsed")
-            }
-            _ => "daemon up, first window not elapsed".to_string(),
-        },
-        "stale_daemon" => "daemon predates the installed build; run fno agents restart".to_string(),
-        "configured_off" => {
-            "the arm is off in config; its age is the switch, not a dead scheduler".to_string()
+    match (cause, daemon) {
+        ("daemon_young", DaemonFacts::Up { uptime_s, .. }) => {
+            format!("daemon up {uptime_s}s, first window not elapsed")
         }
-        "daemon_down" => "daemon not running".to_string(),
-        "tick_timeout" => {
-            "the pr-watch tick cut this arm's phase; run fno do pr watch status".to_string()
-        }
-        "scheduler_down" => {
-            "every arm on this scheduler is silent; the job is not running, the arm is fine"
-                .to_string()
-        }
-        _ => "scheduler looks healthy; the arm itself did not tick".to_string(),
+        _ => crate::arm_repair::hint(cause).to_string(),
     }
 }
 
@@ -915,10 +938,13 @@ fn cause_hint(cause: &str, daemon: &DaemonFacts) -> String {
 /// line. Verdict: UNOBSERVED when no producer receipt exists (before every
 /// other verdict: absence is not staleness, failure, or ok), STALE when
 /// stale, FAIL when failing, pending when the cause is daemon_young, else
-/// ok. The `cause=...` suffix is appended by `explain`.
+/// ok. UPSTREAM outranks STALE and FAIL: the arm is waiting on a red arm, not
+/// broken. The `cause=...` suffix is appended by `explain`.
 pub fn render_row(row: &ArmStatus) -> String {
     let verdict = if row.producer_evidence == ProducerEvidence::Unobserved {
         "UNOBSERVED"
+    } else if row.cause.as_deref() == Some("upstream_down") {
+        "UPSTREAM"
     } else if row.stale {
         "STALE"
     } else if row.failing {
@@ -1305,6 +1331,9 @@ mod tests {
             failing_for_s: None,
             cause: None,
             line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
         };
         assert!(!needs_attention(&observed_fresh_ok));
         let mut failing = observed_fresh_ok.clone();
@@ -1354,6 +1383,9 @@ mod tests {
             failing_for_s: None,
             cause: None,
             line: String::new(),
+            repair: None,
+            heal: None,
+            upstream: None,
         };
         let cause = stale_cause(&row, &DaemonFacts::Down, false, None).unwrap();
         assert_eq!(cause, "configured_off");

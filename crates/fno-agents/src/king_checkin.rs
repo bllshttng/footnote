@@ -719,12 +719,13 @@ fn r_control_plane(ctx: &Ctx) -> Result<Value, String> {
         },
         &trace,
     );
+    let findings = crate::stuck_work::collect(&ctx.cwd)?;
+    crate::arm_repair::annotate(&mut rows, &crate::arm_repair::RepairFacts::live(&findings));
     let threshold = crate::agents_config::notify_arm_failing_after_s(&ctx.cwd);
     let mut attention: Vec<String> = crate::arm_watch::overdue_arms(&rows, threshold)
         .iter()
-        .map(|row| crate::arm_watch::row_line(row))
+        .map(|row| row.line.trim().to_string())
         .collect();
-    let findings = crate::stuck_work::collect(&ctx.cwd)?;
     attention.extend(findings.iter().map(|f| f.line.clone()));
     Ok(json!({ "attention": attention }))
 }

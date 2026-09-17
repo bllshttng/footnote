@@ -226,6 +226,26 @@ pub fn forget(key: &str) {
     forget_at(&notify_signals_path(), key)
 }
 
+/// Record `token` under `key` and say whether it was new. False when the same
+/// token is already stored, or when the store cannot be written: an act that
+/// cannot record itself must not repeat every tick.
+pub(crate) fn mark_once(path: &Path, key: &str, token: &str) -> bool {
+    let mut store = load_store(path);
+    if store
+        .get(key)
+        .and_then(|e| e.get("token"))
+        .and_then(Value::as_str)
+        == Some(token)
+    {
+        return false;
+    }
+    store.insert(
+        key.to_string(),
+        json!({"token": token, "ts": crate::events::now_rfc3339()}),
+    );
+    write_store(path, &store).is_ok()
+}
+
 pub fn forget_at(path: &Path, key: &str) {
     let mut store = load_store(path);
     if store.remove(key).is_some() {
