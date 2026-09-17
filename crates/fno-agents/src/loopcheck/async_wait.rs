@@ -106,6 +106,7 @@ pub(super) fn async_wait_class(
     // refuses the idle the same way. The read site drops a self-held slot;
     // this arm restates it so a hand-built PrInfo cannot idle on its own.
     if pr.ci_conclusion.is_ok()
+        && pr.reviewed
         && pr.merge_slot_holder.is_some()
         && pr.merge_slot_holder != Some(pr.number.unsigned_abs())
         && !pr.base_behind
@@ -138,16 +139,17 @@ pub(super) fn merge_slot_reason(
             pr.number, holder
         ));
     }
-    let idlable = async_wait_class(pr, open_findings_empty, head_shipped);
-    let hint = if idlable == Some("merge_slot") {
-        arm_watch_hint(pr.number, "merge_slot")
-    } else {
-        String::new()
-    };
+    // Only the sole-blocker case renders: a hold beside an unnamed blocker
+    // (open findings on a reviewed PR) must not present itself as the reason.
+    if async_wait_class(pr, open_findings_empty, head_shipped) != Some("merge_slot") {
+        return None;
+    }
     Some(format!(
         "PR #{}: merge slot held by PR #{} (frees when it merges, closes, goes \
-         red, or its lease ends).{hint}",
-        pr.number, holder
+         red, or its lease ends).{}",
+        pr.number,
+        holder,
+        arm_watch_hint(pr.number, "merge_slot")
     ))
 }
 
@@ -359,6 +361,26 @@ mod tests {
         let mut pr = held_green_pr();
         pr.coverage.coverage = Coverage::Unknown;
         assert_eq!(async_wait_class(&pr, true, true), None);
+    }
+
+    #[test]
+    fn unreviewed_pr_with_a_hold_is_not_a_slot_idle() {
+        // "Fully-reviewed" is load-bearing: an unmet local-reviewer gate with
+        // no GitHub bot outstanding (missing_bots empty) would otherwise reach
+        // this arm and idle on the hold while the real blocker - run the local
+        // reviewer - is work the session must DO.
+        let mut pr = held_green_pr();
+        pr.reviewed = false;
+        assert_eq!(async_wait_class(&pr, true, true), None);
+    }
+
+    #[test]
+    fn slot_hold_beside_open_manifest_findings_is_not_the_reason() {
+        // The render twin of the classifier gate: a hold beside a blocker the
+        // render never names falls back to the generic line instead of
+        // presenting the hold as the sole reason.
+        let reason = build_block_reason(&held_green_pr(), "abc", false, true);
+        assert!(!reason.contains("merge slot held"), "got: {reason}");
     }
 
     #[test]

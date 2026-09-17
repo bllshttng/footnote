@@ -2839,9 +2839,17 @@ fn read_pr_info(
 
     // The merge-slot hold: a local claims read keyed to this PR's
     // base ref, so idling on a slot held by another PR costs no GitHub spend.
-    // A slot this PR holds itself is not a hold on THIS session.
-    let merge_slot_holder = crate::authorized_merge::merge_slot_holder(cwd, base_ref)
-        .filter(|m| *m != number.unsigned_abs());
+    // A slot this PR holds itself is not a hold on THIS session. The read is
+    // gated on the classifier's cheap preconditions (green CI, review gate
+    // satisfied): every consumer of this field sits behind both, so a red or
+    // unreviewed PR pays no `git worktree list` subprocess for a value it
+    // never reads.
+    let merge_slot_holder = if ci_conclusion.is_ok() && reviewed {
+        crate::authorized_merge::merge_slot_holder(cwd, base_ref)
+            .filter(|m| *m != number.unsigned_abs())
+    } else {
+        None
+    };
     Ok(PrInfo {
         range_tiling: tiling,
         state,
@@ -8356,6 +8364,7 @@ pub(crate) fn decide_with_payload(
             let blocker = match reason.as_str() {
                 "ci" => "ci",
                 "review" => "review",
+                "merge_slot" => "merge_slot",
                 _ => "unknown",
             };
             emit(
