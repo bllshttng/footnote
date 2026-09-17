@@ -238,7 +238,9 @@ def test_map_covers_current_surface_once():
     # into the binary (`name-codes --check`, PR 1813): 632 -> 631.
     # The decide shim then keeps four distinct compatibility leaves in the
     # baseline, including its hidden-origin retract option: 631 -> 635.
-    assert len(mapped) == 635, (
+    # This branch allocates `agents king term`, the crown's-term declare
+    # verb, sharing the `king shape` dispatch point: 635 -> 636.
+    assert len(mapped) == 636, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
