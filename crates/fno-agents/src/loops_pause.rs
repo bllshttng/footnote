@@ -281,11 +281,13 @@ pub fn is_paused() -> bool {
     dispatch_pause().is_paused()
 }
 
-/// The stop hook's pause read. It folds the fleet incident in too: a held
-/// worker whose stop hook saw only the manual sentinel would count every
-/// fire as NoProgress and die on a hold it was told to obey.
-pub fn pause_message() -> Option<String> {
+/// The stop hook's hold read for a session in `cwd`: the manual sentinel,
+/// the fleet incident, or a cargo build of `cwd` waiting on build admission.
+/// A held worker whose stop hook missed any of them would count every fire
+/// as NoProgress and die on a hold it was told to obey.
+pub fn pause_message(cwd: &Path) -> Option<String> {
     pause_message_for(&read_state(), crate::fleet_incident::verdict())
+        .or_else(|| crate::test_run::build_hold_message(cwd))
 }
 
 fn pause_message_for(

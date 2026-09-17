@@ -40,13 +40,13 @@ The suite claim covers `fno doctor test` only. A bare `cargo build` or `cargo te
 
 So every compile asks for admission. `.cargo/config.toml` sets `scripts/lib/cargo-rustc-wrapper.sh` as the rustc wrapper, for every worktree and every harness. Before each compile the wrapper runs `fno-agents test-run build-admit --cargo-pid <cargo> --worktree <checkout>`. That call takes the machine-wide `build:cargo` claim with holder `cargo:<checkout>:<cargo pid>`.
 
-- The claim records the cargo pid and has no TTL. It frees itself when that cargo exits, so there is no release call. A TTL would keep a dead cargo's claim `suspect`, which refuses a newcomer until the TTL runs out.
+- The claim records the cargo pid and has no TTL. Once that cargo exits, the claim is free, so there is no release call. With a TTL, a dead cargo's claim reads `suspect`, and a newcomer waits for the whole TTL.
 - A second cargo waits. It compiles nothing while it waits, and prints `cargo admission: holding; <holder> is building` at most every 30 seconds.
 - A cargo started under the holding cargo, such as a test that runs cargo, is admitted at once. The check walks the process ancestors of the waiting cargo.
 - A compiler probe (`-vV` or `--print`) never asks. Cargo metadata and IDE probes must not block.
 - Admission fails open. With no `fno-agents` on PATH, or an older one that lacks `build-admit`, the wrapper prints one line and builds.
 
-A waiting build writes a marker under `<claims root>/.fno/claims/build-waiters/`, keyed by its checkout. The target stop hook reads that marker for its own cwd. While the waiter lives, `loop-check` allows the stop with the hold as its message and counts no fire. An agent that backgrounds a held build therefore idles instead of burning to `NoProgress`. The same early allow covers a fleet incident stop, because the stop hook's pause read folds in `fleet_incident` beside the manual sentinel.
+A waiting build writes a marker under `<claims root>/.fno/claims/build-waiters/`, keyed by its checkout. The stop hook reads that marker for its own cwd, for both drivers. While the waiter lives, `loop-check` allows the stop with the hold as its message and counts no fire. An agent that backgrounds a held build therefore idles instead of burning to `NoProgress`. The same early allow covers a fleet incident stop, because the stop hook's pause read folds in `fleet_incident` beside the manual sentinel.
 
 ## What this does not cover
 
