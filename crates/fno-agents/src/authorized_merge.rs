@@ -27,6 +27,9 @@ use crate::paths::canonical_repo_root;
 /// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick
 /// (600s) round up with margin to 60 minutes.
 const MERGE_SLOT_TTL_MS: i64 = 60 * 60 * 1000;
+/// The receipt text derives its minute count from here, so a retuned TTL
+/// never leaves the wording stale.
+const MERGE_SLOT_TTL_MINUTES: i64 = MERGE_SLOT_TTL_MS / 60_000;
 
 /// What the caller wants to happen once the decision clears.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -419,12 +422,13 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                             "{ci}merge_slot_held: PR {m} holds the merge slot; \
                                              PR {n} waits so PR {m}'s rebased CI stays current; \
                                              the slot frees when PR {m} merges, closes, goes red, \
-                                             or its 60m lease ends",
+                                             or its {ttl}m lease ends",
                                             ci = if stale.is_some() {
                                                 "ci_base_stale; "
                                             } else {
                                                 ""
-                                            }
+                                            },
+                                            ttl = MERGE_SLOT_TTL_MINUTES
                                         ),
                                     });
                                 }
@@ -448,9 +452,10 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
                                                 return Err(Outcome::Held {
                                                     reason: format!(
                                                         "{reason}; PR {n} now holds the merge \
-                                                         slot for 60m; remedy: fno do pr rebase \
-                                                         {n}, then fno do pr wait {n} --until \
-                                                         settled, then retry"
+                                                         slot for {ttl}m; remedy: fno do pr \
+                                                         rebase {n}, then fno do pr wait {n} \
+                                                         --until settled, then retry",
+                                                        ttl = MERGE_SLOT_TTL_MINUTES
                                                     ),
                                                 });
                                             }
@@ -534,7 +539,11 @@ pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
         Ok(authorized) => {
             let outcome = effect(probes, request, &authorized);
             // A PR that never held the slot releases nothing (holder-matched).
-            if matches!(outcome, Outcome::Merged { .. }) {
+            // A durable `Failed` (branch protection, a conflict) will not
+            // resolve itself the way a pending check would, so it frees the
+            // slot exactly like a landed merge rather than starving the
+            // queue for the rest of the 60m lease.
+            if matches!(outcome, Outcome::Merged { .. } | Outcome::Failed { .. }) {
                 probes.release_slot(
                     request.cwd.as_path(),
                     &authorized.facts.base_ref,
@@ -1671,6 +1680,31 @@ mod tests {
         assert!(outcome8.detail().contains("PR 8 now holds the merge slot"));
         assert_eq!(*fake.slot.borrow(), Some(8));
         assert_eq!(*fake.release_slot_calls.borrow(), vec![7]);
+    }
+
+    #[test]
+    fn a_holder_whose_merge_attempt_fails_releases_its_own_slot() {
+        // A durable Failed effect (not mergeable, required review pending)
+        // will not resolve itself the way a pending check would, so it must
+        // not starve the queue for the rest of the 60m lease.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            gh_ok: false,
+            gh_output: "not mergeable (conflicts or base changed)".to_string(),
+            ..clean()
+        };
+        let req = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Merge)
+        };
+        let outcome = run(&fake, &req);
+        assert_eq!(outcome.word(), "failed");
+        assert_eq!(
+            *fake.slot.borrow(),
+            None,
+            "a durable merge failure must free the slot rather than starve the queue"
+        );
     }
 
     #[test]
