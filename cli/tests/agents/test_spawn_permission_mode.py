@@ -506,18 +506,24 @@ import subprocess as _sp  # noqa: E402
 
 
 def _node_row(
-    node_id: str, difficulty: str | None = "low", verb: str | None = None
+    node_id: str,
+    difficulty: str | None = "low",
+    verb: str | None = None,
+    model: str | None = "glm-5.3-flash[1m]",
 ) -> dict:
     """The minimal node dict tests pass to the dispatcher.
 
     Key presence is what the projection check reads; difficulty low derives
     /target, matching what the builtin path asserted before the None branch
     was deleted. An out-of-family ``verb`` rides the row so the lifecycle
-    table abstains and the explicit verb wins, as the deleted None path did."""
+    table abstains and the explicit verb wins, as the deleted None path did.
+    The default model pin clears the seam gate (x-8fb2): CI runs with no
+    routing config, so the grid declines and an unpinned spawn would refuse."""
     return {
         "id": node_id,
         "dispatch_verb": verb or "",
         "difficulty": difficulty,
+        "model": model,
     }
 
 
