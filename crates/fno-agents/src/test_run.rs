@@ -29,6 +29,8 @@ const SUITE_CLAIM_KEY: &str = "test:suite";
 const BUILD_CLAIM_KEY: &str = "build:cargo";
 /// How often a held build repeats its holding line on stderr.
 const BUILD_HOLD_NOTICE: Duration = Duration::from_secs(30);
+/// How often a held build scans for a cargo nested under the holder.
+const NESTED_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 /// Grace window for a SIGTERM to land before escalating to SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(3);
 /// Poll interval while waiting on a held admission claim or the child.
@@ -303,6 +305,7 @@ fn run_build_admit(args: &[String]) -> i32 {
     });
     let started = Instant::now();
     let mut last_notice: Option<Instant> = None;
+    let mut last_nested_scan: Option<Instant> = None;
     let mut marked = false;
     let opts = || crate::claims::AcquireOpts {
         pid: Some(cargo_pid),
@@ -313,6 +316,18 @@ fn run_build_admit(args: &[String]) -> i32 {
     let result = acquire_claim_blocking(BUILD_CLAIM_KEY, &holder, opts, |h, pid, _host| {
         if pid.is_some_and(|p| p > 0 && is_self_or_ancestor(p as u32, cargo_pid)) {
             return OnHeld::Admit;
+        }
+        // Cargo takes its build-dir lock before it calls the wrapper. A cargo
+        // under the holder can wait on the lock this cargo holds, and then
+        // each waits on the other forever. The waiter yields instead, and the
+        // two builds overlap only while the holder runs its nested cargo.
+        if last_nested_scan.is_none_or(|t| t.elapsed() >= NESTED_SCAN_INTERVAL) {
+            last_nested_scan = Some(Instant::now());
+            if pid.is_some_and(|p| {
+                p > 0 && runs_nested_cargo(&crate::census::process_table().0, p as u32)
+            }) {
+                return OnHeld::Admit;
+            }
         }
         if let Some(sig) = received_signal() {
             return OnHeld::Stop(128 + sig);
@@ -390,8 +405,10 @@ fn write_waiter_marker(path: &Path, cargo_pid: u32, worktree: &Path, holder: &st
 }
 
 /// The stop hook's read: `Some` when a live `build-admit` is holding a cargo
-/// build for `cwd` or one of its ancestors. The marker is a courtesy signal,
-/// never a gate, so an unreadable one reads as no hold.
+/// build for the checkout that holds `cwd`. The walk stops at the first
+/// `.git`, so a worktree nested under another checkout never reads that
+/// checkout's hold. The marker is a courtesy signal, never a gate, so an
+/// unreadable one reads as no hold.
 pub fn build_hold_message(cwd: &Path) -> Option<String> {
     build_hold_message_in(&crate::claims::build_waiters_dir()?, cwd)
 }
@@ -399,34 +416,66 @@ pub fn build_hold_message(cwd: &Path) -> Option<String> {
 fn build_hold_message_in(dir: &Path, cwd: &Path) -> Option<String> {
     let start = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     for path in start.ancestors() {
-        let marker = dir.join(format!(
-            "{}.json",
-            crate::claims::encode_key(&path.to_string_lossy())
-        ));
-        let Ok(raw) = std::fs::read_to_string(&marker) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
-        };
-        let pid = value["pid"].as_u64().unwrap_or(0) as i32;
-        let since_ms = value["since_ms"].as_i64().unwrap_or(i64::MAX);
-        let alive = pid > 0
-            && match crate::claims::probe_pid(pid) {
-                crate::claims::PidProbe::Created(create_ms) => create_ms <= since_ms,
-                crate::claims::PidProbe::Refused => true,
-                crate::claims::PidProbe::Absent => false,
-            };
-        if !alive {
-            let _ = std::fs::remove_file(&marker);
-            continue;
+        if let Some(message) = live_waiter_hold(dir, path) {
+            return Some(message);
         }
-        let holder = value["holder"].as_str().unwrap_or("another cargo");
-        return Some(format!(
-            "held for cargo build admission: {holder} is building"
-        ));
+        if path.join(".git").exists() {
+            break;
+        }
     }
     None
+}
+
+fn live_waiter_hold(dir: &Path, checkout: &Path) -> Option<String> {
+    let marker = dir.join(format!(
+        "{}.json",
+        crate::claims::encode_key(&checkout.to_string_lossy())
+    ));
+    let raw = std::fs::read_to_string(&marker).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let pid = value["pid"].as_u64().unwrap_or(0) as i32;
+    let since_ms = value["since_ms"].as_i64().unwrap_or(i64::MAX);
+    let alive = pid > 0
+        && match crate::claims::probe_pid(pid) {
+            crate::claims::PidProbe::Created(create_ms) => create_ms <= since_ms,
+            crate::claims::PidProbe::Refused => true,
+            crate::claims::PidProbe::Absent => false,
+        };
+    if !alive {
+        let _ = std::fs::remove_file(&marker);
+        return None;
+    }
+    let holder = value["holder"].as_str().unwrap_or("another cargo");
+    Some(format!(
+        "held for cargo build admission: {holder} is building"
+    ))
+}
+
+/// True when a `cargo` process other than `holder_pid` runs under it.
+fn runs_nested_cargo(rows: &[crate::census::ProcRow], holder_pid: u32) -> bool {
+    let parent: std::collections::HashMap<u32, u32> =
+        rows.iter().map(|row| (row.pid, row.ppid)).collect();
+    rows.iter()
+        .filter(|row| row.pid != holder_pid)
+        .filter(|row| {
+            let argv0 = row.command.split_whitespace().next().unwrap_or("");
+            Path::new(argv0)
+                .file_name()
+                .is_some_and(|name| name == "cargo")
+        })
+        .any(|row| {
+            let mut current = row.ppid;
+            for _ in 0..64 {
+                if current == holder_pid {
+                    return true;
+                }
+                match parent.get(&current) {
+                    Some(&next) if current > 1 => current = next,
+                    _ => return false,
+                }
+            }
+            false
+        })
 }
 
 /// True when `holder_pid` is `pid` or one of its process ancestors: a cargo
@@ -855,6 +904,17 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_checkout_never_reads_its_parent_checkouts_hold() {
+        let td = tempfile::TempDir::new().unwrap();
+        let outer = std::fs::canonicalize(td.path()).unwrap();
+        let inner = outer.join(".claude/worktrees/x");
+        std::fs::create_dir_all(inner.join(".git")).unwrap();
+        let dir = outer.join("waiters");
+        marker_for(&dir, &outer, std::process::id());
+        assert_eq!(build_hold_message_in(&dir, &inner.join("crates")), None);
+    }
+
+    #[test]
     fn a_dead_waiter_marker_reads_no_hold_and_is_removed() {
         let td = tempfile::TempDir::new().unwrap();
         let worktree = std::fs::canonicalize(td.path()).unwrap();
@@ -874,6 +934,30 @@ mod tests {
         let parent = parent_pid(me).expect("this process has a parent");
         assert!(is_self_or_ancestor(parent, me));
         assert!(!is_self_or_ancestor(me, parent));
+    }
+
+    #[test]
+    fn a_cargo_under_the_holder_is_found_through_intermediate_processes() {
+        let row = |pid, ppid, command: &str| crate::census::ProcRow {
+            pid,
+            ppid,
+            state: 'S',
+            elapsed_s: 0,
+            cpu_pct: 0.0,
+            rss_kb: 0,
+            command: command.to_string(),
+        };
+        let mut rows = vec![
+            row(100, 1, "/Users/x/.cargo/bin/cargo test -p fno"),
+            row(200, 100, "/tmp/deps/cross_door_property-abc"),
+            row(300, 1, "cargo build"),
+        ];
+        assert!(
+            !runs_nested_cargo(&rows, 100),
+            "an unrelated cargo is not nested"
+        );
+        rows.push(row(400, 200, "cargo build --bin fno-agents"));
+        assert!(runs_nested_cargo(&rows, 100));
     }
 
     #[test]

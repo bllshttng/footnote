@@ -119,10 +119,26 @@ t04_admission_failure_builds_anyway() {
   rm -rf "$stub_dir"
 }
 
+t05_signalled_admission_compiles_nothing() {
+  local stub_dir out_file rc
+  stub_dir="$(mktemp -d -t cargo-wrapper-test-XXXXXX)"
+  printf '#!/usr/bin/env bash\nexit 130\n' > "$stub_dir/fno-agents"
+  chmod +x "$stub_dir/fno-agents"
+  out_file="$stub_dir/out.txt"
+
+  TMPDIR="$stub_dir" PATH="$stub_dir:/usr/bin:/bin" "$BASH_BIN" "$WRAPPER" /bin/echo compiling >"$out_file" 2>/dev/null
+  rc=$?
+  [[ "$rc" -eq 130 ]] || { fail "T05: expected rc=130, got $rc"; rm -rf "$stub_dir"; return; }
+  grep -q "compiling" "$out_file" && { fail "T05: a signalled wait still compiled"; rm -rf "$stub_dir"; return; }
+  pass "T05 a wait stopped by a signal exits with it and compiles nothing"
+  rm -rf "$stub_dir"
+}
+
 t01_sccache_present_announces_on_probe
 t02_sccache_absent_ordinary_compile_silent
 t03_compile_asks_admission_and_probe_does_not
 t04_admission_failure_builds_anyway
+t05_signalled_admission_compiles_nothing
 
 echo ""
 if [[ "$FAILURES" -eq 0 ]]; then
