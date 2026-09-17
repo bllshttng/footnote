@@ -281,47 +281,26 @@ def list_cmd(
         None, "--repo", help="GitHub owner/repo; defaults to origin"
     ),
 ) -> None:
-    from fno.pr import _rest
+    import subprocess
 
-    if state not in {"open", "closed", "all"}:
-        typer.echo(json.dumps({"error": "--state must be open, closed, or all"}))
-        raise typer.Exit(code=2)
-    slug, slug_reason = _rest._slug_or_reason(os.getcwd(), repo=repo)
-    if not slug:
-        typer.echo(json.dumps({"error": slug_reason}, separators=(",", ":")))
-        raise typer.Exit(code=4)
-    rows, reason = _rest.list_prs_rest(slug, state=state, cwd=os.getcwd(), details=True)
-    if rows is None:
-        typer.echo(json.dumps({"error": reason}, separators=(",", ":")))
-        raise typer.Exit(code=4)
-    open_rows = [row for row in rows if row.get("state") == "OPEN"]
-    if open_rows:
-        from fno.graph._reconcile import classify_open_pr_bindings
-        from fno.graph.store import read_graph_strict
-        from fno.paths import graph_json
+    from fno._subprocess_util import propagate_returncode
+    from fno.rust_binary import resolve_binary
 
-        try:
-            bindings = classify_open_pr_bindings(open_rows, read_graph_strict(graph_json()))
-        except Exception as exc:  # noqa: BLE001 - report the unreadable binding source
-            for row in open_rows:
-                row["node_binding_error"] = f"graph binding read failed: {exc}"
-        else:
-            by_pr = {binding.pr_number: binding for binding in bindings}
-            for row in rows:
-                number = row.get("number")
-                if not isinstance(number, int):
-                    continue
-                binding = by_pr.get(number)
-                if binding is None:
-                    continue
-                row["node_id"] = binding.node_id
-                row["node_binding"] = binding.verdict
-                if binding.detail:
-                    row["node_binding_detail"] = binding.detail
-    for row in rows:
-        # Internal to the binding reader; the listing keeps its current width.
-        row.pop("body", None)
-    typer.echo(json.dumps(rows, separators=(",", ":")))
+    binary = resolve_binary()
+    if binary is None:
+        typer.echo(
+            "fno do pr list: the fno-agents binary was not found. It ships in "
+            "the `pip install fno` wheel and with the plugin; reinstall fno or "
+            "run `fno doctor update --rust`, or set FNO_AGENTS_BIN to its path.",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+
+    argv = [str(binary), "pr-list", "--state", state]
+    if repo:
+        argv += ["--repo", repo]
+    result = subprocess.run(argv, check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
 
 
 @pr_app.command(

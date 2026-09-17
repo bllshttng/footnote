@@ -694,7 +694,6 @@ def list_prs_rest(
     per_page: int = 100,
     max_pages: int = 20,
     timeout: Optional[float] = 30.0,
-    details: bool = False,
 ) -> "tuple[Optional[list[dict]], str]":
     """List a repo's PRs on REST: `(rows, reason)`.
 
@@ -728,24 +727,7 @@ def list_prs_rest(
             number = row.get("number")
             if not isinstance(number, int):
                 continue
-            summary: dict[str, Any] = {"number": number, "state": _map_pr_state(row)}
-            if details:
-                head = row.get("head")
-                if not isinstance(head, dict) or not isinstance(head.get("ref"), str):
-                    return None, f"gh api pulls list page {page} carried malformed head ref"
-                if not isinstance(row.get("title"), str) or not isinstance(
-                    row.get("html_url"), str
-                ):
-                    return None, f"gh api pulls list page {page} carried malformed title/url"
-                summary.update(
-                    {
-                        "title": row["title"],
-                        "headRefName": head["ref"],
-                        "url": row["html_url"],
-                        "body": row.get("body") or "",
-                    }
-                )
-            rows.append(summary)
+            rows.append({"number": number, "state": _map_pr_state(row)})
         if len(payload) < per_page:
             break
     else:

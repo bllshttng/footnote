@@ -191,6 +191,7 @@ pub mod pane_stop;
 pub mod paths;
 pub mod pi;
 pub mod plugin_install;
+pub mod pr_list;
 pub mod pr_nudge;
 pub mod protocol;
 pub mod prove_it_verdicts;

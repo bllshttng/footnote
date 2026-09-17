@@ -171,108 +171,32 @@ def test_pr_info_prints_rest_metadata(monkeypatch):
     }
 
 
-def test_pr_list_prints_rest_summaries(monkeypatch):
-    from fno.pr import _rest
+def test_pr_list_forwards_to_the_rust_verb(monkeypatch):
+    import subprocess
 
-    monkeypatch.setattr(
-        _rest,
-        "list_prs_rest",
-        lambda slug, **kwargs: (
-            [
-                {
-                    "number": 930,
-                    "state": "OPEN",
-                    "title": "Quota reserve",
-                    "headRefName": "feature/x",
-                    "url": "https://github.com/o/r/pull/930",
-                }
-            ],
-            "",
-        ),
-    )
-    result = runner.invoke(app, ["do", "pr", "list", "--repo", "o/r"])
-    assert result.exit_code == 0
-    assert json.loads(result.stdout)[0]["headRefName"] == "feature/x"
+    import fno.rust_binary
+
+    seen = {}
+    monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: Path("/fake/fno-agents"))
+
+    def fake_run(argv, check):
+        seen["argv"] = argv
+        return SimpleNamespace(returncode=4)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = runner.invoke(app, ["do", "pr", "list", "--state", "closed", "--repo", "o/r"])
+    assert seen["argv"] == ["/fake/fno-agents", "pr-list", "--state", "closed", "--repo", "o/r"]
+    assert result.exit_code == 4
 
 
-def test_pr_list_exposes_open_node_binding_verdicts(monkeypatch, tmp_path):
-    from fno import paths
+def test_pr_list_names_the_missing_binary(monkeypatch):
+    import fno.rust_binary
 
-    graph_path = tmp_path / "graph.json"
-    graph_path.write_text(
-        json.dumps(
-            {
-                "entries": [
-                    {"id": "x-1111", "status": "ready"},
-                    {"id": "x-2222", "status": "ready", "pr_number": 931},
-                ]
-            }
-        )
-    )
-    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
-
-    from fno.pr import _rest
-
-    monkeypatch.setattr(
-        _rest,
-        "list_prs_rest",
-        lambda slug, **kwargs: (
-            [
-                {"number": 930, "state": "OPEN", "title": "missing", "headRefName": "feature/x-1111", "url": "https://github.com/o/r/pull/930"},
-                {"number": 931, "state": "OPEN", "title": "bound", "headRefName": "feature/x-2222", "url": "https://github.com/o/r/pull/931"},
-                {"number": 932, "state": "OPEN", "title": "untracked", "headRefName": "feature/no-node", "url": "https://github.com/o/r/pull/932"},
-                {"number": 933, "state": "OPEN", "title": "ambiguous", "headRefName": "feature/x-1111-x-2222", "url": "https://github.com/o/r/pull/933"},
-            ],
-            "",
-        ),
-    )
-
-    result = runner.invoke(app, ["do", "pr", "list", "--repo", "o/r"])
-
-    assert result.exit_code == 0
-    rows = {row["number"]: row for row in json.loads(result.stdout)}
-    assert rows[930]["node_id"] == "x-1111"
-    assert rows[930]["node_binding"] == "missing"
-    assert rows[931]["node_id"] == "x-2222"
-    assert rows[931]["node_binding"] == "bound"
-    assert rows[932]["node_id"] is None
-    assert rows[932]["node_binding"] == "untracked"
-    assert rows[933]["node_id"] is None
-    assert rows[933]["node_binding"] == "ambiguous"
-
-
-def test_pr_list_preserves_rows_when_binding_graph_is_unreadable(monkeypatch, tmp_path):
-    from fno import paths
-
-    graph_path = tmp_path / "graph.json"
-    graph_path.write_text("not-json")
-    monkeypatch.setattr(paths, "graph_json", lambda: graph_path)
-
-    from fno.pr import _rest
-
-    monkeypatch.setattr(
-        _rest,
-        "list_prs_rest",
-        lambda slug, **kwargs: (
-            [
-                {
-                    "number": 930,
-                    "state": "OPEN",
-                    "title": "still visible",
-                    "headRefName": "feature/x-1111",
-                    "url": "https://github.com/o/r/pull/930",
-                }
-            ],
-            "",
-        ),
-    )
-
-    result = runner.invoke(app, ["do", "pr", "list", "--repo", "o/r"])
-
-    assert result.exit_code == 0
-    row = json.loads(result.stdout)[0]
-    assert row["title"] == "still visible"
-    assert "graph binding read failed" in row["node_binding_error"]
+    monkeypatch.setattr(fno.rust_binary, "resolve_binary", lambda: None)
+    result = runner.invoke(app, ["do", "pr", "list"])
+    assert result.exit_code == 127
+    assert "fno do pr list" in result.stderr
+    assert "FNO_AGENTS_BIN" in result.stderr
 
 
 def test_graphql_exec_rejects_public_coverage_purpose():

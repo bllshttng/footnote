@@ -435,20 +435,35 @@ pub(crate) fn pr_binding_keys(
     }
 }
 
-/// Binding classification over already-fetched open-PR rows and graph
-/// entries: the pure half of `read_prs`, returns (bound node rows, warnings).
-/// Three keys, in order: delimiter-bounded branch matching; then - only when
-/// the branch names nothing - the graph's own `(pr_number, pr_url)`
+/// One open PR's binding verdict: `bound` (the node points back at this PR),
+/// `missing` (a unique node resolves but does not point back), `untracked`
+/// (no key names a real node), or `ambiguous` (several nodes, or one node
+/// named by several open PRs). Mirrors _reconcile.classify_open_pr_bindings.
+pub(crate) struct PrVerdict {
+    pub number: i64,
+    pub verdict: &'static str,
+    pub node_id: Option<String>,
+    pub detail: Option<String>,
+    url: Option<String>,
+    head: String,
+    /// The key that decided an `ambiguous` verdict: `branch`, `backref`,
+    /// `trailer`, or `sibling`. The board warns only on backref and trailer.
+    via: &'static str,
+    candidates: Vec<String>,
+}
+
+/// Per-row binding verdicts over already-fetched open-PR rows and graph
+/// entries. Three keys, in order: delimiter-bounded branch matching; then -
+/// only when the branch names nothing - the graph's own `(pr_number, pr_url)`
 /// back-pointer, scoped by normalized URL because a pr_number is only unique
-/// within one repository; then the body's exact `Backlog-Closure:` trailer
-/// (mirrors _reconcile.classify_open_pr_bindings). The keys come from
-/// [`pr_binding_keys`], the same predicate the merge owner reads.
-fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<String>) {
+/// within one repository; then the body's exact `Backlog-Closure:` trailer.
+/// The keys come from [`pr_binding_keys`], the same predicate the merge owner
+/// reads.
+pub(crate) fn pr_binding_verdicts(rows: &[Value], entries: &[Value]) -> Vec<PrVerdict> {
     let node_by_id: HashMap<&str, &Value> = entries
         .iter()
         .filter_map(|e| s_str(e, "id").map(|i| (i, e)))
         .collect();
-    let mut warnings: Vec<String> = Vec::new();
     // First pass: which nodes have exactly one open PR. A trailer-resolved
     // row competes for its node like a branch-resolved one, so one node named
     // by a branch PR and a trailer PR reads ambiguous on both.
@@ -490,65 +505,146 @@ fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<S
             keys,
         ));
     }
-    let mut bound: Vec<Value> = Vec::new();
+    let mut out: Vec<PrVerdict> = Vec::new();
     for (number, url, head, keys) in parsed {
+        let verdict = |verdict, node_id, detail, via, candidates| PrVerdict {
+            number,
+            verdict,
+            node_id,
+            detail,
+            url: url.clone(),
+            head: head.clone(),
+            via,
+            candidates,
+        };
         let unbound = keys.unbound_detail();
         let mut matched = keys.branch;
+        let mut via = "branch";
         if matched.is_empty() {
             match keys.backrefs.as_slice() {
                 [] => {
                     if keys.trailer.is_empty() {
-                        warnings.push(format!(
-                            "pr_node_binding_untracked: #{number} {head} ({})",
-                            unbound.unwrap_or_default()
-                        ));
+                        out.push(verdict("untracked", None, unbound, "", Vec::new()));
                         continue;
                     }
                     if keys.trailer.len() > 1 {
-                        warnings.push(format!(
-                            "pr_node_binding_ambiguous: #{number} -> {}",
+                        let detail = format!(
+                            "trailer names {} real nodes: {}",
+                            keys.trailer.len(),
                             keys.trailer.join(" ")
+                        );
+                        out.push(verdict(
+                            "ambiguous",
+                            None,
+                            Some(detail),
+                            "trailer",
+                            keys.trailer,
                         ));
                         continue;
                     }
                     matched = keys.trailer;
+                    via = "trailer";
                 }
-                [only] => matched = vec![(*only).to_string()],
+                [only] => {
+                    matched = vec![(*only).to_string()];
+                    via = "backref";
+                }
                 many => {
-                    warnings.push(format!(
-                        "pr_node_binding_ambiguous: #{number} -> {}",
-                        many.join(" ")
+                    let detail = format!("{} nodes carry this PR: {}", many.len(), many.join(" "));
+                    out.push(verdict(
+                        "ambiguous",
+                        None,
+                        Some(detail),
+                        "backref",
+                        many.to_vec(),
                     ));
-                    continue; // ambiguous: a list-order guess is the wrong-node bind
+                    continue;
                 }
             }
         }
         if matched.len() > 1 {
-            continue; // ambiguous: a list-order guess is the wrong-node bind
+            let detail = format!(
+                "branch names {} real nodes: {}",
+                matched.len(),
+                matched.join(" ")
+            );
+            out.push(verdict("ambiguous", None, Some(detail), "branch", matched));
+            continue;
         }
-        let nid = &matched[0];
+        let nid = matched[0].clone();
         let mut siblings = open_prs_by_node
             .get(nid.as_str())
             .cloned()
             .unwrap_or_default();
         siblings.sort();
         if siblings.len() > 1 {
-            continue; // ambiguous
+            let shown: Vec<String> = siblings.iter().map(|n| format!("#{n}")).collect();
+            let detail = format!(
+                "{nid} has {} open PRs: {}",
+                siblings.len(),
+                shown.join(", ")
+            );
+            out.push(verdict(
+                "ambiguous",
+                Some(nid),
+                Some(detail),
+                "sibling",
+                Vec::new(),
+            ));
+            continue;
         }
         let Some(node) = node_by_id.get(nid.as_str()) else {
             continue;
         };
-        let refs_this_pr = node_pr_refs(node).iter().any(|(n, _)| *n == number);
-        if !refs_this_pr {
-            warnings.push(format!("pr_node_binding_missing: #{number} -> {nid}"));
-            continue;
+        if node_pr_refs(node).iter().any(|(n, _)| *n == number) {
+            out.push(verdict("bound", Some(nid), None, via, Vec::new()));
+        } else {
+            let detail = format!("{nid} resolved via {via} but does not point back at #{number}");
+            out.push(verdict("missing", Some(nid), Some(detail), via, Vec::new()));
         }
-        let mut row = (*node).clone();
-        if let Some(obj) = row.as_object_mut() {
-            obj.insert("pr_number".to_string(), json!(number));
-            obj.insert("pr_url".to_string(), json!(url));
+    }
+    out
+}
+
+/// The board's reading of [`pr_binding_verdicts`]: (bound node rows,
+/// warnings). A branch or sibling ambiguity stays silent here; a list-order
+/// guess is the wrong-node bind, and the board has always skipped them.
+fn classify_pr_bindings(rows: &[Value], entries: &[Value]) -> (Vec<Value>, Vec<String>) {
+    let node_by_id: HashMap<&str, &Value> = entries
+        .iter()
+        .filter_map(|e| s_str(e, "id").map(|i| (i, e)))
+        .collect();
+    let mut bound: Vec<Value> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    for v in pr_binding_verdicts(rows, entries) {
+        let number = v.number;
+        match v.verdict {
+            "untracked" => warnings.push(format!(
+                "pr_node_binding_untracked: #{number} {} ({})",
+                v.head,
+                v.detail.unwrap_or_default()
+            )),
+            "ambiguous" if matches!(v.via, "backref" | "trailer") => warnings.push(format!(
+                "pr_node_binding_ambiguous: #{number} -> {}",
+                v.candidates.join(" ")
+            )),
+            "missing" => warnings.push(format!(
+                "pr_node_binding_missing: #{number} -> {}",
+                v.node_id.unwrap_or_default()
+            )),
+            "bound" => {
+                let Some(node) = v.node_id.as_deref().and_then(|n| node_by_id.get(n)) else {
+                    continue;
+                };
+                let mut row = (*node).clone();
+                if let Some(obj) = row.as_object_mut() {
+                    obj.insert("pr_number".to_string(), json!(number));
+                    obj.insert("pr_url".to_string(), json!(v.url));
+                }
+                bound.push(row);
+            }
+            _ => {}
         }
-        bound.push(row);
     }
     (bound, warnings)
 }
@@ -944,5 +1040,39 @@ mod tests {
                 "body {body:?}"
             );
         }
+    }
+
+    #[test]
+    fn per_row_verdicts_name_untracked_and_the_ambiguity_the_board_keeps_silent() {
+        let entries = vec![
+            json!({"id": "x-aaaa", "pr_number": 1, "pr_url": "https://github.com/o/r/pull/1"}),
+            json!({"id": "x-bbbb"}),
+        ];
+        let rows = vec![
+            json!({"number": 1, "headRefName": "feature/x-aaaa", "url": "https://github.com/o/r/pull/1"}),
+            json!({"number": 2, "headRefName": "docs/faq", "url": "https://github.com/o/r/pull/2", "body": ""}),
+            json!({"number": 3, "headRefName": "x-aaaa-and-x-bbbb", "url": "https://github.com/o/r/pull/3"}),
+        ];
+        let verdicts = pr_binding_verdicts(&rows, &entries);
+        let got: Vec<(i64, &str, Option<&str>)> = verdicts
+            .iter()
+            .map(|v| (v.number, v.verdict, v.node_id.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, "bound", Some("x-aaaa")),
+                (2, "untracked", None),
+                (3, "ambiguous", None),
+            ]
+        );
+        assert!(verdicts[1]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("branch names no node"));
+        let (_, warnings) = classify_pr_bindings(&rows, &entries);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].starts_with("pr_node_binding_untracked: #2 docs/faq"));
     }
 }

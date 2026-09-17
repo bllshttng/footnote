@@ -84,6 +84,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "feed",
     "ping",
     "pr-heal",
+    "pr-list",
     "probe-run",
     "honesty-sweep",
     "prove-it-verdicts",
@@ -880,6 +881,11 @@ async fn run(args: Vec<String>) -> i32 {
     // dispatches here before build_request.
     if matches!(verb, "pr-heal") {
         return fno_agents::heal::run_heal(&args[1..]);
+    }
+    // `pr-list` lists one repo's PRs with their node bindings, behind
+    // `fno do pr list`. Binary-direct for the same reasons as `pr-heal`.
+    if matches!(verb, "pr-list") {
+        return fno_agents::pr_list::run_pr_list(&args[1..]);
     }
     // `subscribe`: follow the daemon's own `events.jsonl` and stream registry
     // state transitions + pane exits as NDJSON. File-follow, no daemon RPC, so it
