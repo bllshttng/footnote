@@ -76,7 +76,12 @@ pub(crate) struct Ctx {
 
 impl Ctx {
     pub fn live(cwd: &Path, paths: Paths) -> Ctx {
-        let slug = crate::finalize::slug_from_git_remote(cwd).unwrap_or_default();
+        // The store key is `owner/repo#N`, so the cwd side resolves the full
+        // identity and drops the host segment; slug_from_git_remote alone
+        // would read "footnote" and make every row read foreign.
+        let slug = crate::finalize::repo_identity_from_git_remote(cwd)
+            .and_then(|id| id.split_once('/').map(|(_, rest)| rest.to_string()))
+            .unwrap_or_default();
         let entries = graph_rows(cwd);
         let probe_cwd = cwd.to_path_buf();
         Ctx {
