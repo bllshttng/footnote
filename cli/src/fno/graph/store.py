@@ -820,8 +820,18 @@ def set_related(entries: list[dict], node_id: str, desired: list[str]) -> None:
     Symmetry is stored on both endpoints, not derived. Mutates ``entries``
     in place (both halves land in the caller's ``locked_mutate_graph`` call,
     so a half-written edge aborts the mutation before anything persists).
+
+    The keeper returns fresh dicts. Copy them into the existing ones, so a
+    caller that holds a row keeps writing to the row that persists.
     """
     out = _pure(entries, "set_related", {"node_id": node_id, "desired": desired})
+    held = {e.get("id"): e for e in entries}
+    for i, row in enumerate(out):
+        old = held.get(row.get("id"))
+        if old is not None:
+            old.clear()
+            old.update(row)
+            out[i] = old
     entries[:] = out
 
 
