@@ -4886,7 +4886,7 @@ event_types:
 
   - name: pr_watch_unparked
     description: "A parked PR resumes polling: retries reset to 0, either by hand (fno-agents pr-park unpark, the king row's verb) or by the sweep (head moved or 24h old)."
-    sources: [pr-park]
+    sources: [pr-park, daemon]
     data:
       required: [pr, by]
       properties:
