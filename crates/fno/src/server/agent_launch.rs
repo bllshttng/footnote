@@ -91,12 +91,14 @@ pub(crate) async fn run_dispatch_one(
 /// kept, oldest evicted.
 #[derive(Default)]
 pub(crate) struct LaunchDesk {
-    /// Request ids currently running off-loop. A duplicate id here replays
-    /// `Starting` and starts nothing.
-    pending: HashSet<u64>,
+    /// Attempts currently running off-loop. A duplicate key here replays
+    /// `Starting` and starts nothing. Keyed by (client id, request id):
+    /// request ids are client-minted and per-client, so the client id is
+    /// what makes one attempt's key distinct from another client's.
+    pending: HashSet<(u64, u64)>,
     /// Terminal updates, insertion-ordered for eviction.
-    finished: HashMap<u64, AgentLaunchUpdate>,
-    order: VecDeque<u64>,
+    finished: HashMap<(u64, u64), AgentLaunchUpdate>,
+    order: VecDeque<(u64, u64)>,
 }
 
 /// Finished attempts remembered for replay. Small: a popup session rarely
@@ -104,38 +106,40 @@ pub(crate) struct LaunchDesk {
 const DESK_RETENTION: usize = 64;
 
 impl LaunchDesk {
-    fn in_flight_or_done(&self, request_id: u64) -> Option<AgentLaunchUpdate> {
-        if let Some(update) = self.finished.get(&request_id) {
+    fn in_flight_or_done(&self, client: u64, request_id: u64) -> Option<AgentLaunchUpdate> {
+        let key = (client, request_id);
+        if let Some(update) = self.finished.get(&key) {
             return Some(update.clone());
         }
-        self.pending
-            .contains(&request_id)
-            .then(|| AgentLaunchUpdate {
-                request_id,
-                state: LaunchState::Starting,
-            })
+        self.pending.contains(&key).then(|| AgentLaunchUpdate {
+            request_id,
+            state: LaunchState::Starting,
+        })
     }
 
-    fn mark_started(&mut self, request_id: u64) {
-        self.pending.insert(request_id);
+    fn mark_started(&mut self, client: u64, request_id: u64) {
+        self.pending.insert((client, request_id));
     }
 
     /// Read-only replay of an attempt's terminal state (test reader).
     #[cfg(test)]
-    pub(super) fn settled_state(&self, request_id: u64) -> Option<LaunchState> {
-        self.finished.get(&request_id).map(|u| u.state.clone())
+    pub(super) fn settled_state(&self, client: u64, request_id: u64) -> Option<LaunchState> {
+        self.finished
+            .get(&(client, request_id))
+            .map(|u| u.state.clone())
     }
 
-    fn settle(&mut self, update: AgentLaunchUpdate) {
-        self.pending.remove(&update.request_id);
-        if !self.finished.contains_key(&update.request_id) {
-            self.order.push_back(update.request_id);
+    fn settle(&mut self, client: u64, update: AgentLaunchUpdate) {
+        let key = (client, update.request_id);
+        self.pending.remove(&key);
+        if !self.finished.contains_key(&key) {
+            self.order.push_back(key);
         }
         while self.order.len() > DESK_RETENTION {
             let evict = self.order.pop_front().expect("order nonempty");
             self.finished.remove(&evict);
         }
-        self.finished.insert(update.request_id, update);
+        self.finished.insert(key, update);
     }
 }
 
@@ -197,7 +201,7 @@ impl super::Core {
     /// a lost reply reads `Unknown` client-side instead of becoming a
     /// second process.
     pub(super) fn agent_launch(&mut self, id: u64, req: AgentLaunchRequest) {
-        if let Some(update) = self.launch_desk.in_flight_or_done(req.request_id) {
+        if let Some(update) = self.launch_desk.in_flight_or_done(id, req.request_id) {
             self.send_launch_update(id, update);
             return;
         }
@@ -206,11 +210,11 @@ impl super::Core {
                 request_id: req.request_id,
                 state: LaunchState::Refused { reason },
             };
-            self.launch_desk.settle(update.clone());
+            self.launch_desk.settle(id, update.clone());
             self.send_launch_update(id, update);
             return;
         }
-        self.launch_desk.mark_started(req.request_id);
+        self.launch_desk.mark_started(id, req.request_id);
         self.send_launch_update(
             id,
             AgentLaunchUpdate {
@@ -266,7 +270,7 @@ impl super::Core {
     /// The off-loop attempt's terminal update landed: settle the desk and
     /// answer the requesting client.
     pub(super) fn agent_launch_update(&mut self, id: u64, update: AgentLaunchUpdate) {
-        self.launch_desk.settle(update.clone());
+        self.launch_desk.settle(id, update.clone());
         self.send_launch_update(id, update);
     }
 
@@ -320,12 +324,12 @@ mod tests {
     #[test]
     fn launch_desk_replays_one_attempt_per_request_id() {
         let mut desk = LaunchDesk::default();
-        // Unknown id: nothing replayed.
-        assert!(desk.in_flight_or_done(7).is_none());
-        // Started: a duplicate id reads Starting and must not re-spawn.
-        desk.mark_started(7);
+        // Unknown key: nothing replayed.
+        assert!(desk.in_flight_or_done(1, 7).is_none());
+        // Started: a duplicate key reads Starting and must not re-spawn.
+        desk.mark_started(1, 7);
         assert_eq!(
-            desk.in_flight_or_done(7),
+            desk.in_flight_or_done(1, 7),
             Some(AgentLaunchUpdate {
                 request_id: 7,
                 state: LaunchState::Starting
@@ -338,29 +342,64 @@ mod tests {
                 reason: "no capacity".into(),
             },
         };
-        desk.settle(terminal.clone());
-        assert_eq!(desk.in_flight_or_done(7), Some(terminal));
-        // A second settle for the same id never resurrects an evicted order
+        desk.settle(1, terminal.clone());
+        assert_eq!(desk.in_flight_or_done(1, 7), Some(terminal));
+        // A second settle for the same key never resurrects an evicted order
         // slot twice.
-        desk.settle(AgentLaunchUpdate {
-            request_id: 7,
-            state: LaunchState::Unknown { reason: "x".into() },
-        });
+        desk.settle(
+            1,
+            AgentLaunchUpdate {
+                request_id: 7,
+                state: LaunchState::Unknown { reason: "x".into() },
+            },
+        );
         assert_eq!(desk.order.len(), 1);
+    }
+
+    #[test]
+    fn launch_desk_keys_attempts_by_client_not_request_id_alone() {
+        // Two clients minting the same client-local request id are DISTINCT
+        // attempts: one's terminal state must never replay to the other.
+        let mut desk = LaunchDesk::default();
+        desk.mark_started(1, 1);
+        assert!(
+            desk.in_flight_or_done(2, 1).is_none(),
+            "client 2's id 1 is a fresh attempt"
+        );
+        desk.settle(
+            1,
+            AgentLaunchUpdate {
+                request_id: 1,
+                state: LaunchState::Launched {
+                    name: "a".into(),
+                    pane: Some(9),
+                    seed_delivered: Some(true),
+                },
+            },
+        );
+        assert!(
+            desk.in_flight_or_done(2, 1).is_none(),
+            "A's birth never replays to B"
+        );
     }
 
     #[test]
     fn launch_desk_eviction_stays_bounded() {
         let mut desk = LaunchDesk::default();
         for i in 0..(DESK_RETENTION as u64 + 10) {
-            desk.settle(AgentLaunchUpdate {
-                request_id: i,
-                state: LaunchState::Refused { reason: "r".into() },
-            });
+            desk.settle(
+                1,
+                AgentLaunchUpdate {
+                    request_id: i,
+                    state: LaunchState::Refused { reason: "r".into() },
+                },
+            );
         }
         assert!(desk.finished.len() <= DESK_RETENTION);
         // The newest survives; the oldest was evicted.
-        assert!(desk.in_flight_or_done(DESK_RETENTION as u64 + 9).is_some());
-        assert!(desk.in_flight_or_done(0).is_none());
+        assert!(desk
+            .in_flight_or_done(1, DESK_RETENTION as u64 + 9)
+            .is_some());
+        assert!(desk.in_flight_or_done(1, 0).is_none());
     }
 }

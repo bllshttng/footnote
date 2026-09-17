@@ -338,7 +338,9 @@ pub(crate) fn dispatch_notice(
         // pane-send spawn where nothing was ever typed - and then tells them
         // not to re-seed the one pane that needs it. `submitted` is what makes
         // "delivered" true.
-        let receipt = spawn_receipt(stdout);
+        // The dispatch path is pane-substrate: its success decode stays
+        // pane-receipt-only, exactly as before the shared helper existed.
+        let receipt = spawn_receipt(stdout).filter(|v| v.get("pane_id").is_some());
         return match receipt {
             Some(v) => {
                 let seed = v.get("seed").and_then(|s| s.as_str());

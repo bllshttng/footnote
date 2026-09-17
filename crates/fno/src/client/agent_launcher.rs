@@ -247,7 +247,6 @@ fn non_empty(s: &str) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentAttempt {
     pub request_id: u64,
-    pub revision: u64,
     pub state: AttemptState,
 }
 
@@ -291,7 +290,9 @@ pub(crate) fn open(view: &mut View) {
     if let Some(l) = view.launcher.as_mut() {
         sync_harness_names(l, &view.launcher_catalog);
     }
-    if view.launcher_catalog.is_none() {
+    // A missing OR degraded catalog re-probes: one transient failure must
+    // not stick for the session while a healthy one stays last-outcome-wins.
+    if !matches!(view.launcher_catalog, Some(CatalogOutcome::Ok(_))) {
         view.catalog_want = true;
     }
 }
@@ -414,7 +415,6 @@ pub(crate) fn apply_launch_update(view: &mut View, update: AgentLaunchUpdate) ->
     };
     view.launch_attempt = Some(AgentAttempt {
         request_id,
-        revision: 0,
         state: attempt_state,
     });
     focus_pane
@@ -429,8 +429,9 @@ async fn submit(
     let Some(l) = view.launcher.as_mut() else {
         return Ok(());
     };
-    // Duplicate submissions are suppressed at the source (AC2-HP).
-    if matches!(l.phase, Phase::Submitting { .. }) || l.armed.is_some() {
+    // Duplicate submissions are suppressed at the source (AC2-HP), and an
+    // unresolved attempt blocks retry until the operator dismisses it.
+    if matches!(l.phase, Phase::Submitting { .. } | Phase::Unknown { .. }) || l.armed.is_some() {
         return Ok(());
     }
     let request_id = l.next_request_id;
@@ -814,10 +815,13 @@ pub(crate) async fn launcher_keys(
                         }
                     }
                     Focus::Dismiss => {
-                        // The explicit action that resolves an Unknown
-                        // outcome; the draft is untouched.
+                        // The explicit action that resolves an outcome the
+                        // operator chooses not to wait on: an Unknown, or a
+                        // Starting attempt whose update may never arrive.
+                        // The draft is untouched; retry arms a fresh id (a
+                        // new request, one attempt each).
                         if let Some(l) = view.launcher.as_mut() {
-                            if matches!(l.phase, Phase::Unknown { .. }) {
+                            if matches!(l.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
                                 l.phase = Phase::Editing;
                                 l.armed = None;
                             }
@@ -1057,10 +1061,18 @@ impl Launcher {
                 }
             ),
         ));
-        if matches!(self.phase, Phase::Unknown { .. }) {
+        if matches!(self.phase, Phase::Unknown { .. } | Phase::Submitting { .. }) {
             rows.push((
                 Focus::Dismiss,
-                format!("{}[ dismiss ]", mark(Focus::Dismiss, self.focus)),
+                format!(
+                    "{}[ dismiss{} ]",
+                    mark(Focus::Dismiss, self.focus),
+                    if matches!(self.phase, Phase::Submitting { .. }) {
+                        " still starting"
+                    } else {
+                        ""
+                    }
+                ),
             ));
         }
         rows
@@ -1085,10 +1097,13 @@ impl Launcher {
 
     /// Dock rows that never shrink: harness, project, the advanced toggle,
     /// launch, plus the four pins when expanded and the dismiss row while an
-    /// unknown outcome blocks retry.
+    /// attempt is in flight or unresolved.
     fn dock_fixed_rows(&self) -> usize {
         4 + if self.draft.expanded { 4 } else { 0 }
-            + usize::from(matches!(self.phase, Phase::Unknown { .. }))
+            + usize::from(matches!(
+                self.phase,
+                Phase::Unknown { .. } | Phase::Submitting { .. }
+            ))
     }
 
     /// The dock's geometry in a `panel_rows`-tall sideline: (total rows, the
@@ -1191,13 +1206,15 @@ pub(crate) async fn launcher_mouse(
     if (rep.col as usize) + 1 >= panel_w {
         return Ok(false);
     }
+    // The SAME usable height the painter computes with (chrome row
+    // subtracted), so a click maps onto the row that was drawn.
+    let chrome = view.bottom_row_is_chrome() as usize;
     let (rows, _footer) = match view.launcher.as_ref() {
-        Some(l) => l.dock_lines(view, panel_rows),
+        Some(l) => l.dock_lines(view, panel_rows - chrome),
         None => return Ok(false),
     };
     let dock_len = rows.len() + 1;
-    let chrome = view.bottom_row_is_chrome() as usize;
-    let top = panel_rows.saturating_sub(chrome + dock_len);
+    let top = (panel_rows - chrome).saturating_sub(dock_len);
     let row = rep.row as usize;
     // On the footer, above the dock, or clipped off by a too-short panel.
     if row < top || row >= top + rows.len() {
