@@ -390,8 +390,8 @@ def format_violations(violations: list[Violation], surface: str | None = None) -
         # A --diff-base run reads added lines past any marker, so the escape
         # advice would send the author to a fix that changes nothing.
         lines.append(
-            'run "fno doctor lint style --surface markdown --files <path>" '
-            "to check a rewrite first."
+            "commit the rewrite, then run "
+            '"fno doctor lint style --surface markdown --diff-base <base>" to check it.'
         )
         return "\n\n".join(lines)
     lines.append("add a style-exception line with a reason, or pass --style-exception.")

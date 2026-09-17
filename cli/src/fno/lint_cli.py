@@ -1140,8 +1140,8 @@ def style(
 
     Exit 0 clean, 1 with violations, 2 on bad usage, on a --files or --stdin
     run that read zero lines because every input carried a style-exception,
-    OR on a parser failure in this gate. That second 2 fires when git and this verb disagree about how
-    many lines a file added, in either direction, which is never something to
+    OR on a parser failure in this gate. The parser failure fires when git and
+    this verb disagree about how many lines a file added, in either direction, which is never something to
     annotate in the file. Reading FEWER than git counted is the case that
     matters and the case the first version of this guard missed.
     """

@@ -861,6 +861,7 @@ def test_markdown_refusal_offers_no_marker_escape():
     violations = style.check("One line; two clauses.", surface="markdown")
     markdown = style.format_violations(violations, surface="markdown")
     assert "style-exception" not in markdown
-    assert "--surface markdown --files" in markdown
+    # --files skips a marked file, so the recheck must name --diff-base.
+    assert "--surface markdown --diff-base" in markdown
     # Positive control: the other surfaces still offer the escape.
     assert "style-exception" in style.format_violations(violations, surface="pr-body")
