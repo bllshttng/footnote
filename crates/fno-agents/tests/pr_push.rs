@@ -42,6 +42,7 @@ case "$1" in
         fi
         echo "feature/x"; exit 0 ;;
       "@{u}") echo deadbeef0000000; exit 0 ;;
+      --verify) echo deadbeef0000000; exit 0 ;;
       --short) echo abc1234; exit 0 ;;
       --show-toplevel) echo "$D"; exit 0 ;;
     esac

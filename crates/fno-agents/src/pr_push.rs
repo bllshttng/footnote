@@ -336,16 +336,12 @@ pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
     } else if ctx.force {
         emit_bypass_row(ctx);
     }
-    // Push exactly once. `git push` when an upstream exists, `--set-upstream`
-    // when the branch has never been pushed (the create path).
-    let upstream = crate::pr_push::run_labeled(
-        "pr-push",
-        &ctx.git_bin,
-        &["rev-parse", "--abbrev-ref", "@{u}"],
-        &ctx.cwd,
-        READ_TIMEOUT,
-    )
-    .map(|(ok, _, _)| ok);
+    // Push exactly once, to the same-name remote branch, upstream or not.
+    // A bare `git push` cannot be used here: push.default=simple refuses
+    // when the branch's upstream name differs from its own name (a branch
+    // born off origin/main carries exactly that tracking), and the create
+    // path has no upstream at all. `--set-upstream origin HEAD:<branch>`
+    // covers both and pins correct tracking on the first push.
     let branch = run_labeled(
         "pr-push",
         &ctx.git_bin,
@@ -356,10 +352,7 @@ pub(crate) fn guarded_push(ctx: &PushCtx, head: &str) -> PushOutcome {
     .map(|(_, out, _)| out.trim().to_string())
     .unwrap_or_default();
     let refspec = format!("HEAD:{branch}");
-    let push_args: Vec<&str> = match upstream {
-        Ok(true) => vec!["push"],
-        _ => vec!["push", "--set-upstream", "origin", refspec.as_str()],
-    };
+    let push_args: Vec<&str> = vec!["push", "--set-upstream", "origin", refspec.as_str()];
     let (ok, _, err) =
         crate::pr_push::run_labeled("pr-push", &ctx.git_bin, &push_args, &ctx.cwd, READ_TIMEOUT)
             .unwrap_or((false, String::new(), "push spawn failed".to_string()));
@@ -721,8 +714,11 @@ pub fn run_push(argv: &[String]) -> i32 {
         return 1;
     }
 
-    // (7) In-flight read on the REMOTE head. A branch with no upstream has
-    // nothing in flight anywhere (first push).
+    // (7) In-flight read on the REMOTE head of the SAME-NAME branch: that is
+    // the head a push would supersede. `@{u}` is wrong here - a branch born
+    // off origin/main tracks main until its first verb push re-points the
+    // upstream, and main's checks would read as this branch's runs. A branch
+    // with no same-name remote has nothing in flight anywhere (first push).
     let ctx = PushCtx {
         git_bin: git.clone(),
         gh_bin: a.gh_bin.clone(),
@@ -731,15 +727,22 @@ pub fn run_push(argv: &[String]) -> i32 {
         stamps_dir: a.stamps_dir.clone(),
         force: a.force,
     };
-    let remote_head = run_labeled("pr-push", &git, &["rev-parse", "@{u}"], &cwd, READ_TIMEOUT)
-        .map(|(ok, out, _)| {
-            if ok {
-                out.trim().to_string()
-            } else {
-                String::new()
-            }
-        })
-        .unwrap_or_default();
+    let remote_ref = format!("origin/{branch}");
+    let remote_head = run_labeled(
+        "pr-push",
+        &git,
+        &["rev-parse", "--verify", "--quiet", remote_ref.as_str()],
+        &cwd,
+        READ_TIMEOUT,
+    )
+    .map(|(ok, out, _)| {
+        if ok {
+            out.trim().to_string()
+        } else {
+            String::new()
+        }
+    })
+    .unwrap_or_default();
     let outcome = guarded_push(&ctx, &remote_head);
     match outcome {
         PushOutcome::Pushed { sha } => {
