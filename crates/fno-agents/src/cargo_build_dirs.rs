@@ -933,7 +933,7 @@ mod tests {
     #[test]
     fn a_failing_manifest_disables_the_orphan_lane_and_names_itself() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = setup("broken", "broken");
+        let env = setup("broken", "broken");
         std::fs::create_dir_all(env.root.join("crates/broken")).unwrap();
         std::fs::write(
             env.root.join("crates/broken/Cargo.toml"),
@@ -988,7 +988,7 @@ mod tests {
     #[test]
     fn a_bad_fallback_resolution_leaves_only_the_fno_base() {
         let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = setup("badbase", "never-broken");
+        let env = setup("badbase", "never-broken");
         // /x/y/aa/bb: shape passes, `/x/y` has fewer than 3 components.
         std::env::set_var("CBD_FB_ANSWER", "/x/y/aa/bb");
         let bases = managed_bases(&env.root, &registered_trees(&env.root));
