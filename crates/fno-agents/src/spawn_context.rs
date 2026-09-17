@@ -569,24 +569,20 @@ pub fn session_identity_from_table(
 /// intact. `(None, None)` degrades exactly as before - the caller records no
 /// pid and the claim lives by its TTL.
 pub fn session_identity_ambient(start_pid: u32) -> (Option<u32>, Option<&'static str>) {
-    let stamp_live = stamp_pid_is_live();
-    let env_pid = if stamp_live {
+    let env_pid = if stamp_pid_is_live() {
         std::env::var("FNO_SESSION_PID")
             .ok()
             .and_then(|v| v.trim().parse::<u32>().ok())
     } else {
         None
     };
-    let stamp = std::env::var("FNO_SESSION_HARNESS")
-        .unwrap_or_default()
-        .trim()
-        .to_lowercase();
+    let stamp_harness = stamp_pair_harness();
     // One census table serves whichever halves the stamps leave undecided:
     // this runs on the renew path inside the per-claim recovery mutex, where
     // the old subprocess needed a wall-clock bound.
     let table = ancestry_table();
-    let harness = match env_pid.filter(|_| harness_static(&stamp).is_some()) {
-        Some(_) => harness_static(&stamp),
+    let harness = match env_pid.filter(|_| stamp_harness.is_some()) {
+        Some(_) => stamp_harness,
         None => resolve_session_harness_from_table(&table, start_pid),
     };
     let pid = match env_pid {
@@ -634,24 +630,8 @@ pub(crate) fn set_test_ancestry_table(table: Option<BTreeMap<u32, ProcRow>>) {
 /// harness ancestor is found (a plain shell), so "unproven" and "no ancestor"
 /// are the same answer.
 pub fn resolve_session_harness_ambient() -> Option<&'static str> {
-    let stamp = std::env::var("FNO_SESSION_HARNESS").unwrap_or_default();
-    let stamp = stamp.trim().to_lowercase();
-    if [
-        "claude",
-        "codex",
-        "gemini",
-        "opencode",
-        "agy",
-        "cursor-agent",
-    ]
-    .contains(&stamp.as_str())
-    {
-        let pid_raw = std::env::var("FNO_SESSION_PID").unwrap_or_default();
-        if let Ok(pid) = pid_raw.trim().parse::<i64>() {
-            if pid > 0 && stamp_pid_is_live() {
-                return harness_static(&stamp);
-            }
-        }
+    if let Some(harness) = stamp_pair_harness() {
+        return Some(harness);
     }
     let table = ancestry_table();
     let ppid: u32 = unsafe { libc::getppid() } as u32;
@@ -664,8 +644,29 @@ fn stamp_pid_is_live() -> bool {
     let pid_raw = std::env::var("FNO_SESSION_PID").unwrap_or_default();
     match pid_raw.trim().parse::<u32>() {
         Ok(0) | Err(_) => false,
-        Ok(pid) => unsafe { libc::kill(pid as libc::pid_t, 0) == 0 },
+        Ok(pid) => match unsafe { libc::kill(pid as libc::pid_t, 0) } {
+            0 => true,
+            // EPERM proves the pid exists (another uid's process) - the
+            // same semantics psutil's pid_exists gives the retired python
+            // walk, which honored a cross-uid stamped pid.
+            -1 => std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM),
+            _ => false,
+        },
     }
+}
+
+/// The harness half of a VALID launcher stamp pair: `FNO_SESSION_HARNESS`
+/// names a known harness and `FNO_SESSION_PID` is a positive, live pid. A
+/// stale or forged pair fails closed to the walk's own answer.
+fn stamp_pair_harness() -> Option<&'static str> {
+    let stamp = std::env::var("FNO_SESSION_HARNESS")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    if !stamp_pid_is_live() {
+        return None;
+    }
+    harness_static(&stamp)
 }
 
 /// Static helper so the stamp arm returns a `&'static str` tied to the table
