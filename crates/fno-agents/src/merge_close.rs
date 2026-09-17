@@ -42,9 +42,9 @@ fn short(text: &str) -> String {
     text.chars().take(200).collect()
 }
 
-// `unreadable reconcile json` alone was a dead end (x-2e54): the row named
-// the symptom but threw away the one thing a reader needs to diagnose it -
-// what the verb actually printed. Carry a bounded snippet instead.
+// `unreadable reconcile json` alone was a dead end: the row named the
+// symptom but threw away the one thing a reader needs to diagnose it - what
+// the verb actually printed. Carry a bounded snippet instead.
 fn unreadable(stdout: &str) -> CloseOutcome {
     let sample = short(stdout.trim());
     let sample = if sample.is_empty() {
