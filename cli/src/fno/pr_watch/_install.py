@@ -981,7 +981,10 @@ def _parked_block(events_path: Optional[Path], state_path: Optional[Path]) -> No
 
         fno_state = state_dir()
     except Exception:
-        fno_state = Path.home() / ".fno"
+        # No bare HOME/.fno fallback here: the state-dir path gate forbids
+        # the literal, and an unreadable state dir is a degrade-and-say-so.
+        typer.echo("Parked PRs:   (state dir unreadable)")
+        return
     base = Path(state_path) if state_path is not None else pr_watcher_state_path()
     if events_path is None:
         events_path = fno_state / "events.jsonl"
