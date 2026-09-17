@@ -186,6 +186,10 @@ fn pane_state_derives_worst_first_from_badge_and_seen() {
 #[path = "client/tests/agent_hit_tests.rs"]
 mod agent_hit_tests;
 
+// Where a live paneless thread row must appear (finder and fold).
+#[path = "client/tests/paneless_row_tests.rs"]
+mod paneless_row_tests;
+
 #[tokio::test]
 async fn open_attach_place_excludes_mission_squad_from_placement_targets() {
     let mut view = two_pane_view();
@@ -14517,45 +14521,6 @@ fn agent_row(name: &str, pane: u64, badge: Option<AgentBadge>, seen: bool) -> Ag
     r.badge = badge;
     r.seen = seen;
     r
-}
-
-/// (x-d401) The top-K fold's target set after this branch split the old
-/// blind `Idle` three ways. Every non-attention state must still fold: on
-/// `origin/main` a badgeless row was `Idle` and folded, so folding only
-/// `Idle` would strand both a pristine shell AND every badgeless bg
-/// worker (`server.rs` hard-codes `pane_activity: None` on watch-only
-/// paneless rows), driving `idle_budget` to zero on any real fleet. The
-/// `?` glyph, not the fold, is what keeps a no-reading row honest.
-#[test]
-fn idle_fold_takes_every_non_attention_state() {
-    let with = |activity: Option<ShellActivity>| {
-        let mut r = agent_row("w", 1, None, true);
-        r.pane_activity = activity;
-        r
-    };
-    assert!(
-        is_idle_row(&with(Some(ShellActivity::Empty))),
-        "a pristine shell folds, else the fold cap dies on a shell-heavy squad"
-    );
-    assert!(is_idle_row(&with(Some(ShellActivity::Idle))), "idle folds");
-    assert!(
-        is_idle_row(&with(Some(ShellActivity::Unmeasured))),
-        "an unmeasured row folds: the `?` glyph carries the honesty, not the cap"
-    );
-    assert!(
-        is_idle_row(&with(None)),
-        "a badgeless bg worker (pane_activity None) folds as it did before the split"
-    );
-    assert!(
-        !is_idle_row(&with(Some(ShellActivity::Running))),
-        "a running pane is attention, not fold"
-    );
-    let mut dead = with(Some(ShellActivity::Empty));
-    dead.exited = true;
-    assert!(
-        !is_idle_row(&dead),
-        "dead rows are the section view's business"
-    );
 }
 
 fn fold_item(kind: &str, name: &str, live: bool) -> crate::needs_overlay::FoldItem {
