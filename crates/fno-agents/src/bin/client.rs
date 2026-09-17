@@ -94,7 +94,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "roster-reap",
     "reconcile",
     "reclaim",
-    "occupancy-login",
     "plugin-install",
     "recover",
     "registry-json",
@@ -746,12 +745,6 @@ async fn run(args: Vec<String>) -> i32 {
     // in-process.
     if verb == "reclaim" {
         return fno_agents::reclaim::run_reclaim(&args[1..], &AgentsHome::from_env());
-    }
-    // `occupancy-login`: the idle login shell verdict (R6), daemon-free.
-    // The occupancy bridge shells HERE before the Python classifier; pids
-    // this lane answers never reach it.
-    if verb == "occupancy-login" {
-        return fno_agents::occupancy_login::run(&args[1..]);
     }
     // `plugin-install`: the filtered-stage installer for the plugin
     // harnesses, daemon-free. The Python surface `fno config plugin install`

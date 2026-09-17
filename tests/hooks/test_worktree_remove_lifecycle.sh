@@ -1418,23 +1418,37 @@ new_hash_dir() {
     printf 'artifact' > "$dir/blob"
 }
 
-# 9a. AC1-HP: the sweep's build-base delete unlinks; no bare rm ran.
+# 9a. AC1-HP: the build-base half is the Rust lane; the sweep delegates and
+# prints its lines, and the bash sweep never rm's a hash dir itself.
 S=$(new_sandbox)
 STUB=$(mktemp -d -t srm-sweep.XXXXXX)
 RM_LOG="$STUB/rm.log"
 new_rm_stub "$STUB/bin" "$RM_LOG"
 mkdir -p "$S/base/ab/c001"
 new_hash_dir "$S/base/ab/c001"
-out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_CARGO_TARGETS_BASE="$S/base" bash "$LIFECYCLE" cleanup --cargo-targets --apply --cap-bytes 1 --target-max-age 0 2>&1)
-if [[ ! -d "$S/base/ab/c001" ]] && echo "$out" | grep -q 'cargo-target reaped'; then
-    pass "sweep unlinked the build-base hash dir (AC1)"
+# A stub fno-agents whose cargo-build-dirs claims the reap, so the delegate
+# contract is exercised without a built binary.
+mkdir -p "$STUB/fake-agents"
+cat > "$STUB/fake-agents/fno-agents" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "reclaim cargo-build-dirs --apply") printf 'cargo-build-dirs mode=apply reaped=1\n' ;;
+  *) printf 'cargo-build-dirs mode=dry-run\n' ;;
+esac
+EOF
+chmod +x "$STUB/fake-agents/fno-agents"
+out=$(cd "$S" && PATH="$STUB/bin:$PATH" FNO_AGENTS_BIN="$STUB/fake-agents/fno-agents" FNO_CARGO_TARGETS_BASE="$S/base" bash "$LIFECYCLE" cleanup --cargo-targets --apply --cap-bytes 1 --target-max-age 0 2>&1)
+if echo "$out" | grep -q 'cargo-build-dirs mode=apply reaped=1'; then
+    pass "sweep delegates the build-base half to the lane (AC1)"
 else
-    fail "AC1 sweep unlink" "gone=$([[ -d "$S/base/ab/c001" ]] && echo n || echo y) out=[$out]"
+    fail "AC1 delegate prints the lane line" "out=[$out]"
 fi
-if [[ ! -s "$RM_LOG" ]]; then
-    pass "sweep delete never resolved through bare rm (AC1)"
-else
+# The lock teardown's own `rm -f` on its started-marker is lifecycle
+# noise; the assertion is that no bare rm ever names the hash dir.
+if [[ -s "$RM_LOG" ]] && grep -q 'ab/c001' "$RM_LOG"; then
     fail "AC1 stub-rm never ran" "log=[$(cat "$RM_LOG")]"
+else
+    pass "sweep delete never resolved through bare rm (AC1)"
 fi
 rm -rf "$S" "$STUB"
 

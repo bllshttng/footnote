@@ -412,6 +412,12 @@ pub fn run_reclaim(args: &[String], home: &AgentsHome) -> i32 {
             }
             return 0;
         }
+        // `occupancy-login`: the idle login shell verdict (R6). An argument of
+        // the reclaim action, never a new action (law d-fe66560a); the
+        // occupancy bridge shells here before the Python classifier.
+        Some("occupancy-login") => {
+            return crate::occupancy_login::run(&args[1..]);
+        }
         Some("cargo-build-dirs") => {
             let apply = args.iter().skip(1).any(|a| a == "--apply");
             let cwd = std::env::current_dir().unwrap_or_default();
