@@ -34,7 +34,6 @@ mod rm_refusal_detail;
 mod rm_teardown;
 pub(crate) mod roster_death;
 mod stop_refusal_detail;
-pub(crate) mod worktree_sweep;
 pub(crate) use self::blocking_bound::directory_bytes;
 use self::blocking_bound::{off_executor, resolve_reclaimed_bytes};
 use self::roster_death::claude_row_provably_absent;
@@ -1960,9 +1959,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     let grace_cwd = ctx.opts.agents_config_cwd.clone();
                     tokio::task::spawn_blocking(move || {
                         let _gate = SweepGate(flag);
-                        let roots = worktree_sweep::registry_repo_roots(&home);
+                        let roots = registry_repo_roots(&home);
                         let now = now_epoch_secs();
-                        worktree_sweep::worktree_sweep(&home, &emitter, now, &roots, &|root| {
+                        worktree_sweep(&home, &emitter, now, &roots, &|root| {
                             // A pending merge-cleanup request is the standing
                             // order: the pass applies while one waits.
                             crate::merge_reap::merge_cleanup_requested(&home, root).into()
@@ -1977,12 +1976,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                                 cmd.arg("--apply");
                             }
                             match cmd.output() {
-                                Ok(output) => worktree_sweep::WorktreeSweepOutput {
+                                Ok(output) => WorktreeSweepOutput {
                                     exit_code: output.status.code(),
                                     stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                                     stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
                                 },
-                                Err(error) => worktree_sweep::WorktreeSweepOutput {
+                                Err(error) => WorktreeSweepOutput {
                                     exit_code: None,
                                     stdout: String::new(),
                                     stderr: error.to_string(),

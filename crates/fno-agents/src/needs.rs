@@ -740,6 +740,70 @@ pub(crate) fn held_rows_from_raw(raw: &str) -> Vec<HeldRow> {
     rows
 }
 
+/// The open question ids whose node reads a terminal rung (x-55ae): a
+/// question's node is the `node` field plus every `blocks` entry, and a rung
+/// is `done` or `superseded`. Pure over journal contents; the caller
+/// supplies the graph statuses and does the writing.
+pub(crate) fn node_closed_question_ids(
+    raw: &str,
+    statuses: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    const CLOSED_RUNGS: [&str; 2] = ["done", "superseded"];
+    let mut asked: HashMap<String, Value> = HashMap::new();
+    let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() || !line.contains("operator_question") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+        let data = v
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        match kind {
+            "operator_question" => {
+                if let Some(qid) = data.get("question_id").and_then(Value::as_str) {
+                    asked.insert(qid.to_string(), data);
+                }
+            }
+            "operator_question_closed" => {
+                if let Some(qid) = data.get("question_id").and_then(Value::as_str) {
+                    closed.insert(qid.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut ids: Vec<String> = asked
+        .into_iter()
+        .filter(|(qid, data)| {
+            if closed.contains(qid) {
+                return false;
+            }
+            let mut nodes: Vec<String> = data
+                .get("node")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .into_iter()
+                .collect();
+            if let Some(blocks) = data.get("blocks").and_then(Value::as_array) {
+                nodes.extend(blocks.iter().filter_map(Value::as_str).map(str::to_string));
+            }
+            nodes.iter().any(|n| {
+                statuses
+                    .get(n)
+                    .is_some_and(|s| CLOSED_RUNGS.contains(&s.as_str()))
+            })
+        })
+        .map(|(qid, _)| qid)
+        .collect();
+    ids.sort();
+    ids
+}
+
 /// Stamp each item's `live` bit from its node claim (x-aaaa 1.4): an item whose
 /// node holds a Live or Suspect claim (a suspect TTL-unexpired claim still
 /// protects the slot) renders even without a roster row; an unclaimed or
@@ -1986,6 +2050,36 @@ mod tests {
         let held = held_rows_from_raw(&raw);
         assert_eq!(held.len(), 2);
         assert!(held.iter().all(|r| r.question_id == "q-hold"));
+    }
+
+    #[test]
+    fn sweep_skips_an_already_closed_question() {
+        let raw = [
+            operator_question_blocked("2026-07-03T02:00:00Z", "q-hold", "pick", &["x-bbbb"]),
+            operator_question_closed("2026-07-03T03:00:00Z", "q-hold"),
+        ]
+        .join("\n");
+        let statuses: std::collections::BTreeMap<String, String> =
+            [("x-bbbb".to_string(), "done".to_string())]
+                .into_iter()
+                .collect();
+        assert!(node_closed_question_ids(&raw, &statuses).is_empty());
+    }
+
+    #[test]
+    fn sweep_closes_only_terminal_rungs() {
+        let raw = operator_question_blocked("2026-07-03T02:00:00Z", "q-hold", "pick", &["x-bbbb"]);
+        let mk = |status: &str| {
+            let statuses: std::collections::BTreeMap<String, String> =
+                [("x-bbbb".to_string(), status.to_string())]
+                    .into_iter()
+                    .collect();
+            node_closed_question_ids(&raw, &statuses)
+        };
+        assert_eq!(mk("done"), vec!["q-hold".to_string()]);
+        assert_eq!(mk("superseded"), vec!["q-hold".to_string()]);
+        assert!(mk("in_progress").is_empty());
+        assert!(mk("blocked").is_empty());
     }
 
     #[test]

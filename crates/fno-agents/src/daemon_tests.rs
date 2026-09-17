@@ -839,6 +839,11 @@ mod stop_claims;
 #[path = "daemon/tests/incident_pause.rs"]
 mod incident_pause;
 
+// The question-sweep test family (x-55ae): a question whose node closed is
+// closed with it.
+#[path = "daemon/tests/question_sweep.rs"]
+mod question_sweep;
+
 // The codex thread lane's spawn/registry/resume test family, moved
 // verbatim into its own module for the same reason as gc_receipts above:
 // file budget, test motion is the sanctioned shrink.
