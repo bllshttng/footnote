@@ -660,13 +660,10 @@ pub(crate) fn run_claude_rm_in(
             Ok(Some(status)) if status.success() => return Ok(()),
             Ok(Some(status)) => {
                 let code = status.code().unwrap_or(-1);
-                let output = child.wait_with_output().ok();
-                let detail = output
-                    .as_ref()
-                    .map(|output| String::from_utf8_lossy(&output.stderr))
-                    .unwrap_or_default();
+                let detail =
+                    crate::truth_probe::drain_to_detail(&mut child, Duration::from_secs(2));
                 // retired-ok: reports the shellout this code ran and its exit code; tells no reader to run it.
-                return Err(format!("claude rm exited {code}: {}", detail.trim()));
+                return Err(format!("claude rm exited {code}: {detail}"));
             }
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(20));

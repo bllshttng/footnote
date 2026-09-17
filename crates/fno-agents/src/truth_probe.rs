@@ -115,8 +115,49 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     // fast-failing spawn per affected row, and the second attempt always keeps
     // its WARN, so a stuck probe is loud rather than silent.
     // No deadline: nobody handed this probe a budget, so the latch wait is not
-    // taken out of its attempts. Five seconds each, as it has always had.
-    family1_truth_latched(handle, Duration::from_secs(5), None)
+    // taken out of its attempts. The bound is the batch's one-handle bound
+    // (change 1): the batch bound is funded by measurement, the old
+    // 5 s figure never was, and the wrong handle once walked the transcript
+    // store 15-24 s per row against it. A test pins the relationship so the
+    // two cannot drift apart.
+    family1_truth_latched(handle, family1_truth_batch_timeout(1), None)
+}
+
+/// The bounded drain for an EXITED child whose pipes may still be held by a
+/// grandchild: both pipes are read to EOF on their own threads, the bytes
+/// come back over a channel rather than a join (a join is its own unbounded
+/// wait - a grandchild inherits the fds and outlives the child), and `grace`
+/// bounds that wait. Returns the lossy-UTF-8 texts of stdout and stderr,
+/// trimmed, for the removal cascade to fold into its refusal.
+pub fn drain_to_detail(child: &mut std::process::Child, grace: Duration) -> String {
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = out_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        let _ = out_tx.send(buf);
+    });
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = err_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        let _ = err_tx.send(buf);
+    });
+    let out = out_rx.recv_timeout(grace).unwrap_or_default();
+    let err = err_rx.recv_timeout(grace).unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&out);
+    let stderr = String::from_utf8_lossy(&err);
+    match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
+        (true, true) => "stderr and stdout were both empty".to_string(),
+        (true, false) => stderr.trim().to_string(),
+        (false, true) => stdout.trim().to_string(),
+        (false, false) => format!("stderr: {}; stdout: {}", stderr.trim(), stdout.trim()),
+    }
 }
 
 /// One `fno agents truth <handle>` in flight per handle, machine-wide.
@@ -1864,5 +1905,16 @@ mod tests {
         // A non-JSON stdout (e.g. a crashed probe) falls back to the stderr tail.
         let detail = family1_truth_failure_detail(b"not json", "  banner  ");
         assert_eq!(detail, "banner");
+    }
+
+    // change 1: the single probe's bound rides the batch's one-handle
+    // bound, never below it - the batch bound is the one funded by
+    // measurement, and the old flat 5 s was not.
+    #[test]
+    fn the_single_probe_bound_is_never_below_the_batch_one_handle_bound() {
+        assert!(
+            family1_truth_batch_timeout(1) >= std::time::Duration::from_secs(20),
+            "the single probe's bound must track the batch's one-handle bound"
+        );
     }
 }

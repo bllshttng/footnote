@@ -69,6 +69,16 @@ pub struct RosterJudgement {
 #[derive(Debug, Default)]
 pub struct RosterReapSummary {
     pub visited: usize,
+    /// Unique rows this pass JUDGED (visited minus deduped) - beside
+    /// `visited` so a reader can tell "looked at 75, answered about 3"
+    /// from "looked at 75, all fine" (change 1).
+    pub enumerated: usize,
+    /// Rows that reached the quiet gate and so cost a batch age answer.
+    pub probed: usize,
+    /// Of those, rows the batch actually answered. Zero answers over a
+    /// non-empty probe set means the probe resolved nothing, and the run
+    /// refuses instead of reporting a clean pass.
+    pub answered: usize,
     /// Duplicate listing rows collapsed before judging: one session can be
     /// minted more than once into a listing, and judging each copy is how
     /// one removal becomes three.
@@ -84,6 +94,16 @@ pub struct RosterReapSummary {
     /// Apply-mode removals whose typed outcome did not confirm: named,
     /// never silent, retried by the next pass.
     pub refused: Vec<(String, String)>,
+}
+
+impl RosterReapSummary {
+    /// AC1-ERR (change 1): rows reached the quiet gate and the batch
+    /// answered none of them. That is not a clean pass with nothing to do -
+    /// the probe resolved nothing at all - so the verb refuses instead of
+    /// reporting success while removing nothing.
+    pub fn nothing_resolved(&self) -> bool {
+        self.probed > 0 && self.answered == 0
+    }
 }
 
 fn judgement(
@@ -121,6 +141,9 @@ pub fn render(summary: &RosterReapSummary, json_out: bool, dry_run: bool) -> Str
             "{}\n",
             serde_json::json!({
                 "visited": summary.visited,
+                "enumerated": summary.enumerated,
+                "probed": summary.probed,
+                "answered": summary.answered,
                 "deduped": summary.deduped,
                 "kept_owned": summary.kept_owned,
                 "kept": rows(&summary.kept),
@@ -140,6 +163,15 @@ pub fn render(summary: &RosterReapSummary, json_out: bool, dry_run: bool) -> Str
         summary.retired.len(),
         summary.visited
     );
+    // The judged count beside the enumerated count (AC1-ERR): "looked at
+    // 75, answered about 3" must never read as "looked at 75, all fine".
+    out.push_str(&format!(
+        "  enumerated {} judged, {} probed through the quiet gate, {} resolved\n",
+        summary.enumerated, summary.probed, summary.answered
+    ));
+    if summary.nothing_resolved() {
+        out.push_str("  refusing: every probe came back unresolved; the sweep removed nothing\n");
+    }
     if summary.deduped > 0 {
         out.push_str(&format!(
             "  deduped {} duplicate listing row(s)\n",
@@ -212,6 +244,7 @@ pub(crate) fn run(
         unique.push(row);
     }
     let rows: Vec<ClaudeAgentRow> = unique;
+    summary.enumerated = rows.len();
     let graph = read_graph();
     // An adopted row is a fact a healer or `fno agents adopt` wrote ABOUT a
     // session, not work fno itself spawned: the registry sweep keeps the row
@@ -480,9 +513,12 @@ pub(crate) fn run(
     // Pass two: ONE batched age call answers every candidate, keyed by
     // `row_handle` - the exact seam `gc_sweep::run` takes, whose production
     // default pages 24 handles per truth probe instead of paying one
-    // subprocess per row. Judgements push in roster order.
+    // subprocess per row. Judgements push in roster order. `answered`
+    // beside `probed` is what turns "nothing resolved" into a refusal the
+    // verb can act on (change 1, AC1-ERR).
     let refs: Vec<&RegistryEntry> = candidates.iter().map(|c| &c.entry).collect();
     let ages = age_many(&refs);
+    summary.probed = candidates.len();
     for c in &candidates {
         let ident = c.ident.clone();
         let node = c.node.clone();
@@ -491,6 +527,9 @@ pub(crate) fn run(
             .get(&crate::gc::row_handle(&c.entry))
             .copied()
             .flatten();
+        if age.is_some() {
+            summary.answered += 1;
+        }
         let pid_gone = c.pid.is_some_and(crate::daemon::pid_is_gone);
         match age {
             None => summary.kept.push(judgement(
@@ -960,7 +999,7 @@ mod tests {
                     entries
                         .iter()
                         .map(|e| {
-                            let age = if crate::gc::row_handle(e) == "aaaa1111" {
+                            let age = if crate::gc::row_handle(e) == "sid-a" {
                                 Some(10_000i64)
                             } else {
                                 None
@@ -1434,13 +1473,27 @@ mod tests {
     // The renderer prints every bucket at every pass, zero included.
     #[test]
     fn render_names_every_bucket_even_at_zero() {
-        let summary = RosterReapSummary::default();
+        let summary = RosterReapSummary {
+            enumerated: 75,
+            probed: 3,
+            answered: 3,
+            ..Default::default()
+        };
         let out = render(&summary, false, true);
         assert!(out.contains("would retire 0 of 0 roster row(s)"), "{out}");
+        // AC1-ERR: the judged count beside the enumerated count.
+        assert!(
+            out.contains("enumerated 75 judged, 3 probed through the quiet gate, 3 resolved"),
+            "{out}"
+        );
+        assert!(!out.contains("refusing"));
         let json_out = render(&summary, true, true);
         let v: serde_json::Value = serde_json::from_str(json_out.trim()).unwrap();
         for key in [
             "visited",
+            "enumerated",
+            "probed",
+            "answered",
             "deduped",
             "kept_owned",
             "kept",
@@ -1450,6 +1503,36 @@ mod tests {
         ] {
             assert!(v.get(key).is_some(), "bucket {key} missing: {json_out}");
         }
+    }
+
+    // AC1-ERR: a run where every probe came back unresolved refuses rather
+    // than reporting a clean pass.
+    #[test]
+    fn a_run_where_no_candidate_resolved_refuses() {
+        let dir = tmpdir("nothing-resolved");
+        let rows = vec![row("ab12cd34", Some("sid-1"), Some("target-x-aaaa-worker"))];
+        let summary = run(
+            &no_home(),
+            900,
+            RosterScope::Provenanced,
+            true,
+            &roster(rows),
+            &[],
+            &|| Some(graph_done_via_sessions("x-aaaa", &["sid-1"])),
+            &|_e| Some(vec![]),
+            &|_| HashMap::new(),
+            crate::daemon::now_epoch_secs(),
+            &|_| CascadeOutcome::NotApplicable,
+        );
+        assert!(summary.probed > 0);
+        assert_eq!(summary.answered, 0);
+        assert!(summary.nothing_resolved(), "{summary:?}");
+        let out = render(&summary, false, true);
+        assert!(
+            out.contains("refusing: every probe came back unresolved"),
+            "{out}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // One session listed twice is judged once: the duplicate is counted in

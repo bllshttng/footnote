@@ -1454,7 +1454,22 @@ async fn run(args: Vec<String>) -> i32 {
         None
     };
 
-    let call_result = call(&home, &daemon_bin, &req).await;
+    let call_result = if verb_owned == "rm" {
+        // change 3: a stale daemon means the removal would be
+        // executed by the OLD binary - the exact shape that left four
+        // sessions stamped origin=adopted while their harness sessions
+        // stayed alive. The notice moves onto the refusal path for rm:
+        // non-zero, no `removed:` line, and the remedy named. `list` keeps
+        // its advisory drift notice (a stale read is still a read).
+        if let Some(w) = drift_warning(&check_daemon_drift(&home).await, None) {
+            eprintln!("fno-agents: refusing rm: {w}");
+            eprintln!("  the removal was not attempted; run `fno doctor update` (or restart the daemon) and retry");
+            return 21;
+        }
+        call(&home, &daemon_bin, &req).await
+    } else {
+        call(&home, &daemon_bin, &req).await
+    };
     drop(daemon_spawn_gate);
     match call_result {
         Ok(resp) => match resp.payload {
@@ -1531,6 +1546,24 @@ async fn run(args: Vec<String>) -> i32 {
                     && result.get("stopped").and_then(Value::as_bool) == Some(false)
                 {
                     return 18;
+                }
+                // change 3: a receipt over a surviving harness row is
+                // the "reports success while removing nothing" shape that
+                // stamped four sessions origin=adopted. The renderer already
+                // prints the survival in its notes; the exit code now says it
+                // too. An already-absent harness row is a COMPLETED removal,
+                // not a survivor - the removal asked for is total, so it
+                // keeps exit 0 and the sideline never renders a false
+                // failure for it.
+                let harness_survives = result.get("harness_removed").and_then(Value::as_bool)
+                    == Some(false)
+                    && !result
+                        .get("harness_reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .contains("already absent");
+                if verb_owned == "rm" && harness_survives {
+                    return 21;
                 }
                 // The daemon-bound thread lane (codex and every other
                 // attach-with-server harness): the RPC created the row, so the
@@ -3147,6 +3180,13 @@ fn run_roster_reap(rest: &[String]) -> i32 {
         "{}",
         fno_agents::roster_reap::render(&summary, json_out, dry_run)
     );
+    if summary.nothing_resolved() {
+        eprintln!(
+            "fno-agents: roster-reap refused: probed {} row(s), the truth probe resolved none",
+            summary.probed
+        );
+        return 1;
+    }
     0
 }
 
@@ -3269,11 +3309,21 @@ fn run_node_route(rest: &[String]) -> i32 {
             let answer = match store.matches(&entry) {
                 // the age is the newest timestamped entry through the
                 // shared probe, not a file stat.
-                Some(hits) if !hits.is_empty() => match fno_agents::gc::probe_row_age(&entry) {
-                    Some(age) if age <= grace_secs => serde_json::json!({"state": "live"}),
-                    Some(_) => serde_json::json!({"state": "quiet"}),
-                    None => serde_json::json!({"state": "unresolved"}),
-                },
+                Some(hits) if !hits.is_empty() => {
+                    // The same batched seam the sweeps take, not a deleted
+                    // per-row wrapper: the entry's harness_session_id is set,
+                    // so `row_handle` returns it and that is the key the map
+                    // answers under.
+                    let age = fno_agents::gc::probe_entry_ages(&[&entry])
+                        .get(&fno_agents::gc::row_handle(&entry))
+                        .copied()
+                        .flatten();
+                    match age {
+                        Some(age) if age <= grace_secs => serde_json::json!({"state": "live"}),
+                        Some(_) => serde_json::json!({"state": "quiet"}),
+                        None => serde_json::json!({"state": "unresolved"}),
+                    }
+                }
                 _ => serde_json::json!({"state": "unresolved"}),
             };
             answers.insert(pair.clone(), answer);
@@ -4264,138 +4314,10 @@ fn format_success(
             if let Some(outcome) = outcome {
                 line.push_str(&format!(" (turn {outcome})"));
             }
-            line.push_str(&claims_release_suffix(result));
+            line.push_str(&fno_agents::rm_receipt::claims_release_suffix(result));
             Some(line)
         }
-        "rm" => {
-            let harness = result.get("harness").and_then(Value::as_str).unwrap_or("");
-            let mut removed = vec!["fno"];
-            let mut notes = Vec::new();
-            // The harness row we just tore down IS the resume handle. The seam
-            // warns BEFORE the reap; this names the reversal AFTER it, so a
-            // direct `fno-agents rm` (which never passes the Python seam) is
-            // not silent about the loss either.
-            let mut adopt_hint: Option<String> = None;
-            if !harness.is_empty() {
-                let reason = result
-                    .get("harness_reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let row_id = result
-                    .get("harness_row_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                // Prefer the FULL session id over `harness_row_id`: that field
-                // falls back to this id's first eight chars, which is not a
-                // unique adopt key for a codex row (time-prefixed ids collide
-                // across same-window sessions) and is not even hex for a
-                // non-uuid id. Only name a handle that resolves back.
-                let adopt_key = result
-                    .get("harness_session_id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty())
-                    .unwrap_or(row_id);
-                match result.get("harness_removed").and_then(Value::as_bool) {
-                    Some(true) => {
-                        removed.push(harness);
-                        if adopt_key != "unknown" {
-                            adopt_hint = Some(format!(
-                                "\nthe {harness} session record was the resume handle; \
-                                 the transcript stays on disk.\nreverse it with: \
-                                 fno agents adopt {adopt_key} --cross-project"
-                            ));
-                        }
-                    }
-                    Some(false) if reason.contains("already absent") => {
-                        notes.push(format!("{harness} row already absent"))
-                    }
-                    Some(false) => notes.push(format!("{harness} row {row_id} survives: {reason}")),
-                    None if harness == "claude" => {
-                        notes.push("claude list unreadable, harness side unverified".to_string())
-                    }
-                    None if !reason.is_empty() => {
-                        notes.push(format!("{harness} side unverified: {reason}"))
-                    }
-                    None => {}
-                }
-            }
-            let pane_reason = result
-                .get("pane_reason")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            match result.get("pane_removed").and_then(Value::as_bool) {
-                Some(true) => {
-                    removed.push("mux");
-                    // the confirmed stop's measurement (pane killed,
-                    // pid gone) is the printed proof - a bare "mux" would
-                    // name the surface but not the death it claims.
-                    if !pane_reason.is_empty() {
-                        notes.push(pane_reason.to_string());
-                    }
-                }
-                Some(false) if pane_reason.contains("already absent") => {
-                    notes.push("mux pane already absent".to_string())
-                }
-                Some(false) => {
-                    let session = result
-                        .get("pane_session")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown");
-                    let pane_id = result
-                        .get("pane_id")
-                        .and_then(Value::as_u64)
-                        .map(|id| id.to_string())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    notes.push(format!(
-                        "mux pane {session}:{pane_id} survives: {pane_reason}"
-                    ));
-                }
-                None => {}
-            }
-            if result.get("event_written").and_then(Value::as_bool) == Some(false) {
-                let reason = result
-                    .get("event_reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error");
-                notes.push(format!("event record not written: {reason}"));
-            }
-            if result.get("worktree_outcome").and_then(Value::as_str) == Some("removed") {
-                // `null` means the size walk hit its budget on a large or
-                // slow-storage tree - print `unmeasured`, never a `0` that
-                // reads identically to "measured, nothing to reclaim".
-                let bytes = match result.get("reclaimed_bytes").and_then(Value::as_u64) {
-                    Some(n) => n.to_string(),
-                    None => "unmeasured".to_string(),
-                };
-                notes.push(format!(
-                    "WARNING: worktree removed by guarded cleanup (reclaimed_bytes={bytes})"
-                ));
-            }
-            if removed.len() == 1
-                && notes.is_empty()
-                && result.get("pane_removed").is_none_or(Value::is_null)
-            {
-                return Some(format!("removed: {name}{}", claims_release_suffix(result)));
-            }
-            let has_survivor = notes
-                .iter()
-                .any(|note| note.contains("survives") || note.contains("unverified"));
-            let surfaces = if removed.len() == 1 && has_survivor {
-                "fno only".to_string()
-            } else {
-                removed.join(" + ")
-            };
-            let detail = if notes.is_empty() {
-                surfaces
-            } else {
-                format!("{surfaces}; {}", notes.join("; "))
-            };
-            Some(format!(
-                "removed: {name} ({detail}){}{}",
-                adopt_hint.unwrap_or_default(),
-                claims_release_suffix(result)
-            ))
-        }
+        "rm" => fno_agents::rm_receipt::receipt(name, result),
         "rename" => fno_agents::rename::receipt(name, result),
         "list" => {
             let agents = &result["agents"];
@@ -4529,32 +4451,6 @@ fn render_list_json(
 /// carries when the daemon released or kept claims for the stopped worker
 /// (change 5d). Empty when the receipt names neither, so a stop that
 /// released nothing renders byte-identical to today.
-fn claims_release_suffix(result: &Value) -> String {
-    let Some(claims) = result.get("claims") else {
-        return String::new();
-    };
-    let (Some(released), Some(kept)) = (
-        claims.get("released").and_then(Value::as_array),
-        claims.get("kept").and_then(Value::as_array),
-    ) else {
-        return String::new();
-    };
-    if released.is_empty() && kept.is_empty() {
-        return String::new();
-    }
-    let mut suffix = format!("; released {} claim(s)", released.len());
-    for kept_claim in kept {
-        suffix.push_str(&format!(
-            "; kept {} ({})",
-            kept_claim.get("key").and_then(Value::as_str).unwrap_or("?"),
-            kept_claim
-                .get("observed")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-        ));
-    }
-    suffix
-}
 
 /// Shell out to the Python `fno agents discovered-json` helper for the P1
 /// discovered-live-sessions lane and return the rows.

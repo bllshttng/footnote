@@ -253,7 +253,7 @@ fn ac4_hp_three_row_marker_retires_prunes_and_names_every_keep() {
     );
     assert_eq!(summary.pruned.len(), 1, "{:?}", summary.pruned);
     assert_eq!(
-        summary.kept_open_work,
+        summary.kept_open_work_stale,
         vec![(
             "rowb".to_string(),
             "N3".to_string(),

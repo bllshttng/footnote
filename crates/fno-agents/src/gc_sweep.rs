@@ -34,7 +34,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::events::EventEmitter;
-use crate::gc::{gc_decide, row_handle, tree_action, GcAction, GcRow, KeepReason, TreeAction};
+use crate::gc::{
+    gc_decide, row_handle, row_label, tree_action, GcAction, GcRow, KeepReason, TreeAction,
+};
 use crate::graph_store::{self, WorkState};
 use crate::node_route;
 use crate::paths::AgentsHome;
@@ -110,6 +112,12 @@ pub struct GcSummary {
     /// done; the first open one, and the provenance source that resolved it,
     /// so a sessions-join keep is distinguishable from a name-pattern keep.
     pub kept_open_work: Vec<(String, String, String, String)>,
+    /// `(id, node, status, reader)` (change 2): open work whose
+    /// transcript is quiet INSIDE the open-work window. The keep names the
+    /// stale node pinning the row; quiet past the window the row falls to
+    /// the grace gate and would retire, so a reader can tell an aging keep
+    /// from one with no clock.
+    pub kept_open_work_stale: Vec<(String, String, String, String)>,
     /// `(id, age_s)`: the transcript was written inside the grace window.
     pub kept_active: Vec<(String, i64)>,
     /// `(id, detail)`: the fresh truth probe answered nothing
@@ -291,6 +299,7 @@ impl GcSummary {
             + self.kept_pr_contradicts.len()
             + self.kept_planning_unclosed.len()
             + self.kept_open_work.len()
+            + self.kept_open_work_stale.len()
             + self.kept_active.len()
             + self.kept_probe_unread.len()
             + self.kept_transcript_unresolved.len()
@@ -1609,6 +1618,13 @@ pub(crate) fn run_with_release(
     release: Option<&Release>,
 ) -> GcSummary {
     let mut summary = GcSummary::default();
+    // change 2: the open-work window, resolved once per pass beside
+    // the grace the caller handed in. The daemon and the verb both resolve
+    // grace against the process cwd, so this reads the same config ladder
+    // without a new parameter threaded through every caller.
+    let open_work_retire_s =
+        crate::agents_config::open_work_retire_secs(&std::env::current_dir().unwrap_or_default())
+            as i64;
     // The retention pass runs on EVERY sweep, before the empty-registry early
     // return: receipts age out on their own clock. Any receipt this pass goes
     // on to write carries `reaped_at` of now, so it can never be this
@@ -1767,7 +1783,7 @@ pub(crate) fn run_with_release(
     }
 
     for (e, staged_row) in registry.entries.iter().zip(staged.iter()) {
-        let id = row_handle(e);
+        let id = row_label(e);
         if e.origin.as_deref() == Some("operator") {
             summary.kept_operator.push(id);
             continue;
@@ -2109,6 +2125,7 @@ pub(crate) fn run_with_release(
             peer_drives_pr,
             pr_settled,
             origin_corpse: !is_spawn,
+            open_work_retire_s,
         };
         let (mut action, mut reason) = gc_decide(&row, grace_secs);
         // d-81c6da7e: a release matched to the planning hold answers the
@@ -2175,6 +2192,17 @@ pub(crate) fn run_with_release(
                         .unwrap_or("sessions")
                         .to_string();
                     summary.kept_open_work.push((id, node, status, reader))
+                }
+                Some(KeepReason::OpenWorkStale { node, status }) => {
+                    let reader = verdict
+                        .route
+                        .source
+                        .map(|s| s.as_str())
+                        .unwrap_or("sessions")
+                        .to_string();
+                    summary
+                        .kept_open_work_stale
+                        .push((id, node, status, reader))
                 }
                 Some(KeepReason::Active { age_s }) => summary.kept_active.push((id, age_s)),
                 Some(KeepReason::TranscriptUnresolved) => {
@@ -2287,7 +2315,7 @@ pub(crate) fn run_with_release(
         // child's tree.
         if !sid.is_empty() && row.session_terminal.is_none() {
             if let Some(child) = crate::spawn_edge::live_child_of(e, &registry.entries) {
-                summary.kept_live_descendants.push((id, row_handle(child)));
+                summary.kept_live_descendants.push((id, row_label(child)));
                 continue;
             }
         }
@@ -2788,7 +2816,7 @@ pub(crate) fn run_with_release(
             .filter(|e| e.cwd == cwd && !to_retire.contains_key(&e.name))
             .min_by_key(|e| &e.name);
         if let Some(occupant) = occupant {
-            let holder = row_handle(occupant);
+            let holder = row_label(occupant);
             for name in names {
                 if let Some(order) = to_retire.get_mut(&name) {
                     order.tree = TreeAction::None;
@@ -3198,7 +3226,7 @@ pub(crate) fn commit_retirements(
                 order.tree = TreeAction::None;
                 report
                     .kept_shared_tree
-                    .push((order.id.clone(), row_handle(occupant)));
+                    .push((order.id.clone(), row_label(occupant)));
             }
         }
         r.entries.retain(|e| {

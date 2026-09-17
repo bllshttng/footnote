@@ -221,6 +221,7 @@ pub mod resume_receipt;
 pub mod resume_wake;
 pub mod review_freshness;
 pub mod review_summary;
+pub mod rm_receipt;
 pub mod roster_progress;
 pub mod roster_reap;
 pub mod route_slot;
