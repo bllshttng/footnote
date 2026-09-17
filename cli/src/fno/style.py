@@ -386,6 +386,14 @@ def format_violations(violations: list[Violation], surface: str | None = None) -
                 "This refusal does that with every word it names.",
             ]
         )
+    if surface == "markdown":
+        # A --diff-base run reads added lines past any marker, so the escape
+        # advice would send the author to a fix that changes nothing.
+        lines.append(
+            'run "fno doctor lint style --surface markdown --files <path>" '
+            "to check a rewrite first."
+        )
+        return "\n\n".join(lines)
     lines.append("add a style-exception line with a reason, or pass --style-exception.")
     # Name the surface explicitly: --stdin defaults to mail, which checks the
     # word cap only, so the bare command would pass a prose rewrite vacuously.

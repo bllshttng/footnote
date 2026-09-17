@@ -854,3 +854,13 @@ def test_fix_negation_control_rewrites_and_keeps_not():
     fixed, _residue = style.fix(body, surface="pr-body")
     assert fixed != body
     assert _negation_counts(fixed)["not"] == 2
+
+
+def test_markdown_refusal_offers_no_marker_escape():
+    """A --diff-base run reads past a marker, so the refusal must not offer one."""
+    violations = style.check("One line; two clauses.", surface="markdown")
+    markdown = style.format_violations(violations, surface="markdown")
+    assert "style-exception" not in markdown
+    assert "--surface markdown --files" in markdown
+    # Positive control: the other surfaces still offer the escape.
+    assert "style-exception" in style.format_violations(violations, surface="pr-body")

@@ -1533,7 +1533,7 @@ def test_preamble_budget_check_is_dispatchable(monkeypatch) -> None:
 
 def test_preamble_budget_wrapper_propagates_the_gate_verdict(tmp_path, monkeypatch) -> None:
     """Exit 1 from the gate exits 1 here; a missing gate script is exit 2."""
-    from fno import lint_cli, paths
+    from fno import paths
 
     monkeypatch.setattr(paths, "resolve_repo_root", lambda: tmp_path)
     script = tmp_path / "scripts" / "ci" / "check-preamble-budget.sh"
@@ -1565,7 +1565,7 @@ def test_internal_refs_check_is_dispatchable(monkeypatch) -> None:
 
 def test_internal_refs_wrapper_propagates_the_gate_verdict(tmp_path, monkeypatch) -> None:
     """Exit 1 from the gate exits 1 here; a missing gate script is exit 2."""
-    from fno import lint_cli, paths
+    from fno import paths
 
     monkeypatch.setattr(paths, "resolve_repo_root", lambda: tmp_path)
     script = tmp_path / "scripts" / "ci" / "check-no-internal-refs.sh"

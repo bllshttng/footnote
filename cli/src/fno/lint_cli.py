@@ -1181,7 +1181,9 @@ def style(
             # exit 2 for. Exiting 1 filed it as a finding against the author.
             # The paths are named, because "1 file(s)" is not investigable.
             if violations:
-                typer.echo(style_mod.format_violations(violations), err=True)
+                typer.echo(
+                    style_mod.format_violations(violations, surface=surface), err=True
+                )
             typer.echo(
                 "style: git and this gate disagree about how many lines these "
                 "file(s) added, so some added lines went unread. That is a "
