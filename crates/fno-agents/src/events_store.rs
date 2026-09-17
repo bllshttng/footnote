@@ -133,6 +133,7 @@ fn open_store(store: &Path) -> Result<Connection, String> {
              line TEXT NOT NULL
          ) WITHOUT ROWID;
          CREATE INDEX IF NOT EXISTS events_scope_type_ts ON events(scope, type, ts_ms);
+         CREATE INDEX IF NOT EXISTS events_type_ts ON events(type, ts_ms);
          CREATE TABLE IF NOT EXISTS ingest_cursor (
              dev INTEGER NOT NULL,
              ino INTEGER NOT NULL,
@@ -158,6 +159,68 @@ pub(crate) fn open_read(store: &Path) -> Result<Connection, String> {
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|e| e.to_string())?;
     Ok(conn)
+}
+
+/// Every review-evidence row type a loopcheck parser reads from journal text.
+/// One list, so a call site picks a source, never a vocabulary.
+pub(crate) const REVIEW_EVENT_TYPES: &[&str] = &[
+    "review_attestation",
+    "review_coverage",
+    "review_finding",
+    "review_finding_resolved",
+    "review_invocation",
+];
+
+/// The journal text for `types`, complete across rotation generations.
+///
+/// Rotation ingests a generation into the store before the rename, so the
+/// store holds every row that left the live file. The text is those rows (the
+/// store rows whose line is not in the live file, oldest first) followed by
+/// the live file verbatim. The live generation reads exactly as it always
+/// did: append order, identical rows and an unterminated tail all survive.
+/// The read never syncs, so a reader never writes. Any store failure reads
+/// the live file alone, which never tightens a gate.
+pub(crate) fn journal_text(journal: &Path, types: &[&str]) -> String {
+    let live = live_journal(journal);
+    let live_text = std::fs::read_to_string(&live).unwrap_or_default();
+    let store = store_path(&live);
+    if !store.is_file() {
+        return live_text;
+    }
+    let in_live: std::collections::HashSet<Vec<u8>> = live_text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| Sha256::digest(l.as_bytes()).to_vec())
+        .collect();
+    let history = open_read(&store).ok().and_then(|conn| {
+        let placeholders = (1..=types.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        // Corrupt and typeless rows store with an empty type; parsers count
+        // our own corrupted rows for their notices.
+        let sql = format!(
+            "SELECT row_hash, line FROM events WHERE type IN ({placeholders}, '') ORDER BY ts_ms"
+        );
+        let mut stmt = conn.prepare(&sql).ok()?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(types), |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+            })
+            .ok()?
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        Some(rows)
+    });
+    let mut text = String::new();
+    for (hash, line) in history.unwrap_or_default() {
+        if !in_live.contains(&hash) {
+            text.push_str(&line);
+            text.push('\n');
+        }
+    }
+    text.push_str(&live_text);
+    text
 }
 
 fn ingest_file(tx: &Transaction, path: &Path, now_ms: i64) -> Result<FileTally, String> {
@@ -539,6 +602,78 @@ mod tests {
         let err = sync(&live).unwrap_err();
         assert!(err.contains("ephemeral"), "err: {err}");
         assert!(!store_path(&live).exists(), "no store was created");
+    }
+
+    /// A journal whose review row rotated out: live lacks it, `.1` holds it.
+    fn rotated_review_journal(dir: &Path) -> PathBuf {
+        let live = journal(dir, "events.jsonl");
+        append(
+            &live,
+            &[
+                json!({"ts": "2026-09-15T08:26:07Z", "type": "review_attestation",
+                     "source": "test", "data": {"reviewer": "code-review",
+                     "branch": "feature/x", "head_sha": "abc1234", "verdict": "pass"}}),
+            ],
+        );
+        let blob = "x".repeat(4096);
+        let filler: Vec<_> = (0..2100)
+            .map(|n| {
+                json!({"ts": "2026-09-15T08:30:00Z", "type": "generation_marker",
+                            "source": "test", "data": {"n": n, "blob": blob}})
+            })
+            .collect();
+        append(&live, &filler);
+        crate::events::EventEmitter::new(&live, "test")
+            .emit("operator_decision", &json!({"decision_id": "d-1"}))
+            .unwrap();
+        let live_text = std::fs::read_to_string(&live).unwrap();
+        let rotated_text = std::fs::read_to_string(dir.join("events.jsonl.1")).unwrap();
+        assert!(
+            !live_text.contains("abc1234"),
+            "the row rotated out of the live file"
+        );
+        assert!(
+            rotated_text.contains("abc1234"),
+            "the rotated generation holds it"
+        );
+        live
+    }
+
+    #[test]
+    fn journal_text_reads_a_row_that_rotated_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = rotated_review_journal(dir.path());
+        let text = journal_text(&live, REVIEW_EVENT_TYPES);
+        assert_eq!(text.matches("abc1234").count(), 1);
+        assert!(
+            !text.contains("generation_marker"),
+            "history carries only the asked types"
+        );
+        // A sync puts the live tail in the store too; it still reads once.
+        sync(&live).unwrap();
+        assert_eq!(journal_text(&live, REVIEW_EVENT_TYPES), text);
+        assert_eq!(
+            crate::review_summary::summary_line(&text, "feature/x", "abc1234").as_deref(),
+            Some("Reviewed at abc1234: 1 rounds, 0 findings disposed."),
+        );
+    }
+
+    #[test]
+    fn journal_text_falls_back_to_the_live_file_when_the_store_breaks() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = journal(dir.path(), "events.jsonl");
+        append(&live, &[checkin("2026-09-10T12:00:00Z", "x-aaaa", "live")]);
+        std::fs::create_dir(dir.path().join("events.db")).unwrap();
+        let text = journal_text(&live, REVIEW_EVENT_TYPES);
+        assert_eq!(text, std::fs::read_to_string(&live).unwrap());
+    }
+
+    #[test]
+    fn journal_text_creates_no_store_for_an_absent_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = journal(dir.path(), "events.jsonl");
+        assert_eq!(journal_text(&live, REVIEW_EVENT_TYPES), "");
+        assert!(!store_path(&live).exists());
     }
 
     #[test]

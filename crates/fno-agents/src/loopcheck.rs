@@ -2110,10 +2110,13 @@ pub fn unattested_reviewers_scan(
     if reviewers.is_empty() {
         return (Vec::new(), 0);
     }
-    let Ok(content) = std::fs::read_to_string(events_path) else {
-        // no evidence file -> gate unmet (fail closed)
+    // Read across rotation generations: a round that rotated out still counts.
+    let content =
+        crate::events_store::journal_text(events_path, crate::events_store::REVIEW_EVENT_TYPES);
+    if content.is_empty() {
+        // no evidence -> gate unmet (fail closed)
         return (unsatisfied_all(), 0);
-    };
+    }
     let mut malformed = 0usize;
     // Single pass (gemini review): record the LATEST verdict per reviewer at the
     // current head. events.jsonl is append-ordered, so a later attestation
@@ -2287,9 +2290,11 @@ struct OpenFinding {
 /// failure yields no findings (the gate is only ADDED by evidence, never
 /// invented from an unreadable file).
 fn open_review_findings(events_path: &Path, node: &str) -> (Vec<OpenFinding>, usize) {
-    let Ok(content) = std::fs::read_to_string(events_path) else {
+    let content =
+        crate::events_store::journal_text(events_path, crate::events_store::REVIEW_EVENT_TYPES);
+    if content.is_empty() {
         return (Vec::new(), 0);
-    };
+    }
     // Preserve first-seen order via a Vec of (id, first_line); a later duplicate
     // id (shouldn't happen - ids are minted) just refreshes the first_line.
     let mut findings: Vec<(String, String)> = Vec::new();
@@ -2511,7 +2516,8 @@ fn read_pr_info(
     // consumer below (the classify_coverage local axis, the emitted
     // review_coverage row). Fail-closed inside: any git failure answers
     // not-tiled and today's single-attestation rule stands alone.
-    let events_text_for_tiling = std::fs::read_to_string(events_path).unwrap_or_default();
+    let events_text_for_tiling =
+        crate::events_store::journal_text(events_path, crate::events_store::REVIEW_EVENT_TYPES);
     let mut tiling = compute_range_tiling(
         git_bin,
         cwd,
@@ -2630,7 +2636,7 @@ fn read_pr_info(
     // axis) plus the GitHub review arrays (its github_app axis). Read once;
     // a missing file is empty (the local axis then contributes nothing, which
     // is correct - no evidence of a local review).
-    let events_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    let events_text = events_text_for_tiling.clone();
     // Authorship carry-forward: when this process resolved no manifest
     // session, the previous coverage row's recorded author FOR THIS PR (the
     // scan filters on the number; the events file is project-wide) stands
