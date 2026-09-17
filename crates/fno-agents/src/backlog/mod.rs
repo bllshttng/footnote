@@ -478,6 +478,7 @@ pub(crate) struct WriteReport {
 }
 
 fn confirm_ids_landed(connection: &Connection, report: &WriteReport) -> Result<(), String> {
+    const SQLITE_BIND_BATCH: usize = 900;
     let ids: Vec<&str> = report
         .present_ids
         .iter()
@@ -488,20 +489,24 @@ fn confirm_ids_landed(connection: &Connection, report: &WriteReport) -> Result<(
         return Ok(());
     }
 
-    let placeholders = std::iter::repeat_n("?", ids.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let query = format!("SELECT id FROM nodes WHERE id IN ({placeholders})");
-    let mut statement = connection
-        .prepare(&query)
-        .map_err(|error| error.to_string())?;
-    let stored: std::collections::BTreeSet<String> = statement
-        .query_map(rusqlite::params_from_iter(ids.iter().copied()), |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(|error| error.to_string())?
-        .collect::<Result<_, _>>()
-        .map_err(|error| error.to_string())?;
+    let mut stored = std::collections::BTreeSet::new();
+    for batch in ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!("SELECT id FROM nodes WHERE id IN ({placeholders})");
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter().copied()), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            stored.insert(row.map_err(|error| error.to_string())?);
+        }
+    }
     let missing: Vec<&str> = report
         .present_ids
         .iter()
@@ -1764,6 +1769,21 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "idea");
+    }
+
+    #[test]
+    fn readback_batches_more_ids_than_sqlite_bind_limit() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let connection = open(&graph).unwrap();
+        let report = WriteReport {
+            present_ids: (0..1001).map(|i| format!("id-{i}")).collect(),
+            deleted_ids: Vec::new(),
+        };
+
+        let error = confirm_ids_landed(&connection, &report).unwrap_err();
+
+        assert!(error.contains("id-0"));
     }
 
     #[test]
