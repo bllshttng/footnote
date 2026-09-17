@@ -60,7 +60,9 @@ def test_attestation_chain_reads_a_row_that_rotated_out(monkeypatch, tmp_path: P
     if binary is None:
         pytest.skip("fno-agents binary not built (cargo build -p fno-agents); set FNO_AGENTS_BIN")
 
-    live = tmp_path / "events.jsonl"
+    # A '#' in the path would end a hand-built file: URI early.
+    live = tmp_path / "space#1" / "events.jsonl"
+    live.parent.mkdir()
     row = {
         "ts": "2026-09-15T08:26:07Z",
         "type": "review_attestation",
@@ -74,10 +76,10 @@ def test_attestation_chain_reads_a_row_that_rotated_out(monkeypatch, tmp_path: P
         check=True,
         capture_output=True,
     )
-    live.rename(tmp_path / "events.jsonl.1")
+    live.rename(live.parent / "events.jsonl.1")
     live.write_text("", encoding="utf-8")
     assert "abc1234" not in live.read_text(encoding="utf-8")
-    assert "abc1234" in (tmp_path / "events.jsonl.1").read_text(encoding="utf-8")
+    assert "abc1234" in (live.parent / "events.jsonl.1").read_text(encoding="utf-8")
 
     from fno.pr import _coverage_gate, _reviews
 

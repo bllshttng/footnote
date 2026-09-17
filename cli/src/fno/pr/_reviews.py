@@ -193,7 +193,7 @@ def journal_lines(path: Path, types: tuple[str, ...]) -> Iterator[str]:
         marks = ",".join("?" * len(types))
         conn = None
         try:
-            conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+            conn = sqlite3.connect(store.as_uri() + "?mode=ro", uri=True)
             rows = conn.execute(
                 f"SELECT line FROM events WHERE type IN ({marks}, '') ORDER BY ts_ms", types
             ).fetchall()
