@@ -16,7 +16,7 @@ def test_backend_visible_node_reads_active(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     # Absent from every file on disk: only the backend holds it.
-    node = {"id": "x-00c5", "project": "fno", "cwd": str(repo_root)}
+    node = {"id": "probe-node", "project": "fno", "cwd": str(repo_root)}
     monkeypatch.setattr(
         "fno.graph.store.read_graph", lambda *a, **k: [node]
     )
