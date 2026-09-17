@@ -2271,6 +2271,24 @@ where
         .map(|entry| (entry.name.clone(), identity_signature(entry)))
         .collect::<BTreeMap<_, _>>();
     let out = f(&mut registry);
+    // Every transition into Exited carries its date, whichever closure wrote
+    // it. A row already Exited with no stamp stays unstamped: a stamp written
+    // now would date an old exit to an unrelated write.
+    let was_exited: std::collections::HashSet<&str> = before_entries
+        .iter()
+        .filter(|b| b.status == AgentStatus::Exited)
+        .map(|b| b.name.as_str())
+        .collect();
+    let mut stamp = None;
+    for entry in &mut registry.entries {
+        if entry.status == AgentStatus::Exited
+            && entry.exited_at.is_none()
+            && !was_exited.contains(entry.name.as_str())
+        {
+            let now = stamp.get_or_insert_with(crate::daemon::now_rfc3339_like);
+            entry.exited_at = Some(now.clone());
+        }
+    }
     // Write-path harness sync (AC6-FR): a closure that mutated a legacy
     // session-id field (the stream-json adopt path writes claude_session_uuid on a
     // uuid-less bg row) must land the value in harness_session_id before serde
