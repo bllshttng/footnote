@@ -7692,16 +7692,12 @@ pub(crate) fn decide_with_payload(
         std::time::Instant::now() + STOPGATE_FIRE_BUDGET,
         reserve_ms,
     );
-    if let Some(message) = crate::loops_pause::pause_message() {
+    if let Some(message) = crate::loops_pause::pause_message(&parsed.cwd) {
         return (0, paused_output(&parsed.driver, &message));
     }
     // The king uses a separate manifest and decision path.
     if parsed.driver == "king" {
         return king_decide::king_decide(&parsed);
-    }
-    // A backgrounded cargo held on build admission is not a stuck worker.
-    if let Some(message) = crate::test_run::build_hold_message(&parsed.cwd) {
-        return (0, paused_output(&parsed.driver, &message));
     }
 
     let state_path = parsed.state_path.clone();
