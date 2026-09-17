@@ -9,7 +9,7 @@ Grading lenses for the blueprint judge. The judge reads `lenses/`: one file per 
 
 Apply the lenses by hand with a forced run: `fno doctor observer judge --plan <plan path> --node <node id> --force`.
 
-The planner never loads these files. A grader read during drafting turns into a checklist the author writes to. The drafting lenses are the `fno:pm-node` and `fno:pm-epic` skills of this pack.
+The planner never loads these files. A grader read during drafting turns into a checklist the author writes to. The drafting lenses are the `pm-plan-draft` skill of this pack, which the blueprint skill links by condition.
 
 ## Sources
 

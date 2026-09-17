@@ -2958,3 +2958,18 @@ mod tier_remap_guard {
         refuse_inherited_tier_remap_with(&params, env).expect("non-claude unaffected");
     }
 }
+
+#[test]
+fn agent_refusal_names_the_codex_role_form() {
+    let line = agent_unsupported_line("codex", "fno:architect").expect("codex refusal");
+    assert!(line.contains(".codex/agents/architect.toml"));
+    assert!(line.contains("agent_type architect"));
+    assert!(
+        agent_unsupported_line("agy", "fno:architect").is_none(),
+        "agy keeps the generic refusal"
+    );
+    assert!(
+        agent_unsupported_line("opencode", "fno:architect").is_none(),
+        "opencode keeps the generic refusal"
+    );
+}

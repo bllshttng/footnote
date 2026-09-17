@@ -171,6 +171,12 @@ REASON: <description>             # if BLOCKED
 UNBLOCKS_AFTER: <prerequisite>    # if BLOCKED
 ```
 
+### Planning Agents
+
+| Agent | Model | Color | Tools | Purpose |
+|-------|-------|-------|-------|---------|
+| `architect` | opus | blue | all but Agent, Task, NotebookEdit | Blueprint author: runs fno:blueprint, reads drafting lenses by condition, writes the plan file, reads it back |
+
 ### Execution Agents
 
 | Agent | Model | Color | Tools | Purpose |

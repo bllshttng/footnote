@@ -10,3 +10,5 @@ footnote_compat:
 skills:
   - id: pm-plan-review
     source: skills/pm-plan-review
+  - id: pm-plan-draft
+    source: skills/pm-plan-draft
