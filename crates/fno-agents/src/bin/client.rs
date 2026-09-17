@@ -137,36 +137,25 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // `backlog-update`: the native patch door. Transport-only, so it
-    // dispatches here and not in `run`: every arm in `run` is a client verb
-    // the verb-surface ratchet enumerates against ALL_CLIENT_ACTIONS, and the
-    // shrink law (d-fe66560a) bars adding one. The Python backlog bridge and
-    // the lifecycle verbs reach this arm through resolve_binary; `fno agents
-    // backlog-update` is not a supported client spelling, and the refusal for
-    // it names nothing because the surface never advertised it.
+    // Transport-only early dispatches, before the runtime builds: every arm
+    // in `run` is a client verb the verb-surface ratchet enumerates against
+    // ALL_CLIENT_ACTIONS, and the shrink law (d-fe66560a) bars adding one, so
+    // these arms register no verb and no advertised spelling exists. Callers
+    // reach them through resolve_binary or the hook wrappers; each module's
+    // own doc carries the shape it answers.
     if args.first().map(String::as_str) == Some("backlog-update") {
         std::process::exit(fno_agents::backlog::patch::run_update(&args[1..]));
     }
-    // `surface-check`: the plan surface: shape check plus the cross-language
-    // symbol walk (see surface_check.rs doc). Dispatched BEFORE `run` like
-    // backlog-update: the action list is shrink-only (d-fe66560a), so this
-    // verb is never registered and never routed. scripts/validate-plan.sh
-    // shells HERE and reads the E/W/X/O/U line protocol back.
+    // scripts/validate-plan.sh shells HERE and reads the E/W/X/O/U line
+    // protocol back.
     if args.first().map(String::as_str) == Some("surface-check") {
         std::process::exit(fno_agents::surface_check::run_surface_check(&args[1..]));
     }
-    // `context-run`: one runner for every fno SessionStart/PostCompact context
-    // producer (see context_run.rs doc). Transport-only, dispatched BEFORE
-    // `run` like surface-check: hooks/context-run.sh is the only caller and
-    // the action list is shrink-only (d-fe66560a), so this verb is never
-    // registered and never routed.
+    // hooks/context-run.sh is the only caller.
     if args.first().map(String::as_str) == Some("context-run") {
         std::process::exit(fno_agents::context_run::run_context_run(&args[1..]));
     }
-    // `hook`: the per-turn hooks as native entries. Transport, not a
-    // client verb - dispatched here so the runtime never builds for a fire
-    // that answers in microseconds, and the verb-surface ratchet never sees
-    // it (shrink law d-fe66560a).
+    // A fire answers in microseconds; the runtime never builds for one.
     if args.first().map(String::as_str) == Some("hook") {
         let code = match args.get(1).map(String::as_str) {
             Some("king-guard") => fno_agents::hook::king_guard::run(&args[2..]),
@@ -182,13 +171,7 @@ fn main() {
         .enable_all()
         .build()
         .expect("build runtime");
-    // `evals-arm`: the eval bank's scheduled writer for the pr-watch
-    // tick. Transport-only, so it dispatches here and not in `run`: every arm
-    // in `run` is a client verb the verb-surface ratchet enumerates against
-    // ALL_CLIENT_ACTIONS, and the shrink law (d-fe66560a) bars adding one -
-    // the same door backlog-update uses. The Python evals phase reaches this
-    // arm through resolve_binary; `fno agents evals-arm` is not a supported
-    // client spelling.
+    // The Python evals phase reaches this arm through resolve_binary.
     if args.first().map(String::as_str) == Some("evals-arm") {
         std::process::exit(fno_agents::evals_arm::run_evals_arm(&args[1..]));
     }
