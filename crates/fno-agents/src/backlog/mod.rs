@@ -22,6 +22,7 @@ pub mod patch;
 pub mod pull_requests;
 pub mod receipt;
 pub mod relations;
+pub mod search;
 pub mod sessions;
 
 use crate::backlog::model::Node;
@@ -44,6 +45,7 @@ pub const TABLE_OWNERS: &[(&str, &str)] = &[
     ("node_provenance", "backlog/nodes.rs"),
     ("supersessions", "backlog/nodes.rs"),
     ("relations", "backlog/relations.rs"),
+    ("nodes_fts", "backlog/search.rs"),
     ("comments", "backlog/comments.rs"),
     ("encounters", "backlog/encounters.rs"),
     ("pull_requests", "backlog/pull_requests.rs"),
@@ -142,6 +144,7 @@ pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=FULL;
              PRAGMA foreign_keys=ON;
+             PRAGMA recursive_triggers=ON;
              CREATE TABLE IF NOT EXISTS graph_meta (
                  key TEXT PRIMARY KEY,
                  value TEXT NOT NULL
@@ -154,6 +157,7 @@ pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
     encounters::ensure_table(&connection)?;
     pull_requests::ensure_table(&connection)?;
     relations::ensure_table(&connection)?;
+    search::ensure_table(&connection)?;
     import_if_needed(&mut connection, graph)?;
     decisions::ensure_table(&connection)?;
     decisions::import_if_needed(&mut connection, graph)?;
