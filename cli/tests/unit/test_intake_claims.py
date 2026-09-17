@@ -1912,17 +1912,25 @@ def test_idea_path_survives_scorer_failure_exit_zero(tmp_path, monkeypatch):
 
 def test_warn_similar_nodes_includes_archived_nodes(monkeypatch, tmp_path, capsys):
     # codex P2: a shipped-and-archived node is the answer to a duplicate filing,
-    # but once `archive --apply` moves it to graph-archive.json the working graph
-    # alone no longer sees it. The dedup scan must read the archive too.
-    archive = tmp_path / "graph-archive.json"
-    archive.write_text(
+    # but once the sweep stamps `archived_at` the default reads no longer see
+    # it. The dedup scan must read the store's archived residents too.
+    from fno.graph.store import _worker_binary
+
+    if _worker_binary() is None:
+        pytest.skip("no fno-agents-worker binary; build with `cargo build -p fno-agents`")
+    graph = tmp_path / "graph.json"
+    graph.write_text(
         json.dumps({"entries": [
-            _node("arch1", title="dedup gate for backlog filings", status="done", pr_number=99),
+            _node(
+                "arch1", title="dedup gate for backlog filings", status="done",
+                pr_number=99, archived_at="2026-08-01T00:00:00Z",
+            ),
         ]})
         + "\n"
     )
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: archive)
-    # Working graph is empty; the only candidate lives in the archive.
+    monkeypatch.setattr("fno.paths.graph_json", lambda: graph)
+    monkeypatch.setattr("fno.paths.state_dir", lambda: tmp_path)
+    # Working graph is empty; the only candidate is an archived resident.
     new = _node("new", title="dedup gate for backlog node filings", status="idea")
     _warn_similar_nodes(new, [], intake_hint=False)
     err = capsys.readouterr().err
@@ -1971,18 +1979,15 @@ def test_safe_stderr_warn_swallows_broken_stream(monkeypatch):
 
 
 def test_entries_with_archive_degrades_when_archive_read_raises(monkeypatch, tmp_path):
-    # codex P2: a malformed/unreadable archive must not suppress scoring of the
+    # codex P2: an unreadable store read must not suppress scoring of the
     # valid working graph; the contract is best-effort degrade.
+    import fno.graph.api as api
     from fno.graph import store
 
-    bad_archive = tmp_path / "graph-archive.json"
-    bad_archive.write_text('{"entries": []}\n')
-    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: bad_archive)
+    def boom(**_kwargs):
+        raise RuntimeError("store unreadable")
 
-    def boom(_path=None):
-        raise RuntimeError("archive unreadable")
-
-    monkeypatch.setattr(store, "read_graph", boom)
+    monkeypatch.setattr(api, "wire_rows", boom)
     working = [_node("live1", title="some live node", status="idea")]
     assert store.entries_with_archive(working) == working  # degraded, did not raise
 

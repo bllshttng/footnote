@@ -149,14 +149,14 @@ pub fn run_graph_get(args: &[String]) -> i32 {
         return 1;
     }
 
-    let mut entries = match crate::backlog::api::rows(&crate::backlog::api::Store::new(&graph_path))
-    {
-        Ok(e) => e,
-        Err(err) => {
-            eprintln!("fno-agents graph-get: {}", err.0);
-            return 1;
-        }
-    };
+    let mut entries =
+        match crate::backlog::api::rows(&crate::backlog::api::Store::new(&graph_path), false) {
+            Ok(e) => e,
+            Err(err) => {
+                eprintln!("fno-agents graph-get: {}", err.0);
+                return 1;
+            }
+        };
     graph_store::apply_readiness_overlay(&mut entries);
 
     let (out, any_missing) = serve(&mut entries, &ids);

@@ -157,6 +157,7 @@ pub(crate) fn open(graph: &Path) -> Result<Connection, String> {
     import_if_needed(&mut connection, graph)?;
     decisions::ensure_table(&connection)?;
     decisions::import_if_needed(&mut connection, graph)?;
+    archive_import_if_needed(&mut connection, graph)?;
     Ok(connection)
 }
 
@@ -244,6 +245,69 @@ fn import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), Str
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// The one-shot archive import: a sibling graph-archive.json folds its
+/// entries into the same tables with `archived_at` stamped (the row's own
+/// stamp, else the import time). An id already present in `nodes` refuses
+/// the whole import and leaves the meta unstamped, so the collision stays
+/// loud on every open.
+fn archive_import_if_needed(connection: &mut Connection, graph: &Path) -> Result<(), String> {
+    if meta(connection, "archive_imported")?.is_some() {
+        return Ok(());
+    }
+    let archive = graph.with_file_name("graph-archive.json");
+    let mut rows: Vec<Value> = Vec::new();
+    if archive.exists() {
+        let text = std::fs::read_to_string(&archive).map_err(|error| {
+            format!("archive import: cannot read {}: {error}", archive.display())
+        })?;
+        let document: Value = serde_json::from_str(&text)
+            .map_err(|error| format!("{} is invalid JSON: {error}", archive.display()))?;
+        rows = document
+            .get("entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+    }
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let mut next_ordinal: i64 = transaction
+        .query_row("SELECT COALESCE(MAX(ordinal), -1) FROM nodes", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|error| error.to_string())?
+        + 1;
+    for row in &rows {
+        let Some(id) = row.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let exists: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM nodes WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if exists > 0 {
+            return Err(format!(
+                "archive import: id {id} already exists in nodes; refusing import from {}",
+                archive.display()
+            ));
+        }
+        let Ok(mut node) = Node::from_json(row) else {
+            continue;
+        };
+        node.ordinal = next_ordinal;
+        next_ordinal += 1;
+        if node.archived_at.is_none() {
+            node.archived_at = Some(crate::graph_store::now_isoformat());
+        }
+        save_aggregate(&transaction, &node).map_err(|error| format!("archive import: {error}"))?;
+    }
+    stamp_meta(&transaction, "archive_imported", "1")?;
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 /// Schema 3: a populated schema-2 store under the json backend rebuilds
@@ -860,6 +924,21 @@ pub fn export_now(graph: &Path) -> Result<String, String> {
     // Best-effort: the JSON write is the deliverable (AC21's exit code reads
     // it); a failed snapshot still leaves graph.db itself (WAL) in place.
     let _ = snapshot_db(graph, now_ms());
+    // Until the JSON leg is deleted (task 17.1), `export --now` is the one
+    // writer of the advisory archive file, rebuilt from archived residents.
+    let archived: Vec<Value> = entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("archived_at")
+                .map_or(false, |stamp| !stamp.is_null())
+        })
+        .cloned()
+        .collect();
+    let _ = crate::graph_store::write_atomic(
+        &graph.with_file_name("graph-archive.json"),
+        &crate::graph_store::serialize_graph_file(&archived),
+    );
     let connection = open(graph)?;
     let stamped = now_ms().to_string();
     connection

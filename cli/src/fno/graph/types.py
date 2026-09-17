@@ -344,6 +344,10 @@ class Node(BaseModel):
     # view; wedge verbs (requeue, hold, dispatch) read this one.
     persisted_status: Optional[str] = None
 
+    # Archive residency stamp. Non-null means the node answers only
+    # include_archived reads; null/absent is live.
+    archived_at: Optional[str] = None
+
     model_config = {"extra": "allow"}
 
     @field_validator("rank", mode="before")

@@ -312,7 +312,6 @@ def test_build_report_checks_source_sync_after_post_merge_refresh(
         "_plugin_hooks_launch_report",
         "_pre_push_hook_report",
         "_groom_health",
-        "_archive_id_collisions",
         "_launch_agent_failures",
         "_plugin_cache_report",
         "_silent_switch_report",

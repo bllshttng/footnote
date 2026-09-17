@@ -580,7 +580,7 @@ pub async fn run_feed(rest: &[String], home: &AgentsHome) -> i32 {
         if !path.exists() {
             (Vec::new(), Some("graph store skipped (absent)".to_string()))
         } else {
-            match crate::backlog::api::rows(&crate::backlog::api::Store::new(&path)) {
+            match crate::backlog::api::rows(&crate::backlog::api::Store::new(&path), false) {
                 Ok(list) => (list, None),
                 Err(e) => (Vec::new(), Some(format!("graph store skipped ({})", e.0))),
             }

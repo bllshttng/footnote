@@ -870,23 +870,17 @@ def _graph_entries(*, required: bool = False) -> "list[dict]":
         entries = graph_store.read_graph_strict(graph_store.GRAPH_JSON)
         if not required:
             return graph_store.entries_with_archive(entries)
-        # entries_with_archive reads the ARCHIVE softly and degrades on any
-        # failure, so a torn graph-archive.json would drop every archived
-        # node's decisions from a backfill that still printed "+0" and exited
-        # 0. Both graph files, or neither: a guard on one is decorative.
-        from fno.paths import graph_archive_json
+        # The archive read is strict too (read_archive_entries raises on a
+        # store failure), so a torn store cannot drop every archived node's
+        # decisions from a backfill that still printed "+0" and exited 0.
+        # Both halves of the store, or neither: a guard on one is decorative.
+        from fno.paths import graph_json
 
-        archive_path = graph_archive_json()
-        if not archive_path.exists():
-            return entries
+        archived = graph_store.read_archive_entries(path=graph_json())
         live = {e.get("id") for e in entries if isinstance(e, dict)}
         return [
             *entries,
-            *(
-                a
-                for a in graph_store.read_graph_strict(archive_path)
-                if isinstance(a, dict) and a.get("id") not in live
-            ),
+            *(a for a in archived if isinstance(a, dict) and a.get("id") not in live),
         ]
     except Exception as exc:  # noqa: BLE001 - the graph is advisory to a string query
         if required:

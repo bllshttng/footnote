@@ -484,8 +484,7 @@ class _Keeper:
 
     # -- typed helpers -----------------------------------------------------
     # The keeper is single-graph (it binds to whatever --graph named), so
-    # read/read_file/begin carry no path; only read_archive does, because the
-    # archive is a DIFFERENT file than the one the keeper owns.
+    # read/read_file/begin carry no path.
 
     def read(self, path: Path, *, strict: bool = False, keep_malformed: bool = False) -> dict:
         del path  # single-graph keeper: the bound graph IS the target
@@ -1073,26 +1072,6 @@ def _read_json(path: Path) -> list[dict]:
     return entries
 
 
-def _write_json(entries: list[dict], path: Path) -> None:
-    """Raw atomic write of an entries file. ARCHIVE ONLY: the working graph's
-    write path is the keeper's publish pipeline, and hand-rolling one here is
-    exactly the two-write window the port retired. The archive store keeps
-    its own readers and lifetime (out of the port's scope), and its writers
-    keep this primitive."""
-    path = Path(path)
-    data = {"entries": entries}
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    try:
-        tmp.write_text(json.dumps(data, indent=2) + "\n")
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
-
-
 def _graph_lock_path(path: Path) -> Path:
     """The keeper's lockfile for a graph file: ``<canonical path>.lock``.
 
@@ -1176,16 +1155,22 @@ def served_store_path(path: Path) -> Path:
     return path
 
 
-def read_archive_entries() -> list[dict]:
-    """The archived nodes, best-effort: an absent archive is []. Callers that
-    may test many ids read once and pass the list to
-    :func:`resolve_node_with_archive`."""
-    from fno.paths import graph_archive_json
+def read_archive_entries(path: Path | None = None) -> list[dict]:
+    """The archived residents. The archive lives in the same store as the
+    working graph (task 15.1), so one include_archived read answers both;
+    a store failure raises, an absent store is []. Callers that may test many
+    ids read once and pass the list to :func:`resolve_node_with_archive`."""
+    if path is None:
+        from fno.paths import graph_json
 
-    archive_path = graph_archive_json()
-    if not archive_path.exists():
-        return []
-    return read_graph(archive_path)
+        path = graph_json()
+    from fno.graph.api import wire_rows
+
+    return [
+        row
+        for row in wire_rows(include_archived=True, path=path)
+        if isinstance(row, dict) and row.get("archived_at")
+    ]
 
 
 def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[dict]:
@@ -1212,27 +1197,27 @@ def resolve_node_with_archive(node_id: str, archived: list[dict]) -> Optional[di
     )
 
 
-def entries_with_archive(entries: list) -> list:
-    """``entries`` plus archived nodes, the working graph winning on id.
+def entries_with_archive(entries: list, path: Path | None = None) -> list:
+    """``entries`` plus archived residents, the working graph winning on id.
 
-    Best-effort and read-only: an absent or unreadable archive degrades to
-    the working graph. The archive store keeps its own readers and lifetime;
-    only its bytes ride the keeper.
+    Read-only and advisory: a store failure degrades to the working graph.
+    The residents come from the same store as ``entries`` (task 15.1); only
+    archived ones are overlaid, so the merge cannot duplicate an id.
     """
-    from fno.paths import graph_archive_json
-
     try:
-        archive_path = graph_archive_json()
-        if not archive_path.exists():
-            return entries
+        if path is None:
+            from fno.paths import graph_json
+
+            path = graph_json()
+        from fno.graph.api import wire_rows
+
         live = {e.get("id") for e in entries if isinstance(e, dict)}
-        archived = _client_for(archive_path).request(
-            "read_archive", {"path": str(archive_path)}
-        )["entries"]
-        return [
-            *entries,
-            *(a for a in archived if isinstance(a, dict) and a.get("id") not in live),
+        archived = [
+            row
+            for row in wire_rows(include_archived=True, path=path)
+            if isinstance(row, dict) and row.get("archived_at")
         ]
+        return [*entries, *(a for a in archived if a.get("id") not in live)]
     except Exception:  # noqa: BLE001 - archive is advisory; any read failure degrades
         return entries
 
@@ -1243,7 +1228,7 @@ def read_graph_with_archive(path: Path | None = None) -> list[dict]:
         from fno.paths import graph_json
 
         path = graph_json()
-    return entries_with_archive(read_graph_strict(path))
+    return entries_with_archive(read_graph_strict(path), path)
 
 
 # ---------------------------------------------------------------------------

@@ -1223,20 +1223,6 @@ event_types:
           description: "The age gate this sweep used (--older-than-days)."
     consumers: [operator]
 
-  - name: graph_archive_ids_reminted
-    description: "One archive id-repair ran to completion (fno backlog archive-dedupe-ids --apply). A distinct type from graph_archive_swept: recording a repair as a zeroed sweep corrupts both 'did the daily sweep run' and per-gate hold statistics."
-    sources: [backlog]
-    data:
-      required: [remint_count]
-      properties:
-        remint_count:
-          type: integer
-          description: "Archive-side ids reminted to resolve a collision with a working-graph id."
-        remap:
-          type: object
-          description: "Map of old id to new id for every entry reminted this run."
-    consumers: [operator]
-
   - name: style_refusal
     description: "A mail body was refused by the seven-rule style gate before delivery. The retry rate (a refusal followed by a passing send in the same session) is a query over events.jsonl."
     sources: [target, subagent, test]

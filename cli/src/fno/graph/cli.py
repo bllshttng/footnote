@@ -285,12 +285,6 @@ def _resolve_entries_or_exit(id: str):
         raise typer.Exit(code=GRAPH_UNREADABLE_EXIT)
 
 
-def _archive_path() -> Path:
-    from fno.graph._constants import GRAPH_ARCHIVE_JSON
-
-    return GRAPH_ARCHIVE_JSON
-
-
 # -- relatedness sidecar (`fno backlog relatedness build|get`) --
 # A node-to-node relatedness map read by 's offer path and /triage.
 # Sidecar, not a graph mutation, so `build` writes unconditionally.
@@ -10486,27 +10480,20 @@ def cmd_archive(
         None, "--roadmap-id", help="Restrict the sweep to this roadmap group."
     ),
 ) -> None:
-    """Sweep old terminal (done/superseded) nodes into graph-archive.json.
+    """Sweep old terminal (done/superseded) nodes into archive residency:
+    same store, but they stop answering default reads.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
     from datetime import datetime, timezone
 
-    from fno.graph.store import (
-        commit_rows_via_store,
-        _apply_graph_defaults,
-        _read_json,
-        _write_json,
-        GraphCorruptError,
-    )
+    from fno.graph.store import commit_rows_via_store
     from fno.graph.archive import (
         _archive_bucket_counts,
         _last_sweep_line,
         _receipt_reason_order,
-        merge_into_archive,
         partition_for_archive,
         release_soft_edges,
         retire_stale_postmortems,
-        stamp_archived_at,
     )
 
     now = datetime.now(timezone.utc)
@@ -10532,7 +10519,7 @@ def cmd_archive(
         for reason in _receipt_reason_order(held):
             typer.echo(f"  held back ({reason}): {held[reason]}")
         typer.echo(f"  soft edges stripped from open nodes: {stripped}")
-        typer.echo(f"  last sweep: {_last_sweep_line(_archive_path(), now)}")
+        typer.echo(f"  last sweep: {_last_sweep_line(now)}")
 
     def _emit_swept_event(
         moved: int, held: dict[str, int], stripped: int = 0, mode: str = "apply"
@@ -10564,7 +10551,7 @@ def cmd_archive(
         to_archive, _rem, skipped = _split(entries)
         typer.echo(
             f"[dry-run] would archive {len(to_archive)} terminal node(s) "
-            f"older than {older_than_days}d to {_archive_path()}"
+            f"older than {older_than_days}d into archive residency"
         )
         typer.echo(f"  would retire {len(retired)} stale postmortem receipt(s)")
         _echo_receipt(len(to_archive), _archive_bucket_counts(skipped))
@@ -10580,37 +10567,37 @@ def cmd_archive(
     def mutator(entries):
         entries, retired = retire_stale_postmortems(entries, now)
         receipt["retired"] = len(retired)
-        to_archive, remaining, skipped = _split(entries)
+        to_archive, _remaining, skipped = _split(entries)
         receipt["held"] = _archive_bucket_counts(skipped)
         if not to_archive:
             return entries
         receipt["moved"] = len(to_archive)
 
-        # Soft-edge release BEFORE the archive write: strip the soon-archived
-        # ids from staying nodes' related lists / source_node_id, so the working
-        # graph never keeps a soft pointer at an archived id. One write, under
-        # the same lock as everything else here.
+        # Soft-edge release BEFORE the stamp: strip the soon-archived ids from
+        # staying nodes' related lists / source_node_id, so no live row keeps a
+        # soft pointer at an archived id. One write, under the same lock as
+        # everything else here.
         arch_ids = {e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")}
-        remaining, stripped = release_soft_edges(remaining, arch_ids)
+        patched, stripped = release_soft_edges(
+            [e for e in entries if e.get("id") not in arch_ids], arch_ids
+        )
         receipt["stripped"] = stripped
 
-        # Archive-first: append (deduped) and write the archive BEFORE returning
-        # `remaining` for the graph write, so a crash leaves a duplicate (healed
-        # on the next sweep) rather than a lost node.
-        archive_path = _archive_path()
-        try:
-            existing = _apply_graph_defaults(_read_json(archive_path))
-        except GraphCorruptError:
-            typer.echo(f"Warning: {archive_path} corrupt, starting fresh archive", err=True)
-            existing = []
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        stamped = stamp_archived_at(to_archive, now.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        _write_json(merge_into_archive(existing, stamped), archive_path)
-        return remaining
+        # One atomic write: candidates keep every field and gain archived_at;
+        # the stamped rows ARE the archive now, and write_changed deletes
+        # nothing, so ALL rows come back or the sweep would drop them.
+        stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        patched_by_id = {e.get("id"): e for e in patched if isinstance(e, dict)}
+        return [
+            {**e, "archived_at": stamp}
+            if isinstance(e, dict) and e.get("id") in arch_ids
+            else patched_by_id.get(e.get("id"), e)
+            for e in entries
+        ]
 
     commit_rows_via_store(_graph_path(), mutator)
     if receipt["moved"]:
-        typer.echo(f"Archived {receipt['moved']} terminal node(s) to {_archive_path()}")
+        typer.echo(f"Archived {receipt['moved']} terminal node(s)")
     else:
         typer.echo("No terminal nodes eligible to archive.")
     if receipt["retired"]:
@@ -10622,109 +10609,9 @@ def cmd_archive(
 
 
 @cli.command(
-    "archive-dedupe-ids",
-    hidden=True,
-    epilog="The id generator once checked only the working graph, so a freed "
-    "id could be reminted while the archive still held a different node under "
-    "it. mint_node_id now reads the archive too; this repairs what predates "
-    "that fix.",
-)
-def cmd_archive_dedupe_ids(
-    apply: bool = typer.Option(
-        False,
-        "--apply",
-        help="Remint the colliding archive entries (default: dry-run, report only).",
-    ),
-) -> None:
-    """Remint archive-side ids that collide with a live working-graph id.
-
-    Reminting the working-graph side would break every open reference to it
-    today (blockers, parents, branches, worktrees, open PRs); the archived
-    side is passive history, so IT moves, keeping its old id as
-    ``previous_id`` -- `fno backlog get <old-id>` still resolves it after.
-    """
-    from fno.graph.store import (
-        commit_rows_via_store,
-        _apply_graph_defaults,
-        _read_json,
-        _write_json,
-        GraphCorruptError,
-    )
-    from fno.graph.archive import remint_archive_collisions
-
-    archive_path = _archive_path()
-
-    def _read_archive_or_exit() -> list:
-        try:
-            return _apply_graph_defaults(_read_json(archive_path)) if archive_path.exists() else []
-        except GraphCorruptError:
-            typer.echo(f"Error: {archive_path} is corrupt", err=True)
-            raise typer.Exit(code=1)
-
-    if not apply:
-        working_ids = {
-            nid
-            for e in wire_rows(path=_graph_path())
-            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
-        }
-        _, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
-        typer.echo(f"[dry-run] would remint {len(remap)} archive id(s):")
-        for old, new in sorted(remap.items()):
-            typer.echo(f"  {old} -> {new}")
-        if remap:
-            typer.echo("Re-run with --apply to write it.")
-        return
-
-    remap_holder: dict = {}
-
-    def mutator(entries):
-        # Never mutates the working graph; runs under its lock only to
-        # serialize the archive read-modify-write against a concurrent
-        # `archive --apply`, which also writes archive.json under this same
-        # lock. Reading the archive HERE (not before the lock) is load-bearing:
-        # a pre-lock read would go stale under that race and the write below
-        # would clobber whatever the concurrent sweep just archived.
-        working_ids = {
-            nid for e in entries if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
-        }
-        patched, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
-        remap_holder.update(remap)
-        if remap:
-            archive_path.parent.mkdir(parents=True, exist_ok=True)
-            _write_json(patched, archive_path)
-        return entries
-
-    commit_rows_via_store(_graph_path(), mutator)
-
-    if not remap_holder:
-        typer.echo("No colliding archive ids found.")
-        return
-    typer.echo(f"Reminted {len(remap_holder)} archive id(s):")
-    for old, new in sorted(remap_holder.items()):
-        typer.echo(f"  {old} -> {new}")
-
-    try:
-        from fno.events import _build, append_event
-        from fno.paths import state_dir
-
-        # Its own event type, not a zeroed graph_archive_swept: a repair run
-        # recorded as a sweep with age gate 0 corrupts both "did the daily
-        # sweep run" and per-gate hold statistics - the structured channel
-        # lying the same way the bare "ok" stdout did.
-        event = _build(
-            "graph_archive_ids_reminted",
-            "backlog",
-            {"remint_count": len(remap_holder), "remap": remap_holder},
-        )
-        append_event(event, state_dir() / "events.jsonl")
-    except Exception:  # noqa: BLE001 - the repair itself must not fail on a bad event write
-        pass
-
-
-@cli.command(
     "album",
     hidden=True,
-    epilog="Read-only browse over graph-archive.json: the memento book of "
+    epilog="Read-only browse over the archive: the memento book of "
     "shipped work. A card with no gift says so - 43% of archived done nodes "
     "carry no PR, and a gap in the record is itself record. `fno backlog get "
     "<id>` still resolves one archived node by id; `fno backlog unarchive "
@@ -10748,6 +10635,7 @@ def cmd_album(
     214 in the archive against 1741 done) are not ships. Card fields: title,
     id, completed_at, and pr_url present only when one was recorded.
     """
+    from fno.graph.store import read_archive_entries
     from fno.tracker import active_backend_name
 
     # The album renders the local archive's shipped work: guarded local-store
@@ -10759,22 +10647,18 @@ def cmd_album(
         )
         raise typer.Exit(code=2)
 
-
-    archive_path = _archive_path()
-    entries = (
-        [
-            e
-            for e in wire_rows(path=archive_path)
-            if isinstance(e, dict)
-            # The shared row-status read: legacy archive rows carry only completed_at ().
-            and derived_status(e) == "done"
-            # Superseded is derived from superseded_by (graph/types.py), so a
-            # row can carry both; the album shows shipped work only.
-            and not e.get("superseded_by")
-        ]
-        if archive_path.exists()
-        else []
-    )
+    # read_archive_entries returns ONLY archive residents (task 15.1: same
+    # store, stamped rows); the album's slice is the shipped ones.
+    entries = [
+        e
+        for e in read_archive_entries()
+        if isinstance(e, dict)
+        # The shared row-status read: legacy archive rows carry only completed_at ().
+        and derived_status(e) == "done"
+        # Superseded is derived from superseded_by (graph/types.py), so a
+        # row can carry both; the album shows shipped work only.
+        and not e.get("superseded_by")
+    ]
     if project:
         entries = [e for e in entries if e.get("project") == project]
 
@@ -10845,105 +10729,46 @@ def cmd_album(
 def cmd_unarchive(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
 ) -> None:
-    """Move one node from graph-archive.json back into the working graph.
+    """Clear one node's archive stamp: it answers default reads again.
     Full contract: docs/architecture/backlog-graph-verb-contracts.md
     """
+    from fno.graph import api
     from fno.graph._intake import _find_node
-    from fno.graph.store import (
-        commit_rows_via_store,
-        GraphCorruptError,
-        _apply_graph_defaults,
-        _read_json,
-        _write_json,
-    )
+    from fno.graph.store import read_archive_entries
 
     _require_node_id(task_id)
 
+    # The default read excludes archived rows, so presence here is live-only.
     if _find_node(wire_rows(path=_graph_path()), task_id) is not None:
         typer.echo(f"warning: {task_id} is already in the working graph", err=True)
         return
 
-    archive_path = _archive_path()
-    if not archive_path.exists():
+    archived = read_archive_entries()
+    # Fuzzy-resolve, matching the working-graph lookup above and the archive
+    # probe `reopen` uses: an exact compare made the short id form fail, and
+    # `reopen`'s refusal prints this verb as the remedy.
+    row = _find_node(archived, task_id)
+    if row is None:
+        # Same previous_id fallback cmd_get uses: a reminted archive entry
+        # keeps its old id as previous_id, and the operator holding the
+        # old id must recover the node, not read a plain miss.
+        row = next(
+            (e for e in archived if isinstance(e, dict) and e.get("previous_id") == task_id),
+            None,
+        )
+    if row is None:
         typer.echo(
-            f"Error: {task_id} is in neither the working graph nor {archive_path}",
+            f"Error: {task_id} is in neither the working graph nor the archive",
             err=True,
         )
         raise typer.Exit(code=1)
 
-    # Rationale (15 lines): docs/architecture/graph-cli-rationale.md#cmd-unarchive-11491
-    row_box: list[Optional[dict]] = [None]
-
-    def add_to_working(entries):
-        try:
-            archived = _apply_graph_defaults(_read_json(archive_path))
-        except GraphCorruptError:
-            typer.echo(f"Error: {archive_path} is corrupt; cannot unarchive", err=True)
-            raise typer.Exit(code=1)
-
-        # Fuzzy-resolve, matching the working-graph lookup above and the archive
-        # probe `reopen` uses: an exact compare made the short id form fail, and
-        # `reopen`'s refusal prints this verb as the remedy.
-        row = _find_node(archived, task_id)
-        if row is None:
-            # Same previous_id fallback cmd_get uses: a reminted archive entry
-            # keeps its old id as previous_id, and the operator holding the
-            # old id must recover the node, not read a plain miss. Without
-            # this, `get` resolved the id one command earlier and `unarchive`
-            # - the remedy the dedupe verb names - refused it.
-            row = next(
-                (e for e in archived if isinstance(e, dict) and e.get("previous_id") == task_id),
-                None,
-            )
-        if row is None:
-            typer.echo(
-                f"Error: {task_id} is in neither the working graph nor {archive_path}",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        row_box[0] = row
-        rid = row.get("id")
-        # Idempotent under a race: another unarchive may have landed it already.
-        if any(isinstance(e, dict) and e.get("id") == rid for e in entries):
-            return entries
-        return [*entries, row]
-
-    commit_rows_via_store(_graph_path(), add_to_working)
-
-    resolved = (row_box[0] or {}).get("id") or task_id
-    archive_write_error: list[str] = []
-
-    def drop_from_archive(entries):
-        # Confirm against the just-persisted working graph, not against the
-        # mutator's own return value: if the node is somehow not live, shrinking
-        # the archive would delete the only copy.
-        if not any(isinstance(e, dict) and e.get("id") == resolved for e in entries):
-            archive_write_error.append("node not present in the working graph after the write")
-            return entries
-        try:
-            archived_now = _apply_graph_defaults(_read_json(archive_path))
-        except GraphCorruptError:
-            archive_write_error.append(f"{archive_path} unreadable")
-            return entries
-        remaining = [
-            e for e in archived_now if not (isinstance(e, dict) and e.get("id") == resolved)
-        ]
-        if len(remaining) != len(archived_now):
-            try:
-                _write_json(remaining, archive_path)
-            except OSError as exc:
-                archive_write_error.append(str(exc))
-        return entries
-
-    commit_rows_via_store(_graph_path(), drop_from_archive)
-
-    for exc in archive_write_error:
-        typer.echo(
-            f"warning: {resolved} is back in the working graph, but the archive copy "
-            f"could not be removed ({exc}); the next `archive` sweep dedupes it",
-            err=True,
-        )
-
+    resolved = row.get("id") or task_id
+    # The store op clears archived_at under the lock; one row, one write.
+    payload = api.unarchive_node(resolved, path=_graph_path())
+    if not payload.success:
+        typer.echo(f"Error: {resolved} could not be unarchived", err=True)
+        raise typer.Exit(code=1)
     typer.echo(f"Unarchived {resolved}")
 
 
@@ -11463,18 +11288,17 @@ def cmd_find(
     # a miss, results stamped `_archived`. A corrupt/absent archive is a miss,
     # never a crash (design "Errors").
     if not matched:
-        from fno.paths import graph_archive_json
+        from fno.graph.store import read_archive_entries
         from fno.tracker import active_backend_name
 
         # The archive is default-backend storage; no read-through behind an
         # external selection (stale local rows are the leak the seam closes).
-        archive_path = graph_archive_json() if active_backend_name() == "graph" else None
-        if archive_path is not None and archive_path.exists():
+        if active_backend_name() == "graph":
             # Guard the whole read + resolve + filter: a corrupt archive OR a
             # malformed archived entry must degrade to a miss, never propagate a
             # crash to the caller (design "Errors").
             try:
-                archived = wire_rows(path=archive_path)
+                archived = read_archive_entries(path=_graph_path())
                 hits = [
                     {**e, "_archived": True}
                     for e in _resolve_against(archived)
