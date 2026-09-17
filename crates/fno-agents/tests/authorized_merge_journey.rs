@@ -86,6 +86,13 @@ impl Probes for FakeGitHub {
     fn require_fresh_ci(&self, _cwd: &Path) -> bool {
         true
     }
+    fn slot_holder(&self, _cwd: &Path, _base_ref: &str) -> Result<Option<u64>, String> {
+        Ok(None)
+    }
+    fn take_slot(&self, _cwd: &Path, _base_ref: &str, _pr: u64) -> Result<(), String> {
+        Ok(())
+    }
+    fn release_slot(&self, _cwd: &Path, _base_ref: &str, _pr: u64) {}
     fn checks_verdict(&self, _cwd: &Path, _pr: u64) -> String {
         "green".to_string()
     }
