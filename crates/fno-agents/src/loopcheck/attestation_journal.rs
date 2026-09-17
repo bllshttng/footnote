@@ -2,8 +2,7 @@
 //! the global journal's surviving mirrors, scoped and deduped.
 use super::{
     attestation_in_scope, blockers_withhold, disposition_blockers_on_chain,
-    line_carries_keyed_findings, local_latest_attestations, zero_evidence_attestation,
-    UnattestedReviewer,
+    line_carries_keyed_findings, zero_evidence_attestation, UnattestedReviewer,
 };
 use crate::review_freshness::Freshness;
 use serde_json::Value;
@@ -135,16 +134,6 @@ pub fn unattested_reviewers_scan_text(
     head_sha: &str,
     rounds_exhausted: bool,
 ) -> (Vec<UnattestedReviewer>, usize) {
-    let unsatisfied_all = || -> Vec<UnattestedReviewer> {
-        reviewers
-            .iter()
-            .map(|r| UnattestedReviewer {
-                name: r.trim_start_matches('/').to_string(),
-                superseded_head: None,
-                failed_at_head: false,
-            })
-            .collect()
-    };
     if reviewers.is_empty() {
         return (Vec::new(), 0);
     }
@@ -304,7 +293,10 @@ pub fn unattested_reviewers_scan_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::loopcheck::{classify_coverage_tiled, AttestationScope, Coverage, CoverageProducer};
+    use crate::loopcheck::{
+        classify_coverage_tiled, local_latest_attestations, AttestationScope, Coverage,
+        CoverageProducer,
+    };
 
     // ── the fork log died, the mirror survived (global-journal merge) ──
 
@@ -325,14 +317,14 @@ mod tests {
             global_attest_line(
                 "2026-09-17T17:11:47Z",
                 "954ee57fed",
-                "feature/x-facb",
+                "feature/gonefork",
                 "github.com/bllshttng/footnote"
             )
         );
         let merged = missing_global_attestations(&global, "", "github.com/bllshttng/footnote");
-        let (passes, _) = local_latest_attestations(&merged, "feature/x-facb", "954ee57fed");
+        let (passes, _) = local_latest_attestations(&merged, "feature/gonefork", "954ee57fed");
         assert_eq!(passes.len(), 1, "the surviving mirror must grade");
-        assert_eq!(passes[0].branch, "feature/x-facb");
+        assert_eq!(passes[0].branch, "feature/gonefork");
         assert!(passes[0].is_pass);
     }
 
@@ -361,7 +353,7 @@ mod tests {
             global_attest_line(
                 "2026-09-17T17:11:47Z",
                 "954ee57fed",
-                "feature/x-facb",
+                "feature/gonefork",
                 "github.com/bllshttng/footnote"
             )
         );
@@ -374,7 +366,7 @@ mod tests {
             false,
             None,
             &|_| Freshness::Fresh,
-            "feature/x-facb",
+            "feature/gonefork",
             "954ee57fed",
             None,
             None,
