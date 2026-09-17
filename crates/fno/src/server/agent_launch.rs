@@ -105,6 +105,11 @@ pub(crate) struct LaunchDesk {
 /// exceeds a handful, and eviction only costs a reopened popup its history.
 const DESK_RETENTION: usize = 64;
 
+/// The terminal update's bounded redelivery: ~5s of 200ms ticks before the
+/// update is dropped and the desk settled anyway.
+const UPDATE_SEND_RETRIES: u8 = 25;
+const UPDATE_SEND_BACKOFF: Duration = Duration::from_millis(200);
+
 impl LaunchDesk {
     fn in_flight_or_done(&self, client: u64, request_id: u64) -> Option<AgentLaunchUpdate> {
         let key = (client, request_id);
@@ -262,21 +267,52 @@ impl super::Core {
                 .send(super::CoreMsg::AgentLaunchUpdate {
                     id,
                     update: AgentLaunchUpdate { request_id, state },
+                    retry: 0,
                 })
                 .await;
         });
     }
 
     /// The off-loop attempt's terminal update landed: settle the desk and
-    /// answer the requesting client.
-    pub(super) fn agent_launch_update(&mut self, id: u64, update: AgentLaunchUpdate) {
-        self.launch_desk.settle(id, update.clone());
-        self.send_launch_update(id, update);
+    /// answer the requesting client. A client whose reliable channel is
+    /// momentarily full gets the update re-queued on a short bounded backoff
+    /// instead of a silent drop: the desk stays pending while retrying, so
+    /// a duplicate still replays `Starting`, and a lost terminal update can
+    /// never strand the client's disabled button.
+    pub(super) fn agent_launch_update(&mut self, id: u64, update: AgentLaunchUpdate, retry: u8) {
+        if self.send_launch_update(id, update.clone()) {
+            self.launch_desk.settle(id, update);
+            return;
+        }
+        if retry >= UPDATE_SEND_RETRIES {
+            // Bounded best effort: settle so the desk stays truthful about
+            // the attempt, and let the update go. The client still has the
+            // Submitting escape (dismiss).
+            self.launch_desk.settle(id, update);
+            return;
+        }
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(UPDATE_SEND_BACKOFF).await;
+            let _ = core_tx
+                .send(super::CoreMsg::AgentLaunchUpdate {
+                    id,
+                    update,
+                    retry: retry + 1,
+                })
+                .await;
+        });
     }
 
-    fn send_launch_update(&self, id: u64, update: AgentLaunchUpdate) {
-        if let Some(c) = self.clients.iter().find(|c| c.id == id) {
-            let _ = c.reliable_tx.try_send(ServerMsg::AgentLaunch(update));
+    /// True when the update was delivered or the client is gone (nothing
+    /// left to answer); false only on a full client channel.
+    fn send_launch_update(&self, id: u64, update: AgentLaunchUpdate) -> bool {
+        match self.clients.iter().find(|c| c.id == id) {
+            None => true,
+            Some(c) => c
+                .reliable_tx
+                .try_send(ServerMsg::AgentLaunch(update))
+                .is_ok(),
         }
     }
 }

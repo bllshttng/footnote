@@ -662,10 +662,12 @@ pub(crate) enum CoreMsg {
     /// The off-loop launcher task's terminal update, routed back so it is
     /// sent from the core loop (which owns `clients`). Trusted origin (a
     /// server task, not a client), so it is NOT in the passive gate - the
-    /// same shape as DispatchResult/PeekResult.
+    /// same shape as DispatchResult/PeekResult. `retry` bounds the
+    /// redelivery when the target client's channel is momentarily full.
     AgentLaunchUpdate {
         id: u64,
         update: crate::proto::AgentLaunchUpdate,
+        retry: u8,
     },
     /// (v29) The off-loop peek task's transcript, routed back so the
     /// `PeekBody` is sent from the core loop (which owns `clients`) to the
@@ -12519,8 +12521,8 @@ impl Core {
                 self.agent_launch(id, request);
                 Flow::Continue
             }
-            CoreMsg::AgentLaunchUpdate { id, update } => {
-                self.agent_launch_update(id, update);
+            CoreMsg::AgentLaunchUpdate { id, update, retry } => {
+                self.agent_launch_update(id, update, retry);
                 Flow::Continue
             }
             // A gesture's canonical re-entry verdict landed. A
