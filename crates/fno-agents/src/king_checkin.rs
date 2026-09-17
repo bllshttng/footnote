@@ -32,8 +32,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-/// The twelve readings of the check-in body, in print order.
-const READING_NAMES: [&str; 12] = [
+/// The thirteen readings of the check-in body, in print order.
+const READING_NAMES: [&str; 13] = [
     "user_notes",
     "board",
     "escalations",
@@ -43,6 +43,7 @@ const READING_NAMES: [&str; 12] = [
     "capacity",
     "workers",
     "crown",
+    "refusal_rate",
     "drain",
     "main_ci",
     "control_plane",
@@ -618,6 +619,30 @@ fn r_crown() -> Result<Value, String> {
     }))
 }
 
+/// The trailing-window refusal rate: the cheapest available proxy for
+/// context degradation, no model introspection needed. Resolves its OWN
+/// ambient identity (same primitive `claim_store`/`king_verdict_inputs`
+/// already use) rather than taking a flag, so no CLI surface or Python
+/// wiring is needed to reach it - only claude sessions keep a per-session
+/// transcript file today (`crate::claude_drive::find_transcript`), so any
+/// other harness (or a claude session whose transcript cannot be found)
+/// reads as an ordinary failed reading, never a silent zero.
+const REFUSAL_RATE_WINDOW: usize = 200;
+
+fn r_refusal_rate() -> Result<Value, String> {
+    let (session_id, harness) = crate::claims::resolve_identity();
+    if harness.as_deref() != Some("claude") {
+        return Err(
+            "refusal rate needs a claude transcript; this session's harness is not claude".into(),
+        );
+    }
+    let session_id = session_id
+        .ok_or_else(|| "no session id resolved from the ambient environment".to_string())?;
+    let transcript = crate::claude_drive::find_transcript(&session_id)
+        .ok_or_else(|| format!("no transcript found for session {session_id}"))?;
+    crate::refusal_rate::refusal_rate(&transcript, REFUSAL_RATE_WINDOW)
+}
+
 fn r_drain(ctx: &Ctx) -> Result<Value, String> {
     let (_, out, err) = fno_verb(&["agents", "king", "drain", &ctx.scope])?;
     let payload: Value = serde_json::from_str(out.trim())
@@ -780,6 +805,7 @@ fn collect_readings(ctx: &Ctx) -> Vec<Reading> {
     take("capacity", r_capacity());
     take("workers", r_workers());
     take("crown", r_crown());
+    take("refusal_rate", r_refusal_rate());
     take("drain", r_drain(ctx));
     take("main_ci", r_main_ci());
     take("control_plane", r_control_plane(ctx));
@@ -834,6 +860,12 @@ fn build_data(readings: &[Reading], scope: &str) -> Map<String, Value> {
             );
         }
     }
+    if let Some(rr) = get("refusal_rate").filter(|r| r.ok) {
+        data.insert(
+            "refusal_rate".into(),
+            rr.value.get("rate").cloned().unwrap_or(Value::Null),
+        );
+    }
     if let Some(drain) = get("drain").filter(|r| r.ok) {
         data.insert("undelivered".into(), drain.value.clone());
     }
@@ -869,6 +901,42 @@ fn previous_row(ctx: &Ctx) -> (Option<Value>, String) {
         }
         Err(e) => (None, e),
     }
+}
+
+/// The `loop` row before `previous_row`'s. Needed only to tell a rising
+/// refusal rate from a single noisy tick - two consecutive rises, not one.
+fn second_previous_loop_row(ctx: &Ctx) -> Option<Value> {
+    let payload = crate::king_history::scan(&ctx.events_paths, &ctx.scope).ok()?;
+    payload["events"]
+        .as_array()?
+        .iter()
+        .filter(|r| s_str(r, "source") == Some("loop"))
+        .nth(1)
+        .cloned()
+}
+
+fn refusal_rate_of(previous_data: Option<&Value>) -> Option<f64> {
+    previous_data?.get("refusal_rate")?.as_f64()
+}
+
+/// Sets `refusal_rate_rising`: true only when the current rate exceeds the
+/// last beat's, and that beat's exceeded the one before it. A single high
+/// tick is noise; two consecutive rises is the handoff signal (R6).
+fn mark_refusal_rate_trend(
+    data: &mut Map<String, Value>,
+    previous_data: Option<&Value>,
+    second_previous_data: Option<&Value>,
+) {
+    let current = data.get("refusal_rate").and_then(Value::as_f64);
+    let rising = match (
+        current,
+        refusal_rate_of(previous_data),
+        refusal_rate_of(second_previous_data),
+    ) {
+        (Some(c), Some(p1), Some(p2)) => c > p1 && p1 > p2,
+        _ => false,
+    };
+    data.insert("refusal_rate_rising".into(), json!(rising));
 }
 
 fn derive_change(
@@ -1196,7 +1264,30 @@ fn render_lines(
             }
         }
     }
-    let _ = &by_name;
+    match failed("refusal_rate") {
+        Some(r) => lines.push(format!("READER FAILED refusal_rate: {}", r.error)),
+        None => {
+            let rr = by_name("refusal_rate")
+                .map(|r| &r.value)
+                .unwrap_or(&Value::Null);
+            let rate = rr.get("rate").and_then(Value::as_f64).unwrap_or(0.0);
+            let mut text = format!(
+                "refusal_rate: {:.1}% ({}/{} last {} calls)",
+                rate * 100.0,
+                dash(rr.get("refused")),
+                dash(rr.get("total")),
+                dash(rr.get("window")),
+            );
+            if data
+                .get("refusal_rate_rising")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                text.push_str(" - RISING (handoff signal)");
+            }
+            lines.push(text);
+        }
+    }
 
     match failed("drain") {
         Some(r) => lines.push(format!("READER FAILED drain: {}", r.error)),
@@ -1559,6 +1650,9 @@ pub fn run_king_checkin(args: &[String]) -> i32 {
     let previous_data = previous.as_ref().and_then(|p| p.get("data"));
     let derived = derive_change(previous_data, &data, &previous_error);
     let mut data = data;
+    let second_previous = second_previous_loop_row(&ctx);
+    let second_previous_data = second_previous.as_ref().and_then(|p| p.get("data"));
+    mark_refusal_rate_trend(&mut data, previous_data, second_previous_data);
     let change = finish_change(derived.clone(), model_change.as_deref(), &mut data);
     let mut lines = render_lines(
         &ctx.scope,
@@ -1888,6 +1982,10 @@ mod tests {
                 "crown",
                 json!({"total": 2, "splits": 0, "disagreements": 0, "anomalies": []}),
             ),
+            Reading::took(
+                "refusal_rate",
+                json!({"rate": 0.05, "refused": 5, "total": 100, "window": 100}),
+            ),
             Reading::took("drain", json!(9)),
             Reading::took("main_ci", json!("green")),
             Reading::took("control_plane", json!({"attention": []})),
@@ -1929,8 +2027,72 @@ mod tests {
         assert!(board_line.contains("blocked 2"));
         let workers_line = lines.iter().find(|l| l.starts_with("workers:")).unwrap();
         assert!(workers_line.contains("live 3"));
-        assert_eq!(data.get("coverage"), Some(&json!(12)));
+        assert_eq!(data.get("coverage"), Some(&json!(13)));
         assert_eq!(data.get("open_prs"), Some(&json!(7)));
+    }
+
+    // AC1: the printed body carries a refusal_rate line with the real
+    // refused/total/window counts, and the same rate lands in the
+    // journaled data.
+    #[test]
+    fn refusal_rate_line_prints_beside_capacity_and_crown() {
+        let readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        let data = build_data(&readings, "x-bbbb");
+        assert_eq!(data.get("refusal_rate"), Some(&json!(0.05)));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("refusal_rate:"))
+            .unwrap();
+        assert_eq!(line, "refusal_rate: 5.0% (5/100 last 100 calls)");
+    }
+
+    // AC2: two consecutive rises trip the handoff-signal suffix; one rise,
+    // or a flat/falling rate, does not.
+    #[test]
+    fn refusal_rate_rising_only_after_two_consecutive_increases() {
+        let mut data: Map<String, Value> = Map::new();
+        data.insert("refusal_rate".into(), json!(0.20));
+        let row = |rate: f64| Some(json!({"refusal_rate": rate}));
+
+        // Two rises: 0.05 -> 0.10 -> 0.20.
+        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.05).as_ref());
+        assert_eq!(data.get("refusal_rate_rising"), Some(&json!(true)));
+
+        // One rise only: 0.10 -> 0.10 -> 0.20 (flat, then up).
+        mark_refusal_rate_trend(&mut data, row(0.10).as_ref(), row(0.10).as_ref());
+        assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
+
+        // Falling into the current beat: 0.05 -> 0.30 -> 0.20.
+        mark_refusal_rate_trend(&mut data, row(0.30).as_ref(), row(0.05).as_ref());
+        assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
+
+        // Missing history reads as not-rising, never a false positive.
+        mark_refusal_rate_trend(&mut data, None, None);
+        assert_eq!(data.get("refusal_rate_rising"), Some(&json!(false)));
+    }
+
+    #[test]
+    fn refusal_rate_rising_line_carries_the_handoff_suffix() {
+        let readings = sample_readings(
+            json!({"open_prs": 7, "free_claim_no_driver": 1, "blocked": 2, "blocked_on": []}),
+            json!({"active_nodes": 4, "total_nodes": 6, "rows": []}),
+            json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
+            json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
+        );
+        let mut data = build_data(&readings, "x-bbbb");
+        data.insert("refusal_rate_rising".into(), json!(true));
+        let lines = render_lines("x-bbbb", &readings, &data, &None, "", "no change");
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("refusal_rate:"))
+            .unwrap();
+        assert!(line.ends_with(" - RISING (handoff signal)"), "line: {line}");
     }
 
     #[test]
@@ -1948,7 +2110,7 @@ mod tests {
         assert!(lines.iter().any(|l| l.starts_with("READER FAILED board:")));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 11 of 12 readings ok")));
+            .any(|l| l.starts_with("coverage: 12 of 13 readings ok")));
         assert!(lines.iter().any(|l| l.contains("failed readers: board")));
         assert_eq!(change, "no numeric movement; readings failed: board");
         assert_eq!(data.get("open_prs"), None);
@@ -1963,7 +2125,7 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[9] = Reading::failed("drain", "drain unreadable".into());
+        readings[10] = Reading::failed("drain", "drain unreadable".into());
         let data = build_data(&readings, "x-bbbb");
         assert!(derive_change(None, &data, "").starts_with("no numeric movement; readings failed"));
     }
@@ -2089,7 +2251,7 @@ mod tests {
             json!({"footprint": "admit", "gate": "admit", "disagree": false, "unparsed_lines": 0}),
             json!({"live_workers": 3, "oldest_worker_seen": "90s w1"}),
         );
-        readings[11] = Reading::failed("control_plane", "journals unreadable".into());
+        readings[12] = Reading::failed("control_plane", "journals unreadable".into());
         let data = build_data(&readings, "x-bbbb");
         let change = derive_change(None, &data, "");
         assert_eq!(
@@ -2102,7 +2264,7 @@ mod tests {
             .any(|l| l == "READER FAILED control_plane: journals unreadable"));
         assert!(lines
             .iter()
-            .any(|l| l.starts_with("coverage: 11 of 12 readings ok")));
+            .any(|l| l.starts_with("coverage: 12 of 13 readings ok")));
     }
 
     // AC6-EDGE: under the threshold with nothing stuck, the quiet beat stands.
