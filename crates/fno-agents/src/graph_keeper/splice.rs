@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::encode;
 use super::TAG_RESPONSE;
 use super::{canonical_row_digests, read_graph_gated, remember_snapshot, GraphRead, StoreState};
 
