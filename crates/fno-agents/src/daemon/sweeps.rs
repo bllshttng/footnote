@@ -3,6 +3,7 @@
 //! shares one shape: a stamp-gated interval floor, a dispatch-pause skip with
 //! a paced sidecar row, and one journal row per run including a quiet one.
 
+use super::worktree_sweep::registry_repo_roots;
 use super::*;
 use crate::pr_park;
 
