@@ -1451,7 +1451,7 @@ def _style_added_lines(
         label=f"bad diff-base {diff_base!r}",
     )
     # No --files means the whole diff. A fixed directory list here missed
-    # .claude/, commands/, and root markdown without a word.
+    # rules files, commands, and root markdown without a word.
     scope = _repo_scope(paths, repo, diff_base) if paths else []
     diff_files = _run_git(
         _pinned_diff_argv("--name-only", f"{diff_base}...HEAD", "--", *scope),
