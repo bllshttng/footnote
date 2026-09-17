@@ -721,6 +721,21 @@ pub(crate) fn write_changed(
     after: &[Value],
     strict: bool,
 ) -> Result<WriteReport, String> {
+    if strict {
+        for (ordinal, row) in after.iter().enumerate() {
+            let Some(id) = row.get("id").and_then(Value::as_str) else {
+                return Err(format!(
+                    "row at ordinal {ordinal} is unrepresentable: missing string id"
+                ));
+            };
+            if id.is_empty() {
+                return Err(format!(
+                    "row at ordinal {ordinal} is unrepresentable: empty string id"
+                ));
+            }
+        }
+    }
+
     fn by_id(rows: &[Value]) -> std::collections::BTreeMap<String, &Value> {
         rows.iter()
             .filter(|row| row.is_object())
@@ -1784,6 +1799,21 @@ mod tests {
         let error = confirm_ids_landed(&connection, &report).unwrap_err();
 
         assert!(error.contains("id-0"));
+    }
+
+    #[test]
+    fn authoritative_publish_rejects_a_row_without_a_usable_id() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after.push(serde_json::json!({"title": "missing id"}));
+
+        let error = authoritative_sync(&graph, &before, &after).unwrap_err();
+
+        assert!(error.contains("ordinal 2"));
+        assert!(error.contains("missing string id"));
     }
 
     #[test]
