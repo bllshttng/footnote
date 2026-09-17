@@ -20,8 +20,13 @@ use std::process::Command;
 
 use crate::backlog::api::{self as backlog_api, Store as GraphStore};
 use crate::backlog_ready::detect_project;
+use crate::claims::{self, ClaimState};
 use crate::king_board::prs::pr_binding_keys;
 use crate::paths::canonical_repo_root;
+
+/// A rebase, this repo's measured rust-ci max (31.3m), and one sweep tick
+/// (600s) round up with margin to 60 minutes.
+const MERGE_SLOT_TTL_MS: i64 = 60 * 60 * 1000;
 
 /// What the caller wants to happen once the decision clears.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +256,15 @@ pub trait Probes {
     fn merge_result(&self, cwd: &Path, pr: u64) -> ProbeOutcome;
     fn ci_base(&self, cwd: &Path, facts: &PrFacts) -> ProbeOutcome;
     fn require_fresh_ci(&self, cwd: &Path) -> bool;
+    /// The PR number holding `merge-slot:<base_ref>` when the claim reads
+    /// `Live` or `Suspect`. `Free`/`Stale` read `Ok(None)`. `Corrupted` or an
+    /// unparseable holder is `Err`.
+    fn slot_holder(&self, cwd: &Path, base_ref: &str) -> Result<Option<u64>, String>;
+    /// Take the merge slot for `pr` on a bounded TTL lease.
+    fn take_slot(&self, cwd: &Path, base_ref: &str, pr: u64) -> Result<(), String>;
+    /// Release the merge slot if `pr` still holds it. Errors are ignored:
+    /// release is best-effort, and the TTL is the backstop.
+    fn release_slot(&self, cwd: &Path, base_ref: &str, pr: u64);
     /// `green` | `red` | `pending` | `unknown`.
     fn checks_verdict(&self, cwd: &Path, pr: u64) -> String;
     fn covered_head(&self, cwd: &Path) -> Option<String>;
@@ -363,13 +377,97 @@ pub fn decide<P: Probes>(probes: &P, request: &Request) -> Result<Authorized, Ou
         match probes.checks_verdict(cwd, facts.number).as_str() {
             "green" => {
                 if request.effect == Effect::Merge && probes.require_fresh_ci(cwd) {
-                    if let Some(reason) = probes.ci_base(cwd, &facts).fail_open() {
-                        return Err(Outcome::Held {
-                            reason: format!(
-                                "{reason}; remedy: fno do pr rebase {n}, then fno do pr wait {n} --until settled, then retry",
-                                n = facts.number
-                            ),
-                        });
+                    let stale = probes.ci_base(cwd, &facts).fail_open();
+                    let n = facts.number;
+                    match probes.slot_holder(cwd, &facts.base_ref) {
+                        // A claims io fault never blocks merges: fall back to
+                        // the pre-slot behavior and take no slot.
+                        Err(_) => {
+                            if let Some(reason) = stale {
+                                return Err(Outcome::Held {
+                                    reason: format!(
+                                        "{reason}; remedy: fno do pr rebase {n}, then fno do pr wait {n} --until settled, then retry"
+                                    ),
+                                });
+                            }
+                        }
+                        Ok(mut holder) => {
+                            // A holder that merged, closed, or went red frees
+                            // its slot now instead of waiting out the TTL.
+                            if let Some(m) = holder {
+                                if m != n {
+                                    let stale_holder = match probes.pr_facts(cwd, Some(m)) {
+                                        Ok(holder_facts) => {
+                                            holder_facts.state == "MERGED"
+                                                || holder_facts.state == "CLOSED"
+                                                || probes.checks_verdict(cwd, m) == "red"
+                                        }
+                                        // Unreadable holder PR keeps the slot;
+                                        // the TTL bounds it.
+                                        Err(_) => false,
+                                    };
+                                    if stale_holder {
+                                        probes.release_slot(cwd, &facts.base_ref, m);
+                                        holder = None;
+                                    }
+                                }
+                            }
+                            match holder {
+                                Some(m) if m != n => {
+                                    return Err(Outcome::Held {
+                                        reason: format!(
+                                            "{ci}merge_slot_held: PR {m} holds the merge slot; \
+                                             PR {n} waits so PR {m}'s rebased CI stays current; \
+                                             the slot frees when PR {m} merges, closes, goes red, \
+                                             or its 60m lease ends",
+                                            ci = if stale.is_some() {
+                                                "ci_base_stale; "
+                                            } else {
+                                                ""
+                                            }
+                                        ),
+                                    });
+                                }
+                                Some(_self_held) => {
+                                    if let Some(reason) = stale {
+                                        // Never re-acquire: it could extend
+                                        // the TTL and starve the queue.
+                                        return Err(Outcome::Held {
+                                            reason: format!(
+                                                "{reason}; PR {n} holds the merge slot; remedy: \
+                                                 fno do pr rebase {n}, then fno do pr wait {n} \
+                                                 --until settled, then retry"
+                                            ),
+                                        });
+                                    }
+                                }
+                                None => {
+                                    if let Some(reason) = stale {
+                                        match probes.take_slot(cwd, &facts.base_ref, n) {
+                                            Ok(()) => {
+                                                return Err(Outcome::Held {
+                                                    reason: format!(
+                                                        "{reason}; PR {n} now holds the merge \
+                                                         slot for 60m; remedy: fno do pr rebase \
+                                                         {n}, then fno do pr wait {n} --until \
+                                                         settled, then retry"
+                                                    ),
+                                                });
+                                            }
+                                            Err(_) => {
+                                                return Err(Outcome::Held {
+                                                    reason: format!(
+                                                        "{reason}; remedy: fno do pr rebase {n}, \
+                                                         then fno do pr wait {n} --until settled, \
+                                                         then retry"
+                                                    ),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -433,7 +531,18 @@ pub fn run<P: Probes>(probes: &P, request: &Request) -> Outcome {
         Ok(authorized) if request.decide_only => Outcome::Authorized {
             head: authorized.head,
         },
-        Ok(authorized) => effect(probes, request, &authorized),
+        Ok(authorized) => {
+            let outcome = effect(probes, request, &authorized);
+            // A PR that never held the slot releases nothing (holder-matched).
+            if matches!(outcome, Outcome::Merged { .. }) {
+                probes.release_slot(
+                    request.cwd.as_path(),
+                    &authorized.facts.base_ref,
+                    authorized.facts.number,
+                );
+            }
+            outcome
+        }
         Err(outcome) => outcome,
     }
 }
@@ -782,6 +891,50 @@ impl Probes for RealProbes {
         crate::agents_config::auto_merge_require_fresh_ci(cwd)
     }
 
+    fn slot_holder(&self, cwd: &Path, base_ref: &str) -> Result<Option<u64>, String> {
+        let root = canonical_repo_root(cwd);
+        let key = slot_key(base_ref);
+        let (state, record) = claims::status(&key, root.as_deref());
+        match state {
+            ClaimState::Free | ClaimState::Stale => Ok(None),
+            ClaimState::Live | ClaimState::Suspect => {
+                let record = record.ok_or_else(|| {
+                    format!("merge slot claim {key} read {state:?} with no record")
+                })?;
+                parse_slot_holder(&record.holder)
+                    .map(Some)
+                    .ok_or_else(|| format!("merge slot holder unparseable: {}", record.holder))
+            }
+            ClaimState::Corrupted => Err(format!("merge slot claim corrupted: {key}")),
+        }
+    }
+
+    fn take_slot(&self, cwd: &Path, base_ref: &str, pr: u64) -> Result<(), String> {
+        let opts = claims::AcquireOpts {
+            pid_unavailable: true,
+            ttl_ms: Some(MERGE_SLOT_TTL_MS),
+            root: canonical_repo_root(cwd),
+            reason: Some("ci_base_stale merge slot".to_string()),
+            ..Default::default()
+        };
+        match claims::acquire(&slot_key(base_ref), &slot_holder_key(pr), opts) {
+            claims::AcquireOutcome::Acquired(_) => Ok(()),
+            claims::AcquireOutcome::HeldByOther { holder, .. } => {
+                Err(format!("merge slot already held by {holder}"))
+            }
+            claims::AcquireOutcome::Error(error) => Err(error),
+        }
+    }
+
+    fn release_slot(&self, cwd: &Path, base_ref: &str, pr: u64) {
+        let _ = claims::release(
+            &slot_key(base_ref),
+            &slot_holder_key(pr),
+            canonical_repo_root(cwd).as_deref(),
+            None,
+        );
+    }
+
     fn checks_verdict(&self, cwd: &Path, pr: u64) -> String {
         match Self::fno(cwd, &["do", "pr", "status", &pr.to_string()]) {
             Ok((_code, stdout, _stderr)) => serde_json::from_slice::<Value>(&stdout)
@@ -818,6 +971,21 @@ impl Probes for RealProbes {
         combined.push_str(&String::from_utf8_lossy(&out.stderr));
         Ok((out.status.success(), combined))
     }
+}
+
+/// The merge-slot claim key for a base branch. Not a global-id prefix: the
+/// crown's worktree cwd and the sweep's repo-root cwd must resolve one
+/// lockfile, so callers always pass an explicit `root`.
+fn slot_key(base_ref: &str) -> String {
+    format!("merge-slot:{base_ref}")
+}
+
+fn slot_holder_key(pr: u64) -> String {
+    format!("pr:{pr}")
+}
+
+fn parse_slot_holder(holder: &str) -> Option<u64> {
+    holder.strip_prefix("pr:")?.parse::<u64>().ok()
 }
 
 fn probe_detail(stdout: &[u8], stderr: &[u8]) -> String {
@@ -1193,6 +1361,7 @@ fn parse_request(payload: &Value) -> Result<Request, String> {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::collections::HashMap;
 
     #[derive(Default)]
     struct Fake {
@@ -1217,6 +1386,16 @@ mod tests {
         /// `gh pr merge` and let the retry succeed.
         gh_recovery_ok: Option<bool>,
         gh_calls: RefCell<Vec<Vec<String>>>,
+        /// Simulated merge-slot claim: `None` is free, `Some(pr)` is held.
+        slot: RefCell<Option<u64>>,
+        slot_holder_err: bool,
+        take_slot_err: bool,
+        take_slot_calls: RefCell<Vec<u64>>,
+        release_slot_calls: RefCell<Vec<u64>>,
+        /// Facts and checks for a PR other than the one under decision, keyed
+        /// by PR number - a holder read in the slot logic.
+        other_facts: RefCell<HashMap<u64, PrFacts>>,
+        other_checks: RefCell<HashMap<u64, String>>,
     }
 
     fn open_facts() -> PrFacts {
@@ -1243,11 +1422,20 @@ mod tests {
     }
 
     impl Probes for Fake {
-        fn pr_facts(&self, _cwd: &Path, _pr: Option<u64>) -> Result<PrFacts, String> {
+        fn pr_facts(&self, _cwd: &Path, pr: Option<u64>) -> Result<PrFacts, String> {
             if let Some(error) = &self.facts_error {
                 return Err(error.clone());
             }
-            self.facts.clone().ok_or_else(|| "no facts".to_string())
+            let main = self.facts.clone().ok_or_else(|| "no facts".to_string())?;
+            match pr {
+                Some(n) if n != main.number => self
+                    .other_facts
+                    .borrow()
+                    .get(&n)
+                    .cloned()
+                    .ok_or_else(|| format!("no facts for pr {n}")),
+                _ => Ok(main),
+            }
         }
         fn node_binding(&self, _cwd: &Path, _facts: &PrFacts) -> ProbeOutcome {
             self.node_binding.clone().unwrap_or(ProbeOutcome::Clear)
@@ -1271,8 +1459,36 @@ mod tests {
         fn require_fresh_ci(&self, _cwd: &Path) -> bool {
             self.fresh_ci.unwrap_or(true)
         }
-        fn checks_verdict(&self, _cwd: &Path, _pr: u64) -> String {
-            self.checks.clone().unwrap_or_else(|| "green".to_string())
+        fn slot_holder(&self, _cwd: &Path, _base_ref: &str) -> Result<Option<u64>, String> {
+            if self.slot_holder_err {
+                return Err("merge slot claim corrupted".to_string());
+            }
+            Ok(*self.slot.borrow())
+        }
+        fn take_slot(&self, _cwd: &Path, _base_ref: &str, pr: u64) -> Result<(), String> {
+            self.take_slot_calls.borrow_mut().push(pr);
+            if self.take_slot_err {
+                return Err("merge slot already held by pr:99".to_string());
+            }
+            *self.slot.borrow_mut() = Some(pr);
+            Ok(())
+        }
+        fn release_slot(&self, _cwd: &Path, _base_ref: &str, pr: u64) {
+            self.release_slot_calls.borrow_mut().push(pr);
+            let mut held = self.slot.borrow_mut();
+            if *held == Some(pr) {
+                *held = None;
+            }
+        }
+        fn checks_verdict(&self, _cwd: &Path, pr: u64) -> String {
+            if self.facts.as_ref().map(|f| f.number) == Some(pr) {
+                return self.checks.clone().unwrap_or_else(|| "green".to_string());
+            }
+            self.other_checks
+                .borrow()
+                .get(&pr)
+                .cloned()
+                .unwrap_or_else(|| "green".to_string())
         }
         fn covered_head(&self, _cwd: &Path) -> Option<String> {
             self.covered_head.clone()
@@ -1326,6 +1542,159 @@ mod tests {
             assert!(outcome.detail().contains("review_in_flight"));
             assert!(fake.gh_calls.borrow().is_empty(), "{effect:?} ran gh");
         }
+    }
+
+    #[test]
+    fn a_stale_pr_takes_the_free_slot_and_holds_a_second_stale_pr_behind_it() {
+        // AC1-HP.
+        let mut fake = Fake {
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 3 behind".to_string())),
+            ..clean()
+        };
+        let req7 = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Merge)
+        };
+        let outcome7 = run(&fake, &req7);
+        assert_eq!(outcome7.word(), "held");
+        assert!(outcome7.detail().contains("PR 7 now holds the merge slot"));
+        assert_eq!(*fake.slot.borrow(), Some(7));
+
+        fake.facts = Some(PrFacts {
+            number: 8,
+            head_sha: "def456".to_string(),
+            ..open_facts()
+        });
+        fake.covered_head = Some("def456".to_string());
+        let req8 = Request {
+            require_checks: true,
+            pr: Some(8),
+            ..request(Effect::Merge)
+        };
+        let outcome8 = run(&fake, &req8);
+        assert_eq!(outcome8.word(), "held");
+        let detail8 = outcome8.detail();
+        assert!(detail8.contains("merge_slot_held"));
+        assert!(detail8.contains("PR 7"));
+        assert_eq!(
+            *fake.slot.borrow(),
+            Some(7),
+            "the slot must stay with the first holder"
+        );
+    }
+
+    #[test]
+    fn a_holder_with_fresh_ci_clears_and_releases_the_slot_on_merge_while_a_racer_waits() {
+        // AC2-HP.
+        let mut fake = Fake {
+            slot: RefCell::new(Some(7)),
+            facts: Some(PrFacts {
+                number: 9,
+                head_sha: "nine".to_string(),
+                ..open_facts()
+            }),
+            covered_head: Some("nine".to_string()),
+            ..clean()
+        };
+        let req9 = Request {
+            require_checks: true,
+            pr: Some(9),
+            ..request(Effect::Merge)
+        };
+        let outcome9 = run(&fake, &req9);
+        assert_eq!(outcome9.word(), "held");
+        let detail9 = outcome9.detail();
+        assert!(detail9.contains("merge_slot_held"));
+        assert!(detail9.contains("PR 7"));
+        assert_eq!(
+            *fake.slot.borrow(),
+            Some(7),
+            "the waiting PR must not take the slot"
+        );
+
+        fake.facts = Some(PrFacts {
+            number: 7,
+            head_sha: "abc123".to_string(),
+            ..open_facts()
+        });
+        fake.covered_head = Some("abc123".to_string());
+        let req7 = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Merge)
+        };
+        let outcome7 = run(&fake, &req7);
+        assert_eq!(
+            outcome7.word(),
+            "merged",
+            "the slot holder with fresh CI clears and merges"
+        );
+        assert_eq!(
+            *fake.slot.borrow(),
+            None,
+            "the slot releases once the Merged outcome lands"
+        );
+    }
+
+    #[test]
+    fn a_holder_that_went_red_releases_its_slot_to_a_waiting_stale_pr() {
+        // AC3-EDGE.
+        let fake = Fake {
+            slot: RefCell::new(Some(7)),
+            facts: Some(PrFacts {
+                number: 8,
+                head_sha: "eight".to_string(),
+                ..open_facts()
+            }),
+            covered_head: Some("eight".to_string()),
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 4 behind".to_string())),
+            ..clean()
+        };
+        fake.other_facts.borrow_mut().insert(
+            7,
+            PrFacts {
+                number: 7,
+                state: "OPEN".to_string(),
+                ..open_facts()
+            },
+        );
+        fake.other_checks.borrow_mut().insert(7, "red".to_string());
+
+        let req8 = Request {
+            require_checks: true,
+            pr: Some(8),
+            ..request(Effect::Merge)
+        };
+        let outcome8 = run(&fake, &req8);
+        assert_eq!(outcome8.word(), "held");
+        assert!(outcome8.detail().contains("PR 8 now holds the merge slot"));
+        assert_eq!(*fake.slot.borrow(), Some(8));
+        assert_eq!(*fake.release_slot_calls.borrow(), vec![7]);
+    }
+
+    #[test]
+    fn slot_holder_error_fails_open_to_the_stale_hold_without_taking_a_slot() {
+        // AC4-ERR.
+        let fake = Fake {
+            slot_holder_err: true,
+            ci_base: Some(ProbeOutcome::Refused("ci_base_stale: 5 behind".to_string())),
+            ..clean()
+        };
+        let req7 = Request {
+            require_checks: true,
+            pr: Some(7),
+            ..request(Effect::Merge)
+        };
+        let outcome = run(&fake, &req7);
+        assert_eq!(outcome.word(), "held");
+        let detail = outcome.detail();
+        assert!(detail.contains("ci_base_stale"));
+        assert!(
+            !detail.contains("merge slot"),
+            "a fail-open read must not mention the slot"
+        );
+        assert!(fake.take_slot_calls.borrow().is_empty());
     }
 
     #[test]
