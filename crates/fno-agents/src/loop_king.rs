@@ -1409,9 +1409,9 @@ mod tests {
     #[test]
     fn crown_answers_to_admits_a_set_member_and_refuses_a_portfolio_member() {
         let none = HashMap::new();
-        assert!(crown_answers_to("x-119e,x-4d9b", "x-4d9b", &none));
-        assert!(crown_answers_to("x-119e,x-4d9b", "x-4d9b,x-119e", &none));
-        assert!(!crown_answers_to("x-119e,x-4d9b", "x-4d9b,x-aaaa", &none));
+        assert!(crown_answers_to("x-bbbb,x-cccc", "x-cccc", &none));
+        assert!(crown_answers_to("x-bbbb,x-cccc", "x-cccc,x-bbbb", &none));
+        assert!(!crown_answers_to("x-bbbb,x-cccc", "x-cccc,x-aaaa", &none));
         let projects: HashMap<String, String> = [("alpha", "alpha"), ("beta", "beta")]
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))

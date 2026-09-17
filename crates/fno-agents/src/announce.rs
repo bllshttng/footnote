@@ -1143,7 +1143,7 @@ mod tests {
             agent_row(
                 "king-set",
                 "sess-set",
-                json!({"crown_level": 2, "crown_scope": "x-119e,x-4d9b"}),
+                json!({"crown_level": 2, "crown_scope": "x-bbbb,x-cccc"}),
             ),
             agent_row(
                 "king-folio",
@@ -1157,12 +1157,12 @@ mod tests {
             .collect();
 
         assert_eq!(
-            resolve_audience("x-4d9b", &registry, Some(&projects)),
+            resolve_audience("x-cccc", &registry, Some(&projects)),
             vec![identity_key("sess-set")]
         );
         assert!(resolve_audience("alpha", &registry, Some(&projects)).is_empty());
         // An unreadable project map fails closed to equality.
-        assert!(resolve_audience("x-4d9b", &registry, None).is_empty());
+        assert!(resolve_audience("x-cccc", &registry, None).is_empty());
         assert!(resolve_audience("alpha", &registry, None).is_empty());
     }
 
