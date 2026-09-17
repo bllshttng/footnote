@@ -472,7 +472,7 @@ pub fn authoritative_sync(
     Ok(version)
 }
 
-struct WriteReport {
+pub(crate) struct WriteReport {
     present_ids: Vec<String>,
     deleted_ids: Vec<String>,
 }
@@ -517,8 +517,6 @@ fn confirm_ids_landed(connection: &Connection, report: &WriteReport) -> Result<(
     if missing.is_empty() && extra.is_empty() {
         return Ok(());
     }
-    let missing: Vec<&str> = expected.difference(&stored).map(String::as_str).collect();
-    let extra: Vec<&str> = stored.difference(&expected).map(String::as_str).collect();
     Err(format!(
         "publish read-back mismatch: missing ids {missing:?}; extra ids {extra:?}"
     ))
@@ -1730,8 +1728,14 @@ mod tests {
 
         let error = authoritative_sync(&graph, &before, &after).unwrap_err();
 
-        assert!(error.contains("ab-one"), "error names the dropped row: {error}");
-        assert!(error.contains("status"), "error names the parse failure: {error}");
+        assert!(
+            error.contains("ab-one"),
+            "error names the dropped row: {error}"
+        );
+        assert!(
+            error.contains("status"),
+            "error names the parse failure: {error}"
+        );
     }
 
     #[test]
