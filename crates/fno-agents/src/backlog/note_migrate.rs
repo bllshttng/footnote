@@ -608,7 +608,7 @@ fn build_candidate(
     out
 }
 
-/// The usage text `--help` prints; names all three commands (the gate reads it).
+/// The usage text `--help` prints; names every command (the gate reads it).
 fn print_usage() {
     println!(
         "usage: backlog-notes <command> [flags]
@@ -620,9 +620,12 @@ commands:
         carry each row's notes into the journal; dry run without --apply
   history [<node>|<slug>]
         read a node's note journal, oldest first
+  stale <node> --plan <path>
+        report notes newer than the plan's last commit (else its mtime)
 
 flags:
-  --node <id>              node for history (a positional token also works)
+  --node <id>              node for history or stale (a positional token also works)
+  --plan <path>            plan file for stale
   --offset N --limit N     page the history read (default limit 50)
   --json                   machine output; history emits {{total, offset, records}}
   --graph <path>           store to read (default ~/.fno/graph.json)
@@ -630,11 +633,12 @@ flags:
     );
 }
 
-/// `backlog-notes inventory|migrate|history` (wave 3).
+/// `backlog-notes inventory|migrate|history|stale`.
 pub fn run_notes(args: &[String]) -> i32 {
     let mut action = String::new();
     let mut graph: Option<PathBuf> = None;
     let mut manifest: Option<PathBuf> = None;
+    let mut plan: Option<PathBuf> = None;
     let mut apply = false;
     let mut json_out = false;
     let mut node: Option<String> = None;
@@ -644,7 +648,7 @@ pub fn run_notes(args: &[String]) -> i32 {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "inventory" | "migrate" | "history" if action.is_empty() => {
+            "inventory" | "migrate" | "history" | "stale" if action.is_empty() => {
                 action = args[i].clone();
             }
             "-h" | "--help" => {
@@ -701,9 +705,23 @@ pub fn run_notes(args: &[String]) -> i32 {
                     }
                 }
             }
+            "--plan" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => plan = Some(PathBuf::from(v)),
+                    None => {
+                        eprintln!("fno-agents backlog-notes: --plan needs a path");
+                        return 2;
+                    }
+                }
+            }
             "--apply" => apply = true,
             "--json" | "-J" => json_out = true,
-            other if action == "history" && positional.is_none() && !other.starts_with('-') => {
+            other
+                if (action == "history" || action == "stale")
+                    && positional.is_none()
+                    && !other.starts_with('-') =>
+            {
                 positional = Some(other.to_string());
             }
             other => {
@@ -749,6 +767,7 @@ pub fn run_notes(args: &[String]) -> i32 {
             limit,
             json_out,
         ),
+        "stale" => super::note_stale::run_stale(&graph, node.as_deref(), plan.as_deref(), json_out),
         "migrate" => run_migrate(&graph, manifest.as_deref(), apply, json_out),
         _ => {
             print_usage();
