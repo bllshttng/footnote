@@ -1732,7 +1732,7 @@ mod tests {
             .insert(7, "green".to_string());
         fake.other_holds.borrow_mut().insert(
             7,
-            ProbeOutcome::Refused("dispatch_hold: held by the crown for x-3f1c".to_string()),
+            ProbeOutcome::Refused("dispatch_hold: held by the crown for a queued node".to_string()),
         );
 
         let req8 = Request {
