@@ -2530,9 +2530,12 @@ fn update_registry_never_dates_an_old_exit_and_keeps_a_closure_stamp() {
     let path = dir.join("registry.json");
     let mut old = sample_entry("old-exit");
     old.status = AgentStatus::Exited;
+    let mut stamped = sample_entry("self-stamped");
+    stamped.session_id = Some("uuid-2".into());
+    stamped.codex_session_id = Some("uuid-2".into());
     update_registry(&path, |r| {
         r.entries.push(old);
-        r.entries.push(sample_entry("self-stamped"));
+        r.entries.push(stamped);
     })
     .unwrap();
     // The seeding write dated the pushed row; clear it to model a legacy
