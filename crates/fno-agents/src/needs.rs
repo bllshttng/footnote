@@ -583,6 +583,18 @@ fn expand_eq(rest: &[String]) -> Vec<String> {
     out
 }
 
+/// The question journal family: the cwd's space journal + global
+/// `~/.fno/events.jsonl` + `~/.fno/questions.jsonl`. Every reader of the
+/// question family folds these same three paths as a UNION (a question can
+/// land in any one of them), so the list lives here and nowhere else.
+pub(crate) fn question_journals(fno_dir: &Path, cwd: &Path) -> Vec<PathBuf> {
+    vec![
+        crate::paths::space_dir(cwd).join("events.jsonl"),
+        fno_dir.join("events.jsonl"),
+        fno_dir.join("questions.jsonl"),
+    ]
+}
+
 /// Default event/ledger sources: the repo's space journal + global
 /// `~/.fno/events.jsonl` + `~/.fno/questions.jsonl` + `~/.fno/ledger.json`.
 fn default_sources(home: &AgentsHome, cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
@@ -591,11 +603,93 @@ fn default_sources(home: &AgentsHome, cwd: &Path) -> (Vec<PathBuf>, PathBuf) {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(".fno"));
-    let global_events = fno_dir.join("events.jsonl");
-    let questions = fno_dir.join("questions.jsonl");
-    let project_events = crate::paths::space_dir(cwd).join("events.jsonl");
+    let events = question_journals(&fno_dir, cwd);
     let ledger = fno_dir.join("ledger.json");
-    (vec![project_events, global_events, questions], ledger)
+    (events, ledger)
+}
+
+/// The held map: node id -> the open question id that holds it. A node is
+/// HELD when an OPEN `operator_question` row names it in `data.blocks`; the
+/// oldest such question wins so every reader names the same one. A closed
+/// question never holds, and a question with no `blocks` array holds nothing.
+pub(crate) fn held_nodes(journals: &[PathBuf]) -> std::collections::BTreeMap<String, String> {
+    let mut raw = String::new();
+    for path in journals {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            raw.push_str(&content);
+            raw.push('\n');
+        }
+    }
+    held_nodes_from_raw(&raw)
+}
+
+/// The pure half of [`held_nodes`], over newline-joined journal contents.
+pub(crate) fn held_nodes_from_raw(raw: &str) -> std::collections::BTreeMap<String, String> {
+    // Latest ask of a qid wins (journal order, mirroring
+    // `scan_unrecorded_decisions`); the oldest OPEN ask per node then wins.
+    let mut asked: HashMap<String, (u64, Value)> = HashMap::new();
+    let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for line in raw.lines() {
+        if line.trim().is_empty() || !line.contains("operator_question") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue; // torn/malformed tail line: skip, never abort
+        };
+        let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+        let data = v
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        match kind {
+            "operator_question" => {
+                let Some(qid) = data.get("question_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let epoch = v
+                    .get("ts")
+                    .and_then(Value::as_str)
+                    .and_then(to_epoch_lenient)
+                    .unwrap_or(0);
+                asked.insert(qid.to_string(), (epoch, data));
+            }
+            "operator_question_closed" => {
+                if let Some(qid) = data.get("question_id").and_then(Value::as_str) {
+                    closed.insert(qid.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut best: std::collections::BTreeMap<String, (u64, String)> =
+        std::collections::BTreeMap::new();
+    let mut qids: Vec<(&String, &(u64, Value))> = asked.iter().collect();
+    qids.sort_by(|a, b| a.0.cmp(b.0));
+    for (qid, (epoch, data)) in qids {
+        if closed.contains(qid) {
+            continue;
+        }
+        let Some(blocks) = data.get("blocks").and_then(Value::as_array) else {
+            continue;
+        };
+        for node in blocks {
+            let Some(node) = node.as_str() else {
+                continue;
+            };
+            let take = match best.get(node) {
+                None => true,
+                Some((best_epoch, best_qid)) => {
+                    (*epoch, qid.as_str()) < (*best_epoch, best_qid.as_str())
+                }
+            };
+            if take {
+                best.insert(node.to_string(), (*epoch, qid.to_string()));
+            }
+        }
+    }
+    best.into_iter()
+        .map(|(node, (_, qid))| (node, qid))
+        .collect()
 }
 
 /// Stamp each item's `live` bit from its node claim (x-aaaa 1.4): an item whose
@@ -1776,6 +1870,72 @@ mod tests {
         .join("\n");
         let items = fold(&events, "", ALL, DEFAULT_FIRES_FLOOR);
         assert_eq!(items.len(), 2);
+    }
+
+    // --- held fold (x-55ae) --------------------------------------------------
+
+    fn operator_question_blocked(ts: &str, qid: &str, question: &str, blocks: &[&str]) -> String {
+        let blocks = blocks
+            .iter()
+            .map(|b| format!("\"{b}\""))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{"ts":"{ts}","type":"operator_question","source":"target","data":{{"question_id":"{qid}","question":"{question}","blocks":[{blocks}]}}}}"#
+        )
+    }
+
+    #[test]
+    fn open_blocking_question_holds_its_node() {
+        let raw = operator_question_blocked(
+            "2026-07-03T02:00:00Z",
+            "q-hold",
+            "auto-merge or hold?",
+            &["x-bbbb"],
+        );
+        let held = held_nodes_from_raw(&raw);
+        assert_eq!(held.get("x-bbbb"), Some(&"q-hold".to_string()));
+        assert_eq!(held.len(), 1);
+    }
+
+    #[test]
+    fn closed_blocking_question_holds_nothing() {
+        let raw = [
+            operator_question_blocked("2026-07-03T02:00:00Z", "q-hold", "pick", &["x-bbbb"]),
+            operator_question_closed("2026-07-03T03:00:00Z", "q-hold"),
+        ]
+        .join("\n");
+        assert!(held_nodes_from_raw(&raw).is_empty());
+    }
+
+    #[test]
+    fn question_without_blocks_holds_nothing() {
+        let raw = operator_question("2026-07-03T02:00:00Z", "q-loose", "idle thought", None);
+        assert!(held_nodes_from_raw(&raw).is_empty());
+    }
+
+    #[test]
+    fn oldest_open_question_wins_per_node() {
+        let raw = [
+            operator_question_blocked("2026-07-03T02:00:00Z", "q-old", "older", &["x-bbbb"]),
+            operator_question_blocked("2026-07-03T05:00:00Z", "q-new", "newer", &["x-bbbb"]),
+        ]
+        .join("\n");
+        let held = held_nodes_from_raw(&raw);
+        assert_eq!(held.get("x-bbbb"), Some(&"q-old".to_string()));
+    }
+
+    #[test]
+    fn held_map_lists_every_blocked_node_of_one_question() {
+        let raw = operator_question_blocked(
+            "2026-07-03T02:00:00Z",
+            "q-hold",
+            "pick",
+            &["x-aaaa", "x-bbbb"],
+        );
+        let held = held_nodes_from_raw(&raw);
+        assert_eq!(held.get("x-aaaa"), Some(&"q-hold".to_string()));
+        assert_eq!(held.get("x-bbbb"), Some(&"q-hold".to_string()));
     }
 
     #[test]
