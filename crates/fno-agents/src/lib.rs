@@ -150,6 +150,7 @@ pub mod king_verdict_inputs;
 pub mod lane_heal;
 pub mod law_match;
 mod lifecycle_child;
+pub mod list_row;
 pub mod liveness_sweep;
 pub mod logs;
 pub mod logs_client;

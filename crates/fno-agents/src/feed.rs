@@ -501,7 +501,7 @@ fn parse_args(rest: &[String]) -> Result<FeedArgs, String> {
 /// The store path, resolved as the fno crate's `backlog_view::graph_path`
 /// does: `FNO_GRAPH_JSON` > `$HOME/.fno/graph.json` (the agents home's parent,
 /// so a test home redirects it too).
-fn graph_path(home: &AgentsHome) -> PathBuf {
+pub(crate) fn graph_path(home: &AgentsHome) -> PathBuf {
     if let Some(v) = std::env::var_os("FNO_GRAPH_JSON") {
         return PathBuf::from(v);
     }

@@ -4605,7 +4605,7 @@ async fn read_worker_snapshot(sock: &std::path::Path) -> Option<String> {
 /// shared fixture in schemas/ is what pins them together.
 const STALE_ATTENTION_S: f64 = 600.0;
 
-const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "model_basis"];
+const LIST_PROJECTION_OMISSIONS: [&str; 0] = [];
 
 /// `agent.list`, with the truth probe injected as a BATCH seam: one call for
 /// the whole filtered page, keyed by handle. The per-row seam it replaced spent
@@ -4759,6 +4759,10 @@ where
     // frozen by the --status filter), so the envelope does.
     let truth_probe_asked = handles.len();
     let truth_probe_answered = handles.iter().filter(|h| truths.contains_key(*h)).count();
+    let node_prs = crate::list_row::node_primary_prs(
+        &crate::feed::graph_path(&ctx.home),
+        filtered.iter().filter_map(|e| e.node.as_deref()),
+    );
     let classified: Vec<_> = filtered
         .into_iter()
         .map(|e| {
@@ -4887,6 +4891,7 @@ where
                     .transport_short()
                     .map(|s| Value::String(s.to_string()))
                     .unwrap_or(Value::Null);
+                let (pr, pr_basis) = crate::list_row::pr_pair(e.node.as_deref(), node_prs.as_ref());
                 let log_path: Value = e
                     .log_path
                     .as_deref()
@@ -4954,6 +4959,8 @@ where
                     // storage from resolved spawn provenance. Never infer it
                     // from the row name.
                     "node": e.node,
+                    "pr": pr,
+                    "pr_basis": pr_basis,
                     "predecessor_session_ids": e.predecessor_session_ids,
                     "forked_from_session_id": e.forked_from_session_id,
                     "short_id": short_id,
@@ -5021,23 +5028,15 @@ where
                     // never grows a second transcript reader that could disagree
                     // with the truth verb about the same session.
                     "observed_model": observed_model,
-                    // v23: the stored REQUEST beside the observation,
-                    // plus the substitution marker derived from the payload
-                    // above - the same two keys, computed the same way, as
-                    // Python's serialize_entry. Null marker is match-or-
-                    // unknown; it never reads as a clean bill on its own.
+                    // The stored request with its basis, beside the observation.
+                    // A null substitution marker is match-or-unknown, never clean.
+                    "model": e.model,
+                    "model_basis": e.model_basis,
                     "requested_model": e.requested_model,
                     "model_substituted": model_substitution_marker(
                         e.requested_model.as_deref(),
                         &observed_model,
                     ),
-                    // Architecture C (plan): additive keys, never removing
-                    // live_status (Locked #4 back-compat). `pid` is the worker pid for
-                    // a PTY agent, null for a one-shot ask (no managed process). The
-                    // pid is cleared when a PTY row reconciles to exited (Locked #7),
-                    // so it never lingers as a misleading liveness signal.
-                    // `last_reconciled_at` is the raw RFC3339 of the last probe (null
-                    // when never reconciled); the client renders it as the CHECKED age.
                     "pid": e.pid,
                     "pid_start_time": e.pid_start_time,
                     "log_path": log_path,
@@ -5078,10 +5077,6 @@ where
                     // under fno's config-resolved state dir, which the daemon
                     // does not load.
                     "delivery_policy": e.delivery_policy,
-                    // Superset of Python's serialize_entry: project_root is retained
-                    // as the daemon's native grouping key (existing daemon_e2e
-                    // contract) alongside the shared parity fields. Python list
-                    // has no project_root; the extra key is a harmless superset.
                     "project_root": e.project_root,
                 });
                 if let Some(object) = row.as_object_mut() {

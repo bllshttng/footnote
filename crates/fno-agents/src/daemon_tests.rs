@@ -3379,8 +3379,8 @@ fn list_row_key_set_matches_shared_contract() {
     let contract: Value = serde_json::from_str(CONTRACT).expect("contract is valid JSON");
     assert_eq!(
         contract["projection_omissions"],
-        json!(["model", "model_basis"]),
-        "projection omissions must stay canonical and sorted"
+        json!([]),
+        "model and model_basis are projected with their basis, never omitted"
     );
     let mut expected: std::collections::BTreeSet<String> = contract["required"]
         .as_array()
@@ -3447,14 +3447,13 @@ fn list_row_key_set_matches_shared_contract() {
         "the list row carries the recorded substrate"
     );
 
-    // v23 (x-2019), by VALUE and not merely by presence: a substituted
-    // row names both values; an unknown request renders null, never a
-    // fabricated match. The seeded row carries no request and the probe
-    // answers no model, so both keys ride null on the baseline read.
+    // By VALUE: an unknown request renders null, never a fabricated match.
     assert_eq!(row["requested_model"], Value::Null);
     assert_eq!(row["model_substituted"], Value::Null);
     state::update_registry(&home.registry_json(), |r| {
         r.entries[0].requested_model = Some("glm-5.3[1m]".into());
+        r.entries[0].model = Some("glm-5.3-flash[1m]".into());
+        r.entries[0].model_basis = Some("requested".into());
     })
     .unwrap();
     let mut contradicting = probe("working").unwrap();
@@ -3467,11 +3466,14 @@ fn list_row_key_set_matches_shared_contract() {
     let row = &response.result().unwrap()["agents"][0];
     assert_eq!(row["requested_model"], "glm-5.3[1m]");
     assert_eq!(
+        (&row["model"], &row["model_basis"]),
+        (&json!("glm-5.3-flash[1m]"), &json!("requested"))
+    );
+    assert_eq!(
         row["model_substituted"],
         json!({"requested": "glm-5.3[1m]", "observed": "glm-5.3-flash"})
     );
-    // Suffix-only difference is a MATCH: the marker stays null. The
-    // operator's specimen table calls glm-5.3[1m] vs glm-5.3 ok.
+    // Suffix-only difference is a MATCH: the marker stays null.
     let mut agreeing = probe("working").unwrap();
     agreeing.observed_model = json!({"kind": "observed", "model": "glm-5.3"});
     let response = handle_list_with_truth(&ctx, &req, per_handle(|_handle| Some(agreeing.clone())));
@@ -3479,9 +3481,7 @@ fn list_row_key_set_matches_shared_contract() {
     assert_eq!(row["requested_model"], "glm-5.3[1m]");
     assert_eq!(row["model_substituted"], Value::Null);
 
-    // Presence in the key set is not the bug being guarded: a key that is
-    // always null is the same lie in a different shape. Assert the values
-    // reach the row.
+    // An always-null key is the same lie as a missing one: assert values.
     assert_eq!(row["harness"], "claude");
     // `provider` carries the stored vendor axis, never a harness (AC8,
     // post x-f273). Emitting it from one serializer only would be worse
@@ -3492,7 +3492,7 @@ fn list_row_key_set_matches_shared_contract() {
     assert!(row.get("effort").is_some(), "effort key must be emitted");
     assert_eq!(row["effort"], "xhigh");
     assert_eq!(row["node"], "x-cafe");
-    assert!(row.get("model").is_none());
+    assert!(["no-pr", "graph-unreadable"].contains(&row["pr_basis"].as_str().unwrap()));
     assert_eq!(
         row["harness_session_id"],
         "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
