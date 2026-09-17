@@ -13,10 +13,12 @@ The read is strictly additive and time-boxed: any failure degrades to the
 from __future__ import annotations
 
 import json
+import re
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 from fno.graph._reconcile import repo_slug_from_url
 from fno.pr import _quota
@@ -169,6 +171,43 @@ def _repo_root(cwd: Optional[str] = None) -> Path:
 from fno.paths import repo_identity as _repo_identity  # noqa: E402
 
 
+def journal_lines(path: Path, types: tuple[str, ...]) -> Iterator[str]:
+    """The lines of ``path``'s journal for ``types``, across rotations.
+
+    The Python half of ``events_store::journal_text``. Rotation ingests a
+    generation into ``<stem>.db`` before the rename, so the store holds every
+    row that left the live file: yield the store rows whose line is not in the
+    live file (oldest first), then the live file verbatim. Any store failure
+    yields the live file alone.
+    """
+    live = path.resolve()
+    name = re.sub(r"\.\d+$", "", live.name)
+    live = live.with_name(name)
+    try:
+        live_lines = live.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    except OSError:
+        live_lines = []
+    store = live.with_name(name.removesuffix(".jsonl") + ".db")
+    if store.is_file():
+        in_live = {line.rstrip("\n").removesuffix("\r") for line in live_lines}
+        marks = ",".join("?" * len(types))
+        conn = None
+        try:
+            conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+            rows = conn.execute(
+                f"SELECT line FROM events WHERE type IN ({marks}, '') ORDER BY ts_ms", types
+            ).fetchall()
+        except sqlite3.Error:
+            rows = []
+        finally:
+            if conn is not None:
+                conn.close()
+        for (line,) in rows:
+            if line not in in_live:
+                yield line + "\n"
+    yield from live_lines
+
+
 def _scan_coverage(
     path: Path, pr_number: int, repo_slug: Optional[str] = None
 ) -> tuple[Optional[dict], str]:
@@ -192,30 +231,29 @@ def _scan_coverage(
     latest: Optional[dict] = None
     latest_ts = ""
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            for raw in fh:
-                # Cheap reject before the JSON parse; 99.99% of lines are other
-                # event types and the logs are large enough for this to matter.
-                if "review_coverage" not in raw:
+        for raw in journal_lines(path, ("review_coverage",)):
+            # Cheap reject before the JSON parse; 99.99% of lines are other
+            # event types and the logs are large enough for this to matter.
+            if "review_coverage" not in raw:
+                continue
+            try:
+                ev = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(ev, dict) or ev.get("type") != "review_coverage":
+                continue
+            data = ev.get("data") or {}
+            if not isinstance(data, dict):
+                continue
+            try:
+                if int(data.get("pr", -1)) != pr_number:
                     continue
-                try:
-                    ev = json.loads(raw)
-                except ValueError:
-                    continue
-                if not isinstance(ev, dict) or ev.get("type") != "review_coverage":
-                    continue
-                data = ev.get("data") or {}
-                if not isinstance(data, dict):
-                    continue
-                try:
-                    if int(data.get("pr", -1)) != pr_number:
-                        continue
-                except (TypeError, ValueError):
-                    continue
-                if repo_slug is not None and data.get("repo") != repo_slug:
-                    continue
-                latest = data
-                latest_ts = str(ev.get("ts") or "")
+            except (TypeError, ValueError):
+                continue
+            if repo_slug is not None and data.get("repo") != repo_slug:
+                continue
+            latest = data
+            latest_ts = str(ev.get("ts") or "")
     except OSError:
         return None, ""
     return latest, latest_ts

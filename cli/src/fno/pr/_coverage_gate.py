@@ -971,7 +971,7 @@ def attestation_chain(
     append-only log written by several processes), never fatal.
     """
     try:
-        from fno.pr._reviews import _coverage_logs
+        from fno.pr._reviews import _coverage_logs, journal_lines
 
         project_path, global_path, slug = _coverage_logs(cwd, None)
     except Exception:  # noqa: BLE001 - an unreadable log never tightens a gate
@@ -989,56 +989,55 @@ def attestation_chain(
         if path is None:
             continue
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                for raw in fh:
-                    if '"review_attestation"' not in raw:
+            for raw in journal_lines(path, ("review_attestation",)):
+                if '"review_attestation"' not in raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except ValueError:
+                    continue
+                data = event.get("data")
+                if not isinstance(data, dict):
+                    continue
+                if scoped:
+                    if data.get("repo") != slug:
                         continue
-                    try:
-                        event = json.loads(raw)
-                    except ValueError:
-                        continue
-                    data = event.get("data")
-                    if not isinstance(data, dict):
-                        continue
-                    if scoped:
-                        if data.get("repo") != slug:
-                            continue
-                    # Dedup the MIRROR, not the branch. invocation_id is
-                    # minted once per branch review-hold (emit-attestation
-                    # resolves it from the hold for the current branch), so
-                    # every round on a branch reuses it and it separates
-                    # nothing. The ts cannot separate either: most producers
-                    # stamp it at second precision (40838 of 43711 events
-                    # measured), so two rounds inside one second are real.
-                    # What separates the mirror's copy from a distinct
-                    # attestation is the payload: the copy differs from its
-                    # original in exactly one key, `repo`, while two distinct
-                    # rounds differ in verdict, findings, dispositions or
-                    # head. One key for every row shape, no invocation-era
-                    # fallback.
-                    key = "{}|{}".format(
-                        event.get("ts", ""),
-                        json.dumps(
-                            {k: v for k, v in data.items() if k != "repo"},
-                            sort_keys=True,
-                        ),
+                # Dedup the MIRROR, not the branch. invocation_id is
+                # minted once per branch review-hold (emit-attestation
+                # resolves it from the hold for the current branch), so
+                # every round on a branch reuses it and it separates
+                # nothing. The ts cannot separate either: most producers
+                # stamp it at second precision (40838 of 43711 events
+                # measured), so two rounds inside one second are real.
+                # What separates the mirror's copy from a distinct
+                # attestation is the payload: the copy differs from its
+                # original in exactly one key, `repo`, while two distinct
+                # rounds differ in verdict, findings, dispositions or
+                # head. One key for every row shape, no invocation-era
+                # fallback.
+                key = "{}|{}".format(
+                    event.get("ts", ""),
+                    json.dumps(
+                        {k: v for k, v in data.items() if k != "repo"},
+                        sort_keys=True,
+                    ),
+                )
+                if key in seen:
+                    continue
+                if _in_scope(data):
+                    seen.add(key)
+                    chain.append(
+                        {
+                            "ts": event.get("ts", ""),
+                            "head_sha": data.get("head_sha", ""),
+                            "reviewed_base_sha": data.get("reviewed_base_sha", ""),
+                            "verdict": data.get("verdict", ""),
+                            "review_round": data.get("review_round"),
+                            "findings": data.get("findings"),
+                            "findings_truncated": data.get("findings_truncated") is True,
+                            "dispositions": data.get("dispositions"),
+                        }
                     )
-                    if key in seen:
-                        continue
-                    if _in_scope(data):
-                        seen.add(key)
-                        chain.append(
-                            {
-                                "ts": event.get("ts", ""),
-                                "head_sha": data.get("head_sha", ""),
-                                "reviewed_base_sha": data.get("reviewed_base_sha", ""),
-                                "verdict": data.get("verdict", ""),
-                                "review_round": data.get("review_round"),
-                                "findings": data.get("findings"),
-                                "findings_truncated": data.get("findings_truncated") is True,
-                                "dispositions": data.get("dispositions"),
-                            }
-                        )
         except OSError:
             continue
     chain.sort(key=lambda e: e["ts"])
