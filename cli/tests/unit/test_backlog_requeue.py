@@ -98,6 +98,29 @@ def _dead_truth(monkeypatch, state="stalled", age_s=18000, observed=None) -> Non
     )
 
 
+@pytest.fixture(autouse=True)
+def _quiet_roster(monkeypatch):
+    """No unit test reads the live fleet: a consulted, empty roster by default."""
+    from fno.claims import roster
+
+    monkeypatch.setattr(roster, "read_roster", lambda **_kw: roster.RosterReading(True, 0, {}))
+
+
+def _started_ago(seconds: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _fresh_node() -> dict:
+    """A do row started a minute ago: the idle arm cannot fire, so only the
+    session's reachability decides."""
+    return _wedged_node(sessions=[{
+        "phase": "do", "harness": "claude", "session_id": DEAD_SESSION,
+        "started_at": _started_ago(60),
+    }])
+
+
 def _acquire(key: str, holder: str, pid: int, root: Path) -> None:
     from fno.claims.core import acquire_claim
     acquire_claim(key=key, holder=holder, pid=pid, root=root)
@@ -174,7 +197,7 @@ def test_ac2_requeue_refuses_non_free_states(tmp_graph, claims_root, monkeypatch
 
 
 def test_ac3_requeue_refuses_warm_session(tmp_graph, claims_root, monkeypatch):
-    _seed(tmp_graph, [_wedged_node()])
+    _seed(tmp_graph, [_fresh_node()])
     _dead_truth(monkeypatch, state="working", age_s=60)
     result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
     assert result.exit_code != 0
@@ -321,7 +344,7 @@ def test_requeue_still_refuses_a_worker_with_a_climbing_sample_count(
     tmp_graph, claims_root, monkeypatch
 ):
     """Same state and age, 31 samples: a live worker still owns the do window."""
-    _seed(tmp_graph, [_wedged_node()])
+    _seed(tmp_graph, [_fresh_node()])
     _dead_truth(
         monkeypatch,
         state="working",
@@ -340,7 +363,7 @@ def test_ac3_hp_the_reachable_refusal_names_the_owners_self_close(
     """The refusal names the next command: the owning session ends its own do
     row with `session add --ended-at`. reap-open is NOT named - this worker
     reads reachable, so a death claim would be false."""
-    _seed(tmp_graph, [_wedged_node()])
+    _seed(tmp_graph, [_fresh_node()])
     _dead_truth(
         monkeypatch,
         state="working",
@@ -444,3 +467,67 @@ def test_requeue_suspect_refusal_invents_no_clock(tmp_graph, claims_root, monkey
     assert result.exit_code == 3, _out(result)
     assert "pid-absent" in _out(result)
     assert "reclaimable" not in _out(result)
+
+
+# -- x-fe51: a live session no longer holds an idle row forever ----------------
+
+
+def _idle_node() -> dict:
+    return _wedged_node(sessions=[{
+        "phase": "do", "harness": "claude", "session_id": DEAD_SESSION,
+        "started_at": _started_ago(30 * 3600),
+    }])
+
+
+def _roster(monkeypatch, *, consulted=True, engaged=()) -> None:
+    from fno.claims import roster
+
+    workers = [{"name": n} for n in engaged]
+    monkeypatch.setattr(
+        roster, "read_roster",
+        lambda **_kw: roster.RosterReading(consulted, 1, {NODE_ID: workers}, "" if consulted else "probe timed out"),
+    )
+    monkeypatch.setattr(roster, "classify_workers", lambda ws: (list(ws), [], {}))
+
+
+def test_requeue_settles_an_idle_row_under_a_reachable_session(tmp_graph, claims_root, monkeypatch):
+    """The x-eb79 specimen: the session reads working at 60s, but it has not
+    touched this node in 30h and no reachable worker is on the node."""
+    _seed(tmp_graph, [_idle_node()])
+    _dead_truth(monkeypatch, state="working", age_s=60)
+    _roster(monkeypatch)
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID, "--json"])
+    assert result.exit_code == 0, _out(result)
+    assert _read(tmp_graph)[0]["status"] == "ready"
+    assert json.loads(result.output)["settled"][0]["row_idle_s"] >= 108000
+
+
+def test_requeue_holds_an_idle_row_with_a_reachable_worker_on_the_node(tmp_graph, claims_root, monkeypatch):
+    _seed(tmp_graph, [_idle_node()])
+    _dead_truth(monkeypatch, state="working", age_s=60)
+    _roster(monkeypatch, engaged=["worker-a"])
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 3, _out(result)
+    assert "worker-a" in _out(result)
+    assert _read(tmp_graph)[0]["sessions"][0]["session_id"] == DEAD_SESSION
+
+
+def test_requeue_reachable_refusal_names_its_clock(tmp_graph, claims_root, monkeypatch):
+    """A fresh row can only be held, so the refusal never waits on a fleet read."""
+    _seed(tmp_graph, [_fresh_node()])
+    _dead_truth(monkeypatch, state="working", age_s=60)
+    _roster(monkeypatch, consulted=False)
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 3, _out(result)
+    assert f"fno backlog session add {NODE_ID} --phase do --ended-at" in _out(result)
+    assert "The do row stays: row idle 0h, inside the 24h bound" in _out(result)
+
+
+def test_requeue_refuses_an_idle_row_when_the_roster_is_unread(tmp_graph, claims_root, monkeypatch):
+    _seed(tmp_graph, [_idle_node()])
+    _dead_truth(monkeypatch, state="working", age_s=60)
+    _roster(monkeypatch, consulted=False)
+    result = runner.invoke(app, ["backlog", "requeue", NODE_ID])
+    assert result.exit_code == 3, _out(result)
+    assert "roster unread" in _out(result)
+    assert _read(tmp_graph)[0]["sessions"][0]["session_id"] == DEAD_SESSION

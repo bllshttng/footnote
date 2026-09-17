@@ -1776,95 +1776,10 @@ def test_apply_harness_shape_fixes_rewrites_under_the_lock_recheck():
     assert applied == []
 
 
-# --- leg 9: abandoned do rows (x-f714) --------------------------------------
+# --- leg 9: abandoned do rows ------------------------------------------------
 
 _CLAUDE_SID = "9f06a492-1111-4222-8333-444455556666"
-
-
-def _write_transcript(tmp_path, monkeypatch, sid, records):
-    """A real fixture transcript under a temp projects root, wired in as the
-    resolver default so the prover reads files, not mocks."""
-    root = tmp_path / "projects" / "-some-worktree"
-    root.mkdir(parents=True)
-    (root / f"{sid}.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in records)
-    )
-    import fno.provenance.resolver as resolver
-
-    monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "projects")
-
-
-def _do_record(role, text, stamp):
-    return {
-        "type": role,
-        "timestamp": stamp,
-        "message": {"role": role, "content": [{"type": "text", "text": text}]},
-    }
-
-
-def test_do_row_session_gone_true_on_quiet_disengaged_tail(tmp_path, monkeypatch):
-    """Positive control: quiet past the bar AND a <promise> tail -> gone, with
-    the quiet duration named."""
-    from datetime import datetime, timezone
-
-    quiet_at = "2026-09-07T10:00:00Z"
-    _write_transcript(
-        tmp_path, monkeypatch, _CLAUDE_SID,
-        [
-            _do_record("user", "build the thing", quiet_at),
-            _do_record("assistant", "<promise>MISSION COMPLETE: shipped</promise>", quiet_at),
-        ],
-    )
-    now = datetime(2026, 9, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
-    gone, reason = m.do_row_session_gone(
-        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=24 * 3600, now_s=now
-    )
-    assert gone is True
-    assert "quiet 4320m" in reason
-    assert "tail not engaged" in reason
-
-
-def test_do_row_session_gone_holds_on_active_transcript(tmp_path, monkeypatch):
-    """Positive control for the refusal: a transcript whose last event is
-    inside the bar is held as active, never reaped."""
-    from datetime import datetime, timezone
-
-    fresh_at = "2026-09-10T09:55:00Z"
-    _write_transcript(
-        tmp_path, monkeypatch, _CLAUDE_SID,
-        [_do_record("assistant", "still mid-task", fresh_at)],
-    )
-    now = datetime(2026, 9, 10, 10, 0, 0, tzinfo=timezone.utc).timestamp()
-    gone, reason = m.do_row_session_gone(
-        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=24 * 3600, now_s=now
-    )
-    assert (gone, reason) == (False, "transcript active")
-
-
-def test_do_row_session_gone_holds_when_transcript_unresolved(tmp_path, monkeypatch):
-    import fno.provenance.resolver as resolver
-
-    monkeypatch.setattr(resolver, "_DEFAULT_PROJECTS_ROOT", tmp_path / "absent")
-    assert m.do_row_session_gone(
-        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=1, now_s=1.0
-    ) == (False, "transcript unresolved")
-
-
-def test_do_row_session_gone_holds_when_transcript_unreadable(tmp_path, monkeypatch):
-    _write_transcript(tmp_path, monkeypatch, _CLAUDE_SID, [])
-    p = tmp_path / "projects" / "-some-worktree" / f"{_CLAUDE_SID}.jsonl"
-    p.write_bytes(b"\xff\xfe not utf-8")
-    assert m.do_row_session_gone(
-        "claude", _CLAUDE_SID, "/some/worktree", quiet_after_s=1, now_s=1.0
-    ) == (False, "transcript unreadable")
-
-
-def test_do_row_session_gone_holds_opencode_without_a_file():
-    """An opencode row can never be proven gone here: the harness is held by
-    name, before any file lookup."""
-    assert m.do_row_session_gone(
-        "opencode", "sess_abc", "/some/worktree", quiet_after_s=1, now_s=1.0
-    ) == (False, "harness not file-backed")
+_BOUND = 24 * 3600
 
 
 def _do_node(nid, sid=_CLAUDE_SID, **over):
@@ -1883,58 +1798,70 @@ def _do_node(nid, sid=_CLAUDE_SID, **over):
     return base
 
 
-def _gone_prover(harness, sid, cwd, *, quiet_after_s, now_s):
-    return True, "transcript quiet 999m, tail not engaged"
+def _hours_after_start(hours):
+    from datetime import datetime, timezone
+
+    return datetime(2026, 9, 9, 15, 46, 29, tzinfo=timezone.utc).timestamp() + hours * 3600
 
 
-def _active_prover(harness, sid, cwd, *, quiet_after_s, now_s):
-    return False, "transcript active"
-
-
-def test_detect_abandoned_do_rows_stamps_a_proven_gone_row():
-    rows = m.detect_abandoned_do_rows(
-        [_do_node("x-gone1")],
-        live_claimed=set(), live_worked={},
-        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
+def _detect(nodes, *, hours, claimed=(), engaged_on=None):
+    return m.detect_abandoned_do_rows(
+        nodes, live_claimed=set(claimed), engaged_on=engaged_on or {},
+        now_s=_hours_after_start(hours), quiet_after_s=_BOUND,
     )
-    assert [(r.node, r.verdict) for r in rows] == [("x-gone1", "gone")]
 
 
-def test_detect_abandoned_do_rows_holds_a_live_claim():
-    rows = m.detect_abandoned_do_rows(
-        [_do_node("x-clm01")],
-        live_claimed={"x-clm01"}, live_worked={},
-        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
-    )
-    assert len(rows) == 1
-    assert rows[0].verdict == "held"
-    assert "live claim" in rows[0].reason
+def test_detect_abandoned_do_rows_reaps_a_row_idle_past_the_bound():
+    """A live session proves nothing about this node: a 40h row with no
+    reachable worker on the node is gone."""
+    rows = _detect([_do_node("x-idle1")], hours=40)
+    assert [(r.node, r.verdict, r.reason) for r in rows] == [
+        ("x-idle1", "gone", "row idle 40h, no reachable worker on the node")
+    ]
 
 
-def test_detect_abandoned_do_rows_holds_a_rostered_worker():
-    rows = m.detect_abandoned_do_rows(
-        [_do_node("x-wrk01")],
-        live_claimed=set(), live_worked={"x-wrk01": ["worker-a"]},
-        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
-    )
-    assert rows[0].verdict == "held"
-    assert "live roster worker worker-a" in rows[0].reason
+def test_detect_abandoned_do_rows_holds_a_row_inside_the_bound():
+    rows = _detect([_do_node("x-young")], hours=3)
+    assert [(r.verdict, r.reason) for r in rows] == [("held", "row idle 3h, inside the 24h bound")]
+
+
+def test_detect_abandoned_do_rows_holds_a_reachable_worker_on_the_node():
+    rows = _detect([_do_node("x-idle2")], hours=40, engaged_on={"x-idle2": ["worker-a"]})
+    assert [(r.verdict, r.reason) for r in rows] == [("held", "reachable worker on node worker-a")]
+
+
+def test_detect_abandoned_do_rows_idle_row_still_held_by_a_live_claim():
+    rows = _detect([_do_node("x-idle3")], hours=40, claimed={"x-idle3"},
+                   engaged_on={"x-idle3": ["worker-a"]})
+    assert [(r.verdict, r.reason) for r in rows] == [("held", "live claim")]
 
 
 def test_detect_abandoned_do_rows_skips_a_locked_node():
-    rows = m.detect_abandoned_do_rows(
-        [_do_node("x-lck01", locked_by="someone")],
-        live_claimed=set(), live_worked={},
-        prover=_gone_prover, now_s=0.0, quiet_after_s=1.0,
-    )
-    assert rows == []
+    assert _detect([_do_node("x-lck01", locked_by="someone")], hours=40) == []
 
 
-def test_detect_abandoned_do_rows_carries_the_prover_verdict():
-    rows = m.detect_abandoned_do_rows(
-        [_do_node("x-hld01")],
-        live_claimed=set(), live_worked={},
-        prover=_active_prover, now_s=0.0, quiet_after_s=1.0,
-    )
-    assert rows[0].verdict == "held"
-    assert rows[0].reason == "transcript active"
+def test_detect_abandoned_do_rows_owner_note_resets_the_idle_clock():
+    """A note the row's own session wrote 1h ago holds the row; a note from
+    another session does not."""
+    from datetime import datetime, timezone
+
+    note_at = datetime.fromtimestamp(_hours_after_start(39), tz=timezone.utc).isoformat()
+    node = _do_node("x-idle4", progress_notes=[
+        {"ts": note_at, "text": "still on it", "source_session_id": _CLAUDE_SID},
+    ])
+    assert [r.verdict for r in _detect([node], hours=40)] == ["held"]
+
+    node["progress_notes"][0]["source_session_id"] = "someone-else"
+    assert [r.verdict for r in _detect([node], hours=40)] == ["gone"]
+
+
+def test_abandoned_do_rows_refuses_an_unread_roster(monkeypatch):
+    """A degraded fleet read reaps nothing: the leg raises and cmd_maintain
+    reports it skipped."""
+    import pytest
+
+    from fno.claims import roster
+
+    monkeypatch.setattr(roster, "read_roster", lambda **_kw: roster.RosterReading(False, 0, {}, "probe timed out"))
+    with pytest.raises(RuntimeError, match="roster unread"):
+        m.abandoned_do_rows([_do_node("x-deg01")], set())
