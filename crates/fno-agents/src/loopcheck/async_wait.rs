@@ -116,6 +116,41 @@ pub(super) fn async_wait_class(
     None
 }
 
+/// The block reason for a green, reviewed, shipped PR whose sole remaining
+/// blocker is the merge slot: the render twin of `conflicting_reason`, so
+/// both hold arms teach one voice. Returns the actionable half (a BEHIND
+/// base) and the idlable half with the ritual hint derived from
+/// `async_wait_class` by construction, so the render and the classifier
+/// cannot disagree about whether the wait is valid.
+pub(super) fn merge_slot_reason(
+    pr: &PrInfo,
+    open_findings_empty: bool,
+    head_shipped: bool,
+) -> Option<String> {
+    let holder = pr.merge_slot_holder?;
+    if holder == pr.number.unsigned_abs() {
+        return None;
+    }
+    if pr.base_behind {
+        return Some(format!(
+            "PR #{}: the base moved past this head while PR #{} holds the merge \
+             slot - rebase onto the base (`fno do pr rebase`), push, then re-check.",
+            pr.number, holder
+        ));
+    }
+    let idlable = async_wait_class(pr, open_findings_empty, head_shipped);
+    let hint = if idlable == Some("merge_slot") {
+        arm_watch_hint(pr.number, "merge_slot")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "PR #{}: merge slot held by PR #{} (frees when it merges, closes, goes \
+         red, or its lease ends).{hint}",
+        pr.number, holder
+    ))
+}
+
 /// The arm-and-tag ritual (US3) that converts an unwatched async wait
 /// into a single idle turn. Supersedes the old "wait silently" prose: waiting
 /// silently still costs a full model invocation every ~90s tick, whereas arming

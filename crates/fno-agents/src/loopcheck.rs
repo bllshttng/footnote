@@ -1552,6 +1552,7 @@ mod async_wait;
 mod attestation_journal;
 mod authorship;
 mod awaiting_merge;
+mod budget_standdown;
 mod coverage_receipt;
 mod holds;
 mod king_decide;
@@ -1560,7 +1561,7 @@ mod review_state;
 use attestation_journal::missing_global_attestations;
 pub use attestation_journal::unattested_reviewers_scan_text;
 mod watch_lease;
-use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason};
+use async_wait::{arm_watch_hint, async_wait_class, conflicting_reason, merge_slot_reason};
 use authorship::carry_author_session_forward;
 pub use authorship::AttestationOrigin;
 use authorship::{classify_attestation_origin, default_attestation_origin};
@@ -10706,28 +10707,11 @@ fn build_block_reason(
         return coverage_unavailable_description(&pr.head_oid);
     }
 
-    // x-de4c: a green, reviewed, shipped PR whose sole remaining blocker is
-    // the repo's one-at-a-time merge slot. The ritual hint rides only the
-    // non-actionable half - a BEHIND base is rebase work to do NOW, and
-    // async_wait_class refuses that idle, so `hint("merge_slot")` is empty
-    // there by construction.
-    if let Some(holder) = pr.merge_slot_holder {
-        if holder != pr.number.unsigned_abs() {
-            if pr.base_behind {
-                return format!(
-                    "PR #{}: the base moved past this head while PR #{} holds the merge \
-                     slot - rebase onto the base (`fno do pr rebase`), push, then re-check.",
-                    pr.number, holder
-                );
-            }
-            return format!(
-                "PR #{}: merge slot held by PR #{} (frees when it merges, closes, goes \
-                 red, or its lease ends).{}",
-                pr.number,
-                holder,
-                hint("merge_slot")
-            );
-        }
+    // A merge-slot hold renders beside the other hold remedies
+    // (conflicting_reason), so both hold arms teach one voice and the
+    // classifier's hint rides by construction.
+    if let Some(r) = merge_slot_reason(pr, open_findings_empty, head_shipped) {
+        return r;
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
