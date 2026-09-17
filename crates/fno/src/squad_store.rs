@@ -1997,7 +1997,10 @@ pub fn begin_external_stop(id: &str, name: &str, cwd: &str) -> io::Result<Lifecy
 /// absent record refuses (nothing to remove). Same persistence-error contract as
 /// [`begin_external_stop`].
 pub fn begin_external_rm(id: &str) -> io::Result<LifecycleCas> {
-    let mut outcome = LifecycleCas::Refused(format!("no such stopped row: {id}"));
+    // The record is absent: say THAT, not "no such stopped row" - the
+    // reader would look for a stopped row that never existed (x-6834
+    // change 4, AC4-ERR).
+    let mut outcome = LifecycleCas::Refused(format!("no external lifecycle record: {id}"));
     mutate_lifecycle(|records| {
         if let Some(r) = records.iter_mut().find(|r| r.attach_id == id) {
             outcome = match r.state {

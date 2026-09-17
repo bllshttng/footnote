@@ -63,14 +63,23 @@ pub(crate) fn resolve_target<'a>(
     if let Some(sid) = harness_session_id.filter(|s| !s.is_empty()) {
         let by_id: Vec<&RegistryAgent> = agents
             .iter()
-            .filter(|a| !a.external && super::agent_harness_session_id(a) == Some(sid))
+            .filter(|a| super::agent_harness_session_id(a) == Some(sid))
             .collect();
         if let [one] = by_id.as_slice() {
             return Ok(Target::Registry(one));
         }
     }
     let matches: Vec<&RegistryAgent> = agents.iter().filter(|a| a.name == name).collect();
-    if matches.iter().any(|a| a.external) {
+    // The external refusal is a fact about OWNERSHIP, keyed on registry
+    // identity, not the display flag (x-6834 change 4). An upgraded orphan
+    // IS an fno registry row - it carries session ids - so the refusal only
+    // fires for a row with no registry identity at all (a synthesized
+    // foreign row carries none). The refusal text is unchanged for that
+    // population.
+    if matches
+        .iter()
+        .any(|a| a.external && a.session_id.is_none() && a.harness_session_id.is_none())
+    {
         return Err(format!(
             "{name} is external - manage it from its own session"
         ));
@@ -371,6 +380,38 @@ mod tests {
         assert!(msg.starts_with("no such agent: ghost"), "{msg}");
         assert!(msg.contains("registry by session id and by label"), "{msg}");
         assert!(!msg.contains("pane table"), "{msg}");
+    }
+
+    #[test]
+    fn an_upgraded_orphan_resolves_by_identity_and_by_name() {
+        // x-6834 AC4-HP: an upgraded orphan is an fno registry row whose
+        // short id the roster still lists - displayed external, but carrying
+        // session ids. RemoveAgent owns it: both legs answer Registry.
+        let mut a = row("t-win", Some("11111111-1111-4111-8111-111111111111"));
+        a.external = true;
+        let agents = vec![a];
+        let by_sid = resolve_target(
+            &agents,
+            |_| None,
+            "t-win",
+            Some("11111111-1111-4111-8111-111111111111"),
+            None,
+        );
+        assert!(matches!(by_sid, Ok(Target::Registry(_))), "{by_sid:?}");
+        let by_name = resolve_target(&agents, |_| None, "t-win", None, None);
+        assert!(matches!(by_name, Ok(Target::Registry(_))), "{by_name:?}");
+    }
+
+    #[test]
+    fn a_foreign_row_without_identity_still_refuses() {
+        // x-6834 AC4-EDGE: a genuinely foreign roster row carries no
+        // registry identity, so the manage-it-from-its-own-session refusal
+        // still fires on the name leg.
+        let mut ext = row("t-win", None);
+        ext.external = true;
+        let agents = vec![ext];
+        let msg = resolve_target(&agents, |_| None, "t-win", None, None).unwrap_err();
+        assert!(msg.contains("external"), "{msg}");
     }
 
     #[test]
