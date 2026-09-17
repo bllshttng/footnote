@@ -115,3 +115,24 @@ def test_an_armed_tick_with_no_roots_never_claims_a_run(tmp_path):
     )
     assert outcome == "no-roots"
     assert rec.runs == []
+
+
+def test_the_armed_tick_passes_detach_and_a_30s_spawn_bound(tmp_path):
+    # The drive loop runs detached from the tick: the phase only
+    # ever pays the spawn, so --detach rides the argv and the timeout only
+    # bounds a wedged spawn, not the loop's remedies.
+    captured: dict = {}
+    runs: list = []
+
+    def run(argv, **kwargs):
+        runs.append(argv)
+        captured["timeout"] = kwargs.get("timeout")
+
+    outcome = run_heal_phase(
+        _settings(armed=True), [tmp_path], resolve_binary=Recorder().resolve, run=run
+    )
+
+    assert outcome == "ran"
+    assert "--detach" in runs[0], f"{runs}"
+    assert "--cwd" in runs[0] and runs[0][-1] == str(tmp_path), f"{runs}"
+    assert captured["timeout"] == 30, captured

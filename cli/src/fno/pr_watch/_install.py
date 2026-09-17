@@ -731,6 +731,54 @@ def tick_end_bits(end: dict) -> list[str]:
     return bits
 
 
+#: The unarmed readout is static: the arm command is the whole answer, and
+#: shelling the Rust renderer for a constant pays a spawn on every status.
+_HEAL_UNARMED = (
+    "Heal: unarmed (auto_heal.enabled=false; "
+    "arm with: fno config set auto_heal.enabled true)"
+)
+
+
+def heal_status_line(events_path: Optional[Path] = None) -> str:
+    """The one ``Heal:`` readout line printed by status, install and refresh.
+
+    Rendered by ``fno-agents pr-heal --status`` (Rust owns the journal and
+    pid-file reads; this side passes only the arm bit and the journal, the
+    way ``_heal_phase`` already shells ``pr-heal``). Unarmed answers without
+    the binary: the arm command is the whole answer. Any readout failure
+    degrades to a line that says so, never silence.
+    """
+    try:
+        from fno.config import load_settings
+
+        settings = load_settings()
+    except Exception:  # noqa: BLE001 - an unreadable config reads unarmed
+        settings = None
+    armed = bool(getattr(getattr(settings, "auto_heal", None), "enabled", False))
+    if not armed:
+        return _HEAL_UNARMED
+    try:
+        import subprocess
+
+        from fno.rust_binary import resolve_binary
+
+        binary = resolve_binary()
+        if binary is None:
+            raise RuntimeError("fno-agents binary not found")
+        argv = [str(binary), "pr-heal", "--status", "--armed"]
+        if events_path is not None:
+            argv += ["--events-file", str(events_path)]
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, check=False, timeout=15
+        )
+        lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("Heal:")]
+        if proc.returncode != 0 or not lines:
+            raise RuntimeError(f"pr-heal --status exited {proc.returncode}")
+        return lines[-1]
+    except Exception as exc:  # noqa: BLE001 - the readout never raises
+        return f"Heal: armed; readout unavailable ({exc})"
+
+
 def status(
     *,
     launch_agents_dir: Path,
@@ -756,6 +804,10 @@ def status(
     typer.echo(f"Verdict:      {report['verdict']} ({report['detail']})")
     if report.get("fix"):
         typer.echo(f"Fix:          {report['fix']}")
+    # The heal arm state sits beside the verdict: the operator's report "I
+    # have never seen the healer do anything" was unanswerable from a
+    # readout that printed nothing about it.
+    typer.echo(heal_status_line(events_path))
     typer.echo(f"Last tick:    {marks['last_tick'] or '(no tick recorded)'}")
     typer.echo(f"Last attempt: {marks['last_attempt'] or '(no attempt recorded)'}")
     end = marks["last_end"]

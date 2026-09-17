@@ -1257,13 +1257,26 @@ def tick() -> None:
         # getattr reads a settings stub with no auto_heal block as unarmed.
         def _phase_heal(_slice_s: float) -> None:
             set_tick_phase("heal")
-            if getattr(getattr(settings, "auto_heal", None), "enabled", False):
-                try:
-                    from fno.pr_watch._heal_phase import run_heal_phase
+            try:
+                from fno.pr_watch._heal_phase import run_heal_phase
 
-                    typer.echo(f"pr heal: {run_heal_phase(settings, _tick_roots())}")
-                except Exception as exc:  # noqa: BLE001 - never let heal break the tick
-                    log.warning("pr-watch: heal phase failed: %s", exc)
+                answer = run_heal_phase(settings, _tick_roots())
+            except Exception as exc:  # noqa:BLE001 - never let heal break the tick
+                log.warning("pr-watch: heal phase failed: %s", exc)
+                return
+            typer.echo(f"pr heal: {answer}")
+            if answer != "ran":
+                # The same arm row the detached spawn writes, so the journal
+                # agrees with the status line on why nothing ran. The spawn
+                # path rows come from the Rust side; this covers the three
+                # gate answers that never reach the binary.
+                _emit_tick_row(
+                    "heal",
+                    interval_s=int(cfg.interval_seconds),
+                    acted=0,
+                    skip_reason=answer.replace("-", "_"),
+                    detail=f"auto_heal gate: {answer}",
+                )
 
         def _phase_evals(_slice_s: float) -> None:
             set_tick_phase("evals")
@@ -1457,6 +1470,11 @@ def install(
         dry_run=dry_run,
         activate=not no_activate,
     )
+    # A fresh install sees the healer's arm state beside the watcher's: an
+    # operator who never armed it learns it here, with the command.
+    from fno.pr_watch._install import heal_status_line
+
+    typer.echo(heal_status_line())
 
 
 @cli.command()
@@ -1486,6 +1504,9 @@ def refresh() -> None:
         caller="refresh",
     )
     typer.echo(f"pr-watch refresh: {msg}")
+    from fno.pr_watch._install import heal_status_line
+
+    typer.echo(heal_status_line())
 
 
 # Single-flight window for the SessionStart self-heal: long enough to cover the

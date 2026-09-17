@@ -12,9 +12,10 @@ from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
-#: Belt over a wedged binary; the drive loop bounds each remedy itself and
-#: the tick's own SIGALRM deadline bounds the phase.
-_DRIVE_TIMEOUT_S = 600
+#: Belt over a wedged spawn, not a run bound: the phase passes ``--detach``,
+#: the binary answers in milliseconds and the drive loop bounds each remedy
+#: itself; the tick's own SIGALRM deadline bounds the phase.
+_DRIVE_TIMEOUT_S = 30
 
 
 def run_heal_phase(
@@ -52,7 +53,15 @@ def run_heal_phase(
     for root in roots:
         try:
             run(
-                [str(binary), "pr-heal", "--all", "--apply", "--cwd", str(root)],
+                [
+                    str(binary),
+                    "pr-heal",
+                    "--all",
+                    "--apply",
+                    "--detach",
+                    "--cwd",
+                    str(root),
+                ],
                 check=False,
                 timeout=_DRIVE_TIMEOUT_S,
             )
