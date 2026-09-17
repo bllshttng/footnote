@@ -732,6 +732,21 @@ def run_king_wake(
                 wake_detail,
                 holder_gone,
             )
+            if not spawned:
+                # A refused spawn still spent a wake bill; the feed must say
+                # why nothing launched, not leave it in the wake log alone.
+                refusal = "manifest-carries-no-model-pin"
+                emit(
+                    "king_wake_refused",
+                    {
+                        "scope": target.scope,
+                        "refusal": refusal,
+                        "reason": reason,
+                        "window_count": window_count,
+                        "ceiling": ceiling,
+                    },
+                )
+                summary["refused"].append({"scope": target.scope, "refusal": refusal})
         if holder_gone and spawned:
             # The new session does not exist yet; its trail is the walk's journal.
             from fno.king.state import parse_manifest as _pm
