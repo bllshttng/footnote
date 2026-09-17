@@ -100,12 +100,14 @@ pub fn hint(cause: &str) -> &'static str {
 
 /// The front-door release verb for one claim. The root prefix is printed
 /// whenever the claim is not under `$HOME`: the verb is pasted into another
-/// shell, which may not carry the reader's `FNO_CLAIMS_ROOT`.
-pub fn release_verb(key: &str, holder: &str, root: &Path) -> String {
-    let prefix = if std::env::var_os("HOME").as_deref() == Some(root.as_os_str()) {
-        String::new()
-    } else {
-        format!("FNO_CLAIMS_ROOT={} ", root.display())
+/// shell, which may not carry the reader's `FNO_CLAIMS_ROOT`. No root means
+/// the global root.
+pub fn release_verb(key: &str, holder: &str, root: Option<&Path>) -> String {
+    let prefix = match root {
+        Some(r) if std::env::var_os("HOME").as_deref() != Some(r.as_os_str()) => {
+            format!("FNO_CLAIMS_ROOT={} ", r.display())
+        }
+        _ => String::new(),
     };
     format!("{prefix}fno agents claim release {key} --holder {holder}")
 }
@@ -298,8 +300,8 @@ fn held_dead_holder(row: &ArmStatus, facts: &RepairFacts) -> Option<(Option<Stri
         .iter()
         .find(|(k, h, _)| h == holder && (key.is_empty() || k == key));
     let verb = match (key.is_empty(), known) {
-        (_, Some((k, h, Some(root)))) => Some(release_verb(k, h, root)),
-        (false, _) => Some(format!("fno agents claim release {key} --holder {holder}")),
+        (_, Some((k, h, Some(root)))) => Some(release_verb(k, h, Some(root))),
+        (false, _) => Some(release_verb(key, holder, None)),
         // A keyless receipt: the stuck-work block prints the exact verb.
         (true, _) => Some("fno agents status".to_string()),
     };
