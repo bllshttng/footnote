@@ -88,7 +88,6 @@ agents mail withdraw	T1	agents mail withdraw	2
 agents mcp send	T1	agents mcp send	10
 agents name	T1	agents name	5
 agents needs	KEEP	agents needs	11	ruled KEEP: fno-agents needs is coupled to needs_overlay
-agents nudge-peek	T1	agents nudge-peek	6
 agents orphans	T1	agents orphans	10
 agents pane-identity	T1	agents pane-identity	0
 agents newest-assistant-text	T1	agents newest-assistant-text	6

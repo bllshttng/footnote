@@ -137,6 +137,7 @@ pub mod harness_capabilities;
 pub mod harness_daemon;
 pub mod heal;
 pub mod honesty_sweep;
+pub mod hook;
 mod identity;
 pub mod interrupt_classify;
 pub mod json_output;

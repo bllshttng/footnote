@@ -1545,6 +1545,37 @@ mod tests {
         fs::remove_dir_all(crate::paths::space_dir(&dir)).ok();
         fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn fire_history_carries_the_newest_king_terminal() {
+        // The newest king `termination` row for the session is
+        // the durable verdict a repeat fire reuses without a board read.
+        // Other sessions' terminals and target-driver rows never count.
+        let dir = tempfile::tempdir().unwrap();
+        let events = dir.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            concat!(
+                r#"{"ts":"2026-09-15T10:00:00Z","type":"termination","data":{"session_id":"k1","driver":"king","reason":"NoProgress"}}"#,
+                "\n",
+                r#"{"ts":"2026-09-15T10:05:00Z","type":"termination","data":{"session_id":"k2","driver":"king","reason":"Budget"}}"#,
+                "\n",
+                r#"{"ts":"2026-09-15T10:07:00Z","type":"termination","data":{"session_id":"k1","driver":"target","reason":"DonePRGreen"}}"#,
+                "\n",
+                r#"{"ts":"2026-09-15T10:09:00Z","type":"termination","data":{"session_id":"k1","driver":"king","reason":"Budget"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let history = king_fire_history(&events, "k1");
+        assert_eq!(
+            history.last_terminal,
+            Some(("2026-09-15T10:09:00Z".to_string(), "Budget".to_string()))
+        );
+        // A session with no rows reads as never-terminal.
+        let history = king_fire_history(&events, "nobody");
+        assert_eq!(history.last_terminal, None);
+    }
 }
 
 /// What the dry-fire scan found: how many fires have landed with no new work
@@ -1562,6 +1593,10 @@ pub(crate) struct KingFireHistory {
     /// readable. A shrinking count is the quiet board's only progress signal:
     /// `actionable_ids` is empty there, so `king_cleared_a_row` never fires.
     pub(crate) last_undelivered: Option<i64>,
+    /// The newest `termination` row this session's king driver emitted, as
+    /// `(ts, reason)`: the durable answer to "did this reign already end"
+    /// Forward scan, so the last write wins.
+    pub(crate) last_terminal: Option<(String, String)>,
 }
 
 /// Count how many king loop-check fires have landed with no NEW work done.
@@ -1585,6 +1620,7 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
             dry: 0,
             last_ids: Vec::new(),
             last_undelivered: None,
+            last_terminal: None,
         };
     };
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1592,6 +1628,7 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
     let mut dry: u64 = 0;
     let mut last_ids: Vec<String> = Vec::new();
     let mut last_undelivered: Option<i64> = None;
+    let mut last_terminal: Option<(String, String)> = None;
     for line in content.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -1612,6 +1649,25 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
                     .unwrap_or("");
                 if !target.is_empty() && seen.insert(target.to_string()) {
                     dry = 0;
+                }
+            }
+            Some("termination") => {
+                // The newest king terminal for this session:
+                // the verdict a later fire can reuse without reading a board.
+                let driver = data
+                    .and_then(|d| d.get("driver"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if driver != "king" {
+                    continue;
+                }
+                let ts = value.get("ts").and_then(|v| v.as_str()).unwrap_or("");
+                let reason = data
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !ts.is_empty() && !reason.is_empty() {
+                    last_terminal = Some((ts.to_string(), reason.to_string()));
                 }
             }
             Some("king_loop_check") => {
@@ -1657,6 +1713,7 @@ pub(crate) fn king_fire_history(events_path: &Path, session_id: &str) -> KingFir
         dry,
         last_ids,
         last_undelivered,
+        last_terminal,
     }
 }
 

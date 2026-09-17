@@ -1,5 +1,22 @@
 use crate::loopcheck::TerminationReason;
 
+impl TerminationReason {
+    /// The terminals that free the node: work is FINISHED (a merge, advisory,
+    /// delivery, or NoWork terminal). The four `Done*` that keep the claim
+    /// (DoneBatched, DoneAwaitingMerge, DoneUnreviewed, DonePlanned) return
+    /// false - a stopped-but-resumable session must not hand the node to a
+    /// twin (the shim's hand-maintained shell list, replaced).
+    pub fn releases_claim(&self) -> bool {
+        matches!(
+            self,
+            TerminationReason::DonePRGreen
+                | TerminationReason::DoneAdvisory
+                | TerminationReason::DoneDelivery
+                | TerminationReason::NoWork
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOutcome {
     outcome: Option<Outcome>,

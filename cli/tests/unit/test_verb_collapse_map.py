@@ -235,15 +235,16 @@ def test_map_covers_current_surface_once():
     # / `evals export` and `doctor evals qualify` / `evals qualify`, the four
     # argv-form transport leaves (refs 0: the flag surface never grows):
     # 628 -> 632. The hidden `agents autonomy provenance` audit verb retired
-    # into the binary (`name-codes --check`, PR 1813): 632 -> 631.
-    # The decide shim then keeps four distinct compatibility leaves in the
-    # baseline, including its hidden-origin retract option: 631 -> 635.
+    # into the binary (`name-codes --check`, PR 1813): 632 -> 631. The
+    # nudge-peek leaf's removal then took its row back: 631 -> 630. The
+    # decide shim then keeps four distinct compatibility leaves in the
+    # baseline, including its hidden-origin retract option: 630 -> 634.
     # This branch allocates `agents king term`, the crown's-term declare
-    # verb, sharing the `king shape` dispatch point: 635 -> 636. The
+    # verb, sharing the `king shape` dispatch point: 634 -> 635. The
     # command-tree cutover then deleted the 29 mux rows: the typed mux tree
     # declares those paths natively and the verb-ratchet reads the generated
-    # inventory, so no collapse-map row is consumed: 636 -> 607.
-    assert len(mapped) == 607, (
+    # inventory, so no collapse-map row is consumed: 635 -> 606.
+    assert len(mapped) == 606, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

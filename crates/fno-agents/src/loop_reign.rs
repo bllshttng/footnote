@@ -112,7 +112,11 @@ pub(crate) fn find_by_session<'a>(
     harness: Option<&str>,
 ) -> Option<&'a RegistryEntry> {
     let exact = |r: &RegistryEntry| {
-        r.harness_session_id.as_deref() == Some(sid) || r.cc_session_id.as_deref() == Some(sid)
+        r.harness_session_id.as_deref() == Some(sid)
+            || r.cc_session_id.as_deref() == Some(sid)
+            // The guard's jq select also matched the bare `session_id` field
+            // One matcher keeps every caller on the same rows.
+            || r.session_id.as_deref() == Some(sid)
     };
     match harness {
         Some(h) if h != "claude" => rows

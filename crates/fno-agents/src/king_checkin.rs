@@ -196,7 +196,7 @@ fn crown_handoff_doc(ctx: &Ctx) -> Result<PathBuf, String> {
         .ok_or_else(|| format!("no canon handoff doc for scope {}", ctx.scope))
 }
 
-fn sanitize_scope_key(scope: &str) -> String {
+pub(crate) fn sanitize_scope_key(scope: &str) -> String {
     let mut out = String::new();
     for ch in scope.trim().chars() {
         if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
@@ -2339,6 +2339,7 @@ mod tests {
             dry: 1,
             last_ids: vec!["undispatched:x-1".into()],
             last_undelivered: Some(4),
+            last_terminal: None,
         };
         let base = "2026-09-15T10:00:00Z"
             .parse::<chrono::DateTime<chrono::Utc>>()
@@ -2390,6 +2391,7 @@ mod tests {
             dry: 0,
             last_ids: vec![],
             last_undelivered: None,
+            last_terminal: None,
         };
         assert!(!hook_beat(
             &path,

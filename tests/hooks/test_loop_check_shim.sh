@@ -1,44 +1,37 @@
 #!/usr/bin/env bash
-# Test suite for the loop-check shim (hooks/target-stop-hook.sh after Task 2.1).
+# Test suite for the native Stop hook path (hooks/target-stop-hook.sh after
+# the hook is a ~12-line exec wrapper of `fno-agents hook stop`,
+# and the translation the old shell shim carried (ownership, foreign-session
+# guard, decision translation, harness-shaped block, terminal cleanup) lives
+# in crates/fno-agents/src/hook/stop.rs. These tests drive the REAL binary
+# through the wrapper with file fixtures: manifest, transcript, space.
 #
-# Task 2.1 / ab-d0337fbc (control-plane collapse wedge): the stop hook is now a
-# read-only shim that delegates all stop/allow decisions to `fno-agents loop-check`.
-# These tests exercise the shim's orchestration logic: binary resolution, foreign-
-# session guard, decision translation, and the read-only invariant.
+# The stub-driven cases from the shell era are gone with the shell: T2/T7/T9/
+# T10/T11/T15/T18 staged a lying or failing loop-check child, which the native
+# handler cannot even express (decide runs in process), and the bounded
+# unavailable counters now guard decide-not-answering, which needs fault
+# injection to stage. Every case that survives keeps its contract number.
 #
 # Tests:
-#   T1  no state file -> exit 0, no unavailable counter written
-#   T2  binary missing (active session) -> exit 2 bounded-block + event + counter=1
-#   T3  block decision (non-claude env) -> exit 2, message on stderr
-#   T4  allow decision with TerminationReason -> exit 0
+#   T1  no state file -> exit 0, empty stdout
+#   T2  (rewired to AC15-EDGE) no fno-agents binary on any path -> one stderr
+#       line, exit 0, empty stdout - the named behavior change
+#   T3  no-intent block (non-claude env) -> exit 2, continue message on stderr
+#   T4  advisory-unit promise -> allow terminal, exit 0
 #   T5  read-only invariant: state file unchanged across a block fire
-#   T6  foreign transcript -> exit 0 without invoking the binary
-#   T7  verb returns garbage output (active session) -> exit 2 bounded-block + warning
-#   T8  claude_transcript_id: null still invokes the binary
-#
-# x-81d9 active-session-aware error handling (AC2):
-#   T9   verb non-zero (active session) -> exit 2 bounded-block + warning
-#   T10  counter at MAX -> loud give-up: exit 0 + loop_check_unavailable_giveup (both logs)
-#   T11  counter is per-session_id (a sibling session's budget is untouched)
-#   T12  clean decision self-heals the counter (removed before honoring)
-#
-# x-7f52 harness-neutral foreign-session guard:
-#   T13  codex-authored manifest + a CLAUDE stop -> exit 0, binary not called
-#   T14  codex-authored manifest + that codex session's own stop -> binary called
-#   T15  canonical fno_id keys the unavailable retry counter
-#
-# Block-as-JSON on the claude harness:
-#   T16  block decision (claude env) -> stdout {"decision":"block","reason"} + exit 0
-#   T17  claude marker + foreign marker -> ambiguous, legacy exit-2 block, no JSON
-#
-# Each test feeds the shim stdin JSON: {"transcript_path":"<tmp>/<uuid>.jsonl"}
-# and runs the shim from a tmp cwd containing .fno/target-state.md.
+#   T6  foreign transcript -> exit 0 without a block
+#   T8  claude_transcript_id: null does not disable the hook
+#   T13 codex-authored manifest + a CLAUDE stop -> exit 0, no block
+#   T14 codex-authored manifest + that codex session's own stop -> judged
+#   T16 block decision (claude env) -> stdout {"decision":"block","reason"} + exit 0
+#   T17 claude marker + foreign marker -> ambiguous, legacy exit-2 block, no JSON
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 HOOK="${REPO_ROOT}/hooks/target-stop-hook.sh"
+BIN="${FNO_AGENTS_BIN:-${REPO_ROOT}/crates/fno-agents/target/release/fno-agents}"
 
 # ── counters ────────────────────────────────────────────────────────────────
 PASS=0; FAIL=0; SKIP_COUNT=0
@@ -50,35 +43,17 @@ skip() { SKIP_COUNT=$((SKIP_COUNT+1)); printf '[shim] SKIP: %s\n' "$*" >&2; }
 
 # ── pre-flight ───────────────────────────────────────────────────────────────
 [[ -f "$HOOK" ]] || { fail "hook not found at $HOOK"; exit 1; }
-command -v jq    >/dev/null 2>&1 || { skip "jq not on PATH"; exit 77; }
-command -v bash  >/dev/null 2>&1 || { skip "bash not on PATH"; exit 77; }
-command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1 || { skip "no shasum/sha256sum"; exit 77; }
+[[ -x "$BIN" ]] || { fail "fno-agents binary not executable at $BIN (build it or set FNO_AGENTS_BIN)"; exit 1; }
 
-# ── helper: checksum a file portably ────────────────────────────────────────
-file_sum() {
-    if command -v shasum >/dev/null 2>&1; then
-        shasum "$1" | awk '{print $1}'
-    else
-        sha256sum "$1" | awk '{print $1}'
-    fi
-}
-
-# ── helper: build a tmp project dir with a state file ───────────────────────
-# Usage: setup_env <transcript_uuid> [claude_transcript_id_override]
-# Sets globals: TMP_DIR HOME_DIR TRANSCRIPT_FILE STATE_FILE
+# ── fixture builders ─────────────────────────────────────────────────────────
+# Globals set: TMP_DIR HOME_DIR SPACE_DIR TRANSCRIPT_FILE STATE_FILE
 setup_env() {
     local uuid="${1:-aaaa-0000}"
-    local ctid="${2:-$uuid}"        # claude_transcript_id in state frontmatter
 
     TMP_DIR="$(mktemp -d)"
     HOME_DIR="${TMP_DIR}/home"
-    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno"
-    # State-path stub: a test that puts this bin first on PATH pins the hook's
-    # SPACE_DIR (manifest, counters, events) into the sandbox space dir instead
-    # of wherever an ambient real fno-agents resolves it.
-    mkdir -p "${TMP_DIR}/bin" "${TMP_DIR}/space"
-    cp "${REPO_ROOT}/tests/helpers/fno-agents-state-path-stub.sh" "${TMP_DIR}/bin/fno-agents"
-    chmod 755 "${TMP_DIR}/bin/fno-agents"
+    SPACE_DIR="${TMP_DIR}/space"
+    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}" "${SPACE_DIR}/kings"
 
     TRANSCRIPT_FILE="${TMP_DIR}/${uuid}.jsonl"
     printf '{"role":"assistant","content":"hello"}\n' > "$TRANSCRIPT_FILE"
@@ -88,23 +63,20 @@ setup_env() {
 ---
 session_id: test-session-001
 created_at: 2026-06-05T00:00:00Z
-claude_transcript_id: ${ctid}
+claude_transcript_id: ${uuid}
 attended: true
-status: IN_PROGRESS
 ---
 STATE
 }
 
-# A codex-authored manifest: claude_session_id is EMPTY and the id lives in
-# harness_session_id. Codex names its transcript rollout-<utc>-<thread-uuid>,
-# so the basename is not the bare id, it ends with it.
 setup_env_codex() {
-    local transcript_basename="$1"   # what the STOPPING session's transcript is called
-    local thread_uuid="$2"           # what the manifest says the OWNER is
+    local transcript_basename="$1"
+    local thread_uuid="$2"
 
     TMP_DIR="$(mktemp -d)"
     HOME_DIR="${TMP_DIR}/home"
-    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno"
+    SPACE_DIR="${TMP_DIR}/space"
+    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}" "${SPACE_DIR}/kings"
 
     TRANSCRIPT_FILE="${TMP_DIR}/${transcript_basename}.jsonl"
     printf '{"role":"assistant","content":"hello"}\n' > "$TRANSCRIPT_FILE"
@@ -125,36 +97,42 @@ STATE
 
 cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" "${HOME_DIR:-/nonexistent}" 2>/dev/null || true; }
 
-# ── helper: strip a PATH of fno-agents executables ──────────────────────────
 safe_path() {
     echo "/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
-# ── helper: make a stub binary ───────────────────────────────────────────────
-# Reads the script body from stdin
-make_stub() {
-    local path="$1"
-    cat > "$path"
-    chmod +x "$path"
-}
-
 # ── helper: run the hook from a given cwd ───────────────────────────────────
 # Usage: run_hook <cwd> <stdin_json> [env vars as NAME=VALUE ...]
-# Returns rc via $HOOK_RC, stderr via $HOOK_STDERR
+# Returns rc via $HOOK_RC, stdout via $HOOK_STDOUT, stderr via $HOOK_STDERR.
 run_hook() {
     local cwd="$1"; shift
     local input_json="$1"; shift
-    # remaining args: env assignments (KEY=VALUE)
 
     HOOK_RC=0
+    HOOK_STDOUT=""
     HOOK_STDERR=""
-    # Default the claude markers off so a block reads as exit 2 even
-    # when the suite itself runs inside a claude session (its env exports
-    # CLAUDECODE=1); a test opts back in by passing its own assignment after.
-    HOOK_STDERR=$(
+    local out
+    out=$(
         cd "$cwd" || exit 1
-        env CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= "$@" bash "$HOOK" <<< "$input_json" 2>&1 >/dev/null
-    ) || HOOK_RC=$?
+        env CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= CODEX_THREAD_ID= \
+            FNO_AGENTS_BIN="$BIN" FNO_EVENTS_PATH="${SPACE_DIR}/events.jsonl" \
+            HOME="${HOME_DIR}" PATH="$(safe_path)" \
+            "$@" bash "$HOOK" <<< "$input_json" 2>"${TMP_DIR}/stderr.txt"
+    )
+    HOOK_RC=$?
+    HOOK_STDOUT="$out"
+    HOOK_STDERR="$(cat "${TMP_DIR}/stderr.txt" 2>/dev/null || true)"
+}
+
+# The payload the hook reads: transcript + cwd, no completion intent.
+payload() {
+    printf '{"transcript_path":"%s","session_id":"%s","cwd":"%s","last_assistant_message":"Work continues."}' \
+        "$TRANSCRIPT_FILE" "${1:-sess-t}" "$TMP_DIR"
+}
+# A promise payload for the advisory-unit terminal case.
+promise_payload() {
+    printf '{"transcript_path":"%s","session_id":"%s","cwd":"%s","last_assistant_message":"<promise>MISSION COMPLETE: t4</promise>"}' \
+        "$TRANSCRIPT_FILE" "${1:-sess-t}" "$TMP_DIR"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,133 +142,101 @@ log "T1: no state file -> exit 0"
 {
     TMP_DIR="$(mktemp -d)"
     HOME_DIR="${TMP_DIR}/home"
-    mkdir -p "${TMP_DIR}/.fno" "${HOME_DIR}/.fno"
+    SPACE_DIR="${TMP_DIR}/space"
+    mkdir -p "${TMP_DIR}" "${HOME_DIR}" "${SPACE_DIR}"
     TRANSCRIPT_FILE="${TMP_DIR}/aaaa-0001.jsonl"
     printf '{}' > "$TRANSCRIPT_FILE"
-    # No .fno/target-state.md created
 
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}"
+    run_hook "$TMP_DIR" "$(payload sess-t1)"
 
     t1_ok=true
     if [[ "$HOOK_RC" -ne 0 ]]; then
         fail "T1: expected exit 0, got $HOOK_RC"
         t1_ok=false
     fi
-    # AC2-HP: no state file -> instant allow, no counter written.
+    if [[ -n "$HOOK_STDOUT" ]]; then
+        fail "T1: expected empty stdout, got: $HOOK_STDOUT"
+        t1_ok=false
+    fi
     if ls "${TMP_DIR}/.fno/.loop-check-unavail-"* >/dev/null 2>&1; then
         fail "T1: an unavailable counter was written despite no state file"
         t1_ok=false
     fi
+    if ! echo "$HOOK_STDERR" | grep -q "visitor allowed"; then
+        fail "T1: visitor diagnostic absent; got: $HOOK_STDERR"
+        t1_ok=false
+    fi
     rm -rf "$TMP_DIR" 2>/dev/null || true
-    [[ "$t1_ok" == "true" ]] && pass "T1: no state file -> exit 0, no counter"
+    [[ "$t1_ok" == "true" ]] && pass "T1: no state file -> exit 0, visitor diagnostic, no counter"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T2: binary missing -> exit 0 + loop_check_binary_missing event emitted
+# T2 (rewired to AC15-EDGE): no binary on any path -> allow with one stderr line
 # ─────────────────────────────────────────────────────────────────────────────
-log "T2: binary missing (active session) -> exit 2 bounded-block + event + counter=1"
+log "T2: no fno-agents binary -> one stderr line, exit 0 (AC15-EDGE)"
 {
     setup_env "bbbb-0002"
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    # FNO_AGENTS_BIN points at nonexistent; PATH has no fno-agents;
-    # REPO_ROOT set to a dir with no crates/fno-agents/target/
-    run_hook "$TMP_DIR" "$INPUT_JSON" \
-        "HOME=${HOME_DIR}" \
+    run_hook "$TMP_DIR" "$(payload sess-t2)" \
         "PATH=$(safe_path)" \
-        "FNO_AGENTS_BIN=/nonexistent"
-
-    proj_events="${TMP_DIR}/.fno/events.jsonl"
-    counter="${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
+        "FNO_AGENTS_BIN=/nonexistent/fno-agents"
 
     t2_ok=true
-
-    # AC2-ERR: a missing binary for an ACTIVE session bounded-blocks (was the
-    # old silent exit 0 that disabled the ship gate).
-    if [[ "$HOOK_RC" -ne 2 ]]; then
-        fail "T2: expected exit 2 (bounded block), got $HOOK_RC"
+    if [[ "$HOOK_RC" -ne 0 ]]; then
+        fail "T2: expected exit 0, got $HOOK_RC"
         t2_ok=false
     fi
-
-    # The diagnostic event still fires (before the block).
-    if [[ -f "$proj_events" ]] && grep -q 'loop_check_binary_missing' "$proj_events" 2>/dev/null; then
-        : # good
-    else
-        fail "T2: loop_check_binary_missing not found in project events.jsonl (file: $proj_events)"
+    if [[ -n "$HOOK_STDOUT" ]]; then
+        fail "T2: expected empty stdout, got: $HOOK_STDOUT"
         t2_ok=false
     fi
-
-    if [[ "$(tr -dc '0-9' < "$counter" 2>/dev/null)" != "1" ]]; then
-        fail "T2: expected counter=1 at $counter; got: $(cat "$counter" 2>/dev/null)"
+    if ! echo "$HOOK_STDERR" | grep -q "fno-agents not found"; then
+        fail "T2: expected the one stderr line; got: $HOOK_STDERR"
         t2_ok=false
     fi
-
-    if ! echo "$HOOK_STDERR" | grep -qi 'missing\|not found\|binary\|fno-agents'; then
-        fail "T2: stderr does not mention missing binary; got: $HOOK_STDERR"
-        t2_ok=false
-    fi
-
-    [[ "$t2_ok" == "true" ]] && pass "T2: binary missing -> exit 2 + event + counter=1"
     cleanup
+    [[ "$t2_ok" == "true" ]] && pass "T2: missing binary -> allow with one stderr line"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T3: block decision (non-claude env) -> exit 2, message on stderr
+# T3: no-intent block (non-claude env) -> exit 2, message on stderr
 # ─────────────────────────────────────────────────────────────────────────────
-log "T3: block decision (non-claude env) -> exit 2 + message on stderr"
+log "T3: no-intent fire (non-claude env) -> exit 2 + continue message on stderr"
 {
     setup_env "cccc-0003"
-
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
-exit 0
-STUB
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" \
-        "HOME=${HOME_DIR}" \
-        "FNO_AGENTS_BIN=${STUB}"
+    run_hook "$TMP_DIR" "$(payload sess-t3)"
 
     t3_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
-        fail "T3: expected exit 2, got $HOOK_RC"
+        fail "T3: expected exit 2, got $HOOK_RC (stderr: $HOOK_STDERR)"
         t3_ok=false
     fi
-    if ! echo "$HOOK_STDERR" | grep -q 'keep going'; then
-        fail "T3: 'keep going' not in stderr; got: $HOOK_STDERR"
+    if ! echo "$HOOK_STDERR" | grep -q "continue working"; then
+        fail "T3: 'continue working' not in stderr; got: $HOOK_STDERR"
         t3_ok=false
     fi
-    [[ "$t3_ok" == "true" ]] && pass "T3: block -> exit 2 + correct message"
+    [[ "$t3_ok" == "true" ]] && pass "T3: block -> exit 2 + continue message"
     cleanup
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T4: allow decision with termination_reason -> exit 0
+# T4: advisory-unit promise -> allow terminal, exit 0
 # ─────────────────────────────────────────────────────────────────────────────
-log "T4: allow decision -> exit 0"
+log "T4: no_ship manifest + promise -> DoneAdvisory allow, exit 0"
 {
     setup_env "dddd-0004"
+    printf '%s\n' "no_ship: true" >> "$STATE_FILE"
+    run_hook "$TMP_DIR" "$(promise_payload sess-t4)"
 
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-printf '{"decision":"allow","termination_reason":"DonePRGreen","message":"PR merged","fires":1,"fingerprint":"y"}\n'
-exit 0
-STUB
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" \
-        "HOME=${HOME_DIR}" \
-        "FNO_AGENTS_BIN=${STUB}"
-
-    if [[ "$HOOK_RC" -eq 0 ]]; then
-        pass "T4: allow -> exit 0"
-    else
-        fail "T4: expected exit 0, got $HOOK_RC"
+    t4_ok=true
+    if [[ "$HOOK_RC" -ne 0 ]]; then
+        fail "T4: expected exit 0, got $HOOK_RC (stderr: $HOOK_STDERR)"
+        t4_ok=false
     fi
+    if ! echo "$HOOK_STDERR" | grep -q "DoneAdvisory\|advisory"; then
+        fail "T4: expected the advisory terminal on stderr; got: $HOOK_STDERR"
+        t4_ok=false
+    fi
+    [[ "$t4_ok" == "true" ]] && pass "T4: allow -> exit 0 with advisory terminal"
     cleanup
 }
 
@@ -300,503 +246,145 @@ STUB
 log "T5: read-only invariant"
 {
     setup_env "eeee-0005"
-
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-printf '{"decision":"block","termination_reason":null,"message":"stop now","fires":2,"fingerprint":"z"}\n'
-exit 0
-STUB
-
-    before_sum=$(file_sum "$STATE_FILE")
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" \
-        "HOME=${HOME_DIR}" \
-        "FNO_AGENTS_BIN=${STUB}"
-
-    after_sum=$(file_sum "$STATE_FILE")
-
-    if [[ "$before_sum" == "$after_sum" ]]; then
+    file_sum() {
+        if command -v shasum >/dev/null 2>&1; then shasum "$1" | awk '{print $1}';
+        else sha256sum "$1" | awk '{print $1}'; fi
+    }
+    local_before="$(file_sum "$STATE_FILE")"
+    run_hook "$TMP_DIR" "$(payload sess-t5)"
+    local_after="$(file_sum "$STATE_FILE")"
+    if [[ "$local_before" == "$local_after" ]]; then
         pass "T5: state file unchanged (checksums match)"
     else
-        fail "T5: state file was modified (before=$before_sum after=$after_sum)"
+        fail "T5: state file was modified (before=$local_before after=$local_after)"
     fi
     cleanup
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T6: foreign transcript -> exit 0 without invoking the binary
+# T6: foreign transcript -> exit 0 without a block
 # ─────────────────────────────────────────────────────────────────────────────
-log "T6: foreign transcript -> exit 0, binary not called"
+log "T6: foreign transcript -> exit 0, not judged"
 {
-    # manifest claude_transcript_id=aaaa-1111; transcript file is bbbb-2222.jsonl
-    setup_env "bbbb-2222" "aaaa-1111"
-
-    MARKER="${TMP_DIR}/stub_was_called"
-    STUB="${TMP_DIR}/fno-agents-stub"
-    # The marker path must be embedded literally into the stub
-cat > "$STUB" <<STUB_EOF
-#!/usr/bin/env bash
-if [[ "\$1" == "manifest-for-session" ]]; then exit 1; fi
-touch "${MARKER}"
-printf '{"decision":"block","termination_reason":null,"message":"should not see this","fires":1,"fingerprint":"f"}\n'
-exit 0
-STUB_EOF
-    chmod +x "$STUB"
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" \
-        "HOME=${HOME_DIR}" \
-        "FNO_AGENTS_BIN=${STUB}"
+    setup_env "ffff-0006"
+    # The manifest names a DIFFERENT claude transcript id.
+    sed -i '' 's/claude_transcript_id: ffff-0006/claude_transcript_id: other-id/' "$STATE_FILE" 2>/dev/null \
+        || sed -i 's/claude_transcript_id: ffff-0006/claude_transcript_id: other-id/' "$STATE_FILE"
+    run_hook "$TMP_DIR" "$(payload sess-t6)"
 
     t6_ok=true
     if [[ "$HOOK_RC" -ne 0 ]]; then
         fail "T6: expected exit 0, got $HOOK_RC"
         t6_ok=false
     fi
-    if [[ -f "$MARKER" ]]; then
-        fail "T6: stub was invoked for foreign transcript"
+    if echo "$HOOK_STDERR" | grep -q "continue working"; then
+        fail "T6: the foreign stop was judged (block text present)"
         t6_ok=false
     fi
-    [[ "$t6_ok" == "true" ]] && pass "T6: foreign transcript -> exit 0, stub not called"
+    [[ "$t6_ok" == "true" ]] && pass "T6: foreign transcript -> exit 0, not judged"
     cleanup
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T7: verb returns garbage output -> exit 0 with warning
+# T8: claude_transcript_id: null does not disable the hook
 # ─────────────────────────────────────────────────────────────────────────────
-log "T7: garbage output from verb (active session) -> exit 2 bounded-block + warning"
+log "T8: null transcript-id does not disable the hook"
 {
-    setup_env "ffff-0007"
+    setup_env "hhhh-0008"
+    sed -i '' 's/claude_transcript_id: hhhh-0008/claude_transcript_id: null/' "$STATE_FILE" 2>/dev/null \
+        || sed -i 's/claude_transcript_id: hhhh-0008/claude_transcript_id: null/' "$STATE_FILE"
+    run_hook "$TMP_DIR" "$(payload sess-t8)"
 
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-printf 'not json\n'
-exit 0
-STUB
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" \
-        "HOME=${HOME_DIR}" \
-        "FNO_AGENTS_BIN=${STUB}"
-
-    t7_ok=true
-    # Non-JSON output for an active session is checker-unavailable -> block.
-    if [[ "$HOOK_RC" -ne 2 ]]; then
-        fail "T7: expected exit 2 (bounded block), got $HOOK_RC"
-        t7_ok=false
+    t8_ok=true
+    # The hook must still JUDGE (the ownership evaluation ran and the
+    # manifest names nobody), which on the native path is the visitor
+    # diagnostic naming every id it tried.
+    if ! echo "$HOOK_STDERR" | grep -q "visitor allowed (tried:"; then
+        fail "T8: null transcript-id disabled the hook (no visitor diagnostic); got: $HOOK_STDERR"
+        t8_ok=false
     fi
-    if ! echo "$HOOK_STDERR" | grep -qi 'warning\|invalid\|json\|parse\|unexpected\|unavailable'; then
-        fail "T7: expected a warning on stderr; got: $HOOK_STDERR"
-        t7_ok=false
-    fi
-    [[ "$t7_ok" == "true" ]] && pass "T7: garbage output -> exit 2 + warning"
+    [[ "$t8_ok" == "true" ]] && pass "T8: null transcript-id does not disable the hook"
     cleanup
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T9: verb non-zero (active session) -> exit 2 bounded-block + warning (AC2-ERR)
+# T13/T14: codex-authored manifest, foreign vs own stop
 # ─────────────────────────────────────────────────────────────────────────────
-log "T9: verb non-zero -> exit 2 bounded-block + warning"
+log "T13: codex-authored manifest + a CLAUDE stop -> exit 0, no block"
 {
-    setup_env "9999-0009"
-
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-echo "boom" >&2
-exit 3
-STUB
-
-    # Pin the hook's state resolution into the sandbox: manifest and counter
-    # live in the stub space dir, not wherever an ambient fno-agents points.
-    mv "${TMP_DIR}/.fno/target-state.md" "${TMP_DIR}/space/target-state.md"
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" \
-        "PATH=${TMP_DIR}/bin:$PATH" "FNO_TEST_SPACE=${TMP_DIR}/space" \
-        "FNO_AGENTS_BIN=${STUB}"
-
-    counter="${TMP_DIR}/space/.loop-check-unavail-test-session-001"
-    t9_ok=true
-    if [[ "$HOOK_RC" -ne 2 ]]; then
-        fail "T9: expected exit 2, got $HOOK_RC"; t9_ok=false
-    fi
-    if [[ "$(tr -dc '0-9' < "$counter" 2>/dev/null)" != "1" ]]; then
-        fail "T9: expected counter=1; got: $(cat "$counter" 2>/dev/null)"; t9_ok=false
-    fi
-    if ! echo "$HOOK_STDERR" | grep -qi 'unavailable\|exited\|warning'; then
-        fail "T9: expected a warning on stderr; got: $HOOK_STDERR"; t9_ok=false
-    fi
-    [[ "$t9_ok" == "true" ]] && pass "T9: verb non-zero -> exit 2 + counter=1 + warning"
-    cleanup
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T10: counter at MAX -> loud give-up (exit 0 + event to both logs) (AC2-UI)
-# ─────────────────────────────────────────────────────────────────────────────
-log "T10: counter at MAX -> give-up exit 0 + loop_check_unavailable_giveup"
-{
-    setup_env "aaaa-0010"
-
-    # Pre-seed the counter at the ceiling (3): the next unavailable fire gives up.
-    printf '3' > "${TMP_DIR}/.fno/.loop-check-unavail-test-session-001"
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" \
-        "HOME=${HOME_DIR}" "PATH=$(safe_path)" "FNO_AGENTS_BIN=/nonexistent"
-
-    proj_events="${TMP_DIR}/.fno/events.jsonl"
-    global_events="${HOME_DIR}/.fno/events.jsonl"
-    t10_ok=true
-    if [[ "$HOOK_RC" -ne 0 ]]; then
-        fail "T10: expected exit 0 (give-up), got $HOOK_RC"; t10_ok=false
-    fi
-    if ! grep -q 'loop_check_unavailable_giveup' "$proj_events" 2>/dev/null; then
-        fail "T10: give-up event missing from project events"; t10_ok=false
-    fi
-    if ! grep -q 'loop_check_unavailable_giveup' "$global_events" 2>/dev/null; then
-        fail "T10: give-up event missing from global events"; t10_ok=false
-    fi
-    [[ "$t10_ok" == "true" ]] && pass "T10: give-up -> exit 0 + event in both logs"
-    cleanup
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T11: counter is per-session_id -> a sibling's budget is untouched (AC2-EDGE)
-# ─────────────────────────────────────────────────────────────────────────────
-log "T11: per-session counter isolation"
-{
-    setup_env "bbbb-0011"
-
-    # A sibling session B already has a counter at 2 in the shared space.
-    sibling="${TMP_DIR}/space/.loop-check-unavail-sibling-session-B"
-    printf '2' > "$sibling"
-
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-exit 3
-STUB
-
-    mv "${TMP_DIR}/.fno/target-state.md" "${TMP_DIR}/space/target-state.md"
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" \
-        "PATH=${TMP_DIR}/bin:$PATH" "FNO_TEST_SPACE=${TMP_DIR}/space" \
-        "FNO_AGENTS_BIN=${STUB}"
-
-    mine="${TMP_DIR}/space/.loop-check-unavail-test-session-001"
-    t11_ok=true
-    if [[ "$(tr -dc '0-9' < "$mine" 2>/dev/null)" != "1" ]]; then
-        fail "T11: my counter should be 1; got: $(cat "$mine" 2>/dev/null)"; t11_ok=false
-    fi
-    if [[ "$(tr -dc '0-9' < "$sibling" 2>/dev/null)" != "2" ]]; then
-        fail "T11: sibling counter was mutated; got: $(cat "$sibling" 2>/dev/null)"; t11_ok=false
-    fi
-    [[ "$t11_ok" == "true" ]] && pass "T11: counters isolated per session_id"
-    cleanup
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T12: a clean decision self-heals (removes) the counter (AC2-FR)
-# ─────────────────────────────────────────────────────────────────────────────
-log "T12: clean decision self-heals the counter"
-{
-    setup_env "cccc-0012"
-
-    # Counter is at 2 from prior broken fires.
-    counter="${TMP_DIR}/space/.loop-check-unavail-test-session-001"
-    printf '2' > "$counter"
-
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
-exit 0
-STUB
-
-    mv "${TMP_DIR}/.fno/target-state.md" "${TMP_DIR}/space/target-state.md"
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" \
-        "PATH=${TMP_DIR}/bin:$PATH" "FNO_TEST_SPACE=${TMP_DIR}/space" \
-        "FNO_AGENTS_BIN=${STUB}"
-
-    t12_ok=true
-    if [[ "$HOOK_RC" -ne 2 ]]; then
-        fail "T12: expected exit 2 (block decision honored), got $HOOK_RC"; t12_ok=false
-    fi
-    if [[ -f "$counter" ]]; then
-        fail "T12: counter should have been removed on a clean decision"; t12_ok=false
-    fi
-    [[ "$t12_ok" == "true" ]] && pass "T12: clean decision removed the counter"
-    cleanup
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T13: a codex-authored manifest must not capture a claude session (x-7f52)
-# ─────────────────────────────────────────────────────────────────────────────
-# The bug: the guard read claude_session_id ONLY. A codex manifest leaves that
-# key empty, so MANIFEST_CTID was empty, the guard was skipped, and a claude
-# session stopping in a codex session's worktree was judged against - and could
-# finalize - a run it did not own.
-log "T13: codex manifest + claude stop -> exit 0, binary not called"
-{
-    setup_env_codex "0a7ec164-eb6b-452d-b25c-8fd11f8c70b6" "01a021d0-b1fa-7750-af25-8d89dc01e2a3"
-
-    MARKER="${TMP_DIR}/stub_was_called"
-    STUB="${TMP_DIR}/fno-agents-stub"
-cat > "$STUB" <<STUB_EOF
-#!/usr/bin/env bash
-if [[ "\$1" == "manifest-for-session" ]]; then exit 1; fi
-touch "${MARKER}"
-printf '{"decision":"block","termination_reason":null,"message":"not ours to judge","fires":1,"fingerprint":"f"}\n'
-exit 0
-STUB_EOF
-    chmod +x "$STUB"
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+    setup_env_codex "a-claude-uuid-1300" "th-uuid-13"
+    # A CLAUDE session's stop: the transcript names no codex thread.
+    run_hook "$TMP_DIR" "$(payload sess-t13)"
 
     t13_ok=true
     if [[ "$HOOK_RC" -ne 0 ]]; then
-        fail "T13: expected exit 0 for a foreign codex manifest, got $HOOK_RC"; t13_ok=false
+        fail "T13: expected exit 0, got $HOOK_RC"
+        t13_ok=false
     fi
-    if [[ -f "$MARKER" ]]; then
-        fail "T13: binary was invoked against another harness's manifest"; t13_ok=false
+    if echo "$HOOK_STDERR" | grep -q "continue working"; then
+        fail "T13: binary judged another harness's manifest"
+        t13_ok=false
     fi
-    [[ "$t13_ok" == "true" ]] && pass "T13: codex manifest + claude stop -> exit 0, stub not called"
+    [[ "$t13_ok" == "true" ]] && pass "T13: foreign harness manifest -> exit 0, not judged"
     cleanup
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# T14: the codex OWNER's own stop still reaches the gate (x-7f52 inversion)
-# ─────────────────────────────────────────────────────────────────────────────
-# Widening the guard must not over-fire. Codex wires this same hook
-# (hooks/codex-hooks.json), and its transcript basename is rollout-<utc>-<uuid>,
-# so a plain equality test would read the owner as foreign and exit 0 - which
-# does not wedge codex, it silently turns the ship gate OFF for every codex run.
-log "T14: codex manifest + its own rollout stop -> binary called"
+log "T14: codex-authored manifest + that codex session's own stop -> judged"
 {
-    UUID="01a021d0-b1fa-7750-af25-8d89dc01e2a3"
-    setup_env_codex "rollout-2026-08-20T17-55-20-${UUID}" "$UUID"
-
-    MARKER="${TMP_DIR}/stub_was_called"
-    STUB="${TMP_DIR}/fno-agents-stub"
-    cat > "$STUB" <<STUB_EOF
-#!/usr/bin/env bash
-touch "${MARKER}"
-printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"f"}\n'
-exit 0
-STUB_EOF
-    chmod +x "$STUB"
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+    setup_env_codex "rollout-20260905T000000-th-uuid-14" "th-uuid-14"
+    run_hook "$TMP_DIR" "$(payload sess-t14)"
 
     t14_ok=true
-    if [[ ! -f "$MARKER" ]]; then
-        fail "T14: the codex owner's own stop was treated as foreign (ship gate off)"; t14_ok=false
+    if ! echo "$HOOK_STDERR" | grep -q "continue working"; then
+        fail "T14: the owner's own stop was not judged; got: $HOOK_STDERR"
+        t14_ok=false
     fi
-    if [[ "$HOOK_RC" -ne 2 ]]; then
-        fail "T14: expected exit 2 (block honored), got $HOOK_RC"; t14_ok=false
-    fi
-    [[ "$t14_ok" == "true" ]] && pass "T14: codex owner's own stop reached the gate"
+    [[ "$t14_ok" == "true" ]] && pass "T14: owner's own stop -> judged (continue message)"
     cleanup
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T15: fno_id is canonical even when session_id appears first
+# T16: block decision (claude env) -> stdout {"decision":"block","reason"} + exit 0
 # ─────────────────────────────────────────────────────────────────────────────
-log "T15: canonical fno_id keys the unavailable retry counter"
+log "T16: block under claude markers -> stdout JSON + exit 0"
 {
-    setup_env "dddd-0015"
-    cat > "$STATE_FILE" <<STATE
----
-session_id: legacy-session
-fno_id: canonical-session
-created_at: 2026-06-05T00:00:00Z
-claude_transcript_id: dddd-0015
-attended: true
-status: IN_PROGRESS
----
-STATE
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" \
-        "HOME=${HOME_DIR}" "PATH=$(safe_path)" "FNO_AGENTS_BIN=/nonexistent"
-
-    t15_ok=true
-    [[ "$HOOK_RC" -eq 2 ]] || {
-        fail "T15: expected exit 2 (bounded block), got $HOOK_RC"; t15_ok=false
-    }
-    [[ -f "${TMP_DIR}/.fno/.loop-check-unavail-canonical-session" ]] || {
-        fail "T15: canonical fno_id did not key the retry counter"; t15_ok=false
-    }
-    [[ ! -f "${TMP_DIR}/.fno/.loop-check-unavail-legacy-session" ]] || {
-        fail "T15: legacy session_id incorrectly keyed the retry counter"; t15_ok=false
-    }
-    [[ "$t15_ok" == "true" ]] && pass "T15: canonical fno_id wins for retry identity"
-    cleanup
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# T16: block decision on the claude harness -> stdout JSON + exit 0
-# ─────────────────────────────────────────────────────────────────────────────
-log "T16: claude block -> stdout JSON decision + exit 0"
-{
-    setup_env "eeee-0016"
-
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
-exit 0
-STUB
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    HOOK_RC=0
-    HOOK_STDOUT=$(
-        cd "$TMP_DIR" || exit 1
-        env "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
-            "CLAUDECODE=1" "CLAUDE_PLUGIN_ROOT=" \
-            bash "$HOOK" 2>/dev/null <<<"$INPUT_JSON"
-    ) || HOOK_RC=$?
+    setup_env "pppp-0016"
+    run_hook "$TMP_DIR" "$(payload sess-t16)" "CLAUDECODE=1"
 
     t16_ok=true
     if [[ "$HOOK_RC" -ne 0 ]]; then
-        fail "T16: expected exit 0 (structured block), got $HOOK_RC"; t16_ok=false
+        fail "T16: expected exit 0, got $HOOK_RC"
+        t16_ok=false
     fi
-    if ! echo "$HOOK_STDOUT" | jq -e '.decision == "block" and .reason == "keep going"' >/dev/null 2>&1; then
-        fail "T16: stdout is not a block decision JSON; got: ${HOOK_STDOUT}"; t16_ok=false
+    if ! echo "$HOOK_STDOUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
+        fail "T16: stdout is not a block decision JSON; got: $HOOK_STDOUT"
+        t16_ok=false
     fi
-    if ls "${TMP_DIR}/.fno/.loop-check-unavail-"* >/dev/null 2>&1; then
-        fail "T16: a clean block must not write an unavailable counter"; t16_ok=false
-    fi
-    [[ "$t16_ok" == "true" ]] && pass "T16: claude block -> stdout JSON + exit 0, no counter"
+    [[ "$t16_ok" == "true" ]] && pass "T16: block under claude markers -> structured stdout block"
     cleanup
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T17: claude marker + foreign marker is ambiguous -> legacy exit-2 block
+# T17: claude marker + foreign marker -> ambiguous, legacy exit-2 block, no JSON
 # ─────────────────────────────────────────────────────────────────────────────
-log "T17: claude marker with foreign marker -> exit 2 stderr block"
+log "T17: ambiguous markers -> exit-2 block, no stdout JSON"
 {
-    setup_env "eeee-0017"
-
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
-exit 0
-STUB
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    HOOK_RC=0
-    HOOK_OUT_FILE="${TMP_DIR}/t17-stdout.txt"
-    (
-        cd "$TMP_DIR" || exit 1
-        env "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
-            "CLAUDECODE=1" "CLAUDE_PLUGIN_ROOT=" "CODEX_THREAD_ID=from-parent" \
-            bash "$HOOK" >"$HOOK_OUT_FILE" 2>/dev/null <<<"$INPUT_JSON"
-    ) || HOOK_RC=$?
-    HOOK_STDOUT="$(cat "$HOOK_OUT_FILE" 2>/dev/null)"
+    setup_env "qqqq-0017"
+    run_hook "$TMP_DIR" "$(payload sess-t17)" "CLAUDECODE=1" "CODEX_THREAD_ID=foreign-thread"
 
     t17_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
-        fail "T17: ambiguous markers must take the exit-2 block, got $HOOK_RC"; t17_ok=false
+        fail "T17: ambiguous markers must take the exit-2 block, got $HOOK_RC"
+        t17_ok=false
     fi
     if [[ -n "$HOOK_STDOUT" ]]; then
-        fail "T17: ambiguous markers must not emit stdout JSON: ${HOOK_STDOUT}"; t17_ok=false
+        fail "T17: ambiguous markers must not emit stdout JSON: $HOOK_STDOUT"
+        t17_ok=false
     fi
-    [[ "$t17_ok" == "true" ]] && pass "T17: ambiguous markers -> exit 2 block, no JSON"
+    [[ "$t17_ok" == "true" ]] && pass "T17: ambiguous markers -> exit-2 block, no JSON"
     cleanup
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# T18: degraded exit-2 reply WITH a verdict (king unreadable board) under claude
-# markers -> honored as a block: stdout JSON + exit 0, never counted unavailable
-# ─────────────────────────────────────────────────────────────────────────────
-log "T18: exit-2-with-verdict under claude markers -> stdout JSON + exit 0"
-{
-    setup_env "eeee-0018"
-
-    STUB="${TMP_DIR}/fno-agents-stub"
-    make_stub "$STUB" <<'STUB'
-#!/usr/bin/env bash
-printf '{"decision":"block","termination_reason":null,"message":"king board unreadable","fires":1,"fingerprint":"x"}\n'
-exit 2
-STUB
-
-    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    HOOK_RC=0
-    HOOK_STDOUT=$(
-        cd "$TMP_DIR" || exit 1
-        env "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
-            "CLAUDECODE=1" "CLAUDE_PLUGIN_ROOT=" \
-            bash "$HOOK" 2>/dev/null <<<"$INPUT_JSON"
-    ) || HOOK_RC=$?
-
-    t18_ok=true
-    if [[ "$HOOK_RC" -ne 0 ]]; then
-        fail "T18: a verdict on exit 2 must still emit a structured block, got rc $HOOK_RC"; t18_ok=false
-    fi
-    if ! echo "$HOOK_STDOUT" | jq -e '.decision == "block" and .reason == "king board unreadable"' >/dev/null 2>&1; then
-        fail "T18: stdout is not the degraded block JSON; got: ${HOOK_STDOUT}"; t18_ok=false
-    fi
-    if ls "${TMP_DIR}/.fno/.loop-check-unavail-"* >/dev/null 2>&1; then
-        fail "T18: a verdict on exit 2 must not write an unavailable counter"; t18_ok=false
-    fi
-    [[ "$t18_ok" == "true" ]] && pass "T18: degraded exit-2 verdict -> stdout JSON + exit 0, no counter"
-    cleanup
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Summary
-# ─────────────────────────────────────────────────────────────────────────────
 echo ""
-
-# T8: claude_transcript_id: null must NOT disable the hook (codex P2 #447) -
-# the binary must still be invoked (stub writes its marker).
-t8() {
-    local T; T=$(mktemp -d)
-    local MARKER="$T/invoked"
-    local STUB="$T/fno-agents"
-    cat > "$STUB" <<STUBEOF
-#!/bin/sh
-if [ "\$1" = "manifest-for-session" ]; then
-  echo "$T/proj/.fno/target-state.md"
-  exit 0
-fi
-touch "$MARKER"
-echo '{"decision":"allow","termination_reason":null,"message":"ok","fires":1,"fingerprint":null}'
-STUBEOF
-    chmod +x "$STUB"
-    mkdir -p "$T/proj/.fno"
-    cat > "$T/proj/.fno/target-state.md" <<MANEOF
----
-session_id: s8
-created_at: 2026-06-05T00:00:00Z
-claude_transcript_id: null
----
-MANEOF
-    local TR="$T/some-real-uuid.jsonl"
-    echo '{"message":{"role":"assistant","content":"hi"}}' > "$TR"
-    ( cd "$T/proj" && printf '{"transcript_path":"%s"}' "$TR" | HOME="$T" FNO_AGENTS_BIN="$STUB" bash "$HOOK" >/dev/null 2>&1 )
-    local rc=$?
-    if [[ -f "$MARKER" && $rc -eq 0 ]]; then
-        pass "T8: null transcript-id does not disable the hook (binary invoked)"
-    else
-        fail "T8: binary not invoked despite null transcript-id (rc=$rc)"
-    fi
-}
-t8
-
-printf '[shim] Results: %d passed, %d failed, %d skipped\n' "$PASS" "$FAIL" "$SKIP_COUNT"
-if [[ "$FAIL" -gt 0 ]]; then
-    exit 1
-fi
-exit 0
+echo "[shim] Results: $PASS passed, $FAIL failed, $SKIP_COUNT skipped"
+[[ $FAIL -eq 0 ]]

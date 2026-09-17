@@ -1,105 +1,106 @@
 #!/usr/bin/env bash
-# test_king_delegation_guard.sh
-#
 # Unit tests for hooks/king-delegation-guard.sh: a crowned court session is
-# refused with a reason naming the write target and the allowed roots (AC1);
-# the unblock allowlist, the plans-directory carveout, and the off knob allow
-# (AC2); a pass shape, an uncrowned row, and an unreadable registry all allow,
-# the unreadable case with a line on stderr (AC3); a Task limb of the court
-# allows via its payload agent_id, its subagents/ transcript, or an open
-# Task/Agent tool_use in the parent transcript (the live claude shape),
-# anything else fail-closes; writes under the auto-memory root allow for
-# king and limb alike. The registry row, reign manifest, knob and plans
-# dir are stubbed per case; no real fno state.
-
+# refused Edit/Write/NotebookEdit and shell writes to source, while its plans
+# dir, crown handoff doc, escalations dir and auto-memory stay writable.
+#
+# The policy moved into crates/fno-agents/src/hook/king_guard.rs and
+# the script became an exec wrapper, so the fixtures are real files the
+# native guard reads (registry.json under FNO_AGENTS_HOME, the court manifest
+# under the space's kings/, config.toml at the payload cwd) instead of stubbed
+# verb outputs. Every pre-port case keeps its semantics; the stub positive
+# control became a no-subprocess canary (the native guard must spawn no `fno`).
 set -uo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KGD="$REPO_ROOT/hooks/king-delegation-guard.sh"
-
 [[ -f "$KGD" ]] || { echo "FAIL: guard not found at $KGD" >&2; exit 1; }
-export CLAUDE_PLUGIN_ROOT="$REPO_ROOT"
+# Same resolution order as the wrapper: env, release, debug. A sibling leg
+# of the packet (preflight, the cargo-isolation tests) may have cleaned the
+# target dir between provisioning and this run: rebuild the debug binary
+# quietly rather than fail on an artifact the environment is documented to
+# provide.
+BIN="${FNO_AGENTS_BIN:-}"
+if [[ -z "$BIN" ]]; then
+    for candidate in "$REPO_ROOT/crates/fno-agents/target/release/fno-agents" \
+        "$REPO_ROOT/crates/fno-agents/target/debug/fno-agents"; do
+        [[ -x "$candidate" ]] && BIN="$candidate" && break
+    done
+fi
+if [[ -z "$BIN" ]] || [[ ! -x "$BIN" ]]; then
+    (cd "$REPO_ROOT/crates/fno-agents" && cargo build --bin fno-agents >/dev/null 2>&1)
+    BIN="$REPO_ROOT/crates/fno-agents/target/debug/fno-agents"
+fi
+[[ -x "$BIN" ]] || { echo "FAIL: fno-agents binary not executable at $BIN" >&2; exit 1; }
 
 PASS=0
 FAIL=0
-pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
+pass() { PASS=$((PASS + 1)); echo "  PASS: $*"; }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
 
 TMP="$(mktemp -d -t king-delegation-guard-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
-# Stub `fno`: registry-json from a fixture, manifest-path from a fixture file,
-# the knob from a fixture, plan path from a fixture dir. Empty knob fixture
-# resolves to the refuse default, exactly like an unset config key.
+# Real fixture files under the pinned roots the native guard reads.
+export FNO_AGENTS_HOME="$TMP/home/agents"
+export FNO_EVENTS_PATH="$TMP/space/events.jsonl"
+export FNO_SPACES_DIR="$TMP/spaces"
+mkdir -p "$FNO_AGENTS_HOME" "$TMP/space/kings" "$TMP/repo/.fno"
+
+# A `fno` canary: the native guard never shells out, so this must never run.
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/fno" <<'STUB'
 #!/usr/bin/env bash
-if [ "$1" = "agents" ] && [ "$2" = "registry-json" ]; then
-  cat "$KGD_REG_FIXTURE"
-elif [ "$1" = "agents" ] && [ "$2" = "king" ] && [ "$3" = "manifest-path" ]; then
-  printf '%s\n' "$*" >> "$KGD_MANIFEST_ARGS"
-  if [ -n "$KGD_MANIFEST" ] && [ -f "$KGD_MANIFEST" ]; then
-    echo "$KGD_MANIFEST"
-  else
-    exit 1
-  fi
-elif [ "$1" = "config" ] && [ "$2" = "get" ]; then
-  cat "$KGD_KNOB" 2>/dev/null || true
-elif [ "$1" = "config" ] && [ "$2" = "paths" ] && [ "$3" = "handoff" ]; then
-  echo "$KGD_HANDOFF"
-elif [ "$1" = "do" ] && [ "$2" = "plan" ] && [ "$3" = "path" ]; then
-  echo "$KGD_PLANS/probe.md"
-else
-  exit 1
-fi
+printf '%s\n' "$*" >> "$KGD_FNO_CALLS"
+exit 1
 STUB
 chmod +x "$TMP/bin/fno"
-
-# Stub `fno-agents`: the escalations path resolver. KGD_ESCALATIONS unset or
-# empty -> exit 1, the unresolved-directory shape.
-cat > "$TMP/bin/fno-agents" <<'STUB'
-#!/usr/bin/env bash
-if [ "$1" = "state" ] && [ "$2" = "path" ] && [ "$3" = "escalations" ]; then
-  if [ -n "$KGD_ESCALATIONS" ]; then
-    echo "$KGD_ESCALATIONS"
-  else
-    exit 1
-  fi
-else
-  exit 1
-fi
-STUB
-chmod +x "$TMP/bin/fno-agents"
 export PATH="$TMP/bin:$PATH"
-export KGD_REG_FIXTURE="$TMP/registry.json"
-export KGD_KNOB="$TMP/knob.txt"
-export KGD_PLANS="$TMP/plans"
-export KGD_MANIFEST_ARGS="$TMP/manifest-args.log"
-export KGD_HANDOFF="$TMP/handoffs/20260910-crown-fno.md"
-mkdir -p "$KGD_PLANS"
-: > "$KGD_KNOB"
-: > "$KGD_MANIFEST_ARGS"
+export KGD_FNO_CALLS="$TMP/fno-calls.log"
+: > "$KGD_FNO_CALLS"
+
+# The repo config: knob, plans dir, handoffs dir, and the vault pin that
+# resolves the escalations dir ($HOME/fixture-vault/internal/repo/escalations).
+mkdir -p "$TMP/home/fixture-vault"
+cat > "$TMP/repo/.fno/config.toml" <<EOF
+plans_dir = "$TMP/plans"
+[paths]
+handoffs_dir = "$TMP/handoffs"
+[obsidian]
+enabled = true
+vault = "fixture-vault"
+EOF
+mkdir -p "$TMP/plans" "$TMP/handoffs"
 
 SID="sess-king"
 SRC_FILE="$TMP/repo/src/main.py"
-mkdir -p "$TMP/repo"  # the payload cwd must exist: the escalations resolver cds there
+mkdir -p "$TMP/repo/src"
 
-# registry_fixture <row-json>; manifest_fixture <shape> [sid]
-registry_fixture() { printf '{"agents":[%s]}\n' "$1" > "$KGD_REG_FIXTURE"; }
+registry_fixture() { printf '{"schema_version":26,"agents":[%s]}\n' "$1" > "$FNO_AGENTS_HOME/registry.json"; }
 manifest_fixture() {
   local shape="$1" mside="${2:-$SID}"
-  export KGD_MANIFEST="$TMP/reign-manifest.md"
-  printf 'scope: fno\nshape: %s\nharness_session_id: %s\n' "$shape" "$mside" > "$KGD_MANIFEST"
+  printf -- '---\nfno_id: 20260915T190000Z-kg1-abcdef\nscope: fno\nshape: %s\nharness_session_id: %s\n---\n' "$shape" "$mside" \
+    > "$TMP/space/kings/fno.md"
 }
-clear_manifest() { export KGD_MANIFEST=""; }
+clear_manifest() { rm -f "$TMP/space/kings/fno.md"; }
+set_knob() { # empty -> unset (refuse default); else refuse|warn|off
+  if [[ -z "$1" ]]; then
+    sed -i '' '/implementation_guard/d' "$TMP/repo/.fno/config.toml" 2>/dev/null \
+      || sed -i '/implementation_guard/d' "$TMP/repo/.fno/config.toml"
+  else
+    printf '[king]\nimplementation_guard = "%s"\n' "$1" >> "$TMP/repo/.fno/config.toml"
+  fi
+}
+clear_knob() {
+  sed -i '' '/implementation_guard/d; /^\[king\]$/d' "$TMP/repo/.fno/config.toml" 2>/dev/null \
+    || sed -i '/implementation_guard/d; /^\[king\]$/d' "$TMP/repo/.fno/config.toml"
+}
 
 run_guard() { # $1 = payload JSON; stderr lands in $ERR via RUN_GUARD_ERR
   printf '%s' "$1" | bash "$KGD" 2>"$TMP/stderr.txt"
 }
 
-CROWNED='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","crown_level":1,"crown_scope":"fno"}'
-UNCROWNED='{"session_id":"'"$SID"'","harness_session_id":"full-'"$SID"'","crown_level":null,"crown_scope":null}'
+CROWNED='{"name":"fixture-king","status":"live","cwd":"'"$TMP/repo"'","created_at":"2026-09-15T19:00:00Z","session_id":"'"$SID"'","harness":"claude","harness_session_id":"full-'"$SID"'","crown_level":1,"crown_scope":"fno"}'
+UNCROWNED='{"name":"fixture-king","status":"live","cwd":"'"$TMP/repo"'","created_at":"2026-09-15T19:00:00Z","session_id":"'"$SID"'","harness":"claude","harness_session_id":"full-'"$SID"'"}'
 
 edit_payload() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$TMP/repo" "$1"; }
 bash_payload() { printf '{"tool_name":"Bash","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"command":"%s"}}' "$SID" "$TMP/repo" "$1"; }
@@ -108,6 +109,15 @@ edit_payload_t() { printf '{"tool_name":"Edit","session_id":"%s","transcript_pat
 # the parent session id plus the harness's per-call subagent marker.
 edit_payload_ag() { printf '{"tool_name":"Edit","session_id":"%s","transcript_path":"%s","agent_id":"%s","cwd":"%s","tool_input":{"file_path":"%s","old_string":"a","new_string":"b"}}' "$SID" "$2" "$3" "$TMP/repo" "$1"; }
 
+# Escalations resolve through the vault pin (project name = the git repo's
+# basename). Seed the repo as git so resolve_project_name answers "repo".
+/usr/bin/git init -q "$TMP/repo"
+ESCALATIONS="$TMP/home/fixture-vault/internal/repo/escalations"
+mkdir -p "$ESCALATIONS"
+# Pre-existing crown handoff doc: the resolver takes the newest *-crown-fno.md.
+KGD_HANDOFF="$TMP/handoffs/20260910-crown-fno.md"
+printf 'gaps:\n' > "$KGD_HANDOFF"
+
 # ── AC1-HP: crowned court + Edit on a source file -> deny names path + roots ─
 registry_fixture "$CROWNED"
 manifest_fixture court
@@ -115,12 +125,12 @@ OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
 if [[ $RC -eq 0 ]] && echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
    && printf '%s' "$REASON" | grep -qF "$SRC_FILE" \
-   && printf '%s' "$REASON" | grep -qF "$KGD_PLANS" \
+   && printf '%s' "$REASON" | grep -qF "$TMP/plans" \
    && ! printf '%s' "$REASON" | grep -qiE "spawn|advance" \
    && echo "$OUT" | jq -e '.decision == "block"' >/dev/null 2>&1; then
   pass "AC1: crowned court Edit denied, reason names the path + allowed roots, no delegation verbs"
 else
-  fail "AC1: rc=$RC out=${OUT:0:300}"
+  fail "AC1: rc=$RC out=${OUT:0:300} err=$(cat "$TMP/stderr.txt")"
 fi
 
 # ── AC2-EDGE: allowlist, plans carveout, knob off ─────────────────────────────
@@ -134,32 +144,32 @@ OUT="$(run_guard "$(bash_payload "fno backlog note x-1 evidence here")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2: backlog lever allowed" \
   || fail "AC2: backlog lever rc=$RC out=$OUT"
 
-OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"plan"}}' "$SID" "$TMP/repo" "$KGD_PLANS/20260909-quick.md")")"; RC=$?
+OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"plan"}}' "$SID" "$TMP/repo" "$TMP/plans/20260909-quick.md")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2: plans-dir Write allowed" \
   || fail "AC2: plans-dir Write rc=$RC out=$OUT"
 
 # NotebookEdit carries notebook_path, not file_path; the carveout must read it.
-OUT="$(run_guard "$(printf '{"tool_name":"NotebookEdit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"notebook_path":"%s","new_source":"x"}}' "$SID" "$TMP/repo" "$KGD_PLANS/book.ipynb")")"; RC=$?
+OUT="$(run_guard "$(printf '{"tool_name":"NotebookEdit","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"notebook_path":"%s","new_source":"x"}}' "$SID" "$TMP/repo" "$TMP/plans/book.ipynb")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2: plans-dir NotebookEdit allowed via notebook_path" \
   || fail "AC2: plans-dir NotebookEdit rc=$RC out=$OUT"
 
-OUT="$(run_guard "$(bash_payload "echo x > $KGD_PLANS/plan.md")")"; RC=$?
+OUT="$(run_guard "$(bash_payload "echo x > $TMP/plans/plan.md")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2: plans-dir redirect allowed" \
   || fail "AC2: plans-dir redirect rc=$RC out=$OUT"
 
-printf 'off\n' > "$KGD_KNOB"
+set_knob off
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC2: knob off allows the AC1 Edit" \
   || fail "AC2: knob off rc=$RC out=$OUT"
-: > "$KGD_KNOB"
+clear_knob
 
-printf 'warn\n' > "$KGD_KNOB"
+set_knob warn
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
 [[ $RC -eq 0 && "$OUT" == "{}" && "$ERR" == *"$SRC_FILE"* && "$ERR" == *"outside the allowed roots"* ]] \
   && pass "AC2: knob warn names the path on stderr and allows" \
   || fail "AC2: knob warn rc=$RC out=$OUT err=$ERR"
-: > "$KGD_KNOB"
+clear_knob
 
 # ── AC3-EDGE: pass shape, uncrowned row, no row, unreadable registry ─────────
 registry_fixture "$CROWNED"
@@ -180,11 +190,10 @@ OUT="$(run_guard "$(printf '{"tool_name":"Edit","session_id":"sess-nobody","tran
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "AC3: no registry row allows" \
   || fail "AC3: no registry row rc=$RC out=$OUT"
 
-registry_fixture ""
 # Unreadable, not empty: an empty agents array is a valid registry (the silent
-# no-row path above). A missing fixture file makes the stubbed registry-json
-# itself fail, which is the unreadable path AC3 requires stderr on.
-export KGD_REG_FIXTURE="$TMP/registry-missing.json"
+# no-row path above). A registry that fails to parse must allow with a stderr
+# line - never a silent no-owner.
+printf 'not json at all' > "$FNO_AGENTS_HOME/registry.json"
 OUT="$(run_guard "$(edit_payload "$SRC_FILE")")"; RC=$?
 ERR="$(cat "$TMP/stderr.txt")"
 [[ $RC -eq 0 && "$OUT" == "{}" && -n "$ERR" ]] \
@@ -212,13 +221,13 @@ OUT="$(run_guard "$(bash_payload "fno agents mail send hi --to-self")")"; RC=$?
 
 # tee writes EVERY FILE operand; a first-operand-only floor reads a plan path
 # and approves while the second operand overwrites source.
-OUT="$(run_guard "$(bash_payload "echo x | tee $KGD_PLANS/plan.md $TMP/repo/src/evil.py")")"; RC=$?
+OUT="$(run_guard "$(bash_payload "echo x | tee $TMP/plans/plan.md $TMP/repo/src/evil.py")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && pass "Bash floor: tee with a second source target denied" \
   || fail "Bash floor: tee rc=$RC out=${OUT:0:300}"
 
 # Quoting survives the floor: a legal plan write with quotes and spaces allows.
-OUT="$(run_guard "$(bash_payload "cat > \"$KGD_PLANS/quoted plan.md\"")")"; RC=$?
+OUT="$(run_guard "$(bash_payload "cat > \"$TMP/plans/quoted plan.md\"")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "Bash floor: quoted plans-dir redirect allowed" \
   || fail "Bash floor: quoted redirect rc=$RC out=$OUT"
 
@@ -277,7 +286,7 @@ echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/nul
   || fail "glue real target rc=$RC out=${OUT:0:300}"
 
 # A quoted semicolon inside the filename is data: plans-dir write still allows.
-OUT="$(run_guard "$(bash_payload "cat > \"$KGD_PLANS/plan;.md\"")")"; RC=$?
+OUT="$(run_guard "$(bash_payload "cat > \"$TMP/plans/plan;.md\"")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "glue: quoted plan;.md in plans allows" \
   || fail "glue quoted rc=$RC out=$OUT"
 
@@ -302,11 +311,11 @@ OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $KGD_HANDOFF")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] && pass "handoff: cp into the canon doc allowed" \
   || fail "handoff cp rc=$RC out=$OUT"
 
-mkdir -p "$TMP/vault/briefs"
-OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $TMP/vault/briefs/b.md")")"; RC=$?
+mkdir -p "$TMP/vaultdir/briefs"
+OUT="$(run_guard "$(bash_payload "cp $TMP/brief.md $TMP/vaultdir/briefs/b.md")")"; RC=$?
 REASON="$(printf '%s' "$OUT" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty')"
 if echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-   && printf '%s' "$REASON" | grep -qF "vault/briefs/b.md" \
+   && printf '%s' "$REASON" | grep -qF "vaultdir/briefs/b.md" \
    && ! printf '%s' "$REASON" | grep -qiE "spawn|advance"; then
   pass "vault: cp outside the roots denied, reason names the path, no delegation verbs"
 else
@@ -400,36 +409,34 @@ echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/nul
   || fail "memory stray rc=$RC out=${OUT:0:300}"
 
 # ── Escalations carve-out: an escalation note is the superuser-tier lane a
-# king files. The dir resolves through the fno-agents stub; an unresolved
-# directory leaves the carve-out off, never a blanket allow.
-export KGD_ESCALATIONS="$TMP/internal/fno/escalations"
-mkdir -p "$KGD_ESCALATIONS"
-OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"note"}}' "$SID" "$TMP/repo" "$KGD_ESCALATIONS/20260915-0900-token.md")")"; RC=$?
+# king files. The dir resolves through the vault pin; a lookalike tree that is
+# NOT the resolved root stays fail-closed.
+OUT="$(run_guard "$(printf '{"tool_name":"Write","session_id":"%s","transcript_path":"","cwd":"%s","tool_input":{"file_path":"%s","content":"note"}}' "$SID" "$TMP/repo" "$ESCALATIONS/20260915-0900-token.md")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] \
   && pass "escalations: court Write of an escalation note allowed" \
   || fail "escalations Write rc=$RC out=$OUT"
 
-OUT="$(run_guard "$(bash_payload "echo question >> $KGD_ESCALATIONS/20260915-0900-token.md")")"; RC=$?
+OUT="$(run_guard "$(bash_payload "echo question >> $ESCALATIONS/20260915-0900-token.md")")"; RC=$?
 [[ $RC -eq 0 && "$OUT" == "{}" ]] \
   && pass "escalations: Bash append into an escalation note allowed" \
   || fail "escalations append rc=$RC out=$OUT"
 
-# A write in the vault's internal/ tree but outside escalations/ stays
-# implementation surface: denied, with the escalations directory named among
-# the allowed roots.
+# A write in a lookalike internal/ tree outside the resolved escalations root
+# stays implementation surface: denied, with the escalations directory named
+# among the allowed roots.
 OUT="$(run_guard "$(edit_payload "$TMP/internal/fno/decisions/x.md")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
   && echo "$OUT" | grep -q 'escalations directory' \
   && pass "escalations: write outside the dir denied, refusal names it" \
   || fail "escalations outside rc=$RC out=${OUT:0:300}"
 
-# The unresolved-directory shape: no escalation write is specially allowed,
-# and the guard stays fail-closed.
-export KGD_ESCALATIONS=""
+# The lookalike escalations TREE itself (a path that only resembles the
+# resolved root) is denied too: the guard matches the resolved path, never a
+# prefix of the string.
 OUT="$(run_guard "$(edit_payload "$TMP/internal/fno/escalations/escape.md")")"; RC=$?
 echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1 \
-  && pass "escalations: unresolved resolver keeps the guard fail-closed" \
-  || fail "escalations unresolved rc=$RC out=${OUT:0:300}"
+  && pass "escalations: lookalike tree keeps the guard fail-closed" \
+  || fail "escalations lookalike rc=$RC out=${OUT:0:300}"
 
 # ── Third limb signature: the live claude payload carries no agent_id and its
 # transcript_path names the parent MAIN transcript (the refusal of 2026-09-14).
@@ -465,21 +472,17 @@ echo "$OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/nul
   && pass "limb: orphaned open spawn with later tool_use denied" \
   || fail "limb orphan rc=$RC out=${OUT:0:300}"
 
-# Positive control on the harness itself: the stub fno must be reachable and
-# the crown read live, else every "allow" above is a silent stub failure.
-command -v fno >/dev/null 2>&1 \
-  && pass "positive control: stubbed fno on PATH" \
-  || fail "positive control: stubbed fno missing"
+# Positive control 1: the binary runs at all, so every PASS above is real.
+"$BIN" version >/dev/null 2>&1 \
+  && pass "positive control: fno-agents binary executes" \
+  || fail "positive control: fno-agents binary failed to run"
 
-# The manifest resolves through the CLI's canonical space root: the hook must
-# NOT override --state-root with the checkout's .fno, which only a legacy
-# layout has (on the documented default the override resolves nothing and the
-# guard silently no-ops).
-if grep -q -- "--state-root" "$KGD_MANIFEST_ARGS"; then
-  fail "manifest-path called with a --state-root override: $(cat "$KGD_MANIFEST_ARGS")"
-else
-  pass "manifest-path resolves the CLI default (no --state-root override)"
-fi
+# Positive control 2: the native guard spawns no `fno` process (the canary
+# stays empty across every decision above). This is what replaces the stub
+# positive control: the guard's five old CLI round trips are GONE.
+[[ ! -s "$KGD_FNO_CALLS" ]] \
+  && pass "positive control: no fno subprocess across all decisions" \
+  || fail "positive control: guard shelled fno: $(cat "$KGD_FNO_CALLS")"
 
 echo ""
 echo "king-delegation-guard: $PASS passed, $FAIL failed"
