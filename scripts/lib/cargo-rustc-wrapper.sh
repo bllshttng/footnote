@@ -28,7 +28,7 @@ case " $* " in
 esac
 
 if [[ "$HAS_SCCACHE" -eq 1 ]]; then
-    export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-10G}"
+    export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-30G}"
     # sccache hashes every CARGO_* var but rustc never reads these three,
     # and fno doctor test sets a new build dir per run, which would split
     # the cache key per worktree.

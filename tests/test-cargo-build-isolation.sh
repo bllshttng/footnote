@@ -37,7 +37,7 @@ if [[ -x "$WRAPPER" ]]; then
   if grep -q '^unset|--crate-name direct$' "$TMP/logs/compiler-direct"; then pass "missing sccache falls through to real compiler"; else fail "direct fallback" "compiler receipt missing"; fi
 
   COMPILER_LOG="$TMP/logs/compiler-cache" SCCACHE_LOG="$TMP/logs/sccache-default" PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name cached
-  if grep -q '^10G|' "$TMP/logs/sccache-default"; then pass "sccache defaults to bounded 10G cache"; else fail "sccache default cap" "10G receipt missing"; fi
+  if grep -q '^30G|' "$TMP/logs/sccache-default"; then pass "sccache defaults to bounded 30G cache"; else fail "sccache default cap" "30G receipt missing"; fi
   if grep -q -- '--crate-name cached' "$TMP/logs/compiler-cache"; then pass "sccache preserves the rustc invocation"; else fail "sccache argv" "compiler did not receive original argv"; fi
 
   COMPILER_LOG="$TMP/logs/compiler-override" SCCACHE_LOG="$TMP/logs/sccache-override" SCCACHE_CACHE_SIZE=3G PATH="$TMP/bin:/usr/bin:/bin" "$WRAPPER" "$TMP/compiler" --crate-name override
