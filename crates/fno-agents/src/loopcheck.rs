@@ -1552,7 +1552,6 @@ mod async_wait;
 mod attestation_journal;
 mod authorship;
 mod awaiting_merge;
-mod budget_standdown;
 mod coverage_receipt;
 mod holds;
 mod king_decide;
