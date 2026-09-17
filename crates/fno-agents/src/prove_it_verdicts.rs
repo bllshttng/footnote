@@ -94,13 +94,13 @@ pub fn run_prove_it_verdicts(args: &[String]) -> i32 {
     // the graph store is not authoritative (an explicit --graph is trusted).
     if !graph_overridden && external_backend_selected() {
         eprintln!(
-            "fno-agents prove-it-verdicts: this reads graph.json directly; \
+            "fno-agents prove-it-verdicts: this reads the graph store directly; \
              under an external tracker backend that store is not authoritative."
         );
         return 1;
     }
 
-    let mut entries = match graph_store::read_defaulted(&graph_path, false) {
+    let mut entries = match graph_store::read_rows(&graph_path) {
         Ok(e) => e,
         Err(err) => {
             eprintln!("fno-agents prove-it-verdicts: {err}");

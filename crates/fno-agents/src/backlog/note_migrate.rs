@@ -40,7 +40,7 @@ fn char_len(v: Option<&Value>) -> usize {
 /// Read-only census: backend, node counts, note counts and character totals
 /// per node (source hash included so a manifest can be prepared from it).
 fn run_inventory(graph: &std::path::Path, json_out: bool) -> i32 {
-    let entries = match graph_store::read_defaulted(graph, false) {
+    let entries = match graph_store::read_rows(graph) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("fno-agents backlog-notes: {e}");
@@ -392,7 +392,7 @@ fn run_migrate(
     apply: bool,
     json_out: bool,
 ) -> i32 {
-    let entries = match graph_store::read_defaulted(graph, false) {
+    let entries = match graph_store::read_rows(graph) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("fno-agents backlog-notes: {e}");
@@ -518,7 +518,7 @@ fn run_migrate(
             .map(|_| ())
             .is_some();
         let _ = expected;
-        let rows_now = graph_store::read_defaulted(graph, false).unwrap_or_default();
+        let rows_now = graph_store::read_rows(graph).unwrap_or_default();
         let row_now = rows_now
             .iter()
             .find(|r| graph_store::entry_id(r) == Some(id.as_str()));
@@ -625,7 +625,7 @@ flags:
   --node <id>              node for history (a positional token also works)
   --offset N --limit N     page the history read (default limit 50)
   --json                   machine output; history emits {{total, offset, records}}
-  --graph <path>           graph file to read (default ~/.fno/graph.json)
+  --graph <path>           store to read (default ~/.fno/graph.json)
   -h, --help               this text"
     );
 }
@@ -729,7 +729,7 @@ pub fn run_notes(args: &[String]) -> i32 {
     // archived node's history outlives its row).
     let mut row = None;
     if let Some(tok) = node.as_deref() {
-        if let Ok(entries) = graph_store::read_defaulted(&graph, false) {
+        if let Ok(entries) = graph_store::read_rows(&graph) {
             row = crate::graph_get::find_entry(&entries, tok).cloned();
         }
     }

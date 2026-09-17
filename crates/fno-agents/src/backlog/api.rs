@@ -267,17 +267,10 @@ fn decode_cursor(cursor: &str) -> Option<(i64, String)> {
 
 /// Every row, in store order (file position under the JSON leg, ordinal
 /// order under SQLite). The position in this list IS the ordinal the
-/// pagination cursors name, in both arms. Both arms surface the same
-/// defaulted view: the export passes through the same `apply_defaults`
-/// normalization the JSON read runs.
+/// pagination cursors name, in both arms. The rows surface defaulted
+/// through the one backend switch, `graph_store::read_rows`.
 fn read_rows(store: &Store) -> Result<Vec<Value>, ApiError> {
-    let mut rows = if crate::backlog::backend(&store.graph) == crate::backlog::Backend::Sqlite {
-        crate::backlog::read_entries(&store.graph)?
-    } else {
-        crate::graph_store::read_defaulted(&store.graph, false)?
-    };
-    crate::graph_store::apply_defaults(&mut rows, false);
-    Ok(rows)
+    Ok(crate::graph_store::read_rows(&store.graph)?)
 }
 
 fn typed_rows(store: &Store) -> Result<Vec<Node>, ApiError> {

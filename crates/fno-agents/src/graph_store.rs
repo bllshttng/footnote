@@ -2432,21 +2432,10 @@ pub fn locked_mutate_with_hook(
     let (backup, shadow_warning, version) = if sqlite_backend {
         let version = crate::backlog::authoritative_sync(path, &shadow_before, &entries)
             .map_err(StoreError::Sqlite)?;
-        // Keeper convergence: while sqlite is authoritative, the json file
-        // stays a full projection the file-path readers still resolve
-        // against (the backlog-note/update bridges read --graph as a path).
-        // Mirror every publish so a node filed after the backend flip stays
-        // visible to them. Best-effort: sqlite holds the truth, a mirror
-        // failure warns instead of refusing, like the json leg's shadow
-        // write.
-        let body = serialize_graph_file(&entries);
-        let warning = write_atomic(path, &body).err().map(|error| {
-            format!(
-                "JSON keeper mirror write for {} failed: {error}",
-                path.display()
-            )
-        });
-        (None, warning, version)
+        // graph.json is frozen under sqlite: the readers moved onto the
+        // backend switch, so a publish rewrites only graph.db. The file
+        // comes back on demand via `fno doctor graph export --now`.
+        (None, None, version)
     } else {
         let backup = create_backup(path);
         let body = serialize_graph_file(&entries);
@@ -2749,11 +2738,10 @@ mod tests {
     }
 
     #[test]
-    fn a_sqlite_publish_mirrors_the_json_file_for_path_readers() {
-        // The backlog-note/update bridges read --graph as a FILE. Under the
-        // sqlite backend the file froze at the backend flip, so every node
-        // filed after the flip refused to resolve. Convergence: a sqlite
-        // publish re-projects the json file, and the file reader sees it.
+    fn a_sqlite_publish_leaves_the_json_file_frozen() {
+        // The readers moved onto the backend switch, so a sqlite publish
+        // rewrites only graph.db. graph.json keeps its pre-publish bytes:
+        // it is frozen, and comes back on demand via the doctor export.
         let root = tempfile::tempdir().unwrap();
         let graph = root.path().join("graph.json");
         std::fs::write(
@@ -2766,6 +2754,7 @@ mod tests {
         )
         .unwrap();
         crate::backlog::set_backend(&graph, crate::backlog::Backend::Sqlite).unwrap();
+        let frozen_bytes = std::fs::read(&graph).unwrap();
 
         let mut entries = crate::backlog::read_entries(&graph).unwrap();
         assert_eq!(entries.len(), 1, "positive control: the fixture imported");
@@ -2781,19 +2770,17 @@ mod tests {
         };
         locked_mutate(&graph, input, std::time::Duration::from_secs(5)).unwrap();
 
-        // The file-path reader (the bridge's exact read) resolves x-new.
-        let mirrored = read_defaulted(&graph, false).unwrap();
+        // The store carries x-new; the file is byte-identical to pre-publish.
+        let rows = read_rows(&graph).unwrap();
         assert!(
-            mirrored.iter().any(|e| entry_id(e) == Some("x-new")),
-            "json mirror must carry the post-flip node"
+            rows.iter().any(|e| entry_id(e) == Some("x-new")),
+            "the store must carry the post-flip node"
         );
-        assert!(
-            mirrored.iter().any(|e| entry_id(e) == Some("x-old")),
-            "json mirror must keep the pre-flip node"
+        assert_eq!(
+            std::fs::read(&graph).unwrap(),
+            frozen_bytes,
+            "graph.json must stay frozen across a sqlite publish"
         );
-        // Both keepers carry the same rows.
-        let authoritative = crate::backlog::read_entries(&graph).unwrap();
-        assert_eq!(mirrored.len(), authoritative.len());
     }
 
     #[test]

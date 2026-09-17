@@ -18,7 +18,7 @@
 
 use crate::evidence::truncate_chars;
 use crate::graph_get::{default_graph_path, find_entry};
-use crate::graph_store::{read_defaulted, s_str};
+use crate::graph_store::s_str;
 use crate::paths::worktree_repo_root;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -573,7 +573,8 @@ fn judge_rows(
     lenses: &Lenses,
     spawn: Spawn,
 ) -> Vec<Value> {
-    let entries: Vec<Value> = read_defaulted(&default_graph_path(), true).unwrap_or_default();
+    let entries: Vec<Value> =
+        crate::graph_store::read_rows(&default_graph_path()).unwrap_or_default();
     let node_text = node_text_of(node_id, &entries);
     JUDGE_DIMENSIONS
         .iter()
@@ -660,7 +661,8 @@ fn run_calibration(
     let mut dims: HashMap<String, (u32, u32, u32, u32, u32)> = HashMap::new();
     let mut disagreements: Vec<Value> = Vec::new();
     let mut controls_wrong = 0u32;
-    let entries: Vec<Value> = read_defaulted(&default_graph_path(), true).unwrap_or_default();
+    let entries: Vec<Value> =
+        crate::graph_store::read_rows(&default_graph_path()).unwrap_or_default();
 
     for row in &rows {
         let row_split = row.get("split").and_then(Value::as_str).unwrap_or("dev");
