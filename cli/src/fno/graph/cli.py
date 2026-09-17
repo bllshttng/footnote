@@ -23,6 +23,7 @@ from typing import Any, List, Literal, Optional, Union
 
 import typer
 
+from fno.graph.write_receipts import confirm_created_row, confirm_updated_row
 from fno.control_plane import emit_tick, scheduler_from_env
 from fno.loops import refuse_if_paused
 from fno.tombstones import tombstone_group_cls
@@ -1293,6 +1294,8 @@ def _create_node_impl(
     new_child_id = new_id_holder[0]
     if new_child_id is not None and node_holder[0] is not None and node_holder[0].get("parent"):
         _project_plans_from_graph([new_child_id])
+
+    confirm_created_row(_graph_path(), new_id_holder[0])
 
     typer.echo(json.dumps({"id": new_id_holder[0], "title": title}, indent=2))
 
@@ -3471,6 +3474,7 @@ def cmd_update(
         derived_add_pr_url = _resolve_or_refuse(int(add_pr), "--add-pr-url")
 
     projected_node: list = [None]
+    resolved_id: list[Optional[str]] = [None]
     reparent_old_parent: list = [None]
     ship_stamp_node: list = [None]
 
@@ -3504,6 +3508,7 @@ def cmd_update(
             typer.echo(f"Error: graph node {task_id} not found", err=True)
             raise typer.Exit(code=1)
         projected_node[0] = node
+        resolved_id[0] = node["id"]
 
         if related is not None:
             from fno.graph.store import set_related
@@ -3839,12 +3844,7 @@ def cmd_update(
     commit_rows_via_store(_graph_path(), mutator)
     _dispatch_overrides.emit(brief_warning_box[0])
 
-    # Mutation receipts read the committed, recomputed row. Flags express the
-    # caller's intent; only the reread can say whether ownership and dispatch
-    # state actually landed.
-    from fno.graph.load import load_graph
-
-    stored_node = _find_node(load_graph(_graph_path()), task_id) or {}
+    stored_node = confirm_updated_row(_graph_path(), resolved_id[0] or task_id)
     if locked_by is not None:
         from fno.backlog.requeue import verify_lock_stamp_receipt
 
@@ -3868,7 +3868,7 @@ def cmd_update(
             f"owner={stored_owner} pr={stored_pr} status={stored_status}; "
             f"{ready_effect}"
         )
-    typer.echo(f"Updated {task_id}")
+    typer.echo(f"Updated {stored_node.get('id', task_id)}")
 
     # Ship provenance: the link just committed (lock released), so stamp the row
     # here rather than inside the mutator (which would re-enter the graph lock).

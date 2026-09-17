@@ -447,7 +447,7 @@ pub fn shadow_sync(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    write_changed(&transaction, before, after)?;
+    let _report = write_changed(&transaction, before, after, false)?;
     stamp_version(&transaction, json_version)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(database_path(graph))
@@ -464,11 +464,61 @@ pub fn authoritative_sync(
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    write_changed(&transaction, before, after)?;
+    let _report = write_changed(&transaction, before, after, true)?;
     let version = content_version(after);
     stamp_version(&transaction, &version)?;
+    confirm_ids_landed(&transaction, after)?;
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(version)
+}
+
+pub(crate) struct WriteReport {
+    present_ids: Vec<String>,
+    deleted_ids: Vec<String>,
+}
+
+fn confirm_ids_landed(connection: &Connection, after: &[Value]) -> Result<(), String> {
+    const SQLITE_BIND_BATCH: usize = 900;
+    let expected: std::collections::BTreeSet<String> = after
+        .iter()
+        .filter_map(crate::graph_store::entry_id)
+        .map(str::to_owned)
+        .collect();
+    let stored_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM nodes", [], |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+
+    let mut stored = std::collections::BTreeSet::new();
+    let ids: Vec<&str> = expected.iter().map(String::as_str).collect();
+    for batch in ids.chunks(SQLITE_BIND_BATCH) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let query = format!("SELECT id FROM nodes WHERE id IN ({placeholders})");
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter().copied()), |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| error.to_string())?;
+        for row in rows {
+            stored.insert(row.map_err(|error| error.to_string())?);
+        }
+    }
+    let missing: Vec<&str> = expected
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !stored.contains(*id))
+        .collect();
+    if stored_count == expected.len() as i64 && missing.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "publish read-back mismatch: expected {} ids, stored {stored_count}; missing ids {missing:?}",
+        expected.len()
+    ))
 }
 
 /// The single-row mutation path: under the sqlite backend,
@@ -570,7 +620,7 @@ fn mutate_single_row_once(
             );
         }
     }
-    write_changed(&transaction, &rows, &working)?;
+    write_changed(&transaction, &rows, &working, true)?;
     nodes::recompute_status(&transaction)?;
     let rows_after = export_rows(&transaction)?;
     let version = content_version(&rows_after);
@@ -658,13 +708,32 @@ fn delete_aggregate(connection: &Connection, id: &str) -> Result<(), String> {
 /// (nodes row, its single-row mirrors, its child tables) is replaced for
 /// each id whose canonical JSON differs.
 ///
-/// Returns the number of ids acted on (saved or deleted), so a test can
-/// count what a sync moved.
+/// Returns the ids acted on, split by rows that should be present or deleted.
 pub(crate) fn write_changed(
     connection: &Connection,
     before: &[Value],
     after: &[Value],
-) -> Result<usize, String> {
+    strict: bool,
+) -> Result<WriteReport, String> {
+    if strict {
+        let mut seen_ids = std::collections::BTreeSet::new();
+        for (ordinal, row) in after.iter().enumerate() {
+            let Some(id) = row.get("id").and_then(Value::as_str) else {
+                return Err(format!(
+                    "row at ordinal {ordinal} is unrepresentable: missing string id"
+                ));
+            };
+            if id.is_empty() {
+                return Err(format!(
+                    "row at ordinal {ordinal} is unrepresentable: empty string id"
+                ));
+            }
+            if !seen_ids.insert(id) {
+                return Err(format!("duplicate id in after rows: {id}"));
+            }
+        }
+    }
+
     fn by_id(rows: &[Value]) -> std::collections::BTreeMap<String, &Value> {
         rows.iter()
             .filter(|row| row.is_object())
@@ -683,7 +752,10 @@ pub(crate) fn write_changed(
     let mut ids: Vec<String> = before_map.keys().chain(after_map.keys()).cloned().collect();
     ids.sort();
     ids.dedup();
-    let mut written = 0usize;
+    let mut report = WriteReport {
+        present_ids: Vec::new(),
+        deleted_ids: Vec::new(),
+    };
     for id in ids {
         let old = before_map.get(&id);
         let new = after_map.get(&id);
@@ -707,23 +779,24 @@ pub(crate) fn write_changed(
         }
         match new {
             Some(body) => {
-                // Same best-effort rule as the write path: a row the model
-                // cannot represent is skipped so the JSON publish never
-                // inherits a shadow failure.
-                let Ok(mut node) = Node::from_json(body) else {
-                    continue;
+                let mut node = match Node::from_json(body) {
+                    Ok(node) => node,
+                    Err(error) if strict => {
+                        return Err(format!("row {id} is unrepresentable: {error}"));
+                    }
+                    Err(_) => continue,
                 };
                 node.ordinal = ordinals.get(id.as_str()).copied().unwrap_or(0);
                 save_aggregate(connection, &node)?;
-                written += 1;
+                report.present_ids.push(id);
             }
             None => {
                 delete_aggregate(connection, &id)?;
-                written += 1;
+                report.deleted_ids.push(id);
             }
         }
     }
-    Ok(written)
+    Ok(report)
 }
 
 /// Every stored node, in ordinal order, as its canonical JSON row. This is
@@ -1651,10 +1724,153 @@ mod tests {
             .unwrap()
             .insert("completion_note".to_string(), Value::Null);
         let connection = open(&graph).unwrap();
-        let written = write_changed(&connection, &before_with_null, &after).unwrap();
-        assert_eq!(written, 1, "only the real change writes: {written}");
+        let written = write_changed(&connection, &before_with_null, &after, true).unwrap();
+        assert_eq!(
+            written.present_ids.len(),
+            1,
+            "only the real change writes: {:?}",
+            written.present_ids
+        );
         drop(connection);
         drop(dir);
+    }
+
+    #[test]
+    fn an_unrepresentable_row_refuses_the_publish_instead_of_dropping_it() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after[0]["status"] = Value::String("not-a-status".into());
+
+        let error = authoritative_sync(&graph, &before, &after).unwrap_err();
+
+        assert!(
+            error.contains("ab-one"),
+            "error names the dropped row: {error}"
+        );
+        assert!(
+            error.contains("status"),
+            "error names the parse failure: {error}"
+        );
+    }
+
+    #[test]
+    fn shadow_sync_skips_an_unrepresentable_row_without_refusing_the_publish() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after[0]["status"] = Value::String("not-a-status".into());
+
+        shadow_sync(&graph, &before, &after, "sha256:next").unwrap();
+
+        let connection = open(&graph).unwrap();
+        let version: String = connection
+            .query_row(
+                "SELECT value FROM graph_meta WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "sha256:next");
+        let status: String = connection
+            .query_row("SELECT status FROM nodes WHERE id = 'ab-one'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "idea");
+    }
+
+    #[test]
+    fn readback_batches_more_ids_than_sqlite_bind_limit() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let connection = open(&graph).unwrap();
+        let after: Vec<Value> = (0..1001)
+            .map(|i| serde_json::json!({"id": format!("id-{i}")}))
+            .collect();
+
+        let error = confirm_ids_landed(&connection, &after).unwrap_err();
+
+        assert!(error.contains("id-0"));
+    }
+
+    #[test]
+    fn authoritative_publish_rejects_a_row_without_a_usable_id() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after.push(serde_json::json!({"title": "missing id"}));
+
+        let error = authoritative_sync(&graph, &before, &after).unwrap_err();
+
+        assert!(error.contains("ordinal 2"));
+        assert!(error.contains("missing string id"));
+    }
+
+    #[test]
+    fn authoritative_publish_rejects_duplicate_ids() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after.push(after[0].clone());
+
+        let error = authoritative_sync(&graph, &before, &after).unwrap_err();
+
+        assert!(error.contains("duplicate id"));
+        assert!(error.contains("ab-one"));
+    }
+
+    #[test]
+    fn a_landed_publish_reads_every_id_back() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let mut after = before.clone();
+        after[0]["title"] = Value::String("One renamed".into());
+
+        authoritative_sync(&graph, &before, &after).unwrap();
+
+        let connection = open(&graph).unwrap();
+        let mut statement = connection
+            .prepare("SELECT id FROM nodes ORDER BY ordinal")
+            .unwrap();
+        let stored: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let expected: Vec<String> = after
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_string())
+            .collect();
+
+        assert_eq!(stored, expected);
+    }
+
+    #[test]
+    fn authoritative_publish_rejects_a_missing_unchanged_row() {
+        let dir = TempDir::new().unwrap();
+        let graph = two_node_graph(&dir);
+        let before = raw_rows(&graph);
+        shadow_sync(&graph, &[], &before, "sha256:seed").unwrap();
+        let connection = open(&graph).unwrap();
+        delete_aggregate(&connection, "ab-two").unwrap();
+        drop(connection);
+        let mut after = before.clone();
+        after[0]["title"] = Value::String("One renamed".into());
+
+        let error = authoritative_sync(&graph, &before, &after).unwrap_err();
+
+        assert!(error.contains("ab-two"));
     }
 
     #[test]

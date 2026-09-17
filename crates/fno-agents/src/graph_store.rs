@@ -2450,20 +2450,18 @@ pub fn locked_mutate_with_hook(
         (backup, warning, version)
     };
 
-    // Still under the lock, read the published bytes back
-    // and compare digests. Every receipt (idea, session close, note) rides
-    // this Ok, so a publish that silently failed to land refuses instead of
-    // claiming success.
-    let readback = if sqlite_backend {
-        crate::backlog::version(path).map_err(StoreError::Sqlite)?
-    } else {
-        file_content_version(path)
-    };
-    if readback != version {
-        return Err(StoreError::Invalid(format!(
-            "publish read-back mismatch on {}: wrote {version}, file holds {readback}",
-            path.display()
-        )));
+    // The JSON backend still reads the published bytes back and compares
+    // digests. The sqlite backend already confirmed its stored ids in
+    // authoritative_sync. Every receipt rides this Ok, so a publish that
+    // silently failed to land refuses instead of claiming success.
+    if !sqlite_backend {
+        let readback = file_content_version(path);
+        if readback != version {
+            return Err(StoreError::Invalid(format!(
+                "publish read-back mismatch on {}: wrote {version}, file holds {readback}",
+                path.display()
+            )));
+        }
     }
 
     Ok(MutateOutcome {
