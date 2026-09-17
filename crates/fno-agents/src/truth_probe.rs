@@ -135,6 +135,43 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
 /// the latch wait comes out of it: without that subtraction the wait is
 /// additive and a joiner blows the bound its caller set. `None` means nobody
 /// set one, and the wait then costs the attempts nothing.
+/// The bounded drain for an EXITED child whose pipes may still be held by a
+/// grandchild: both pipes are read to EOF on their own threads, the bytes
+/// come back over a channel rather than a join (a join is its own unbounded
+/// wait - a grandchild inherits the fds and outlives the child), and `grace`
+/// bounds that wait. The lossy-UTF-8 texts of stdout and stderr, trimmed,
+/// which the removal cascade folds into its refusal.
+pub fn drain_to_detail(child: &mut std::process::Child, grace: Duration) -> String {
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = out_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        let _ = out_tx.send(buf);
+    });
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(pipe) = err_pipe.as_mut() {
+            let _ = std::io::Read::read_to_end(pipe, &mut buf);
+        }
+        let _ = err_tx.send(buf);
+    });
+    let out = out_rx.recv_timeout(grace).unwrap_or_default();
+    let err = err_rx.recv_timeout(grace).unwrap_or_default();
+    let stdout = String::from_utf8_lossy(&out);
+    let stderr = String::from_utf8_lossy(&err);
+    match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
+        (true, true) => "stderr and stdout were both empty".to_string(),
+        (true, false) => stderr.trim().to_string(),
+        (false, true) => stdout.trim().to_string(),
+        (false, false) => format!("stderr: {}; stdout: {}", stderr.trim(), stdout.trim()),
+    }
+}
+
 fn family1_truth_latched(
     handle: &str,
     per_attempt: Duration,
