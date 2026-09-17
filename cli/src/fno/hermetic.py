@@ -186,6 +186,12 @@ _ENVIRONMENT: tuple[str, ...] = (
     "XDG_STATE_HOME",  # pinned into the sandbox below
     "XDG_CACHE_HOME",  # a cache, preserved at its real value
     "CARGO_HOME",  # ditto
+    # The toolchain binary itself (rustup shims set it); the cargo_build_dirs
+    # lane reads it first, before PATH and ~/.cargo/bin/cargo. A developer's
+    # value names the same toolchain the caches above resolve, so a test
+    # seeing it is consistent, and the sandbox build-dir pin depends on a
+    # working cargo surviving the scrub.
+    "CARGO",
     # A unix socket path, not a source of answers. Sandboxing it risks the
     # 108-byte sockaddr limit under a long pytest tmpdir, which would break the
     # mux tests for no isolation gain.
