@@ -86,6 +86,14 @@ Exit codes: 0 success, 1 plan not found, 2 contract violation (missing sections,
 
 For operator's detection and dispatch logic, see [skills/execute/references/single-doc-shape.md](../../skills/execute/references/single-doc-shape.md).
 
+## Plan history
+
+In-place mutation is safe only when something versions the file. Each `/blueprint` write is one commit in the plans dir's own git repo, made by `skills/blueprint/scripts/commit-plan.sh`. The subject is `blueprint(<node>): <cause>` and the body carries a `Node: <node>` trailer. So `git log -- <plan>` is the plan's history, and each diff says why it moved. The script commits the plan path only, so other staged work in that repo stays staged. A plans dir outside any git repo reports `unversioned` and keeps no history.
+
+A plan can still lag its node. `fno backlog notes stale <node> --plan <path>` compares the plan's last commit time (else its mtime) with every note time on the node: legacy progress notes, the current state, and the note journal. It names its basis, because an mtime moves on any save. Target init runs it and prints a `predates` line when notes are newer. The read is advisory and never blocks.
+
+Writes outside `/blueprint` are not committed: a `/think` design doc, `fno do plan stamp` at the ship gate, `fno do plan sync`, and hand edits in Obsidian. A ruling that lives only in mail is invisible to the stale read.
+
 ## Migration path
 
 - **PR1 (this PR):** single-doc support added; folder plans still work unchanged. `/blueprint` on a design doc appends execution sections in place. `fno do plan brief` is available.
