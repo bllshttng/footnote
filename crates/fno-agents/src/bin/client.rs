@@ -1548,10 +1548,18 @@ async fn run(args: Vec<String>) -> i32 {
                 // the "reports success while removing nothing" shape that
                 // stamped four sessions origin=adopted. The renderer already
                 // prints the survival in its notes; the exit code now says it
-                // too, whatever the reason.
-                if verb_owned == "rm"
-                    && result.get("harness_removed").and_then(Value::as_bool) == Some(false)
-                {
+                // too. An already-absent harness row is a COMPLETED removal,
+                // not a survivor - the removal asked for is total, so it
+                // keeps exit 0 and the sideline never renders a false
+                // failure for it.
+                let harness_survives = result.get("harness_removed").and_then(Value::as_bool)
+                    == Some(false)
+                    && !result
+                        .get("harness_reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .contains("already absent");
+                if verb_owned == "rm" && harness_survives {
                     return 21;
                 }
                 // The daemon-bound thread lane (codex and every other

@@ -123,24 +123,12 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     family1_truth_latched(handle, family1_truth_batch_timeout(1), None)
 }
 
-/// One `fno agents truth <handle>` in flight per handle, machine-wide.
-///
-/// The daemon, `wait`, `needs` and `king_board` each probe the same rows from
-/// their own processes. Every one of those was a Python cold start of 1 to 2.4
-/// seconds, and a slow read made the next one overlap it. The retry rides
-/// INSIDE the flight: retrying outside it would leave a joiner waiting on a
-/// claim nobody holds, and that joiner would then spawn a second probe.
-/// `per_attempt` bounds each of the two attempts the retrying reader may make.
-/// `deadline` is the caller's TOTAL budget when it handed one down, and then
-/// the latch wait comes out of it: without that subtraction the wait is
-/// additive and a joiner blows the bound its caller set. `None` means nobody
-/// set one, and the wait then costs the attempts nothing.
 /// The bounded drain for an EXITED child whose pipes may still be held by a
 /// grandchild: both pipes are read to EOF on their own threads, the bytes
 /// come back over a channel rather than a join (a join is its own unbounded
 /// wait - a grandchild inherits the fds and outlives the child), and `grace`
-/// bounds that wait. The lossy-UTF-8 texts of stdout and stderr, trimmed,
-/// which the removal cascade folds into its refusal.
+/// bounds that wait. Returns the lossy-UTF-8 texts of stdout and stderr,
+/// trimmed, for the removal cascade to fold into its refusal.
 pub fn drain_to_detail(child: &mut std::process::Child, grace: Duration) -> String {
     let mut out_pipe = child.stdout.take();
     let mut err_pipe = child.stderr.take();
@@ -172,6 +160,18 @@ pub fn drain_to_detail(child: &mut std::process::Child, grace: Duration) -> Stri
     }
 }
 
+/// One `fno agents truth <handle>` in flight per handle, machine-wide.
+///
+/// The daemon, `wait`, `needs` and `king_board` each probe the same rows from
+/// their own processes. Every one of those was a Python cold start of 1 to 2.4
+/// seconds, and a slow read made the next one overlap it. The retry rides
+/// INSIDE the flight: retrying outside it would leave a joiner waiting on a
+/// claim nobody holds, and that joiner would then spawn a second probe.
+/// `per_attempt` bounds each of the two attempts the retrying reader may make.
+/// `deadline` is the caller's TOTAL budget when it handed one down, and then
+/// the latch wait comes out of it: without that subtraction the wait is
+/// additive and a joiner blows the bound its caller set. `None` means nobody
+/// set one, and the wait then costs the attempts nothing.
 fn family1_truth_latched(
     handle: &str,
     per_attempt: Duration,
