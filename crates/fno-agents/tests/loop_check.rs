@@ -472,6 +472,7 @@ fn fire(args: &[&str]) -> (i32, Decision) {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
+mod awaiting_merge_ruling;
 mod cancel_sentinel;
 mod gh_budget_gate;
 mod watch_lease_gate;
@@ -481,8 +482,6 @@ mod watch_lease_gate;
 fn ac1_hp_promise_green_pr_done() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
-
-    // Create .fno dir for events
     fs::create_dir_all(cwd.join(".fno")).unwrap();
     isolate_settings(cwd);
 

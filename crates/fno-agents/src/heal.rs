@@ -947,7 +947,7 @@ fn findings_for(
     let inherited = match cached_inherited {
         Some(v) => v.clone(),
         None => {
-            let read = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20);
+            let read = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd);
             if read.is_none() {
                 println!(
                     "note: could not read main's HEAD, so no row can be shown as inherited; \
@@ -1450,7 +1450,7 @@ fn run_all_apply(a: &Args, dry_run: bool) -> i32 {
     // One main-HEAD read per invocation, shared by every PR: the failing
     // checks of origin/main do not change between PRs in one cycle, and N
     // reads per tick is exactly the shared-quota spend the broker refuses.
-    let inherited_once = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd, 20);
+    let inherited_once = crate::loopcheck::main_head_failing_checks(&a.gh_bin, &a.cwd);
     if inherited_once.is_none() {
         println!(
             "note: could not read main's HEAD, so no row can be shown as inherited; \

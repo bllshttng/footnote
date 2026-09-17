@@ -9,7 +9,7 @@ use super::{
 };
 use serde_json::{json, Map, Value};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 /// Per-project rows rendered for the capture stream; the count stays whole.
@@ -1010,6 +1010,15 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
         .filter(|e| s_str(e, "contained_in").is_some_and(|c| !c.is_empty()))
         .filter_map(|e| s_str(e, "id").map(str::to_string))
         .collect();
+    // A ruling hold (crown's dispatch_hold) parks the node deliberately;
+    // it is not driverless, so undriven_pr must not name it.
+    let by_id: BTreeMap<String, Value> = inputs
+        .entries
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|e| s_str(e, "id").map(|id| (id.to_string(), e.clone())))
+        .collect();
     if inputs.pr_nodes.is_ok() && inputs.claims.is_ok() {
         for node in &inputs.pr_nodes.rows() {
             // No priority filter: a PR is finished work at any band, so a p2
@@ -1031,6 +1040,18 @@ pub(crate) fn build_board(inputs: &BoardInputs) -> Value {
             }
             let status = derived_status(node);
             if status == "deferred" || status == "blocked" {
+                continue;
+            }
+            // pr_nodes rows carry no `plan_path` (that lives on the graph
+            // entry, per the contained_ids comment above); look the node up
+            // in `by_id` so the hold reader sees the entry that actually
+            // carries the plan.
+            let hold_entry = s_str(node, "id")
+                .and_then(|id| by_id.get(id))
+                .unwrap_or(node);
+            if crate::backlog_ready::dispatch_hold_verdict(hold_entry, &by_id)
+                .is_some_and(|v| v.held)
+            {
                 continue;
             }
             let (state, _claim) = node_driver(

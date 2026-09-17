@@ -1306,6 +1306,83 @@ mod tests {
         assert_eq!(rows[0]["pr_number"], 1895);
     }
 
+    fn write_hold_plan(dir: &std::path::Path, hold_frontmatter: &str) -> String {
+        let plan = dir.join("plan.md");
+        std::fs::write(
+            &plan,
+            format!("---\nstatus: ready\n{hold_frontmatter}---\n\n# Held\n"),
+        )
+        .unwrap();
+        plan.display().to_string()
+    }
+
+    #[test]
+    fn undriven_pr_skips_a_ruling_held_pr_node() {
+        // A crown dispatch_hold parks the node deliberately; it is not
+        // driverless, so undriven_pr must not name it (AC2-HP).
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = write_hold_plan(
+            dir.path(),
+            "dispatch_hold:\n  reason: waiting on legal\n  release_when: legal clears\n  review_on: 2099-01-01\n  set_by: operator\n",
+        );
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(vec![json!({
+            "id": "x-pr2",
+            "priority": "p2",
+            "status": "in_review",
+            "plan_path": plan_path,
+        })]);
+        inputs.pr_nodes = ok_read(json!([{
+            "id": "x-pr2",
+            "priority": "p2",
+            "status": "in_review",
+            "title": "held work",
+            "pr_number": 1895,
+        }]));
+        let board = build_board(&inputs);
+        let queue = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|queue| queue["name"] == "undriven_pr")
+            .unwrap();
+        assert_eq!(queue["status"], "ok");
+        assert!(queue["rows"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn undriven_pr_still_names_an_invalid_hold_pr_node() {
+        // A broken ruling (missing required field) fails CLOSED: the PR
+        // stays a row so a human notices (AC3-EDGE).
+        let dir = tempfile::tempdir().unwrap();
+        let plan_path = write_hold_plan(dir.path(), "dispatch_hold:\n  reason: waiting on legal\n");
+        let mut inputs = inputs_with(json!([]), json!([]), json!([]));
+        inputs.entries = Some(vec![json!({
+            "id": "x-pr3",
+            "priority": "p2",
+            "status": "in_review",
+            "plan_path": plan_path,
+        })]);
+        inputs.pr_nodes = ok_read(json!([{
+            "id": "x-pr3",
+            "priority": "p2",
+            "status": "in_review",
+            "title": "invalid hold work",
+            "pr_number": 1896,
+        }]));
+        let board = build_board(&inputs);
+        let queue = board["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|queue| queue["name"] == "undriven_pr")
+            .unwrap();
+        assert_eq!(queue["status"], "ok");
+        let rows = queue["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "x-pr3");
+    }
+
     #[test]
     fn unplanned_note_names_the_batch_and_undispatched_names_the_target() {
         // a rule without a number is advice nobody applies; the
