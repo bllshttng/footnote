@@ -6986,6 +6986,9 @@ fn agent_tails_push_updates_rows_without_a_row_change() {
 #[path = "server/tests/external_lifecycle_and_backlog_tests.rs"]
 mod external_lifecycle_and_backlog_tests;
 
+#[path = "server/tests/agent_launcher_tests.rs"]
+mod agent_launcher_tests;
+
 #[test]
 fn classify_guard_registry_keeps_document_and_row_failures_distinct() {
     // Document-level malformation already failed closed and keeps its own
@@ -8926,6 +8929,7 @@ fn empty_core() -> Core {
         agents: Vec::new(),
         agents_read_ok: false,
         journal: crate::spawn_journal::JournalCache::default(),
+        launch_desk: Default::default(),
         branch_by_cwd: HashMap::new(),
         tail_by_session: HashMap::new(),
         truth_by_name: HashMap::new(),

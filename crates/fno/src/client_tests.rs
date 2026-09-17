@@ -25,6 +25,11 @@ mod glyph_tests;
 #[path = "client/tests/rename_tests.rs"]
 mod rename_tests;
 
+// The sideline new-agent composer family: editor, focus, submit
+// refusals, and update correlation.
+#[path = "client/tests/agent_launcher_tests.rs"]
+mod agent_launcher_tests;
+
 #[test]
 fn config_says_off_matches_only_trimmed_off() {
     // Bridges config.toml -> the env the interactive server latches

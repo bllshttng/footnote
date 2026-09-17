@@ -1354,6 +1354,22 @@ struct View {
     /// A pending sweep verb (counts probe or scoped apply) for the run
     /// loop to spawn off the UI thread, mirroring `conn_action`.
     sweep_action: Option<SweepAction>,
+    /// The open new-agent popup, or the RETAINED draft after Esc
+    /// (hidden but alive). Both live through `launcher_closed`.
+    launcher: Option<agent_launcher::Launcher>,
+    launcher_closed: Option<agent_launcher::Launcher>,
+    /// The launcher's key-folder carry (esc/CSI/UTF-8/paste across reads).
+    launcher_esc: agent_launcher::LauncherEsc,
+    /// The launch attempt this client owns, remembered across popup
+    /// close/reopen: a reopened popup shows the pending or resolved attempt
+    /// and can never silently re-spawn (AC2-EDGE).
+    launch_attempt: Option<agent_launcher::AgentAttempt>,
+    /// The harness catalog read (`fno agents harnesses`), last outcome
+    /// wins; `None` until the first launcher open kicks the probe.
+    launcher_catalog: Option<agent_launcher::CatalogOutcome>,
+    /// A catalog probe is wanted/in flight (the update-probe discipline).
+    catalog_want: bool,
+    catalog_inflight: bool,
     /// A queued `fno agents restart` and its one-in-flight bound,
     /// mirroring the sweep pair.
     restart_agents_want: bool,
@@ -2164,6 +2180,9 @@ pub(crate) enum AuxAction {
     OpenKeybinds,
     OpenSettings,
     OpenConnections,
+    /// Open the sideline new-agent popup: one composer that
+    /// launches a new harness session through the canonical spawn door.
+    OpenAgentLauncher,
     /// Open the update-readiness overlay: version pair, changelog,
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
@@ -2307,6 +2326,19 @@ const UNLANED: &str = "unlaned";
 
 mod update_menu;
 
+// The sideline new-agent launcher: composer state, input folding,
+// and the typed launch request. client.rs keeps only the integration
+// branches; the peek mail adapter moved to its own module for the
+// shrink-only ratchet.
+mod agent_launcher;
+mod input_folds;
+mod mail_input;
+
+use input_folds::{
+    fold_modal_keys, fold_search_input, fold_selector_keys, ModalKey, SearchKey, MAX_ESC_CARRY,
+};
+
+use mail_input::peek_input_keys;
 use update_menu::{
     build_sideline_menu, build_update_modal, probe_update_readiness, run_restart_verb,
     UpdateOutcome,
@@ -2527,6 +2559,13 @@ impl View {
             restart_agents_want: false,
             restart_inflight: false,
             sweep_inflight: false,
+            launcher: None,
+            launcher_closed: None,
+            launcher_esc: Default::default(),
+            launch_attempt: None,
+            launcher_catalog: None,
+            catalog_want: false,
+            catalog_inflight: false,
         }
     }
 
@@ -3385,7 +3424,8 @@ impl View {
     /// on a sideline row opened the row menu over an open peek BEFORE this
     /// diff, and that behavior must survive the guard.
     fn menu_usurping_open(&self) -> bool {
-        self.keys_modal.is_some()
+        self.launcher.is_some()
+            || self.keys_modal.is_some()
             || self.row_menu.is_some()
             || self.aux.is_some()
             || self.connections.is_some()
@@ -6282,6 +6322,23 @@ impl View {
                 cols,
                 &m.popup.render(self.term),
                 &self.theme,
+            );
+        } else if let Some(l) = &self.launcher {
+            // The new-agent composer: framed chrome around the
+            // shared rows table; the footer carries the launch lifecycle.
+            let body: Vec<String> = l.render_rows(self).into_iter().map(|(_, s)| s).collect();
+            let footer = l.footer();
+            let chrome = agent_launcher::launcher_chrome().footer(footer);
+            draw_lines_overlay(
+                &mut cells,
+                rows,
+                cols,
+                overlay_origin,
+                overlay_dims,
+                &chrome,
+                &body,
+                &self.theme,
+                None,
             );
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
@@ -10328,6 +10385,9 @@ async fn attach_and_run(
                 | ServerMsg::SessionRetired { .. } | ServerMsg::AgentRowsReceipt { .. }
                 | ServerMsg::ServerStats { .. },
             ) => {}
+            // A launch update cannot precede attach; ignore a misaddressed
+            // one rather than failing the handshake.
+            Ok(ServerMsg::AgentLaunch(_)) => {}
             Err(e) => return Err(format!("attach failed: {e}; {log_hint}")),
         }
     }
@@ -10470,9 +10530,14 @@ async fn attach_and_run(
     let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::unbounded_channel::<SweepMsg>();
 
     // The update-readiness probe runs off the UI loop and reports back
-    // here. Untagged (unlike conn_rx) - there is no per-open state to
+    // when the next probe is needed. Untagged (unlike conn_rx) - there is no per-open state to
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<UpdateOutcome>();
+
+    // The harness-catalog probe for the new-agent popup, same
+    // last-outcome-wins shape as the update probe.
+    let (catalog_tx, mut catalog_rx) =
+        tokio::sync::mpsc::unbounded_channel::<agent_launcher::CatalogOutcome>();
 
     // The queued `fno agents restart` runs off the UI loop and
     // reports back its verdict line. One at a time (the View's inflight
@@ -10608,6 +10673,17 @@ async fn attach_and_run(
             let tx = update_tx.clone();
             tokio::spawn(async move {
                 let outcome = probe_update_readiness().await;
+                let _ = tx.send(outcome);
+            });
+        }
+        // Kick a wanted harness-catalog probe , same one-in-flight
+        // discipline as the update probe.
+        if view.catalog_want && !view.catalog_inflight {
+            view.catalog_want = false;
+            view.catalog_inflight = true;
+            let tx = catalog_tx.clone();
+            tokio::spawn(async move {
+                let outcome = agent_launcher::load_catalog();
                 let _ = tx.send(outcome);
             });
         }
@@ -10801,6 +10877,26 @@ async fn attach_and_run(
                     // tab-bar notice takes the full text.
                     view.resolve_row_stamp(&text);
                     view.set_notice(text);
+                    if let Err(e) = compositor.draw(&view.compose()) {
+                        break Err(format!("draw: {e}"));
+                    }
+                }
+                Ok(ServerMsg::AgentLaunch(update)) => {
+                    // One launcher attempt's progress. Applied only
+                    // to a popup that armed this request (a stale id cannot
+                    // overwrite a newer draft); a verified pane birth
+                    // focuses through the existing command path.
+                    if let Some(pane) = agent_launcher::apply_launch_update(&mut view, update) {
+                        view.note_command_sent(&Command::FocusPane(pane));
+                        if let Err(e) = write_msg(
+                            &mut sock_w,
+                            &ClientMsg::Command(Command::FocusPane(pane)),
+                        )
+                        .await
+                        {
+                            break Err(format!("launch focus send failed: {e}"));
+                        }
+                    }
                     if let Err(e) = compositor.draw(&view.compose()) {
                         break Err(format!("draw: {e}"));
                     }
@@ -11177,6 +11273,26 @@ async fn attach_and_run(
                 view.update_probe_inflight = false;
                 view.update_outcome = Some(outcome);
                 view.refresh_open_sideline_menu();
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(outcome) = catalog_rx.recv() => {
+                // Last-outcome-wins like the update probe: sync the
+                // popup's harness names (first landing or a retained draft)
+                // and redraw so an open popup shows the fresh field.
+                view.catalog_inflight = false;
+                if let agent_launcher::CatalogOutcome::Ok(rows) = &outcome {
+                    if let Some(l) = view.launcher.as_mut() {
+                        if l.draft.harnesses.is_empty() && !rows.is_empty() {
+                            l.draft.harnesses = rows.iter().map(|r| r.name.clone()).collect();
+                            if l.draft.harness_idx >= rows.len() {
+                                l.draft.harness_idx = 0;
+                            }
+                        }
+                    }
+                }
+                view.launcher_catalog = Some(outcome);
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -11644,6 +11760,13 @@ async fn handle_stdin(
             if let StdinFlow::Detach = aux_mouse(view, rep, sock_w).await? {
                 return Ok(StdinFlow::Detach);
             }
+            continue;
+        }
+        // The new-agent composer owns the pointer while open:
+        // hover-free, a click focuses the row it hit (Launch submits),
+        // clicks outside the box are ignored.
+        if view.launcher.is_some() {
+            agent_launcher::launcher_mouse(view, rep, sock_w).await?;
             continue;
         }
         // a seam drag in flight owns the mouse. The pointer routinely
@@ -12221,6 +12344,11 @@ async fn handle_stdin(
     if view.aux.is_some() {
         // US4/US5: the MENU popup / settings modal consumes keys.
         return aux_keys(view, &passthrough, sock_w).await;
+    }
+    if view.launcher.is_some() {
+        // The new-agent composer consumes keys while open; nothing
+        // reaches a pane while it does.
+        return agent_launcher::launcher_keys(view, &passthrough, sock_w).await;
     }
     if view.connections.is_some() {
         // the Connections modal consumes all keys while open (Tab
@@ -12822,119 +12950,6 @@ async fn confirm_keys(
         view.reanchor_after_row_commit(row_name.as_deref());
     }
     Ok(StdinFlow::Continue)
-}
-
-/// A folded which-key modal key (US3). Arrows/pgup navigate the
-/// reference; `Byte`/`Enter` execute; `Esc` dismisses. Distinct from
-/// [`fold_selector_keys`] because the modal needs arrows kept as navigation
-/// (not folded to hjkl, which are executable bindings) and pgup/pgdn as scroll.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModalKey {
-    Byte(u8),
-    Enter,
-    Esc,
-    Up,
-    Down,
-    Left,
-    Right,
-    PageUp,
-    PageDown,
-}
-
-/// The ceiling on a partially-read escape sequence, shared by all four folds.
-/// A real CSI is far shorter, so this only ever fires on a pathological stream,
-/// and it is what stops one from growing the carry without limit.
-const MAX_ESC_CARRY: usize = 16;
-
-/// Fold raw modal-mode bytes into [`ModalKey`]s, carrying escape state in `esc`
-/// ACROSS reads (same split-arrow safety as [`fold_selector_keys`]). Arrows and
-/// PageUp/PageDown become navigation tokens; a bare Esc (a lone `0x1b` chunk is
-/// special-cased by the caller for instant close) becomes `Esc`; every other
-/// printable byte is `Byte`, resolved by the caller through the chord table.
-fn fold_modal_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<ModalKey> {
-    let mut out = Vec::new();
-    for &b in bytes {
-        if !esc.is_empty() {
-            match (esc.as_slice(), b) {
-                ([0x1b], b'[') => {
-                    esc.push(b);
-                    continue;
-                }
-                ([0x1b], _) => {
-                    // The pending ESC was a bare Esc press; emit it, then let the
-                    // fresh byte fall through to be processed below.
-                    out.push(ModalKey::Esc);
-                    esc.clear();
-                }
-                ([0x1b, b'['], b'A') => {
-                    out.push(ModalKey::Up);
-                    esc.clear();
-                    continue;
-                }
-                ([0x1b, b'['], b'B') => {
-                    out.push(ModalKey::Down);
-                    esc.clear();
-                    continue;
-                }
-                ([0x1b, b'['], b'C') => {
-                    out.push(ModalKey::Right);
-                    esc.clear();
-                    continue;
-                }
-                ([0x1b, b'['], b'D') => {
-                    out.push(ModalKey::Left);
-                    esc.clear();
-                    continue;
-                }
-                ([0x1b, b'['], b'5') | ([0x1b, b'['], b'6') => {
-                    esc.push(b); // PageUp `ESC[5~` / PageDown `ESC[6~` pending
-                    continue;
-                }
-                ([0x1b, b'[', b'5'], b'~') => {
-                    out.push(ModalKey::PageUp);
-                    esc.clear();
-                    continue;
-                }
-                ([0x1b, b'[', b'6'], b'~') => {
-                    out.push(ModalKey::PageDown);
-                    esc.clear();
-                    continue;
-                }
-                _ => {
-                    // Inside a CSI (`ESC [ ...`): consume the WHOLE sequence.
-                    // "swallow it whole (never leak)" used to be a comment
-                    // rather than a behaviour here: this arm dropped ONE byte
-                    // and let the rest of the sequence fall through as plain
-                    // keys, so Ctrl-Up (`ESC [ 1; 5 A`) leaked `;`, `5`, `A`.
-                    // Same defect the selector fold had, same fix.
-                    if b == 0x1b {
-                        // ESC aborts an in-progress sequence and starts a fresh
-                        // one, so a cancel is never eaten as a parameter.
-                        esc.clear();
-                        esc.push(0x1b);
-                        continue;
-                    }
-                    if (0x40..=0x7e).contains(&b) || esc.len() >= MAX_ESC_CARRY {
-                        esc.clear();
-                        continue;
-                    }
-                    if (0x20..=0x3f).contains(&b) {
-                        esc.push(b);
-                        continue;
-                    }
-                    // A C0 control mid-sequence is malformed: abandon the
-                    // sequence and reprocess the byte below rather than losing it.
-                    esc.clear();
-                }
-            }
-        }
-        match b {
-            0x1b => esc.push(0x1b),
-            b'\r' | b'\n' => out.push(ModalKey::Enter),
-            _ => out.push(ModalKey::Byte(b)),
-        }
-    }
-    out
 }
 
 /// Which-key modal keys (US3). Esc closes; arrows/pgup scroll+select;
@@ -13916,6 +13931,12 @@ async fn execute_aux_action(
             view.aux = None;
             view.open_connections();
         }
+        AuxAction::OpenAgentLauncher => {
+            // close the MENU and open the new-agent composer;
+            // the catalog probe is kicked on first open (run loop spawns it).
+            view.aux = None;
+            agent_launcher::open(view);
+        }
         AuxAction::Detach => {
             view.aux = None;
             return Ok(DispatchFlow::Detach);
@@ -14389,100 +14410,6 @@ async fn aux_mouse(
     Ok(StdinFlow::Continue)
 }
 
-/// Fold raw selector-mode bytes into simple key bytes, carrying escape state
-/// in `esc` ACROSS reads (gemini medium: an arrow sequence split at a read
-/// boundary must neither close the selector nor leak its tail into the
-/// pane). Arrows map to their hjkl twins; unknown escape tails are
-/// swallowed. A lone ESC stays pending until the next byte decides it - a
-/// bare-Esc close lands on the following keypress (which is swallowed);
-/// `q` closes instantly.
-fn fold_selector_keys(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<u8> {
-    let mut keys = Vec::new();
-    for &b in bytes {
-        if !esc.is_empty() {
-            if esc.as_slice() == [0x1b] && b == b'[' {
-                esc.push(b);
-                continue;
-            }
-            if esc.first() == Some(&0x1b) && esc.get(1) == Some(&b'[') {
-                // Inside a CSI sequence. Consume until its FINAL byte (0x40-0x7E)
-                // rather than dropping one byte and letting the tail out.
-                //
-                // "swallowed whole" used to be a comment, not a behaviour: a
-                // modified arrow like Ctrl-Up (`ESC [ 1; 5 A`) had its `1`
-                // swallowed and then leaked `;`, `5` and `A` as plain keys. That
-                // was survivable while these overlays closed on any key they did
-                // not recognise. Once a picker gained a cursor it was not: the
-                // leaked `5` reads as a digit, which in the move picker COMMITS,
-                // and the leaked `A`/`H` reads as an uppercase split key, which
-                // in the attach picker commits too. A function key (`ESC [ 1 5 ~`)
-                // leaks a digit the same way.
-                //
-                // Five overlays share this fold, so fixing it here fixes every
-                // door at once instead of guarding the two that were probed.
-                if (0x40..=0x7e).contains(&b) {
-                    // A BARE `ESC [ X` is a plain arrow. A parameterised one is a
-                    // modified arrow (ctrl/shift/alt) and means something this
-                    // layer has no mapping for, so it is dropped entirely rather
-                    // than aliased onto the unmodified key.
-                    if esc.len() == 2 {
-                        match b {
-                            b'A' => keys.push(b'k'),
-                            b'B' => keys.push(b'j'),
-                            b'C' => keys.push(b'l'),
-                            b'D' => keys.push(b'h'),
-                            _ => {} // unknown final byte: swallowed whole
-                        }
-                    }
-                    esc.clear();
-                    continue;
-                }
-                if (0x20..=0x3f).contains(&b) && esc.len() < MAX_ESC_CARRY {
-                    // A real parameter or intermediate byte (ECMA-48): keep
-                    // accumulating, up to the shared ceiling.
-                    esc.push(b);
-                    continue;
-                }
-                if esc.len() >= MAX_ESC_CARRY {
-                    // A pathological run of parameter bytes: drop the sequence
-                    // rather than growing the carry without limit.
-                    esc.clear();
-                    continue;
-                }
-                // Anything else is malformed: a C0 control landed mid-sequence.
-                // Treating it as a parameter would strand the parser and eat the
-                // operator's escape hatch - a truncated `ESC [` in the carry (an
-                // Alt-`[` press emits exactly that) would swallow the Esc meant
-                // to cancel the picker, and then swallow the following `q` too,
-                // because `q` is in the final-byte range. Abandon the sequence
-                // and let the byte be handled as if it arrived fresh, so a
-                // cancel always reaches the overlay. This also bounds the carry:
-                // it can only ever hold parameter bytes.
-                esc.clear();
-                if b == 0x1b {
-                    esc.push(0x1b);
-                } else {
-                    keys.push(b);
-                }
-                continue;
-            }
-            // Pending [ESC] + a non-'[' byte: that ESC was a bare Esc press.
-            esc.clear();
-            keys.push(0x1b);
-            if b == 0x1b {
-                esc.push(0x1b); // and a new one just started
-            }
-            continue;
-        }
-        if b == 0x1b {
-            esc.push(0x1b);
-            continue;
-        }
-        keys.push(b);
-    }
-    keys
-}
-
 /// Open (or move) the peek overlay to `cursor` and fetch its transcript: bumps
 /// the seq, resets the body to loading, and sends the matching `PeekAgent`. The
 /// caller guarantees `cursor` is a `DisplayRow::Agent`. Shared by Space-open,
@@ -14723,84 +14650,6 @@ async fn peek_keys(
             // Everything else is swallowed - never a pane leak (prefix-layer
             // invariant). h (left-arrow) has no peek action.
             _ => {}
-        }
-    }
-    Ok(StdinFlow::Continue)
-}
-
-/// (US5) The peek `m` free-text reply input keys, mirroring
-/// [`rename_keys`]' discipline (fold_search_input, Esc drops the buffer,
-/// backspace pops, printable ASCII appends, re-read the mode each key) with two
-/// node-spec divergences: **empty-Enter keeps the input open** (a blank mail is
-/// meaningless, unlike a blank rename's "reset to auto"), and Enter-with-text
-/// sends [`Command::MailAgent`] then closes the input, leaving peek open (the
-/// notice line is the feedback). The buffer caps at [`MAX_MAIL_TEXT`] chars so
-/// the operator sees the same ceiling the server enforces.
-async fn peek_input_keys(
-    view: &mut View,
-    bytes: &[u8],
-    sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<StdinFlow, String> {
-    let mut esc = std::mem::take(&mut view.peek_input_esc);
-    let keys = fold_search_input(&mut esc, bytes);
-    view.peek_input_esc = esc;
-    for key in keys {
-        // Re-read the mode each key: an Esc/Enter mid-chunk closes the input, and
-        // the rest of the chunk must be swallowed, never forwarded.
-        if view.peek_input.is_none() {
-            break;
-        }
-        match key {
-            SearchKey::Esc => {
-                // Drop half-typed text; peek stays open underneath (AC parity
-                // with rename Esc).
-                view.peek_input = None;
-                view.peek_input_esc.clear();
-                break;
-            }
-            SearchKey::Byte(b) => match b {
-                b'\r' | b'\n' => {
-                    // Empty (or whitespace-only) buffer: BEL, input stays open,
-                    // nothing sent (AC3-UI). Otherwise send + close.
-                    let send = view
-                        .peek_input
-                        .as_ref()
-                        .filter(|(_, buf)| !buf.trim().is_empty())
-                        .map(|(name, buf)| (name.clone(), buf.clone()));
-                    match send {
-                        None => {
-                            let _ = raw_out(b"\x07");
-                        }
-                        Some((name, text)) => {
-                            view.peek_input = None;
-                            view.peek_input_esc.clear();
-                            write_msg(
-                                sock_w,
-                                &ClientMsg::Command(Command::MailAgent { name, text }),
-                            )
-                            .await
-                            .map_err(|e| format!("mail send failed: {e}"))?;
-                        }
-                    }
-                    break;
-                }
-                0x7f | 0x08 => {
-                    if let Some((_, buf)) = view.peek_input.as_mut() {
-                        buf.pop();
-                    }
-                }
-                0x20..=0x7e => {
-                    if let Some((_, buf)) = view.peek_input.as_mut() {
-                        // Cap to the server's ceiling so the operator sees exactly
-                        // what will be accepted (server stays authoritative). Only
-                        // printable ASCII is ever pushed, so byte len == char count.
-                        if buf.len() < MAX_MAIL_TEXT {
-                            buf.push(b as char);
-                        }
-                    }
-                }
-                _ => {}
-            },
         }
     }
     Ok(StdinFlow::Continue)
@@ -15479,15 +15328,6 @@ async fn move_pick_keys(
     Ok(StdinFlow::Continue)
 }
 
-/// One folded search-input token (v12). A printable/control byte for the
-/// query, or a bare Esc press. Complete arrow sequences are swallowed by the fold
-/// (cursor motion is discretionary polish, Discretion 4).
-#[derive(Debug, PartialEq, Eq)]
-enum SearchKey {
-    Byte(u8),
-    Esc,
-}
-
 /// Fold raw search-mode bytes, carrying escape state in `esc` ACROSS reads so an
 /// ESC-prefixed sequence broken at a read boundary never exits the search or
 /// leaks its tail into the query. A whole CSI sequence (`ESC [ ` params `x`) is
@@ -15499,56 +15339,6 @@ enum SearchKey {
 /// Query-length ceiling. Far above any real search term; only bounds the scan
 /// cost against a held key or a paste. (gemini review, MEDIUM)
 const MAX_SEARCH_QUERY: usize = 256;
-
-fn fold_search_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<SearchKey> {
-    let mut keys = Vec::new();
-    for &b in bytes {
-        match esc.as_slice() {
-            [] => {
-                if b == 0x1b {
-                    esc.push(0x1b);
-                } else {
-                    keys.push(SearchKey::Byte(b));
-                }
-            }
-            [0x1b] => {
-                if b == b'[' {
-                    esc.push(b); // CSI introducer: start accumulating the sequence
-                } else {
-                    // A lone [ESC] then a non-'[' byte: that ESC was a bare Esc
-                    // press. Surface it, then reprocess `b`.
-                    esc.clear();
-                    keys.push(SearchKey::Esc);
-                    if b == 0x1b {
-                        esc.push(0x1b); // a new ESC just started
-                    } else {
-                        keys.push(SearchKey::Byte(b));
-                    }
-                }
-            }
-            // Inside a CSI (`ESC [ ...`): keep eating param/intermediate bytes,
-            // swallowing the whole sequence at its final byte. Bounded so a
-            // pathological stream can never grow `esc` without limit.
-            // ponytail: 16-byte ceiling; real CSI sequences are far shorter.
-            _ => {
-                if b == 0x1b {
-                    // ESC aborts any in-progress sequence and starts a fresh
-                    // one (standard VT semantics). Without this, an ESC arriving
-                    // mid-CSI (a split sequence in the buffer) would be eaten as
-                    // a param byte, so pressing Esc to cancel search would
-                    // silently fail. (gemini review, HIGH)
-                    esc.clear();
-                    esc.push(0x1b);
-                } else if (0x40..=0x7e).contains(&b) || esc.len() >= 16 {
-                    esc.clear();
-                } else {
-                    esc.push(b);
-                }
-            }
-        }
-    }
-    keys
-}
 
 /// Navigator fold keys. Superset of [`SearchKey`]: the same split-arrow escape
 /// fold, but a completed CSI whose final byte is Up/Down/Shift-Tab surfaces as a
