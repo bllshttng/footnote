@@ -191,6 +191,7 @@ fn held_receipt_value(key: &str, root: Option<&Path>) -> Value {
     };
     json!({
         "acquired": false,
+        "key": key,
         "holder": holder,
         "held_for_s": held_for_s,
         "expires": expires,
@@ -309,6 +310,7 @@ mod tests {
         assert_eq!(run_flight_acquire(&verb_args(key, "A", &td)), 0);
         let receipt = held_receipt_value(key, Some(td.path()));
         assert_eq!(receipt["acquired"], false);
+        assert_eq!(receipt["key"], key);
         let expires = receipt["expires"]
             .as_str()
             .expect("expires must be an ISO string when the lease has a TTL");

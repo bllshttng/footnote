@@ -2719,6 +2719,9 @@ fn attention_row(
         failing_for_s: None,
         cause: None,
         line: String::new(),
+        repair: None,
+        heal: None,
+        upstream: None,
     }
 }
 

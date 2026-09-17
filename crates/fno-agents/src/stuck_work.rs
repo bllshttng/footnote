@@ -22,7 +22,7 @@ const DEFAULT_HUNG_FLOOR_S: u64 = 1800;
 /// news.
 // ponytail: fixed 1800 s floor and 300 s holder grace, move to [notify] keys
 // if a lane needs a different clock
-const DEAD_HOLDER_GRACE_S: i64 = 300;
+pub(crate) const DEAD_HOLDER_GRACE_S: i64 = 300;
 
 /// How much of a finding's argv a line carries. The notice names the argv so
 /// a missing exclusion shape is fixable from the page alone.
@@ -37,6 +37,11 @@ pub struct Finding {
     pub kind: &'static str,
     pub key: String,
     pub line: String,
+    /// The claims root the lockfile sits under, so a heal releases the same
+    /// file this read scanned. Set only on a dead holder.
+    pub root: Option<PathBuf>,
+    pub holder: Option<String>,
+    pub claim_key: Option<String>,
 }
 
 /// A verb is hung when its age passes three times its declared `--timeout`
@@ -99,6 +104,9 @@ fn hung_verb(pid: u32, age_s: u64, args: &str, now_unix: u64) -> Option<Finding>
             fmt_age(age_s),
             cut(args, ARGV_CAP)
         ),
+        root: None,
+        holder: None,
+        claim_key: None,
     })
 }
 
@@ -169,40 +177,65 @@ fn ps_rows() -> Result<Vec<(u32, u64, String)>, String> {
 /// Dead holders among the `flight:` claims: rows `long_holds` already aged
 /// past the grace whose pid probe read `absent` on this host. Only `flight:`
 /// holds count - they are pid-scoped by design; a session claim outlives its
-/// ambient pid on purpose.
-pub(crate) fn dead_holders(dirs: &[PathBuf]) -> Result<Vec<Finding>, String> {
-    let payload = crate::claims::long_holds(dirs, DEAD_HOLDER_GRACE_S)?;
+/// ambient pid on purpose. Each line ends with the release verb, so the page
+/// alone is enough to clear it.
+pub fn dead_holders(dirs: &[PathBuf]) -> Result<Vec<Finding>, String> {
     let now_unix = crate::claims::now_ms() / 1000;
-    let rows: Vec<Value> = payload
-        .get("rows")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
     let mut findings = Vec::new();
-    for row in &rows {
-        if row.get("pid_observed").and_then(Value::as_str) != Some("absent") {
-            continue;
+    // One dir at a time: a row does not say which dir it came from, and the
+    // release must name the root that holds the lockfile.
+    for dir in dirs {
+        let payload = crate::claims::long_holds(std::slice::from_ref(dir), DEAD_HOLDER_GRACE_S)?;
+        let root = claims_root_of(dir);
+        let rows: Vec<Value> = payload
+            .get("rows")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for row in &rows {
+            if row.get("pid_observed").and_then(Value::as_str) != Some("absent") {
+                continue;
+            }
+            let Some(key) = row.get("key").and_then(Value::as_str) else {
+                continue;
+            };
+            let holder = row.get("holder").and_then(Value::as_str).unwrap_or("?");
+            let pid = row
+                .get("pid")
+                .map(|p| p.to_string().trim_matches('"').to_string());
+            let held_s = row.get("held_s").and_then(Value::as_i64).unwrap_or(0);
+            let anchor = (now_unix - held_s.max(0)).max(0) as u64;
+            let repair = match &root {
+                Some(r) => format!(
+                    "; repair: {} heal=auto",
+                    crate::arm_repair::release_verb(key, holder, r)
+                ),
+                None => "; heal=operator".to_string(),
+            };
+            findings.push(Finding {
+                kind: "dead_holder",
+                key: format!("holder:{key}@{anchor}"),
+                line: format!(
+                    "dead holder {key} holder {holder} pid {} absent held {}{repair}",
+                    pid.as_deref().unwrap_or("None"),
+                    fmt_age(held_s.max(0) as u64)
+                ),
+                root: root.clone(),
+                holder: Some(holder.to_string()),
+                claim_key: Some(key.to_string()),
+            });
         }
-        let Some(key) = row.get("key").and_then(Value::as_str) else {
-            continue;
-        };
-        let holder = row.get("holder").and_then(Value::as_str).unwrap_or("?");
-        let pid = row
-            .get("pid")
-            .map(|p| p.to_string().trim_matches('"').to_string());
-        let held_s = row.get("held_s").and_then(Value::as_i64).unwrap_or(0);
-        let anchor = (now_unix - held_s.max(0)).max(0) as u64;
-        findings.push(Finding {
-            kind: "dead_holder",
-            key: format!("holder:{key}@{anchor}"),
-            line: format!(
-                "dead holder {key} holder {holder} pid {} absent held {}",
-                pid.as_deref().unwrap_or("None"),
-                fmt_age(held_s.max(0) as u64)
-            ),
-        });
     }
     Ok(findings)
+}
+
+/// The claims root behind a `<root>/.fno/claims` dir. The space dir's claims
+/// has no such root, so no release verb can reach it.
+fn claims_root_of(dir: &Path) -> Option<PathBuf> {
+    if !dir.ends_with(".fno/claims") {
+        return None;
+    }
+    dir.parent().and_then(Path::parent).map(Path::to_path_buf)
 }
 
 /// The claims directories the dead-holder read scans: the global dir, then
@@ -517,6 +550,35 @@ mod tests {
             "{}",
             f.line
         );
+    }
+
+    // The line carries the release verb, and the release it names clears it.
+    #[test]
+    fn dead_holder_line_carries_a_release_verb_that_releases() {
+        let td = TempDir::new().unwrap();
+        let claims_dir = td.path().join(".fno/claims");
+        write_rec(
+            &claims_dir,
+            &flight_rec(
+                "flight:k",
+                "single-flight:9:ab",
+                Some(dead_pid() as i32),
+                600,
+            ),
+        );
+        let findings = dead_holders(std::slice::from_ref(&claims_dir)).unwrap();
+        assert_eq!(findings.len(), 1);
+        let f = &findings[0];
+        let verb = format!(
+            "; repair: FNO_CLAIMS_ROOT={} fno agents claim release flight:k --holder single-flight:9:ab heal=auto",
+            td.path().display()
+        );
+        assert!(f.line.ends_with(&verb), "{}", f.line);
+        assert_eq!(f.root.as_deref(), Some(td.path()));
+        assert_eq!(f.claim_key.as_deref(), Some("flight:k"));
+        assert_eq!(f.holder.as_deref(), Some("single-flight:9:ab"));
+        crate::claims::release("flight:k", "single-flight:9:ab", f.root.as_deref(), None).unwrap();
+        assert!(dead_holders(&[claims_dir]).unwrap().is_empty());
     }
 
     // AC3-ERR: a live holder, no pid, or a non-flight claim is not a finding.

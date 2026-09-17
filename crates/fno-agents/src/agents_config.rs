@@ -1076,6 +1076,21 @@ pub fn notify_arm_failing_after_s(cwd: &Path) -> u64 {
     .unwrap_or(1800)
 }
 
+/// `recovery.self_heal.enabled` (default ON): the arm_watch tick runs the
+/// safe repairs (dead flight holds, the launchd refresh, the install from
+/// main) before it pages. Off, the rows still name the repair verb.
+pub fn self_heal_enabled(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("recovery")?
+            .as_table()?
+            .get("self_heal")?
+            .as_table()?
+            .get("enabled")?
+            .as_bool()
+    })
+    .unwrap_or(true)
+}
+
 /// `mux.notify_on_blocked` (default ON): the daemon fires an OS notification when
 /// a badge ENTERS `blocked`.
 pub fn notify_on_blocked_enabled(cwd: &Path) -> bool {

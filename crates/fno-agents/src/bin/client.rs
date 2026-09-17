@@ -2657,7 +2657,7 @@ async fn run_status(json_out: bool) -> i32 {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 let drifted = matches!(drift, DriftState::Drifted { .. });
-                fno_agents::tick_ledger::explain_with_trace(
+                fno_agents::arm_repair::explain(
                     &mut arms,
                     &fno_agents::tick_ledger::DaemonFacts::Up { uptime_s, drifted },
                     &trace,
@@ -2715,7 +2715,7 @@ async fn run_status(json_out: bool) -> i32 {
         Err(ClientError::DaemonNotRunning) => {
             // The arms table is exactly what a dead control plane needs to
             // show; print it beside the down-daemon signal rather than nothing.
-            fno_agents::tick_ledger::explain_with_trace(
+            fno_agents::arm_repair::explain(
                 &mut arms,
                 &fno_agents::tick_ledger::DaemonFacts::Down,
                 &trace,
@@ -2737,7 +2737,7 @@ async fn run_status(json_out: bool) -> i32 {
             // shape as DaemonNotRunning - the arms readout stands on its own.
             // Daemon rules do not fire on Unknown, so stale rows read
             // `unexplained` rather than blaming a daemon of unknown health.
-            fno_agents::tick_ledger::explain_with_trace(
+            fno_agents::arm_repair::explain(
                 &mut arms,
                 &fno_agents::tick_ledger::DaemonFacts::Unknown,
                 &trace,
