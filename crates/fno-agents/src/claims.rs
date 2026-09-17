@@ -871,6 +871,13 @@ fn pid_verdict_on_expiry(
     None
 }
 
+/// A pid the prover proved is the holder session's own process, on a harness
+/// where that process dies with the session. Both TTL arms trust it.
+fn proven_session_pid(rec: &ClaimRecord) -> bool {
+    rec.pid_provenance.as_deref() == Some("session-prover")
+        && pid_dies_with_session(rec.harness.as_deref())
+}
+
 pub fn classify_with_basis_and_exclusivity(
     rec: &ClaimRecord,
     now: Option<i64>,
@@ -925,9 +932,7 @@ pub fn classify_with_basis_and_exclusivity(
         // record's own `harness` is independent evidence, already on every
         // record, so a pre-fix claim on disk and one from an older binary in a
         // mixed-version fleet both get the correct verdict here.
-        if rec.pid_provenance.as_deref() == Some("session-prover")
-            && pid_dies_with_session(rec.harness.as_deref())
-        {
+        if proven_session_pid(rec) {
             let (live, cause) = liveness_reading(rec, probe);
             if live {
                 if pid_exclusive == Some(false) {
@@ -992,6 +997,15 @@ pub fn classify_with_basis_and_exclusivity(
             .filter(|session| !session.is_empty())
             .map(|_| witness(rec))
     });
+    // The session's own live process outranks an Absent witness, in the same
+    // order as the expired arm. An ambient pid is only a neighbour, so it
+    // proves nothing and the witness still decides.
+    if live && proven_session_pid(rec) {
+        if pid_exclusive == Some(false) {
+            return (ClaimState::Suspect, basis::PID_SHARED);
+        }
+        return (ClaimState::Live, cause);
+    }
     if rec.key.starts_with("node:")
         && is_same_machine(&rec.host, rec.machine_id.as_deref())
         && matches!(witnessed, Some(SessionLiveness::Absent))
