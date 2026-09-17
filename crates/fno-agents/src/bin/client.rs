@@ -871,21 +871,13 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::wait::run_wait(&args[1..], &AgentsHome::from_env()).await;
     }
 
-    // `pr-heal` classifies a red check and applies the mechanical fix. Binary-
-    // direct behind `fno do pr heal`, like `kill-check`: it is NOT a routable
-    // `fno agents` verb, so it stays out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS
-    // (whose lengths the --help parity test asserts equal). `matches!` rather
-    // than `verb == "..."` for the same reason `version` uses it: the Python
-    // parity guard scrapes `verb == "..."` and would demand a RUST_CLIENT_VERBS
-    // row for a verb that is not an `fno agents` verb. Daemon-free, so it
-    // dispatches here before build_request.
-    if matches!(verb, "pr-heal") {
-        return fno_agents::heal::run_heal(&args[1..]);
-    }
-    // `pr-list` lists one repo's PRs with their node bindings, behind
-    // `fno do pr list`. Binary-direct for the same reasons as `pr-heal`.
-    if matches!(verb, "pr-list") {
-        return fno_agents::pr_list::run_pr_list(&args[1..]);
+    // Daemon-free and binary-direct behind `fno do pr heal` / `fno do pr list`,
+    // not routable `fno agents` verbs, so they stay out of RUST_CLIENT_VERBS.
+    // No `verb == "..."`: the Python parity guard scrapes that form.
+    match verb {
+        "pr-heal" => return fno_agents::heal::run_heal(&args[1..]),
+        "pr-list" => return fno_agents::pr_list::run_pr_list(&args[1..]),
+        _ => {}
     }
     // `subscribe`: follow the daemon's own `events.jsonl` and stream registry
     // state transitions + pane exits as NDJSON. File-follow, no daemon RPC, so it
