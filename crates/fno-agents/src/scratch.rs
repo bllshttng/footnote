@@ -465,12 +465,14 @@ pub fn blob_hashes(repo_root: &Path, paths: &[&Path]) -> HashMap<PathBuf, String
 // Journal + graph reads (the dedupe index)
 // ---------------------------------------------------------------------------
 
-/// Tolerant per-line parse of a JSONL events journal.
+/// The committed rows of an events journal, tolerant per-line parse kept for
+/// the folded shapes the consolidation decisions read.
 fn read_events(path: &Path) -> Vec<serde_json::Value> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Ok(lines) = crate::loopcheck::event_lines(path) else {
         return Vec::new();
     };
-    text.lines()
+    lines
+        .iter()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .collect()
 }

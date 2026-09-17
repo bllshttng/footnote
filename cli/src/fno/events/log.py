@@ -186,6 +186,19 @@ def emit_event(
 
 # -- Read / filter --
 
+def _filter_by_session(
+    rows: List[Dict[str, Any]], session_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    if session_id is None:
+        return rows
+    out: List[Dict[str, Any]] = []
+    for event in rows:
+        normalized = normalize_event(event)
+        if session_id in {normalized["session_id"], normalized["holder_session_id"]}:
+            out.append(event)
+    return out
+
+
 def read_events(
     events_path: Optional[Path] = None,
     *,
@@ -212,29 +225,27 @@ def read_events(
 
     events_path = Path(events_path)
 
-    if not events_path.exists():
-        return []
+    # SQL authority: committed rows in commit order; a missing store falls
+    # back to the raw journal (a fixture or pre-cutover bytes nothing has
+    # imported yet), and an unreadable store raises rather than reading empty.
+    from fno.events.store_client import store_db_path
 
-    results: List[Dict[str, Any]] = []
-    for lineno, raw in enumerate(events_path.read_text(encoding="utf-8").splitlines(), start=1):
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Corrupted events.jsonl at line {lineno}: {exc}. "
-                "Repair or truncate the file before continuing."
-            ) from exc
-        normalized = normalize_event(event)
-        if session_id is None or session_id in {
-            normalized["session_id"],
-            normalized["holder_session_id"],
-        }:
-            results.append(event)
+    if not store_db_path(events_path).exists():
+        raw_rows: List[Dict[str, Any]] = []
+        if events_path.exists():
+            for raw in events_path.read_text(encoding="utf-8").splitlines():
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    raw_rows.append(json.loads(raw))
+                except json.JSONDecodeError:
+                    continue
+        return _filter_by_session(raw_rows, session_id)
 
-    return results
+    from fno.events.store_client import query_rows
+
+    return _filter_by_session(results, session_id)
 
 
 # -- Audit --

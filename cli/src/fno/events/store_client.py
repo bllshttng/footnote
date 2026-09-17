@@ -78,6 +78,117 @@ def read_committed_lines(events_path: Path) -> list[str]:
     return [row[0] for row in rows]
 
 
+def query_rows(
+    events_path: Path,
+    *,
+    types: Optional[list[str]] = None,
+    session_id: Optional[str] = None,
+    since_ms: Optional[int] = None,
+    limit: Optional[int] = None,
+    include_rejected: bool = False,
+) -> list[dict[str, Any]]:
+    """Committed rows for one journal's store, in commit order, as parsed
+    envelopes. A store that does not exist yet is an empty history; a locked
+    or corrupt store raises EventStoreUnavailable - unavailable is never
+    folded into an empty result."""
+    import sqlite3
+
+    db = store_db_path(events_path)
+    if not db.exists():
+        return []
+    where: list[str] = []
+    args: list[Any] = []
+    if types:
+        where.append("type IN (%s)" % ",".join("?" * len(types)))
+        args.extend(types)
+    if session_id is not None:
+        where.append("session_id = ?")
+        args.append(session_id)
+    if since_ms is not None:
+        where.append("ts_ms >= ?")
+        args.append(since_ms)
+    if not include_rejected:
+        where.append("reject_reason IS NULL")
+    sql = "SELECT line FROM events"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY seq"
+    if limit is not None:
+        sql += f" LIMIT {int(limit)}"
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    except sqlite3.Error as exc:
+        raise EventStoreUnavailable(f"event store unreadable at {db}: {exc}") from exc
+    finally:
+        conn.close()
+    out: list[dict[str, Any]] = []
+    for (line,) in rows:
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            out.append({"_corrupt": line})
+    return out
+
+
+def gc_ephemeral(
+    events_path: Path, *, ttl_hours: Optional[int] = None, dry_run: bool = False
+) -> dict[str, Any]:
+    """Delete expired ephemeral rows from the store; every other class stays.
+    With ``dry_run`` nothing is deleted and ``deleted`` reports what the
+    horizon WOULD take. The returned shape keeps the historical gc fold
+    (scanned/deleted/kept/malformed) so the CLI contract does not drift."""
+    import sqlite3
+    from fno.events import RETENTION_MINIMUM_TTL_HOURS
+
+    horizon = max(ttl_hours or 0, 0) or RETENTION_MINIMUM_TTL_HOURS
+    db = store_db_path(events_path)
+    if not db.exists():
+        return {
+            "scanned": 0,
+            "deleted": 0,
+            "kept": 0,
+            "malformed": 0,
+            "ttl_hours": horizon,
+        }
+    cutoff_ms = _now_ms() - horizon * 3_600_000
+    conn = sqlite3.connect(f"file:{db}?mode=rw", uri=True)
+    try:
+        scanned, malformed = conn.execute(
+            "SELECT count(*), coalesce(sum(reject_reason IS NOT NULL), 0) FROM events"
+        ).fetchone()
+        if dry_run:
+            expired = conn.execute(
+                "SELECT count(*) FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?",
+                (cutoff_ms,),
+            ).fetchone()[0]
+            deleted = 0
+        else:
+            expired = None
+            deleted = conn.execute(
+                "DELETE FROM events WHERE retention_class = 'ephemeral' AND ts_ms < ?",
+                (cutoff_ms,),
+            ).rowcount
+            conn.commit()
+    except sqlite3.Error as exc:
+        raise EventStoreUnavailable(f"event store unreadable at {db}: {exc}") from exc
+    finally:
+        conn.close()
+    return {
+        "scanned": scanned,
+        "deleted": expired if dry_run else deleted,
+        "kept": scanned - (expired if dry_run else deleted),
+        "malformed": malformed,
+        "ttl_hours": horizon,
+    }
+
+
+def _now_ms() -> int:
+    import time
+
+    return int(time.time() * 1000)
+
+
 def emit_envelope(
     envelope: dict[str, Any],
     events_path: Path,

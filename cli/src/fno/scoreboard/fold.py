@@ -168,6 +168,47 @@ def read_jsonl_events_with_coverage(paths: list[Path], kinds: set[str]) -> dict:
         if path_key in seen_paths:
             continue
         seen_paths.add(path_key)
+        # SQL authority: a store beside the journal answers first. Only a
+        # store-less path falls back to the raw file (a fixture or a
+        # pre-cutover journal nothing has imported yet).
+        from fno.events.store_client import EventStoreUnavailable, store_db_path
+
+        db = store_db_path(p)
+        if db.exists():
+            try:
+                from fno.events.store_client import query_rows
+
+                rows = query_rows(p)
+            except EventStoreUnavailable as exc:
+                unreadable_paths += 1
+                path_coverage.append(
+                    {
+                        "path": path_key,
+                        "status": "unreadable",
+                        "error": str(exc),
+                        "malformed_lines": 0,
+                    }
+                )
+                continue
+            path_malformed = 0
+            for e in rows:
+                if not isinstance(e, dict):
+                    path_malformed += 1
+                    malformed_lines += 1
+                    continue
+                if (e.get("kind") or e.get("type")) in kinds:
+                    signature = json.dumps(e, sort_keys=True, separators=(",", ":"))
+                    if signature not in seen_events:
+                        seen_events.add(signature)
+                        out.append(e)
+            path_coverage.append(
+                {
+                    "path": path_key,
+                    "status": "ok" if path_malformed == 0 else "malformed",
+                    "malformed_lines": path_malformed,
+                }
+            )
+            continue
         if not p.exists():
             path_coverage.append({"path": path_key, "status": "missing", "malformed_lines": 0})
             continue
