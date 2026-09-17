@@ -485,23 +485,19 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           bash cli/scripts/check-prompt-drift.sh || true
 
-  test:
-    name: cargo test + schema parity
+  test-agents:
+    name: cargo test (fno-agents) + schema parity
     needs: [smoke-pytest]
     runs-on: ubuntu-latest
-    # 40, raised from 25 because 25 was not a budget, it was a coin toss.
-    # Measured 2026-08-27 across four runs of this job: main finished at 24m56s
-    # and 24m47s, and two PR attempts were cancelled at 25m03s and 25m07s. The
-    # cancelled attempts spent LESS time in their steps than the successful main
-    # run (1470s and 1471s against 1490s), so which side of the cap a run lands
-    # on is runner noise, not the diff. A gate that reddens on noise teaches
-    # everyone to re-run rather than to read it.
-    #
-    # This is headroom, not permission to grow. One step owns the cost: the
-    # fno-agents real-process integration suite runs `--test-threads=1` for
-    # 1128s, 76 percent of the whole job; everything else together is about six
-    # minutes. Cut THAT before touching this number again - split those binaries
-    # across two jobs, or find the serialization they actually need.
+    # 40, kept from the old single `test` job, now over half the work. Split
+    # 2026-09-17 (x-e8b1) after two runs (main at 37da45e9, PR 2137) were
+    # cancelled at this cap: the job could pass on its merits and still not
+    # finish in the time it was given, so main read red and every PR in the
+    # queue waited on one job. Shard by crate, the x-5b73 smoke split, instead
+    # of raising the number - a raised cap only hides the growth until the
+    # next PR pays it. The 2026-08-27 measurement still names the cost owner:
+    # the fno-agents real-process integration suite runs `--test-threads=1`
+    # for 1128s, 76 percent of the old whole-job time.
     timeout-minutes: 40
 
     # The claim classifier parity harness needs the FULL oracle package
@@ -584,10 +580,9 @@ jobs:
       - name: Clean cached Rust package artifacts
         # The cache key follows Cargo.lock, so source-only changes can restore
         # package artifacts whose mtimes make a stale test harness look fresh.
-        # Dependencies remain cached; only both workspace packages are rebuilt.
-        run: |
-          cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
-          cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+        # Dependencies remain cached; only this shard's package is rebuilt.
+        # The fno mux shard cleans its own package the same way.
+        run: cargo clean -p fno-agents --manifest-path crates/fno-agents/Cargo.toml
 
       - name: cargo test --lib --bins (fno-agents)
         working-directory: crates/fno-agents
@@ -595,16 +590,6 @@ jobs:
 
       - name: cargo test --test '*' --test-threads=1 (fno-agents real-process integration)
         working-directory: crates/fno-agents
-        run: cargo test --test '*' -- --test-threads=1
-
-      - name: cargo test --lib --bins (fno mux)
-        working-directory: crates/fno
-        run: cargo test --lib --bins
-
-      - name: cargo test --test '*' --test-threads=1 (fno mux real-process integration)
-        # The mux e2e tests spawn real PTYs and Unix sockets; both work on
-        # the ubuntu-latest runner (the harness needs no TTY of its own).
-        working-directory: crates/fno
         run: cargo test --test '*' -- --test-threads=1
 
       - name: Build fno-agents binary (for parity check)
@@ -698,9 +683,76 @@ jobs:
         # together; the paths filter above carries all three.
         run: bash scripts/ci/check-product-boundaries.sh
 
+  test-mux:
+    name: cargo test (fno mux)
+    needs: [smoke-pytest]
+    runs-on: ubuntu-latest
+    # 20 against a load measured in single minutes: the mux lib suite, the
+    # real-process integration suite, and the workspace standalone journey,
+    # which moves with the crate it exercises. The 2026-08-27 measurement put
+    # everything except the fno-agents integration leg at about six minutes.
+    # No python or uv steps here: flock_interop.rs, the cross-language test,
+    # lives in fno-agents, and no fno crate test spawns the cli venv.
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry + build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/build
+            crates/fno-agents/target
+            crates/fno/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Clean cached Rust package artifacts
+        # Same stale-mtime guard as the fno-agents shard, scoped to the
+        # package this shard tests.
+        run: cargo clean -p fno --manifest-path crates/fno/Cargo.toml
+
+      - name: cargo test --lib --bins (fno mux)
+        working-directory: crates/fno
+        run: cargo test --lib --bins
+
+      - name: cargo test --test '*' --test-threads=1 (fno mux real-process integration)
+        # The mux e2e tests spawn real PTYs and Unix sockets; both work on
+        # the ubuntu-latest runner (the harness needs no TTY of its own).
+        working-directory: crates/fno
+        run: cargo test --test '*' -- --test-threads=1
+
       - name: Workspace standalone journey
         # The conformance journey on the real binaries: server, plain shell
         # panes, split, markers, the same child across viewer detach, doctor
         # naming missing backends as advisory, and a full-component control.
-        # Runs after the test steps so both builds are warm.
+        # Runs after the test steps so the mux build is warm. It needs no
+        # fno-agents binary: it proves the workspace stands alone with that
+        # backend absent.
         run: bash tests/mux-workspace-standalone.sh
+
+  test:
+    name: cargo test + schema parity
+    needs: [test-agents, test-mux]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    # The check name this workflow has always reported, now an aggregator over
+    # the two crate shards (the x-5b73 smoke shape: shards carry the work and
+    # their own caps; this job exists so the world still reads one cargo
+    # verdict). A cap this tight is a real alarm on a job that can only ever
+    # hang; the reported check itself must not be the one job with no cap.
+    timeout-minutes: 5
+    steps:
+      - name: Both shards passed
+        run: |
+          echo "test-agents=${{ needs.test-agents.result }} test-mux=${{ needs.test-mux.result }}"
+          [ "${{ needs.test-agents.result }}" = "success" ] || exit 1
+          [ "${{ needs.test-mux.result }}" = "success" ] || exit 1
