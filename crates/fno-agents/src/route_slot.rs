@@ -294,6 +294,26 @@ fn row_capacity(row: &Value, harness_detail: Option<&Value>) -> (String, String,
     }
 }
 
+/// How many planned lanes the walk would judge unknown on an outdated
+/// reading: state `unknown` with window `stale` or `absent`. The refresh
+/// gate's trigger count; a lane missing its declared row counts, because the
+/// walk would skip it unknown all the same.
+fn outdated_lane_count(
+    plan: &[(String, String)],
+    rows: &Map<String, Value>,
+    capacity: &Value,
+) -> usize {
+    plan.iter()
+        .filter(|(_, row_name)| rows.contains_key(row_name))
+        .filter_map(|(_, row_name)| rows.get(row_name))
+        .filter(|r| {
+            let harness = row_value(r, "harness");
+            let (state, window, _age) = row_capacity(r, capacity.get(&harness));
+            state == "unknown" && (window == "stale" || window == "absent")
+        })
+        .count()
+}
+
 /// `never` when nothing was observed (the positive marker: an empty field is
 /// indistinguishable from a dropped token), otherwise the age floored to its
 /// coarsest unit under a day.
@@ -458,7 +478,15 @@ fn order_candidates(mut rows: Vec<InvRow>, objective: &str, prefer_harness: &str
 /// inventory under a live capacity snapshot. Receipts are the Python
 /// resolver's, verbatim.
 fn grid_leg(payload: &Value, _rung_base: &str, chain: &mut Vec<Value>) -> Value {
-    let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
+    let capacity = match payload.get("capacity") {
+        Some(v) => v.clone(),
+        None => crate::route_capacity::capacity(
+            &payload.get("inventory").cloned().unwrap_or(json!({})),
+            &slot_cwd(),
+            slot_now(),
+            None,
+        ),
+    };
     let node = payload.get("node").cloned().unwrap_or(Value::Null);
     let band_raw = node
         .get("difficulty")
@@ -777,7 +805,15 @@ fn states_leg(payload: &Value) -> Value {
         .get("rung_base")
         .and_then(Value::as_str)
         .unwrap_or("agents.profiles");
-    let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
+    let capacity = match payload.get("capacity") {
+        Some(v) => v.clone(),
+        None => crate::route_capacity::capacity(
+            &payload.get("inventory").cloned().unwrap_or(json!({})),
+            &slot_cwd(),
+            slot_now(),
+            None,
+        ),
+    };
     let profile = payload.get("profile").cloned().unwrap_or(Value::Null);
     let lanes_raw = payload.get("lanes_raw").cloned().unwrap_or(json!([]));
     let mut chain: Vec<Value> = Vec::new();
@@ -808,6 +844,9 @@ fn states_leg(payload: &Value) -> Value {
         let mut slot_payload = payload.clone();
         if let Some(obj) = slot_payload.as_object_mut() {
             obj.remove("mode");
+            // The readout never refreshes: display judges on current
+            // evidence, and its preview walk must not probe either.
+            obj.remove("capacity_refresh");
         }
         let slot_out = resolve_slot_payload(&slot_payload);
         let candidate = slot_out.get("candidate");
@@ -1076,14 +1115,37 @@ fn payload_fingerprint(payload: &Value) -> String {
 }
 
 pub fn resolve_slot_payload(payload: &Value) -> Value {
-    let mut out = resolve_slot_walk(payload);
+    let mut judged: Option<Value> = None;
+    let mut out = resolve_slot_walk(payload, &mut judged);
     if let Some(obj) = out.as_object_mut() {
         obj.insert("fingerprint".into(), json!(payload_fingerprint(payload)));
+        // The summary explain used to build in Python, read straight off the
+        // map the walk judged lanes with.
+        if let Some(cap) = judged {
+            obj.insert(
+                "capacity".into(),
+                crate::route_capacity::capacity_summary(&cap),
+            );
+        }
     }
     out
 }
 
-fn resolve_slot_walk(payload: &Value) -> Value {
+/// The cwd the verb's own capacity read resolves config against: the process
+/// cwd Python invoked the binary with.
+fn slot_cwd() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// The epoch seconds the capacity read judges evidence freshness by.
+fn slot_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn resolve_slot_walk(payload: &Value, judged: &mut Option<Value>) -> Value {
     let mut chain: Vec<Value> = Vec::new();
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
     if mode == "tier" {
@@ -1098,7 +1160,21 @@ fn resolve_slot_walk(payload: &Value) -> Value {
         .unwrap_or("agents.profiles")
         .to_string();
     let profile = payload.get("profile").cloned().unwrap_or(Value::Null);
-    let capacity = payload.get("capacity").cloned().unwrap_or(json!({}));
+    // An explicit capacity stays honored (the existing Rust tests' seam); a
+    // payload without one is computed here, from the same state file and
+    // config the Python resolver used to read.
+    let (mut capacity, capacity_computed) = match payload.get("capacity") {
+        Some(v) => (v.clone(), false),
+        None => (
+            crate::route_capacity::capacity(
+                &payload.get("inventory").cloned().unwrap_or(json!({})),
+                &slot_cwd(),
+                slot_now(),
+                None,
+            ),
+            true,
+        ),
+    };
     let gate_bypassed = payload
         .get("gate_bypassed")
         .and_then(Value::as_bool)
@@ -1472,6 +1548,38 @@ fn resolve_slot_walk(payload: &Value) -> Value {
             return none(chain);
         }
     };
+
+    // --- refresh gate ---------------------------------------------------------
+    // A lane the walk would skip on an outdated reading (unknown with a stale
+    // or never-probed window) gets ONE refresh before the judging loop: a
+    // skipped lane never launches, so nothing else would ever probe it. The
+    // dispatch seam arms this; display and explicit-capacity payloads never
+    // refresh.
+    let capacity_refresh_armed = capacity_computed
+        && payload
+            .get("capacity_refresh")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    if capacity_refresh_armed && on_unknown == "skip" {
+        let outdated = outdated_lane_count(&plan, &rows, &capacity);
+        if outdated > 0 {
+            chain.push(json!(
+                match crate::route_capacity::refresh_usage_readings(&slot_cwd()) {
+                    Some(refreshed) => {
+                        capacity = crate::route_capacity::capacity(
+                            &payload.get("inventory").cloned().unwrap_or(json!({})),
+                            &slot_cwd(),
+                            slot_now(),
+                            Some(&refreshed),
+                        );
+                        format!("slot refresh accounts usage ({outdated} lanes outdated)")
+                    }
+                    None => "slot refresh unavailable".to_string(),
+                }
+            ));
+        }
+    }
+    *judged = Some(capacity.clone());
     let sorted_rows: Vec<String> = {
         let mut names: Vec<String> = rows.keys().cloned().collect();
         names.sort();
@@ -4161,5 +4269,229 @@ mod tests {
         assert_eq!(sessions[0]["account"], "zai-main");
         assert_eq!(sessions[0]["receipt_fingerprint"], "fp1");
         assert_eq!(sessions[0]["view_records"].as_array().unwrap().len(), 1);
+    }
+
+    // --- computed capacity + the refresh gate (x-1c38) -----------------------
+
+    use crate::claims;
+
+    /// A hermetic config + runtime-state env: FNO_CONFIG pins the sole config
+    /// candidate (no canonical/global tier), FNO_RUNTIME_STATE_PATH pins the
+    /// state file. Drop clears both.
+    struct CapacityEnv(std::sync::MutexGuard<'static, ()>, tempfile::TempDir);
+
+    impl CapacityEnv {
+        /// `fno_bin` pins the refresh subprocess: the stub script's path, or
+        /// None to leave no FNO_BIN in the environment.
+        fn new(state_json: &str, fno_bin: Option<&str>) -> Self {
+            let guard = claims::test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().expect("tempdir");
+            let cfg = dir.path().join("config.toml");
+            std::fs::write(&cfg, format!("state_dir = '{}'\n", dir.path().display())).unwrap();
+            let state = dir.path().join("state.json");
+            std::fs::write(&state, state_json).unwrap();
+            std::env::set_var("FNO_CONFIG", &cfg);
+            std::env::set_var("FNO_RUNTIME_STATE_PATH", &state);
+            match fno_bin {
+                Some(path) => std::env::set_var("FNO_BIN", path),
+                None => std::env::remove_var("FNO_BIN"),
+            }
+            // The claude fallback lane names its account, so the identity
+            // check reads the slot stamp: makers is materialized, no taint.
+            let providers = dir.path().join("providers");
+            std::fs::create_dir_all(&providers).unwrap();
+            std::fs::write(providers.join(".active-claude"), "makers").unwrap();
+            Self(guard, dir)
+        }
+    }
+
+    impl Drop for CapacityEnv {
+        fn drop(&mut self) {
+            std::env::remove_var("FNO_CONFIG");
+            std::env::remove_var("FNO_RUNTIME_STATE_PATH");
+        }
+    }
+
+    fn slot_env_payload(overrides: Value) -> Value {
+        let mut base = json!({
+            "rung_base": "agents.profiles.target",
+            "lanes_raw": ["codex-luna", "sonnet-x"],
+            "declared_rows": {
+                "codex-luna": {"name": "codex-luna", "harness": "codex",
+                               "model": "gpt-5.6-luna", "band": "high",
+                               "account": "codex", "route": "codex/gpt-5.6-luna"},
+                "sonnet-x": {"name": "sonnet-x", "harness": "claude",
+                             "model": "claude-sonnet-5", "account": "makers"},
+            },
+            "profile": {"on_exhausted": "refuse", "on_low": "prefer_healthy",
+                        "on_unknown": "skip", "by_difficulty": {}},
+            "node": null,
+            "vendor_counts": {}, "vendor_caps": {}, "vendor_count_errors": {},
+            "thread_seatable": {}, "substrate": null, "permission_mode": null,
+            "constrain_harness": null,
+            "explicit_lane": false, "gate_bypassed": false,
+            "inventory": {"declared": false, "rows": [
+                {"name": "codex-luna", "harness": "codex", "model": "gpt-5.6-luna",
+                 "account": "codex"},
+                {"name": "sonnet-x", "harness": "claude", "model": "claude-sonnet-5",
+                 "account": "makers"},
+            ]},
+        });
+        if let (Some(base_obj), Some(ovr)) = (base.as_object_mut(), overrides.as_object()) {
+            for (k, v) in ovr {
+                base_obj.insert(k.clone(), v.clone());
+            }
+        }
+        base
+    }
+
+    fn now_secs() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+    }
+
+    fn fresh_codex_row() -> String {
+        format!(
+            r#"{{"codex": {{"source": "probe", "probed_at": {:.0}, "partial": false, "windows": [{{"label": "weekly", "used_pct": 70.0, "resets_at": null}}]}}}}"#,
+            now_secs()
+        )
+    }
+
+    fn write_refresh_stub(dir: &std::path::Path, body: &str, marker: &std::path::Path) -> String {
+        let script = dir.join("refresh-stub.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s' '{}' > {}\nprintf '%s' '{}'\n",
+                body,
+                marker.display(),
+                body
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script.display().to_string()
+    }
+
+    fn makers_row() -> String {
+        format!(
+            r#"{{"probed_at": {:.0}, "partial": false, "windows": [{{"label": "daily", "used_pct": 10.0, "resets_at": null}}]}}"#,
+            now_secs()
+        )
+    }
+
+    fn stale_codex_row() -> String {
+        format!(
+            r#"{{"probed_at": {:.0}, "partial": false, "windows": [{{"label": "weekly", "used_pct": 5.0, "resets_at": null}}]}}"#,
+            now_secs() - 600.0
+        )
+    }
+
+    /// State file: the claude fallback account fresh, codex stale or absent.
+    fn state_json(codex_row: Option<&str>) -> String {
+        match codex_row {
+            Some(r) => format!(
+                r#"{{"usage": {{"codex": {}, "makers": {}}}}}"#,
+                r,
+                makers_row()
+            ),
+            None => format!(r#"{{"usage": {{"makers": {}}}}}"#, makers_row()),
+        }
+    }
+
+    /// AC5-HP: a stale codex reading is refreshed once and the fresh reading
+    /// decides the pick: lanes[0] codex-luna instead of the sonnet fallthrough.
+    #[test]
+    fn refresh_gate_probes_a_stale_lane_and_the_pick_uses_the_fresh_reading() {
+        let stubdir = tempfile::tempdir().expect("stubdir");
+        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
+        let marker = env.1.path().join("marker");
+        let stub = write_refresh_stub(env.1.path(), &fresh_codex_row(), &marker);
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick", "chain: {:?}", out["chain"]);
+        assert_eq!(out["candidate"]["lane"], "codex-luna");
+        let chain = chain_of(&out);
+        assert!(
+            chain
+                .iter()
+                .any(|l| l.starts_with("slot refresh accounts usage (")),
+            "chain: {chain:?}"
+        );
+        assert_eq!(out["candidate"]["evidence"]["window"], "window");
+    }
+
+    /// AC6-EDGE: a never-probed (absent) account takes the same refresh: the
+    /// most outdated case IS the never-probed case.
+    #[test]
+    fn refresh_gate_covers_a_never_probed_account() {
+        let env = CapacityEnv::new(&state_json(None), None);
+        let marker = env.1.path().join("marker");
+        let stub = write_refresh_stub(env.1.path(), &fresh_codex_row(), &marker);
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["lane"], "codex-luna");
+    }
+
+    /// AC7-HP: without capacity_refresh the refresh stub never runs; the
+    /// positive-control run with the flag proves the marker would be written.
+    #[test]
+    fn no_refresh_flag_means_no_probe() {
+        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
+        let marker = env.1.path().join("marker");
+        let stub = write_refresh_stub(
+            env.1.path(),
+            r#"{"codex": {"source": "probe", "probed_at": 0, "partial": false, "windows": []}}"#,
+            &marker,
+        );
+        std::env::set_var("FNO_BIN", &stub);
+        // Negative control: no capacity_refresh -> the stub never runs.
+        let out = resolve_slot_payload(&slot_env_payload(json!({})));
+        assert_eq!(out["status"], "pick", "the fresh claude fallback answers");
+        assert_eq!(out["candidate"]["lane"], "sonnet-x");
+        assert!(!marker.exists(), "the refresh ran without the flag");
+        // Positive control: the same payload with the flag writes the marker.
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick");
+        assert!(marker.exists(), "the stub never ran under the flag");
+    }
+
+    /// AC8-EDGE: the probe answers but cannot read the account
+    /// (auth-unsupported): the lane is still skipped, and the chain names
+    /// refresh:<reason> so the config smell is visible.
+    #[test]
+    fn a_lane_the_probe_cannot_read_stays_skipped_and_names_the_reason() {
+        let env = CapacityEnv::new(&state_json(Some(&stale_codex_row())), None);
+        let marker = env.1.path().join("marker");
+        let stub = write_refresh_stub(
+            env.1.path(),
+            r#"{"codex": {"state": "unknown", "reason": "auth-unsupported"}}"#,
+            &marker,
+        );
+        std::env::set_var("FNO_BIN", &stub);
+        let out = resolve_slot_payload(&slot_env_payload(json!({
+            "capacity_refresh": true,
+        })));
+        assert_eq!(out["status"], "pick");
+        assert_eq!(out["candidate"]["lane"], "sonnet-x");
+        let chain = chain_of(&out);
+        assert!(
+            chain
+                .iter()
+                .any(|l| l.contains("source=refresh:auth-unsupported")),
+            "chain: {chain:?}"
+        );
     }
 }
