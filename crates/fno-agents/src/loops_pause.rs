@@ -493,7 +493,7 @@ fn decide_loops(args: &[String]) -> Result<(String, Value), i32> {
                 Ok(state) => {
                     let (mail_state, mail_detail) = match options.ttl_ms {
                         Some(ttl_ms) => {
-                            let minutes = ((ttl_ms + 59_999) / 60_000).max(1);
+                            let minutes = ttl_ms.div_ceil(60_000).max(1);
                             match run_mail_hold(&["--for", &minutes.to_string()]) {
                                 MailLeg::Ok(detail) => ("held", detail),
                                 MailLeg::NoIdentity => ("skipped", NO_IDENTITY_DETAIL.to_string()),

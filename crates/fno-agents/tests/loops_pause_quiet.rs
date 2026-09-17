@@ -150,7 +150,7 @@ fn ac5_a_zero_ttl_is_refused_and_writes_no_sentinel() {
 fn ac6_resume_all_lifts_the_mail_leg() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    fs::create_dir_all(&home.join(".fno")).unwrap();
+    fs::create_dir_all(home.join(".fno")).unwrap();
     fs::write(
         home.join(".fno/loops-paused.json"),
         r#"{"who":"op","paused_at":1,"expires_at":null,"reason":null}"#,
@@ -184,7 +184,7 @@ fn ac6_resume_all_lifts_the_mail_leg() {
 fn ac7_a_failing_stub_still_lifts_the_sentinel() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");
-    fs::create_dir_all(&home.join(".fno")).unwrap();
+    fs::create_dir_all(home.join(".fno")).unwrap();
     fs::write(
         home.join(".fno/loops-paused.json"),
         r#"{"who":"op","paused_at":1,"expires_at":null}"#,
