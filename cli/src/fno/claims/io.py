@@ -147,10 +147,10 @@ _GLOBAL_ID_PREFIXES = frozenset(
         # mints it under global_claims_root() (gate_claims_root), so a
         # root-less reader/release resolves the same file the gate wrote.
         "worker",
-        # `test:suite`, the fno-agents test-run admission claim (Rust-only
-        # caller): keeps parity with crates/fno-agents/src/claims.rs so the
-        # same key never routes to two different roots.
+        # `test:suite` and `build:cargo`, the fno-agents test-run admission
+        # claims (Rust-only callers): parity with crates/fno-agents/src/claims.rs.
         "test",
+        "build",
     }
 )
 

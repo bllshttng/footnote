@@ -27,6 +27,26 @@ case " $* " in
         ;;
 esac
 
+# One cargo builds at a time on this machine: two concurrent builds from
+# separate worktrees took load to 508 on 12 cores. Probes never wait, and
+# admission fails open, so CI, a clone without fno, and an older fno-agents
+# that lacks build-admit all build normally. See
+# docs/architecture/test-run-lifecycle.md "Build admission".
+case " $* " in
+    *" -vV "* | *" --print"*) ;;
+    *)
+        # A failed admission is said once per cargo, not once per crate.
+        unadmitted="${TMPDIR:-/tmp}/fno-build-unadmitted.$PPID"
+        if [[ ! -e "$unadmitted" ]] && command -v fno-agents >/dev/null 2>&1; then
+            repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+            fno-agents test-run build-admit --cargo-pid "$PPID" --worktree "$repo_root" || {
+                echo "cargo-rustc-wrapper: build admission unavailable (exit $?); building unadmitted" >&2
+                : >"$unadmitted" 2>/dev/null || true
+            }
+        fi
+        ;;
+esac
+
 if [[ "$HAS_SCCACHE" -eq 1 ]]; then
     export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-30G}"
     # sccache hashes every CARGO_* var but rustc never reads these three,

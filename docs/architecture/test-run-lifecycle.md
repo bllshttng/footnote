@@ -34,6 +34,20 @@ A keeper with no such environment is completely unaffected. That covers every pr
 
 This is deliberately never a name- or path-based sweep. Locked Decision 4 for this feature refuses to infer permission to kill a pane from its socket filename, `/tmp`, PPID 1, or an argv substring. That heuristic cannot tell a leaked test pane from a live production one.
 
+## Build admission
+
+The suite claim covers `fno doctor test` only. A bare `cargo build` or `cargo test` does not pass through it. On 2026-09-16 two rustc test builds from separate worktrees ran at once and took the load to 508 on 12 cores. The `jobs = 3` cap in `~/.cargo/config.toml` limits one cargo. It cannot stop two.
+
+So every compile asks for admission. `.cargo/config.toml` sets `scripts/lib/cargo-rustc-wrapper.sh` as the rustc wrapper, for every worktree and every harness. Before each compile the wrapper runs `fno-agents test-run build-admit --cargo-pid <cargo> --worktree <checkout>`. That call takes the machine-wide `build:cargo` claim with holder `cargo:<checkout>:<cargo pid>`.
+
+- The claim records the cargo pid and has no TTL. It frees itself when that cargo exits, so there is no release call. A TTL would keep a dead cargo's claim `suspect`, which refuses a newcomer until the TTL runs out.
+- A second cargo waits. It compiles nothing while it waits, and prints `cargo admission: holding; <holder> is building` at most every 30 seconds.
+- A cargo started under the holding cargo, such as a test that runs cargo, is admitted at once. The check walks the process ancestors of the waiting cargo.
+- A compiler probe (`-vV` or `--print`) never asks. Cargo metadata and IDE probes must not block.
+- Admission fails open. With no `fno-agents` on PATH, or an older one that lacks `build-admit`, the wrapper prints one line and builds.
+
+A waiting build writes a marker under `<claims root>/.fno/claims/build-waiters/`, keyed by its checkout. The target stop hook reads that marker for its own cwd. While the waiter lives, `loop-check` allows the stop with the hold as its message and counts no fire. An agent that backgrounds a held build therefore idles instead of burning to `NoProgress`. The same early allow covers a fleet incident stop, because the stop hook's pause read folds in `fleet_incident` beside the manual sentinel.
+
 ## What this does not cover
 
 Raw `pytest`, or tests under `crates/fno`, invoked outside `fno doctor test`, bypass the wrapper entirely. They get none of this: no admission, no thread clamping, no group cleanup. Rust tests under `crates/fno-agents` declare their own test-binary identity. They apply it to every daemon or client spawn. Bare `cargo test` therefore covers those daemon lifetimes but still does not acquire the machine-wide suite claim or clamp test threads. The contract is scoped to the front doors this repo's tooling actually uses, not to every possible way of invoking a test binary. A regression controller that wants isolated test state runs a prebuilt binary directly, instead of going through the wrapper. That path skips recursively acquiring the live machine's `test:suite` claim.
