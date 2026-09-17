@@ -2111,22 +2111,15 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
             });
+        // The transcript observation wins; the stored request fills only a
+        // row nothing was observed on, so a request never reads as truth.
         let model = row
-            .get("model")
+            .get("observed_model")
+            .and_then(|m| m.get("model"))
+            .or_else(|| row.get("model"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| {
-                // The daemon's probe-verified model (`{"kind": "observed",
-                // "model": ...}`) fills rows the spawn receipt left null, so
-                // the model tier resolves on every probed row, not only the
-                // requested ones.
-                row.get("observed_model")
-                    .and_then(|m| m.get("model"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            });
+            .map(str::to_string);
         out.push(RegistryAgent {
             name: name.to_string(),
             cwd: cwd.to_string(),
@@ -3076,7 +3069,9 @@ mod tests {
                 "route":"openrouter","model":"gpt-5.6-luna"},
                {"name":"bare","cwd":"/w","status":"live","harness":"opencode"},
                {"name":"obs","cwd":"/w","status":"live","harness":"claude",
-                "model":null,"observed_model":{"kind":"observed","model":"gpt-5.6-luna"}}"#,
+                "model":null,"observed_model":{"kind":"observed","model":"gpt-5.6-luna"}},
+               {"name":"both","cwd":"/w","status":"live","harness":"claude",
+                "model":"glm-5.3-flash[1m]","observed_model":{"kind":"observed","model":"claude-opus-5"}}"#,
         );
         let rows = derive_rows(&raw, NOW).unwrap();
         let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
@@ -3098,6 +3093,7 @@ mod tests {
             Some("gpt-5.6-luna"),
             "null model falls to observed_model.model"
         );
+        assert_eq!(get("both").model.as_deref(), Some("claude-opus-5"));
     }
 
     #[test]
