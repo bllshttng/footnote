@@ -43,7 +43,8 @@ pub(crate) fn scan_unrecorded_decisions(
         std::collections::HashSet::new();
     let mut recorded: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in journals {
-        let Ok(content) = std::fs::read_to_string(path) else {
+        // SQL authority: committed rows in commit order (x-0915 cutover).
+        let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
             continue;
         };
         for line in content.lines() {
@@ -130,7 +131,8 @@ pub(crate) fn scan_open_holds(
     let mut closed: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut blocked_once: std::collections::HashSet<String> = std::collections::HashSet::new();
     for path in journals {
-        let Ok(content) = std::fs::read_to_string(path) else {
+        // SQL authority: committed rows in commit order (x-0915 cutover).
+        let Ok(content) = crate::loopcheck::event_lines(path).map(|l| l.join("\n")) else {
             continue;
         };
         for line in content.lines() {

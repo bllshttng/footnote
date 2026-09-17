@@ -1711,56 +1711,14 @@ fn remove_reaped(path: &Path) {
 pub(crate) fn append_event_line(
     events_path: &Path,
     event: &Value,
-    lock_timeout: Duration,
+    _lock_timeout: Duration,
 ) -> Result<(), String> {
-    let mut line = serde_json::to_vec(event).map_err(|e| e.to_string())?;
-    line.push(b'\n');
-    // Honor the declared retention class: ephemeral rows (the claim
-    // lifecycle, single_flight_gate) go to the sibling journal - the same
-    // routing EventEmitter::write_line and the Python append_event apply - so
-    // an event lands in one store whichever language emitted it.
-    let ephemeral = event
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(crate::events::is_ephemeral_event);
-    loop {
-        // Setup can replace a local journal with a canonical-journal symlink
-        // while this writer waits on the old mutex. Re-resolve after acquiring
-        // and retry whenever the leaf changed during that handoff.
-        let resolved_path =
-            std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
-        let target_path = if ephemeral {
-            crate::events::ephemeral_path(&resolved_path)
-        } else {
-            resolved_path.clone()
-        };
-        if let Some(parent) = target_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let lock_dir = target_path.with_file_name(format!(
-            "{}.lock.d",
-            target_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "events.jsonl".into())
-        ));
-        let token = acquire_dir_mutex(&lock_dir, lock_timeout, true)
-            .ok_or_else(|| format!("events.jsonl lock timeout: {}", lock_dir.display()))?;
-        let current_path =
-            std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
-        if current_path != resolved_path {
-            release_dir_mutex(&lock_dir, &token);
-            continue;
-        }
-        let res = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&target_path)
-            .and_then(|mut f| f.write_all(&line))
-            .map_err(|e| e.to_string());
-        release_dir_mutex(&lock_dir, &token);
-        return res;
-    }
+    // One native commit is the acknowledgement boundary: the store's SQL
+    // transaction serializes writers in every language, so the mkdir mutex,
+    // symlink re-resolve loop, and sibling routing are all retired. The
+    // retention class comes from the event type inside the store.
+    let line = serde_json::to_string(event).map_err(|e| e.to_string())?;
+    fno_event_store::append_envelope(events_path, &line, None).map(|_| ())
 }
 
 fn event_maintenance_dir(events_path: &Path) -> PathBuf {

@@ -621,36 +621,39 @@ fn segment_stamps(live: &std::path::Path) -> Vec<(std::path::PathBuf, std::time:
 /// the sweep modal and the CLI apply read the same durable rows the server
 /// sweep reads - one reader shape, never two.
 pub(crate) fn read_journal_text_at(live: &std::path::Path) -> (String, Option<String>) {
-    let dir = live.parent().map(std::path::Path::to_path_buf);
-    let mut paths = dir
-        .map(|dir| spawn_receipt_segments(&dir, "events.jsonl"))
-        .unwrap_or_default();
-    paths.push(live.to_path_buf());
-    let mut combined = String::new();
-    let mut error = None;
-    for path in &paths {
-        match std::fs::read_to_string(path) {
-            // A segment whose last row lacks its newline would fuse with the
-            // next segment's first row into one unparseable line - every
-            // segment is newline-terminated before the next begins.
-            Ok(raw) => {
-                combined.push_str(&raw);
-                if !raw.ends_with('\n') {
-                    combined.push('\n');
-                }
-            }
-            // A missing segment is skipped; an unreadable one surfaces its
-            // error while the readable segments still contribute - unreadable
-            // is not missing, and neither folds into "no receipt".
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                error.get_or_insert_with(|| {
-                    format!("spawn receipt store unreadable at {}: {e}", path.display())
-                });
-            }
-        }
+    // SQL authority: one import over every retained generation plus the live
+    // file, then the committed rows in commit order. The store's import order
+    // is the old concat order (oldest generation first), so parse-order
+    // semantics - a revocation landing on a receipt from an older segment -
+    // are preserved. A missing store is an empty journal, not an error.
+    let unreadable = |e: String| {
+        (
+            String::new(),
+            Some(format!("spawn receipt store unreadable at {}: {e}", live.display())),
+        )
+    };
+    if let Err(e) = fno_event_store::import_all(live) {
+        return unreadable(e);
     }
-    (combined, error)
+    let rows = match fno_event_store::query_events(
+        live,
+        &fno_event_store::EventQuery {
+            include_rejected: true,
+            ..Default::default()
+        },
+    ) {
+        Ok(rows) => rows,
+        Err(e) => return unreadable(e),
+    };
+    let mut combined = rows
+        .into_iter()
+        .map(|r| r.line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !combined.is_empty() {
+        combined.push('\n');
+    }
+    (combined, None)
 }
 
 pub(crate) fn receipt_for_member<'a>(

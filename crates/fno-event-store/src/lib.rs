@@ -179,8 +179,31 @@ fn ephemeral_sibling(live: &Path) -> PathBuf {
 /// History import is oldest-first by generation, and the `row_hash` key makes
 /// a retried import after a crash insert zero duplicates.
 pub fn import_all(live: &Path) -> Result<SyncReceipt, String> {
-    let sibling = ephemeral_sibling(live);
-    sync_sources(live, &[&rotated_generation(live), live, &sibling])
+    // Every retained generation imports, oldest first, then the live file,
+    // then the ephemeral sibling - the same order the pre-store segment walk
+    // concatenated, so commit-order rows read the same as the old concat.
+    let mut generations: Vec<(u64, PathBuf)> = Vec::new();
+    if let (Some(dir), Some(name)) = (live.parent(), live.file_name()) {
+        let name = name.to_string_lossy();
+        let prefix = format!("{name}.");
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let candidate = entry.file_name().to_string_lossy().into_owned();
+                if let Some(gen) = candidate
+                    .strip_prefix(&prefix)
+                    .and_then(|g| g.parse::<u64>().ok())
+                {
+                    generations.push((gen, dir.join(&candidate)));
+                }
+            }
+        }
+    }
+    generations.sort_by_key(|(gen, _)| *gen);
+    let mut sources: Vec<PathBuf> = generations.into_iter().map(|(_, p)| p).collect();
+    sources.push(live.to_path_buf());
+    sources.push(ephemeral_sibling(live));
+    let refs: Vec<&Path> = sources.iter().map(|p| p.as_path()).collect();
+    sync_sources(live, &refs)
 }
 
 fn sync_sources(live: &Path, sources: &[&Path]) -> Result<SyncReceipt, String> {

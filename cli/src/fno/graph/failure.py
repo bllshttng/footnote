@@ -111,24 +111,12 @@ def read_events(path: Optional[Path] = None) -> list[dict]:
     targets = [path] if path is not None else _default_event_paths()
     histories: list[list[dict]] = []
     for target in targets:
-        out: list[dict] = []
-        rotated = target.with_name(target.name + ".1")
-        for source in (rotated, target):
-            try:
-                with source.open(encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                        except (json.JSONDecodeError, ValueError):
-                            continue
-                        if isinstance(rec, dict):
-                            out.append(rec)
-            except OSError:
-                continue
-        histories.append(out)
+        # SQL authority: the store beside each journal answers in commit
+        # order; the import inside the native writer already folded the
+        # rotated generation, so no per-file walk remains here.
+        from fno.events.store_client import query_rows
+
+        histories.append(query_rows(target))
     return merge_event_histories(*histories)
 
 
