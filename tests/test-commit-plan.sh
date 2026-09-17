@@ -23,17 +23,17 @@ make_repo() {
 
 # --- T1: two writes -> two commits, each naming the node ---
 R1="$(make_repo)"
-P1="$R1/plan-x-cc4e.md"
+P1="$R1/plan-x-0001.md"
 echo "v1" > "$P1"
-OUT="$(bash "$SCRIPT" "$P1" x-cc4e "initial blueprint")"
+OUT="$(bash "$SCRIPT" "$P1" x-0001 "initial blueprint")"
 check_contains "T1: first write committed" "committed " "$OUT"
 echo "v2" > "$P1"
-OUT="$(bash "$SCRIPT" "$P1" x-cc4e "review finding 2")"
+OUT="$(bash "$SCRIPT" "$P1" x-0001 "review finding 2")"
 check_contains "T1: second write committed" "committed " "$OUT"
 check_eq "T1: git log holds 2 commits" "2" "$(git -C "$R1" log --format=%H -- "$P1" | wc -l | tr -d ' ')"
 check_eq "T1: each message names the node twice (subject + trailer)" "4" \
-  "$(git -C "$R1" log --format=%B -- "$P1" | grep -c x-cc4e)"
-check_contains "T1: cause in subject" "blueprint(x-cc4e): review finding 2" \
+  "$(git -C "$R1" log --format=%B -- "$P1" | grep -c x-0001)"
+check_contains "T1: cause in subject" "blueprint(x-0001): review finding 2" \
   "$(git -C "$R1" log -1 --format=%s -- "$P1")"
 
 # --- T2: other staged work stays staged and out of the commit ---
@@ -57,12 +57,12 @@ check_eq "T3: exit 0" "0" "$RC"
 
 # --- T4: no change since the last commit -> unchanged, no new commit ---
 BEFORE="$(git -C "$R1" rev-parse HEAD)"
-OUT="$(bash "$SCRIPT" "$P1" x-cc4e "noop")"
+OUT="$(bash "$SCRIPT" "$P1" x-0001 "noop")"
 check_contains "T4: unchanged line" "unchanged " "$OUT"
 check_eq "T4: HEAD did not move" "$BEFORE" "$(git -C "$R1" rev-parse HEAD)"
 
 # --- T5: bad args -> skipped, exit 2 ---
-OUT="$(bash "$SCRIPT" "$P1" x-cc4e)"; RC=$?
+OUT="$(bash "$SCRIPT" "$P1" x-0001)"; RC=$?
 check_contains "T5: skipped line" "skipped reason=missing-args" "$OUT"
 check_eq "T5: exit 2" "2" "$RC"
 
