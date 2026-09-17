@@ -839,7 +839,7 @@ def apply_related_update(entries: list[dict], node: dict, related: list[str], re
     tokens = _parse_blocker_list(related)
     desired = [] if tokens == ["null"] else [resolve(t) for t in tokens]
     set_related(entries, node["id"], desired)
-    return _find_node(entries, node["id"])
+    return _find_node(entries, node["id"]) or node
 
 
 def canonicalize_entries(entries: list[dict]) -> list[dict]:
