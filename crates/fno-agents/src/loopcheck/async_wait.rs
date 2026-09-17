@@ -92,12 +92,12 @@ pub(super) fn async_wait_class(
         return Some("review");
     }
     // A green, shipped, fully-reviewed PR whose sole remaining blocker is the
-    // repo's one-at-a-time merge slot held by ANOTHER PR (x-de4c): external
+    // repo's one-at-a-time merge slot held by ANOTHER PR: external
     // truth by the classifier's own contract. Another PR owns the slot, the
     // holder's fate ends it, and nothing this session does shortens it - the
     // same shape as waiting on CI, so idling is correct and waiting awake is
-    // pure waste. Measured 2026-09-17 on node x-c971: PR 2129 green at 34/34,
-    // held behind 2135, burned one invocation per stop tick because the
+    // pure waste. A measured specimen: a green 34-of-34 PR held behind
+    // another PR burned one invocation per stop tick because the
     // classifier had only the ci and review labels.
     //
     // A hold the session CAN act on still refuses: BEHIND means the base
@@ -295,7 +295,7 @@ mod tests {
     }
 
     /// A green, shipped, fully-reviewed PR whose sole remaining blocker is
-    /// the merge slot held by PR 2135 - the measured x-c971 specimen shape.
+    /// the merge slot held by another PR - the measured specimen shape.
     fn held_green_pr() -> PrInfo {
         PrInfo {
             ci_conclusion: CiConclusion::Success,

@@ -1177,14 +1177,14 @@ struct PrInfo {
     /// cannot merge past main-red until the branch is rebased, and the terminal
     /// would drop the node from retry circulation while it is un-mergeable.
     mergeable: String,
-    /// Live merge-slot holder for this PR's base ref when ANOTHER PR holds it
-    /// (x-de4c). A fail-open read of the local claims store - no GitHub spend.
+    /// Live merge-slot holder for this PR's base ref when ANOTHER PR holds it.
+    /// A fail-open read of the local claims store - no GitHub spend.
     /// None on no hold, a self-held slot, or an unreadable store.
     merge_slot_holder: Option<u64>,
     /// GitHub `mergeStateStatus` == BEHIND (REST `mergeable_state` == behind):
     /// the base moved past this PR's head, so a rebase is work to do now and a
-    /// merge-slot hold must not idle (x-de4c keeps the refusal for a hold the
-    /// session can act on). Absent on either payload reads as false.
+    /// merge-slot hold must not idle: the refusal stays for a hold the
+    /// session can act on. Absent on either payload reads as false.
     base_behind: bool,
     /// Newest review/comment/inline-comment activity (ISO8601 or "none");
     /// folded into the fingerprint's 4th component on done() fires.
@@ -2874,7 +2874,7 @@ fn read_pr_info(
         );
     }
 
-    // The merge-slot hold (x-de4c): a local claims read keyed to this PR's
+    // The merge-slot hold: a local claims read keyed to this PR's
     // base ref, so idling on a slot held by another PR costs no GitHub spend.
     // A slot this PR holds itself is not a hold on THIS session.
     let merge_slot_holder = crate::authorized_merge::merge_slot_holder(cwd, base_ref)
