@@ -254,6 +254,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
                 Role::MuxUsage(cli_args::render_path_help(&["mux", "view"]))
             }
             cli_args::MuxCmd::View(t) => Role::MuxView(t.tail),
+            // Thread help routes in classify's error branch: clap refuses the
+            // hyphen spelling before the external arm can carry it, so
+            // ThreadOp::Name never sees `-h`/`--help`.
             cli_args::MuxCmd::Thread { op } => match op {
                 cli_args::ThreadOp::Reseat(t) => Role::MuxThreadReseat(t.tail),
                 cli_args::ThreadOp::Name(words) => Role::MuxThread(words),
@@ -693,6 +696,36 @@ mod tests {
     }
 
     #[test]
+    fn proto_role_mux_thread_help_routes_to_one_body_and_never_swallows_a_key() {
+        // AC2-HP: both spellings render the SAME self-teaching body, which
+        // carries the addressing contract the docs quote. AC2-EDGE lives in
+        // the characterization test beside it: a bare name, a full Codex
+        // session UUID and reseat keep their roles rather than routing here.
+        let long = match decide_role(&os(&["mux", "thread", "--help"]), false) {
+            Role::MuxUsage(body) => body,
+            other => panic!("--help is usage, got {other:?}"),
+        };
+        assert_eq!(
+            long,
+            match decide_role(&os(&["mux", "thread", "-h"]), false) {
+                Role::MuxUsage(body) => body,
+                other => panic!("-h is usage, got {other:?}"),
+            },
+            "both spellings render one body"
+        );
+        for needle in [
+            "fno agents whoami",
+            "3f9d3c55-1c2b-4e8a-9a3f-7b2c5d6e8f90",
+            "Claude",
+            "exact",
+            "refuse",
+            "reseat",
+        ] {
+            assert!(long.contains(needle), "missing {needle}: {long}");
+        }
+    }
+
+    #[test]
     fn proto_role_mux_server_parses_session() {
         assert_eq!(
             decide_role(&os(&["mux", "server"]), false),
@@ -783,6 +816,15 @@ mod tests {
         assert_eq!(
             decide_role(&os(&["mux", "thread", "wk"]), false),
             Role::MuxThread(os(&["wk"]))
+        );
+        // Help never swallows a row key: a full Codex session UUID and a
+        // bare name keep their roles (AC2-EDGE).
+        assert_eq!(
+            decide_role(
+                &os(&["mux", "thread", "3f9d3c55-1c2b-4e8a-9a3f-7b2c5d6e8f90"]),
+                false
+            ),
+            Role::MuxThread(os(&["3f9d3c55-1c2b-4e8a-9a3f-7b2c5d6e8f90"]))
         );
         // view: -h is usage; a selector rides verbatim.
         assert!(matches!(

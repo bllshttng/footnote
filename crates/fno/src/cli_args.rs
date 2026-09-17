@@ -521,6 +521,23 @@ pub fn classify(args: &[OsString]) -> FrontDoor {
             if !native_first(args) {
                 return FrontDoor::Forward;
             }
+            // `fno mux thread -h`/`--help` is the addressing door's one
+            // self-teaching surface. The thread group keeps its help flag OFF
+            // (its tail is a row key, and clap refuses a hyphen spelling
+            // before the external arm can read it as one), so the help
+            // request arrives here as a parse error: render the group's help
+            // instead of reciting the refusal.
+            if path_words(args).as_slice() == ["mux", "thread"]
+                && args.len() == 3
+                && args[2]
+                    .to_str()
+                    .map(|v| v == "-h" || v == "--help")
+                    .unwrap_or(false)
+            {
+                return FrontDoor::Usage {
+                    message: render_path_help(&["mux", "thread"]),
+                };
+            }
             // `fno mux -h` (or any explicit help request on a mux group)
             // renders clap's help for that group: the banner's replacement.
             let message = if args.first().and_then(|a| a.to_str()) == Some("mux")
@@ -550,6 +567,7 @@ pub fn classify(args: &[OsString]) -> FrontDoor {
 pub fn front_command() -> clap::Command {
     FnoRoot::command().mut_subcommand("mux", |mux| {
         mux.mut_subcommand("pane", |pane| pane.after_help(pane_group_help()))
+            .mut_subcommand("thread", |thread| thread.after_help(thread_group_help()))
     })
 }
 
@@ -572,6 +590,23 @@ pub fn pane_group_help() -> String {
         crate::mux_cli::PANE_RUN_WORKER_HELP,
         crate::mux_cli::PANE_LS_IDENTITY_HELP
     )
+}
+
+/// The thread group's self-teaching help: the addressing contract the two
+/// portal documents quote. classify routes `fno mux thread -h`/`--help` here
+/// (the group keeps its help flag off, so the spelling arrives as a parse
+/// error); `render_path_help(["mux", "thread"])` reads it.
+pub fn thread_group_help() -> String {
+    "\
+The addressing door onto a live thread row: show it through a portal (or focus the portal it already has), and never create, resume, or duplicate a worker. The key matches one live row exactly, not by the prefix or substring tiers `fno mux view` uses; zero matches, or several rows answering the same key, refuse and spawn no worker.
+
+  fno mux thread w2
+  fno mux thread 3f9d3c55-1c2b-4e8a-9a3f-7b2c5d6e8f90
+  fno agents whoami prints both values: `name` for either harness, the full `session` id for Codex, and the `short_id` job id for Claude - a full Claude transcript UUID is not accepted here.
+
+Move a live pane-hosted worker into a portal seat, keeping its terminal:
+  fno mux thread reseat <name> --portal N"
+        .to_string()
 }
 
 /// The deepest declared command path in `args` (e.g. `["mux", "pane"]` for
@@ -1083,6 +1118,25 @@ mod tests {
         for path in ["mux pane keeper list", "mux thread reseat", "mux web reap"] {
             assert!(render_inventory().contains(path), "{path} must be listed");
         }
+    }
+
+    #[test]
+    fn thread_group_help_renders_the_addressing_contract() {
+        // The help body is the contract the two portal documents quote:
+        // both address forms, the discovery verb, the exact-match boundary,
+        // and the no-spawn refusal. `attach_id` stays internal; the help
+        // teaches `name`, `session` and `short_id` (the whoami fields).
+        let help = render_path_help(&["mux", "thread"]);
+        assert!(help.contains("fno mux thread w2"), "{help}");
+        assert!(
+            help.contains("3f9d3c55-1c2b-4e8a-9a3f-7b2c5d6e8f90"),
+            "{help}"
+        );
+        assert!(help.contains("fno agents whoami"), "{help}");
+        assert!(help.contains("exact"), "{help}");
+        assert!(help.contains("refuse and spawn no worker"), "{help}");
+        assert!(help.contains("short_id"), "{help}");
+        assert!(!help.contains("attach_id"), "{help}");
     }
 
     #[test]
