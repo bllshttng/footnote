@@ -84,7 +84,6 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "feed",
     "ping",
     "pr-heal",
-    "pr-park",
     "probe-run",
     "honesty-sweep",
     "prove-it-verdicts",
@@ -189,6 +188,16 @@ fn main() {
     // over whole-history batches at read time.
     if args.first().map(String::as_str) == Some("evals-attempt") {
         std::process::exit(fno_agents::eval_attempt::run_evals_attempt(&args[1..]));
+    }
+    // `pr-park`: the park-record owner (list / unpark / sweep) behind
+    // `fno do pr watch` and the king reading. Transport-only, dispatched
+    // here like evals-arm: every arm in `run` is a client verb the
+    // verb-surface ratchet enumerates against ALL_CLIENT_ACTIONS, and the
+    // shrink law (d-fe66560a) bars adding one. The status page reaches this
+    // arm through resolve_binary; `fno agents pr-park` is not a supported
+    // client spelling.
+    if args.first().map(String::as_str) == Some("pr-park") {
+        std::process::exit(fno_agents::pr_park::run(&args[1..]));
     }
     let code = rt.block_on(run(args));
     std::process::exit(code);
@@ -877,14 +886,8 @@ async fn run(args: Vec<String>) -> i32 {
     // parity guard scrapes `verb == "..."` and would demand a RUST_CLIENT_VERBS
     // row for a verb that is not an `fno agents` verb. Daemon-free, so it
     // dispatches here before build_request.
-    if matches!(verb, "pr-heal" | "pr-park") {
-        // Both binary-direct behind `fno do pr watch`, like `kill-check`:
-        // they are NOT routable `fno agents` verbs. See the pr-heal comment
-        // above for why they stay out of CLIENT_VERB_USAGE / RUST_CLIENT_VERBS.
-        if verb == "pr-heal" {
-            return fno_agents::heal::run_heal(&args[1..]);
-        }
-        return fno_agents::pr_park::run(&args[1..]);
+    if matches!(verb, "pr-heal") {
+        return fno_agents::heal::run_heal(&args[1..]);
     }
     // `subscribe`: follow the daemon's own `events.jsonl` and stream registry
     // state transitions + pane exits as NDJSON. File-follow, no daemon RPC, so it
