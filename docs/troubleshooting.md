@@ -34,7 +34,7 @@ fno doctor --json   # lists any missing verbs
 fno doctor --fix    # refresh a stale install
 ```
 
-If `fno --version` itself fails, the console script is not on your PATH; reinstall from the repo root with `pip install -e cli/` and re-open the shell.
+If `fno --version` itself fails, the console script is not on your PATH. Installed through the Claude plugin? Read `~/.claude/plugins/data/fno-footnote/postinstall.log`. It names the install path the installer took, or why it failed. Delete `postinstall.version` in that directory to run it again at the next session. In a dev checkout, reinstall from the repo root with `pip install -e cli/` and re-open the shell.
 
 ## Credentials: account, GitHub, and billing
 

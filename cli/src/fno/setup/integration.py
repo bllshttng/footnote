@@ -130,7 +130,7 @@ def _claude_install(run: Runner) -> IntegrationResult:
             if inst.returncode == 0:
                 return IntegrationResult("claude", label, "installed")
     # Fallback: clone the plugin into ~/.claude/skills/fno/ -> fno@skills-dir.
-    # No postinstall and no `claude plugin update`, but a curl user already has
+    # No `claude plugin update`, but a curl user already has
     # the CLI, so that is acceptable.
     return _claude_skills_dir_install(run)
 
