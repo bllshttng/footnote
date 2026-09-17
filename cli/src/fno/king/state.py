@@ -154,7 +154,7 @@ def arm_king_manifest(
             crown_grantor if crown_grantor is not None else getattr(row, "crown_grantor", None)
         )
         # The crowned row's own request is the pin the wake must repeat; a
-        # manifest without it wakes the king on the account default (x-8fb2).
+        # manifest without it wakes the king on the account default model.
         model = model or getattr(row, "requested_model", None)
     if state_root is None:
         state_root = _owner_state_root(owner_cwd)

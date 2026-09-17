@@ -1697,7 +1697,7 @@ def _grid_lane_for(
             inventory=inventory,
             explicit_model_value=model,
         )
-    except Exception as exc:  # noqa: BLE001 - the decline text feeds the spawn seam's refusal (x-8fb2)
+    except Exception as exc:  # noqa: BLE001 - the decline text feeds the spawn seam's refusal
         return None, None, None, None, f"grid=unreadable ({str(exc)[:80]})"
     # The chain's last element is the terminal reason on every path, so it is
     # surfaced verbatim rather than reformatted - the strings are the existing

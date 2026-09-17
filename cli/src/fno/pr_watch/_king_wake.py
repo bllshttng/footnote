@@ -402,7 +402,7 @@ def _dispatch_walk(
 
     Neither can it derive a model: the argv carries the crown manifest's pin,
     and a manifest without one refuses the walk - an unpinned king respawn
-    bills the account default, the exact substitution x-8fb2 deletes."""
+    bills the account default model."""
     from fno.king.state import parse_manifest
 
     model = (parse_manifest(target.manifest).get("model") or "").strip()
