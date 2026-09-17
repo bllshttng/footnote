@@ -1,6 +1,6 @@
-//! The sideline new-agent composer: one popup that launches a new
-//! harness session through the canonical spawn door and hands off to the
-//! native session.
+//! The sideline new-agent composer: a dock pinned to the bottom of the
+//! sideline column that launches a new harness session through the canonical
+//! spawn door and hands off to the native session.
 //!
 //! This is a LAUNCHER, not a chat client: it owns the draft, the typed
 //! request, and the launch lifecycle only. After a verified birth the pane
@@ -9,13 +9,10 @@
 //! permissions, seed acceptance - stay with the door; a refusal renders
 //! verbatim and the draft survives.
 
-use super::{write_msg, ClientMsg, StdinFlow, View, MAX_MAIL_TEXT};
+use super::{glyph_cols, write_msg, ClientMsg, StdinFlow, View, MAX_MAIL_TEXT};
 use crate::clipboard::on_path;
 use crate::proto::agent_launch::{AgentLaunchRequest, AgentLaunchUpdate, LaunchState};
-
-/// The message editor shows this many physical lines; longer prompts scroll
-/// internally so the popup survives an 80x24 terminal.
-const EDITOR_VISIBLE: usize = 4;
+use crate::proto::{cell_flags, Cell, Color};
 
 /// Ceiling on an open bracketed paste's carried bytes. The submit gate
 /// refuses an over-cap message anyway; this only stops a close-marker-less
@@ -49,7 +46,7 @@ impl HarnessChoice {
     }
 }
 
-/// The catalog read's outcome (the update-probe shape): the popup opens
+/// The catalog read's outcome (the update-probe shape): the dock opens
 /// instantly on whatever is in hand and refreshes when the probe lands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CatalogOutcome {
@@ -128,7 +125,7 @@ impl Focus {
     }
 }
 
-/// The launch lifecycle the popup renders. `Submitting` freezes the
+/// The launch lifecycle the dock renders. `Submitting` freezes the
 /// submitted snapshot; a terminal state keeps the draft and the reason side
 /// by side.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,15 +151,15 @@ pub(crate) enum Phase {
     },
 }
 
-/// One popup instance. `open` false means the draft is RETAINED with the
-/// popup hidden (Esc); nothing is dropped except by an explicit terminal
+/// One composer instance. `open` false means the draft is RETAINED with
+/// the dock hidden (Esc); nothing is dropped except by an explicit terminal
 /// resolve.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Launcher {
     pub draft: LaunchDraft,
     pub focus: Focus,
     pub phase: Phase,
-    /// The request id this popup's button armed, if a launch is owned.
+    /// The request id this dock's button armed, if a launch is owned.
     pub armed: Option<u64>,
     pub next_request_id: u64,
 }
@@ -217,7 +214,7 @@ impl LaunchDraft {
             revision: self.revision,
             cwd: self.cwd(),
             harness: self.harness(),
-            // v1 popup: the mux sideline launches pane-hosted sessions; the
+            // v1 dock: the mux sideline launches pane-hosted sessions; the
             // native session is the pane itself. bg threads are NOT offered
             // here (the roster + row menu remain their surface).
             substrate: "pane".to_string(),
@@ -244,8 +241,8 @@ fn non_empty(s: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
-/// A terminal launch attempt the View remembers ACROSS popup close/reopen,
-/// so a reopened popup shows the pending or resolved attempt instead of
+/// A terminal launch attempt the View remembers ACROSS dock close/reopen,
+/// so a reopened dock shows the pending or resolved attempt instead of
 /// silently allowing a replacement spawn (AC2-EDGE).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentAttempt {
@@ -276,7 +273,7 @@ pub(crate) fn open(view: &mut View) {
             next_request_id: 1,
         },
     };
-    // An in-flight owned attempt re-arms its posture (AC2-EDGE): the popup
+    // An in-flight owned attempt re-arms its posture (AC2-EDGE): the dock
     // reopens showing Starting, never offering a silent second spawn.
     if let Some(attempt) = &view.launch_attempt {
         if matches!(attempt.state, AttemptState::Starting)
@@ -385,8 +382,8 @@ pub(crate) fn apply_launch_update(view: &mut View, update: AgentLaunchUpdate) ->
         }
     };
     // Always remember the attempt (survives close/reopen), then mirror into
-    // an open popup that owns this request. A stale id cannot overwrite a
-    // newer draft: the popup only applies updates it armed.
+    // an open dock that owns this request. A stale id cannot overwrite a
+    // newer draft: the dock only applies updates it armed.
     if let Some(l) = view.launcher.as_mut() {
         if l.armed == Some(request_id) {
             l.phase = match &attempt_state {
@@ -461,7 +458,7 @@ async fn submit(
         .await
         .map_err(|e| {
             // The send failed before the server ever saw the request: no
-            // attempt exists, so the popup returns to editing with the
+            // attempt exists, so the dock returns to editing with the
             // draft intact and the reason visible.
             if let Some(l) = view.launcher.as_mut() {
                 l.armed = None;
@@ -903,7 +900,7 @@ fn cycle_harness(draft: &mut LaunchDraft, delta: i32) {
 const CAPABILITY_TOML: &str = include_str!("../harness_capabilities.toml");
 
 /// The catalog read (instant: a compiled-in table plus PATH stats). Still
-/// delivered through the probe channel so the popup's render flow has one
+/// delivered through the probe channel so the dock's render flow has one
 /// shape for "not yet read" and "read".
 pub(crate) fn load_catalog() -> CatalogOutcome {
     let Ok(parsed) = toml::from_str::<toml::Value>(CAPABILITY_TOML) else {
@@ -931,8 +928,9 @@ pub(crate) fn load_catalog() -> CatalogOutcome {
 
 impl Launcher {
     /// One `(focus, line)` pair per rendered body row; the SAME table drives
-    /// drawing, keyboard focus marking, and mouse hit-testing.
-    pub(crate) fn render_rows(&self, view: &View) -> Vec<(Focus, String)> {
+    /// drawing, keyboard focus marking, and mouse hit-testing. `editor_visible`
+    /// caps the message window: the dock passes its dynamic count.
+    pub(crate) fn render_rows(&self, view: &View, editor_visible: usize) -> Vec<(Focus, String)> {
         let d = &self.draft;
         let mut rows: Vec<(Focus, String)> = Vec::new();
         let mark = |f: Focus, self_f: Focus| if f == self_f { "> " } else { "  " };
@@ -975,12 +973,12 @@ impl Launcher {
         let (cur_line, _cur_col) = cursor_line_col(d);
         let total = lines.len();
         let start = total
-            .saturating_sub(EDITOR_VISIBLE)
-            .min(cur_line.saturating_sub(EDITOR_VISIBLE - 1));
+            .saturating_sub(editor_visible)
+            .min(cur_line.saturating_sub(editor_visible.saturating_sub(1)));
         let shown: Vec<&str> = lines
             .iter()
             .skip(start)
-            .take(EDITOR_VISIBLE)
+            .take(editor_visible)
             .copied()
             .collect();
         for (i, text) in shown.iter().enumerate() {
@@ -1084,6 +1082,38 @@ impl Launcher {
             }
         }
     }
+
+    /// Dock rows that never shrink: harness, project, the advanced toggle,
+    /// launch, plus the four pins when expanded and the dismiss row while an
+    /// unknown outcome blocks retry.
+    fn dock_fixed_rows(&self) -> usize {
+        4 + if self.draft.expanded { 4 } else { 0 }
+            + usize::from(matches!(self.phase, Phase::Unknown { .. }))
+    }
+
+    /// The dock's geometry in a `panel_rows`-tall sideline: (total rows, the
+    /// editor's visible window). The editor is dynamic - exactly the typed
+    /// lines up to a cap that holds the dock near half the panel - so typing
+    /// grows it and deleting shrinks it. Below the cap's floor the fields
+    /// still paint; the dock never hides.
+    pub(crate) fn dock_layout(&self, panel_rows: usize) -> (usize, usize) {
+        let footer = 1;
+        let fixed = self.dock_fixed_rows();
+        let cap = (panel_rows / 2).saturating_sub(fixed + footer).max(1);
+        let editor = self.draft.message_lines().len().clamp(1, cap);
+        (fixed + footer + editor, editor)
+    }
+
+    /// The dock's paintable lines: the rows table with the dynamic editor
+    /// window, then the outcome footer as the last line.
+    pub(crate) fn dock_lines(
+        &self,
+        view: &View,
+        panel_rows: usize,
+    ) -> (Vec<(Focus, String)>, String) {
+        let (_, editor) = self.dock_layout(panel_rows);
+        (self.render_rows(view, editor), self.footer())
+    }
 }
 
 fn field_or_default(s: &str) -> String {
@@ -1094,49 +1124,86 @@ fn field_or_default(s: &str) -> String {
     }
 }
 
-/// The launcher's chrome + overlay: header, the shared rows table, footer.
-pub(crate) fn launcher_chrome() -> super::chrome::Chrome {
-    super::chrome::Chrome::new("New agent", super::Anchor::Center)
-        .footer("enter on Launch submits; esc hides and keeps the draft")
+/// Paint the dock's rows and footer at the bottom of the sideline column.
+/// `top` is the dock's first row; the painter truncates to the panel width -
+/// the same rule every sideline row follows. Plain cells: the dock is live
+/// UI, not chrome.
+pub(crate) fn paint_dock(
+    cells: &mut [Cell],
+    rows: &[(Focus, String)],
+    footer: &str,
+    top: usize,
+    term_rows: usize,
+    cols: usize,
+    text_w: usize,
+) {
+    for (k, text) in rows
+        .iter()
+        .map(|(_, s)| s)
+        .chain(std::iter::once(&footer.to_string()))
+        .enumerate()
+    {
+        let r = top + k;
+        if r >= term_rows {
+            break;
+        }
+        let mut col = 0usize;
+        for ch in text.chars() {
+            let w = glyph_cols(ch);
+            if col + w > text_w {
+                break;
+            }
+            cells[r * cols + col] = Cell {
+                c: ch,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: 0,
+            };
+            if w == 2 {
+                cells[r * cols + col + 1] = Cell {
+                    c: ' ',
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    flags: cell_flags::WIDE_SPACER,
+                };
+            }
+            col += w;
+        }
+    }
 }
 
-/// Mouse: a click inside the overlay focuses the row it hit; a click on the
-/// Launch row submits; clicks outside are ignored (Esc closes).
+/// Mouse: a left press inside the dock focuses the row it hit (the Launch
+/// row submits). Anything else - the footer line, the list above, the panes -
+/// reads unconsumed so the normal mouse routes still run while the composer
+/// is open.
 pub(crate) async fn launcher_mouse(
     view: &mut View,
     rep: crate::mouse::MouseReport,
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
-) -> Result<(), String> {
+) -> Result<bool, String> {
     use crate::proto::{MouseButton, MouseKind};
     if !matches!(rep.kind, MouseKind::Press(MouseButton::Left)) {
-        return Ok(());
+        return Ok(false);
     }
-    let launcher = match view.launcher.as_ref() {
-        Some(l) => l.clone(),
-        None => return Ok(()),
+    let panel_rows = view.term.0 as usize;
+    let panel_w = view.panel_w() as usize;
+    // The divider column and the content area beyond are never the dock's.
+    if (rep.col as usize) + 1 >= panel_w {
+        return Ok(false);
+    }
+    let (rows, _footer) = match view.launcher.as_ref() {
+        Some(l) => l.dock_lines(view, panel_rows),
+        None => return Ok(false),
     };
-    let rows = launcher.render_rows(view);
-    let chrome = launcher_chrome();
-    let overlay_dims = (view.term.0 as usize, view.term.1 as usize);
-    let layout = super::layout_lines_overlay(
-        (0, 0),
-        overlay_dims,
-        &chrome,
-        &rows.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(),
-        None,
-        super::OverlayAnchor::Center,
-    );
-    let origin = layout.origin;
-    // The layout origin is the FRAME's top-left; the body starts below the
-    // chrome's top rows (title border). Without this offset every click
-    // focuses the row above the one it hit.
-    let top = chrome.rows_above();
-    let (row, _col) = (rep.row as usize, rep.col as usize);
-    let idx = row.checked_sub(origin.0 + top);
-    let Some(idx) = idx else {
-        return Ok(());
-    };
-    if let Some((focus, _)) = rows.get(idx) {
+    let dock_len = rows.len() + 1;
+    let chrome = view.bottom_row_is_chrome() as usize;
+    let top = panel_rows.saturating_sub(chrome + dock_len);
+    let row = rep.row as usize;
+    // On the footer, above the dock, or clipped off by a too-short panel.
+    if row < top || row >= top + rows.len() {
+        return Ok(false);
+    }
+    if let Some((focus, _)) = rows.get(row - top) {
         let focus = *focus;
         if let Some(l) = view.launcher.as_mut() {
             l.focus = focus;
@@ -1145,5 +1212,5 @@ pub(crate) async fn launcher_mouse(
             submit(view, sock_w).await?;
         }
     }
-    Ok(())
+    Ok(true)
 }

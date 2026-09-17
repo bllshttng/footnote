@@ -6323,23 +6323,6 @@ impl View {
                 &m.popup.render(self.term),
                 &self.theme,
             );
-        } else if let Some(l) = &self.launcher {
-            // The new-agent composer: framed chrome around the
-            // shared rows table; the footer carries the launch lifecycle.
-            let body: Vec<String> = l.render_rows(self).into_iter().map(|(_, s)| s).collect();
-            let footer = l.footer();
-            let chrome = agent_launcher::launcher_chrome().footer(footer);
-            draw_lines_overlay(
-                &mut cells,
-                rows,
-                cols,
-                overlay_origin,
-                overlay_dims,
-                &chrome,
-                &body,
-                &self.theme,
-                None,
-            );
         } else if let Some(sel) = self.answers {
             // needs-me queue (grown from the answer overlay,
             // folded MINE in as the first lane): MINE then the
@@ -7696,9 +7679,20 @@ impl View {
         // an agent row indents by the depth computed over exactly the set that
         // paints - never a re-derivation over a different visibility set.
         let (display, row_depths) = self.display_rows_with_depths();
-        // The reservation is the court block's rendered line count.
-        let (block_rows, block_lines) = self.court_block_layout(rows);
-        let list_rows = rows - block_rows;
+        // The docked new-agent composer takes the bottom rows while open,
+        // and the passive court block yields to it: an active editor
+        // outranks glance chrome.
+        let chrome_rows = self.bottom_row_is_chrome() as usize;
+        let dock_len = self
+            .launcher
+            .as_ref()
+            .map_or(0, |l| l.dock_layout(rows - chrome_rows).0);
+        let (block_rows, block_lines) = if dock_len > 0 {
+            (0, Vec::new())
+        } else {
+            self.court_block_layout(rows)
+        };
+        let list_rows = rows.saturating_sub(block_rows + dock_len);
         for (i, drow) in display.into_iter().enumerate().skip(off) {
             // (US1) The sideline owns the full column height including
             // row 0; the tab strip moved right of the divider. Display row `i`
@@ -8161,6 +8155,16 @@ impl View {
         // chrome beside the live rows, and the painter truncates to the panel
         // width - the same rule every sideline row follows.
         court_block::paint_court_block(cells, block_lines, list_rows, rows, cols, text_w);
+        // The docked composer: rows then footer, pinned above the bottom
+        // chrome row. On a panel too small for even the fixed fields the
+        // painter clips; the dock never hides while open.
+        if dock_len > 0 {
+            if let Some(l) = &self.launcher {
+                let (dock_rows, footer) = l.dock_lines(self, rows - chrome_rows);
+                let top = (rows - chrome_rows).saturating_sub(dock_len);
+                agent_launcher::paint_dock(cells, &dock_rows, &footer, top, rows, cols, text_w);
+            }
+        }
         // The divider column, now full terminal height (the sideline owns row
         // 0 too; the strip sits right of the divider) - US1.
         //
@@ -11762,11 +11766,11 @@ async fn handle_stdin(
             }
             continue;
         }
-        // The new-agent composer owns the pointer while open:
-        // hover-free, a click focuses the row it hit (Launch submits),
-        // clicks outside the box are ignored.
-        if view.launcher.is_some() {
-            agent_launcher::launcher_mouse(view, rep, sock_w).await?;
+        // The new-agent composer owns presses that land inside its dock
+        // (a click focuses the row it hit; Launch submits). Anything else
+        // falls through: the list above and the panes stay live while it
+        // is open.
+        if view.launcher.is_some() && agent_launcher::launcher_mouse(view, rep, sock_w).await? {
             continue;
         }
         // a seam drag in flight owns the mouse. The pointer routinely
