@@ -209,8 +209,7 @@ impl AgentsHome {
     /// this home. Compared canonicalized, so a symlinked `$HOME` is not a
     /// sandbox.
     pub fn is_sandbox(&self) -> bool {
-        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        canon(&self.root) != canon(&Self::ambient_shared_root())
+        !same_path(&self.root, &Self::ambient_shared_root())
     }
 
     /// The agents root directory.
@@ -741,6 +740,14 @@ pub fn migrate_from_checkout(old: &Path, new: &Path) -> bool {
         }
     }
     true
+}
+
+/// Whether two paths name the same directory, compared canonicalized on
+/// both sides so a symlinked parent never breaks the comparison. A path
+/// that cannot be canonicalized compares as written.
+pub fn same_path(a: &Path, b: &Path) -> bool {
+    let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    canon(a) == canon(b)
 }
 
 /// One test's declared state root: `FNO_SPACES_DIR` and `FNO_AGENTS_HOME`
