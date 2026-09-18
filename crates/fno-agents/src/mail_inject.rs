@@ -1496,12 +1496,11 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         return code;
     }
 
-    // Single-line predicate on UNWRAPPED bodies. Any single line rides verbatim
-    // (slash command, codex verb, plain word); a second content line is the one
-    // refusal. A direct binary call is one unwrapped door and the Python raw
-    // send is the other, so the same predicate lives here. Refuses before
-    // delivery and before the audit record, matching the byte cap. Framed
-    // envelopes skip it.
+    // Single-line command predicate on UNWRAPPED bodies: one line, and it is a
+    // command (starts with / or $); a message goes wrapped. A direct binary
+    // call is one unwrapped door and the Python raw send is the other, so the
+    // same predicate lives here. Refuses before delivery and before the audit
+    // record, matching the byte cap. Framed envelopes skip it.
     if let Some(code) = single_line_decision(&text) {
         return code;
     }
