@@ -48,7 +48,7 @@ regex = "1"
 sha2 = "0.10"
 # The shared event store: the native front door routes `fno doctor event`
 # onto this library (x-0915); the runtime binary links the same types.
-fno-event-store = { path = "../fno-event-store" }
+fno-event-store = { version = "0.1.0", path = "../fno-event-store" }
 # Re-verify a picked answer's region fingerprint against the live grid before
 # injecting. Must match the daemon's hash byte-for-byte across
 # processes, so the same content hash both sides use - not a per-process
