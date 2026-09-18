@@ -8,6 +8,11 @@ import fnoPlugin, {
   createTaskTool,
   createTaskResultTool,
   isActivated,
+  resolvePluginRoot,
+  buildHookPayload,
+  protectionScriptsFor,
+  parseHookDecision,
+  runProtections,
 } from "../plugins/fno.ts"
 
 // Run plugin init with FNO_OPENCODE forced, restoring the prior value.
@@ -425,4 +430,68 @@ test("task_result on a child with no assistant message is pending (AC5-*)", asyn
   const v = JSON.parse((await t.execute({ task_id: "ses_p" } as any, ctx)) as string)
   expect(v.state).toBe("pending")
   expect(v.result).toBeUndefined()
+})
+
+// ---- Change 7: policy outcomes on the V1 seams (AC8-*) --------------------
+
+test("the payload the seam builds is the claude shape the scripts already read (AC8-HP)", () => {
+  const payload = buildHookPayload("Bash", "ses_x", { command: "rg -uu x" }, "/proj")
+  expect(payload.tool_name).toBe("Bash")
+  expect(payload.session_id).toBe("ses_x")
+  expect(payload.cwd).toBe("/proj")
+  expect(payload.hook_event_name).toBe("PreToolUse")
+  expect((payload.tool_input as any).command).toBe("rg -uu x")
+})
+
+test("tool matching mirrors the claude matchers (AC8-HP)", () => {
+  expect(protectionScriptsFor("bash").map((e) => e.script)).toEqual([
+    "graph-write-protect.sh",
+    "git-protection.py",
+    "truncation-guard.py",
+    "recursive-grep-guard.py",
+  ])
+  expect(protectionScriptsFor("write").map((e) => e.script)).toContain("plan-location-guard.sh")
+  expect(protectionScriptsFor("webfetch")).toEqual([])
+})
+
+test("parseHookDecision honors deny and reads allow (AC8-HP)", () => {
+  const deny = parseHookDecision(
+    '{"decision":"block","reason":"no","hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"forbidden surface"}}',
+  )
+  expect(deny.deny).toBe(true)
+  expect(deny.reason).toBe("forbidden surface")
+  expect(parseHookDecision("{}").deny).toBe(false)
+  expect(parseHookDecision("").deny).toBe(false)
+})
+
+test("runProtections denies on the script's decision and throws at the seam (AC8-HP)", async () => {
+  const seen: string[] = []
+  const out = await runProtections("Write", "ses_w", { file_path: "/x" }, "/proj", async (script, payload) => {
+    seen.push(script)
+    return JSON.stringify({
+      hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "protected manifest" },
+    })
+  })
+  expect(out.denied).toBe(true)
+  expect(out.reason).toBe("protected manifest")
+  expect(seen.length).toBeGreaterThan(0)
+})
+
+test("a missing/deciding-nothing script reports once and allows - fail-open (AC8-ERR)", async () => {
+  const errors: string[] = []
+  const orig = console.error
+  console.error = (...a: unknown[]) => errors.push(a.join(" "))
+  try {
+    const out = await runProtections("Bash", "ses_b", { command: "ls" }, "/proj", async () => "")
+    expect(out.denied).toBe(false)
+    expect(errors.some((e) => e.includes("no decision"))).toBe(true)
+  } finally {
+    console.error = orig
+  }
+})
+
+test("resolvePluginRoot reads the env chain and the plugin-root file", () => {
+  expect(resolvePluginRoot({ FNO_PLUGIN_ROOT: "/p1" })).toBe("/p1")
+  expect(resolvePluginRoot({ CLAUDE_PLUGIN_ROOT: "/p2" })).toBe("/p2")
+  expect(resolvePluginRoot({})).toBeNull()
 })

@@ -564,6 +564,124 @@ async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void):
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Policy outcomes (Change 7): the SAME protection scripts the claude and
+// codex hook manifests wire, driven through OpenCode's pre-tool seam. The
+// scripts read a claude-shaped payload from stdin and answer stdout JSON, so
+// the seam only translates the payload and honors the decision. Fail-open by
+// design: a script that is missing, times out, or exits without a decision is
+// reported once and the tool proceeds - a protection gap never becomes a
+// silent block.
+// ---------------------------------------------------------------------------
+
+/** script filename, the tools it guards (opencode tool names, lowercase),
+ * and its stdin-read bound. Mirrors the matchers in hooks/hooks.json. */
+const PROTECTION_SCRIPTS: Array<{ script: string; tools: string[]; timeoutMs: number }> = [
+  { script: "graph-write-protect.sh", tools: ["edit", "write", "bash"], timeoutMs: 10_000 },
+  { script: "plan-location-guard.sh", tools: ["write"], timeoutMs: 10_000 },
+  { script: "git-protection.py", tools: ["bash"], timeoutMs: 10_000 },
+  { script: "truncation-guard.py", tools: ["bash"], timeoutMs: 10_000 },
+  { script: "recursive-grep-guard.py", tools: ["bash"], timeoutMs: 10_000 },
+]
+
+/** Resolve the installed plugin root the scripts live under. */
+export function resolvePluginRoot(env: Record<string, string | undefined> = process.env): string | null {
+  const fromEnv = env.FNO_PLUGIN_ROOT || env.CLAUDE_PLUGIN_ROOT || env.CODEX_PLUGIN_ROOT
+  if (fromEnv) return fromEnv
+  try {
+    const p = readFileSync(join(env.HOME || "", ".fno", "plugin-root"), "utf8").trim()
+    return p || null
+  } catch {
+    return null
+  }
+}
+
+/** The claude-shaped PreToolUse payload the protection scripts already read. */
+export function buildHookPayload(
+  tool: string,
+  sessionID: string,
+  args: unknown,
+  projectDir: string,
+): Record<string, unknown> {
+  return {
+    hook_event_name: "PreToolUse",
+    tool_name: tool,
+    tool_input: args ?? {},
+    cwd: projectDir,
+    session_id: sessionID,
+  }
+}
+
+/** Which protection scripts guard this tool. */
+export function protectionScriptsFor(tool: string): typeof PROTECTION_SCRIPTS {
+  const name = (tool || "").toLowerCase()
+  return PROTECTION_SCRIPTS.filter((e) => e.tools.includes(name))
+}
+
+/** Read a hook-script decision from its stdout. `{}`/empty = allow. */
+export function parseHookDecision(stdout: string): { deny: boolean; reason: string } {
+  const t = (stdout || "").trim()
+  if (!t || t === "{}") return { deny: false, reason: "" }
+  try {
+    const v = JSON.parse(t) as {
+      decision?: string
+      reason?: string
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string }
+    }
+    const decision = v.hookSpecificOutput?.permissionDecision
+    if (decision === "deny" || (decision === undefined && v.decision === "block")) {
+      return {
+        deny: true,
+        reason: v.hookSpecificOutput?.permissionDecisionReason ?? v.reason ?? "denied by footnote protection",
+      }
+    }
+    return { deny: false, reason: "" }
+  } catch {
+    // Non-JSON stdout is "no decision": the caller reports it once, allows.
+    return { deny: false, reason: "" }
+  }
+}
+
+type ProtectionOutcome = { denied: boolean; reason: string; reported: boolean }
+
+/** Run every protection script guarding `tool`; DENY wins over any allow. */
+export async function runProtections(
+  tool: string,
+  sessionID: string,
+  args: unknown,
+  projectDir: string,
+  runScript: (script: string, payload: string, timeoutMs: number) => Promise<string>,
+): Promise<ProtectionOutcome> {
+  const root = resolvePluginRoot()
+  const payload = JSON.stringify(buildHookPayload(tool, sessionID, args, projectDir))
+  let reported = false
+  for (const entry of protectionScriptsFor(tool)) {
+    if (!root) {
+      if (!reported) {
+        console.error("[footnote] protection scripts unavailable (no plugin root resolved); tools run unprotected")
+        reported = true
+      }
+      continue
+    }
+    let stdout = ""
+    try {
+      stdout = await runScript(join(root, "hooks", entry.script), payload, entry.timeoutMs)
+    } catch {
+      stdout = ""
+    }
+    const d = parseHookDecision(stdout)
+    if (d.deny) return { denied: true, reason: d.reason, reported }
+    if (!stdout.trim() && !reported) {
+      // A missing or timed-out script answers silence: reported once, never a
+      // silent block, and never once per tool call.
+      console.error(`[footnote] protection script ${entry.script} gave no decision; allowing`)
+      reported = true
+    }
+  }
+  return { denied: false, reason: "", reported }
+}
+
 // ---------------------------------------------------------------------------
 // Plugin wiring
 // ---------------------------------------------------------------------------
@@ -638,11 +756,67 @@ const plugin: Plugin = async (input: PluginInput) => {
       output.system.unshift(orchestratorPrompt)
       await injectAnnouncements(input, output)
     },
+    async "tool.execute.before"(
+      input: { tool: string; sessionID: string; callID: string },
+      output: { args: any },
+    ) {
+      // The abort channel is an exception: the hook signature returns void and
+      // offers no decision field, so a deny throws and the tool never runs.
+      const out = await runProtections(input.tool, input.sessionID, output.args, projectDir, runScript)
+      if (out.denied) throw new Error(out.reason)
+    },
+    async "tool.execute.after"(input: { tool: string; sessionID: string; callID: string; args: any }) {
+      // Claim heartbeat on the same payload the script's stdin reader parses.
+      try {
+        const root = resolvePluginRoot()
+        if (!root) return
+        await runScript(
+          join(root, "hooks", "claim-heartbeat.sh"),
+          JSON.stringify({ cwd: projectDir, session_id: input.sessionID }),
+          5_000,
+        )
+      } catch {
+        // never blocks a completed tool call
+      }
+    },
+    async "experimental.session.compacting"(input: { sessionID: string }, output: { context: string[] }) {
+      // The mechanical canon-doc sections ride the compaction prompt, so
+      // footnote's context survives a compaction without injected prompt text.
+      try {
+        const root = resolvePluginRoot()
+        if (!root) return
+        const pointer = await runScript(
+          join(root, "hooks", "precompact-canon-doc.sh"),
+          JSON.stringify({ cwd: projectDir, session_id: input.sessionID }),
+          5_000,
+        )
+        const text = pointer.trim()
+        if (text) output.context.push(text)
+      } catch {
+        // compaction must never fail at the moment it fires
+      }
+    },
     tool: {
       task: taskTool,
       task_result: taskResultTool,
     },
   }
+}
+
+/** The transport: run one hook script with the payload on stdin, answer its
+ * stdout. A spawn failure or timeout resolves empty (no decision = allow,
+ * reported once by the caller). */
+function runScript(script: string, payload: string, timeoutMs: number): Promise<string> {
+  return new Promise((resolve) => {
+    try {
+      const child = execFile(script, [], { timeout: timeoutMs }, (_err, stdout) => {
+        resolve(String(stdout ?? ""))
+      })
+      child.stdin?.end(payload)
+    } catch {
+      resolve("")
+    }
+  })
 }
 
 export default { id: "fno", server: plugin }
