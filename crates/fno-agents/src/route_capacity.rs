@@ -485,7 +485,7 @@ mod tests {
     /// provenance stays per account and the walk's evidence suffix can name it.
     #[test]
     fn per_account_sources_and_observed_at_are_kept() {
-        let t = now();
+        let t = now().floor();
         let state = format!(
             r#"{{"usage": {{"paid": {{"probed_at": {t}, "partial": false, "windows": [{{"label": "daily", "used_pct": 100.0, "resets_at": null}}]}}}}}}"#
         );
