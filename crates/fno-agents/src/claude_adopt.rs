@@ -91,7 +91,9 @@ pub fn transcript_model(session_id: &str) -> Option<String> {
             .and_then(|m| m.get("model"))
             .and_then(|m| m.as_str())
         {
-            if !m.is_empty() {
+            // A synthetic tail turn is not the running model; the last real
+            // one is.
+            if !m.is_empty() && m != crate::resume_pin::SYNTHETIC_MODEL {
                 model = Some(m.to_string());
             }
         }
@@ -624,6 +626,27 @@ mod tests {
             &[
                 transcript_line("glm-5.3"),
                 transcript_line("glm-5.3-flash[1m]"),
+            ],
+        );
+        assert_eq!(transcript_model(uuid).as_deref(), Some("glm-5.3-flash[1m]"));
+        std::env::remove_var(crate::claude_drive::PROJECTS_DIR_ENV);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn transcript_model_skips_a_synthetic_tail_turn() {
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // AC2-HP: a synthetic tail turn is not the running model; the last
+        // real model answers.
+        let uuid = "a1b2c3d4-1111-2222-3333-444455557777";
+        let base = seed_transcript(
+            "model-synthetic-tail",
+            uuid,
+            &[
+                transcript_line("glm-5.3-flash[1m]"),
+                transcript_line(crate::resume_pin::SYNTHETIC_MODEL),
             ],
         );
         assert_eq!(transcript_model(uuid).as_deref(), Some("glm-5.3-flash[1m]"));

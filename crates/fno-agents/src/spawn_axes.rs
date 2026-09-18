@@ -45,7 +45,7 @@ fn opt_str(payload: &Value, key: &str) -> Option<String> {
 /// the value contains a single quote and no double quote, backslashes and
 /// control characters escaped. The receipts quote operator-typed values, so
 /// the spelling must match what the Python seam used to print.
-fn repr(s: &str) -> String {
+pub(crate) fn repr(s: &str) -> String {
     let has_sq = s.contains('\'');
     let has_dq = s.contains('"');
     let (open, close) = if has_sq && !has_dq {
@@ -589,6 +589,12 @@ pub fn run_spawn_axes(args: &[String]) -> i32 {
     // action, never a new action).
     if let Some(seed) = parsed.get("node_seed") {
         println!("{}", crate::node_seed::decide(seed));
+        return 0;
+    }
+    // A `resume_pin` field routes the same way: which model a resume comes
+    // back on, answered by crates/fno-agents/src/resume_pin.rs.
+    if let Some(pin) = parsed.get("resume_pin") {
+        println!("{}", crate::resume_pin::decide(pin));
         return 0;
     }
     println!("{}", decide(&parsed));
