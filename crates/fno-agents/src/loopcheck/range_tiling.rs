@@ -1,8 +1,8 @@
 //! The range-tiling answer: do a branch's attestation ranges, taken as a
 //! chain, tile `merge_base(base, head)..head`? Named by its question because
 //! `loopcheck.rs` is over the file budget and shrink-only, the same rule that
-//! minted `review_freshness.rs`, whose carry vocabulary the chain asks in
-//! change 3 of x-ee4c.
+//! minted `review_freshness.rs`, whose carry vocabulary the chain asks when
+//! no sha survives a rebase.
 
 use std::path::Path;
 
