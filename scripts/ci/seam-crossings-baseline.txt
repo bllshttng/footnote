@@ -97,7 +97,6 @@ resolver	crates/fno-agents/src/operator_notice.rs	33	pub fn notify_operator(titl
 resolver	crates/fno-agents/src/operator_notice.rs	85	pub fn notify_operator_confirmed(title: &str, body: &str, pointer: Option<&str>) -> bool {
 resolver	crates/fno-agents/src/plugin_install.rs	158	fn build_stage(source_root: &Path, stage_parent: &Path) -> Result<(PathBuf, usize), String> {
 resolver	crates/fno-agents/src/plugin_install.rs	394	fn restage_stage(source_dir: &Path, stage_parent: &Path) -> Result<RestageOutcome, String> {
-resolver	crates/fno-agents/src/plugin_install.rs	653	pub fn run_plugin_install(args: &[String]) -> i32 {
 resolver	crates/fno-agents/src/provider_cap_verbs.rs	294	pub(crate) fn run_fno_output(
 resolver	crates/fno-agents/src/provider_cap_verbs.rs	322	fn real_deps() -> crate::provider_cap::LeaveDeps {
 resolver	crates/fno-agents/src/reclaim.rs	114	fn plugin_cache_copies() -> Vec<PathBuf> {

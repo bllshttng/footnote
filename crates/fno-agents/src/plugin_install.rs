@@ -1850,6 +1850,45 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// A NON-local marketplace (github and friends) yields no live root, and
+    /// the registry installPath copy is still enumerated and byte-checked
+    /// whatever the marketplace shape - the enumeration is shape-independent.
+    #[test]
+    fn roots_without_a_local_marketplace_still_report_registry_copies() {
+        let base = std::env::temp_dir().join(format!("pi-roots-github-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let (source, _stage) = fresh_stage(&base);
+        let home = fixture_home(&base);
+        write_marketplace(
+            &home,
+            "github",
+            &base.join("not-on-disk"),
+            &base.join("not-on-disk"),
+        );
+        // A registry copy that differs from source HEAD in one file.
+        let cache = home.join(".claude/plugins/cache/footnote");
+        fs::create_dir_all(cache.join("hooks")).unwrap();
+        fs::write(
+            cache.join("hooks/hooks.json"),
+            "{\"hooks\":[{\"command\":\"${CLAUDE_PLUGIN_ROOT}/hooks/live.sh\"}]}",
+        )
+        .unwrap();
+        fs::write(cache.join("hooks/live.sh"), "tampered\n").unwrap();
+        write_registry(&home, &cache);
+
+        let (roots, _) = plugin_roots_for(&home);
+        assert_eq!(roots.len(), 1, "only the registry copy exists: {roots:?}");
+        assert!(!roots[0].live, "a github marketplace yields no live root");
+        let (report, exit) = check_roots_report(&roots, Vec::new(), &source);
+        assert_eq!(exit, 3);
+        assert_eq!(report.roots[0].check.status, "stale");
+        assert_eq!(
+            report.roots[0].check.sample,
+            vec!["hooks/live.sh".to_string()]
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// AC2.1-HP + AC2.1-ERR: the Claude cache copy is removed only under the
     /// guard. A local marketplace with a proven live root removes it and
     /// receipts the path; a non-local marketplace and a cache that IS the
