@@ -647,12 +647,11 @@ def emit(
         except Exception as exc:  # noqa: BLE001 - never fail the emit
             typer.echo(f"bot-review: skipped (mirror error: {exc})", err=True)
 
-    # Push leg: blocked + run_summary notify the parent when spawn
-    # lineage exists. Fired AFTER the durable append so the events.jsonl record
-    # is independent of the push (AC1-FR). No lineage -> silent skip.
-    # (run_summary is normally pushed by Rust finalize's native emit; a
-    # CLI-emitted one pushes here too for uniformity.)
-    if type_ in ("blocked", "run_summary"):
+    # Push leg: blocked notifies the parent when spawn lineage exists. Fired
+    # AFTER the durable append so the events.jsonl record is independent of the
+    # push (AC1-FR). No lineage -> silent skip. run_summary is pushed only by
+    # Rust finalize, which dedups on run plus reason; this emit path never pushes it.
+    if type_ == "blocked":
         _parent = event.get("parent")  # already resolved into the envelope above
         if _parent:
             _push_to_parent(

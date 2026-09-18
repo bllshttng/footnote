@@ -1,8 +1,9 @@
-"""Push leg for the a2a status-breakpoint family (x-dbaf, US4).
+"""Push leg for the a2a status-breakpoint family.
 
-blocked + run_summary notify the parent handle when spawn lineage exists; the
-push rides `fno agents mail send` (durable-first), fires AFTER the durable events.jsonl
-append, and silently skips when there is no lineage.
+blocked notifies the parent handle when spawn lineage exists; the push rides
+`fno agents mail send` (durable-first), fires AFTER the durable events.jsonl
+append, and silently skips when there is no lineage. run_summary pushes only
+from Rust finalize, never from this emit path.
 """
 from __future__ import annotations
 
@@ -66,6 +67,34 @@ def test_blocked_pushes_to_parent(runner, tmp_path, monkeypatch) -> None:
     assert "claude-parent99" in sent["argv"]
     # message references the run so the parent can correlate
     assert any("R1" in a for a in sent["argv"])
+
+
+# -- AC5-EDGE: a CLI-emitted run_summary does not push (Rust finalize owns it) --
+
+def test_run_summary_emit_does_not_push(runner, tmp_path, monkeypatch) -> None:
+    calls: list = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        return _R(0)
+
+    events = tmp_path / ".fno" / "events.jsonl"
+    state = tmp_path / ".fno" / "target-state.md"
+    monkeypatch.setattr("fno.events.cli._resolve_parent_handle", lambda explicit: "claude-parent99")
+    monkeypatch.setattr("fno.events.cli.subprocess.run", fake_run)
+    result = runner.invoke(
+        event_cli,
+        ["emit", "--events", str(events), "--state", str(state),
+         "--type", "run_summary", "--source", "test", "--run", "R1",
+         "--outcome", "FAILED",
+         "--data", json.dumps({
+             "termination_reason": "DoneAwaitingMerge",
+             "tasks_started": 2, "tasks_done": 2, "tasks_failed": 0,
+         })],
+    )
+    assert result.exit_code == 0, result.output
+    assert events.exists()
+    assert not any(a[:4] == ["fno", "agents", "mail", "send"] for a in calls)
 
 
 # -- P1: resolution matches a spawned row by identity, not name==handle --
