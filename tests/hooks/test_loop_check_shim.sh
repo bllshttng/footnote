@@ -337,12 +337,13 @@ log "T14: codex-authored manifest + that codex session's own stop -> judged"
 
     t14_ok=true
     # The ownership check needs a gh read first; with gh absent the stop is
-    # still ANSWERED - the advisory gate's line - rather than ignored.
-    if ! echo "$HOOK_STDERR" | grep -q "advisory mode"; then
+    # still ANSWERED - a gh-missing terminal (advisory when the manifest
+    # reads attended, Interrupted when unattended) - rather than ignored.
+    if ! echo "$HOOK_STDERR" | grep -q "gh binary not found"; then
         fail "T14: the owner's own stop was not judged; got: $HOOK_STDERR"
         t14_ok=false
     fi
-    [[ "$t14_ok" == "true" ]] && pass "T14: owner's own stop -> judged (advisory line)"
+    [[ "$t14_ok" == "true" ]] && pass "T14: owner's own stop -> answered (gh-missing terminal)"
     cleanup
 }
 
