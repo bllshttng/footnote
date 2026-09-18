@@ -21,7 +21,7 @@ The one rule the whole report stands on: **operator turns only**. Relay, harness
 
    (`fno doctor intel` is the same fold with the same flags.) Exit 3 means no sessions in the window. Report that and stop.
 
-2. Judge the attended sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged - skip it, so a resumed session re-enters the report instead of stranding on a stale cache:
+2. Judge the attended sessions and write one facet file each: `~/.fno/intel/facets/<session>.json`, mode 0600. Key the facet by session id + mtime + size (all three are on the fold's session row). A session whose key matches an existing facet is not re-judged. Skip it, so a resumed session re-enters the report instead of stranding on a stale cache:
 
    ```json
    {
