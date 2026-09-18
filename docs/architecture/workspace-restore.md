@@ -88,4 +88,4 @@ A codex thread can be visible three ways, and each is a different claim.
 
 1. Daemon listing. `thread/loaded/list` names the id. This proves the daemon hosts the thread, nothing about its content.
 2. Same-id read. `thread/read` answers for the id with its history intact. This is what the upgrade transaction verifies after a swap.
-3. Operator mobile visibility. The same id opens in ChatGPT mobile Remote Control and a new message loads there. This is the only level the operator accepts on, and it is read by a person after merge, never asserted by a test.
+3. Operator mobile visibility. The same id opens in ChatGPT mobile Remote Control and a new message loads there. This is the level the operator accepts on. A person reads it after merge. No test asserts it.
