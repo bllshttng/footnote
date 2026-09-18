@@ -1240,6 +1240,13 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // for the same reason worktree_sweep is: a quiet repo must not read as a
     // loop that never ran. The Python tick emits nothing for this family.
     "pr_heal_tick",
+    // The heal loop's acted-on rows: one flake guard staged per flapping
+    // (sha, run id, check), and one remedy row per PR the loop acted on.
+    "pr_heal_flake",
+    "pr_heal_pr",
+    // Daemon startup scope declaration: sandbox home vs the operator's
+    // shared home. Fleet gating and board routing key off it.
+    "daemon_fleet_scope",
     // NOTE: the a2a status-breakpoint kinds (task_started/task_done/blocked/
     // run_summary) are NOT registered here. They are Python-defined in
     // cli/src/fno/events/schema.yaml; the parity gate partitions names (a kind

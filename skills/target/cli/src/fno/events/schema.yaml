@@ -5144,6 +5144,57 @@ event_types:
           type: boolean
           description: "True for a --all --apply --dry-run rehearsal: nothing changed, nothing pushed, no question filed."
 
+  - name: pr_heal_flake
+    description: "CI heal drive loop: one row per check classified a flake and guarded, so a rerun of the same (sha, run id, check) is skipped instead of rerun forever. Rust-emitted into the global journal."
+    sources: [pr-heal, daemon]
+    data:
+      required: [key, sha, run_id, check]
+      properties:
+        key:
+          type: string
+          description: "The dedup key of the flake guard this row staged."
+        sha:
+          type: string
+          description: "The head commit whose run flapped."
+        run_id:
+          type: string
+          description: "The CI run id the flaky check belongs to."
+        check:
+          type: string
+          description: "The check name that flapped."
+        node_id:
+          type: string
+          description: "The backlog node named on the PR branch, when one resolved."
+
+  - name: pr_heal_pr
+    description: "CI heal drive loop: one row per acted-on PR recording which remedy ran and why. Rust-emitted into the global journal."
+    sources: [pr-heal, daemon]
+    data:
+      required: [pr, action, reason]
+      properties:
+        pr:
+          type: integer
+          description: "The acted-on PR number."
+        action:
+          type: string
+          description: "The remedy applied (rerun, escalate, comment, ...)."
+        reason:
+          type: string
+          description: "Why that remedy was chosen, from the finding's signature."
+
+  - name: daemon_fleet_scope
+    description: "Daemon startup scope declaration: whether this daemon owns a sandbox home or the operator's shared home. Readers key fleet gating and board routing off it instead of probing paths."
+    sources: [daemon]
+    data:
+      required: [scope, home]
+      properties:
+        scope:
+          type: string
+          description: "sandbox when the daemon runs on a temp-rooted home, shared otherwise."
+        home:
+          type: string
+          description: "The state root the daemon resolved."
+
   - name: recovery_nudge
     description: "Session auto-recovery injected a resume nudge into a footnote-launched bg session that was idle-but-incomplete after an abnormal turn termination."
     sources: [daemon]
